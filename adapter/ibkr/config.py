@@ -1,14 +1,20 @@
 """The IBKR adapter's connection configuration (ADR 0025; ADR 0026 point 8)."""
 import math
 from collections import namedtuple
+from collections.abc import Mapping
+from types import MappingProxyType
 
 MODES = ("dry-run", "paper", "live")
+# Every IBKR paper trading account ID begins "DU", and no live one does
+# (ADR 0025 point 3; the engine's event.PaperAccountPrefix).
+PAPER_ACCOUNT_PREFIX = "DU"
 
 _FIELDS = (
     "host", "port", "client_id", "account_id", "mode",
     "connect_timeout", "request_timeout",
     "heartbeat_interval", "heartbeat_timeout", "restore_timeout",
-    "backoff_initial", "backoff_max", "max_connect_attempts",
+    "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
+    "con_ids",
 )
 
 # Any key containing one of these is refused outright. The adapter never
@@ -28,7 +34,14 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     ADR 0019 makes them versioned operational configuration with no
     permissive defaults. restore_timeout is how long Gateway may stay cut
     off from IBKR's servers (codes 1100/2110) before the adapter gives up
-    waiting for Gateway's own restoration and reconnects.
+    waiting for Gateway's own restoration and reconnects. commission_wait
+    is how long an execution may wait for IBKR's commission report, without
+    which its fill cannot be recorded, before the adapter stops for a
+    person (reports.OrderReportJournal). con_ids is the contract map: the
+    engine's instrument ID to IBKR's contract ID (conId), the only way the
+    adapter names a contract (sender.release_to_request), never a lookup by
+    name; no two instruments may share a contract ID; it is kept as a
+    read-only copy.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -50,7 +63,9 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
         missing = [f for f in _FIELDS if f not in values]
         if missing:
             raise ConfigError("missing required keys: {}".format(", ".join(missing)))
-        cfg = cls(**{f: values[f] for f in _FIELDS})
+        fields = {f: values[f] for f in _FIELDS}
+        fields["con_ids"] = _contract_map(values["con_ids"])
+        cfg = cls(**fields)
         cfg._validate()
         return cfg
 
@@ -67,8 +82,19 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("account_id must be a non-empty string")
         if self.mode not in MODES:
             raise ConfigError("mode must be one of {}".format(", ".join(MODES)))
+        # The account is bound to the mode, as the engine binds it: paper
+        # names a paper account and live does not, so a paper adapter can
+        # never send to a live account. A dry-run sends nothing.
+        paper = is_paper_account(self.account_id)
+        if self.mode == "paper" and not paper:
+            raise ConfigError("mode paper names account {!r}, but an IBKR paper account ID begins {!r}".format(
+                self.account_id, PAPER_ACCOUNT_PREFIX))
+        if self.mode == "live" and paper:
+            raise ConfigError("mode live names account {!r}, but an account ID beginning {!r} is a paper "
+                              "account".format(self.account_id, PAPER_ACCOUNT_PREFIX))
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
-                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max"):
+                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max",
+                     "commission_wait"):
             value = getattr(self, name)
             # NaN and infinity pass "> 0" but would switch a deadline off.
             if not _is_number(value) or not math.isfinite(value) or value <= 0:
@@ -77,6 +103,33 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("backoff_max must be at least backoff_initial")
         if not _is_int(self.max_connect_attempts) or self.max_connect_attempts < 1:
             raise ConfigError("max_connect_attempts must be a positive integer")
+
+
+def _contract_map(value):
+    """value as a read-only map from instrument ID to IBKR's positive contract ID, one each, else ConfigError."""
+    if not isinstance(value, Mapping):
+        raise ConfigError("con_ids must be an object from instrument ID to IBKR contract ID")
+    for instrument, con_id in value.items():
+        if not isinstance(instrument, str) or not instrument:
+            raise ConfigError("con_ids names instrument {!r}; an instrument ID is a non-empty string".format(
+                instrument))
+        if not _is_int(con_id) or con_id < 1:
+            raise ConfigError("con_ids gives {!r} contract ID {!r}; IBKR's contract ID is a positive "
+                              "integer".format(instrument, con_id))
+    # One contract per instrument: a contract ID shared by two instruments
+    # would send one instrument's order on the other's contract.
+    named = {}
+    for instrument, con_id in value.items():
+        if con_id in named:
+            raise ConfigError("con_ids gives {!r} and {!r} the same contract ID {}; each instrument names its own "
+                              "IBKR contract".format(named[con_id], instrument, con_id))
+        named[con_id] = instrument
+    return MappingProxyType(dict(value))
+
+
+def is_paper_account(account_id):
+    """Whether account_id is an IBKR paper trading account's ID."""
+    return isinstance(account_id, str) and account_id.startswith(PAPER_ACCOUNT_PREFIX)
 
 
 def _is_int(value):
