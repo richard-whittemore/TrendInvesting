@@ -2484,13 +2484,13 @@ class MinimumLotTest(unittest.TestCase):
         growth = {"A": 1.004, "B": 1.003, "C": 1.002, "E": 1.001, "F": 1.0005, "SPY": 1.001}
         series = {n: Series(100.0 * g ** i * (1 + 0.01 * (i % 3)) for i in range(260)) for n, g in growth.items()}
 
-        def run(template, raw_close):
+        def run(template, raw_close, mode, stock_trend, held):
             module = _load_template(self, template, {})
             module.Resolution = types.SimpleNamespace(Daily=1)
             module.np = types.SimpleNamespace(std=lambda x: statistics.pstdev(list(x)))
             algo = module.MomentumResearch()
-            algo.MODE, algo.TOP_N, algo.SECTOR_CAP, algo.INV_VOL = "mom", 3, 1, True
-            algo.RISK_OFF_FRACTION, algo.SPY_BLEND, algo.STOCK_TREND_DAYS = 0.5, 0.0, 0
+            algo.MODE, algo.TOP_N, algo.SECTOR_CAP, algo.INV_VOL = mode, 3, 1, True
+            algo.RISK_OFF_FRACTION, algo.SPY_BLEND, algo.STOCK_TREND_DAYS = 0.5, 0.0, stock_trend
             algo.bond, algo.spy, algo.members, algo.sectors = "IEF", "SPY", names, self.SECTOR
             algo.History = lambda symbols, n, res: Frame(series)
             algo.MIN_LOT, algo.raw_close, algo.lot_kept = None, raw_close, set()
@@ -2499,6 +2499,9 @@ class MinimumLotTest(unittest.TestCase):
                 setattr(algo, attr, 0)
             algo.resize_all, algo.pending, algo.pending_tickets = False, {}, {}
             algo.orders = []
+
+            def holding(value):
+                return types.SimpleNamespace(Invested=True, IsLong=True, IsShort=False, HoldingsValue=value)
 
             class Book(dict):
                 TotalPortfolioValue = 1000.0
@@ -2509,16 +2512,24 @@ class MinimumLotTest(unittest.TestCase):
                 def __missing__(self, key):
                     return types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
 
-            algo.Portfolio = Book()
+            algo.Portfolio = Book({n: holding(v) for n, v in held.items()})
             algo.SetHoldings = lambda s, w: algo.orders.append((s, round(w, 6)))
             algo.Liquidate = lambda s: algo.orders.append((s, 0))
             algo._priced = lambda s: True
             algo.Rebalance()
             return algo.orders
 
-        base = run("momentum/fresh_universe.py", {})
-        self.assertGreater(len(base), 0)
-        self.assertEqual(run("momentum/minimum_lot.py", {n: 1e9 for n in names}), base)
+        # First month with an empty book, and a later month holding the
+        # top pick (kept or resized) and a name the book no longer wants
+        # (sold), in the plain mode and in the control's mode.
+        for mode, stock_trend in (("mom", 0), ("mom_trend", 100)):
+            for held in ({}, {"A": 500.0, "E": 300.0, "F": 100.0}):
+                with self.subTest(mode=mode, stock_trend=stock_trend, held=sorted(held)):
+                    base = run("momentum/fresh_universe.py", {}, mode, stock_trend, held)
+                    self.assertGreater(len(base), 0)
+                    if held:
+                        self.assertTrue(any(w == 0 for _, w in base), "a held name is sold")
+                    self.assertEqual(run("momentum/minimum_lot.py", {n: 1e9 for n in names}, mode, stock_trend, held), base)
 
     def test_the_template_only_adds_to_fresh_universe(self):
         _additions_only(self, "momentum/fresh_universe.py", "momentum/minimum_lot.py")

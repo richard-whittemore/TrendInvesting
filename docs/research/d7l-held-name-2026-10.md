@@ -238,6 +238,12 @@ What the verdict rests on, stated plainly:
   there is no return benefit shown either; none was expected at this size.
   *Wording corrected 2026-10-18; the original read "does no harm and saves a
   few orders and dollars". The numbers in the tables are unchanged.*
+  *Reason corrected 2026-10-18; the original read "It never arose in 17
+  tuning years (1999-2015), when few stocks traded above about $1,000 a
+  share, the size of a typical target. It arose 2 or 3 times in 10.5
+  held-out years, when four-figure share prices were common." It stated as
+  fact something the runs did not record; it is now a likely reason, not a
+  finding.*
 - **The only window where it fired is the held-out one.** That pair ran
   once, on the same day as the unchanged rule, and nothing was tuned on it.
   There is no setting to tune: option 2 has no parameter.
