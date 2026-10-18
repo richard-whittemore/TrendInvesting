@@ -32,28 +32,46 @@ func february(t *testing.T, r momentumResult, id string) (event.TargetsDecidedPa
 
 // TestAHeldStockWithOneMissingSessionIsDecidedAcrossTheGap encodes the
 // owner's decision of 2026-10-18 (ADR 0026 point 5, amended): CCC, bought on
-// January's decision, has no bar on 2025-02-20, inside February's window. It
-// is scored across the gap as the backtest scores it, so it stays in the
-// book on its merits, and the decision names the missing session. Before,
-// it read short-history and was sold whole.
+// January's decision and named to the market-data step, has no bar on
+// 2025-02-20, inside February's window, in the compact stream. It is scored
+// across the gap as the backtest scores it, so it stays in the book on its
+// merits, and the decision names the missing session. Before, it read
+// short-history and was sold whole.
 func TestAHeldStockWithOneMissingSessionIsDecidedAcrossTheGap(t *testing.T) {
-	for _, compact := range []bool{false, true} {
-		r := simulateMomentum(t, momentumOptions{noBar: map[string]string{"2025-02-20": "CCC"}, compact: compact})
-		feb, ccc := february(t, r, "CCC")
-		if feb.Outcome != event.TargetsOutcomeDecided {
-			t.Fatalf("compact %v: February %s %s", compact, feb.Outcome, feb.Detail)
+	r := simulateMomentum(t, momentumOptions{noBar: map[string]string{"2025-02-20": "CCC"}, compact: true})
+	feb, ccc := february(t, r, "CCC")
+	if feb.Outcome != event.TargetsOutcomeDecided {
+		t.Fatalf("February %s %s", feb.Outcome, feb.Detail)
+	}
+	if ccc.Status != event.MomentumStatusPicked || !slices.Equal(ccc.GapSessions, []string{"2025-02-20"}) {
+		t.Errorf("CCC %+v, want picked across its gap on 2025-02-20", ccc)
+	}
+	if !slices.Contains(targetIDs(feb), "CCC") {
+		t.Errorf("CCC is not targeted: %v", targetIDs(feb))
+	}
+	for _, o := range planned(t, r.decisions) {
+		if o.InstrumentID == "CCC" && o.Side == event.OrderSideSell && o.Quantity == 115 {
+			t.Errorf("the whole holding of CCC is sold: %+v", o)
 		}
-		if ccc.Status != event.MomentumStatusPicked || !slices.Equal(ccc.GapSessions, []string{"2025-02-20"}) {
-			t.Errorf("compact %v: CCC %+v, want picked across its gap on 2025-02-20", compact, ccc)
-		}
-		if !slices.Contains(targetIDs(feb), "CCC") {
-			t.Errorf("compact %v: CCC is not targeted: %v", compact, targetIDs(feb))
-		}
-		for _, o := range planned(t, r.decisions) {
-			if o.InstrumentID == "CCC" && o.Side == event.OrderSideSell && o.Quantity == 115 {
-				t.Errorf("compact %v: the whole holding of CCC is sold: %+v", compact, o)
-			}
-		}
+	}
+}
+
+// TestABarsRunDoesNotScoreAHoldingAcrossAGap: in a stream of every member's
+// bars a held member has bars whether or not it was named to the
+// market-data step, and that step leaves an unnamed member out of the
+// ex-date session of a split or dividend it could not adjust, so the run
+// cannot tell a session the stock did not trade from an unadjusted level
+// jump. CCC, held, with no bar on 2025-02-20 (such an ex-date) is not scored
+// across it: a bars run keeps the complete-window rule for every name, and
+// CCC reads gap and is not targeted (ADR 0026 point 5, amended 2026-10-18).
+func TestABarsRunDoesNotScoreAHoldingAcrossAGap(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{noBar: map[string]string{"2025-02-20": "CCC"}, unnamed: map[string]bool{"CCC": true}})
+	feb, ccc := february(t, r, "CCC")
+	if ccc.Status != event.MomentumStatusGap || !slices.Equal(ccc.GapSessions, []string{"2025-02-20"}) {
+		t.Errorf("CCC %+v, want gap on 2025-02-20", ccc)
+	}
+	if slices.Contains(targetIDs(feb), "CCC") {
+		t.Errorf("CCC is targeted: %v", targetIDs(feb))
 	}
 }
 

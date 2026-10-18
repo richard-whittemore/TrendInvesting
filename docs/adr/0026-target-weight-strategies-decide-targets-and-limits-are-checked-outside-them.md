@@ -667,9 +667,9 @@ recorded.
 - **A held stock is scored across its gap, as the backtest scored every
   stock.** `defensive_v2.py` read 260 sessions of history at each
   rebalance (271), dropped the missing closes, and scored each stock from
-  the last 253 closes it had (286-291): the 12-1 score from the 22nd and
-  253rd closes from the end, the volatility from the 252 daily returns
-  between them, one of which spans the gap. A stock the account holds at
+  the last 253 closes it had (286-291): the 12-1 score from two of them,
+  the 22nd and the 253rd closes from the end, and the volatility from the
+  252 daily returns of all 253 closes, one of which spans the gap. A stock the account holds at
   the decision, whose live window has a gap, is now scored and weighted
   exactly so (the momentum module's `ScoreHeld`, which reuses
   `BacktestScore`). It is then kept, resized or sold on its merits, like
@@ -689,16 +689,26 @@ recorded.
   cover 260 sessions. The recorded close counts (`closes`,
   `trend_closes`) count closes in those 260 sessions, as the backtest's
   export did. The market-data backfill records 260 sessions by default.
-- **Only a holding with its own bars.** A score across a gap must never
-  span a split or dividend the market-data step could not adjust, which
-  would put an unadjusted price jump inside the window. A stock named to
-  that step (`--optional`, every holding) refuses the whole stream on such
-  an action, so a gap in its own bars is a session it did not trade. A held
-  stock the engine sees only through its close history, because it was not
-  named, is not known to be safe, so its gap leaves it out as for a stock
-  not held. In a bars stream written with `--universe-members` every member
-  has bars, so the holdings must be named with `--optional` there too; the
-  compact stream is the shape the IRAs run on (point 1, "Universe").
+- **Only a holding positively known to have sent its own bars: a compact
+  run.** A score across a gap must never span a split or dividend the
+  market-data step could not adjust, which would put an unadjusted price
+  jump inside the window. A stock named to that step (`--optional`, every
+  holding) refuses the whole stream on such an action, so a gap in its own
+  bars is a session it did not trade. In the compact stream only the named
+  holdings (and the fixed instruments) have bars, so a held stock with its
+  own bar in the decision session is known to be named, and only it is
+  scored across its gap. A held stock the engine sees only through its
+  close history, because it was not named, is not known to be safe, so its
+  gap leaves it out as for a stock not held. In a bars stream written with
+  `--universe-members` every member has bars, named or not, and the
+  market-data step leaves an unnamed member out of the ex-date session of
+  an action it could not adjust, a gap the engine cannot tell from a
+  session the stock did not trade; the stream marks no gap as a plain
+  missing session. A bars run therefore keeps the complete-window rule for
+  every name, held or not (fail closed): a held stock with a gap reads
+  `gap` and is sold, as before this amendment. The compact stream is the
+  shape the IRAs run on (point 1, "Universe"), and naming every holding
+  with `--optional` is mandatory there.
 
 A rules change: target-weight rules version 1.15.0 (1.14.0 is reserved for
 a change landing in parallel), so a journal written under 1.13.0 does not

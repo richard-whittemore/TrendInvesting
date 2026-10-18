@@ -567,19 +567,23 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 }
 
 // held returns the instruments the latest account snapshot holds that sent
-// their own bar in the last session: a held member whose window has a gap
-// is scored across it (momentum.ScoreHeld; ADR 0026 point 5, amended
-// 2026-10-18). With no snapshot it holds none, and the decision is withheld
-// as stale-account-snapshot anyway.
+// their own bar in the last session of a compact run: a held member whose
+// window has a gap is scored across it (momentum.ScoreHeld; ADR 0026 point
+// 5, amended 2026-10-18). With no snapshot it holds none, and the decision
+// is withheld as stale-account-snapshot anyway.
 //
 // Invariant: a score across a gap must never span a split or dividend the
 // market-data step could not adjust. A holding named to that step refuses
-// the stream on one, so a gap in its own bars is a session it did not trade;
-// a holding seen only through its close history is not known to be named,
-// so its gap leaves it out as for a stock not held.
+// the stream on one, so a gap in its own bars is a session it did not trade.
+// Only the compact stream's bars are the named holdings'; a holding seen
+// only through its close history is not known to be named, so its gap
+// leaves it out as for a stock not held. A bars stream carries every
+// member's bars, named or not, and marks no gap as a plain missing session,
+// so a bars run holds none here and keeps the complete-window rule for
+// every name (fail closed).
 func (r *momentumRun) held() map[string]bool {
 	held := map[string]bool{}
-	if r.snapshot != nil {
+	if r.snapshot != nil && r.compact {
 		for _, p := range r.snapshot.Positions {
 			if p.Quantity != 0 && r.barred[p.InstrumentID] {
 				held[p.InstrumentID] = true

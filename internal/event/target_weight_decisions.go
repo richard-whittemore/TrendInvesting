@@ -460,14 +460,12 @@ func (n MomentumName) validate(rank int) []error {
 }
 
 // validateGaps checks a name's gap sessions: dates, strictly ascending, on
-// or before the close session; a gap name names at least one, and a short
-// history, refused before any window is read, none.
+// or before the close session; a short history, refused before any window
+// is read, names none. A gap name may name none: version 4 was written
+// before gap sessions were recorded, and its logs must still be read.
 func (n MomentumName) validateGaps(closeSession string) []error {
 	var errs []error
-	switch {
-	case n.Status == MomentumStatusGap && len(n.GapSessions) == 0:
-		errs = append(errs, fmt.Errorf("momentum name %s: a gap name names its missing sessions", n.InstrumentID))
-	case n.Status == MomentumStatusShortHistory && len(n.GapSessions) > 0:
+	if n.Status == MomentumStatusShortHistory && len(n.GapSessions) > 0 {
 		errs = append(errs, fmt.Errorf("momentum name %s: a short history records no gap sessions", n.InstrumentID))
 	}
 	for i, s := range n.GapSessions {

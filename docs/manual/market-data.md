@@ -30,6 +30,12 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata universe --out DIR` | the last session's bars for every US stock, plus the list of common-stock (type CS) tickers | yes |
 | `python3 -m marketdata bars --out DIR --instruments SPY,IEF,SHY` | the named instruments' bars | yes |
 | `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
+
+If your recordings hold an older 253-session backfill, extend it to 260
+before a fresh run's first decision: `backfill --sessions 260` resumes and
+records only the missing days. With fewer than 260 sessions recorded, a
+stock you hold with a missing day has too few prices to be scored across
+it, reads `short-history` and is sold.
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
 | `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
@@ -258,8 +264,12 @@ or any instrument named with `--instruments` or `--optional` still refuses
 the whole stream. That refusal is what lets the engine score a stock you hold
 across a missing day (ADR 0026 point 5, amended 2026-10-18): a holding named
 with `--optional` can be missing a day only because it did not trade, never
-because a split was left unadjusted. So name every stock you hold; one you
-leave unnamed is treated as not held when its prices have a gap.
+because a split was left unadjusted. That guarantee holds only for the
+compact stream (`--ranker`, below), where only named stocks have bars.
+Naming every stock you hold with `--optional` is mandatory: one you leave
+unnamed is treated as not held when its prices have a gap. In a bars stream (`--universe-members`) every member
+has bars, named or not, so the engine scores no holding across a gap there
+at all: a held stock with a gap is sold, as before 2026-10-18.
 
 Sector labels are GICS from iShares' IWV holdings where it lists the stock,
 else Nasdaq's sector, both mapped onto Morningstar's eleven sector names so
