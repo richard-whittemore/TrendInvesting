@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode")
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8)
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -377,7 +377,9 @@ the module's own rules version and decision corpus (ADR 0016;
    own universe and adjusted closes. Picks and their order must match exactly.
    Weights must match within a stated tolerance, because numpy's summation
    differs from Go's. Boost's state must match day by day. Repeat with each D7
-   option and with the IRA buy delay.
+   option and with the IRA buy delay. *(The thresholds, and the owner's
+   amendment of 2026-10-18 for Boost's RSI and moving averages, are in the
+   amendment of that date below.)*
 3. **Planner:** the band at exactly 25% and past it; entries and exits; IEF
    summed across sleeves; sells first; a plan with no sells planning its buys
    at once; buys costed at the band edge plus fees; buy scaling and the
@@ -405,6 +407,7 @@ the module's own rules version and decision corpus (ADR 0016;
 | One live engine per account, or one engine for all three behind one gateway (ADR 0025 allows one adapter connection per engine) | **decided 2026-10-16: one engine per account**, each with its own adapter connection (its own client ID) to one IB Gateway, its own configuration, hash, journal and engine state. Market data both IRAs share is fetched once by a separate data step and recorded as the input each engine reads, so IBKR's request limits are not spent twice. A fault, Degraded or Halted state, or an upgrade touches one account only. No limit spans accounts. Depends on one IBKR username reaching all three accounts; if it cannot, each account gets its own gateway |
 | The owner's birth date enters the journal through the configuration, though it stays out of the repository | **decided 2026-10-16:** only the birth year and month, as a configured value (point 6) |
 | Backtest behaviours live trading will not copy: keeping the last book on short data, SPY treated as risk-on with fewer than 200 closes, a lookback window that shifts across a gap (`defensive_v2.py:269-291`); ties in the ranking (323); a zero volatility weighted as 1 (76); RSI(2)'s dependence on its warm-up seed (`template.py:54-55`) | measured by the parity tests, which report each difference; none is copied into live code without a decision |
+| A name with no sector label, which the backtest ranked and left uncapped (`defensive_v2.py:69-74`) and live trading had left out (`plan.md` section 4, "Sectors", "Chosen") | **decided 2026-10-18 by the owner ("I want parity"): live trading copies the backtest.** The name is ranked and can be picked, counted toward the book's 25 but toward no sector's cap of 3; it is not excluded and has no status of its own. Target-weight rules version 1.13.0. It is not a listed difference: the parity tests require the live book to equal the backtest's here |
 | Excess Liquidity thresholds: `plan.md` says "their own hash"; this ADR puts them in the account configuration's one hash | corrected in `plan.md` on acceptance (2026-10-16): part of the account configuration's one hash |
 
 ## Alternatives rejected
@@ -559,3 +562,84 @@ whose target weight is positive; the three cases below follow from that.
   picks: a book decided under it, or one withheld as `all-unaffordable`. They
   stay if the run then withholds a decided book; a decision the rule
   withheld for any other reason compared no pick and records none.
+
+## Amendment (2026-10-18, owner decision, #461, #462 and #463): parity thresholds and names with no sector
+
+The parity run of 2026-10-18 (`docs/research/parity-2026-10.md`) failed on
+three checks; the owner decided each on 2026-10-18. The recorded failures
+stand as recorded (AGENTS.md rule 6).
+
+- **Point 8: names with no sector label (#461).** QuantConnect's universe
+  held names with no Morningstar sector (5.3% of the ranked names in the
+  tuning months, 3.5% held out: mostly foreign ADRs and recent listings).
+  `defensive_book` ranked them, uncapped (`defensive_v2.py:69-74`); live
+  trading left them out (`plan.md` section 4, "Sectors", "Chosen"), so the
+  live book departed from the backtest's in 29 of 30 tuning months and 26
+  of 31 held out. The owner chose parity: the live rule ranks a name with
+  no sector label and can pick it, counted toward the book's `TOP_N` but
+  toward no sector's `SECTOR_CAP`, exactly as the backtest did. It is no
+  longer left out, and a decision no longer records a `no-sector` status
+  (the event schema keeps the value so earlier decisions still read). A
+  rules change: target-weight rules version 1.13.0. The live labels come
+  from other sources than Morningstar's (point 8, "Sector-label source"),
+  so which names carry no label still differs from the backtest; that is
+  measured through dry-run and paper trading (`plan.md` section 4).
+  **Guard against a label outage.** Ranking an unlabelled name uncapped
+  means a snapshot in which every name has lost its label (a renamed
+  column, a renamed sector vocabulary, a broken source) would otherwise be
+  decided as an uncapped top-25 book, with the sector cap silently absent;
+  point 5 requires that to fail closed. So the momentum rule withholds a
+  month, with the new reason `labels-missing` and the last book kept, when
+  more than a configured share of the ranked names has no label: the
+  momentum configuration's `max_unlabelled_share` (configuration schema
+  version 7, ADR 0015 and 0016), set to **0.20**. The backtest's months had
+  3.5% to 5.3% unlabelled, so 0.20 sits well above normal and well below an
+  outage; **the figure was accepted by the owner on 2026-10-18.** The reporter sends
+  `labels-missing` as an urgent alert. The market-data step also refuses a
+  session whose sector file has lost its sector column, or in which no
+  label from either source maps onto a Morningstar sector, rather than
+  writing a snapshot with no labels, and likewise a session in which either
+  source that parsed maps none of its labels. The withhold is part of rules
+  version 1.13.0; the market-data refusal is a change to the encoder, which
+  has no rules version and alters recordings, not decisions. Neither changes
+  a month the parity run compared, since the parity tool compares the book
+  selection, not the withhold.
+- **Point 7, item 2: Boost's indicators (#462, #463).** The thresholds
+  were fixed before the first parity run (`docs/research/parity-2026-10.md`,
+  "Thresholds"), with Boost's RSI(2) and its 200-day and 5-day means
+  required bit for bit. They are amended: **RSI(2) and both means must
+  match within 1e-9 relative** (|Go - QuantConnect| / max(|Go|,
+  |QuantConnect|)), the tolerance already set for scores and volatility;
+  readiness must still match exactly, and Boost's latched state and SPY
+  target exactly, every session. Rationale, as the owner recorded it:
+  QuantConnect's LEAN computes the indicators in C# `decimal`, the Go
+  module in float64, so bit equality is out of reach of any float64
+  implementation; the largest differences found were 4.26e-12 on the
+  0-100 RSI (6.1e-13 relative) and 5.68e-13 on the means (1.3e-15
+  relative); the closest RSI(2) came to its entry threshold of 10 was
+  0.0027, and every one of 7,166 sessions reached the same state and
+  target. Matching LEAN bit for bit would mean reimplementing its
+  indicator arithmetic in a decimal library, operation for operation, and
+  tracking LEAN's changes; judged not worth it. No decision changed.
+
+The thresholds of the parity gate are now:
+
+| Check | Threshold |
+| --- | --- |
+| months | every planned month exported, no other |
+| ranked order, cap marks | exact |
+| weights | absolute difference at most 1e-12 |
+| scores, volatility | relative difference at most 1e-9 |
+| risk-off | flag, close and close count exact; 200-day mean within 1e-9 relative |
+| history | each sampled name's status and close count exact |
+| Boost RSI, means | within 1e-9 relative, readiness exact, every session (amended 2026-10-18) |
+| Boost state | latched state and SPY target exact, every session |
+| differences | any live departure whose cause point 8 does not list fails |
+
+The `labels-missing` withhold is no parity check: the parity tool compares
+the book the rule selects, which the withhold does not change, and the
+exports' months had at most 5.3% unlabelled, under the 0.20 ceiling.
+
+The comparison was re-run on the kept exports with no new QuantConnect run
+(`docs/research/parity-2026-10.md`, "Owner decisions applied,
+2026-10-18").

@@ -289,21 +289,19 @@ func TestTooFewTrendClosesIsAListedDifference(t *testing.T) {
 	}
 }
 
-func TestANameWithNoSectorIsAnUnlistedDifferenceAndFails(t *testing.T) {
+// TestANameWithNoSectorIsNoDifference: defensive_book left a name with no
+// sector uncapped, and so does the live rule (ADR 0026 point 8, the owner's
+// decision of 2026-10-18), so the comparison passes with no departure.
+func TestANameWithNoSectorIsNoDifference(t *testing.T) {
 	ms := months()
-	ms[1].Ranked[0].Sector = "" // defensive_book left it uncapped; live leaves it out
+	ms[1].Ranked[0].Sector = ""
 	markAndWeigh(&ms[1])
 	r := compare(ms)
-	failsOnly(t, r, parity.CheckDifferences)
-	found := false
-	for _, d := range r.Differences {
-		found = found || d.Kind == parity.KindNoSector
-		if d.Listed() {
-			t.Errorf("no-sector is not on ADR 0026 point 8's list: %+v", d)
-		}
+	if !r.Pass() {
+		t.Errorf("a name with no sector is handled as the backtest handled it: %+v", r.Checks)
 	}
-	if !found {
-		t.Error("the no-sector difference must be reported")
+	if len(r.Differences) != 0 {
+		t.Errorf("differences %+v, want none", r.Differences)
 	}
 }
 
@@ -375,8 +373,8 @@ func TestANoSectorNameOutsideTheBookLeavesTheWeightsCompared(t *testing.T) {
 	if c := checkNamed(r, parity.CheckWeights); c.Compared != 51 || !c.Pass() {
 		t.Errorf("the book is the same on both sides, so every weight is compared: %+v", c)
 	}
-	if d := onlyDifference(t, r); d.Kind != parity.KindNoSector {
-		t.Errorf("difference %+v", d)
+	if len(r.Differences) != 0 {
+		t.Errorf("differences %+v, want none", r.Differences)
 	}
 }
 

@@ -25,7 +25,8 @@
       "ishares-iwv-gics",
       "nasdaq-screener"
     ],
-    "universe_input": "compact"
+    "universe_input": "compact",
+    "max_unlabelled_share": 0.2
   },
   "glide": {
     "anchors": [

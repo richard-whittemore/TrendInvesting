@@ -138,21 +138,15 @@ func everyItemCompared(t *testing.T, r parity.Report) {
 	}
 }
 
-func TestANoSectorPickIsComparedAsTheBacktestHandledItAndItsLiveDeparturesListed(t *testing.T) {
+func TestANoSectorPickIsComparedAsTheBacktestHandledItAndIsNoLiveDeparture(t *testing.T) {
 	ms := months()
 	m := &ms[1]
 	m.Ranked[10].Sector = ""
 	markAndWeigh(m)
-	ticker := m.Ranked[10].Ticker
 	r := compare(ms)
 	everyItemCompared(t, r)
-	failsOnly(t, r, parity.CheckDifferences)
-	// The name itself, the name that takes its place, and the weights.
-	classified(t, r, parity.KindNoSector, ticker, 3)
-	for _, d := range r.Differences {
-		if d.Listed() {
-			t.Errorf("no-sector is not on ADR 0026 point 8's list: %+v", d)
-		}
+	if !r.Pass() || len(r.Differences) != 0 {
+		t.Errorf("the live rule picks a no-sector name as the backtest did: %+v, differences %+v", r.Checks, r.Differences)
 	}
 }
 

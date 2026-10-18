@@ -109,15 +109,40 @@ func TestALiveBookTheListedRulesExplainIsNoDeparture(t *testing.T) {
 	}
 }
 
-func TestALiveNoSectorOrZeroVolatilityTheDataDoesNotShowIsUnexplained(t *testing.T) {
-	for _, s := range []momentum.Status{momentum.StatusNoSector, momentum.StatusZeroVolatility} {
-		t.Run(string(s), func(t *testing.T) {
+func TestALiveZeroVolatilityTheDataDoesNotShowIsUnexplained(t *testing.T) {
+	for _, sector := range []string{"102", ""} {
+		t.Run("sector "+sector, func(t *testing.T) {
 			r, m := internalRun(), twoNames()
+			m.Ranked[1].Sector = sector
 			want := withPicks(goBook(m, momentum.StatusPicked, momentum.StatusPicked))
-			live := withPicks(goBook(m, momentum.StatusPicked, s))
+			live := withPicks(goBook(m, momentum.StatusPicked, momentum.StatusZeroVolatility))
 			r.unexplained(m, want, want, live)
-			onlyUnexplained(t, r, fmt.Sprintf("a labelled name with volatility left out as %s", s))
+			onlyUnexplained(t, r, fmt.Sprintf("a name of sector %q with volatility left out as zero-volatility", sector))
 		})
+	}
+}
+
+// TestAnUnlabelledZeroVolatilityNameIsLeftOutByTheZeroVolatilityRule: with
+// no sector rule of its own, a name with no sector and zero volatility is
+// the zero-volatility rule's, whatever its label.
+func TestAnUnlabelledZeroVolatilityNameIsLeftOutByTheZeroVolatilityRule(t *testing.T) {
+	r, m := internalRun(), twoNames()
+	m.Ranked[1].Sector, m.Ranked[1].Volatility = "", 0
+	m.Weights = map[string]float64{"AAA": 0.98}
+	last := withPicks(goBook(m, momentum.StatusPicked))
+	live := goBook(m, momentum.StatusPicked, momentum.StatusZeroVolatility)
+	// The backtest picks it, weighting its zero volatility as 1.
+	live.Ranked[0].BacktestWouldPick, live.Ranked[1].BacktestWouldPick = true, true
+	for i := range live.Ranked {
+		live.Ranked[i].Weight = m.Weights[live.Ranked[i].InstrumentID]
+	}
+	for i := range last.Ranked {
+		last.Ranked[i].Weight = m.Weights[last.Ranked[i].InstrumentID]
+	}
+	withGaps := withPicks(goBook(m, momentum.StatusPicked, momentum.StatusPicked))
+	r.unexplained(m, last, withGaps, live)
+	if len(r.diffs) != 0 {
+		t.Errorf("differences %+v, want none", r.diffs)
 	}
 }
 

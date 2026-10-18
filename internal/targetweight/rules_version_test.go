@@ -182,3 +182,20 @@ func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheUnlabelledNamePicked pins ADR 0016's
+// same-rules-version replay guarantee for names with no sector label: a
+// momentum decision ranks and picks such a name uncapped, as the backtest
+// did, where rules 1.12.0 and earlier left it out as no-sector (ADR 0026
+// point 8, the owner's decision of 2026-10-18), so a journal holding an
+// unlabelled name in the book's reach decides differently and the build
+// must not claim 1.12.0 or earlier.
+func TestRulesVersionDeclaresTheUnlabelledNamePicked(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.12.0 once a momentum decision picks a name with no sector label", targetweight.RulesVersion)
+		}
+	}
+}

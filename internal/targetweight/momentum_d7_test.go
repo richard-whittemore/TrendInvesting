@@ -268,7 +268,7 @@ func TestMinimumLotFiguresOnlyWhenPicksWereValued(t *testing.T) {
 // that valued it, a detail naming the one-share lot and the net liquidation,
 // and no order planned, so HHH is kept (ADR 0026, point 5, "fail closed").
 func TestMinimumLotWithholdsAnAllUnaffordableBook(t *testing.T) {
-	dear := map[string]float64{"AAA": 200, "BBB": 200, "CCC": 200, "FFF": 2000, "GGG": 2000}
+	dear := map[string]float64{"AAA": 200, "BBB": 200, "CCC": 200, "FFF": 2000, "GGG": 2000, "HHH": 2000}
 	for name, riskOff := range map[string]bool{"risk-on": false, "partial risk-off": true} {
 		t.Run(name, func(t *testing.T) {
 			r := simulateMomentum(t, momentumOptions{riskOffJanuary: riskOff, rawScale: dear, held: map[string]int64{"HHH": 10}, stopAfter: "2025-02-03"})

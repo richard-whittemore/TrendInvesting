@@ -34,7 +34,7 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			InverseVolatility: true, Invested: 0.98, TrendInstrument: "SPY", TrendCloses: 5,
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "fixture-universe", SectorSources: []string{"gics", "screener"},
-			UniverseInput: event.UniverseInputBars,
+			UniverseInput: event.UniverseInputBars, MaxUnlabelledShare: 0.20,
 		},
 		Glide: event.GlideConfiguration{
 			Anchors: []event.GlideAnchor{
@@ -90,7 +90,7 @@ func names() []name {
 		{"EEE", "ETF", "", "", 9e6, 0, 100, 1.04, 1.04, 0},  // not common stock
 		{"FFF", "CS", "Energy", "gics", 1e5, 0, 20, 0.99, 0.99, 0},
 		{"GGG", "CS", "Utilities", "gics", 4e6, 38, 60, 1.05, 1.05, 0}, // lists late in February
-		{"HHH", "CS", "", "", 5e6, 0, 25, 1.06, 1.001, 0},              // no sector label
+		{"HHH", "CS", "", "", 5e6, 0, 25, 1.0, 1.001, 0},               // no sector label: ranked uncapped, beyond the book
 		{"III", "CS", "Materials", "gics", 1e4, 0, 10, 1, 1, 5},        // delisted after five sessions
 		{"SPY", "ETF", "", "", 1e8, 0, 500, 1.002, 1.002, 0},
 		{"IEF", "ETF", "", "", 1e7, 0, 95, 1.0005, 1.0005, 0},

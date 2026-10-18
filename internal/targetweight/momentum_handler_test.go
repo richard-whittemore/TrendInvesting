@@ -55,11 +55,11 @@ func TestMomentumRunDecidesOnTheLastSessionOfEachMonth(t *testing.T) {
 	if jan.Outcome != event.TargetsOutcomeDecided || !equalStrings(targetIDs(jan), []string{"AAA", "CCC"}) || jan.Momentum.RiskOff {
 		t.Errorf("January: %s %v risk-off %v", jan.Outcome, targetIDs(jan), jan.Momentum.RiskOff)
 	}
-	// Every ranked name is recorded with what the rule did with it: the
-	// unlabelled HHH is left out though the backtest would have picked it,
-	// BBB is capped behind AAA in Tech, FFF ranks after the book is full;
+	// Every ranked name is recorded with what the rule did with it: BBB is
+	// capped behind AAA in Tech; the unlabelled HHH is ranked, uncapped, as
+	// the backtest ranked it, and with FFF ranks after the book is full;
 	// DDD (under $5) and EEE (a fund) never join the universe.
-	want := map[string]string{"HHH": "no-sector", "AAA": "picked", "BBB": "sector-capped", "CCC": "picked", "FFF": "beyond-top-n"}
+	want := map[string]string{"HHH": "beyond-top-n", "AAA": "picked", "BBB": "sector-capped", "CCC": "picked", "FFF": "beyond-top-n"}
 	got := statuses(jan)
 	for id, status := range want {
 		if got[id] != status {
@@ -69,8 +69,10 @@ func TestMomentumRunDecidesOnTheLastSessionOfEachMonth(t *testing.T) {
 	if len(got) != 5 || jan.Momentum.UniverseRows != 10 || jan.Momentum.UniverseListingType != 6 || jan.Momentum.UniverseAtOrAboveFloor != 5 {
 		t.Errorf("January universe: %d names, counts %+v", len(got), jan.Momentum)
 	}
-	if !jan.Momentum.Names[0].BacktestWouldPick {
-		t.Error("the backtest, which left an unlabelled name uncapped, would have picked HHH")
+	for _, n := range jan.Momentum.Names {
+		if n.BacktestWouldPick != (n.Status == event.MomentumStatusPicked) {
+			t.Errorf("January %s: %s, backtest would pick %v", n.InstrumentID, n.Status, n.BacktestWouldPick)
+		}
 	}
 	sum := 0.0
 	for _, w := range jan.Targets {
@@ -89,6 +91,49 @@ func TestMomentumRunDecidesOnTheLastSessionOfEachMonth(t *testing.T) {
 	}
 	if got := statuses(feb); got["GGG"] != "short-history" || got["FFF"] != "" || got["AAA"] != "beyond-top-n" {
 		t.Errorf("February statuses: %v", got)
+	}
+}
+
+// TestAMomentumRunPicksAnUnlabelledNameUncapped widens the book to three:
+// HHH, with no sector label from any source, is ranked fourth and takes
+// the third pick, counted toward no sector's cap, as the backtest picked
+// such a name (defensive_v2.py:69-74; ADR 0026 point 8, the owner's
+// decision of 2026-10-18). It is recorded picked and targeted, and the
+// backtest would have picked it too.
+func TestAMomentumRunPicksAnUnlabelledNameUncapped(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{mutate: func(c *event.TargetWeightConfigurationPayload) { c.Momentum.TopN = 3 }, stopAfter: "2025-02-03"})
+	jan := targets(t, r.decisions)[0]
+	if jan.Outcome != event.TargetsOutcomeDecided || !equalStrings(targetIDs(jan), []string{"AAA", "CCC", "HHH"}) {
+		t.Fatalf("January: %s %v", jan.Outcome, targetIDs(jan))
+	}
+	for _, n := range jan.Momentum.Names {
+		if n.InstrumentID == "HHH" && (n.Status != event.MomentumStatusPicked || !n.BacktestWouldPick || n.Sector != "" || n.Weight <= 0) {
+			t.Errorf("HHH: %+v, want picked with no sector, as the backtest would", n)
+		}
+		if n.Status == "no-sector" {
+			t.Errorf("%s recorded no-sector: the rule leaves no unlabelled name out", n.InstrumentID)
+		}
+	}
+}
+
+// TestAMomentumRunWithholdsALabelOutage lowers the unlabelled-share
+// ceiling below the fixture's one unlabelled member in five: the month is
+// withheld as labels-missing, a valid decision record naming the count, and
+// nothing is planned (ADR 0026 point 5).
+func TestAMomentumRunWithholdsALabelOutage(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{mutate: func(c *event.TargetWeightConfigurationPayload) { c.Momentum.MaxUnlabelledShare = 0.1 }, stopAfter: "2025-02-03"})
+	jan := targets(t, r.decisions)[0]
+	if jan.Outcome != event.TargetsOutcomeWithheld || jan.WithheldReason != event.WithheldLabelsMissing {
+		t.Fatalf("January: %s %s", jan.Outcome, jan.WithheldReason)
+	}
+	if err := jan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(jan.Detail, "1 of 5 ranked members") {
+		t.Errorf("detail %q does not count the unlabelled members", jan.Detail)
+	}
+	if got := planned(t, r.decisions); len(got) != 0 {
+		t.Errorf("planned %d orders for a withheld month", len(got))
 	}
 }
 

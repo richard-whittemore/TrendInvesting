@@ -3,8 +3,7 @@ package momentum
 import "sort"
 
 // The backtest-compatible functions decide as defensive_v2.py did in each
-// case where the live rule departs from it (ADR 0026 point 8; plan.md
-// section 4, "Sectors"). No live decision uses them: they exist so the
+// case where the live rule departs from it (ADR 0026 point 8). No live decision uses them: they exist so the
 // parity comparison can recompute QuantConnect's book exactly and list
 // each live departure from it apart (ADR 0026 point 7, item 2).
 
