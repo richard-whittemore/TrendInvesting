@@ -116,6 +116,27 @@ func TestAMomentumRunPicksAnUnlabelledNameUncapped(t *testing.T) {
 	}
 }
 
+// TestAMomentumRunWithholdsALabelOutage lowers the unlabelled-share
+// ceiling below the fixture's one unlabelled member in five: the month is
+// withheld as labels-missing, a valid decision record naming the count, and
+// nothing is planned (ADR 0026 point 5).
+func TestAMomentumRunWithholdsALabelOutage(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{mutate: func(c *event.TargetWeightConfigurationPayload) { c.Momentum.MaxUnlabelledShare = 0.1 }, stopAfter: "2025-02-03"})
+	jan := targets(t, r.decisions)[0]
+	if jan.Outcome != event.TargetsOutcomeWithheld || jan.WithheldReason != event.WithheldLabelsMissing {
+		t.Fatalf("January: %s %s", jan.Outcome, jan.WithheldReason)
+	}
+	if err := jan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(jan.Detail, "1 of 5 ranked members") {
+		t.Errorf("detail %q does not count the unlabelled members", jan.Detail)
+	}
+	if got := planned(t, r.decisions); len(got) != 0 {
+		t.Errorf("planned %d orders for a withheld month", len(got))
+	}
+}
+
 func TestMomentumBuysAtOnceWithoutSellsThenSellsFirst(t *testing.T) {
 	r := simulateMomentum(t, momentumOptions{})
 	orders := planned(t, r.decisions)

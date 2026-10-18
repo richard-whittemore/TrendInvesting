@@ -109,7 +109,8 @@ func reading(c *Check, where string, got float64, ready bool, want *float64) {
 	}
 }
 
-// wellFormedBoost refuses an export that is out of order or malformed, or
+// wellFormedBoost refuses an export that is out of order or malformed (a
+// close that is not positive and finite, an RSI outside [0, 100]), or
 // that does not cover the planned range: the plan was recorded before the
 // run, so an export that stops short of it, starts after it or holds
 // another number of sessions is not the run that was planned.
@@ -134,6 +135,11 @@ func wellFormedBoost(plan BoostPlan, sessions []BoostSession) error {
 		}
 		if !(s.Close > 0) || math.IsInf(s.Close, 0) {
 			return fmt.Errorf("%s: close %v", s.Date, s.Close)
+		}
+		// RSI lies in [0, 100]: one outside it is no RSI, refused before the
+		// relative tolerance could pass it against a Go RSI of 100 or 0.
+		if s.RSI != nil && !(*s.RSI >= 0 && *s.RSI <= 100) {
+			return fmt.Errorf("%s: RSI %v outside [0, 100]", s.Date, *s.RSI)
 		}
 		if s.Warmup && decided {
 			return fmt.Errorf("%s: a warm-up session after a decision", s.Date)

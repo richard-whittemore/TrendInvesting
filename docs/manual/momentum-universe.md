@@ -26,7 +26,7 @@ The engine never reads a bar for every listed stock in a session.
 
 ## The configuration says which shape the run reads
 
-The IRA's configuration (version 6) must say which of the two shapes its
+The IRA's configuration (version 6 on) must say which of the two shapes its
 stream is, in the momentum section's `universe_input`:
 
 - `"compact"`: the shape above, written by `encode --ranker`;
@@ -130,10 +130,45 @@ the one that was tested (ADR 0026, point 8; target-weight rules version
 come from iShares and Nasdaq, not Morningstar; that is measured during
 dry-run and paper trading.
 
+### Too many stocks with no label: `labels-missing`
+
+A few unlabelled stocks a month is normal: 3.5% to 5.3% of the ranked
+stocks in the backtests. Many at once is not. If iShares renamed its sector
+column, or either source renamed its sectors, every stock would arrive with
+no label, and because unlabelled stocks are not capped, the engine would buy
+the 25 top scores with no sector limit at all and no error anywhere.
+
+So the engine counts the ranked stocks with no label each month. If more
+than the configured share have none, it does not decide: the month is
+**withheld** with the reason `labels-missing`, and the account keeps the
+book it has. The detail says how many of how many had no label, and the
+ceiling. The share is the momentum configuration's `max_unlabelled_share`,
+set to 0.20 (20%), well above normal and well below an outage; it is part of
+the configuration hash (configuration version 7). The figure was accepted
+by the owner on 2026-10-18 (ADR 0026, amendment of 2026-10-18).
+
+The reporter sends `labels-missing` as an urgent alert
+([alerts](alerts-and-dashboard.md)). What to do: open the latest
+`sectors-iwv` and `sectors-nasdaq` recordings for the session and check that
+each still has a sector column and its usual sector names. The market-data
+step already refuses a session whose sector file has no sector column, or in
+which no label from either source maps onto a Morningstar sector
+([market data](market-data.md)), so a total outage stops there; this check
+catches a partial one.
+
 Tests: `TestSelectBookPicksNamesWithNoSectorAsTheBacktestDoes`
-(`internal/targetweight/momentum/book_test.go`) and
+(`internal/targetweight/momentum/book_test.go`),
 `TestAMomentumRunPicksAnUnlabelledNameUncapped`
-(`internal/targetweight/momentum_handler_test.go`).
+and `TestAMomentumRunWithholdsALabelOutage`
+(`internal/targetweight/momentum_handler_test.go`),
+`TestDecideWithholdsAUniverseWithTooManyUnlabelledNames`,
+`TestDecideDecidesAUniverseWithFewUnlabelledNames` and
+`TestDecideAtTheCeilingDecides`
+(`internal/targetweight/momentum/labels_missing_test.go`), and
+`test_an_iwv_file_with_its_sector_column_renamed_is_refused`,
+`test_a_screener_response_with_its_sector_field_renamed_is_refused` and
+`test_a_session_whose_labels_all_fail_to_map_is_refused`
+(`adapter/marketdata/tests/test_sectors.py`).
 
 ## A session the exchange cancels
 
@@ -218,7 +253,7 @@ bars (ADR 0026, point 5).
 - ADR 0026, points 1 (inputs, ranking in Go, decision times) and 5 (missing
   bars fail closed); ADR 0015 (the two new record types start at version 1;
   the configuration's `universe_input` is its version 6, and version 5 is
-  refused); ADR 0016 (the value is part of the configuration hash; rules
+  refused; version 7 adds `max_unlabelled_share`, below); ADR 0016 (the value is part of the configuration hash; rules
   version 1.6.0);
   ADR 0004 and the adjusted-bar rule in `internal/event/bar_adjusted.go` (how
   closes are adjusted).

@@ -34,7 +34,7 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			InverseVolatility: true, Invested: 0.98, TrendInstrument: "SPY", TrendCloses: 5,
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "fixture-universe", SectorSources: []string{"gics", "screener"},
-			UniverseInput: event.UniverseInputBars,
+			UniverseInput: event.UniverseInputBars, MaxUnlabelledShare: 0.20,
 		},
 		Glide: event.GlideConfiguration{
 			Anchors: []event.GlideAnchor{

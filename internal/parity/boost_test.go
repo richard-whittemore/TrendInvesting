@@ -164,6 +164,23 @@ func TestSessionsOutOfOrderOrAWarmUpAfterADecisionFail(t *testing.T) {
 	}
 }
 
+// TestAnRSIOutsideItsRangeFailsTheExport: RSI lies in [0, 100], so an
+// exported RSI outside it, or not finite, is a malformed export, refused
+// before the tolerance applies: a value just above 100 is within 1e-9 of a
+// Go RSI of 100 and would otherwise pass.
+func TestAnRSIOutsideItsRangeFailsTheExport(t *testing.T) {
+	for _, bad := range []float64{100.5, 100 * (1 + 1e-10), -0.5, math.NaN(), math.Inf(1)} {
+		t.Run(fmt.Sprint(bad), func(t *testing.T) {
+			s := syntheticBoost(400, 210)
+			v := bad
+			s[300].RSI = &v
+			if c := checkNamed(compareBoost(s), parity.CheckExport); c.Pass() || !strings.Contains(c.First, "RSI") {
+				t.Errorf("an RSI of %v must fail the export check, naming the RSI: %+v", bad, c)
+			}
+		})
+	}
+}
+
 func TestAnEmptyBoostExportFails(t *testing.T) {
 	if compareBoost(nil).Pass() {
 		t.Error("an export with no session compares nothing and must fail")

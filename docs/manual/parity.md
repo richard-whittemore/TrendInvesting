@@ -179,7 +179,10 @@ valid, a run with no planned months).
   length, dates out of order or repeated, a picked stock with no weight, a
   stock ranked twice, a member count that is not the ranked plus the too
   short); nothing in that month is compared further. It also fails when
-  Go gave a stock a status the tool has no backtest mark for. A required
+  Go gave a stock a status the tool has no backtest mark for. A Boost
+  export fails it for a close that is not positive, or an RSI outside 0 to
+  100 (an RSI just above 100 would otherwise pass the 1e-9 tolerance
+  against a Go RSI of 100). A required
   field that is missing or null (a weight or a close count included), or an
   empty ticker, stops the tool before any comparison (exit status 2).
 - **`differences` fails**: the live rule departs from the backtest for a

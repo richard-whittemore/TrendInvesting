@@ -31,6 +31,8 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     bytes are still version 1's. The withheld reason histories-missing,
 //     which only a run reading the compact universe input emits, is a
 //     reason of this version too: no journal read before that input has it.
+//     So is labels-missing, which only a run under configuration version 7
+//     emits.
 const TargetsDecidedSchemaVersion uint32 = 4
 
 // The two outcomes of a target decision (ADR 0026, point 1).
@@ -70,6 +72,13 @@ const (
 	// members it ranks, so it cannot score them and does not decide from the
 	// bars of the names held alone (ADR 0026, point 5, "fail closed").
 	WithheldHistoriesMissing = "histories-missing"
+	// WithheldLabelsMissing: more than the configuration's
+	// MaxUnlabelledShare of the ranked members have no sector label, a label
+	// outage rather than a few names the sources do not cover. A name with
+	// no label is ranked uncapped, so deciding would trade a book with the
+	// sector cap silently absent; the book is kept (ADR 0026, point 5, "fail
+	// closed", and point 8).
+	WithheldLabelsMissing = "labels-missing"
 )
 
 // TargetWeight is one instrument's target as a fraction of net liquidation.
@@ -282,7 +291,7 @@ func (p TargetsDecidedPayload) Validate() error {
 		switch p.WithheldReason {
 		case WithheldMissingBars, WithheldStaleAccountSnapshot, WithheldMissingUniverse,
 			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress, WithheldAllUnaffordable,
-			WithheldHistoriesMissing:
+			WithheldHistoriesMissing, WithheldLabelsMissing:
 		default:
 			errs = append(errs, fmt.Errorf("withheld reason %q is not recognised", p.WithheldReason))
 		}

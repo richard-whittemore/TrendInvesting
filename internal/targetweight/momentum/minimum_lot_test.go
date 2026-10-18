@@ -248,12 +248,16 @@ func mustAllUnaffordable(t *testing.T, d momentum.Decision, n int) {
 // sector label and prices AAA's one share above its target: BBB is ranked
 // and picked uncapped, as the backtest picked such a name (ADR 0026 point
 // 8, the owner's decision of 2026-10-18), so it takes AAA's place and the
-// decision is decided, not withheld.
+// decision is decided, not withheld. One unlabelled member in four is above
+// the default unlabelled-share ceiling, so the ceiling is raised to isolate
+// the substitution.
 func TestDecideSubstitutesAnUnlabelledNameForADearOne(t *testing.T) {
 	in := decideInput()
 	in.Universe.Rows[1].Sector, in.Universe.Rows[1].SectorSource = "", ""
 	in.MinimumLot = &momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: map[string]float64{"AAA": 2000, "BBB": 1}}
-	d, err := momentum.Decide(momentum.FCombo(), in)
+	cfg := momentum.FCombo()
+	cfg.MaxUnlabelledShare = 0.5
+	d, err := momentum.Decide(cfg, in)
 	if err != nil {
 		t.Fatal(err)
 	}

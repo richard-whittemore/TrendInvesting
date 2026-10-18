@@ -330,9 +330,9 @@ marks them unreadable instead: the sale back to 98% is then withheld as
 refused, because working sells could not be checked.
 
 The thresholds are in the configuration. They were introduced in version 5 of
-`strategy.target-weight.configuration`, carried unchanged in the current version 6,
-and read from rules version 1.5.0 on. This build (rules version 1.13.0) reads
-only configuration version 6, so a journal written under an earlier rules
+`strategy.target-weight.configuration`, carried unchanged in versions 6 and the
+current 7, and read from rules version 1.5.0 on. This build (rules version
+1.13.0) reads only configuration version 7, so a journal written under an earlier rules
 version will not replay. Only the margin account has them: an
 IRA has no margin cushion, so its configuration leaves them out and it gets no
 alarm. A change of level is recorded as

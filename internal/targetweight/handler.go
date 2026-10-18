@@ -79,7 +79,10 @@ import (
 //     (defensive_v2.py:69-74), where 1.12.0 left it out as no-sector: the
 //     owner's decision of 2026-10-18 (ADR 0026 point 8). A journal holding
 //     such a name within the book's reach decides differently, so one
-//     written under 1.12.0 does not replay.
+//     written under 1.12.0 does not replay. It withholds a month as
+//     labels-missing when more than the configuration's MaxUnlabelledShare
+//     of the ranked members has no label (configuration version 7, so a
+//     version 6 configuration is refused).
 const RulesVersion = "1.13.0"
 
 // source names this handler on every envelope it emits.

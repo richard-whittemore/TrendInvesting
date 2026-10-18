@@ -74,6 +74,16 @@ class ParseTest(unittest.TestCase):
             with self.subTest(text[:20]), self.assertRaises(sectors.Unusable):
                 sectors.parse_iwv(text)
 
+    def test_an_iwv_file_with_its_sector_column_renamed_is_refused(self):
+        text = iwv_csv(("AAPL", "Information Technology", "Equity")).replace(",Sector,", ",GICS Sector,")
+        with self.assertRaises(sectors.Unusable):
+            sectors.parse_iwv(text)
+
+    def test_a_screener_response_with_its_sector_field_renamed_is_refused(self):
+        body = {"data": {"rows": [{"symbol": "SHOP", "industry": "Technology"}, {"symbol": "AAPL", "industry": "x"}]}}
+        with self.assertRaises(sectors.Unusable):
+            sectors.parse_nasdaq(body)
+
     def test_the_screener_gives_each_symbols_sector(self):
         self.assertEqual(sectors.parse_nasdaq(json.loads(screener(("BRK/B", "Finance"), ("SHOP", "Technology")))),
                          {"BRKB": "Finance", "SHOP": "Technology"})
@@ -118,6 +128,18 @@ class LabelsTest(unittest.TestCase):
         iwv, nasdaq = records([("BF.B", "Consumer Staples", "Equity"), ("BFB", "Energy", "Equity")],
                               [("BF/B", "Consumer Staples")])
         self.assertEqual(sectors.labels(iwv, nasdaq)["BFB"], ("Consumer Defensive", sectors.NASDAQ_SOURCE))
+
+    def test_a_session_whose_labels_all_fail_to_map_is_refused(self):
+        # A renamed vocabulary at both sources leaves every row unmapped: the
+        # encoder refuses the session rather than emit a snapshot with no
+        # label, which the momentum rule would rank with no sector cap.
+        iwv, nasdaq = records([("AAPL", "Info Tech", "Equity")], [("SHOP", "Tech")])
+        with self.assertRaises(sectors.Unusable):
+            sectors.labels(iwv, nasdaq)
+
+    def test_one_source_mapping_still_labels_the_session(self):
+        iwv, nasdaq = records([("AAPL", "Info Tech", "Equity")], [("SHOP", "Technology")])
+        self.assertEqual(sectors.labels(iwv, nasdaq), {"SHOP": ("Technology", sectors.NASDAQ_SOURCE)})
 
     def test_tickers_match_without_punctuation(self):
         self.assertEqual(sectors.norm("brk.b"), "BRKB")

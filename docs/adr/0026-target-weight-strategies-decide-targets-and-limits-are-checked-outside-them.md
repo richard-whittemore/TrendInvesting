@@ -584,6 +584,23 @@ stand as recorded (AGENTS.md rule 6).
   from other sources than Morningstar's (point 8, "Sector-label source"),
   so which names carry no label still differs from the backtest; that is
   measured through dry-run and paper trading (`plan.md` section 4).
+  **Guard against a label outage.** Ranking an unlabelled name uncapped
+  means a snapshot in which every name has lost its label (a renamed
+  column, a renamed sector vocabulary, a broken source) would otherwise be
+  decided as an uncapped top-25 book, with the sector cap silently absent;
+  point 5 requires that to fail closed. So the momentum rule withholds a
+  month, with the new reason `labels-missing` and the last book kept, when
+  more than a configured share of the ranked names has no label: the
+  momentum configuration's `max_unlabelled_share` (configuration schema
+  version 7, ADR 0015 and 0016), set to **0.20**. The backtest's months had
+  3.5% to 5.3% unlabelled, so 0.20 sits well above normal and well below an
+  outage; **the figure was accepted by the owner on 2026-10-18.** The reporter sends
+  `labels-missing` as an urgent alert. The market-data step also refuses a
+  session whose sector file has lost its sector column, or in which no
+  label from either source maps onto a Morningstar sector, rather than
+  writing a snapshot with no labels. Both are part of rules version
+  1.13.0; neither changes a month the parity run compared, since the
+  parity tool compares the book selection, not the withhold.
 - **Point 7, item 2: Boost's indicators (#462, #463).** The thresholds
   were fixed before the first parity run (`docs/research/parity-2026-10.md`,
   "Thresholds"), with Boost's RSI(2) and its 200-day and 5-day means
@@ -615,6 +632,10 @@ The thresholds of the parity gate are now:
 | Boost RSI, means | within 1e-9 relative, readiness exact, every session (amended 2026-10-18) |
 | Boost state | latched state and SPY target exact, every session |
 | differences | any live departure whose cause point 8 does not list fails |
+
+The `labels-missing` withhold is no parity check: the parity tool compares
+the book the rule selects, which the withhold does not change, and the
+exports' months had at most 5.3% unlabelled, under the 0.20 ceiling.
 
 The comparison was re-run on the kept exports with no new QuantConnect run
 (`docs/research/parity-2026-10.md`, "Owner decisions applied,
