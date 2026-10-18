@@ -179,6 +179,9 @@ type momentumOptions struct {
 	// heldBarsOnly feeds a run configured for bars the compact stream's
 	// bars (SPY, IEF, SHY and the names held) and no close history.
 	heldBarsOnly bool
+	// valueAtRaw values the account snapshot's positions at the raw close
+	// rawScale gives, as the venue would, instead of at the adjusted close.
+	valueAtRaw bool
 	// retract feeds a market.session.retracted for each session named,
 	// just after the calendar; unlisted leaves sessions off the calendar fed.
 	retract  []string
@@ -295,6 +298,16 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				prices[n.id] = n.price(cal, i, opts.riskOffJanuary)
 			}
 		}
+		marks := prices // what the snapshot values positions at
+		if opts.valueAtRaw {
+			marks = map[string]float64{}
+			for id, p := range prices {
+				marks[id] = p
+				if k, ok := opts.rawScale[id]; ok {
+					marks[id] = float64(p * k)
+				}
+			}
+		}
 		// The venue: yesterday's proceeds settle, then each released order is
 		// acknowledged and fills at the open; the fill that ends the sell
 		// phase may release buys, which fill in turn.
@@ -342,7 +355,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				}, event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID)
 				if amount, ok := opts.withdrawFill[o.InstrumentID]; ok && o.Side == event.OrderSideSell {
 					acct.settled = float64(acct.settled - amount)
-					venue(acct.snapshot(at, prices), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
+					venue(acct.snapshot(at, marks), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
 				}
 			}
 			if quantity < o.Quantity {
@@ -404,7 +417,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			if opts.lateSnapshot[session] {
 				asOf = end.Add(time.Hour)
 			}
-			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, prices)))
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, marks)))
 		}
 		if !opts.compact {
 			marked = ids
@@ -435,7 +448,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		}
 		if amount, ok := opts.withdraw[session]; ok {
 			acct.settled = float64(acct.settled - amount)
-			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-after-withdrawal:"+session, end.Add(time.Hour), acct.snapshot(end.Add(time.Hour), prices)))
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-after-withdrawal:"+session, end.Add(time.Hour), acct.snapshot(end.Add(time.Hour), marks)))
 		}
 		if session == opts.stopAfter {
 			break

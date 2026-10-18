@@ -30,8 +30,9 @@ amendment of that date) the rule treats a stock the account already holds
 differently. Before, a held stock that was still in the book but whose
 target had dropped below one share's price was skipped like any other, so
 the program sold the whole holding. Had the stock kept its target, the 25%
-rebalance band would have left a holding of one share alone, and trimmed a
-holding of more shares down to one share. Now the holding is neither sold
+rebalance band or the whole-share rounding of the trade would have left a
+holding of one share alone, and trimmed a holding of more shares down to one
+share. Now the holding is neither sold
 nor trimmed.
 
 Now such a stock is **kept**:
@@ -155,6 +156,8 @@ In `internal/targetweight/momentum/minimum_lot_held_test.go`:
 `TestMinimumLotKeepsAHeldPickOneLotShort`,
 `TestMinimumLotKeepsAHeldPicksSectorSlot`,
 `TestMinimumLotStillSkipsAPickNotHeld`,
+`TestMinimumLotKeepsAHeldPickThatBecomesDearOnALaterPass`,
+`TestMinimumLotPicksAHeldNameThatBecomesAffordable`,
 `TestMinimumLotRefusesABadHolding`,
 `TestDecideKeepsAHeldPickOneLotShort` and
 `TestDecideWithholdsABookWithNoAffordablePickThoughOneIsHeld`.
@@ -167,6 +170,14 @@ held stock outside the book still sold) and
 pins the planner, `TestHeldOneLotShortNamesValidate` (in `internal/event`)
 the recorded figures, and `TestRulesVersionDeclaresTheHeldNameKeptOneLotShort`
 the version.
+
+`TestHeldOneLotShortReplayFixture` (in `momentum_d7_held_replay_test.go`)
+pins a whole synthetic run, with one AAA share kept, byte for byte against
+the committed journal `testdata/held-one-lot-short.journal.jsonl` and
+replays it to the same decisions. After a deliberate change to the rule or a
+rules-version bump, regenerate the journal with
+`go test ./internal/targetweight -run TestHeldOneLotShortReplayFixture -update`
+and read the diff before committing it.
 
 In `internal/targetweight/momentum_d7_test.go`:
 `TestMinimumLotSubstitutesAnUnaffordablePick`,

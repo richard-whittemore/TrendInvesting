@@ -18,11 +18,14 @@ import (
 var updateHeldReplay = flag.Bool("update", false, "rewrite internal/targetweight's committed replay fixtures from this run")
 
 // heldReplayFixture is a synthetic run, every input invented by
-// simulateMomentum, whose account snapshot holds 10 AAA at a raw close of
-// about $14,000 a share, far above its target: January's decision keeps AAA
-// one lot short (ADR 0026, point 2, "D7-L", amended 2026-10-18). It holds no
-// market data and is committed, so the decision is pinned byte for byte on
-// every machine that runs the tests.
+// simulateMomentum, whose account snapshot holds one AAA share valued at its
+// raw close, $15,218 at January's last session, far above its target:
+// January's decision keeps AAA one lot short (ADR 0026, point 2, "D7-L",
+// amended 2026-10-18) and the run stays Normal. It holds no market data and
+// is committed, so the decision is pinned byte for byte on every machine that
+// runs the tests. The fixture was written under rules version 1.17.0
+// (targetweight.RulesVersion); a rules bump changes what the handler decides,
+// so regenerate it with -update and read the diff before committing it.
 const heldReplayFixture = "testdata/held-one-lot-short.journal.jsonl"
 
 // TestHeldOneLotShortReplayFixture pins a decided book with a held name kept
@@ -31,7 +34,7 @@ const heldReplayFixture = "testdata/held-one-lot-short.journal.jsonl"
 // January decision it pins records AAA held-one-lot-short with figures that
 // validate as written.
 func TestHeldOneLotShortReplayFixture(t *testing.T) {
-	r := simulateMomentum(t, momentumOptions{rawScale: dearAAA, held: map[string]int64{"AAA": 10, "HHH": 10}, stopAfter: "2025-02-03"})
+	r := simulateMomentum(t, momentumOptions{rawScale: dearAAA, held: map[string]int64{"AAA": 1, "HHH": 10}, valueAtRaw: true, stopAfter: "2025-02-03"})
 	header, err := r.recorder.Header(r.hash, strategyVersion)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +90,16 @@ func TestHeldOneLotShortReplayFixture(t *testing.T) {
 	if err := decided[0].ValidateWritten(); err != nil {
 		t.Errorf("the pinned decision does not validate: %v", err)
 	}
-	if aaa := nameOf(t, decided[0], "AAA"); aaa.Status != event.MomentumStatusHeldOneLotShort || aaa.HeldQuantity != 10 {
-		t.Errorf("AAA pinned as %+v, want held-one-lot-short with its 10 shares", aaa)
+	if aaa := nameOf(t, decided[0], "AAA"); aaa.Status != event.MomentumStatusHeldOneLotShort || aaa.HeldQuantity != 1 {
+		t.Errorf("AAA pinned as %+v, want held-one-lot-short with its one share", aaa)
+	}
+	// The run stays Normal: the account snapshot values the kept share at its
+	// raw close, so the planned CCC buy is within every limit and nothing is
+	// refused.
+	if states := ofType(decisions, event.EngineStateEventType); len(states) != 0 {
+		t.Errorf("the pinned run changed the engine state: %+v", states)
+	}
+	if refused := ofType(decisions, event.OrderRefusedEventType); len(refused) != 0 {
+		t.Errorf("the pinned run refused %d orders, want none", len(refused))
 	}
 }

@@ -44,6 +44,15 @@ func TestOrderSkippedValidate(t *testing.T) {
 	expectInvalid(t, "held", v, func(p *P) { p.HeldQuantity = -1 }, "held quantity")
 }
 
+// nameAt mutates a copy of name i, so no case leaks into the next through the
+// Names slice the copies of a payload share.
+func nameAt(i int, f func(n *event.MomentumName)) func(*event.TargetsDecidedPayload) {
+	return func(p *event.TargetsDecidedPayload) {
+		p.Momentum.Names = append([]event.MomentumName(nil), p.Momentum.Names...)
+		f(&p.Momentum.Names[i])
+	}
+}
+
 func TestUnaffordableNamesValidate(t *testing.T) {
 	v := validMomentumDecided()
 	v.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: 30000, MomentumScale: 0.9}
@@ -56,8 +65,11 @@ func TestUnaffordableNamesValidate(t *testing.T) {
 	expectInvalid(t, "no lot figures", v, func(p *P) { p.Momentum.MinimumLot = event.MinimumLotFigures{} }, "minimum lot figures")
 	expectInvalid(t, "scale", v, func(p *P) { p.Momentum.MinimumLot.MomentumScale = 1.5 }, "scale in (0, 1]")
 	expectInvalid(t, "net liquidation", v, func(p *P) { p.Momentum.MinimumLot.NetLiquidation = 0 }, "positive net liquidation")
-	expectInvalid(t, "affordable", v, func(p *P) { p.Momentum.Names[1].OneShare = 700 }, "exceeds its target value")
-	expectInvalid(t, "figures on a pick", v, func(p *P) { p.Momentum.Names[0].OneShare = 10 }, "only an unaffordable name")
+	expectInvalid(t, "affordable", v, nameAt(1, func(n *event.MomentumName) { n.OneShare = 700 }), "exceeds its target value")
+	expectInvalid(t, "figures on a pick", v, nameAt(0, func(n *event.MomentumName) { n.OneShare = 10 }), "only an unaffordable name")
+	if err := v.Validate(); err != nil {
+		t.Errorf("a case changed the valid record: %v", err)
+	}
 
 	// A book D7-L found wholly unaffordable is withheld with its figures.
 	w := validMomentumDecided()
@@ -86,14 +98,7 @@ func TestHeldOneLotShortNamesValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	type P = event.TargetsDecidedPayload
-	// first mutates a copy of the first name, so no case leaks into the next
-	// through the Names slice the copies of v share.
-	first := func(f func(n *event.MomentumName)) func(*P) {
-		return func(p *P) {
-			p.Momentum.Names = append([]event.MomentumName(nil), p.Momentum.Names...)
-			f(&p.Momentum.Names[0])
-		}
-	}
+	first := func(f func(n *event.MomentumName)) func(*P) { return nameAt(0, f) }
 	expectInvalid(t, "no lot figures", v, func(p *P) { p.Momentum.MinimumLot = event.MinimumLotFigures{} }, "minimum lot figures")
 	expectInvalid(t, "affordable", v, first(func(n *event.MomentumName) { n.OneShare = 14000 }), "exceeds its target value")
 	expectInvalid(t, "no weight", v, first(func(n *event.MomentumName) { n.Weight = 0 }), "keeps its weight")

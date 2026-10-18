@@ -789,8 +789,9 @@ amends point 2, "D7-L", and its amendment of 2026-10-17.
 stock that was held and still ranked into the book, but whose target value
 had fallen below one share's price, was skipped like any other pick: it got
 no target and the planner sold the whole holding. Had it kept its target,
-the rebalance band would have left a one-share holding alone, and trimmed a
-holding of more shares to one share; the kept holding is now neither sold
+the rebalance band, or the whole-share rounding of the trade it asked for,
+would have left a one-share holding alone, and trimmed a holding of more
+shares to one share; the kept holding is now neither sold
 nor trimmed.
 
 **The rule now.**
