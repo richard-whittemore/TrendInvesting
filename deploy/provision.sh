@@ -4,6 +4,7 @@
 #
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
 #   sudo deploy/provision.sh gateway    IBC and IB Gateway (pinned, checksummed)
+#   sudo deploy/provision.sh twsapi     IBKR's TWS API, fetched and verified (not part of all)
 #   sudo deploy/provision.sh services   systemd units, directories, config stubs
 #   sudo deploy/provision.sh firewall   close everything except Tailscale
 #   sudo deploy/provision.sh all        base, gateway, services, then firewall
@@ -149,6 +150,18 @@ step_gateway() {
   fi
 }
 
+# IBKR's TWS API (the adapter's ibapi), fetched and verified against its
+# pinned checksum (ADR 0025 point 4, amended 2026-10-16); a mismatch stops
+# the step. Its own step, run with the paper-account test and not by `all`:
+# the pin is IBKR's moving "latest" link, so once IBKR replaces the file the
+# checksum fails, and that must not block the Gateway or the services. It is
+# not yet installed into the adapter's environment: that step is written and
+# run with the paper-account test, the first use of the real client.
+step_twsapi() {
+  log "TWS API ${TWSAPI_VERSION} (fetched and verified, not installed)"
+  fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
+}
+
 # write_stub PATH TEMPLATE: root-only, empty, created once and never
 # overwritten, so a re-run cannot erase what the owner entered.
 write_stub() {
@@ -228,10 +241,11 @@ main() {
   case ${1:-} in
     base) step_base ;;
     gateway) step_gateway ;;
+    twsapi) step_twsapi ;;
     services) step_services ;;
     firewall) step_firewall ;;
     all) step_base; step_gateway; step_services; step_firewall ;;
-    *) die "usage: provision.sh base|gateway|services|firewall|all" ;;
+    *) die "usage: provision.sh base|gateway|twsapi|services|firewall|all" ;;
   esac
   log "done: ${1}"
 }

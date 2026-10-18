@@ -131,3 +131,27 @@ IBKR's own licence terms, which may not allow publishing its source here.
   here.** They are set, from IBKR's official download page, in #327's next PR;
   until then neither `deploy/versions.env` nor `deploy/provision.sh` carries
   `ibapi`.
+
+## Amendment (2026-10-18): the `ibapi` pin
+
+The version and checksum the amendment of 2026-10-16 left open are set in
+`deploy/versions.env` (`TWSAPI_VERSION`, `TWSAPI_URL`, `TWSAPI_SHA256`):
+
+- **Version:** IBKR's TWS API 10.51.01, its "Latest" Linux build. IBKR's
+  download page says only the Latest Mac/Linux build includes the Python
+  API; "Stable" (10.50.02) has Java and C++ only. So the pin is Latest, as
+  the one released build that carries `ibapi`.
+- **Checksum:** IBKR publishes none. The SHA-256 is of the installer as
+  downloaded on 2026-10-18, as for the Gateway installer. IBKR's link is a
+  moving one, so when IBKR replaces the file provisioning stops, which is
+  intended (point 5: a version change repeats the paper-account test).
+- **Fetch and verify:** `deploy/provision.sh twsapi`, a step of its own that
+  `all` does not run, downloads the installer and refuses it unless its
+  SHA-256 matches; kept apart so that IBKR moving its "latest" link never
+  blocks provisioning the Gateway. Installing `ibapi` from it into
+  the adapter's environment is written with, and first run by, the
+  paper-account test, since that is the first use of the real client.
+  CI still runs against the fake.
+- The Gateway is pinned at 10.50.1f (stable) and the API at 10.51.01: the API
+  client negotiates the server version on connect, and the paper-account
+  test confirms the pair works before any account sends.
