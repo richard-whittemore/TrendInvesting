@@ -78,6 +78,15 @@ import (
 // execution"). The buys are budgeted from cash under the D5 rule and scaled
 // to fit; the budget is carried through each release and fill, less any cash
 // a newer snapshot shows gone that the fills do not explain.
+//
+// # Dry-run
+//
+// A dry-run releases every order with send false, so no venue ever reports
+// on it. The run records a synthetic terminal report for each as it is
+// released (endUnsent), so the buy phase is planned at the same close and the
+// next rebalance is not withheld as rebalance-in-progress. Nothing executes:
+// no fill, proceeds or commission is counted, so the buys are budgeted from
+// the snapshot's cash alone. Paper and live runs never record one.
 type momentumRun struct {
 	h       *Handler
 	rule    momentum.Config
@@ -480,10 +489,51 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	for _, o := range r.check(b, reb, plan.Sells, 0) {
 		reb.sells = append(reb.sells, o.ClientOrderID)
 	}
-	if len(reb.sells) == 0 {
+	r.endUnsent(b, reb.sells)
+	if r.sellsTerminal(reb) {
 		r.planBuys(b)
 	}
 	return b.result()
+}
+
+// sellsTerminal reports whether every sell the rebalance released is
+// terminal, as when it released none.
+func (r *momentumRun) sellsTerminal(reb *rebalance) bool {
+	for _, id := range reb.sells {
+		if !r.orders[id].terminal {
+			return false
+		}
+	}
+	return true
+}
+
+// endUnsent records, in a dry-run only, a synthetic terminal report for each
+// of the orders just released, which the run never sent (ADR 0026, point 3,
+// "Mode"), and ends each as a venue's cancellation would: the gate no longer
+// counts the sell as pending and a buy commits nothing more. The report is
+// marked synthetic and names no venue order, so no reader can take it for a
+// venue's report or an execution (LimitOrderLifecyclePayload.Synthetic).
+func (r *momentumRun) endUnsent(b *emissions, released []string) {
+	if r.h.cfg.Mode != event.TradingModeDryRun {
+		return
+	}
+	for _, id := range released {
+		o := r.orders[id]
+		p := event.LimitOrderLifecyclePayload{
+			AccountID: r.h.cfg.AccountID, ClientOrderID: id, InstrumentID: o.planned.InstrumentID, Side: o.planned.Side,
+			Status: event.OrderLifecycleStatusCanceled, Quantity: o.planned.Quantity, LimitPrice: o.planned.LimitPrice,
+			OccurredAt: b.at, Synthetic: true,
+			Message: "dry-run: journalled with send false and never sent; synthetic terminal report, nothing executed",
+		}
+		b.add("synthetic-lifecycle:"+id, event.OrderLifecycleEventType, p.SchemaVersion(), p)
+		// The gate released this order from these very figures, so it
+		// cannot refuse the report: an error is a defect.
+		b.fail(r.h.gate.ObserveLifecycle(p))
+		o.terminal = true
+		if o.planned.Side == event.OrderSideBuy {
+			r.rebalance.budget.Close(id)
+		}
+	}
 }
 
 // minimumLot returns what D7-L's substitution values the picks against at the
@@ -614,9 +664,12 @@ func (r *momentumRun) planBuys(b *emissions) {
 	}
 	buys, skipped, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
 	r.skipped(b, skipped)
+	var released []string
 	for _, o := range r.check(b, reb, buys, reb.sellsPlanned) {
 		reb.budget.Release(o.ClientOrderID, orderplan.BuyCost(o, r.exec.MaxFeesPerOrder))
+		released = append(released, o.ClientOrderID)
 	}
+	r.endUnsent(b, released)
 }
 
 // unexplainedCashDrop is how far the latest snapshot's cash under the D5 rule
@@ -776,10 +829,8 @@ func (r *momentumRun) terminal(in event.Envelope, o *trackedOrder, at time.Time)
 		reb.budget.Close(o.planned.ClientOrderID)
 		return nil, nil
 	}
-	for _, id := range reb.sells {
-		if !r.orders[id].terminal {
-			return nil, nil
-		}
+	if !r.sellsTerminal(reb) {
+		return nil, nil
 	}
 	b := &emissions{h: r.h, in: in, at: at}
 	r.planBuys(b)

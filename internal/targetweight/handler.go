@@ -241,7 +241,16 @@ func decodeInput[T interface{ Validate() error }](in event.Envelope, version uin
 	if err := json.Unmarshal(in.Payload, &p); err != nil {
 		return p, fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
 	}
-	if err := p.Validate(); err != nil {
+	// A payload whose fields depend on its version is checked against the
+	// version it arrived at, so a synthetic lifecycle report, which only an
+	// engine records (version 3), is never read as a venue's (ADR 0015).
+	var err error
+	if v, ok := any(p).(interface{ ValidateSchema(uint32) error }); ok {
+		err = v.ValidateSchema(in.SchemaVersion)
+	} else {
+		err = p.Validate()
+	}
+	if err != nil {
 		return p, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
 	return p, nil

@@ -153,7 +153,15 @@ func (p AccountCashSnapshotPayload) Validate() error {
 //   - Version 2 is LimitOrderLifecyclePayload. Version 1 stays what the
 //     Turtle reducer reads (OrderLifecycleSchemaVersion); each consumer
 //     refuses the other's version.
+//   - Version 3 (OrderLifecycleSyntheticVersion) is version 2 with
+//     Synthetic set.
 const OrderLifecycleLimitVersion uint32 = 2
+
+// OrderLifecycleSyntheticVersion is version 3 of execution.order.lifecycle:
+// a synthetic report, which a dry-run engine records itself for an order it
+// never sent (ADR 0026, point 3, "Mode"). It is a decision, never an input,
+// and holds only a synthetic report: a venue's report stays version 2.
+const OrderLifecycleSyntheticVersion uint32 = 3
 
 // LimitOrderLifecyclePayload records one state change of one released limit
 // order, as the venue reported it. Status is one of the OrderLifecycleStatus
@@ -172,6 +180,12 @@ type LimitOrderLifecyclePayload struct {
 	LimitPrice   float64   `json:"limit_price"`
 	OccurredAt   time.Time `json:"occurred_at"`
 	Message      string    `json:"message"`
+	// Synthetic marks a report no venue sent: a dry-run engine's own end of
+	// an order released with send false, so the rebalance it belongs to can
+	// complete (ADR 0026, point 3, "Mode"; point 2, "IRA execution"). It is
+	// canceled, names no venue order ID, says why in Message, and is never
+	// an execution: no fill, proceeds or commission follows from it.
+	Synthetic bool `json:"synthetic,omitempty"`
 }
 
 // Terminal reports whether the order can no longer execute: canceled or invalid.
@@ -179,10 +193,42 @@ func (p LimitOrderLifecyclePayload) Terminal() bool {
 	return p.Status == OrderLifecycleStatusCanceled || p.Status == OrderLifecycleStatusInvalid
 }
 
-// Validate checks identity, side, status, quantity, limit and time.
+// SchemaVersion returns the version a writer journals p at: 3 for a
+// synthetic report, otherwise 2.
+func (p LimitOrderLifecyclePayload) SchemaVersion() uint32 {
+	if p.Synthetic {
+		return OrderLifecycleSyntheticVersion
+	}
+	return OrderLifecycleLimitVersion
+}
+
+// ValidateSchema checks that p is one schemaVersion holds, then validates
+// it: version 2 is a venue's report and version 3 a synthetic one, so a
+// synthetic report can never pass for a venue's (ADR 0015).
+func (p LimitOrderLifecyclePayload) ValidateSchema(schemaVersion uint32) error {
+	switch {
+	case schemaVersion != OrderLifecycleLimitVersion && schemaVersion != OrderLifecycleSyntheticVersion:
+		return fmt.Errorf("%s: schema version %d is not recognised for a limit order", OrderLifecycleEventType, schemaVersion)
+	case p.Synthetic && schemaVersion != OrderLifecycleSyntheticVersion:
+		return fmt.Errorf("%s: a synthetic report is version 3; version %d is a venue's", OrderLifecycleEventType, schemaVersion)
+	case !p.Synthetic && schemaVersion == OrderLifecycleSyntheticVersion:
+		return fmt.Errorf("%s: version 3 holds only a synthetic report", OrderLifecycleEventType)
+	}
+	return p.Validate()
+}
+
+// Validate checks identity, side, status, quantity, limit and time, and that
+// a synthetic report is canceled, names no venue order and says why.
 func (p LimitOrderLifecyclePayload) Validate() error {
 	errs := orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
-	if p.OrderID == "" {
+	switch {
+	case p.Synthetic && p.OrderID != "":
+		errs = append(errs, errors.New("a synthetic report names no venue order id: no venue saw the order"))
+	case p.Synthetic && p.Status != OrderLifecycleStatusCanceled:
+		errs = append(errs, fmt.Errorf("a synthetic report is %q, not %q", OrderLifecycleStatusCanceled, p.Status))
+	case p.Synthetic && p.Message == "":
+		errs = append(errs, errors.New("a synthetic report needs a message saying why"))
+	case !p.Synthetic && p.OrderID == "":
 		errs = append(errs, errors.New("order id is required"))
 	}
 	switch p.Status {

@@ -104,7 +104,7 @@ func TestATradeRoundedToNoShareIsRecorded(t *testing.T) {
 	}
 }
 
-const febDecisionID = "targets-decided:ira:2025-02-28T21:00:00Z"
+const febDecisionID = "targets-decided:DUIRA:2025-02-28T21:00:00Z"
 
 // TestMinimumLotRunReplaysByteIdentically reruns and replays a run with a
 // substitution and a skip.

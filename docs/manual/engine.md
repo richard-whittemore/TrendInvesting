@@ -48,6 +48,27 @@ and records everything, and marks every order "do not send".
    writing, and nothing from that input was ever released.
 6. **In dry-run, every released order says `send: false`.** The adapter must
    never send it. Paper and live say `send: true`.
+
+### What dry-run simulates, and what it does not
+
+Dry-run rehearses the decisions, not the trading. Nothing reaches a venue, so
+no venue ever reports on an order. A momentum IRA plans its buys only once
+every sell of the rebalance has ended (ADR 0026, point 2, "IRA execution"),
+and would wait on an unsent sell for ever, withholding every later month as
+`rebalance-in-progress`. So in dry-run, and only in dry-run, the engine
+records its own **synthetic** terminal report for each order it releases:
+an `execution.order.lifecycle` record at version 3, marked
+`"synthetic": true`, status `canceled`, with no venue order id and a message
+saying it was never sent. The rebalance then plans its buys at the same
+close, and next month is decided normally.
+
+A synthetic report is never an execution. Nothing fills, so no proceeds,
+commission or position change is counted, and the buys are budgeted from
+the account's cash alone. The holdings never move, so each month's dry-run
+decides from the same positions. `journal-query orders` shows the record as
+`synthetic-lifecycle-canceled`. Paper and live never record one: there the
+venue's own reports end each order. A synthetic report arriving as an input
+is refused. Boost has no buy phase to wait for and records none.
 7. **When stopped** (SIGTERM, which `systemctl stop` sends), it also writes a
    journal of the whole run (ADR 0017).
 
@@ -97,6 +118,12 @@ from the first one's log and checks the two logs are identical byte for byte.
 - ADRs: 0014 (socket), 0016 (configuration hash and build), 0017 (journal),
   0019 (Degraded and Halted), 0025 (IBKR adapter), 0026 (target-weight
   strategies and the risk gate), 0027 (durable log, restart).
+- Tests of the synthetic reports, in `internal/targetweight`:
+  `TestADryRunRebalanceThatSellsPlansItsBuysInTheSameRun`,
+  `TestOnlyADryRunRecordsSyntheticReports`,
+  `TestADryRunCountsNoProceedsOrCommissionFromASyntheticReport`,
+  `TestADryRunJournalReplays`; in `internal/journalquery`:
+  `TestASyntheticReportIsShownAndCountsNoFill`.
 - Tests in `cmd/engine`: `TestADryRunEngineRunsBoostAndSendsNothing`,
   `TestTheDeclaredModeMustBeTheConfiguredMode`,
   `TestTheAccountMustMatchTheMode`,

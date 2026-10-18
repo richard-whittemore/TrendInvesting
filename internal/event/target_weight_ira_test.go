@@ -329,6 +329,58 @@ func TestLimitOrderLifecycleValidate(t *testing.T) {
 	}
 }
 
+// A synthetic report is the engine's own end of a dry-run order it never
+// sent (ADR 0026, point 3, "Mode"): canceled, with no venue order ID and a
+// message, and only version 3 holds it.
+func TestSyntheticLimitOrderLifecycle(t *testing.T) {
+	v := validLimitOrderLifecycle()
+	v.Synthetic, v.OrderID, v.Status, v.Message = true, "", event.OrderLifecycleStatusCanceled, "dry-run: never sent"
+	type P = event.LimitOrderLifecyclePayload
+	if err := v.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !v.Terminal() {
+		t.Error("a synthetic report must end the order")
+	}
+	expectInvalid(t, "venue order id", v, func(p *P) { p.OrderID = "ib-7" }, "venue")
+	expectInvalid(t, "not canceled", v, func(p *P) { p.Status = event.OrderLifecycleStatusSubmitted }, "canceled")
+	expectInvalid(t, "no message", v, func(p *P) { p.Message = "" }, "message")
+	if got := v.SchemaVersion(); got != event.OrderLifecycleSyntheticVersion {
+		t.Errorf("synthetic SchemaVersion() = %d, want %d", got, event.OrderLifecycleSyntheticVersion)
+	}
+	venue := validLimitOrderLifecycle()
+	if got := venue.SchemaVersion(); got != event.OrderLifecycleLimitVersion {
+		t.Errorf("venue SchemaVersion() = %d, want %d", got, event.OrderLifecycleLimitVersion)
+	}
+	for _, c := range []struct {
+		p       P
+		version uint32
+		want    string
+	}{
+		{v, event.OrderLifecycleLimitVersion, "version 3"},
+		{v, event.OrderLifecycleSchemaVersion, "not recognised"},
+		{v, event.OrderLifecycleSyntheticVersion + 1, "not recognised"},
+		{venue, event.OrderLifecycleSyntheticVersion, "only a synthetic"},
+	} {
+		if err := c.p.ValidateSchema(c.version); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("ValidateSchema(%d) on synthetic=%v = %v, want %q", c.version, c.p.Synthetic, err, c.want)
+		}
+	}
+	if err := v.ValidateSchema(event.OrderLifecycleSyntheticVersion); err != nil {
+		t.Error(err)
+	}
+	if err := venue.ValidateSchema(event.OrderLifecycleLimitVersion); err != nil {
+		t.Error(err)
+	}
+	raw, err := json.Marshal(venue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "synthetic") {
+		t.Errorf("a venue report encodes as version 2 did: %s", raw)
+	}
+}
+
 func TestTargetWeightFillValidate(t *testing.T) {
 	v := validTargetWeightFill()
 	type P = event.TargetWeightFillPayload

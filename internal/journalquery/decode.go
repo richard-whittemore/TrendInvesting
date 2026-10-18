@@ -53,11 +53,13 @@ type fill struct {
 // lifecycle is one order state change in either lifecycle version: a Turtle
 // stop order's (version 1), priced at its stop and noted with its tag, or a
 // target-weight limit order's (version 2, ADR 0026), priced at its limit and
-// noted with its client order id.
+// noted with its client order id. Synthetic marks a dry-run engine's own
+// report on an order it never sent (version 3), which is never an execution.
 type lifecycle struct {
 	InstrumentID, Status, Side, Note string
 	Quantity                         int64
 	Price                            float64
+	Synthetic                        bool
 }
 
 type seenFill struct {
@@ -227,18 +229,20 @@ func readFill(env event.Envelope) (*fill, error) {
 	return &fill{InstrumentID: p.InstrumentID, Kind: p.Kind, Quantity: p.Quantity, Price: p.Price, Commission: p.Commission, turtle: p}, nil
 }
 
-// readLifecycle decodes an order state change of either version, with the
-// account a limit order's change names; any other version is refused.
+// readLifecycle decodes an order state change of any version, with the
+// account a limit order's change names; any other version is refused. A
+// limit order's version 2 is a venue's report and version 3 a synthetic one,
+// and each is refused at the other's version.
 func readLifecycle(env event.Envelope) (*lifecycle, string, error) {
-	if env.SchemaVersion == event.OrderLifecycleLimitVersion {
+	if env.SchemaVersion == event.OrderLifecycleLimitVersion || env.SchemaVersion == event.OrderLifecycleSyntheticVersion {
 		p := new(event.LimitOrderLifecyclePayload)
-		if err := read(env, []uint32{event.OrderLifecycleLimitVersion}, p); err != nil {
+		if err := read(env, []uint32{event.OrderLifecycleLimitVersion, event.OrderLifecycleSyntheticVersion}, p); err != nil {
 			return nil, "", err
 		}
-		return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Side: p.Side, Note: p.ClientOrderID, Quantity: p.Quantity, Price: p.LimitPrice}, p.AccountID, nil
+		return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Side: p.Side, Note: p.ClientOrderID, Quantity: p.Quantity, Price: p.LimitPrice, Synthetic: p.Synthetic}, p.AccountID, nil
 	}
 	p := new(event.OrderLifecyclePayload)
-	if err := read(env, []uint32{event.OrderLifecycleSchemaVersion, event.OrderLifecycleLimitVersion}, p); err != nil {
+	if err := read(env, []uint32{event.OrderLifecycleSchemaVersion, event.OrderLifecycleLimitVersion, event.OrderLifecycleSyntheticVersion}, p); err != nil {
 		return nil, "", err
 	}
 	return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Note: p.Tag, Quantity: p.Quantity, Price: p.StopPrice}, "", nil

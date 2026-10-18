@@ -784,6 +784,55 @@ func TestTheTargetWeightAccountsRecordVersionsAreRead(t *testing.T) {
 	}
 }
 
+// A dry-run engine's synthetic terminal report (execution.order.lifecycle
+// version 3, ADR 0026, point 3, "Mode") is shown as synthetic, and is never
+// an execution: no fill, commission or position change follows from it.
+func TestASyntheticReportIsShownAndCountsNoFill(t *testing.T) {
+	d := at(time.March, 2)
+	synthetic := event.LimitOrderLifecyclePayload{
+		AccountID: "I", ClientOrderID: "c1", InstrumentID: "AAA", Side: "sell", Status: event.OrderLifecycleStatusCanceled,
+		Quantity: 5, LimitPrice: 2.5, OccurredAt: d, Message: "dry-run: never sent", Synthetic: true,
+	}
+	data := build(t,
+		cashSnap(at(time.January, 1), event.AccountPosition{InstrumentID: "AAA", Quantity: 10}),
+		dec(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, d, event.OrderReleasedPayload{AccountID: "I", ClientOrderID: "c1", PlanID: "p", Tag: "t", InstrumentID: "AAA", Side: "sell", Quantity: 5, LimitPrice: 2.5, Mode: "dry-run", Figures: cashFigures}),
+		dec(event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion, d, synthetic),
+	)
+	js := []journalquery.Journal{load(t, "dry", data)}
+	orders, err := journalquery.Orders(js, journalquery.Filter{})
+	if err != nil || len(orders.Rows) != 2 {
+		t.Fatalf("orders: %v %v", orders.Rows, err)
+	}
+	if got := strings.Join(orders.Rows[1], " "); got != "dry 3 2026-03-02 I AAA synthetic-lifecycle-canceled sell 5 2.50 c1" {
+		t.Errorf("synthetic lifecycle row: %q", got)
+	}
+	fills, err := journalquery.Fills(js, journalquery.Filter{})
+	if err != nil || len(fills.Rows) != 0 {
+		t.Errorf("fills: %v %v", fills.Rows, err)
+	}
+	tot, err := journalquery.Totals(js, journalquery.Filter{})
+	if err != nil || strings.Join(tot.Rows[len(tot.Rows)-1], " ") != "TOTAL all 0 0 0 0.00" {
+		t.Errorf("totals: %v %v", tot.Rows, err)
+	}
+	pos, err := journalquery.Positions(js, journalquery.Filter{})
+	if err != nil || len(pos.Rows) != 0 {
+		t.Errorf("positions: %v %v", pos.Rows, err)
+	}
+
+	// Each version holds only its own kind of report.
+	venue := synthetic
+	venue.Synthetic, venue.OrderID = false, "o1"
+	for name, r := range map[string]rec{
+		"synthetic at version 2": dec(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, d, synthetic),
+		"venue's at version 3":   dec(event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion, d, venue),
+	} {
+		js := []journalquery.Journal{load(t, "j", build(t, rec{journal.KindInput, "other.thing", 1, d, 1}, r))}
+		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "version 3") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestRiskRecordsOfTheEarlierVersionStillRead(t *testing.T) {
 	d := at(time.March, 2)
 	data := build(t, rec{journal.KindInput, "other.thing", 1, d, 1},
@@ -800,7 +849,7 @@ func TestTheNextVersionOfEveryReadRecordIsRefused(t *testing.T) {
 	d := at(time.March, 2)
 	for _, r := range []rec{
 		{journal.KindInput, event.FillEventType, event.FillTargetWeightVersion + 1, d, map[string]any{}},
-		{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion + 1, d, map[string]any{}},
+		{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion + 1, d, map[string]any{}},
 		{journal.KindDecision, event.OrderPlannedEventType, event.OrderPlannedSafetyVersion + 1, d, map[string]any{}},
 		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSafetyVersion + 1, d, map[string]any{}},
 		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedSafetyVersion + 1, d, map[string]any{}},

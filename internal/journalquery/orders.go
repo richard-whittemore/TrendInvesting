@@ -36,6 +36,10 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 			case it.lifecycle != nil:
 				p := it.lifecycle
 				instrument, event, side, quantity, price, note = p.InstrumentID, "lifecycle-"+p.Status, p.Side, p.Quantity, p.Price, p.Note
+				if p.Synthetic {
+					// A dry-run engine's own report, never a venue's.
+					event = "synthetic-" + event
+				}
 			default:
 				continue
 			}
