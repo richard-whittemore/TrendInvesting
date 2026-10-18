@@ -53,9 +53,12 @@ sends nothing twice: an entry the log already holds as a committed input,
 with the same type, schema version and payload, is struck off unsent, and
 one whose ID the log holds with any other content stops the adapter
 (OutboxInvalid). The records already committed, in the outbox, or awaiting
-their reply seed the report journal in the order of their event time, so IBKR's replay
-after a restart records nothing twice and each order keeps its latest
-status.
+their reply seed the report journal in the order they were made (each
+run of the chain oldest first with the settlements of the runs it ended,
+then the input awaiting its reply, then the outbox), never by their
+times, so IBKR's replay after a restart records nothing twice and each
+order keeps its latest status; a report whose event time cannot be read
+stops the start (ReportRecordInvalid).
 
 The engine must be running, with its durable log begun, before the adapter
 starts: the log is the run's identity. The loop connects to the engine's
@@ -111,20 +114,22 @@ class ReconcileMismatch(Exception):
     """IBKR shows an open order or execution the journal does not explain; the link is not reconciled."""
 
 
+class ReportRecordInvalid(ValueError):
+    """A report the adapter keeps (in an engine's log, the outbox, a settlement or awaiting its reply) is not as it writes one."""
+
+
 def _utc_now():
     return datetime.now(timezone.utc)
 
 
-def _event_time(record):
-    """A report record's event time, for ordering: (True, its time) when it can be read, else (False,), which sorts first."""
-    text = record.payload.get(EVENT_TIME_FIELD[record.event_type]) if isinstance(record.payload, dict) else None
+def _event_time_readable(payload, field):
+    """Whether payload holds field as a time with its zone, as the adapter stamps every report it records."""
+    text = payload.get(field) if isinstance(payload, dict) else None
     try:
         at = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except (AttributeError, ValueError):
-        return (False,)
-    if at.tzinfo is None:
-        return (False,)
-    return (True, at)
+        return False
+    return at.tzinfo is not None
 
 
 def _stamp(at):
@@ -211,11 +216,11 @@ class AdapterLoop:
         # and the session's orders after a fresh run starts, and a report an
         # earlier run's engine recorded is never recorded again.
         logs = run_logs(self._engine_log_path, self._session(), settled=self.pending.settled_orders())
-        engine_logs = [read_engine_log(path) for path in logs]
+        chain = [(run_identity(path), read_engine_log(path)) for path in logs]
         self.reports = OrderReportJournal(
             cfg.account_id, cfg.client_id, self._record, now=self._now, commission_wait=cfg.commission_wait,
             held_path=self._pending_path + HELD_SUFFIX, owns_lock=self.relay.holds, ready=self.ready,
-            journalled=self._journalled(engine_logs), acknowledged=self.pending.acknowledged_corrections(),
+            journalled=self._journalled(chain), acknowledged=self.pending.acknowledged_corrections(),
             late_fills=self.pending.acknowledged_late_fills())
         self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record)
         self.conn.subscribe(self.tracker.on_event)
@@ -294,31 +299,78 @@ class AdapterLoop:
                 log.info("ibkr disconnect at stop failed: %s", type(err).__name__)
 
     # -- the engine side ---------------------------------------------------
-    def _journalled(self, engine_logs):
+    def _journalled(self, chain):
         """The report records this run's or an earlier run's engine holds, the outbox holds, or that await a reply: never recorded again.
 
-        The journal keeps the last status seeded for each order, so every
-        record (the logs' inputs, the outbox's entries, the inputs and
-        entries settled at a run-ended settlement, and the input awaiting
-        its reply) is seeded in the order of its event time, whichever of
-        them holds it: a status struck at a settlement never outlives a
-        later run's report on the same order. Records of the same time keep
-        the order of their sources (engine_logs is newest first, relay.run_logs,
-        and is read oldest first); a record whose event time cannot be read
-        is seeded before every other, so it never stands as an order's
-        latest status.
+        chain is each run's (identity, EngineLog), newest first
+        (relay.run_logs, relay.run_identity). The journal keeps the last
+        status seeded for each order, so the records are seeded in the
+        order they were made, never by their times: a lifecycle report's
+        time is the adapter's clock at receipt (IBKR's orderStatus carries
+        none), whole seconds only, and a clock set back would reorder them.
+        That order is total: each run of the chain oldest first, its
+        committed inputs in log order, then the run-ended settlements of
+        that run in the order they were recorded (each input, then the
+        outbox entries struck off with it, which the outbox held behind the
+        run's committed inputs); then the input awaiting its reply, which is
+        the outbox's head while it is exchanged; then the outbox's entries
+        in order. A settlement whose run is no run of the chain was made
+        before every run it reaches; one with no recorded run (the input was
+        never sent) is placed as late as the settlements recorded after it
+        allow, before the run now running. The outbox's own copy of a
+        record placed earlier is not seeded again. A record whose event
+        time cannot be read stops the start (ReportRecordInvalid; fail
+        closed, AGENTS.md), as every other record the adapter keeps is read
+        strictly.
         """
-        records = [Record(i.event_type, i.schema_version, i.payload) for log_ in reversed(engine_logs)
-                   for i in log_.inputs]
-        records += [Record(e["event_type"], e["schema_version"], e["payload"]) for e in self.outbox.load()]
+        oldest = list(reversed(chain))
+        position = {run: n for n, (run, _) in enumerate(oldest)}
         settled = self.pending.run_ended()
-        records += [Record(e["input"].get("type"), e["input"].get("schema_version"), e["input"].get("payload") or {})
-                    for e in settled]
-        records += [Record(o["event_type"], o["schema_version"], o["payload"]) for e in settled for o in e["outbox"]]
+        placed = [None] * len(settled)
+        bound = len(oldest) - 2
+        for k in reversed(range(len(settled))):
+            run = settled[k]["run"]
+            at = bound if run is None else position.get(run, -1)
+            placed[k] = bound = min(at, bound)
+        sources = []
+
+        def add_settled(at):
+            for k, entry in enumerate(settled):
+                if placed[k] != at:
+                    continue
+                sources.append((self.pending.run_ended_path, entry["input"].get("id"), entry["input"].get("type"),
+                                entry["input"].get("schema_version"), entry["input"].get("payload") or {}))
+                sources.extend((self.pending.run_ended_path, o["id"], o["event_type"], o["schema_version"],
+                                o["payload"]) for o in entry["outbox"])
+        add_settled(-1)
+        for n, (run, log_) in enumerate(oldest):
+            sources.extend(("the durable log of run {}".format(run), i.id, i.event_type, i.schema_version, i.payload)
+                           for i in log_.inputs)
+            add_settled(n)
+        # The outbox's copies of what is placed earlier (the input awaiting
+        # its reply, an entry a settlement names, an input this run
+        # committed before its strike) are never sent, so never seeded again.
+        placed_ids = {i.id for i in oldest[-1][1].inputs} if oldest else set()
+        placed_ids |= {e["input"].get("id") for e in settled} | {o["id"] for e in settled for o in e["outbox"]}
         waiting = self.pending.load()
         if waiting is not None:
-            records.append(Record(waiting.get("type"), waiting.get("schema_version"), waiting.get("payload") or {}))
-        return sorted((r for r in records if r.event_type in EVENT_TIME_FIELD), key=_event_time)
+            sources.append((self.pending.path, waiting.get("id"), waiting.get("type"), waiting.get("schema_version"),
+                            waiting.get("payload") or {}))
+            placed_ids.add(waiting.get("id"))
+        sources.extend((self.outbox.path, e["id"], e["event_type"], e["schema_version"], e["payload"])
+                       for e in self.outbox.load() if e["id"] not in placed_ids)
+        records = []
+        for where, input_id, event_type, schema_version, payload in sources:
+            if event_type not in EVENT_TIME_FIELD:
+                continue
+            field = EVENT_TIME_FIELD[event_type]
+            if not _event_time_readable(payload, field):
+                raise ReportRecordInvalid(
+                    "the report {} in {} has no {} that can be read (a time with its zone): it is not as the "
+                    "adapter records one, so it is never seeded as an order's status; check it against IBKR "
+                    "before starting (docs/manual/paper-trading.md)".format(input_id, where, field))
+            records.append(Record(event_type, schema_version, payload))
+        return records
 
     def _record(self, record):
         """The report journal's sink: record IBKR's report as the engine's next input."""

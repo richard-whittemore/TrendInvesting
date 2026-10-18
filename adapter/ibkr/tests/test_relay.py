@@ -1449,6 +1449,27 @@ class RunLogsTests(unittest.TestCase):
                 self.assertEqual(run_logs(second, today=TODAY, settled=pending.settled_orders()),
                                  [second, first] if kept else [second])
 
+    def test_a_record_line_that_cannot_be_read_is_named_by_its_line_in_the_file(self):
+        # A blank line counts, so the number in the stop is the line the
+        # owner finds in the file.
+        never_sent = {"client_order_id": "tw-1", "decision": "never-sent", "reason": "checked",
+                      "at": "2026-10-16T12:00:00+00:00", "session_date": "2026-10-16"}
+        pending = PendingInput(str(Path(self.dir.name) / "numbered.json"))
+        pending.record_decision(never_sent)
+        with open(pending.decisions_path, "a", encoding="utf-8") as f:
+            f.write("\n" + '{"client_order_id": "tw-1", "decision": "se' + "\n")
+        with self.assertRaises(HandoverRecordInvalid) as raised:
+            pending.settled_orders()
+        self.assertIn("{} line 3 is not JSON".format(pending.decisions_path), str(raised.exception))
+        pending.record_run_ended({"input": {"id": "session:9"}, "refused": "run ended", "reason": "a fresh run",
+                                  "run": None, "unsent": [], "outbox": [], "at": "2026-10-16T12:00:00+00:00",
+                                  "session_date": "2026-10-16"})
+        with open(pending.run_ended_path, "a", encoding="utf-8") as f:
+            f.write("\n\n" + '{"input": {"id": "sess' + "\n")
+        with self.assertRaises(HandoverRecordInvalid) as raised:
+            pending.run_ended()
+        self.assertIn("{} line 4 is not JSON".format(pending.run_ended_path), str(raised.exception))
+
     def test_a_decision_line_that_cannot_be_read_stops_rather_than_settling_its_order(self):
         # An order settled --never-sent and then found at IBKR (--sent): if
         # the later line were skipped, the earlier one would end the order

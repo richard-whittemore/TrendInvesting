@@ -30,7 +30,8 @@ from test_connection import Clock, config
 from connection import AccountNotManaged
 from engine_client import EngineRejected
 from relay import EngineUnavailable
-from loop import OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch, SOURCE
+from loop import (OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch,
+                  ReportRecordInvalid, SOURCE)
 from relay import (RELEASED, EarlierRunInput, HandoverRecordInvalid, PendingInput, ResolveRefused, main as relay_main,
                    read_engine_log, run_identity)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
@@ -694,14 +695,15 @@ class LoopTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in third.received], ["operator.run.approved"])
         self.assertEqual(loop.outbox.load(), [])
 
-    def test_a_struck_working_status_never_outlives_a_later_runs_cancellation_of_the_same_order(self):
-        # Run one releases tw-paper-1 and IBKR's working status of it is
-        # recorded in the outbox while that run decides; the run stops and
-        # resolve --run-ended strikes the status off with its input. Run two
-        # commits IBKR's cancellation. A third run seeds the journal by event
-        # time across every source, so the cancellation, not the older
-        # struck status, is the order's latest, and IBKR's replay of it is
-        # never recorded again.
+    def struck_status_then_cancelled(self, struck_at):
+        """Run one's working status of tw-paper-1, recorded at struck_at, struck at a settlement; run two commits IBKR's cancellation.
+
+        A third run seeds the journal in the records' durable order (each
+        run of the chain, then the settlements of the runs it ended), so the
+        cancellation, not the older struck status, is the order's latest
+        whatever the struck status's time, and IBKR's replay of it is never
+        recorded again.
+        """
         loop = self.loop()
         self.fake.on_place = self.fake.accept
         loop.start()
@@ -712,8 +714,8 @@ class LoopTests(unittest.TestCase):
         second = self.left_waiting_by_the_first_run("session:2", commits=False)
         Outbox(self.pending + OUTBOX_SUFFIX).append({
             "id": "ibkr:execution.order.lifecycle:replayed", "event_type": LIFECYCLE_TYPE,
-            "schema_version": working["schema_version"], "event_time": "2026-10-17T13:29:00Z",
-            "payload": dict(working["payload"], occurred_at="2026-10-17T13:29:00Z")})
+            "schema_version": working["schema_version"], "event_time": struck_at,
+            "payload": dict(working["payload"], occurred_at=struck_at)})
         self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
                                      str(second.path), "--reason", "a fresh run after a reboot"]), 0)
         self.assertEqual([[o["id"] for o in r["outbox"]] for r in PendingInput(self.pending).run_ended()],
@@ -723,7 +725,9 @@ class LoopTests(unittest.TestCase):
         self.fake.status(7, "Cancelled", filled="0", remaining="9")
         self.settle(loop)
         loop.close()
-        self.assertEqual([e["payload"]["status"] for e in second.inputs(LIFECYCLE_TYPE)], ["canceled"])
+        cancelled = second.inputs(LIFECYCLE_TYPE)
+        self.assertEqual([e["payload"]["status"] for e in cancelled], ["canceled"])
+        self.assertEqual(cancelled[0]["payload"]["occurred_at"], "2026-10-17T13:30:00Z")
         third = self.fresh_run("run-2.log", "run-3.log")
         loop = self.loop(engine=third, engine_log=third.path)
         loop.start()
@@ -732,20 +736,83 @@ class LoopTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in third.received], ["operator.run.approved"])
         self.assertEqual(loop.outbox.load(), [])
 
-    def test_a_report_whose_event_time_cannot_be_read_is_seeded_before_every_other(self):
-        # It never stands as an order's latest status, and it never stops
-        # the seed from ordering the rest by time.
+    def test_a_struck_working_status_never_outlives_a_later_runs_cancellation_of_the_same_order(self):
+        self.struck_status_then_cancelled("2026-10-17T13:29:00Z")
+
+    def test_a_struck_status_of_the_same_second_as_a_later_runs_cancellation_never_outlives_it(self):
+        self.struck_status_then_cancelled("2026-10-17T13:30:00Z")
+
+    def test_a_struck_status_stamped_after_a_later_runs_cancellation_by_a_clock_set_back_never_outlives_it(self):
+        # The adapter stamps a status with its own clock as it receives it
+        # (IBKR's orderStatus carries no time), so a clock set back between
+        # the two can stamp the older status the later time.
+        self.struck_status_then_cancelled("2026-10-17T13:31:00Z")
+
+    def test_the_input_awaiting_its_reply_is_seeded_in_its_place_at_the_outboxs_head(self):
+        # A stop mid-exchange leaves the input awaiting its reply and still
+        # at the outbox's head, with IBKR's later reports behind it. Of the
+        # same second, the later report is the order's latest status.
         loop = self.loop()
-        status = {"account_id": ACCOUNT, "order_id": "order:1:7", "client_order_id": "tw-paper-1"}
-        logs = [SimpleNamespace(inputs=[SimpleNamespace(event_type=LIFECYCLE_TYPE, schema_version=2, payload=dict(
-            status, status="canceled", occurred_at="2026-10-17T13:30:00Z"))])]
+        status = {"account_id": ACCOUNT, "order_id": "order:1:7", "client_order_id": "tw-paper-1",
+                  "occurred_at": "2026-10-17T13:30:00Z"}
+        submitted = {"id": "ibkr:execution.order.lifecycle:1", "event_type": LIFECYCLE_TYPE, "schema_version": 2,
+                     "event_time": "2026-10-17T13:30:00Z", "payload": dict(status, status="submitted")}
+        loop.outbox.append(submitted)
+        loop.outbox.append(dict(submitted, id="ibkr:execution.order.lifecycle:2",
+                                payload=dict(status, status="canceled")))
+        PendingInput(self.pending).save({"id": submitted["id"], "type": LIFECYCLE_TYPE, "schema_version": 2,
+                                         "recorded_at": "2026-10-17T13:30:00Z", "payload": submitted["payload"]})
+        records = loop._journalled([("run-1", SimpleNamespace(inputs=[]))])
+        self.assertEqual([r.payload["status"] for r in records], ["submitted", "canceled"])
+
+    def test_a_settlement_is_seeded_after_the_run_it_ended_and_before_the_runs_after_it(self):
+        # One of a run older than the chain was made before every run of
+        # it; one with no recorded run is placed before the run now running.
+        loop = self.loop()
+        pending = PendingInput(self.pending)
+
+        def status(name, n):
+            return {"account_id": ACCOUNT, "order_id": "order:1:{}".format(n), "client_order_id": name,
+                    "status": name, "occurred_at": "2026-10-17T13:30:00Z"}
+
+        def settle(run, name, n):
+            pending.record_run_ended({
+                "input": {"id": "session:" + name, "type": LIFECYCLE_TYPE, "schema_version": 2,
+                          "payload": status(name, n)},
+                "refused": "run ended", "reason": "a fresh run", "run": run, "unsent": [], "outbox": [],
+                "at": "2026-10-17T13:30:00+00:00", "session_date": "2026-10-17"})
+
+        def log(*names):
+            return SimpleNamespace(inputs=[SimpleNamespace(id="logged:" + name, event_type=LIFECYCLE_TYPE,
+                                                           schema_version=2, payload=status(name, n))
+                                           for name, n in names])
+        settle("run-0", "older-than-the-chain", 1)
+        settle("run-1", "ended-run-1", 2)
+        settle(None, "no-recorded-run", 3)
+        chain = [("run-3", log(("run-3", 4))), ("run-2", log(("run-2", 5))), ("run-1", log(("run-1", 6)))]
+        self.assertEqual([r.payload["status"] for r in loop._journalled(chain)],
+                         ["older-than-the-chain", "run-1", "ended-run-1", "run-2", "no-recorded-run", "run-3"])
+
+    def test_a_report_whose_event_time_cannot_be_read_stops_the_adapter_at_start(self):
+        # Read strictly, like every other record the adapter keeps: a report
+        # the adapter did not write as it writes one is never seeded.
+        status = {"account_id": ACCOUNT, "order_id": "order:1:7", "client_order_id": "tw-paper-1",
+                  "status": "submitted"}
         for occurred_at in (None, 7, "", "not a time", "2026-10-17T13:31:00"):
             with self.subTest(occurred_at=occurred_at):
                 Path(self.pending + OUTBOX_SUFFIX).unlink(missing_ok=True)
-                loop.outbox.append({"id": "ibkr:execution.order.lifecycle:odd", "event_type": LIFECYCLE_TYPE,
-                                    "schema_version": 2, "event_time": "2026-10-17T13:31:00Z",
-                                    "payload": dict(status, status="submitted", occurred_at=occurred_at)})
-                self.assertEqual([r.payload["status"] for r in loop._journalled(logs)], ["submitted", "canceled"])
+                Outbox(self.pending + OUTBOX_SUFFIX).append({
+                    "id": "ibkr:execution.order.lifecycle:odd", "event_type": LIFECYCLE_TYPE, "schema_version": 2,
+                    "event_time": "2026-10-17T13:31:00Z", "payload": dict(status, occurred_at=occurred_at)})
+                loop = self.loop()
+                try:
+                    with self.assertRaises(ReportRecordInvalid) as raised:
+                        loop.start()
+                finally:
+                    loop.close()
+                for part in ("ibkr:execution.order.lifecycle:odd", self.pending + OUTBOX_SUFFIX, "occurred_at"):
+                    self.assertIn(part, str(raised.exception))
+                self.assertEqual(self.fake.placed, [])
 
     def test_an_outbox_entry_recorded_at_a_settlement_is_never_sent_even_if_the_strike_was_cut_short(self):
         # A stop between the settlement's record and its strike: the record
@@ -754,7 +821,8 @@ class LoopTests(unittest.TestCase):
         second = self.left_waiting_by_the_first_run("session:2", commits=False)
         outbox = Outbox(self.pending + OUTBOX_SUFFIX)
         behind = {"id": "ibkr:execution.order.lifecycle:late", "event_type": LIFECYCLE_TYPE, "schema_version": 2,
-                  "event_time": "2026-10-16T20:00:01Z", "payload": {"client_order_id": "tw-paper-1"}}
+                  "event_time": "2026-10-16T20:00:01Z",
+                  "payload": {"client_order_id": "tw-paper-1", "occurred_at": "2026-10-16T20:00:01Z"}}
         outbox.append(behind)
         self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
                                      str(second.path), "--reason", "a fresh run after a reboot"]), 0)

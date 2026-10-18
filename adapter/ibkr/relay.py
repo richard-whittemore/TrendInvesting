@@ -615,11 +615,13 @@ class PendingInput:
         """
         try:
             with open(self.run_ended_path, encoding="utf-8") as f:
-                lines = [line for line in f if line.strip()]
+                # Numbered as the file's own lines, blank ones included, so
+                # a stop names the line the owner finds.
+                lines = [(n, line) for n, line in enumerate(f, 1) if line.strip()]
         except FileNotFoundError:
             return []
         entries = []
-        for n, line in enumerate(lines, 1):
+        for n, line in lines:
             try:
                 entry = json.loads(line)
             except ValueError as err:
@@ -668,10 +670,12 @@ class PendingInput:
         last = {}
         try:
             with open(self.decisions_path, encoding="utf-8") as f:
-                lines = [line for line in f if line.strip()]
+                # Numbered as the file's own lines, blank ones included, so
+                # a stop names the line the owner finds.
+                lines = [(n, line) for n, line in enumerate(f, 1) if line.strip()]
         except FileNotFoundError:
             lines = []
-        for n, line in enumerate(lines, 1):
+        for n, line in lines:
             try:
                 decision = json.loads(line)
             except ValueError as err:
