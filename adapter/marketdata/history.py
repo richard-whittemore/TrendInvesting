@@ -123,11 +123,16 @@ def _canonical(row):
     return json.dumps(row, sort_keys=True, separators=(",", ":"))
 
 
-def load_actions(directory, kind, first, last):
+def load_actions(directory, kind, first, last, tickers=None):
     """Every recorded row of ``kind`` (splits or dividends), oldest window
     first, each action once. Raises Gap unless the recorded windows cover
     every day of first..last, and ConflictingActions if two recordings hold
-    different rows for one action."""
+    different rows for one action.
+
+    With ``tickers`` (a set), only those tickers' rows are returned and a
+    conflict is raised only when either copy is one of theirs, so a revised
+    figure for an instrument the caller never reads does not refuse it; a
+    copy that moves an action onto or off one of them still does."""
     windows, rows, seen = [], [], {}
     for path in sorted(glob.glob(os.path.join(directory, kind + "_*_*.json"))):
         rec = record.read(path)
@@ -136,11 +141,13 @@ def load_actions(directory, kind, first, last):
             body = _canonical(r)
             key = ("id", r["id"]) if r.get("id") else ("row", body)
             if key in seen:
-                if seen[key] != body:
+                kept, ticker = seen[key]
+                if kept != body and (tickers is None or ticker in tickers or r.get("ticker") in tickers):
                     raise ConflictingActions("{} {} differs between recordings".format(kind, key[1]))
                 continue
-            seen[key] = body
-            rows.append(r)
+            seen[key] = (body, r.get("ticker"))
+            if tickers is None or r.get("ticker") in tickers:
+                rows.append(r)
     reach = first - dt.timedelta(days=1)
     for a, b in sorted(windows):
         if a > reach + dt.timedelta(days=1):

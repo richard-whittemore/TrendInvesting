@@ -233,3 +233,20 @@ func TestRulesVersionDeclaresTheReplanAfterARefusal(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheHeldNameKeptOneLotShort pins ADR 0016's
+// same-rules-version replay guarantee for D7-L's held-name exception: a
+// held pick whose one share exceeds its target keeps its holding, place and
+// weight, with no order, where earlier versions skipped it and sold it in
+// full (ADR 0026, point 2, "D7-L", amended 2026-10-18), so a journal holding
+// such a name decides differently and the build must not claim 1.16.0 or
+// earlier.
+func TestRulesVersionDeclaresTheHeldNameKeptOneLotShort(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.16.0 once D7-L keeps a held name one lot short", targetweight.RulesVersion)
+		}
+	}
+}

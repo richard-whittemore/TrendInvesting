@@ -107,7 +107,18 @@ import (
 //     kill-switch refusal of an engagement for the alert (ADR 0026, point 3,
 //     kill switch: "alert once"). A journal holding such a refusal decides
 //     differently under 1.15.0.
-const RulesVersion = "1.16.0"
+//   - 1.17.0 keeps a held momentum pick whose one share at its previous raw
+//     close exceeds its target value: it keeps its place, sector slot and
+//     weight, is recorded held-one-lot-short with its one-share price,
+//     target value and the holding it keeps (shares, value and share of net
+//     liquidation), and gets no order, where 1.16.0 skipped it under D7-L
+//     and sold it in full. A pick not held is skipped as before, and a book
+//     with no affordable pick is still withheld as all-unaffordable. The
+//     owner's decision of 2026-10-18 (option 2), adopted on the measurement
+//     in docs/research/d7l-held-name-2026-10.md (ADR 0026, point 2, "D7-L",
+//     amended 2026-10-18). A journal holding such a name decides
+//     differently under 1.16.0.
+const RulesVersion = "1.17.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

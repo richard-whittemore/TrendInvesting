@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost")
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L")
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -776,3 +776,85 @@ narrowed. The parity tool compares the live `Score` with `BacktestScore`
 for each name and knows no holdings, so its results are unchanged; it was
 re-run on the kept exports (`docs/research/parity-2026-10.md`, "Held stock
 with a gap, 2026-10-18").
+
+## Amendment (2026-10-18, owner decision, #437): D7-L keeps a held name one lot short
+
+Accepted by the owner on 2026-10-18 (option 2 of #437), on condition that it
+was measured once first (AGENTS.md rule 6); measured on 2026-10-18, all
+five QuantConnect runs that day (`docs/research/d7l-held-name-2026-10.md`),
+verdict adopt. It
+amends point 2, "D7-L", and its amendment of 2026-10-17.
+
+**What happened before.** D7-L did not look at what the account holds. A
+stock that was held and still ranked into the book, but whose target value
+had fallen below one share's price, was skipped like any other pick: it got
+no target and the planner sold the whole holding. Had it kept its target,
+the rebalance band, or the whole-share rounding of the trade it asked for,
+would have left a one-share holding alone, and trimmed a holding of more
+shares to one share; the kept holding is now neither sold
+nor trimmed.
+
+**The rule now.**
+
+- **Reading of "within one lot of affordability."** A lot is one share. A
+  pick is unaffordable when one share at its previous raw close, p, exceeds
+  its target value t (weight x momentum scale x net liquidation). D7-L
+  compares only a pick with t > 0, so the shortfall p - t is always less
+  than one lot, and every held pick D7-L would skip qualifies. This is the
+  reading the study measured.
+- **A held pick is kept.** When D7-L would skip a pick the account holds
+  (one share or more in the account snapshot as of the previous close), it
+  is not skipped. It keeps its place in the book, its sector slot and its
+  weight, so the other picks' weights are those of a book that holds it,
+  and the substitution's fixed point is otherwise unchanged: each pass
+  skips every unaffordable pick not held and keeps every unaffordable pick
+  held, and the passes end when one skips nothing new.
+- **No order.** The planner places no order in a kept name at that
+  rebalance: no buy, no sell, no resize by the band, and no
+  `strategy.order.skipped` record, since the decision itself records why.
+  The next rebalance compares it afresh.
+- **Recorded with its own status.** The decision records the name as
+  `held-one-lot-short`, with its one-share price and target value as for an
+  `unaffordable` name, and the holding it keeps: the shares
+  (`held_quantity`), their value at the previous raw close (`held_value`)
+  and that value as a fraction of net liquidation (`held_share`). The
+  decision's detail names each kept name with the same figures, so paper
+  trading measures the concentration the study could not.
+- **A pick not held is skipped as before**, and a held name with no target
+  (dropped from the book) is still sold in full.
+- **The all-unaffordable withhold is unchanged in effect.** A kept name is
+  not an affordable pick. When no pick is affordable and at least one was
+  skipped or kept, the decision is withheld as `all-unaffordable` and the
+  whole book is kept (amendment of 2026-10-17, case (b)). Deciding a book of
+  kept names alone would sell every other stock held on a valuation that
+  may be wrong. The study's instrument decided such a book instead; it never
+  arose there (no month was withheld and none was kept wholly).
+
+**Accepted concentration.** A kept holding is not resized toward its target,
+so the kept holding may exceed its target by a multiple bounded by one
+share's price: q shares at price p are worth q x p against a target value t
+below p, so the holding exceeds its target by q x p - t, less than one
+share's price for each share held (less than p itself for a one-share
+holding). The study's runs at $30,000 kept 3
+name-months in 10.5 held-out years and none in 17 tuning years. **This is
+accepted by the owner for now**; the recorded `held_share` is how paper
+trading measures it.
+
+**Measured.** Paired same-day QuantConnect runs at $30,000 under Interactive
+Brokers' fees (`docs/research/d7l-held-name-2026-10.md`): in-sample
+(1999-2015) the exception never fired and the runs are identical; held out
+(2016-2026-06) it kept 3 name-months, CAGR +0.02 pp, maximum drawdown 0.11
+pp deeper, 12 fewer orders and $11.50 lower fees, all inside the margins
+fixed before the runs.
+
+A rules change: target-weight rules version **1.17.0**, so a journal holding
+such a name does not replay under 1.16.0. `strategy.targets.decided` keeps
+schema version 5: the status and the holding figures are of that version,
+and the figures are omitted when unset, so a decision with no kept name
+has the bytes it had before. Boost is unaffected.
+
+**Golden cases and parity.** The golden months replay through `SelectBook`,
+which applies no minimum lot, and record no holdings, so no golden month
+changed. The parity tool knows no holdings either; it was re-run on the
+kept exports and its three reports are byte-identical to the
+`_held_gap` reports (`docs/research/parity-2026-10.md`).

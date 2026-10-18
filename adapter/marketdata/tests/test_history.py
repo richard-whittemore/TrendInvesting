@@ -137,6 +137,24 @@ class ActionsTest(unittest.TestCase):
             with self.assertRaises(history.ConflictingActions):
                 history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 23))
 
+    def test_a_conflict_is_checked_only_for_the_tickers_asked_for(self):
+        old = {"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-05", "cash_amount": 1.0}
+        spy = dict(old, ticker="SPY")
+        for first, revised, refused in ((old, dict(old, cash_amount=1.5), False),   # another ticker's figure revised
+                                        (old, spy, True),                           # an action moved onto the ticker
+                                        (spy, old, True)):                          # an action moved off the ticker
+            with tempfile.TemporaryDirectory() as d:
+                write_window(d, "dividends", "2026-01-01", "2026-03-20", [first])
+                write_window(d, "dividends", "2026-01-02", "2026-03-23", [revised])
+                if refused:
+                    with self.assertRaises(history.ConflictingActions):
+                        history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 23), tickers={"SPY"})
+                else:
+                    self.assertEqual(history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 23),
+                                                          tickers={"SPY"}), [])
+                with self.assertRaises(history.ConflictingActions):   # every ticker by default
+                    history.load_actions(d, "dividends", D(2026, 1, 1), D(2026, 3, 23))
+
     def test_no_recorded_window_is_a_gap_not_an_empty_list(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(history.Gap):

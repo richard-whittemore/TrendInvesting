@@ -640,7 +640,9 @@ func (r *momentumRun) endUnsent(b *emissions, released []string) {
 // minimumLot returns what D7-L's substitution values the picks against at the
 // close end, with b the decision's bond share (ADR 0026, point 2, "D7-L"):
 // the snapshot's net liquidation and this session's raw closes, the basis the
-// planner sizes orders from, and the momentum sleeve's scale 1 - b. With no
+// planner sizes orders from, the momentum sleeve's scale 1 - b, and the
+// shares the snapshot holds, so a held pick one lot short is kept (ADR 0026,
+// point 2, "D7-L", amended 2026-10-18). With no
 // snapshot as of the close (staleSnapshot) the decision is withheld whatever
 // the picks, and with b at 1 there is no momentum sleeve, so neither applies
 // it.
@@ -652,7 +654,13 @@ func (r *momentumRun) minimumLot(end time.Time, b float64) (momentum.MinimumLot,
 	if scale <= 0 {
 		return momentum.MinimumLot{}, false
 	}
-	return momentum.MinimumLot{NetLiquidation: r.snapshot.NetLiquidation, Scale: scale, Prices: r.raw}, true
+	held := map[string]int64{}
+	for _, p := range r.snapshot.Positions {
+		if p.Quantity > 0 {
+			held[p.InstrumentID] = p.Quantity
+		}
+	}
+	return momentum.MinimumLot{NetLiquidation: r.snapshot.NetLiquidation, Scale: scale, Prices: r.raw, Held: held}, true
 }
 
 // skipped records each trade the planner sized but could not order.
@@ -988,6 +996,7 @@ func (r *momentumRun) payload(d momentum.Decision, end time.Time) event.TargetsD
 			Sector: n.Sector, SectorSource: n.SectorSource, Status: string(n.Status), Closes: n.Closes,
 			Score: n.Score, Volatility: n.Volatility, ScoreRank: n.ScoreRank, Weight: n.Weight,
 			BacktestWouldPick: n.BacktestWouldPick, OneShare: n.OneShare, TargetValue: n.TargetValue,
+			HeldQuantity: n.HeldQuantity, HeldValue: n.HeldValue, HeldShare: n.HeldShare,
 			GapSessions: n.GapSessions,
 		})
 	}

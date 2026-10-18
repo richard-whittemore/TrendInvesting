@@ -260,10 +260,10 @@ def load_sessions(directory, first, last, retracted=()):
     return out
 
 
-def _actions(directory, kind, first, last):
+def _actions(directory, kind, first, last, tickers=None):
     """history.load_actions, with its refusals as this module's errors."""
     try:
-        return history.load_actions(directory, kind, first, last)
+        return history.load_actions(directory, kind, first, last, tickers)
     except history.Gap as e:
         raise MissingData(str(e)) from e
     except history.ConflictingActions as e:
@@ -547,9 +547,13 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
         wanted |= members
     start = base + dt.timedelta(days=1)
     by_ticker = collections.defaultdict(lambda: ([], []))
-    for r in _actions(directory, "splits", start, last):
+    # A boost stream reads its one instrument's actions only, so only theirs
+    # are checked for conflicting copies; a momentum stream may encode any
+    # listed ticker, so every action is.
+    scope = set(required) if boost else None
+    for r in _actions(directory, "splits", start, last, scope):
         by_ticker[r.get("ticker")][0].append(r)
-    for r in _actions(directory, "dividends", start, last):
+    for r in _actions(directory, "dividends", start, last, scope):
         by_ticker[r.get("ticker")][1].append(r)
 
     factors, out = {}, {}   # out: ticker -> {session left out: reason}

@@ -36,6 +36,12 @@ const (
 	// raw close exceeds its target value; the next eligible ranked name
 	// takes its place (ADR 0026, point 2, "D7-L"; plan.md lines 380-383).
 	StatusUnaffordable Status = "unaffordable"
+	// StatusHeldOneLotShort: a pick the account holds whose one share at its
+	// previous raw close exceeds its target value. D7-L keeps it rather than
+	// skipping it: it keeps its place, its sector slot and its weight, and
+	// the planner places no order in it at that rebalance (ADR 0026, point 2,
+	// "D7-L", amended 2026-10-18).
+	StatusHeldOneLotShort Status = "held-one-lot-short"
 )
 
 // History is one name's score and volatility, or why it has none.
