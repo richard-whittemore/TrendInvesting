@@ -16,16 +16,16 @@ _FIELDS = (
     "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
     "con_ids", "paper_sending_enabled", "mark_timeout",
 )
-# How long the adapter waits, by default, for IBKR to end a market-data
-# snapshot: IBKR ends one only at the end of its 11-second snapshot window
-# (TWS API "Market Data: Snapshot", tickSnapshotEnd), so the wait outlasts it.
+# The recommended mark_timeout, as the deployed example sets it: IBKR ends a
+# market-data snapshot only at the end of its 11-second snapshot window (TWS
+# API "Market Data: Snapshot", tickSnapshotEnd), so the wait outlasts it. A
+# configuration must still set it (ADR 0019): there is no default.
 MARK_TIMEOUT = 15
 
 # The keys a configuration may leave out, with the value an omission means.
 # paper_sending_enabled is the switch that lets the real IBKR client place
 # an order (real_client.IbapiClient.can_place_orders): left out, it is off.
-# mark_timeout left out is MARK_TIMEOUT, which only lengthens a wait.
-_OPTIONAL = {"paper_sending_enabled": False, "mark_timeout": MARK_TIMEOUT}
+_OPTIONAL = {"paper_sending_enabled": False}
 
 # Any key containing one of these is refused outright. The adapter never
 # handles the IBKR password: IBC holds it on the server (ADR 0025 point 6).
@@ -40,9 +40,9 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     """Where one engine's adapter connects, and its fail-closed timing bounds.
 
     One engine per account, each with its own client ID to one IB Gateway
-    (ADR 0026 point 8, decided 2026-10-16). Every timing value but
-    mark_timeout is required: ADR 0019 makes them versioned operational
-    configuration with no permissive defaults. restore_timeout is how long Gateway may stay cut
+    (ADR 0026 point 8, decided 2026-10-16). Every timing value is
+    required: ADR 0019 makes them versioned operational configuration with
+    no permissive defaults. restore_timeout is how long Gateway may stay cut
     off from IBKR's servers (codes 1100/2110) before the adapter gives up
     waiting for Gateway's own restoration and reconnects. commission_wait
     is how long an execution may wait for IBKR's commission report, without
@@ -57,9 +57,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     refused on any mode but paper. mark_timeout is how long the marks wait
     for IBKR to end its market-data snapshots (snapshot.read_marks), apart
     from request_timeout, which bounds the account reads: IBKR ends a
-    snapshot only at the end of its 11-second window, so it is the one
-    timing value with a default, MARK_TIMEOUT (15 seconds); a value at or
-    under 11 seconds can give no mark for a price IBKR did send.
+    snapshot only at the end of its 11-second window, so MARK_TIMEOUT (15
+    seconds) is the recommended value; a value at or under 11 seconds can give no mark for a price IBKR did send.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor

@@ -99,6 +99,18 @@ class LosesIbkrOnTheRelaysOrderRead(DropsOnTheRelaysOrderRead):
         FakeTWS.req_all_open_orders(self)
 
 
+class LosesIbkrAndRestoresLater(DropsOnTheRelaysOrderRead):
+    """Gateway loses IBKR's servers as the relay reads IBKR's orders; the restoration comes only when the test sends it."""
+
+    def req_all_open_orders(self):
+        self.reads += 1
+        if self.reads == 3:
+            self.calls.append(("req_all_open_orders",))
+            self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+            return
+        FakeTWS.req_all_open_orders(self)
+
+
 class Interposed:
     """The engine, with act() run once, inside the next exchange, before the reply returns."""
 
@@ -363,6 +375,24 @@ class LoopTests(unittest.TestCase):
         self.assertIsNotNone(PendingInput(self.pending).load(), "the input is held on disk")
         self.settle(loop)
         self.assertEqual(len(fake.called("connect")), 2, "the link was made again, not taken back as restored")
+        self.assertEqual(len(fake.placed), 1)
+
+    def test_an_order_read_cut_off_by_an_outage_waits_for_the_restoration_before_the_link_is_made_again(self):
+        fake = LosesIbkrAndRestoresLater()
+        fake.summary = list(SUMMARY)
+        fake.on_place = fake.accept
+        loop = self.loop(fake, max_connect_attempts=1)
+        loop.start()
+        self.session_closed(loop)
+        loop.step()
+        for _ in range(5):
+            loop.step()
+        self.assertEqual(len(fake.called("connect")), 1, "Gateway is given restore_timeout to restore IBKR")
+        self.assertEqual(fake.placed, [])
+        fake.callbacks.error(-1, 1102, "Connectivity between IB and Trader Workstation has been restored - "
+                                       "data maintained.")
+        self.settle(loop)
+        self.assertEqual(len(fake.called("connect")), 2, "the restored socket is never read on")
         self.assertEqual(len(fake.placed), 1)
 
     def test_a_link_lost_while_ibkr_is_read_for_a_due_order_holds_it_and_sends_it_once_reconnected(self):

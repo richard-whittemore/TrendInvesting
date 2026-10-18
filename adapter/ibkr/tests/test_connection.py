@@ -313,6 +313,43 @@ class MaintainTests(unittest.TestCase):
         self.assertIn("connectivity-not-restored", [s.reason for s in h.statuses])
         self.assertTrue(h.conn.needs_reconciliation)
 
+    def test_a_drop_asked_for_while_gateway_has_lost_ibkr_waits_for_the_restoration(self):
+        # An upstream outage Gateway restores within restore_timeout must not
+        # use up connect attempts: the drop waits for 1101/1102, then happens.
+        h = Harness(max_connect_attempts=1)
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.conn.drop("untagged-read-interrupted")
+        h.clock.now += 30.0
+        h.conn.maintain()
+        self.assertEqual(len(h.fake.called("disconnect")), 0, "the restore wait is still honoured")
+        self.assertEqual(len(h.fake.called("connect")), 1)
+        h.fake.callbacks.error(-1, 1102, "restored")
+        h.conn.pump(0.01)
+        self.assertFalse(h.conn.connected, "the restored socket is not taken back")
+        self.assertEqual(len(h.fake.called("disconnect")), 1)
+        self.assertIn("untagged-read-interrupted", [s.reason for s in h.statuses])
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+
+    def test_a_drop_asked_for_during_an_outage_never_restored_reconnects_at_restore_timeout(self):
+        h = Harness()
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.conn.drop("untagged-read-interrupted")
+        h.clock.now += 60.0
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        h.fake.callbacks.error(-1, 1102, "restored")
+        h.conn.pump(0.01)
+        self.assertTrue(h.conn.connected, "a stale drop does not cut the new link")
+
     def test_a_healthy_link_is_left_alone(self):
         h = Harness()
         h.conn.connect()

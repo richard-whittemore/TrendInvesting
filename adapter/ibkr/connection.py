@@ -110,6 +110,9 @@ class Connection:
         # Monotonic time Gateway reported losing IBKR's servers (1100/2110);
         # None while it has not, or once it is restored or the link is dropped.
         self._lost_at = None
+        # The reason for a drop asked for during such an outage, made once
+        # Gateway restores the link (see drop).
+        self._drop_when_restored = None
         self._next_req_id = REQUEST_ID_BASE
         self.time_requests = 0
         self.time_answers = 0
@@ -283,8 +286,15 @@ class Connection:
 
         For a link on which answers that carry no request ID can no longer
         be matched to their requests: the reconnected session has a new
-        Inbox, which no answer of the old one can reach.
+        Inbox, which no answer of the old one can reach. While Gateway has
+        lost IBKR's servers (1100/2110) the drop waits for the restoration
+        (1101/1102) or restore_timeout, as maintain() does, so an outage
+        Gateway restores in time does not use up the connect attempts; the
+        restored socket is then dropped, never read on.
         """
+        if self._lost_at is not None:
+            self._drop_when_restored = reason
+            return
         self._abandon()
         self._report("disconnected", reason)
 
@@ -312,6 +322,7 @@ class Connection:
     def _abandon(self):
         self.connected = False
         self._lost_at = None
+        self._drop_when_restored = None
         try:
             self.api.disconnect()
         except Exception as err:  # the link is being discarded either way
@@ -362,6 +373,11 @@ class Connection:
                 self._lost_at = self._monotonic()
             self._report("connectivity-lost", "gateway-lost-ibkr", ibkr_code=code)
         elif code in (CODE_RESTORED_DATA_LOST, CODE_RESTORED_DATA_MAINTAINED):
+            if self._drop_when_restored is not None:
+                reason = self._drop_when_restored
+                self._abandon()
+                self._report("disconnected", reason)
+                return
             self.connected = True
             self.needs_reconciliation = True
             self._lost_at = None

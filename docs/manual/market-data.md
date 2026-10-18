@@ -517,8 +517,8 @@ days), it takes them all, oldest first.
    9:30 to 4 p.m. New York, 1 p.m. on an early close). After 17:05 that is
    always "closed". A price counts only if IBKR's answer for it finished in
    time (IBKR finishes it at the end of an 11-second window, so the adapter
-   waits up to `mark_timeout`, 15 seconds unless the configuration sets
-   it) and every last price in it was a real price above zero; otherwise
+   waits up to `mark_timeout`, which the configuration sets and the
+   example sets to 15 seconds) and every last price in it was a real price above zero; otherwise
    the holding is listed with no mark ("mark set false"), as it is when IBKR
    gives no last price at all (the paper login has no market data for SPY,
    say). The engine then cannot size the joint account's emergency sale

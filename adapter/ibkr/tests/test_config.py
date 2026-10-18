@@ -113,14 +113,14 @@ class ConfigTests(unittest.TestCase):
         values = config(mode="paper", paper_sending_enabled=True)._asdict()
         self.assertIs(AdapterConfig.from_mapping(values).paper_sending_enabled, True)
 
-    def test_the_wait_for_a_market_data_snapshot_outlasts_ibkrs_snapshot_window_unless_set(self):
-        # IBKR ends a market-data snapshot only at the end of its 11-second
-        # window; the account reads keep request_timeout.
+    def test_the_wait_for_a_market_data_snapshot_is_required_and_named_when_missing(self):
+        # ADR 0019: a snapshot collection deadline is versioned operational
+        # configuration with no permissive default.
         values = config()._asdict()
-        values.pop("mark_timeout", None)
-        c = AdapterConfig.from_mapping(values)
-        self.assertEqual(c.mark_timeout, 15)
-        self.assertGreater(c.mark_timeout, 11)
+        del values["mark_timeout"]
+        with self.assertRaises(ConfigError) as caught:
+            AdapterConfig.from_mapping(values)
+        self.assertIn("mark_timeout", str(caught.exception))
         self.assertEqual(config(mark_timeout=20, request_timeout=3).mark_timeout, 20)
         self.assertEqual(config(mark_timeout=20, request_timeout=3).request_timeout, 3)
 

@@ -96,8 +96,11 @@ IBKR's positions and open orders carry no request ID, so a read cut off
 before either ended (it timed out, or Gateway lost IBKR's servers, which it
 restores on the same socket) is never followed by another on that link,
 where the late end of the abandoned list would complete the new one: the
-link is dropped (Connection.drop), and the snapshot, or the order due,
-waits until it is back and reconciled.
+link is dropped (Connection.drop; after Gateway's restoration or
+restore_timeout if it had lost IBKR's servers), and the snapshot waits
+until it is back and reconciled. The order due is held the same way when
+the link went part-way through the relay's open-order read; a read that
+times out with the link up stops the adapter (BrokerOrdersIncomplete).
 Each snapshot's cutoff is logged: the last report recorded before it.
 
 The outbox goes oldest first, but a broker report recorded behind a stream
