@@ -63,6 +63,7 @@ after the saved original is settled, and never replaces it on disk.
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 import sys
@@ -87,6 +88,13 @@ RESEND_SHAPE = re.compile(r"resend:[0-9]{4}-[0-9]{2}-[0-9]{2}")
 SESSION_ZONE = ZoneInfo("America/New_York")
 # How long close waits, by default, for the step in flight (seconds).
 CLOSE_TIMEOUT = 60
+
+
+def _positive_seconds(name, value):
+    """value as a finite number of seconds greater than zero, else ValueError naming the argument."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError("{} must be a finite number of seconds greater than zero, not {!r}".format(name, value))
+    return value
 # The person's decisions on a stopped hand-over.
 DECIDE_SENT = "sent"
 DECIDE_RESEND = "resend"
@@ -268,11 +276,15 @@ class Relay:
     checked. Each relay takes its own exclusive lock on the pending file at
     construction and holds it until close (PendingInUse if another relay or
     resolve has it, in this process or another); once closed it raises
-    PendingInUse rather than edit the record or send.
+    PendingInUse rather than edit the record or send. close_timeout (a finite
+    number of seconds greater than zero, else ValueError) bounds how long
+    close waits for the step in flight; a close that times out raises
+    RelayCloseTimeout and keeps the lock, leaving the relay open.
     """
 
     def __init__(self, connect, send, pending, broker_orders, to_request, reconnects=1, today=None,
                  close_timeout=CLOSE_TIMEOUT):
+        _positive_seconds("close_timeout", close_timeout)
         self._held = _lock(pending.lock_path)
         if self._held is None:
             raise PendingInUse("{} is held by another adapter or by relay.py resolve".format(pending.path))
@@ -303,7 +315,7 @@ class Relay:
         the relay open and holding the pending file, so a supervisor can
         decide what to do.
         """
-        wait = self._close_timeout if timeout is None else timeout
+        wait = self._close_timeout if timeout is None else _positive_seconds("timeout", timeout)
         if not self._step.acquire(timeout=wait):
             raise RelayCloseTimeout("close waited {} s for the step in flight (the sender, or an edit of {}) and "
                                     "gave up; the relay is still open and holds the pending file".format(

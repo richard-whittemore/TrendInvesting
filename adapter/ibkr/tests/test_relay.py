@@ -566,6 +566,24 @@ class RelayTests(unittest.TestCase):
         settling.join(timeout=5)
         relay.close()
 
+    def test_a_close_timeout_that_is_not_a_finite_positive_number_is_refused_at_construction(self):
+        for bad in (None, -1, 0, float("nan"), float("inf"), True, "5"):
+            with self.subTest(close_timeout=bad):
+                with self.assertRaises(ValueError) as refused:
+                    self.relay(Restarts({}, {}), close_timeout=bad)
+                self.assertIn("close_timeout", str(refused.exception))
+        self.relay(Restarts({}, {}), close_timeout=0.5)
+
+    def test_a_close_timeout_that_is_not_a_finite_positive_number_is_refused_by_close(self):
+        relay = self.relay(Restarts({}, {}))
+        for bad in (-1, 0, float("nan"), float("inf"), True, "5"):
+            with self.subTest(timeout=bad):
+                with self.assertRaises(ValueError) as refused:
+                    relay.close(timeout=bad)
+                self.assertIn("timeout", str(refused.exception))
+        with self.assertRaises(ResolveRefused):
+            resolve(PendingInput(self.pending.path), "tw-1", "sent", "still held", today=date(2026, 10, 16))
+
     def test_close_uses_the_configured_timeout_by_default(self):
         in_send, let_send_return = threading.Event(), threading.Event()
 
