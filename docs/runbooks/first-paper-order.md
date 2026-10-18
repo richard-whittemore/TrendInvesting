@@ -27,8 +27,9 @@ the one it waits for:
   work: enabling the real IBKR client (today it refuses to place any order),
   installing IBKR's `ibapi` into the adapter's environment, and the adapter's
   main loop (the part that keeps reading IB Gateway's messages and passing
-  them on). Without it, no order can reach IBKR whatever you do. The
-  work-item numbers are in "Related tickets" at the end.
+  them on). Without it, no order can reach IBKR whatever you do. The plan's
+  Phase 4 (`docs/live-trading/plan.md` section 9) and ADR 0025 point 4
+  (amended) describe this work.
 
 Do the owner steps in part A that are **[NOW]** first: they take the longest
 (IBKR's login and phone approval) and block nothing else.
@@ -46,9 +47,14 @@ Do the owner steps in part A that are **[NOW]** first: they take the longest
   ticket, a pull request or a chat. It is not a password, but together with
   other details it identifies you, and the rule is simpler than judging each
   case.
-- **Paper only.** The engine and the adapter both refuse to start in live
-  mode, and refuse a paper configuration that names an account not beginning
-  `DU` (see the manual's "What sends" in `docs/manual/paper-trading.md`).
+- **Paper only.** Today the engine refuses a paper configuration that names
+  an account not beginning `DU`, and refuses a start mode that differs from
+  its configuration's mode. **[AFTER FIRST HALF]** Once the paper-sending
+  change has merged, the adapter's configuration refuses the same
+  mismatch, and the sender sends only to a paper account that your IBKR
+  login manages (the manual's "What sends" in
+  `docs/manual/paper-trading.md`). A live-mode configuration is a different
+  thing and is not what this checklist builds: nothing here sets live mode.
 - **Do not trade by hand in the paper account during the test.** A hand trade
   at IBKR looks to the program like a fill it did not make, and the morning
   reconciliation will say so.
@@ -65,11 +71,11 @@ alternative for a first look. The trade-offs:
 | | Lightsail server (the plan) | Mac mini (first look) |
 | --- | --- | --- |
 | Matches what will run live | Yes: the same machine, users, service units and the Gateway and TWS API builds pinned in `deploy/versions.env` | No: IB Gateway for macOS and the TWS API for Mac are different downloads from the Linux builds the pins cover |
-| Checksummed download | `provision.sh gateway` and `provision.sh twsapi` fetch the pinned Linux files and refuse a mismatch | You download the Mac installers yourself and compare their SHA-256 to a value you compute and write down; nothing in the repository pins them |
-| Counts as the ADR 0025 point 5 coverage test | Yes, if it ran on the pinned Gateway (10.50.1f) and API (10.51.01) | No: it proves the order path, not that IBKR's execution history covers the nightly restart on the pinned versions. That test must be repeated on the server |
+| Checksummed download | `provision.sh gateway` fetches the pinned Linux file and refuses a mismatch; once the paper-sending change has merged, `provision.sh twsapi` does the same for the TWS API | You download the Mac installers yourself and compare their SHA-256 to a value you compute and write down; nothing in the repository pins them |
+| Counts as the ADR 0025 point 5 coverage test | Yes, if it ran on the pinned Gateway (10.50.1f) and, once the paper-sending change has merged, the pinned API (10.51.01) | No: it proves the order path, not that IBKR's execution history covers the nightly restart on the pinned versions. That test must be repeated on the server |
 | Cost and effort | Needs the instance (a purchase only you make) and the setup in the Lightsail runbook, including Tailscale | Nothing to buy; no firewall or Tailscale to set up |
 | Weekly phone approval (2FA) | The Gateway logs out each Sunday and sends a prompt to your phone | Same prompt, and the Mac must not sleep: a sleeping Mac drops the link mid-session |
-| Credentials | Root-only file on the server, handed to the Gateway only, rendered into memory (`deploy/libexec/render-ibc-config.sh`) | Typed into Gateway's login screen each time; keep it off the iCloud-synced Desktop |
+| Credentials | Root-only file on the server, handed to the Gateway only, rendered into a memory-only directory (`deploy/libexec/render-ibc-config.sh`) | Typed into Gateway's login screen each time; keep it off the iCloud-synced Desktop |
 | Where the account number goes | `/etc/trend-investing/`, root-owned | A local file outside the repository checkout and outside any synced folder |
 
 **Recommendation:** use the server if it exists by the time the second half
@@ -115,8 +121,8 @@ in Account Management).
   `sudo systemctl start ti-gateway`, and approve the IBKR Mobile prompt on
   your phone within three minutes. `journalctl -u ti-gateway -n 50` should
   show a login and no credential. If it will not log in, see
-  `docs/runbooks/gateway-login.md` **[AFTER FIRST HALF]**, or the "Reconnect
-  drill" in the Lightsail runbook.
+  `docs/runbooks/gateway-login.md`, or the "Reconnect drill" in the Lightsail
+  runbook.
 - **Mac mini.** Open IB Gateway, choose "IB API" and **Paper Trading**, and
   type the paper credentials into its login screen.
 
@@ -126,18 +132,29 @@ containing "password", "secret" or "token".
 ### A4. Enable the API socket for paper [NOW]
 
 IB Gateway only lets a program connect if you say so. In Gateway's
-Configure > Settings > API > Settings:
+Configure > Settings > API > Settings (on the server there is no screen:
+`render-ibc-config.sh` sets only the trading mode and the read-only flag, so
+the rest are Gateway's own settings and the listening check below is how you
+know they are right):
 
 | Setting | Value | Why |
 | --- | --- | --- |
 | Socket port | **4002** | IB Gateway's paper-trading port (4001 is the live one; the adapter's paper configuration must use 4002) |
 | Enable ActiveX and Socket Clients | on | Without it the adapter's connection is refused |
-| Read-Only API | **off** for this test | A read-only API refuses every order. On the server this is `TWS_READONLY_API=no` in `ibkr-login.env`; the shipped default is `yes`. Set it to `no` only for the paper test, and set it back to `yes` when the test ends |
+| Read-Only API | **on (leave it on) for now** | A read-only API refuses every order, which is what you want until the moment of the first order. On the server this is `TWS_READONLY_API=yes` in `ibkr-login.env`, the shipped value. You turn it off in B4, immediately before the first order, and back on afterwards (C) |
 | Trusted IPs | `127.0.0.1` only | The adapter runs on the same machine as the Gateway. Do not add another address, and do not open the port in any firewall: the server's firewall already allows inbound traffic on the Tailscale interface only |
 | Allow connections from localhost only | on | Same reason |
 
-Check from the machine that the Gateway listens on 4002, and nowhere you did
-not intend: on the server, `ss -ltn | grep 4002` shows `127.0.0.1:4002`.
+Check that the Gateway is listening on 4002 and only on this machine. On the
+server run `ss -ltn | grep 4002`; you should see one line whose local address
+is `127.0.0.1:4002` (after the Gateway has logged in; it does not listen
+before). On the Mac run `lsof -nP -iTCP:4002 -sTCP:LISTEN`; you should see
+the Gateway's Java process listening on `127.0.0.1:4002` or `localhost:4002`.
+If nothing is listening, the Gateway is not logged in yet or its API is off:
+check the login (A3), then Gateway's API settings above (Enable ActiveX and
+Socket Clients, port 4002), and run the check again. If the address is
+`0.0.0.0` or `*` (every interface), "Allow connections from localhost only"
+is off: turn it on and check again before going on.
 Also confirm the paper account was given trading permissions for US stocks
 and ETFs in Account Management (SPY is one); a missing permission shows up
 later as an IBKR refusal (part D).
@@ -215,7 +232,7 @@ saved in shell history or the screen):
 
 ```sh
 make adapter-test
-read -s -p "paper account (DU...): " ACC && echo && export ACC
+printf 'paper account (DU...): '; read -r -s ACC; echo; export ACC
 python3 - <<'PY'
 import os, sys
 sys.path.insert(0, "adapter/ibkr")
@@ -236,14 +253,21 @@ typo in the number is found here, not in front of IBKR.
 Order of starting, each on the server, each an explicit step of yours:
 
 1. The Gateway is running and logged in (A3).
-2. Write the run file the engine reads, exactly as the "Restarting an engine"
+2. **Turn the Read-Only API off, now, and not before.** On the server:
+   `sudo -e /etc/trend-investing/ibkr-login.env`, set
+   `TWS_READONLY_API=no`, then `sudo systemctl restart ti-gateway` and
+   approve the phone prompt if it comes; wait until the check in A4 shows
+   port 4002 listening again. On the Mac: untick Read-Only API in
+   Gateway's API settings. From here until you turn it back on (C), the
+   Gateway accepts orders from the adapter.
+3. Write the run file the engine reads, exactly as the "Restarting an engine"
    section of `docs/runbooks/durable-log.md` says: a new `TI_RUN`, a
    `TI_AS_OF`, and an empty `TI_RESTART_ARGS` for a first run. A log is never
    reused.
-3. Start the adapter, then the engine: `sudo systemctl start ti-engine@boost`.
+4. Start the adapter, then the engine: `sudo systemctl start ti-engine@boost`.
    Engines are never started by systemd on their own and never restarted by
    it; every start is yours.
-4. Confirm the engine's log begins with the paper configuration, and that the
+5. Confirm the engine's log begins with the paper configuration, and that the
    adapter says it connected on 4002, and matched IBKR's open orders, trades
    and balances ("reconciled") before anything else. The adapter does this on
    every start and reconnect (ADR 0025 point 5).
@@ -279,7 +303,8 @@ One order, from the Boost engine on the paper account:
 | --- | --- |
 | The engine's durable log (`-log`, in `/var/lib/trend-investing/engines/boost/`) | the order released with `mode: paper` and `send: true`; then each report IBKR sent, as the engine read it |
 | IBKR's reports, as records | an order-lifecycle record each time the order's state changes (working, cancelling, cancelled or refused, with IBKR's reason), and one fill record for each execution, with shares, price, IBKR's commission and IBKR's time. A fill is recorded only once IBKR's commission report arrives |
-| The adapter's own files beside its pending file | `.handover` (the "about to send" and "sent" marks), `.handover.decisions` (every decision you make with `relay.py resolve`), `.refused` (an order the sender refused and why), `.held` (a cancellation waiting for a fill's commission), `.corrections` and `.late-fills` (your acknowledgements) |
+| The adapter's own files beside its pending file (the file's name followed by a suffix) | `.handover` (the "about to send" and "sent" marks), `.handover.decisions` (every decision you make with `relay.py resolve`), `.refused` (an order the sender refused and why), `.corrections` and `.late-fills` (your acknowledgements) |
+| The adapter's held-reports file, beside the journal | a cancellation or refusal waiting for a fill's commission before it is recorded. Its name is set when the adapter's main loop is built |
 
 You never edit any of these files by hand. The adapter reads them strictly
 and stops on a value it does not know.
@@ -339,39 +364,187 @@ Check in this order, and compare the three: they must agree.
    account in Degraded or Halted; follow `docs/runbooks/reconciliation.md`.
 
 When the order is filled, reconciled and the reconnect proof (B7) passed, the
-first paper order is done. Then set `TWS_READONLY_API=yes` again if you are
-stopping here, and record the result: which machine, which Gateway and API
+first paper order is done. Then turn the Read-Only API back on: on the server set
+`TWS_READONLY_API=yes` in `ibkr-login.env` and `sudo systemctl restart
+ti-gateway`; on the Mac tick Read-Only API in Gateway's settings. Do this
+even if you plan to run again soon, so a stray start cannot send. Record the result: which machine, which Gateway and API
 builds, the date, and what you saw. Phase 4 continues from here with the
 daily checks (plan section 9).
 
 ## D. What can go wrong, and what to do
 
-The adapter fails closed: whenever it cannot be sure what happened, it stops
-and sends nothing more. The full table is "What can go wrong, and what the
-program does" in `docs/manual/paper-trading.md`; the stops you may meet on a
-first order, and what to do, are below. In every case: **do not place the
-order by hand**, stop the adapter before using the commands (they refuse
-while it runs), and never edit a journal, a `.handover` file or any number to
-make a state look right. `PENDING_FILE` is the adapter's pending file;
-`ENGINE_LOG` is the engine's `-log` file.
+This part is written for someone who does not read code. The program is
+built to stop and send nothing more whenever it cannot be sure what
+happened. A stopped program costs nothing in a paper account, so a stop is
+not an emergency. The full list is "What can go wrong, and what the program
+does" in `docs/manual/paper-trading.md`.
 
-| What you see | What it means | What to do |
-| --- | --- | --- |
-| **Never sent.** A stop or refusal that says the order "was released for the session of ... not today's", or a refusal kept in `PENDING_FILE.refused` | The order was refused before "about to send" was written, so IBKR never received it. A link that is down or not yet matched on the same day waits and goes out when it is back. After the day ends it is stale and can never go out | If the link is simply down the same day, do nothing; do not settle it. If the day has passed: stop the adapter, confirm in IBKR (orders, including cancelled ones) that no order carries that client order ID as its reference, then `python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --never-sent --reason "released for <day>, refused as stale"`. The engine then keeps the order working, so the next rebalance is withheld until you clear it with `operator rebalance-cleared` (`docs/manual/operator.md`; Boost reads no clearance, so reconcile and report it instead), reconcile, and start again. The manual's rows on a stale order and on an order the adapter can never send (such as a missing contract number in `con_ids`) have the detail |
-| **Handover unconfirmed.** "was being handed to the broker when the adapter stopped" | It stopped while sending and IBKR shows the order neither open nor executed. It may have been taken and cancelled, or never arrived. The adapter will not guess | Look in IBKR for an order whose reference is the client order ID. If it is there at all (working, filled or cancelled): `python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent --reason "what IBKR showed"`. Only if IBKR has no trace of it today and it was committed today: `--resend`, then start the adapter the same day. Never `--resend` an order IBKR shows at all (`docs/manual/redelivery.md`, "What can go wrong") |
-| **Correction.** The adapter stops because IBKR reported the same trade again under an execution ID that differs only in its last part | Recording it would count the shares twice. It stops at every start until acknowledged | Check the trades in IBKR. With the adapter stopped: `python3 adapter/ibkr/relay.py acknowledge-correction PENDING_FILE --journal ENGINE_LOG CORRECTED_EXEC_ID --corrects ORIGINAL_EXEC_ID --reason "what IBKR shows"` (both IDs are in the stop message). It is never recorded as a fill. Reconcile the account before starting again. If it says the original "was never recorded as a fill", acknowledging cannot help: reconcile by hand first |
-| **Late fill.** A trade or status reported on an order the adapter already recorded as cancelled or refused | A contradiction the engine will not record. For a trade the adapter stops at every start that day | Check the order and its trades in IBKR. With the adapter stopped: `python3 adapter/ibkr/relay.py acknowledge-late-fill PENDING_FILE --journal ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason "what IBKR shows"`. The trade is never a fill; the position difference is its shares, settled by reconciling by hand (`docs/runbooks/reconciliation.md`) |
-| **Unmanaged account.** "is not among the accounts this IBKR login manages" | The login the Gateway used does not manage the account in the configuration, so the link is never treated as matched and nothing is sent | Check the number in the configurations against the paper account the Gateway logged in to (A3, A5). Most often the live login was used, or the number has a typo. A wrong account is a new configuration and a new run |
-| **Link down.** The adapter cannot reach the Gateway, or the Gateway cannot reach IBKR | Nothing goes out and nothing comes back. The engines withhold decisions that need fresh data; an order waits and goes out when the link is back the same day | `docs/runbooks/gateway-login.md` (a login, 2FA or "existing session" problem) **[AFTER FIRST HALF]**, and the Lightsail runbook's reconnect drill. Do not retry a bad password in a loop: IBKR locks the login. After a drop the adapter reconnects, matches IBKR, and does not resend (B7) |
-| **A client-ID conflict** (IBKR code 326) | Another program is connected under the same client ID | The adapter does not retry or pick another ID. Stop the other program; each engine has one ID (Boost 11) |
-| **IBKR refuses the order** | The refusal and IBKR's reason are recorded and the engine reads the order as ended | Read the reason in `journal-query orders`. A margin, permission or price refusal in paper usually means a paper-account setting (trading permissions for stocks, A4) |
-| **Commission never arrives.** "has waited ... for IBKR's commission report" | A trade happened at IBKR but cannot be recorded without its commission | Check the trade in IBKR, then reconcile the account before starting again |
-| **A report the adapter cannot state exactly** (part shares, a zero or odd price, a commission in another currency) | It stops rather than record an approximation | A fault to investigate: check the order in IBKR, and do not start again until it is understood |
-| **The account left Normal** (Degraded or Halted) | The risk gate or reconciliation moved it | `docs/runbooks/halted-account.md` and `docs/runbooks/reconciliation.md` |
+**Four rules for every case below:**
 
-If you are unsure, the safe action is always the same: stop the adapter,
-look in IBKR, change nothing, and ask. A stopped adapter costs nothing in a
-paper account.
+1. Do not place the order by hand at IBKR.
+2. Stop the adapter first (the commands below refuse to run while it is
+   running).
+3. Never edit a journal, a `.handover` file or any number to make things
+   look right.
+4. If you are unsure: stop, look in IBKR, change nothing, and ask.
+
+Two names are used in the commands. **PENDING_FILE** is the adapter's
+pending file: its path is named in the adapter's stop message and in its
+start command (added by the second half). **ENGINE_LOG** is the engine's
+`-log` file, the `<TI_RUN>.log` in `/var/lib/trend-investing/engines/boost/`
+(B4). **CLIENT_ORDER_ID** is the order's tag, shown in the stop message and
+in IBKR as the order's reference. Replace these capitals with the real
+values and leave everything else exactly as written. The `relay.py`
+commands below exist once the paper-sending change has merged
+**[AFTER FIRST HALF]**.
+
+### D1. The order was never sent
+
+- **What you will see:** a message that the order "was released for the
+  session of ... not today's", or a line for it in the file
+  `PENDING_FILE.refused`.
+- **What it means:** the program refused the order before it wrote "about
+  to send", so IBKR never received it. If the connection was only down
+  during the same trading day, the order simply goes out when the
+  connection is back. After the day ends it is out of date and can never go
+  out.
+- **What to do:** if the day has not ended, do nothing. If it has: stop the
+  adapter, look in IBKR (orders, including cancelled ones) and confirm no
+  order has that CLIENT_ORDER_ID as its reference, then run this, replacing
+  the capitals and the day:
+
+  ```sh
+  python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --never-sent --reason "released for DAY, refused as stale"
+  ```
+
+  Boost reads no operator clearance (`docs/manual/operator.md`, "A
+  rebalance clearance"), so after this reconcile the account
+  (`docs/runbooks/reconciliation.md`), then start a fresh run as
+  `docs/runbooks/durable-log.md` ("Restarting an engine") says. The manual's
+  rows on a stale order and on an order the adapter can never send (such as
+  a missing contract number in the adapter's `con_ids`) have the detail.
+
+### D2. The program stopped while sending
+
+- **What you will see:** a message "was being handed to the broker when the
+  adapter stopped".
+- **What it means:** the adapter stopped at the moment of sending and IBKR
+  shows the order neither open nor executed. It may have been taken and
+  cancelled, or never arrived. The program will not guess.
+- **What to do:** in IBKR, look for an order with that CLIENT_ORDER_ID as
+  its reference. If you find it at all (working, filled or cancelled), run:
+
+  ```sh
+  python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent --reason "what IBKR showed"
+  ```
+
+  Only if IBKR has no trace of it, and it was released today, run the same
+  command with `--resend` in place of `--sent`, then start the adapter the
+  same day. Never use `--resend` for an order IBKR shows in any form
+  (`docs/manual/redelivery.md`, "What can go wrong").
+
+### D3. IBKR reported the same trade twice
+
+- **What you will see:** the adapter stops at every start, with a message
+  naming two execution IDs that differ only at the end.
+- **What it means:** IBKR corrected a trade it already reported. Recording
+  it would count the shares twice, so the program refuses until you say you
+  have looked.
+- **What to do:** with the adapter stopped, check the trades in IBKR, then
+  run this (both IDs are in the stop message; replace ENGINE_LOG,
+  CORRECTED_EXEC_ID and ORIGINAL_EXEC_ID):
+
+  ```sh
+  python3 adapter/ibkr/relay.py acknowledge-correction PENDING_FILE --journal ENGINE_LOG CORRECTED_EXEC_ID --corrects ORIGINAL_EXEC_ID --reason "what IBKR shows"
+  ```
+
+  The repeat is never recorded as a fill. Reconcile the account before
+  starting again. If the message says the original "was never recorded as a
+  fill", acknowledging cannot help: reconcile by hand first.
+
+### D4. A trade arrived for an order already closed
+
+- **What you will see:** the adapter stops (at every start that day, for a
+  trade) after IBKR reports a trade or status on an order the program had
+  already recorded as cancelled or refused.
+- **What it means:** IBKR's report contradicts the program's record, and the
+  engine will not record a contradiction.
+- **What to do:** with the adapter stopped, check the order and its trades
+  in IBKR, then run (replace EXEC_ID, the trade's execution ID from the stop
+  message):
+
+  ```sh
+  python3 adapter/ibkr/relay.py acknowledge-late-fill PENDING_FILE --journal ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason "what IBKR shows"
+  ```
+
+  The trade is never recorded as a fill. The account then differs from the
+  program's book by that trade's shares; settle it by reconciling
+  (`docs/runbooks/reconciliation.md`).
+
+### D5. The login does not manage the account
+
+- **What you will see:** "is not among the accounts this IBKR login
+  manages".
+- **What it means:** the Gateway is logged in to a different IBKR account
+  than the one in the configuration, so the program treats the link as not
+  matched and sends nothing.
+- **What to do:** compare the account number in the configurations with the
+  paper account the Gateway logged in to (A3, A5). Most often the live login
+  was used, or the number has a typo. A corrected account is a new
+  configuration and a new run. No command is needed.
+
+### D6. The connection to the Gateway is down
+
+- **What you will see:** nothing goes out and nothing comes back; the
+  engines hold their decisions until fresh data returns.
+- **What it means:** the adapter cannot reach the Gateway, or the Gateway
+  cannot reach IBKR (often the weekly phone approval).
+- **What to do:** follow `docs/runbooks/gateway-login.md` and the Lightsail
+  runbook's "Reconnect drill". Do not retry a bad password in a loop: IBKR
+  locks the login. After a drop the adapter reconnects, matches IBKR's
+  records, and does not resend (B7).
+
+### D7. Another program uses the same client ID
+
+- **What you will see:** IBKR error code 326.
+- **What it means:** two programs are connected under one client ID. The
+  adapter does not retry or pick another.
+- **What to do:** stop the other program. Each engine has one ID (Boost is
+  11).
+
+### D8. IBKR refused the order
+
+- **What you will see:** an order that ended as refused, with IBKR's reason.
+- **What it means:** IBKR said no (margin, permission or price). In a paper
+  account this usually means a paper-account setting, such as trading
+  permission for stocks (A4).
+- **What to do:** read the reason with
+  `go run ./cmd/journal-query orders ENGINE_LOG`, fix the setting at IBKR,
+  and ask before trying again.
+
+### D9. A commission report never arrived
+
+- **What you will see:** "has waited ... for IBKR's commission report".
+- **What it means:** a trade happened at IBKR but cannot be recorded
+  without its commission.
+- **What to do:** check the trade in IBKR, then reconcile the account
+  before starting again.
+
+### D10. A report the program cannot state exactly
+
+- **What you will see:** a stop mentioning part shares, a zero or odd
+  price, or a commission in another currency.
+- **What it means:** the program stops rather than record an approximation.
+- **What to do:** treat it as a fault to investigate. Check the order in
+  IBKR and do not start again until it is understood.
+
+### D11. The account is Degraded or Halted
+
+- **What you will see:** the dashboard or an alert says Degraded or Halted.
+- **What it means:** the risk gate or the morning reconciliation moved the
+  account out of Normal.
+- **What to do:** `docs/runbooks/halted-account.md` and
+  `docs/runbooks/reconciliation.md`.
 
 ## The rules and their sources
 
