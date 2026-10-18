@@ -47,9 +47,16 @@ start but never the status of an order no longer open: a stop before the
 commission would otherwise lose the cancellation and leave the order
 working in the engine, or journal it before a fill IBKR had already
 reported. An execution of an order whose terminal report is already
-journalled, and any other status for an order after its terminal report,
-raises UnreportableOrder: a fill or a change after a cancellation is a
-contradiction for a person to reconcile (ADR 0019). The held reports file
+journalled, and any other status for an order after its terminal report
+(held or journalled), raises UnreportableOrder: a fill or a change after a
+cancellation is a contradiction for a person to reconcile (ADR 0019). IBKR
+replays the day's executions on every start, so such a fill would stop
+every restart that day; the owner's acknowledgement of it (relay.py
+acknowledge-late-fill) names the execution and the order it followed, and a
+journal given that acknowledgement passes over it. It is never journalled:
+the engine's OrderReports refuses a fill on an order already terminal, so
+the trade is left to reconciliation (ADR 0019), where the morning
+reconciliation shows its shares as a position difference. The held reports file
 is this adapter's alone: it is read and written only while the adapter
 holds its exclusive lock (owns_lock; relay.Relay.holds), so a second
 adapter started beside the first journals nothing. A restarted journal
@@ -140,6 +147,22 @@ def check_acknowledged(acknowledged):
                              "and changes the last segment".format(corrected, original))
 
 
+def check_late_fills(late_fills):
+    """Refuse (ValueError) an acknowledgement that does not name an execution and the order it followed.
+
+    late_fills maps an execId (with a base and last segment, as IBKR's are)
+    to the client order ID of the order it was reported after.
+    """
+    for exec_id, after in dict(late_fills).items():
+        try:
+            _exec_base(exec_id)
+        except UnreportableOrder as err:
+            raise ValueError(str(err)) from None
+        if not _is_text(after):
+            raise ValueError("execution {!r} is acknowledged as after order {!r}, which is no client order ID".format(
+                exec_id, after))
+
+
 def _order_key(order_id):
     """(client ID, IBKR order ID) from a lifecycle record's "order:<clientId>:<orderId>", or None."""
     parts = str(order_id).split(":")
@@ -176,7 +199,10 @@ class OrderReportJournal:
     working order's status and each execution with its commission, which it
     sends on every read after a reconnect, writes nothing twice.
     acknowledged maps each correction the owner acknowledged to the execId
-    it corrects (check_acknowledged; ValueError otherwise). held_path is the
+    it corrects (check_acknowledged; ValueError otherwise). late_fills maps
+    each execution the owner acknowledged as reported after its order ended
+    to that order's client order ID (check_late_fills; ValueError
+    otherwise). held_path is the
     file, beside the journal, that keeps each report held for a waiting
     execution across a stop. owns_lock returns whether this adapter holds
     its exclusive lock (relay.Relay.holds), so construct the journal after
@@ -192,7 +218,7 @@ class OrderReportJournal:
     """
 
     def __init__(self, account_id, client_id, sink, now, commission_wait, held_path, owns_lock, ready,
-                 journalled=(), acknowledged=None):
+                 journalled=(), acknowledged=None, late_fills=None):
         if (isinstance(commission_wait, bool) or not isinstance(commission_wait, (int, float))
                 or not math.isfinite(commission_wait) or commission_wait <= 0):
             raise ValueError("commission_wait must be a positive number of seconds, not {!r}".format(
@@ -202,6 +228,8 @@ class OrderReportJournal:
                             "and whether its link is up and reconciled")
         check_acknowledged(acknowledged or {})
         self._acknowledged = dict(acknowledged or {})
+        check_late_fills(late_fills or {})
+        self._late_fills = dict(late_fills or {})
         self.account_id = account_id
         self.client_id = client_id
         self._sink = sink
@@ -373,7 +401,8 @@ class OrderReportJournal:
                 if missing:
                     raise UnreportableOrder(
                         "order {} was reported {} while execution {} waited for its commission, and IBKR has not "
-                        "replayed that execution within {} s of the start: neither can be recorded; check the "
+                        "replayed that execution within {} s of the link being up and reconciled: neither can be "
+                        "recorded; check the "
                         "order and its trades in IBKR (docs/manual/paper-trading.md)".format(
                             record.payload.get("client_order_id"), status, ", ".join(missing),
                             self._commission_wait))
@@ -415,9 +444,11 @@ class OrderReportJournal:
         key = (report.client_id, report.broker_order_id)
         if report.client_id != self.client_id or report.lifecycle is None:
             return
-        if self._status.get(key) == report.lifecycle:
-            return
+        # A held terminal report is the order's last status, whatever was
+        # journalled before it: only its repeat is passed over.
         if key in self._held and self._held[key][1] == report.lifecycle:
+            return
+        if key not in self._held and self._status.get(key) == report.lifecycle:
             return
         ended = self._held[key][1] if key in self._held else self._status.get(key)
         if ended in TERMINAL:
@@ -503,17 +534,36 @@ class OrderReportJournal:
                 "IBKR reported execution {} as a correction of execution {}; it is not recorded as another fill: "
                 "check the order's trades in IBKR and reconcile it (docs/manual/paper-trading.md)".format(
                     report.exec_id, first))
+        key = (report.client_id, report.broker_order_id)
+        ended = self._status.get(key) in TERMINAL
+        after = self._late_fills.get(report.exec_id)
+        if after is not None:
+            if not ended or after != report.client_order_id:
+                raise UnreportableOrder(
+                    "IBKR reported execution {} of order {}, acknowledged as a trade after order {} ended, but {}: "
+                    "check the order's trades in IBKR and reconcile them (docs/manual/paper-trading.md)".format(
+                        report.exec_id, report.client_order_id, after,
+                        "the order is not recorded as ended" if not ended
+                        else "it is order {}'s".format(report.client_order_id)))
+            # The owner acknowledged this trade; the engine reads no fill on
+            # an ended order, so it is left to reconciliation. Seen, so a
+            # correction of it still stops.
+            self._seen[base] = report.exec_id
+            return
+        if ended:
+            raise UnreportableOrder(
+                "IBKR reported execution {} of order {} after the order was recorded as {}: the engine reads no "
+                "fill on an order already ended. IBKR replays the day's trades, so the adapter stops again at "
+                "every start today until you acknowledge it. Check the order's trades in IBKR, then, with the "
+                "adapter stopped, run python3 adapter/ibkr/relay.py acknowledge-late-fill PENDING_FILE --journal "
+                "ENGINE_LOG {} --after {} --reason TEXT; the trade is never recorded as a fill, so reconcile the "
+                "account (docs/manual/paper-trading.md)".format(
+                    report.exec_id, report.client_order_id, self._status[key], report.exec_id,
+                    report.client_order_id))
         price = report.price
         if not isinstance(price, Decimal) or not price.is_finite() or price <= 0 or price >= UNSET_FIGURE:
             raise UnreportableOrder("execution {} has price {}; the engine reads a finite price above "
                                     "zero".format(report.exec_id, price))
-        key = (report.client_id, report.broker_order_id)
-        if self._status.get(key) in TERMINAL:
-            raise UnreportableOrder(
-                "IBKR reported execution {} of order {} after the order was recorded as {}: the engine reads no "
-                "fill on an order already ended; check the order's trades in IBKR and reconcile them "
-                "(docs/manual/paper-trading.md)".format(report.exec_id, report.client_order_id,
-                                                         self._status[key]))
         if key in self._held and report.exec_id not in self._held[key][2]:
             # The held report now waits for this execution too, on disk
             # before the execution is accepted.

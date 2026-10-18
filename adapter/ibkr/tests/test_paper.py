@@ -97,7 +97,8 @@ class PaperAdapter:
                 now=lambda: self.received, commission_wait=self.conn.config.commission_wait,
                 held_path=str(Path(directory) / "journal.held"), owns_lock=self.relay.holds,
                 ready=lambda: self.conn.connected and not self.conn.needs_reconciliation,
-                journalled=list(self.inputs), acknowledged=self.pending.acknowledged_corrections())
+                journalled=list(self.inputs), acknowledged=self.pending.acknowledged_corrections(),
+                late_fills=self.pending.acknowledged_late_fills())
         except BaseException:
             self.relay.close()
             raise
@@ -389,6 +390,44 @@ class PaperSendingTests(unittest.TestCase):
         c.drain()
         self.assertEqual(len(c.inputs), 4, "each is journalled once, across every restart")
 
+    def test_a_trade_after_a_recorded_cancellation_stops_until_the_owner_acknowledges_it(self):
+        # IBKR reports a trade on an order after its cancellation was
+        # journalled (no execution was waiting, so nothing was held). The
+        # engine reads no fill on an ended order, so the adapter stops; IBKR
+        # replays the day's trades on every start, so it stops again at every
+        # start until the owner acknowledges the trade, which is then left to
+        # reconciliation and never recorded as a fill.
+        a = self.sent_and_working()
+        late = "0001f4e8.paper.01.01"
+        a.h.fake.status(7, "Cancelled", filled="0", remaining="9")
+        a.drain()
+        self.assertEqual([r.payload.get("status") for r in a.inputs], ["submitted", "canceled"])
+        a.h.fake.fill(7, shares="4", price=401.25, exec_id=late, cum_qty="4", time="20261017 09:30:01 US/Eastern")
+        a.h.fake.open_orders = [o for o in a.h.fake.open_orders if o[0] != 7]
+        with self.assertRaises(UnreportableOrder) as raised:
+            a.drain()
+        message = str(raised.exception)
+        self.assertIn("relay.py acknowledge-late-fill PENDING_FILE --journal ENGINE_LOG {} --after tw-paper-1".format(
+            late), message)
+        self.assertIn("every start", message)
+        a.relay.close()
+        b = self.restart(a)
+        with self.assertRaises(UnreportableOrder):
+            b.start()
+        ack = ["acknowledge-late-fill", b.pending.path, "--journal", b.engine_journal, late, "--after", "tw-paper-1",
+               "--reason", "IBKR shows 4 SPY bought at 401.25 after the cancel"]
+        self.assertEqual(relay_main(ack), 1, "refused while an adapter holds the pending file")
+        b.relay.close()
+        self.assertEqual(relay_main(ack), 0)
+        c = self.restart(b)
+        c.start()
+        c.exchange()
+        c.drain()
+        self.assertEqual([(r.event_type, r.payload.get("status")) for r in c.inputs],
+                         [(LIFECYCLE_TYPE, "submitted"), (LIFECYCLE_TYPE, "canceled")],
+                         "the trade is never a fill: the engine refuses one on an ended order")
+        self.assertEqual(c.placed(), 1)
+
     def test_a_second_adapter_journals_nothing_held_while_the_first_holds_the_lock(self):
         # The first adapter holds a cancellation whose fill is journalled but
         # whose own write failed; a second adapter started beside it must be
@@ -556,10 +595,12 @@ class OrderReportJournalTests(unittest.TestCase):
         self.addCleanup(self.dir.cleanup)
         self.held_path = str(Path(self.dir.name) / "journal.held")
 
-    def journal(self, now=lambda: RECEIVED, journalled=(), sink=None, owns_lock=lambda: True, ready=lambda: True):
+    def journal(self, now=lambda: RECEIVED, journalled=(), sink=None, owns_lock=lambda: True, ready=lambda: True,
+                late_fills=None):
         inputs = []
         j = OrderReportJournal(ACCOUNT, 11, sink or inputs.append, now=now, commission_wait=COMMISSION_WAIT,
-                               held_path=self.held_path, owns_lock=owns_lock, ready=ready, journalled=journalled)
+                               held_path=self.held_path, owns_lock=owns_lock, ready=ready, journalled=journalled,
+                               late_fills=late_fills)
         return j, inputs
 
     def held_cancellation(self, sink=None):
@@ -696,6 +737,48 @@ class OrderReportJournalTests(unittest.TestCase):
             restarted.on_record(late)
         self.assertEqual(more, [])
 
+    def test_an_acknowledged_trade_after_an_ended_order_is_passed_over_and_never_a_fill(self):
+        j, inputs = self.journal()
+        self.sent(j)
+        j.on_record(self.status("submitted"))
+        j.on_record(self.status("canceled"))
+        late = execution_report(contract(), execution(order_ref="tw-1", side="SLD", shares="1", cum_qty="1",
+                                                      price=401.5))
+        restarted, more = self.journal(journalled=list(inputs), late_fills={late.exec_id: "tw-1"})
+        restarted.on_record(late)
+        restarted.on_record(CommissionReport(late.exec_id, Decimal("1"), "USD"))
+        restarted.on_record(late)
+        restarted.check_overdue()
+        self.assertEqual(more, [])
+        # A correction of the acknowledged trade is not acknowledged with it.
+        correction = late._replace(exec_id=late.exec_id[:-2] + "02")
+        with self.assertRaises(UnreportableOrder):
+            restarted.on_record(correction)
+        # Acknowledged as after another order: still a stop.
+        other, _ = self.journal(journalled=list(inputs), late_fills={late.exec_id: "tw-2"})
+        with self.assertRaises(UnreportableOrder) as raised:
+            other.on_record(late)
+        self.assertIn("tw-2", str(raised.exception))
+        # Acknowledged, but the order is not recorded as ended: still a stop.
+        working, _ = self.journal(journalled=list(inputs[:1]), late_fills={late.exec_id: "tw-1"})
+        with self.assertRaises(UnreportableOrder) as raised:
+            working.on_record(late)
+        self.assertIn("not recorded as ended", str(raised.exception))
+        for bad in ({late.exec_id: ""}, {late.exec_id: 7}, {"nodots": "tw-1"}, {"": "tw-1"}):
+            with self.subTest(late_fills=bad), self.assertRaises(ValueError):
+                self.journal(late_fills=bad)
+
+    def test_a_status_other_than_the_held_report_while_it_is_held_stops_for_a_person(self):
+        # The held cancellation is the order's last status: IBKR repeating it
+        # changes nothing, but any other status contradicts it, even the one
+        # journalled before it.
+        j, inputs, _ = self.held_cancellation()
+        j.on_record(self.status("canceled"))
+        with self.assertRaises(UnreportableOrder) as raised:
+            j.on_record(self.status("submitted"))
+        self.assertIn("after reporting it canceled", str(raised.exception))
+        self.assertEqual([r.payload.get("status") for r in inputs], ["submitted"])
+
     def test_a_status_after_an_orders_terminal_report_stops_for_a_person(self):
         self.held_cancellation()
         restarted, inputs = self.journal()
@@ -776,6 +859,7 @@ class OrderReportJournalTests(unittest.TestCase):
         with self.assertRaises(UnreportableOrder) as raised:
             j.check_overdue()
         self.assertIn("0001f4e8", str(raised.exception))
+        self.assertIn("within {} s of the link being up and reconciled".format(COMMISSION_WAIT), str(raised.exception))
         self.assertEqual(inputs, [])
 
     def sent(self, j, order_id=7, client_order_id="tw-1"):

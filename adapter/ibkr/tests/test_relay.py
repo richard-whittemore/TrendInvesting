@@ -24,7 +24,8 @@ if tests_dir not in sys.path:
 from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
-                   acknowledge_correction, journalled_fills, main, resolve)
+                   acknowledge_correction, acknowledge_late_fill, journalled_fills, journalled_reports, main,
+                   resolve)
 from sender import OrderRequest
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -182,6 +183,23 @@ def write_engine_journal(path, fill_ids):
     for n, fill_id in enumerate(fill_ids, 3):
         lines += log_group(n, [("input", "execution.fill", 5, fill_payload(fill_id))])
     Path(path).write_text("".join(lines), encoding="utf-8")
+    return str(path)
+
+
+def lifecycle_payload(client_order_id, status, account_id="DU1234567"):
+    return {"account_id": account_id, "client_order_id": client_order_id, "order_id": "order:11:7",
+            "instrument_id": "SPY", "side": "buy", "status": status, "quantity": 9, "limit_price": 401.5,
+            "occurred_at": "2026-10-17T13:30:00Z", "message": ""}
+
+
+def write_ended_journal(path, fill_ids, statuses):
+    """The engine's durable log holding committed fills, then a lifecycle input (client order ID, status) for each of statuses."""
+    write_engine_journal(path, fill_ids)
+    lines = []
+    for n, (client_order_id, status) in enumerate(statuses, 3 + len(fill_ids)):
+        lines += log_group(n, [("input", "execution.order.lifecycle", 2, lifecycle_payload(client_order_id, status))])
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("".join(lines))
     return str(path)
 
 
@@ -999,6 +1017,75 @@ class RelayTests(unittest.TestCase):
         with open(self.pending.corrections_path, "w", encoding="utf-8") as f:
             f.write("[]\n")
         self.assertEqual(main(ack + ["e.1.03", "--corrects", "e.1.01", "--reason", "x"]), 1)
+
+    def test_the_engines_log_names_each_order_it_recorded_ended(self):
+        journal = Path(self.dir.name) / "log.jsonl"
+        write_ended_journal(journal, ["e.1.01"], [("tw-1", "submitted"), ("tw-1", "canceled"), ("tw-2", "invalid"),
+                                                  ("tw-3", "submitted")])
+        reports = journalled_reports(str(journal))
+        self.assertEqual((reports.fills, reports.ended), ({"e.1.01"}, {"tw-1", "tw-2"}))
+        good = journal.read_text(encoding="utf-8")
+        uncommitted = "".join(log_group(8, [("input", "execution.order.lifecycle", 2,
+                                             lifecycle_payload("tw-3", "canceled"))], committed=False))
+        journal.write_text(good + uncommitted, encoding="utf-8")
+        self.assertEqual(journalled_reports(str(journal)).ended, {"tw-1", "tw-2"}, "a group without its commit")
+        for name, payload, version in (("no client order ID", dict(lifecycle_payload("tw-3", "canceled"),
+                                                                   client_order_id=""), 2),
+                                       ("no status", {k: v for k, v in lifecycle_payload("tw-3", "canceled").items()
+                                                      if k != "status"}, 2),
+                                       ("another schema", lifecycle_payload("tw-3", "canceled"), 1)):
+            with self.subTest(name):
+                journal.write_text(good + "".join(log_group(8, [("input", "execution.order.lifecycle", version,
+                                                                 payload)])), encoding="utf-8")
+                with self.assertRaises(ResolveRefused):
+                    journalled_reports(str(journal))
+
+    def test_a_trade_after_an_order_ended_is_acknowledged_only_as_the_engines_log_records_it(self):
+        ended, fills = frozenset({"tw-1"}), frozenset({"e.1.01"})
+        refusals = (("e.5.01", "tw-2", "an order the engine never recorded ended", "never recorded"),
+                    ("e.1.01", "tw-1", "a trade the engine holds as a fill", "is recorded as a fill"),
+                    ("e.5.01", "tw-1", " ", "reason"),
+                    ("nodots", "tw-1", "no base", "base"),
+                    ("e.5.01", "", "no order", "order"))
+        for exec_id, after, reason, why in refusals:
+            with self.subTest(why), self.assertRaises(ResolveRefused) as raised:
+                acknowledge_late_fill(self.pending, exec_id, after, reason, fills=fills, ended=ended)
+            self.assertIn(why, str(raised.exception))
+        self.assertEqual(self.pending.acknowledged_late_fills(), {})
+        acknowledge_late_fill(self.pending, "e.5.01", "tw-1", "IBKR shows 4 SPY bought after the cancel",
+                              fills=fills, ended=ended)
+        acknowledge_late_fill(self.pending, "e.5.01", "tw-1", "the same, again", fills=fills, ended=ended)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-1"})
+        with self.assertRaises(ResolveRefused):
+            acknowledge_late_fill(self.pending, "e.5.01", "tw-9", "another order", fills=fills, ended=ended | {"tw-9"})
+        running = self.relay(Restarts({}, {}))
+        with self.assertRaises(ResolveRefused):
+            acknowledge_late_fill(self.pending, "e.6.01", "tw-1", "while the adapter runs", fills=fills, ended=ended)
+        running.close()
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-1"})
+
+    def test_a_late_fills_file_not_as_acknowledge_late_fill_writes_it_is_refused(self):
+        good = {"exec_id": "e.5.01", "after": "tw-1", "reason": "r", "at": "2026-10-17T14:00:00+00:00"}
+        for lines in (["{not json"], ["[]"], [json.dumps(dict(good, extra="x"))], [json.dumps(dict(good, reason=""))],
+                      [json.dumps(dict(good, after=7))], [json.dumps(dict(good, exec_id="nodots"))],
+                      [json.dumps(good), json.dumps(dict(good, after="tw-2"))]):
+            with self.subTest(lines=lines):
+                with open(self.pending.late_fills_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + "\n")
+                with self.assertRaises(HandoverRecordInvalid):
+                    self.pending.acknowledged_late_fills()
+
+    def test_the_acknowledge_late_fill_command_refuses_with_a_nonzero_exit(self):
+        path = self.pending.path
+        journal = write_ended_journal(Path(self.dir.name) / "journal.jsonl", ["e.1.01"], [("tw-1", "canceled")])
+        ack = ["acknowledge-late-fill", path, "--journal", journal]
+        self.assertEqual(main(ack + ["e.5.01", "--after", "tw-2", "--reason", "x"]), 1)
+        self.assertEqual(main(ack + ["e.1.01", "--after", "tw-1", "--reason", "x"]), 1)
+        self.assertEqual(main(["acknowledge-late-fill", path, "--journal", str(Path(self.dir.name) / "missing.jsonl"),
+                               "e.5.01", "--after", "tw-1", "--reason", "x"]), 1)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {})
+        self.assertEqual(main(ack + ["e.5.01", "--after", "tw-1", "--reason", "x"]), 0)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-1"})
 
     def test_the_never_sent_at_broker_stop_names_a_resolve_command_that_runs(self):
         message = str(NeverSentAtBroker("tw-1"))

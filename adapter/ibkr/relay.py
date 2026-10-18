@@ -87,7 +87,22 @@ while the engine runs (journalled_fills). Only a correction of an execution
 the engine's durable log already holds as a committed fill is
 acknowledged: the engine keeps that original fill, and one never recorded leaves the shares in no
 fill, which only a reconciliation by hand can settle (ADR 0019).
+
+The owner acknowledges a trade IBKR reported on an order after the order's
+cancellation or refusal was journalled, which also stops the adapter at
+every start while IBKR's replay carries it (reports.py), with
+`python3 adapter/ibkr/relay.py acknowledge-late-fill PENDING_FILE --journal
+ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason TEXT`, under the same
+lock, into a sidecar file read strictly at start
+(PendingInput.acknowledged_late_fills). Only a trade the engine's durable
+log does not hold as a fill, after an order it holds a committed
+cancellation or refusal of, is acknowledged. The engine refuses a fill on an
+order already ended (internal/event OrderReports), so the trade is never
+journalled: the acknowledgement is its record for reconciliation (ADR
+0019), and the morning reconciliation shows its shares as a position
+difference.
 """
+from collections import namedtuple
 import argparse
 import fcntl
 import hashlib
@@ -176,6 +191,17 @@ FILL_TYPE = "execution.fill"
 FILL_VERSION = 5
 FILL_FIELDS = ("account_id", "client_order_id", "commission", "fill_id", "filled_at", "instrument_id", "price",
                "quantity", "side")
+# A lifecycle input, as the IBKR adapter journals it (reports.LIFECYCLE_TYPE
+# and LIFECYCLE_VERSION), and the statuses that end an order (reports.TERMINAL).
+LIFECYCLE_TYPE = "execution.order.lifecycle"
+LIFECYCLE_VERSION = 2
+LIFECYCLE_TERMINAL = ("canceled", "invalid")
+# The fields of one acknowledged late fill, as acknowledge_late_fill writes it.
+LATE_FILL_FIELDS = ("after", "at", "exec_id", "reason")
+# What the engine's durable log holds of the venue's reports: the fill IDs of
+# its committed fills, and the client order IDs of the orders a committed
+# lifecycle input ended.
+JournalledReports = namedtuple("JournalledReports", ("fills", "ended"))
 
 
 class EngineUnavailable(Exception):
@@ -261,6 +287,7 @@ class PendingInput:
         self.handover_path = path + ".handover"
         self.decisions_path = path + ".handover.decisions"
         self.corrections_path = path + ".corrections"
+        self.late_fills_path = path + ".late-fills"
         self.refused_path = path + ".refused"
         # Never removed: a lock lives on the file's inode, so deleting it
         # under a live holder would let a second writer lock a new file.
@@ -376,6 +403,46 @@ class PendingInput:
                                             "acknowledge-correction writes one".format(self.corrections_path, n))
             acknowledged[entry["exec_id"]] = entry["corrects"]
         return acknowledged
+
+    def acknowledged_late_fills(self):
+        """The owner's acknowledged late fills: each execId to the client order ID of the order it followed.
+
+        Read strictly (fail closed, AGENTS.md): a line that is not exactly
+        what acknowledge_late_fill writes raises HandoverRecordInvalid.
+        """
+        from reports import check_late_fills
+        try:
+            with open(self.late_fills_path, encoding="utf-8") as f:
+                lines = [line for line in f if line.strip()]
+        except FileNotFoundError:
+            return {}
+        acknowledged = {}
+        for n, line in enumerate(lines, 1):
+            try:
+                entry = json.loads(line)
+            except ValueError as err:
+                raise HandoverRecordInvalid("{} line {} is not JSON: {}".format(self.late_fills_path, n, err)) from None
+            valid = (isinstance(entry, dict) and tuple(sorted(entry)) == LATE_FILL_FIELDS
+                     and all(isinstance(entry[k], str) and entry[k] for k in LATE_FILL_FIELDS)
+                     and acknowledged.get(entry["exec_id"], entry["after"]) == entry["after"])
+            if valid:
+                try:
+                    check_late_fills({entry["exec_id"]: entry["after"]})
+                except ValueError:
+                    valid = False
+            if not valid:
+                raise HandoverRecordInvalid("{} line {} is not an acknowledged late fill as "
+                                            "acknowledge-late-fill writes one".format(self.late_fills_path, n))
+            acknowledged[entry["exec_id"]] = entry["after"]
+        return acknowledged
+
+    def record_late_fill(self, entry):
+        """Append one acknowledged late fill durably; never removed, as IBKR's execution IDs are never reused."""
+        with open(self.late_fills_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self._sync_dir()
 
     def record_correction(self, entry):
         """Append one acknowledged correction durably; never removed, as IBKR's execution IDs are never reused."""
@@ -722,7 +789,18 @@ def _resolve(pending, client_order_id, decision, reason, today):
 
 
 def journalled_fills(path):
-    """The fill IDs of every committed fill input in the engine's durable log at path (the engine's -log file).
+    """The fill IDs of every committed fill input in the engine's durable log at path (journalled_reports)."""
+    return journalled_reports(path).fills
+
+
+def journalled_reports(path):
+    """The committed fills and ended orders in the engine's durable log at path (the engine's -log file).
+
+    A JournalledReports: the fill ID of every committed fill input, and the
+    client order ID of every order a committed lifecycle input ended
+    (cancelled or invalid). A lifecycle input not as the IBKR adapter
+    journals one (version 2, a client order ID and a status) is refused
+    like a fill.
 
     The engine streams that log as it runs (ADR 0027), so it is read while
     the engine runs: the lines after the last commit are a group not yet
@@ -756,6 +834,7 @@ def journalled_fills(path):
             or not _is_text(header["strategy_version"])):
         raise _unreadable(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
     fills = set()
+    ended = set()
     group = []
     sequence = 0
     last_hash = None
@@ -784,8 +863,12 @@ def journalled_fills(path):
         for at, kind, envelope in group:
             if envelope["type"] == FILL_TYPE:
                 fills.add(_fill_id(path, at, kind, envelope))
+            elif envelope["type"] == LIFECYCLE_TYPE:
+                client_order_id, status = _lifecycle(path, at, kind, envelope)
+                if status in LIFECYCLE_TERMINAL:
+                    ended.add(client_order_id)
         group = []
-    return fills
+    return JournalledReports(fills, ended)
 
 
 def _unreadable(path, n, why):
@@ -839,6 +922,16 @@ def _fill_id(path, n, kind, envelope):
         raise _unreadable(path, n, "it is a fill but not an input {} version {} as the engine reads one".format(
             FILL_TYPE, FILL_VERSION))
     return payload["fill_id"]
+
+
+def _lifecycle(path, n, kind, envelope):
+    """(client order ID, status) of a committed lifecycle input as the IBKR adapter journals one, else ResolveRefused."""
+    payload = envelope["payload"]
+    if (kind != LOG_INPUT or envelope["schema_version"] != LIFECYCLE_VERSION or not isinstance(payload, dict)
+            or not _is_text(payload.get("client_order_id")) or not _is_text(payload.get("status"))):
+        raise _unreadable(path, n, "it is a lifecycle report but not an input {} version {} as the adapter "
+                                   "journals one".format(LIFECYCLE_TYPE, LIFECYCLE_VERSION))
+    return payload["client_order_id"], payload["status"]
 
 
 def _is_text(value):
@@ -904,6 +997,50 @@ def acknowledge_correction(pending, exec_id, corrects, reason, fills):
         os.close(held)
 
 
+def acknowledge_late_fill(pending, exec_id, after, reason, fills, ended):
+    """Record the owner's acknowledgement that IBKR's execution exec_id was reported after order after ended.
+
+    fills and ended are what the engine's durable log holds
+    (journalled_reports). Refuses (ResolveRefused, nothing changed) while an
+    adapter holds the pending file, an empty reason, an execId without the
+    base and last segment IBKR's have or an empty order
+    (reports.check_late_fills), a trade the log holds as a fill, an order
+    the log does not hold a committed cancellation or refusal of, and a
+    trade already acknowledged as after another order. The journal then
+    passes over that trade on every start. The engine refuses a fill on an
+    order already ended (internal/event OrderReports), so it is never a
+    fill: this record and the morning reconciliation, which shows its shares
+    as a position difference, are how it is settled (ADR 0019).
+    """
+    from reports import check_late_fills
+    if not reason or not reason.strip():
+        raise ResolveRefused("a reason is required: it is kept with the acknowledgement")
+    try:
+        check_late_fills({exec_id: after})
+    except ValueError as err:
+        raise ResolveRefused(str(err)) from None
+    if exec_id in fills:
+        raise ResolveRefused("execution {} is recorded as a fill in the engine's durable log: it is not a trade "
+                             "after its order ended, so there is nothing to acknowledge".format(exec_id))
+    if after not in ended:
+        raise ResolveRefused(
+            "order {} was never recorded as cancelled or refused in the engine's durable log, so execution {} is "
+            "not a trade after it ended: check the order's trades in IBKR (docs/manual/paper-trading.md)".format(
+                after, exec_id))
+    held = _lock(pending.lock_path)
+    if held is None:
+        raise ResolveRefused("the adapter holds the pending file {}; stop it first".format(pending.path))
+    try:
+        known = pending.acknowledged_late_fills().get(exec_id)
+        if known is not None and known != after:
+            raise ResolveRefused("execution {} is already acknowledged as a trade after order {}".format(
+                exec_id, known))
+        pending.record_late_fill({"exec_id": exec_id, "after": after, "reason": reason,
+                                  "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    finally:
+        os.close(held)
+
+
 def _session_date(envelope):
     """The New York date of an input's event time, or None when it has none that can be read."""
     text = (envelope or {}).get("event_time")
@@ -946,9 +1083,26 @@ def main(argv=None, today=None):
     ack.add_argument("exec_id", help="the correction's execution ID")
     ack.add_argument("--corrects", required=True, help="the execution ID it corrects (the fill the engine holds)")
     ack.add_argument("--reason", required=True, help="what IBKR's trades show; kept with the acknowledgement")
+    late = commands.add_parser("acknowledge-late-fill",
+                               help="acknowledge a trade IBKR reported after its order was recorded cancelled or "
+                                    "refused, so the adapter can start again; it is left to reconciliation")
+    late.add_argument("pending_file", help="the adapter's pending-input file")
+    late.add_argument("--journal", required=True, metavar="ENGINE_LOG",
+                      help="the engine's durable log (its -log file), which must hold the order's cancellation or "
+                           "refusal and not the trade as a fill")
+    late.add_argument("exec_id", help="the trade's execution ID")
+    late.add_argument("--after", required=True, metavar="CLIENT_ORDER_ID",
+                      help="the client order ID of the order the trade was reported after")
+    late.add_argument("--reason", required=True, help="what IBKR's trades show; kept with the acknowledgement")
     args = parser.parse_args(argv)
     pending = PendingInput(args.pending_file)
     try:
+        if args.command == "acknowledge-late-fill":
+            reports = journalled_reports(args.journal)
+            acknowledge_late_fill(pending, args.exec_id, args.after, args.reason, reports.fills, reports.ended)
+            print("execution {} acknowledged as a trade after order {} ended; it is not recorded as a fill: "
+                  "reconcile the account".format(args.exec_id, args.after))
+            return 0
         if args.command == "acknowledge-correction":
             acknowledge_correction(pending, args.exec_id, args.corrects, args.reason,
                                    journalled_fills(args.journal))

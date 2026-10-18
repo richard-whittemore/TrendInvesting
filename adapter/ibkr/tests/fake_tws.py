@@ -19,6 +19,8 @@ from tws import TWSApi
 
 ACCOUNT = "DU0000001"
 OTHER_ACCOUNT = "DU0000002"
+# IBKR's statuses of an order that has ended.
+ENDED = ("Cancelled", "ApiCancelled", "Inactive")
 SERVER_TIME = 1_800_000_000
 
 
@@ -246,8 +248,12 @@ class FakeTWS(TWSApi):
         done = Decimal(remaining) == 0
         if done:
             self.open_orders = [o for o in self.open_orders if o[0] != order_id]
-        self.status(order_id, "Filled" if done else "Submitted", filled=cum_qty, remaining=remaining,
-                    avg_fill_price=price, last_fill_price=price)
+        # An order IBKR already reported ended keeps that status: its
+        # orderStatus after a late execution repeats it, never Submitted.
+        last = self.order_statuses.get(order_id)
+        ended = last is not None and last[1] in ENDED
+        self.status(order_id, last[1] if ended else "Filled" if done else "Submitted", filled=cum_qty,
+                    remaining=remaining, avg_fill_price=price, last_fill_price=price)
 
     def called(self, name):
         return [c for c in self.calls if c[0] == name]
