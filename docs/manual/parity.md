@@ -244,8 +244,11 @@ valid, a run with no planned months).
 ## When something goes wrong
 
 - **`ira-orders` fails on a buy the backtest never placed**: look at the
-  export's `unplaced` list (a stock that had no price for five sessions)
-  before suspecting the planner.
+  export's `unplaced` list (a stock that had no price for five sessions),
+  and at an order ID of -10 (QuantConnect refused the order), before
+  suspecting the planner. In the 2026-10 runs every such failure was a
+  stock being delisted or acquired at the rebalance, and one month's buys
+  waited for ever on a sell of such a stock that never filled (#494).
 - **A planned month is missing** (`months` fails): the backtest did not
   rebalance that month, or the tag was lost. Check the run's `Parity`
   statistic, which counts the months it exported.
