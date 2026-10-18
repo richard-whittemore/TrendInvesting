@@ -11,6 +11,11 @@ import "sort"
 // a target (defensive_v2.py:87, to_bond > 1e-12).
 const backtestBondFloor = 1e-12
 
+// BacktestHistorySessions is how many sessions of closes defensive_v2.py
+// requested at each rebalance (History(..., 260), defensive_v2.py:271):
+// a score across a gap reads its closes from no further back.
+const BacktestHistorySessions = 260
+
 // BacktestBook is defensive_book as F_COMBO ran it (defensive_v2.py:49-89,
 // ranked by defensive_v2.py:323): the candidates ranked by score, highest
 // first, equal scores kept in the order given, as Python's stable sort

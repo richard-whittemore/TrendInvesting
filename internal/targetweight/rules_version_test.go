@@ -199,3 +199,21 @@ func TestRulesVersionDeclaresTheUnlabelledNamePicked(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheHeldNameScoredAcrossItsGap pins ADR 0016's
+// same-rules-version replay guarantee for a held name whose window has a
+// gap: a momentum decision scores it across the gap as the backtest did,
+// keeps BacktestHistorySessions sessions of closes, and records each gap's
+// sessions (ADR 0026 point 5, amended 2026-10-18, the owner's decision),
+// where rules 1.13.0 and earlier left a held name out as short-history and
+// sold it, so the build must not claim 1.13.0 or earlier. 1.14.0 is
+// reserved for a rules change landing in parallel.
+func TestRulesVersionDeclaresTheHeldNameScoredAcrossItsGap(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.14.0 once a momentum decision scores a held name across its gap", targetweight.RulesVersion)
+		}
+	}
+}

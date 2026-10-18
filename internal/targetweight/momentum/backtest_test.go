@@ -1,6 +1,7 @@
 package momentum_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
@@ -168,7 +169,7 @@ func TestBacktestScoreShiftsItsWindowAcrossAGap(t *testing.T) {
 	}
 	same, err := momentum.BacktestScore(cfg, cal, closes)
 	want, _ := momentum.Score(cfg, cal, closes)
-	if err != nil || same != want {
+	if err != nil || !reflect.DeepEqual(same, want) {
 		t.Errorf("without a gap it is Score: %+v %+v %v", same, want, err)
 	}
 	short, err := momentum.BacktestScore(cfg, cal, series(cal, full[:252]))
