@@ -1,4 +1,5 @@
 """The adapter starts only on the ibapi build deploy/versions.env pins, as provision.sh twsapi recorded installing it."""
+import contextlib
 import sys
 import tempfile
 import types
@@ -16,6 +17,29 @@ for p in (str(tests_dir), str(adapter_dir)):
 from ibapi_pin import IbapiNotPinned, check_installed, read_pin
 
 SHA = "152af944be28bcfaf2733aec907e7724f6dda092cb3148848e84d2a0bb866c0a"
+# The adapter's environment as the tests see it: a venv over a system Python.
+VENV = "/opt/trend-investing/adapter-venv"
+SYSTEM = "/usr"
+VENV_IBAPI = VENV + "/lib/python3.12/site-packages/ibapi/__init__.py"
+
+
+def ibapi_stub(version=(10, 51, 1), path=VENV_IBAPI):
+    stub = types.ModuleType("ibapi")
+    if version is not None:
+        stub.VERSION = dict(zip(("major", "minor", "micro"), version))
+    if path is not None:
+        stub.__file__ = path
+    return stub
+
+
+def in_venv(stub, prefix=VENV, base_prefix=SYSTEM):
+    """sys.modules and sys's prefixes as the adapter's unit runs: its venv's Python importing stub as ibapi."""
+    patches = [mock.patch.dict(sys.modules, {"ibapi": stub}), mock.patch.object(sys, "prefix", prefix),
+               mock.patch.object(sys, "base_prefix", base_prefix)]
+    stack = contextlib.ExitStack()
+    for p in patches:
+        stack.enter_context(p)
+    return stack
 
 
 class PinTests(unittest.TestCase):
@@ -48,12 +72,32 @@ class PinTests(unittest.TestCase):
             with self.subTest(imported=imported), self.assertRaises(IbapiNotPinned) as caught:
                 check_installed(str(self.record), str(self.versions), installed_version=lambda: imported)
             self.assertIn("10.51.01", str(caught.exception))
-        stub = types.ModuleType("ibapi")
-        stub.VERSION = {"major": 10, "minor": 51, "micro": 1}
-        with mock.patch.dict(sys.modules, {"ibapi": stub}):
+        with in_venv(ibapi_stub()):
             self.assertEqual(check_installed(str(self.record), str(self.versions)), "10.51.01")
-        stub.VERSION = {"major": 10, "minor": 50, "micro": 2}
-        with mock.patch.dict(sys.modules, {"ibapi": stub}), self.assertRaises(IbapiNotPinned):
+        with in_venv(ibapi_stub((10, 50, 2))), self.assertRaises(IbapiNotPinned):
+            check_installed(str(self.record), str(self.versions))
+
+    def test_an_ibapi_of_the_pinned_version_from_outside_the_adapter_venv_is_refused(self):
+        # The venv sees the system's site packages (it is built with
+        # --system-site-packages), so a system-wide or hand-installed ibapi
+        # reporting the pinned version could be imported in its place: the
+        # module must be the venv's own, and the Python must run in a venv.
+        self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
+        outside = (SYSTEM + "/lib/python3/dist-packages/ibapi/__init__.py",
+                   "/home/someone/.local/lib/python3.12/site-packages/ibapi/__init__.py",
+                   VENV + "-old/lib/python3.12/site-packages/ibapi/__init__.py",
+                   VENV + "/../elsewhere/ibapi/__init__.py",
+                   "relative/ibapi/__init__.py", None)
+        for path in outside:
+            with self.subTest(path=path), in_venv(ibapi_stub(path=path)), \
+                    self.assertRaises(IbapiNotPinned) as caught:
+                check_installed(str(self.record), str(self.versions))
+            self.assertIn("provision.sh twsapi", str(caught.exception))
+        # Not in a venv at all: the prefix is the system's.
+        with in_venv(ibapi_stub(path=SYSTEM + "/lib/python3/dist-packages/ibapi/__init__.py"), prefix=SYSTEM), \
+                self.assertRaises(IbapiNotPinned):
+            check_installed(str(self.record), str(self.versions))
+        with in_venv(ibapi_stub(path=VENV_IBAPI), prefix=VENV, base_prefix=VENV), self.assertRaises(IbapiNotPinned):
             check_installed(str(self.record), str(self.versions))
 
     def test_an_ibapi_that_does_not_import_or_names_no_version_is_refused(self):
@@ -62,11 +106,10 @@ class PinTests(unittest.TestCase):
             check_installed(str(self.record), str(self.versions))
         self.assertIn("provision.sh twsapi", str(caught.exception))
         for version in (None, {"major": 10, "minor": 51}, {"major": "10", "minor": 51, "micro": 1}):
-            stub = types.ModuleType("ibapi")
+            stub = ibapi_stub(None)
             if version is not None:
                 stub.VERSION = version
-            with self.subTest(version=version), mock.patch.dict(sys.modules, {"ibapi": stub}), \
-                    self.assertRaises(IbapiNotPinned):
+            with self.subTest(version=version), in_venv(stub), self.assertRaises(IbapiNotPinned):
                 check_installed(str(self.record), str(self.versions))
 
     def test_no_record_means_ibapi_was_never_installed_by_the_provisioning_step(self):

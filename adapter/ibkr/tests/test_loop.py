@@ -8,6 +8,7 @@ out once and IBKR's reports on it come back as inputs. Synthetic figures
 only; nothing here reaches IBKR.
 """
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -29,7 +30,7 @@ from test_connection import Clock, config
 from connection import AccountNotManaged
 from engine_client import EngineRejected
 from loop import OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch, SOURCE
-from relay import RELEASED, PendingInput, read_engine_log
+from relay import RELEASED, PendingInput, ResolveRefused, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 
 TESTDATA = tests_dir / "testdata"
@@ -114,14 +115,15 @@ class LoopTests(unittest.TestCase):
         fake.summary = list(SUMMARY)
         return fake
 
-    def loop(self, fake=None, engine=None, **overrides):
+    def loop(self, fake=None, engine=None, engine_log=None, **overrides):
         values = dict(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT)
         values.update(overrides)
         clock = self.clock = Clock()
 
         def sleep(seconds):
             clock.now += seconds
-        loop = AdapterLoop(config(**values), fake or self.fake, engine or self.engine, self.pending, self.engine_log,
+        loop = AdapterLoop(config(**values), fake or self.fake, engine or self.engine, self.pending,
+                           engine_log or self.engine_log,
                            now=lambda: self.received, today=lambda: SESSION, sleep=sleep, monotonic=clock, poll=0,
                            new_id=Ids())
         self.addCleanup(loop.close)
@@ -357,6 +359,78 @@ class LoopTests(unittest.TestCase):
                 self.assertIn("unexplained", str(caught.exception))
                 self.assertNotIn(ACCOUNT, str(caught.exception))
                 self.assertEqual(fake.placed, [])
+
+    def fresh_run(self, previous_log, name):
+        """A fresh run's engine in the same directory, its Run approval naming previous_log committed first."""
+        engine = LoggedEngine(str(Path(self.dir.name) / name))
+        payload = {"account_id": ACCOUNT, "previous_log": previous_log, "previous_log_final_hash": "sha256:" + "2" * 64,
+                   "incident_id": "", "approved_by": "owner", "approved_at": "2026-10-17T14:00:00Z",
+                   "boost": {"latched": False}, "incident_in_force": None}
+        raw = json.dumps(payload, separators=(",", ":"))
+        engine.decide({"id": "operator-run-approved:" + payload["previous_log_final_hash"],
+                       "type": "operator.run.approved", "envelope_version": 1, "schema_version": 2,
+                       "event_time": "2026-10-17T14:00:00Z", "recorded_at": "2026-10-17T14:00:00Z", "sequence": 1,
+                       "source": "engine", "configuration_hash": CONFIGURATION_HASH,
+                       "strategy_version": STRATEGY_VERSION, "payload": payload,
+                       "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+        return engine
+
+    def filled_under_the_first_run(self):
+        """Run engine.log until its order is sent and filled, then stop the adapter, as before a reboot."""
+        loop = self.loop()
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        self.session_closed(loop)
+        self.settle(loop)
+        self.fills(self.fake)
+        self.settle(loop)
+        loop.close()
+        self.assertEqual(len(self.engine.inputs(FILL_TYPE)), 2)
+
+    def test_a_fresh_run_after_a_same_day_fill_starts_and_records_nothing_twice(self):
+        # IBKR replays the day's executions under this client ID and the
+        # first run's orderRef. The fresh run's Run approval names the run
+        # before it, whose log released that order and holds its reports.
+        self.filled_under_the_first_run()
+        second = self.fresh_run("engine.log", "run-2.log")
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        self.assertFalse(loop.conn.needs_reconciliation)
+        self.settle(loop)
+        self.assertEqual([e["type"] for e in second.inputs()], ["operator.run.approved"])
+        # And a run after that one: the approvals chain back to the order.
+        loop.close()
+        third = self.fresh_run("run-2.log", "run-3.log")
+        loop = self.loop(engine=third, engine_log=third.path)
+        loop.start()
+        self.settle(loop)
+        self.assertFalse(loop.conn.needs_reconciliation)
+        self.assertEqual([e["type"] for e in third.inputs()], ["operator.run.approved"])
+        self.assertEqual(len(self.fake.placed), 1)
+
+    def test_a_fresh_run_still_stops_on_an_execution_no_run_released(self):
+        self.filled_under_the_first_run()
+        self.fake.executions.append((contract(), execution(exec_id="0001f4e8.other.01.01", order_ref="tw-elsewhere",
+                                                           order_id=40, perm_id=4444)))
+        second = self.fresh_run("engine.log", "run-2.log")
+        loop = self.loop(engine=second, engine_log=second.path)
+        with self.assertRaises(ReconcileMismatch) as caught:
+            loop.start()
+        self.assertIn("tw-elsewhere", str(caught.exception))
+        self.assertTrue(loop.conn.needs_reconciliation)
+
+    def test_a_run_approval_naming_a_log_that_cannot_be_read_stops_the_adapter(self):
+        self.filled_under_the_first_run()
+        for name in ("missing.log", "../engine.log", "/tmp/engine.log", "sub/engine.log", ""):
+            with self.subTest(previous_log=name):
+                second = self.fresh_run(name, "run-{}.log".format(abs(hash(name))))
+                loop = self.loop(engine=second, engine_log=second.path)
+                try:
+                    with self.assertRaises(ResolveRefused):
+                        loop.start()
+                finally:
+                    loop.close()
+                self.assertTrue(loop.conn is None or loop.conn.needs_reconciliation)
 
     def test_ibkr_refusing_the_order_in_read_only_mode_reaches_the_engine_as_invalid_with_its_reason(self):
         def read_only(order_id, contract_, order_):

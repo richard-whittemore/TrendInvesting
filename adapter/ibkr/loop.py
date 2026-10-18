@@ -7,10 +7,13 @@ and IBKR's open orders and the session's executions
 (orders.collect_broker_orders), refusing to go on if any of it could not be
 read (ReconcileIncomplete; an unavailable balance is not zero, ADR 0019).
 It then matches IBKR's open orders and executions against the orders the
-engine's durable log released to be sent (orders.match_on_reconnect, by
-client order ID under this engine's client ID): an open order or execution
-in the account that none of them explains (an order placed by hand or by
-another client, or one from another run) stops the adapter for a person
+engine's durable log released to be sent, and the logs of the earlier runs
+its Run approvals chain back to (relay.run_logs), since IBKR's day lists
+still show an earlier run's orders after a fresh run starts
+(orders.match_on_reconnect, by client order ID under this engine's client
+ID): an open order or execution in the account that none of them explains
+(an order placed by hand or by another client, or one no run of this
+engine released) stops the adapter for a person
 (ReconcileMismatch) before anything is sent. A released order IBKR no
 longer shows is not a refusal here: a DAY order ended or filled on an
 earlier day leaves nothing in today's lists, and the relay checks IBKR for
@@ -65,7 +68,7 @@ from datetime import datetime, timezone
 
 from connection import Connection, NotConnected
 from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect
-from relay import PendingInput, Relay, read_engine_log, released_client_order_ids
+from relay import PendingInput, Relay, read_engine_log, released_client_order_ids, run_logs
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from snapshot import Record, read_account
@@ -246,11 +249,15 @@ class AdapterLoop:
                            self.pending, lambda: collect_broker_orders(self.conn),
                            lambda order, session: release_to_request(order, cfg.mode, cfg.con_ids, session),
                            today=self._today)
-        engine_log = read_engine_log(self._engine_log_path)
+        # The earlier runs' reports too: IBKR replays the day's executions
+        # and the session's orders after a fresh run starts, and a report an
+        # earlier run's engine recorded is never recorded again.
+        logs = run_logs(self._engine_log_path)
+        engine_logs = [read_engine_log(path) for path in logs]
         self.reports = OrderReportJournal(
             cfg.account_id, cfg.client_id, self._record, now=self._now, commission_wait=cfg.commission_wait,
             held_path=self._pending_path + HELD_SUFFIX, owns_lock=self.relay.holds, ready=self.ready,
-            journalled=self._journalled(engine_log), acknowledged=self.pending.acknowledged_corrections(),
+            journalled=self._journalled(engine_logs), acknowledged=self.pending.acknowledged_corrections(),
             late_fills=self.pending.acknowledged_late_fills())
         self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record)
         self.conn.subscribe(self.tracker.on_event)
@@ -270,7 +277,12 @@ class AdapterLoop:
                                       "read is complete (ADR 0019: an unavailable balance is not zero)".format(
                                           ", ".join(sorted(reading.unread))))
         broker = collect_broker_orders(self.conn)
-        expected = released_client_order_ids(self._engine_log_path) | set(self.pending.handovers())
+        # An order an earlier run of this engine released (the runs its Run
+        # approvals chain back to) is this engine's too: IBKR's day lists
+        # still show it after a fresh run starts.
+        expected = set(self.pending.handovers())
+        for path in run_logs(self._engine_log_path):
+            expected |= released_client_order_ids(path)
         match = match_on_reconnect(expected, broker, self.config.client_id)
         if match.unknown_at_broker or match.unknown_executions:
             unexplained = ["open order orderRef={} client_id={} order_id={} perm_id={}".format(
@@ -280,7 +292,7 @@ class AdapterLoop:
             raise ReconcileMismatch(
                 "IBKR shows {} unexplained open order(s) or execution(s) in the account, which no order the engine "
                 "released explains: {}. Nothing is sent: check them in IBKR (an order placed by hand or by another "
-                "client, or one from another run) and reconcile the account before starting again "
+                "client, or one no run of this engine released) and reconcile the account before starting again "
                 "(docs/manual/paper-trading.md)".format(len(unexplained), "; ".join(unexplained)))
         self.conn.mark_reconciled()
         log.info("ibkr reconciled client_id=%d positions=%d open_orders=%d executions=%d", self.config.client_id,
@@ -320,9 +332,9 @@ class AdapterLoop:
                 log.info("ibkr disconnect at stop failed: %s", type(err).__name__)
 
     # -- the engine side ---------------------------------------------------
-    def _journalled(self, engine_log):
-        """The report records the engine holds, has in the outbox, or awaits a reply to: never recorded again."""
-        records = [Record(i.event_type, i.schema_version, i.payload) for i in engine_log.inputs]
+    def _journalled(self, engine_logs):
+        """The report records this run's or an earlier run's engine holds, the outbox holds, or that await a reply: never recorded again."""
+        records = [Record(i.event_type, i.schema_version, i.payload) for log_ in engine_logs for i in log_.inputs]
         records += [Record(e["event_type"], e["schema_version"], e["payload"]) for e in self.outbox.load()]
         waiting = self.pending.load()
         if waiting is not None:

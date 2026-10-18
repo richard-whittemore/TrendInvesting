@@ -119,6 +119,10 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 RELEASED = "risk.order.released"
+# The owner's Run approval, a fresh run's second input: its previous_log
+# names, without a directory, the durable log of the run before it, beside
+# the fresh run's own (internal/event.OperatorRunApprovedPayload).
+RUN_APPROVED = "operator.run.approved"
 # The write-ahead record holds one of four marks for a client order ID:
 # HANDING_OVER, SENT, NEVER_SENT, or a resend permission "resend:YYYY-MM-DD".
 HANDING_OVER = "handing-over"
@@ -850,6 +854,42 @@ def released_client_order_ids(path):
                     and payload.get("send") is True and _is_text(payload.get("client_order_id"))):
                 released.add(payload["client_order_id"])
     return released
+
+
+def run_logs(path):
+    """The engine's durable log at path, then each earlier run's its Run approvals name, newest first.
+
+    A fresh run's log holds one committed Run approval, whose previous_log
+    is the run before it in the same directory; that run's log may hold one
+    in turn, back to the first run, which holds none. IBKR's lists reach
+    back past a restart (the day's executions, the session's open orders),
+    so reconciliation and the report journal read every run of the chain,
+    not only the current one. Fail closed (ResolveRefused): a log that
+    cannot be read, more than one Run approval in a log, a previous_log
+    that is not a bare file name, or a chain that names a log twice.
+    """
+    logs = [path]
+    seen = {os.path.realpath(path)}
+    current = path
+    while True:
+        approvals = [envelope for group in _committed_groups(current)[1] for _, kind, envelope in group
+                     if kind == LOG_INPUT and envelope["type"] == RUN_APPROVED]
+        if not approvals:
+            return logs
+        if len(approvals) > 1:
+            raise ResolveRefused("the engine's durable log {} holds {} Run approvals; a run holds at most one".format(
+                current, len(approvals)))
+        payload = approvals[0]["payload"]
+        name = payload.get("previous_log") if isinstance(payload, dict) else None
+        if not _is_text(name) or os.path.basename(name) != name or name in (".", ".."):
+            raise ResolveRefused("the Run approval in {} names previous_log {!r}, not a log file name in its "
+                                 "directory".format(current, name))
+        current = os.path.join(os.path.dirname(path), name)
+        if os.path.realpath(current) in seen:
+            raise ResolveRefused("the Run approvals from {} name {} twice; the chain of runs must end at the first "
+                                 "run".format(path, name))
+        seen.add(os.path.realpath(current))
+        logs.append(current)
 
 
 def read_engine_log(path):

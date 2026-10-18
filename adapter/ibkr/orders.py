@@ -46,13 +46,14 @@ INACTIVE = "Inactive"
 # IBKR message code 201: "Order rejected - reason: ...".
 REJECTION_CODES = frozenset({201})
 # IBKR message codes that refuse a newly placed order before it works, but
-# that IBKR also uses for other requests, whose request IDs may equal an
-# order ID ("Message Codes" in IBKR's TWS API documentation): 103 duplicate
-# order ID, 110 price not a multiple of the minimum tick, 200 no security
-# definition, 203 security not allowed for this account, 321 error
-# validating the request (the Read-Only API refuses every order this way).
-# Each is a rejection only for an order this client placed in this session
-# (OrderTracker.placed) that IBKR has not yet shown working.
+# that IBKR also uses for other requests ("Message Codes" in IBKR's TWS API
+# documentation): 103 duplicate order ID, 110 price not a multiple of the
+# minimum tick, 200 no security definition, 203 security not allowed for
+# this account, 321 error validating the request (the Read-Only API refuses
+# every order this way). The adapter's request IDs start above any order ID
+# (connection.REQUEST_ID_BASE), so a request's error does not name an
+# order; and each code is a rejection only for an order this client placed
+# in this session (OrderTracker.placed) that IBKR has not yet shown working.
 PLACEMENT_REJECTION_CODES = frozenset({103, 110, 200, 203, 321})
 # ibapi marks an unset price with sys.float_info.max (UNSET_DOUBLE).
 _UNSET_PRICE = 1.7e308

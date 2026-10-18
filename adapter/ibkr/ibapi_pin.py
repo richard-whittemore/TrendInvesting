@@ -10,18 +10,24 @@ adapter's environment and, only then, writes an install record:
 At start the adapter compares that record with the pin in the versions.env
 beside its own code (installed by `provision.sh adapter` from the same
 checkout), and the version of the ibapi Python actually imports with the
-pinned version, and refuses to start on any difference: code updated to a
-new pin without ibapi being installed again, an environment changed after
-the record was written or an ibapi installed by hand (a system-wide one
-included), an ibapi that does not import, or a record not exactly as the
-step writes it (fail closed, AGENTS.md). ADR 0025 point 5: a change of API
+pinned version, and requires that ibapi to be the one in the venv the
+adapter runs in (its file under sys.prefix), and refuses to start on any
+difference: code updated to a new pin without ibapi being installed again,
+an environment changed after the record was written, an ibapi from outside
+the venv (a system-wide or hand-installed one, whatever version it
+reports), a Python that is not running in a venv, an ibapi that does not
+import, or a record not exactly as the step writes it (fail closed,
+AGENTS.md). The files inside the venv are not hashed: the record attests
+the installer, and the venv is root's, rebuilt whole by that step. ADR 0025 point 5: a change of API
 version repeats the paper-account test before the pin moves.
 
 The TWS API's version "10.51.01" is ibapi's VERSION {"major": 10, "minor":
 51, "micro": 1}: compared as whole numbers.
 """
 import importlib
+import os
 import re
+import sys
 
 PIN_KEYS = ("TWSAPI_VERSION", "TWSAPI_SHA256")
 _LINE = re.compile(r"([A-Z0-9_]+)=(.*)")
@@ -70,13 +76,34 @@ def _version_numbers(text):
     return tuple(int(part) for part in text.split("."))
 
 
+def _require_own_environment(ibapi):
+    """Refuse an ibapi that is not the adapter's venv's own: the version alone does not say which files run.
+
+    The venv is built with --system-site-packages (deploy/provision.sh), so
+    the system's site packages follow its own on sys.path, and a system-wide
+    or hand-installed ibapi that reports the pinned version would otherwise
+    pass. The Python must run in a venv (sys.prefix is not sys.base_prefix)
+    and ibapi's file must lie under that venv.
+    """
+    prefix = os.path.realpath(sys.prefix)
+    if prefix == os.path.realpath(sys.base_prefix):
+        raise IbapiNotPinned("this Python ({}) is not the adapter's environment; run the adapter with the venv "
+                             "`sudo deploy/provision.sh twsapi` creates".format(sys.prefix))
+    path = getattr(ibapi, "__file__", None)
+    if not isinstance(path, str) or not os.path.isabs(path) or \
+            os.path.commonpath((prefix, os.path.realpath(path))) != prefix:
+        raise IbapiNotPinned("the ibapi this Python imports ({}) is not the one installed in its environment {}; "
+                             "install the pinned build with `sudo deploy/provision.sh twsapi`".format(path, prefix))
+
+
 def installed_ibapi_version():
-    """(major, minor, micro) of the ibapi this Python imports, else IbapiNotPinned."""
+    """(major, minor, micro) of the ibapi this Python imports from its own venv, else IbapiNotPinned."""
     try:
         ibapi = importlib.import_module("ibapi")
     except ImportError as err:
         raise IbapiNotPinned("ibapi does not import ({}); install the pinned build with `sudo deploy/provision.sh "
                              "twsapi`".format(type(err).__name__)) from None
+    _require_own_environment(ibapi)
     version = getattr(ibapi, "VERSION", None)
     parts = tuple(version.get(k) for k in ("major", "minor", "micro")) if isinstance(version, dict) else ()
     if len(parts) != 3 or not all(isinstance(p, int) and not isinstance(p, bool) for p in parts):

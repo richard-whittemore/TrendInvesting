@@ -16,6 +16,7 @@ for p in (str(tests_dir), str(adapter_dir)):
         sys.path.insert(0, p)
 
 from cli import _parser, main
+from connection import REQUEST_ID_BASE
 from config import AdapterConfig
 from engine_double import LoggedEngine
 from fake_tws import ACCOUNT, FakeTWS
@@ -85,7 +86,7 @@ class CommandTests(unittest.TestCase):
         cfg = self.made[0]
         self.assertEqual((cfg.mode, cfg.account_id, cfg.paper_sending_enabled), ("paper", ACCOUNT, True))
         self.assertEqual(self.fake.called("connect"), [("connect", "127.0.0.1", 4002, 11)])
-        self.assertIn(("req_executions", 2, ACCOUNT), self.fake.calls)
+        self.assertIn(("req_executions", REQUEST_ID_BASE + 1, ACCOUNT), self.fake.calls)
         self.assertNotIn(ACCOUNT, self.err.getvalue(), "the account number is never written to the log")
 
     def test_the_help_names_every_file_and_the_switch_that_enables_sending(self):

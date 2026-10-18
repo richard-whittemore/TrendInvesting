@@ -747,6 +747,18 @@ class PlacingOrdersTests(unittest.TestCase):
         client._client.conn = None
         self.assertFalse(client.is_connected())
 
+    def test_a_socket_closed_before_placeorder_says_nothing_was_handed_over_and_to_resend(self):
+        # placeOrder was never called, so IBKR cannot have the order: the
+        # owner is told so and that resolve --resend settles it today.
+        client = self.client(paper_config())
+        client._client.conn.socket = None
+        with self.assertRaises(HandoverUnconfirmed) as caught:
+            client.place_order(7, *request_shape(paper_request()))
+        message = str(caught.exception)
+        self.assertIn("nothing was handed to IB Gateway", message)
+        self.assertIn("--resend", message)
+        self.assertNotIn("is not known", message)
+
     def test_an_order_whose_socket_closed_during_placeorder_is_unconfirmed_never_taken_as_sent(self):
         client = self.client(paper_config())
 
@@ -757,6 +769,7 @@ class PlacingOrdersTests(unittest.TestCase):
         with self.assertRaises(HandoverUnconfirmed) as caught:
             client.place_order(7, *request_shape(paper_request()))
         self.assertIn("tw-paper-1", str(caught.exception))
+        self.assertIn("is not known", str(caught.exception))
 
 
 if __name__ == "__main__":

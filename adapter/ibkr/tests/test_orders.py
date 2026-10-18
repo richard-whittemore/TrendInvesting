@@ -12,6 +12,7 @@ if tests_dir not in sys.path:
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order, execution
 from test_connection import Harness
+from connection import REQUEST_ID_BASE
 from orders import (OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
                     CommissionReport, UnrecognisedOrderReport, collect_broker_orders,
                     match_on_reconnect, parse_execution_time)
@@ -360,6 +361,33 @@ class OrderStatusTests(unittest.TestCase):
         for bad in ("20261016  09:30:01", "yesterday", "20261016 09:30:01 Mars/Olympus"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_execution_time(bad)
+
+
+class RequestIdTests(unittest.TestCase):
+    def test_an_error_on_a_request_is_never_read_as_an_orders_rejection(self):
+        # IBKR answers a request's error under its request ID and an order's
+        # rejection under its order ID, with codes shared by both (321).
+        # Request IDs start far above any order ID, so an error on
+        # reqExecutions cannot name an order this client placed.
+        h = Harness()
+        # A fresh paper account's first valid order ID is 1.
+        h.fake.next_order_id = 1
+        h.conn.connect()
+        reports = []
+        tracker = OrderTracker(ACCOUNT, 11, reports.append)
+        h.conn.subscribe(tracker.on_event)
+        tracker.placed(h.conn.next_order_id)
+        h.fake.executions_error = (321, "Error validating request")
+        collect_broker_orders(h.conn)
+        self.assertEqual([r for r in reports if isinstance(r, OrderStatusReport)], [])
+        self.assertGreaterEqual(h.fake.called("req_executions")[0][1], REQUEST_ID_BASE)
+
+    def test_request_ids_start_above_the_order_id_space_and_never_repeat(self):
+        h = Harness()
+        h.conn.connect()
+        ids = [h.conn.new_req_id() for _ in range(3)]
+        self.assertEqual(ids, [REQUEST_ID_BASE, REQUEST_ID_BASE + 1, REQUEST_ID_BASE + 2])
+        self.assertEqual(REQUEST_ID_BASE, 1 << 30)
 
 
 class ReconnectMatchTests(unittest.TestCase):

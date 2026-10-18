@@ -25,7 +25,7 @@ from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
                    acknowledge_correction, acknowledge_late_fill, journalled_fills, journalled_reports, main,
-                   resolve)
+                   resolve, run_logs)
 from sender import OrderRequest
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -1197,6 +1197,43 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(main(["resolve", path, "tw-1", "--sent", "--reason", "IBKR shows it filled"],
                               today=date(2026, 10, 16)), 0)
         self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+
+
+class RunLogsTests(unittest.TestCase):
+    """The chain of runs a fresh run's Run approvals name, read strictly."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def write(self, name, previous=()):
+        lines = [log_header()]
+        lines += log_group(1, [("input", "operator.run.approved", 2, {"previous_log": p}) for p in previous]
+                           or [("input", "market.session.closed", 1, {"session": "2026-10-16"})])
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def test_the_chain_runs_from_the_newest_run_back_to_the_first(self):
+        first = self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        third = self.write("c.log", ["b.log"])
+        self.assertEqual(run_logs(third), [third, second, first])
+        self.assertEqual(run_logs(first), [first])
+
+    def test_a_log_with_two_approvals_or_a_chain_that_loops_is_refused(self):
+        self.write("a.log")
+        for name, previous in (("two.log", ["a.log", "a.log"]), ("self.log", ["self.log"])):
+            with self.subTest(name), self.assertRaises(ResolveRefused):
+                run_logs(self.write(name, previous))
+        self.write("x.log", ["y.log"])
+        with self.assertRaises(ResolveRefused):
+            run_logs(self.write("y.log", ["x.log"]))
+
+    def test_an_approval_naming_no_log_file_name_is_refused(self):
+        for previous in ("", ".", "..", "../a.log", "d/a.log", 7):
+            with self.subTest(previous=previous), self.assertRaises(ResolveRefused):
+                run_logs(self.write("n.log", [previous]))
 
 
 if __name__ == "__main__":
