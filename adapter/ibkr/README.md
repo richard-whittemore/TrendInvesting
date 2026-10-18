@@ -123,12 +123,16 @@ On the server the unit `deploy/systemd/ti-adapter-boost.service` runs, as
   --pending /var/lib/trend-investing/adapters/boost/pending.json \
   --engine-log /var/lib/trend-investing/engines/boost/$TI_RUN.log \
   --socket /run/ti-engine-boost/engine.sock \
+  --streams /var/lib/trend-investing/data/streams/boost \
   --ibapi-record /opt/trend-investing/twsapi/INSTALLED \
   --versions /opt/trend-investing/adapter/versions.env
 ```
 
 The engine starts first (its durable log must exist); the unit is never
-enabled or restarted by systemd. The configuration
+enabled or restarted by systemd. `--streams` is the data job's Boost stream
+folder: without it the adapter delivers no market data for the day, and it
+refuses to start until the run's own folder inside it exists (the one-time
+warm-up in `docs/manual/market-data.md` writes it). The configuration
 (`deploy/etc/adapters/boost.json.example`, copied once by `provision.sh
 services`) ships in dry-run with sending off and an empty `con_ids`.
 
