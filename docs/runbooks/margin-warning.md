@@ -1,6 +1,8 @@
 # Runbook: a margin warning on the joint account
 
-Boost borrows to hold up to 147% of the joint account in SPY. The
+Boost borrows to hold 147% of the joint account in SPY while its boost is
+on (its target, 98% x 1.5); the separate hard limit no buy may exceed is
+150% ([boost](../manual/boost.md)). The
 margin-cushion alarm watches IBKR's Excess Liquidity as a share of net
 liquidation from every broker snapshot (plan.md section 5; ADR 0026,
 point 6). Its thresholds are in the account's hashed configuration

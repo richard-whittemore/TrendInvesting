@@ -95,13 +95,16 @@ Each input must say `engaged` true or false. An input that leaves it out, or
 sets it to null, is rejected rather than read as "off", so a malformed input
 can never turn the switch off.
 
-The kill switch stops new orders from this program. To stop everything,
-including orders already at the broker, stop the gateway or use IBKR's own
-app.
+The kill switch stops new orders from this program. To cancel orders already
+at the broker, cancel them in IBKR's own app. Stopping the Gateway is not a
+cancel: it only delays an order the engine has released, which goes out once
+the Gateway is back the same day.
 
 ## The one sale back to 98%
 
-Boost borrows to hold up to 150% of the account in SPY. If the account is
+Boost borrows to hold 147% of the account in SPY while its boost is on (98%
+x 1.5, its own target: [boost](boost.md)); 150% is the separate hard limit no
+buy may exceed. If the account is
 stuck in a state that refuses Boost's exit, it would stay borrowed. So the
 margin account gets one sale that brings it back to the unlevered weight, the
 configured invested fraction of 98%, and never below.
@@ -282,8 +285,9 @@ readable and positive, while what fired it is still in force:
 
 Otherwise the withheld sale lapses, its attempt unspent, and the program
 records one more `risk.sale.withheld`, with reason `lapsed`, so the journal
-shows it will not be decided again. A lapse goes in the daily summary, not
-an urgent alert: what needed the sale has ended. Boost's exit and the alarm
+shows it will not be decided again. A lapse is meant for the daily summary,
+not an urgent alert, since what needed the sale has ended. The daily summary
+lists lapses; `journal-query refusals` does too. Boost's exit and the alarm
 can fire the same sale, under the same incident or engagement. Once either
 of them plans it, it is not tried again for the other and never recorded as
 lapsed; withheld for both, it lapses once, when neither is still in force. The incident or the
@@ -375,8 +379,10 @@ the dashboard read every version. See [journal-query](journal-query.md).
 ## What can go wrong
 
 - **The broker snapshot is missing or unreadable.** Degraded sells are refused
-  and the sale back to 98% is withheld. Nothing is guessed. Sell by hand if the
-  alert asks you to.
+  and the sale back to 98% is withheld. Nothing is guessed. If the withhold is
+  `broker-values-unreadable`, the program will not try again: sell back to
+  98% by hand at IBKR if the sale is still needed; the reporter sends an
+  urgent "sell by hand" alert for it.
 - **The broker snapshot is old.** The sale is withheld and other sells are
   refused, with no state change and one urgent alert per stale episode; the
   next fresh snapshot ends the episode and decides again.
@@ -389,10 +395,12 @@ the dashboard read every version. See [journal-query](journal-query.md).
 - **You sold by hand after a withheld sale.** The program never repeats the
   attempt in that incident, so it cannot sell a second time.
 - **The sale fills only partly, or IBKR rejects it.** It is not retried. The
-  reporter sends an urgent "sale back to 98% failed" alert saying how many
-  shares filled; sell the rest by hand if exposure is still above 98% of net
-  liquidation, after checking no other sell is working. The account stays in
-  its state until you recover.
+  account stays in its state until you recover. The reporter sends an urgent
+  "sale back to 98% failed" alert saying how many shares filled. Check the
+  account at IBKR; if it is still above 98%, engage the kill switch (it does not cancel orders
+  already at IBKR), cancel any remaining sale in IBKR, and confirm that no
+  `working`, `pending` or `cancel-pending` sell remains before selling the rest
+  by hand (`docs/runbooks/margin-warning.md`).
 - **The kill switch is on and the margin alarm turns urgent.** The sale still
   goes. That is intended: the switch never keeps you borrowed.
 - **You release the kill switch after it refused a Boost order.** Nothing

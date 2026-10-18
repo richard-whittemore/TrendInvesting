@@ -404,11 +404,16 @@ func TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves(t *testing.T) {
 	if enable >= 0 && restart >= 0 && restart < enable {
 		t.Error("the dashboard is restarted before it is enabled")
 	}
-	// Stopped when active (a server whose unit file is already gone but whose
+	// The timer is stopped when active (a server whose unit file is already gone but whose
 	// unit is still loaded), disabled only when its file exists; neither may
 	// trip set -e.
 	active := at("if systemctl is-active --quiet ti-reporter.timer; then systemctl stop ti-reporter.timer; fi")
-	at("if systemctl is-active --quiet ti-reporter.service; then systemctl stop ti-reporter.service; fi")
+	// A oneshot still starting is "activating", which is-active does not
+	// report as active: its stop is unconditional.
+	if strings.Contains(text, "is-active --quiet ti-reporter.service") {
+		t.Error("the old reporter service is stopped only when is-active: a oneshot in activating is not active")
+	}
+	at("systemctl stop ti-reporter.service || true")
 	disable := at("systemctl disable ti-reporter.timer")
 	remove := at("rm -f /etc/systemd/system/ti-reporter.service")
 	if active >= 0 && disable >= 0 && remove >= 0 && (remove < active || remove < disable) {

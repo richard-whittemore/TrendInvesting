@@ -204,8 +204,20 @@ whether it is the crashed run. The message says which case it is.
       for a Degraded log, or a wider Degraded scope), never loosened, and
       cleared only by that ID. A log that ended Normal accepts no incident.
       An incident or latch change recorded only in the lost log therefore
-      cannot be expressed in the approval. This build has no kill-switch
-      input (that is a later slice) and no configuration fallback, so:
+      cannot be expressed in the approval. The kill switch is not part of
+      the approval: a fresh run starts with it released, so if you want it
+      on, record it again with `operator kill-switch`: the engine reads it
+      before the fresh run's first input from the adapter
+      ([operator](../manual/operator.md), "An approval").
+      **Prerequisite:** this works only if the engine was started with
+      `-operator <inbox>`. The server's service file does not pass it yet,
+      so until it does, recording the file does not make a fresh run read the
+      switch, and a restart can release it. Before relying on this step,
+      confirm that the engine's command line includes `-operator` with the
+      inbox you recorded into ([operator](../manual/operator.md), "The
+      operator inbox"); if it does not, do not start the run until it
+      does, or stop the engine instead. There is no configuration
+      fallback, so:
       - If the last readable log ended in an incident, carry it Halted
         under that ID.
       - If it ended Normal and you believe the lost log opened an incident,

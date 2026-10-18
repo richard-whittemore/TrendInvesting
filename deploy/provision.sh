@@ -235,7 +235,10 @@ CONF
     # loaded); disabled only while its file exists. The test sits in an if,
     # so its failure does not trip set -e.
     if systemctl is-active --quiet ti-reporter.timer; then systemctl stop ti-reporter.timer; fi
-    if systemctl is-active --quiet ti-reporter.service; then systemctl stop ti-reporter.service; fi
+    # A oneshot still starting is "activating", which is-active does not
+    # report as active, so the service is stopped unconditionally; stopping a
+    # unit that is not loaded fails, which must not trip set -e.
+    systemctl stop ti-reporter.service || true
     if test -e /etc/systemd/system/ti-reporter.timer; then
       systemctl disable ti-reporter.timer
     fi
