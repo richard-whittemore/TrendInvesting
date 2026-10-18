@@ -482,7 +482,10 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
       TestScoreLeavesOutANameWithAGapInItsWindow and
       TestDecideRecordsEveryRankedName (internal/targetweight/momentum) pin
       that one missing session inside the window leaves the name out of the
-      ranking even when 253 or more of its bars have arrived.
+      ranking even when 253 or more of its bars have arrived. The engine
+      scores a stock it holds across a gap (ADR 0026 point 5, amended
+      2026-10-18) only from its own bars, so a holding must be named in
+      ``optional``, where the same action refuses the stream instead.
 
     Its bars before the bad session are written, so later bad data never
     changes an earlier session's bars. A universe snapshot row whose close

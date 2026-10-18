@@ -32,7 +32,9 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     which only a run reading the compact universe input emits, is a
 //     reason of this version too: no journal read before that input has it.
 //     So is labels-missing, which only a run under configuration version 7
-//     emits.
+//     emits, and a name's GapSessions, which only rules 1.15.0 record and
+//     which are omitted when empty, so a Boost decision's bytes are still
+//     version 1's (ADR 0026 point 5, amended 2026-10-18).
 const TargetsDecidedSchemaVersion uint32 = 4
 
 // The two outcomes of a target decision (ADR 0026, point 1).
@@ -241,6 +243,11 @@ type MomentumName struct {
 	// previous raw close and the target value it exceeded.
 	OneShare    float64 `json:"one_share,omitzero"`
 	TargetValue float64 `json:"target_value,omitzero"`
+	// GapSessions are the sessions, YYYY-MM-DD and ascending, with no close
+	// in the window the name was scored or refused on: a gap name's, or a
+	// held name's scored across its gap (ADR 0026 point 5, amended
+	// 2026-10-18). Omitted for a complete window.
+	GapSessions []string `json:"gap_sessions,omitempty"`
 }
 
 // Validate checks the identity, the outcome and its reason, the targets and
@@ -403,6 +410,7 @@ func (m MomentumFigures) validate() []error {
 	}
 	for i, n := range m.Names {
 		errs = append(errs, n.validate(i+1)...)
+		errs = append(errs, n.validateGaps(m.CloseSession)...)
 		if n.Status == MomentumStatusUnaffordable && !lot {
 			errs = append(errs, fmt.Errorf("momentum name %s: an unaffordable name needs the minimum lot figures", n.InstrumentID))
 		}
@@ -447,6 +455,30 @@ func (n MomentumName) validate(rank int) []error {
 	}
 	if n.Weight > 0 && n.Status != MomentumStatusPicked {
 		errs = append(errs, fmt.Errorf("momentum name %s: only a picked name has a weight", n.InstrumentID))
+	}
+	return errs
+}
+
+// validateGaps checks a name's gap sessions: dates, strictly ascending, on
+// or before the close session; a gap name names at least one, and a short
+// history, refused before any window is read, none.
+func (n MomentumName) validateGaps(closeSession string) []error {
+	var errs []error
+	switch {
+	case n.Status == MomentumStatusGap && len(n.GapSessions) == 0:
+		errs = append(errs, fmt.Errorf("momentum name %s: a gap name names its missing sessions", n.InstrumentID))
+	case n.Status == MomentumStatusShortHistory && len(n.GapSessions) > 0:
+		errs = append(errs, fmt.Errorf("momentum name %s: a short history records no gap sessions", n.InstrumentID))
+	}
+	for i, s := range n.GapSessions {
+		switch _, err := time.Parse(time.DateOnly, s); {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("momentum name %s: gap session %q is not a YYYY-MM-DD date", n.InstrumentID, s))
+		case i > 0 && s <= n.GapSessions[i-1]:
+			errs = append(errs, fmt.Errorf("momentum name %s: gap sessions must be strictly ascending; %s follows %s", n.InstrumentID, s, n.GapSessions[i-1]))
+		case s > closeSession:
+			errs = append(errs, fmt.Errorf("momentum name %s: gap session %s is after the close session %s", n.InstrumentID, s, closeSession))
+		}
 	}
 	return errs
 }

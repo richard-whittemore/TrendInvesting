@@ -25,8 +25,8 @@ func TestRankAnswersEachSnapshotInOrder(t *testing.T) {
 	if err := run([]string{"-config", config}, strings.NewReader(in), &out, &errs); err != nil {
 		t.Fatalf("%v: %s", err, errs.String())
 	}
-	want := `{"session":"2026-11-27","decision_session":false,"window":4,"members":[]}` + "\n" +
-		`{"session":"2026-11-30","decision_session":true,"window":4,"members":["BBB","AAA"]}` + "\n"
+	want := `{"session":"2026-11-27","decision_session":false,"window":260,"members":[]}` + "\n" +
+		`{"session":"2026-11-30","decision_session":true,"window":260,"members":["BBB","AAA"]}` + "\n"
 	if out.String() != want {
 		t.Errorf("got\n%swant\n%s", out.String(), want)
 	}

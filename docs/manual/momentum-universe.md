@@ -20,7 +20,9 @@ can decide. The owner chose a smaller shape on 2026-10-16:
   (the trend), IEF and SHY (risk-off and bonds), and whatever is held;
 - **at each month's last session, one price history per ranked stock**: the
   500 stocks the engine will rank from that day's snapshot, each with its last
-  253 sessions of split- and dividend-adjusted closes, in one record.
+  260 sessions of split- and dividend-adjusted closes, in one record (253
+  are scored; the extra seven let a stock you hold be scored across a
+  missing day, below).
 
 The engine never reads a bar for every listed stock in a session.
 
@@ -246,7 +248,47 @@ withheld as `histories-missing` or `missing-bars` (above).
 
 A stock whose history is short or has a gap is recorded in the decision as
 `short-history` or `gap` and left out of that month, exactly as with daily
-bars (ADR 0026, point 5).
+bars (ADR 0026, point 5), unless you hold it (next section).
+
+## A stock you hold with a missing day
+
+Sometimes a stock has no price for a day inside its last 253 sessions: it
+did not trade (a halt), or the vendor's bar for that day was unusable.
+
+- **A stock you do not hold** is not ranked that month. The decision lists
+  it as `gap` and names the missing days in `gap_sessions`. It can be
+  ranked again once its last 253 sessions are complete.
+- **A stock you hold** is scored the way the backtest scored every stock:
+  from its last 253 prices in the last 260 sessions, skipping the missing
+  day (one daily return then spans two days). It is then kept, trimmed,
+  topped up or sold on its score like any other stock. Its line in the
+  decision shows its usual status (`picked`, `sector-capped`, ...) with
+  `gap_sessions` naming the missing days, so you can see it was scored
+  across a hole.
+- **A stock you hold that has fewer than 253 prices in those 260 sessions**
+  (more than seven missing days, or too new) is `short-history` and is sold
+  at the rebalance, as the backtest left it out too.
+
+Before 2026-10-18 a held stock with one missing day was listed as
+`short-history` and sold whole, and could not be bought back for about a
+year (owner's decision of 2026-10-18, ADR 0026 point 5, amended; rules
+version 1.15.0).
+
+This applies only to a holding the engine receives its own daily bars for,
+which is every holding you name to the market-data step with `--optional`.
+That step refuses the whole stream when a split or dividend of a named stock
+cannot be adjusted, so a missing day in a holding's bars is never an
+unadjusted price jump. A holding the engine sees only through its monthly
+history (you did not name it) is treated like a stock you do not hold:
+`gap`, no target, sold. Name everything you hold.
+
+Tests: `TestAHeldStockWithOneMissingSessionIsDecidedAcrossTheGap` (both
+streams), `TestACandidateNotHeldWithAGapIsStillNotRanked`,
+`TestAHeldStockWithTooFewClosesIsStillShortHistory`,
+`TestAHeldStockWithoutItsOwnBarsIsNotScoredAcrossItsGap`
+(`internal/targetweight`), and
+`TestDecideScoresAHeldNameAcrossItsGapAsTheBacktestDoes` and its neighbours
+in `internal/targetweight/momentum/held_gap_test.go`.
 
 ## What backs it
 

@@ -29,7 +29,7 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | --- | --- | --- |
 | `python3 -m marketdata universe --out DIR` | the last session's bars for every US stock, plus the list of common-stock (type CS) tickers | yes |
 | `python3 -m marketdata bars --out DIR --instruments SPY,IEF,SHY` | the named instruments' bars | yes |
-| `python3 -m marketdata backfill --out DIR --sessions 253` | one whole-market bar file per past session (about 53 minutes at Massive's 5 requests a minute; resumable) | yes |
+| `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
 | `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
@@ -158,7 +158,9 @@ With `--ranker`, `encode` writes the compact universe input:
 - at the last session of each month (a decision session), right after that
   snapshot, one `market.close.history` for each of the 500 stocks the engine
   will rank, carrying that stock's split- and dividend-adjusted closes for
-  the last 253 sessions. They are exactly the closes its daily bars would
+  the last 260 sessions (the engine keeps 260 so a stock you hold can be
+  scored across a missing day; [the momentum universe](momentum-universe.md)).
+  They are exactly the closes its daily bars would
   have carried, and a session a stock is left out of for bad data (see
   below) is missing from its history, just as its bar would be.
 
@@ -166,7 +168,7 @@ So a month costs about 21 small sets of bars, 21 universe snapshots and 500
 histories, instead of about 105,000 bars. A new journal's warm-up is only the
 named instruments' bars (SPY's 200-session trend among them; start `--first`
 at the base for that), not every stock's: the first month's histories carry
-the stocks' 253 sessions.
+the stocks' 260 sessions.
 
 Which 500 is the ranking rule, and that lives in Go, so this step never
 works it out itself. `--ranker` names the command that does:
@@ -253,7 +255,11 @@ earlier session. `encode` names each stretch on stderr (`marketdata: excluded
 TICKER from FIRST to LAST (N sessions): reason`). SPY, IEF, SHY and every
 other instrument are still written, and the same bad data in SPY, IEF, SHY
 or any instrument named with `--instruments` or `--optional` still refuses
-the whole stream.
+the whole stream. That refusal is what lets the engine score a stock you hold
+across a missing day (ADR 0026 point 5, amended 2026-10-18): a holding named
+with `--optional` can be missing a day only because it did not trade, never
+because a split was left unadjusted. So name every stock you hold; one you
+leave unnamed is treated as not held when its prices have a gap.
 
 Sector labels are GICS from iShares' IWV holdings where it lists the stock,
 else Nasdaq's sector, both mapped onto Morningstar's eleven sector names so

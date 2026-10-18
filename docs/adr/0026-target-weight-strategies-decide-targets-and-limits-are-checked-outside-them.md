@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8)
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5)
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -324,7 +324,9 @@ IBKR bars:
   (`missing-bars`). Nothing is traded and the owner is alerted. Boost never
   computes RSI across a gap (`plan.md` lines 152-155).
 - A universe stock missing any session in its 253-close window is left out of
-  that month's ranking, and the decision records it.
+  that month's ranking, and the decision records it. *(Amended 2026-10-18:
+  a stock the account holds is scored across the gap instead, as the
+  backtest scored it; see "Amendment (2026-10-18, owner decision, #434)".)*
 - The backtest silently keeps the last book when its data is short
   (`defensive_v2.py:269-275,319-320`) and treats SPY as risk-on with fewer than
   200 closes (279). Live withholds the decision instead.
@@ -643,3 +645,70 @@ exports' months had at most 5.3% unlabelled, under the 0.20 ceiling.
 The comparison was re-run on the kept exports with no new QuantConnect run
 (`docs/research/parity-2026-10.md`, "Owner decisions applied,
 2026-10-18").
+
+## Amendment (2026-10-18, owner decision, #434): a held stock with a gap in its window
+
+Accepted by the owner on 2026-10-18 (option (b) of #434).
+
+**What happened before.** Point 5 leaves a universe stock missing any
+session of its 253-close window out of that month's ranking. A stock the
+account already held was treated the same way: it got no target, so the
+planner sold the whole holding (point 2, "Held, with no target"), and it
+could not be bought again until its window was complete, about a year
+later. One missing session, a day the stock did not trade or one bar the
+vendor got wrong, forced a sale the strategy had not decided on its
+merits. The decision recorded it as `short-history`, not `gap`: the run
+kept exactly 253 sessions of closes, so one missing session left 252,
+fewer than the score needs, and the `gap` status was in practice never
+recorded.
+
+**The rule now.**
+
+- **A held stock is scored across its gap, as the backtest scored every
+  stock.** `defensive_v2.py` read 260 sessions of history at each
+  rebalance (271), dropped the missing closes, and scored each stock from
+  the last 253 closes it had (286-291): the 12-1 score from the 22nd and
+  253rd closes from the end, the volatility from the 252 daily returns
+  between them, one of which spans the gap. A stock the account holds at
+  the decision, whose live window has a gap, is now scored and weighted
+  exactly so (the momentum module's `ScoreHeld`, which reuses
+  `BacktestScore`). It is then kept, resized or sold on its merits, like
+  any other name. A held stock with fewer than 253 closes in those 260
+  sessions is still `short-history` and is sold, as the backtest left it
+  out too.
+- **The ranking of stocks not held is unchanged.** A candidate the account
+  does not hold still needs a complete 253-close window to be ranked;
+  otherwise it is left out with the status `gap`.
+- **The gap is recorded.** Every name with a gap names the missing sessions
+  in the decision (`gap_sessions`): for a `gap` name the sessions missing
+  from its 253-session window, and for a held stock scored across its gap
+  the sessions missing between the first close read and the last. A name
+  left out for a gap now reads `gap`, not `short-history`.
+- **260 sessions are kept.** The engine keeps 260 sessions of closes (the
+  backtest's history), and the compact universe input's close histories
+  cover 260 sessions. The recorded close counts (`closes`,
+  `trend_closes`) count closes in those 260 sessions, as the backtest's
+  export did. The market-data backfill records 260 sessions by default.
+- **Only a holding with its own bars.** A score across a gap must never
+  span a split or dividend the market-data step could not adjust, which
+  would put an unadjusted price jump inside the window. A stock named to
+  that step (`--optional`, every holding) refuses the whole stream on such
+  an action, so a gap in its own bars is a session it did not trade. A held
+  stock the engine sees only through its close history, because it was not
+  named, is not known to be safe, so its gap leaves it out as for a stock
+  not held. In a bars stream written with `--universe-members` every member
+  has bars, so the holdings must be named with `--optional` there too; the
+  compact stream is the shape the IRAs run on (point 1, "Universe").
+
+A rules change: target-weight rules version 1.15.0 (1.14.0 is reserved for
+a change landing in parallel), so a journal written under 1.13.0 does not
+replay. `strategy.targets.decided` keeps schema version 4: `gap_sessions`
+is omitted when empty, so a Boost decision's bytes are unchanged.
+
+**Parity.** The live rule now departs from the backtest for a gapped name
+only when the account does not hold it, which is point 8's gap departure
+narrowed. The parity tool compares the live `Score` with `BacktestScore`
+for each name and knows no holdings, so its results are unchanged; it was
+re-run on the kept exports (`docs/research/parity-2026-10.md`, "Held stock
+with a gap, 2026-10-18").
+

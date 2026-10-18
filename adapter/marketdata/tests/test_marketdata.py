@@ -332,6 +332,13 @@ class SettleTest(unittest.TestCase):
         self.assertEqual(cli.parse(["universe", "--out", "x", "--asof", "2026-03-20"]).asof, dt.date(2026, 3, 20))
         self.assertEqual(cli.parse(["universe", "--out", "x", "--settle-minutes", "90"]).settle_minutes, 90)
 
+    def test_the_backfill_records_the_260_sessions_a_held_stock_is_scored_across(self):
+        # The engine keeps 260 sessions of closes (momentum.BacktestHistorySessions,
+        # defensive_v2.py:271): a held stock with a gap is scored from its last
+        # 253 closes in them (ADR 0026 point 5, amended 2026-10-18).
+        from marketdata import __main__ as cli
+        self.assertEqual(cli.parse(["backfill", "--out", "x"]).sessions, 260)
+
 
 class BarsTest(unittest.TestCase):
     def test_records_raw_split_adjusted_and_dividends_per_instrument(self):
