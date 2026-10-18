@@ -57,6 +57,12 @@ type ServerConfig struct {
 	// envelope", nothing more); admission is a fact about a CONNECTION, and
 	// only Server ever sees one of those.
 	MaxConnections int
+	// AfterReply, when set, is called on a connection's goroutine each
+	// time a reply to a request has been written to it, before the next
+	// request is read. A caller that must stop serving because of an
+	// answer stops it here, so the answer reaches the client first. It
+	// must not block on the server (Close waits for this goroutine).
+	AfterReply func()
 }
 
 func (c ServerConfig) maxFrameBytes() int {
@@ -356,6 +362,9 @@ func (s *Server) handle(conn net.Conn) {
 		}
 		if writeFrame(conn, s.respond(frame), maxFrame) != nil {
 			return
+		}
+		if s.cfg.AfterReply != nil {
+			s.cfg.AfterReply()
 		}
 	}
 }

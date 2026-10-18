@@ -41,6 +41,11 @@
 // its own: its record bound or emission ceiling, ADR 0017), the last
 // instruction's, and the run stops, so its durable log never misses a
 // sequence and resumes. The adapter's next input carries that Sequence + 1.
+// The recorder refusing an input no instruction moved stops the run too,
+// its sequence spent, and the refusal states no Sequence: resumed, the
+// adapter's next input carries the refused input's own Sequence. A refusal
+// that stops the run is written to the adapter before serving ends
+// (wireGuard.afterReply).
 // A resume reports the sequence the adapter's next input carries, once
 // (with an approval, on the approval's line).
 //
@@ -407,6 +412,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		// decider.go's newDecider for why this belongs here and not inside
 		// the Decider).
 		MaxConnections: 1,
+		// A refusal that stops the run is written first, then the run
+		// stops (wireGuard.afterReply).
+		AfterReply: guard.afterReply,
 	})
 	if err != nil {
 		return fmt.Errorf("engine: %w", err)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -803,10 +804,10 @@ func TestAnInputSentAgainIsAnsweredOnlyAtTheSequenceItWasSentWith(t *testing.T) 
 // TestARecorderRefusalAfterOperatorInputsStopsTheRun: when operator inputs
 // were recorded before the adapter's input and the recorder then refuses
 // that input of its own (here its emission ceiling, ADR 0017), the sequence
-// the input was given is spent but not in the log, so the run stops on it:
-// the refusal states the last operator input's sequence, every later input
-// is refused with the same cause, and the log, missing no sequence,
-// resumes.
+// the input was given is spent but not in the log, so the run stops on it,
+// once the refusal is written: the refusal states the last operator input's
+// sequence, every later input is refused with the same cause, and the log,
+// missing no sequence, resumes.
 func TestARecorderRefusalAfterOperatorInputsStopsTheRun(t *testing.T) {
 	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 	burst := make([]event.Envelope, journal.MaxEmissionsPerInput+1)
@@ -841,6 +842,10 @@ func TestARecorderRefusalAfterOperatorInputsStopsTheRun(t *testing.T) {
 	if msg := err.Error(); !strings.Contains(msg, "adapter:2 was not recorded") || !strings.Contains(msg, "the run stops") {
 		t.Errorf("the refusal says %q, want it to say the input was not recorded and the run stops", msg)
 	}
+	if stopped != nil {
+		t.Errorf("the run was stopped with %v before the refusal was written", stopped)
+	}
+	guard.afterReply()
 	if !errors.As(stopped, &limit) || !errors.As(guard.failure(), &limit) {
 		t.Errorf("the run was stopped with %v (failure %v), want the emission ceiling's refusal", stopped, guard.failure())
 	}
@@ -851,6 +856,169 @@ func TestARecorderRefusalAfterOperatorInputsStopsTheRun(t *testing.T) {
 	if _, _, err := durableWiring(t, filepath.Join(t.TempDir(), "run-2.log"), hash, handler, &recovery); err != nil {
 		t.Errorf("resume the stopped run's log: %v", err)
 	}
+}
+
+// burstHandler decides more than the recorder takes from one input
+// (journal.MaxEmissionsPerInput, ADR 0017) for the input named id, and
+// nothing for any other.
+func burstHandler(id string) replay.Handler {
+	burst := make([]event.Envelope, journal.MaxEmissionsPerInput+1)
+	for i := range burst {
+		burst[i] = stubEnvelope(fmt.Sprintf("burst-%d", i))
+	}
+	return replay.HandlerFunc(func(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
+		if in.ID == id {
+			return burst, nil
+		}
+		return nil, nil
+	})
+}
+
+// TestARefusalThatStopsTheRunReachesTheAdapterFirst: a refusal that stops
+// the run is written to the adapter, with the sequence it states, before
+// serving ends, and the next input is refused with the cause the run
+// stopped on.
+func TestARefusalThatStopsTheRunReachesTheAdapterFirst(t *testing.T) {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	engine, recorder, err := durableWiring(t, filepath.Join(t.TempDir(), "run-1.log"), hash, burstHandler("adapter:2"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := directInbox(t, recorder, hash)
+	serveCtx, stopServing := context.WithCancelCause(t.Context())
+	defer stopServing(nil)
+	guard := &wireGuard{stop: stopServing}
+	decide := newDecider(guard, engine, recorder, "test", hash, inbox)
+	path := filepath.Join(shortSocketDir(t), "engine.sock")
+	server, err := transport.Listen(path, decide, transport.ServerConfig{MaxConnections: 1, AfterReply: guard.afterReply})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeContext(serveCtx) }()
+	client, err := transport.Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	exchange, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	if _, err := client.Decide(exchange, adapterInput(t, "adapter:1", 1, hash)); err != nil {
+		t.Fatal(err)
+	}
+	writeOperatorRecord(t, inbox.dir, time.Date(2024, time.January, 2, 16, 0, 0, 0, time.UTC))
+	_, err = client.Decide(exchange, adapterInput(t, "adapter:2", 2, hash))
+	var protocolErr *transport.ProtocolError
+	if !errors.As(err, &protocolErr) || protocolErr.Code != transport.CodeDeciderFailed || protocolErr.Sequence != 2 {
+		t.Fatalf("err = %#v, want the refusal stating sequence 2, the operator input's", err)
+	}
+	select {
+	case <-served:
+	case <-exchange.Done():
+		t.Fatal("serving did not end after the refusal that stops the run")
+	}
+	var limit *journal.EmissionLimitError
+	if !errors.As(context.Cause(serveCtx), &limit) {
+		t.Errorf("serving ended with %v, want the emission ceiling's refusal", context.Cause(serveCtx))
+	}
+	if _, err := decide(context.Background(), adapterInput(t, "adapter:3", 3, hash)); !errors.As(err, &limit) {
+		t.Errorf("the next input: err = %v, want it refused with the cause the run stopped on", err)
+	}
+}
+
+// TestAnEmissionCeilingRefusalWithoutOperatorInputsStopsTheRun: the
+// recorder refusing an input no operator input moved (its emission
+// ceiling, ADR 0017) still spends the input's sequence, so the run stops
+// on it whether an inbox is configured or not: the next input is refused
+// with the same cause, and the log, missing no sequence, resumes.
+func TestAnEmissionCeilingRefusalWithoutOperatorInputsStopsTheRun(t *testing.T) {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	for _, withInbox := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inbox=%v", withInbox), func(t *testing.T) {
+			handler := burstHandler("adapter:2")
+			path := filepath.Join(t.TempDir(), "run-1.log")
+			engine, recorder, err := durableWiring(t, path, hash, handler, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var inbox *operatorInbox
+			if withInbox {
+				inbox = directInbox(t, recorder, hash)
+			}
+			guard := &wireGuard{}
+			decide := newDecider(guard, engine, recorder, "test", hash, inbox)
+			if _, err := decide(context.Background(), adapterInput(t, "adapter:1", 1, hash)); err != nil {
+				t.Fatal(err)
+			}
+			_, err = decide(context.Background(), adapterInput(t, "adapter:2", 2, hash))
+			var limit *journal.EmissionLimitError
+			if !errors.As(err, &limit) || !strings.Contains(err.Error(), "the run stops") {
+				t.Fatalf("err = %v, want the emission ceiling's refusal, saying the run stops", err)
+			}
+			if !errors.As(guard.failure(), &limit) {
+				t.Errorf("the run's failure is %v, want the emission ceiling's refusal", guard.failure())
+			}
+			if _, err := decide(context.Background(), adapterInput(t, "adapter:3", 3, hash)); !errors.As(err, &limit) {
+				t.Errorf("the next input: err = %v, want it refused with the cause the run stopped on", err)
+			}
+			recovery := recoverFile(t, path)
+			if _, _, err := durableWiring(t, filepath.Join(t.TempDir(), "run-2.log"), hash, handler, &recovery); err != nil {
+				t.Errorf("resume the stopped run's log: %v", err)
+			}
+		})
+	}
+}
+
+// TestARecoveredInputSentAgainWhileAnotherIsDecidedDoesNotRace: checking a
+// re-sent input recovered from the log against the operator inputs before
+// it reads the recorder, which a concurrent decision writes; under the race
+// detector the two must never overlap.
+func TestARecoveredInputSentAgainWhileAnotherIsDecidedDoesNotRace(t *testing.T) {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	accepting := replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil })
+	first := filepath.Join(t.TempDir(), "run-1.log")
+	engine, _, err := durableWiring(t, first, hash, accepting, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range []event.Envelope{
+		adapterInput(t, "adapter:1", 1, hash),
+		operatorRecord(t, time.Date(2024, time.January, 2, 16, 0, 0, 0, time.UTC)).Envelope(2, "test", hash),
+		adapterInput(t, "adapter:2", 3, hash),
+	} {
+		if _, err := engine.Apply(context.Background(), in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recovery := recoverFile(t, first)
+	engine, recorder, err := durableWiring(t, filepath.Join(t.TempDir(), "run-2.log"), hash, accepting, &recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decide := newDecider(&wireGuard{}, engine, recorder, "test", hash, nil)
+	const rounds = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range rounds {
+			if _, err := decide(context.Background(), adapterInput(t, "adapter:2", 2, hash)); err != nil {
+				t.Errorf("adapter:2 sent again at 2: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for n := range uint64(rounds) {
+			if _, err := decide(context.Background(), adapterInput(t, fmt.Sprintf("adapter:%d", n+4), n+4, hash)); err != nil {
+				t.Errorf("adapter:%d: %v", n+4, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
 
 // TestAResumedLogEndingInOperatorInputsAnswersTheNextInput: a log whose

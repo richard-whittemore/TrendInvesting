@@ -111,10 +111,15 @@ type wireGuard struct {
 	mu       sync.Mutex
 	wg       sync.WaitGroup
 	poisoned error
-	// stop, when set, ends the run with its cause; stopped is that cause.
-	// An operator record that could not be delivered stops the run, since
-	// its log has failed (operatorInbox).
+	// stop, when set, ends the run with its cause; stopped is that cause,
+	// under stopMu. An operator record that could not be delivered stops
+	// the run, since its log has failed (operatorInbox), as does an input
+	// whose sequence was spent but not recorded (answer). The cause is
+	// recorded when it happens and the run is stopped only once the reply
+	// stating it has been written (afterReply), so the adapter receives the
+	// refusal, and the sequence it states, before the socket closes.
 	stop    context.CancelCauseFunc
+	stopMu  sync.Mutex
 	stopped error
 }
 
@@ -131,51 +136,71 @@ type wireGuard struct {
 // sequence they leave; the group returned is input's as recorded, and the
 // recorder notes beside it the sequence input was sent with
 // (journal.Recorder.NoteSent), so a re-send is checked against that
-// sequence (sentWith). An input not committed always gets an error.
+// sequence (sentWith). An input not committed always gets an error. sent
+// reports whether input carries a sequence the group can have been sent
+// with (sentWith), decided here because that reads the recorder.
 //
 // The durable log must never miss a sequence, or Resume refuses it. So when
-// records were delivered and input was then not recorded, whether a record
-// could not be delivered or the recorder refused input of its own (its
-// record bound, its emission ceiling) and so spent its sequence, g is
-// poisoned and the run stops with the cause, and the error states the last
-// sequence recorded, the last record's (transport.SequencedError). Resumed,
-// the log ends there, and the adapter's next input continues from it.
-func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder *journal.Recorder, input event.Envelope, inbox *operatorInbox) (committed journal.Committed, ok bool, err error) {
+// input was not recorded and its sequence was spent (the engine's cursor
+// moved past it: the recorder refused input of its own, its record bound or
+// its emission ceiling), or records were delivered first and so moved it,
+// or a record could not be delivered, g is poisoned and the run stops with
+// the cause (stopWith), whether or not any record was delivered. When
+// records were delivered first, the error states the last sequence
+// recorded, the last record's (transport.SequencedError). Resumed, the log
+// ends there, and the adapter's next input continues from it.
+func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder *journal.Recorder, input event.Envelope, inbox *operatorInbox) (committed journal.Committed, sent, ok bool, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.poisoned != nil {
-		return journal.Committed{}, false, g.poisoned
+		return journal.Committed{}, false, false, g.poisoned
 	}
 	if committed, ok = recorder.Committed(input.ID); ok {
-		return committed, true, nil
+		return committed, sentWith(recorder, committed, input.Sequence), true, nil
 	}
 	at, err := g.applyLocked(ctx, engine, input, inbox)
 	if g.poisoned != nil {
-		return journal.Committed{}, false, err
+		return journal.Committed{}, false, false, err
 	}
 	if committed, ok = recorder.Committed(input.ID); ok {
 		recorder.NoteSent(input.ID, input.Sequence)
 		committed.Sent = input.Sequence
-		return committed, true, err
+		return committed, true, true, err
 	}
 	if err == nil {
 		err = fmt.Errorf("engine: input %s was applied but not committed, so it has no reply", input.ID)
 	}
-	if at != input.Sequence {
-		return journal.Committed{}, false, g.stopAfterDelivery(fmt.Errorf("%w (%s was given sequence %d and not recorded, so the log would miss it; the run stops)", err, input.ID, at), at, input.ID)
+	if next, _ := engine.Next(); next > at || at != input.Sequence {
+		err = g.stopWith(fmt.Errorf("%w (%s was given sequence %d and not recorded; the run stops, so its log ends at sequence %d)", err, input.ID, at, at-1))
+		if at != input.Sequence {
+			err = deliveredThrough(err, at, input.ID)
+		}
 	}
-	return journal.Committed{}, false, err
+	return journal.Committed{}, false, false, err
 }
 
-// stopAfterDelivery poisons g and stops the run with cause, for an exchange
-// that recorded operator records up to the sequence before at and then did
-// not record the adapter's input inputID; the error it returns states that
-// sequence (transport.ProtocolError.Sequence).
-func (g *wireGuard) stopAfterDelivery(cause error, at uint64, inputID string) error {
-	g.poisoned, g.stopped = cause, cause
-	if g.stop != nil {
+// stopWith poisons g with cause and records it as the cause the run stops
+// with once the reply has been written (afterReply); it returns cause.
+func (g *wireGuard) stopWith(cause error) error {
+	g.poisoned = cause
+	g.stopMu.Lock()
+	defer g.stopMu.Unlock()
+	g.stopped = cause
+	return cause
+}
+
+// afterReply is transport.ServerConfig.AfterReply: once a reply has been
+// written, it stops the run with the cause recorded (stopWith), if any.
+func (g *wireGuard) afterReply() {
+	if cause := g.failure(); cause != nil && g.stop != nil {
 		g.stop(cause)
 	}
+}
+
+// deliveredThrough is cause for an exchange that recorded operator records
+// up to the sequence before at and then did not record the adapter's input
+// inputID; it states that sequence (transport.ProtocolError.Sequence).
+func deliveredThrough(cause error, at uint64, inputID string) error {
 	return &transport.SequencedError{
 		Sequence: at - 1,
 		Err:      fmt.Errorf("%w (operator inputs were recorded through sequence %d, so %s was not recorded)", cause, at-1, inputID),
@@ -220,13 +245,9 @@ func (g *wireGuard) applyLocked(ctx context.Context, engine *replay.Engine, inpu
 			if sequence != input.Sequence {
 				// Records before the failed one were journalled: the reply
 				// states the last sequence recorded, theirs.
-				return sequence, g.stopAfterDelivery(failed, sequence, input.ID)
+				return sequence, deliveredThrough(g.stopWith(failed), sequence, input.ID)
 			}
-			g.poisoned, g.stopped = failed, failed
-			if g.stop != nil {
-				g.stop(failed)
-			}
-			return sequence, failed
+			return sequence, g.stopWith(failed)
 		}
 		input.Sequence = sequence
 	}
@@ -247,11 +268,12 @@ func (g *wireGuard) awaitIdle() {
 	g.wg.Wait()
 }
 
-// failure is the error an undelivered operator record stopped the run
-// with, or nil.
+// failure is the cause the run stops with (stopWith), or nil. It takes
+// stopMu, not mu, so a reply written while a decision still holds mu is not
+// held up behind it.
 func (g *wireGuard) failure() error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.stopMu.Lock()
+	defer g.stopMu.Unlock()
 	return g.stopped
 }
 
@@ -372,7 +394,7 @@ func (g *wireGuard) failure() error {
 // nicety.
 func newDecider(guard *wireGuard, engine *replay.Engine, recorder *journal.Recorder, strategyVersion, configurationHash string, inbox *operatorInbox) transport.Decider {
 	return func(ctx context.Context, input event.Envelope) (event.Envelope, error) {
-		committed, ok, err := guard.answer(ctx, engine, recorder, input, inbox)
+		committed, sent, ok, err := guard.answer(ctx, engine, recorder, input, inbox)
 		if !ok {
 			// Fail closed (docs/development.md principle 4): an envelope the
 			// reducer rejects, a bound journal.Recorder itself enforces
@@ -386,7 +408,6 @@ func newDecider(guard *wireGuard, engine *replay.Engine, recorder *journal.Recor
 			// is refused with that error (wireGuard.answer).
 			return event.Envelope{}, err
 		}
-		sent := sentWith(recorder, committed, input.Sequence)
 		reply, replyErr := committedReply(committed, input, sent, strategyVersion, configurationHash)
 		if replyErr != nil && err != nil && committed.Refusal != "" {
 			// The first answer to a refused input: the committed refusal's

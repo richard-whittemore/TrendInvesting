@@ -109,7 +109,13 @@ run takes from one input), the refusal's `sequence` is the number of the
 last instruction that was, says the adapter's input was not recorded, and
 the run stops: a log missing a number could never be resumed, so the run
 stops where its log ends, and resumed, the adapter's next input carries the
-number after it.
+number after it. The same holds with no instruction recorded first: when
+the engine cannot record the adapter's input for either of those reasons,
+its number is used up, so the refusal says so and the run stops; resumed, the
+adapter's next input carries the input's own number again. (Before this
+release a run carried on after that refusal and left a gap in its log that
+could not be resumed.) Either way the engine writes the refusal to the
+adapter first and only then stops, so the adapter always receives it.
 
 When the engine records your instructions before the adapter's input, the
 input is recorded under a later number than the one it was sent with. If
