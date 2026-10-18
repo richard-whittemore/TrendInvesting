@@ -40,7 +40,7 @@ func path(n int, growth float64, seed int) []float64 {
 	out := make([]float64, n)
 	p := 100.0
 	for i := range out {
-		wobble := 1 + 0.004*float64((i*7+seed*3)%5-2)
+		wobble := 1 + float64(0.004*float64((i*7+seed*3)%5-2))
 		p *= growth
 		out[i] = float64(p * wobble)
 	}
@@ -97,7 +97,7 @@ func syntheticMonth(month string, riskOff bool) parity.MomentumMonth {
 			s = 101
 		}
 		names = append(names, name{ticker: "N" + strconv.Itoa(100+i), sector: &s,
-			closes: path(rows, 1+0.0001*float64(40-i), i)})
+			closes: path(rows, 1+float64(0.0001*float64(40-i)), i)})
 	}
 	spy := path(rows, 1.0005, 99)
 	if riskOff {

@@ -184,3 +184,15 @@ func TestTheCommandRefusesWhatItCannotCompare(t *testing.T) {
 		})
 	}
 }
+
+type brokenWriter struct{}
+
+func (brokenWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
+
+func TestAReportThatCannotBeWrittenIsAnError(t *testing.T) {
+	path := writeOrders(t, []order{{ID: 1, Tag: boostTag(t, boostRows(t, 300, 210))}})
+	var errs bytes.Buffer
+	if _, err := run([]string{"-boost", "BX_SYN=" + path}, brokenWriter{}, &errs); err == nil {
+		t.Error("a failed write must be reported")
+	}
+}

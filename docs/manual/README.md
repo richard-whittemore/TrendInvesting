@@ -30,3 +30,6 @@ prints, and what happens when something goes wrong.
   shares only: a stock one share of which costs more than its target is
   skipped for the next-ranked one, what happens when nothing is affordable,
   and what the program records.
+- [parity](parity.md): the check that the Go momentum and Boost code makes
+  the same decisions as the QuantConnect backtests from the same data, its
+  thresholds, and how to read its pass/fail report.

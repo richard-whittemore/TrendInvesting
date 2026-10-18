@@ -125,7 +125,9 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 		reports = append(reports, parity.CompareBoost(parity.BacktestBoost(), name, sessions))
 	}
 	r := parity.Merge(reports...)
-	fmt.Fprintf(stdout, "%s\n\n%s", strings.Join(inputs, "\n"), r.Markdown())
+	if _, err := fmt.Fprintf(stdout, "%s\n\n%s", strings.Join(inputs, "\n"), r.Markdown()); err != nil {
+		return false, err
+	}
 	return r.Pass(), nil
 }
 
