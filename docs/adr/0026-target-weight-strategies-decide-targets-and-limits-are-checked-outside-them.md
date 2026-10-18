@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5)
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost")
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -764,8 +764,9 @@ recorded.
 
 A rules change: target-weight rules version 1.15.0 (1.14.0 was reserved for the
 Boost re-plan, which is 1.16.0), so a journal written under 1.13.0 does not
-replay. `strategy.targets.decided` keeps schema version 4: `gap_sessions`
-is omitted when empty, so a Boost decision's bytes are unchanged. A reader
+replay. `strategy.targets.decided` kept schema version 4 at rules 1.15.0 (the Boost
+re-plan amendment above raised it to 5): `gap_sessions` is omitted when empty,
+so a Boost decision's bytes were unchanged. A reader
 accepts a `gap` name that names no sessions, as a record written before
 `gap_sessions` existed does; the writer refuses to stamp one.
 

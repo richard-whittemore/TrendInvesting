@@ -32,7 +32,7 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     which only a run reading the compact universe input emits, is a
 //     reason of this version too: no journal read before that input has it.
 //     So is labels-missing, which only a run under configuration version 7
-//     emits, and a name's GapSessions, which only rules 1.15.0 record and
+//     emits, and a name's GapSessions, which rules 1.15.0 and later record and
 //     which are omitted when empty, so a Boost decision's bytes are still
 //     version 1's (ADR 0026 point 5, amended 2026-10-18).
 //   - Version 5 records Boost's pending re-plan (ADR 0026, point 2, "Boost",
