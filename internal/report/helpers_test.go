@@ -104,6 +104,15 @@ func (s *stream) flaggedRefusal(n int, clientID, reason string, alert bool) {
 			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures", Figures: figures, Alert: alert})
 }
 
+// staleSaleWithheld is a sale back to 98% the gate withheld because the
+// latest broker snapshot was too old, carrying alert as the gate set it.
+func (s *stream) staleSaleWithheld(n int, clientID string, alert bool) {
+	s.add(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, "sale-withheld:"+clientID, day(n),
+		event.SaleWithheldPayload{AccountID: "joint", Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID, InstrumentID: "SPY",
+			Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit, Reason: event.SaleWithheldStaleBrokerSnapshot,
+			Detail: "snapshot too old", SnapshotID: "broker:1", Alert: alert})
+}
+
 func (s *stream) engineState(n int, state, reason string, scope ...string) {
 	p := event.EngineStatePayload{State: state, Reason: reason, Detail: "figures"}
 	if state == event.EngineStateDegraded {

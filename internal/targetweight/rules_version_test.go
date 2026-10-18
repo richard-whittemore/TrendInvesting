@@ -205,8 +205,8 @@ func TestRulesVersionDeclaresTheUnlabelledNamePicked(t *testing.T) {
 // that leaves the engine Normal, the next decision plans the difference to
 // the target in force though the target is unchanged (ADR 0026, point 2,
 // "Boost", amended 2026-10-18), so a journal holding such a refusal decides
-// differently under an earlier rules version. 1.13.0 is reserved for a rules
-// change landing in parallel, so this one is 1.14.0.
+// differently under an earlier rules version. 1.13.0 is the unlabelled-name
+// rule, so this one is 1.14.0.
 func TestRulesVersionDeclaresTheReplanAfterARefusal(t *testing.T) {
 	t.Parallel()
 

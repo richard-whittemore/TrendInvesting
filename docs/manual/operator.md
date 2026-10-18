@@ -159,12 +159,14 @@ Normally Boost orders only when its target changes (ADR 0026, point 2,
 decision, after the market's next close: Boost works out the difference
 between what the account holds and the target in force, and orders that.
 If you engaged the switch while Boost wanted to buy, the buy goes at the
-first close after you release it; if Boost wanted to sell, the sale back
+first close after you release it that decides, while the account is
+Normal; if Boost wanted to sell, the sale back
 to 98% has gone anyway, and the next decision sells whatever is still above
 the target. While the switch stays on, each close plans the order again and
 the switch refuses it again, so you see one `kill-switch` refusal per close
 in the journal, but the reporter alerts you only for the first one of each
-engagement. A close that withholds its decision (no bar, or no account
+engagement (a log written before the engine marked that first refusal
+alerts for every one). A close that withholds its decision (no bar, or no account
 snapshot as of it) plans nothing, so the order waits for the next close
 that decides.
 This applies to any refusal that leaves the engine Normal (the kill switch,
