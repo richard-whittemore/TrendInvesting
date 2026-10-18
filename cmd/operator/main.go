@@ -3,12 +3,15 @@
 //
 //	operator kill-switch -inbox <dir> -account <id> -state engaged|released -by <name> -detail <text> [-at <RFC3339>]
 //	operator rebalance-cleared -inbox <dir> -account <id> -decision <decision id> -orders <id,id,...> -by <name> -detail <text> [-at <RFC3339>]
+//	operator acknowledge -inbox <dir> -account <id> -alert <alert key> -by <name> [-detail <text>] [-at <RFC3339>]
 //	operator approve -log <previous durable log> -account <id> -by <name> -out <approval.json> [-clear-incident <incident id>] [-at <RFC3339>]
 //
-// kill-switch and rebalance-cleared write one record into the engine's
-// operator inbox (the engine's -operator), which the engine delivers as an
-// operator.kill-switch or operator.rebalance.cleared input before the
-// adapter's next input (ADR 0026, points 3 and 5; internal/operator).
+// kill-switch, rebalance-cleared and acknowledge write one record into the
+// engine's operator inbox (the engine's -operator), which the engine
+// delivers as an operator.kill-switch, operator.rebalance.cleared or
+// operator.alert.acknowledged input before the adapter's next input (ADR
+// 0026, points 3 and 5; ADR 0019, amended 2026-09-24, "Alerting";
+// internal/operator).
 // approve writes the operator.run.approved file a fresh run is started with
 // (the engine's -approval; ADR 0027, amended 2026-10-17), stating what the
 // previous log ends in (internal/restart). Every input is validated before
@@ -36,7 +39,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
-const usage = "usage: operator <kill-switch|rebalance-cleared|approve> [flags]; see docs/manual/operator.md"
+const usage = "usage: operator <kill-switch|rebalance-cleared|acknowledge|approve> [flags]; see docs/manual/operator.md"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -54,6 +57,8 @@ func run(args []string, out io.Writer) error {
 		return killSwitch(args[1:], out)
 	case "rebalance-cleared":
 		return rebalanceCleared(args[1:], out)
+	case "acknowledge":
+		return acknowledge(args[1:], out)
 	case "approve":
 		return approve(args[1:], out)
 	}
@@ -150,6 +155,28 @@ func rebalanceCleared(args []string, out io.Writer) error {
 		return err
 	}
 	return record(*c.inbox, r, "decision "+*decision, out)
+}
+
+// acknowledge records the owner's acknowledgement of the alert whose key the
+// alert states; the reporter stops repeating that alert once the engine has
+// journalled it (ADR 0019, amended 2026-09-24, "Alerting").
+func acknowledge(args []string, out io.Writer) error {
+	flags, c := inboxFlags("acknowledge", out)
+	key := flags.String("alert", "", "the alert key the alert ends with")
+	if err := parse(flags, args); err != nil {
+		return err
+	}
+	at, err := when(*c.at)
+	if err != nil {
+		return err
+	}
+	r, err := operator.AlertAcknowledged(event.AlertAcknowledgedPayload{
+		AccountID: *c.account, AlertKey: *key, AcknowledgedBy: *c.by, AcknowledgedAt: at, Detail: *c.detail,
+	})
+	if err != nil {
+		return err
+	}
+	return record(*c.inbox, r, "alert "+*key, out)
 }
 
 // record installs r in inbox under its file name, whole and never over

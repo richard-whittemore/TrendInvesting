@@ -109,6 +109,36 @@ func TestTheClearanceIsRecordedInTheInbox(t *testing.T) {
 	}
 }
 
+// TestTheAcknowledgementIsRecordedInTheInbox: the tool records the owner's
+// acknowledgement of one alert, named by the key the alert states, as an
+// operator.alert.acknowledged record the engine delivers before the
+// adapter's next input, which stops the reporter repeating that alert (ADR
+// 0019, amended 2026-09-24, "Alerting").
+func TestTheAcknowledgementIsRecordedInTheInbox(t *testing.T) {
+	inbox := t.TempDir()
+	const key = "engine-state:halted:risk-limit-breached:||:2026-10-17T14:00:00Z@joint"
+	out, err := invoke(t, "acknowledge", "-inbox", inbox, "-account", "joint", "-alert", key, "-by", "owner", "-detail", "seen; reconciling at IBKR", "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := inboxRecords(t, inbox)
+	if len(records) != 1 || records[0].Type != event.AlertAcknowledgedEventType {
+		t.Fatalf("the inbox holds %+v, want one acknowledgement", records)
+	}
+	var p event.AlertAcknowledgedPayload
+	if err := json.Unmarshal(records[0].Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.AccountID != "joint" || p.AlertKey != key || p.AcknowledgedBy != "owner" || p.Detail != "seen; reconciling at IBKR" || p.AcknowledgedAt.Format(time.RFC3339) != at {
+		t.Errorf("recorded %+v", p)
+	}
+	for _, want := range []string{"recorded operator.alert.acknowledged:joint:" + at, "alert " + key, records[0].FileName(), "before the adapter's next input"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed %q, want it to say %q", out, want)
+		}
+	}
+}
+
 // TestAnInputTheToolCannotRecordIsRefused: every input is validated before
 // anything is written, and a record is never overwritten, so a refusal
 // leaves the inbox as it was.
@@ -130,6 +160,10 @@ func TestAnInputTheToolCannotRecordIsRefused(t *testing.T) {
 		"no operator":      {[]string{"kill-switch", "-state", "engaged", "-inbox", inbox, "-account", "joint", "-detail", "x", "-at", at}, "operator is required"},
 		"no orders":        {[]string{"rebalance-cleared", "-inbox", inbox, "-account", "ira", "-decision", "d", "-by", "owner", "-detail", "x", "-at", at}, "client order ids"},
 		"a repeated order": {[]string{"rebalance-cleared", "-inbox", inbox, "-account", "ira", "-decision", "d", "-orders", "a,a", "-by", "owner", "-detail", "x", "-at", at}, "ascending"},
+		"no alert key":     {[]string{"acknowledge", "-inbox", inbox, "-account", "joint", "-by", "owner", "-at", at}, "alert key is required"},
+		"no acknowledger":  {[]string{"acknowledge", "-inbox", inbox, "-account", "joint", "-alert", "k", "-at", at}, "acknowledged by is required"},
+		"an ack bad time":  {[]string{"acknowledge", "-inbox", inbox, "-account", "joint", "-alert", "k", "-by", "owner", "-at", "today"}, "-at"},
+		"an ack extra arg": {[]string{"acknowledge", "-inbox", inbox, "-account", "joint", "-alert", "k", "-by", "owner", "-at", at, "k2"}, "k2"},
 		"extra arguments":  {append([]string{"kill-switch", "-state", "engaged"}, append(kill, "extra")...), "extra"},
 	} {
 		if _, err := invoke(t, c.args...); err == nil || !strings.Contains(err.Error(), c.want) {

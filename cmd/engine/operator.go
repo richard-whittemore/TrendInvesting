@@ -32,7 +32,8 @@ const deliveredSuffix = ".delivered"
 const operatorClockSkew = 5 * time.Minute
 
 // operatorInbox is the folder of -operator, where the operator tool records
-// the owner's kill switch and rebalance clearances (internal/operator).
+// the owner's kill switch, rebalance clearances and alert acknowledgements
+// (internal/operator).
 // Before each adapter input, under the wire guard's lock, every record not
 // yet delivered is delivered as an input at the next positions of the run's
 // one input sequence, in file-name order, which is the order of the times
@@ -54,10 +55,9 @@ const operatorClockSkew = 5 * time.Minute
 // the order of the times they state"): a kill switch stating a time earlier
 // than the newest one the gate applied for its account is refused by the
 // gate (risklimit.Gate.SetKillSwitch), so a stale instruction never undoes a
-// later one, and its refusal is journalled. A record of either kind, kill
-// switch or clearance, stating a time later than the engine's clock, beyond
-// operatorClockSkew, would order every truthful instruction before it, so
-// it is never delivered.
+// later one, and its refusal is journalled. A record of any kind stating a
+// time later than the engine's clock, beyond operatorClockSkew, would order
+// every truthful instruction before it, so it is never delivered.
 //
 // A record the engine cannot read, or that states a time more than
 // operatorClockSkew ahead of the engine's clock, is never delivered; one

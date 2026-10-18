@@ -1,8 +1,9 @@
-# The operator tool: your kill switch, your approval, your clearance
+# The operator tool: your kill switch, your approval, your clearance, your acknowledgement
 
 *For the owner. How you tell a running engine to stop ordering, approve a
-fresh run, and clear a rebalance that is stuck, what each of these records,
-why it works this way, and what can go wrong.*
+fresh run, clear a rebalance that is stuck, and acknowledge an alert so it
+stops repeating, what each of these records, why it works this way, and
+what can go wrong.*
 
 ## What it is
 
@@ -27,12 +28,13 @@ user> operator ...`. Approval files are read by the engine too: write them
 as `ti-trader` as well, into a folder `ti-trader` can read. Every example
 below leaves out the `sudo -u ti-trader` in front to keep it short.
 
-It has three commands:
+It has four commands:
 
 | Command | What it records | Where it goes | When the engine acts |
 | --- | --- | --- | --- |
 | `operator kill-switch` | the kill switch engaged or released | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator rebalance-cleared` | your clearance of a rebalance that is stuck | the engine's operator inbox | before the engine's next input from the adapter |
+| `operator acknowledge` | your acknowledgement of one alert, by its alert key | the engine's operator inbox | before the engine's next input from the adapter; the reporter stops repeating the alert at its next run |
 | `operator approve` | your approval of a fresh run | an approval file you pass to the engine with `-approval` | when that fresh run starts, as its second input |
 
 ## The operator inbox
@@ -74,8 +76,8 @@ applied for its account is recorded in the log and refused, with no effect
 `released` never undoes a later `engaged`, and the log still shows it was
 tried. To change the switch, record it again with the current time.
 
-An instruction of either kind, kill switch or clearance, stating a time
-more than five minutes after the engine's own clock (a slip in `-at`) is
+An instruction of any kind (kill switch, clearance or acknowledgement)
+stating a time more than five minutes after the engine's own clock (a slip in `-at`) is
 never recorded: it would put every instruction stating the true time before
 it. The engine refuses it with a `.refused` note; record it again with the
 current time. Up to five minutes ahead is allowed, since the tool and the
@@ -191,6 +193,49 @@ report on a cleared order is refused, which stops the engine until you
 reconcile. The reporter reads the clearance the same way, so that report
 also raises the urgent "venue report not read" alert.
 
+## Acknowledging an alert
+
+A Degraded, Halted or reconciliation alert is sent again every
+`-repeat-interval` until you acknowledge it ([alerts](alerts-and-dashboard.md),
+"Repeated until you acknowledge it"). Its text ends with `acknowledge with
+alert key: <key>`. Copy that key, exactly, into:
+
+```
+operator acknowledge -inbox <inbox> -account <IBKR account> \
+  -alert 'engine-state:halted:risk-limit-breached:||:2026-10-17T14:00:00Z@<account>' \
+  -by owner -detail "seen; reconciling at IBKR"
+```
+
+Put the key in single quotes: it can hold `|` and other characters your
+shell would otherwise read. `-detail` is optional here; `-at` works as for
+the other commands. It prints:
+
+```
+recorded operator.alert.acknowledged:<account>:2026-10-17T14:30:05Z (alert engine-state:halted:…@<account>) in <inbox>/20261017T143005Z-operator.alert.acknowledged.json; the engine delivers it before the adapter's next input and journals it in its durable log
+```
+
+What you see next: the engine writes the acknowledgement to its durable log
+before the adapter's next input (it decides nothing from it), and from the
+reporter's next run on, that alert is sent no more, on any channel: no more
+ntfy messages and no more PagerDuty incidents. Incidents already open in
+PagerDuty stay open until you resolve them there. The alert is not marked
+anywhere else, and a new alert (the account going Halted again later, say)
+has a new key and repeats until you acknowledge that one.
+
+Acknowledging changes nothing else. The account stays Degraded or Halted, and
+the kill switch where it was, until you recover it
+([reconciliation runbook](../runbooks/reconciliation.md)). An
+acknowledgement is not refused for stating an earlier time than another
+instruction: it changes no state, so the order it counts in does not matter.
+Only one stating a time more than five minutes ahead of the engine's clock is
+refused, as for every instruction. A key that names no alert is recorded and
+does nothing; a misspelt key leaves the alert repeating, so check the next
+run stops it. The tool does not check the key against the alerts: it cannot
+see them, and the log is the only evidence of what you acknowledged.
+
+Two acknowledgements in the same second share a file name, so the second is
+refused; run it again a second later.
+
 ## An approval
 
 A fresh run (anything but a crash resume: see [restart](restart.md)) starts
@@ -252,7 +297,9 @@ instruments then the cash components, as in `incident engine-state:U1234:3 in
 force, degraded on SPY;total-cash, sale attempted false`, so an account
 Degraded on its cash alone reads `degraded on total-cash`. An approval an
 earlier build recorded (schema version 1, which could not state a cash scope)
-is read as it was recorded.
+is read as it was recorded. Acknowledgements are not listed in this report
+yet: the reporter reads them from the log, and the `.delivered` marker beside
+the file in the inbox says at which sequence the engine recorded one.
 
 `-account`, `-from`, `-to` and `-format csv|json` work as for the other
 reports ([journal-query](journal-query.md)).
@@ -268,6 +315,8 @@ reports ([journal-query](journal-query.md)).
 | The log is full (the most records a run holds) when an instruction arrives | No note; the run stops with the error; the file waits | Start a fresh run; the instruction is recorded first |
 | You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
 | A typing slip in `-state`, or a missing `-by` or `-detail` | Refused, nothing written | Run it again |
+| An acknowledgement with no `-alert` or no `-by` | Refused, nothing written | Run it again with the key from the alert |
+| An acknowledgement naming a key with a typing slip | Recorded; it acknowledges nothing, and the alert keeps repeating | Copy the key from the alert again, in single quotes |
 | Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |
 | Someone edits a file in the inbox | The engine refuses it, writes `<file>.refused` saying why, and never uses it | Record the instruction again with the tool |
 | A clearance that names the wrong orders | Recorded with no effect; `.refused` note says which orders are open | Clear again naming exactly those |
@@ -281,13 +330,16 @@ including orders already at IBKR, stop the gateway or use IBKR's own app.
 ## What backs this
 
 ADR 0026, points 3 and 5 (the kill switch and the rebalance in progress as
-recorded inputs); ADR 0027 and its amendment of 2026-10-17 (the durable log,
+recorded inputs); ADR 0019, amended 2026-09-24, "Alerting" (an alert
+"repeats at a fixed interval until the owner acknowledges it.
+Acknowledgement is recorded"); ADR 0027 and its amendment of 2026-10-17 (the durable log,
 the fresh-run approval); ADR 0019, amended 2026-10-15 (one sale per
 incident); ADR 0015 (each new input type is versioned: `operator.rebalance.cleared`
 is version 1).
 
 Tests: `TestTheKillSwitchIsRecordedInTheInbox`,
 `TestTheClearanceIsRecordedInTheInbox`,
+`TestTheAcknowledgementIsRecordedInTheInbox`,
 `TestAnInputTheToolCannotRecordIsRefused`,
 `TestTheApprovalStatesWhatThePreviousLogEndsIn`,
 `TestTheApprovalWarnsOfAKillSwitchLeftEngaged`,
@@ -317,6 +369,9 @@ the engine responds); `TestTheOwnersClearanceEndsARebalanceInProgress`,
 (`internal/restart`); `TestADecodedRecordIsExactlyOneTheToolWrites`,
 `TestARecordIsDeliveredAsAnOperatorInput` (`internal/operator`);
 `TestTheOperatorReportListsEveryOperatorInput` (`internal/journalquery`);
+`TestAnAcknowledgementTheOperatorToolRecordsStopsTheRepeats`
+(`cmd/reporter`, the alert's key through the tool, delivered as the engine
+delivers it, and no repeat after it on either channel);
 `TestARefusalRecordedAtAnotherSequenceStatesIt` (`transport`);
 `TestRebalanceClearedValidate` (`internal/event`).
 

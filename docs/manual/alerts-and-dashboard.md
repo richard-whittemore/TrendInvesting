@@ -102,10 +102,11 @@ The alert's text ends with its **alert key**. You acknowledge it by recording
 an `operator.alert.acknowledged` input naming that key, which the engine
 writes to the log like any other input; the reporter reads it there and
 stops repeating that alert. Acknowledging changes no state: the account stays
-Degraded or Halted until recovery (`docs/runbooks/reconciliation.md`). The
-[operator](operator.md) tool records your kill switch, approvals and
-clearances, but not yet the acknowledgement: recording it from the server is
-not in this build.
+Degraded or Halted until recovery (`docs/runbooks/reconciliation.md`).
+Record it on the server with `operator acknowledge`, pasting the key from
+the alert ([operator](operator.md), "Acknowledging an alert"). The engine
+writes it to its log before the adapter's next input, and the reporter's
+next run sends that alert no more.
 
 On PagerDuty, each repeat opens a **new incident**: the first alert's
 incident is named by the alert key, and each repeat's by the alert key with

@@ -1,7 +1,9 @@
 // Package operator defines the records the operator tool writes into an
 // engine's inbox: the owner's kill switch (operator.kill-switch, ADR 0026,
-// point 3) and the clearance of a rebalance in progress
-// (operator.rebalance.cleared, ADR 0026, point 5), each a recorded input,
+// point 3), the clearance of a rebalance in progress
+// (operator.rebalance.cleared, ADR 0026, point 5) and the acknowledgement of
+// an alert (operator.alert.acknowledged, ADR 0019, amended 2026-09-24,
+// "Alerting"), each a recorded input,
 // never a live read of a file or command. A record is validated when it is
 // written and again, byte for byte, when the engine reads it, which delivers
 // it as an input at the next position of the run's one input sequence; the
@@ -49,6 +51,13 @@ func RebalanceCleared(p event.RebalanceClearedPayload) (Record, error) {
 	return record(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, p.AccountID, p.AsOf, p)
 }
 
+// AlertAcknowledged records the owner's acknowledgement of the alert whose
+// key it names, which stops the reporter repeating that alert and changes no
+// engine state (ADR 0019, amended 2026-09-24, "Alerting").
+func AlertAcknowledged(p event.AlertAcknowledgedPayload) (Record, error) {
+	return record(event.AlertAcknowledgedEventType, event.AlertAcknowledgedSchemaVersion, p.AccountID, p.AcknowledgedAt, p)
+}
+
 func record(eventType string, version uint32, account string, at time.Time, p interface{ Validate() error }) (Record, error) {
 	if err := p.Validate(); err != nil {
 		return Record{}, fmt.Errorf("operator: %w", err)
@@ -71,7 +80,8 @@ func (r Record) FileName() string { return r.At.Format(fileTime) + "-" + r.Type 
 
 // Encode returns the record as the tool writes it, one line of JSON and a
 // newline. The payload keeps its exact bytes, which Decode compares. A
-// record KillSwitch, RebalanceCleared or Decode built marshals: its payload
+// record KillSwitch, RebalanceCleared, AlertAcknowledged or Decode built
+// marshals: its payload
 // is the JSON its constructor encoded.
 func (r Record) Encode() []byte {
 	raw, _ := json.Marshal(r)
@@ -105,6 +115,11 @@ func Decode(raw []byte) (Record, error) {
 		var p event.RebalanceClearedPayload
 		if err = json.Unmarshal(r.Payload, &p); err == nil {
 			rebuilt, err = RebalanceCleared(p)
+		}
+	case event.AlertAcknowledgedEventType:
+		var p event.AlertAcknowledgedPayload
+		if err = json.Unmarshal(r.Payload, &p); err == nil {
+			rebuilt, err = AlertAcknowledged(p)
 		}
 	default:
 		return Record{}, fmt.Errorf("operator: record %s has type %q, which is not an operator input this build reads", r.ID, r.Type)
