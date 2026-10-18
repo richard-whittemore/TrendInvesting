@@ -335,21 +335,34 @@ func (r *momentumRun) weights(m *MomentumMonth, book momentum.Book, first *cause
 		sorted = append(sorted, n)
 	}
 	sort.Strings(sorted)
-	if first != nil {
-		maxDiff := 0.0
-		for _, n := range sorted {
-			maxDiff = math.Max(maxDiff, math.Abs(goW[n]-m.Weights[n]))
-		}
-		c.Compared += len(sorted)
-		r.diff(m.Month+" weights", first.kind, fmt.Sprintf("largest weight difference %.3g, following %s", maxDiff, first.where))
-		return
+	type entry struct {
+		name   string
+		g, q   float64
+		inGo   bool
+		inQC   bool
+		within bool
 	}
+	entries := make([]entry, 0, len(sorted))
+	mismatch, maxDiff := false, 0.0
 	for _, n := range sorted {
 		g, inGo := goW[n]
 		q, inQC := m.Weights[n]
 		d := math.Abs(g - q)
-		c.compare(inGo && inQC && d <= WeightTolerance, d,
-			fmt.Sprintf("%s %s: Go %v (set %v), QuantConnect %v (set %v)", m.Month, n, g, inGo, q, inQC))
+		e := entry{n, g, q, inGo, inQC, inGo && inQC && d <= WeightTolerance}
+		mismatch = mismatch || !e.within
+		maxDiff = math.Max(maxDiff, d)
+		entries = append(entries, e)
+	}
+	// Only a book that differs is put down to the cause; a book the cause
+	// left alone is compared weight by weight.
+	if mismatch && first != nil {
+		c.Compared += len(entries)
+		r.diff(m.Month+" weights", first.kind, fmt.Sprintf("largest weight difference %.3g, following %s", maxDiff, first.where))
+		return
+	}
+	for _, e := range entries {
+		c.compare(e.within, math.Abs(e.g-e.q),
+			fmt.Sprintf("%s %s: Go %v (set %v), QuantConnect %v (set %v)", m.Month, e.name, e.g, e.inGo, e.q, e.inQC))
 	}
 }
 

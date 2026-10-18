@@ -349,3 +349,17 @@ func TestAConstantNameScoresZeroOnBothSides(t *testing.T) {
 		t.Errorf("a zero volatility is on the list: %+v", r.Checks)
 	}
 }
+
+func TestANoSectorNameOutsideTheBookLeavesTheWeightsCompared(t *testing.T) {
+	ms := months()
+	m := &ms[1]
+	m.Ranked[39].Sector = "" // beyond the book on both sides
+	markAndWeigh(m)
+	r := compare(ms)
+	if c := checkNamed(r, parity.CheckWeights); c.Compared != 51 || !c.Pass() {
+		t.Errorf("the book is the same on both sides, so every weight is compared: %+v", c)
+	}
+	if d := onlyDifference(t, r); d.Kind != parity.KindNoSector {
+		t.Errorf("difference %+v", d)
+	}
+}
