@@ -431,12 +431,12 @@ number of resumes:
 Keep the first run's log (`<first TI_RUN>.log`) in the engine's folder
 while its resumes run: the folder is matched to the run through it. If it
 is missing, both stop, and say so from the resumed log itself: a log that
-already holds committed market inputs (bars, session closes and the
-data job's other inputs; an operator input such as a kill switch, the
+already holds committed delivered inputs (bars, session closes and the
+data job's other inputs, and the adapter's broker snapshots; an operator input such as a kill switch, the
 approval and the configuration never count) holds copied history, which a
 fresh run's log cannot, so the message says "the log <path> already holds
-N committed market inputs beyond its configuration", N counting market
-inputs only, that if it is a crash resume
+N committed delivered inputs beyond its configuration", N counting delivered
+inputs only (market data and the adapter's broker snapshots), that if it is a crash resume
 of an earlier run you restore that run's log beside it and start again, and
 that you do not run a warm-up under this name; if a stream folder with no
 log beside it exists, the message names it as the likely first run's.
@@ -541,12 +541,12 @@ carries on from them.
 - **No warm-up yet** for the engine's run: the message gives the warm-up
   command's date. It is given only to a fresh run, whose log holds nothing
   but its configuration, approval and any operator inputs; a log that
-  already holds committed market inputs is a crash resume whose first log is missing, and the
+  already holds committed delivered inputs is a crash resume whose first log is missing, and the
   message says to restore that log instead (next but one, below).
-- **A log that already holds committed market inputs, with no stream folder of its
+- **A log that already holds committed delivered inputs, with no stream folder of its
   run** (a crash resume whose first run's log is missing from the engine's
   folder: "A crash resume", above): the data job and the adapter refuse,
-  naming the log and its count of committed market inputs, and the stream folder with no
+  naming the log and its count of committed delivered inputs, and the stream folder with no
   log beside it as the likely first run's. Restore the first run's log
   from the backup, unchanged, and start again; do not run a warm-up under
   the new name.

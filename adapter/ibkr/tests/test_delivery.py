@@ -1510,7 +1510,7 @@ class StreamFolderRuleTests(unittest.TestCase):
         for refusal in (str(adapter.exception), str(data.exception)):
             self.assertIn("crash resume of an earlier run", refusal)
             self.assertIn("restore that run's log beside it", refusal)
-            self.assertIn("committed market inputs beyond its configuration", refusal)
+            self.assertIn("committed delivered inputs beyond its configuration", refusal)
             self.assertIn(str(self.streams / "run-a"), refusal)
             self.assertIn("do not run a warm-up under this name", refusal)
             self.assertNotIn("Run it once", refusal)
@@ -1548,7 +1548,7 @@ class StreamFolderRuleTests(unittest.TestCase):
             check.check()
         self.assertIn("Run it once", str(checked.exception))
 
-    def test_a_resume_holding_copied_bars_gets_the_resume_message_counting_market_inputs_only(self):
+    def test_a_resume_holding_copied_bars_gets_the_resume_message_counting_delivered_inputs_only(self):
         from delivery import stream_run
         from marketdata import tidata
         first = self.engine("run-a")
@@ -1562,7 +1562,46 @@ class StreamFolderRuleTests(unittest.TestCase):
         with self.assertRaises(tidata.Refused) as data:
             tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log))
         for refusal in (str(adapter.exception), str(data.exception)):
-            self.assertIn("already holds 1 committed market inputs beyond its configuration", refusal)
+            self.assertIn("already holds 1 committed delivered inputs beyond its configuration", refusal)
+
+    def test_a_resume_that_crashed_after_the_broker_snapshot_and_before_the_first_bar_is_told_it_is_a_resume(self):
+        import snapshot
+        from delivery import stream_run
+        from marketdata import tidata
+        first = self.engine("run-a")
+        commit(first, "broker-snapshot-1", kind=snapshot.BROKER_SNAPSHOT_TYPE,
+               version=snapshot.BROKER_SNAPSHOT_VERSION, payload={"as_of": "2027-01-14T22:05:00Z"})
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        os.remove(first.path)
+        log = str(resumed.path)
+        with self.assertRaises(StreamRefused) as adapter:
+            stream_run(str(self.streams), log)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log))
+        for refusal in (str(adapter.exception), str(data.exception)):
+            self.assertIn("already holds 1 committed delivered inputs beyond its configuration", refusal)
+            self.assertIn("crash resume of an earlier run", refusal)
+            self.assertNotIn("Run it once", refusal)
+
+    def test_a_fresh_run_with_only_configuration_approval_and_a_kill_switch_is_told_to_run_the_warm_up(self):
+        from delivery import Deliverer
+        from marketdata import tidata
+        self.first_run()
+        fresh = self.engine("run-b")
+        approve(fresh, str(self.root / "run-a.log"))
+        commit(fresh, "operator-kill-switch:1", kind="operator.kill_switch.set")
+        self.assertEqual(self.found(fresh), ("run-b", "run-b"))
+        check = Deliverer(str(self.streams), str(self.root / "record.json"), None, str(fresh.path), None, None)
+        with self.assertRaises(StreamRefused) as checked:
+            check.check()
+        self.assertIn("Run it once", str(checked.exception))
+
+    def test_the_delivered_kinds_are_one_table_for_both_readers(self):
+        import snapshot
+        from delivery import DELIVERED_KINDS, kinds
+        self.assertEqual(set(DELIVERED_KINDS), set(kinds.KINDS) | {(snapshot.BROKER_SNAPSHOT_TYPE,
+                                                                     snapshot.BROKER_SNAPSHOT_VERSION)})
+        self.assertIs(kinds.DELIVERED_KINDS, DELIVERED_KINDS)
 
     def test_a_true_fresh_run_with_no_folder_is_still_told_to_run_the_warm_up(self):
         from delivery import Deliverer

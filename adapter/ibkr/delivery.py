@@ -125,6 +125,7 @@ def _marketdata(name):
 
 nyse_calendar = _marketdata("nyse_calendar")
 kinds = _marketdata("kinds")
+DELIVERED_KINDS = kinds.DELIVERED_KINDS
 
 
 class StreamRefused(Exception):
@@ -408,7 +409,7 @@ def stream_run(streams, engine_log_path):
     With no folder of the run, a log holding no history beyond its
     configuration, approval and operator inputs is a fresh run's before its
     warm-up, and its own name is returned (check then refuses: its warm-up is
-    not written); a log already holding committed market inputs holds copied
+    not written); a log already holding committed delivered inputs holds copied
     history, so it is a crash resume whose first run's log is missing, and it
     is refused with that case named, never sent to a warm-up
     (_own_or_resume).
@@ -501,9 +502,9 @@ def _own_or_resume(streams, logs, engine_log_path, own):
     """own for a log of a fresh run; StreamRefused for a log that holds history, no folder being found.
 
     A fresh run's log holds its configuration, its Run approval, if any, and
-    any operator input; only committed market inputs (the data job's kinds,
-    kinds.KINDS) are history, which a fresh run's log cannot hold (ADR 0027),
-    so a log holding one is a crash resume whose first run's
+    any operator input; only committed delivered inputs (the data job's kinds
+    and the adapter's broker snapshot, DELIVERED_KINDS) are history, which a
+    fresh run's log cannot hold (ADR 0027), so a log holding one is a crash resume whose first run's
     log is not in the engine's log folder, and a warm-up under its new name
     would make the second folder the manual forbids.
     """
@@ -513,7 +514,7 @@ def _own_or_resume(streams, logs, engine_log_path, own):
         raise StreamRefused("the run's stream folder is found by the run's identity, from its durable log, and "
                             "that log cannot be read: {}".format(err)) from None
     history = sum(1 for g in groups
-                  if g[0][1] == LOG_INPUT and (g[0][2]["type"], g[0][2]["schema_version"]) in kinds.KINDS)
+                  if g[0][1] == LOG_INPUT and (g[0][2]["type"], g[0][2]["schema_version"]) in DELIVERED_KINDS)
     if history <= 0:
         return own
     unmatched = sorted(n for n in (os.listdir(streams) if os.path.isdir(streams) else [])
@@ -524,7 +525,7 @@ def _own_or_resume(streams, logs, engine_log_path, own):
         hint = " The stream folder {} has no log beside it: it is likely the first run's.".format(
             ", ".join(os.path.join(streams, n) for n in unmatched))
     raise StreamRefused(
-        "the log {} already holds {} committed market inputs beyond its configuration; if it is a crash resume of an "
+        "the log {} already holds {} committed delivered inputs beyond its configuration; if it is a crash resume of an "
         "earlier run, restore that run's log beside it and start again; do not run a warm-up under this name "
         "(a second stream folder splits one run's stream).{} (docs/manual/market-data.md, \"A crash "
         "resume\")".format(engine_log_path, history, hint))
