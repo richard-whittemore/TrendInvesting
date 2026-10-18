@@ -54,11 +54,31 @@ type ProtocolError struct {
 	// CausationID echoes the request envelope's id whenever the server could
 	// read it, so the adapter can tell which bar was rejected.
 	CausationID string `json:"causation_id,omitempty"`
+	// Sequence, when set, is the sequence the engine recorded the request
+	// at, which differs from the one the request carried because the engine
+	// recorded inputs of its own before it (a Decider's *SequencedError).
+	// The request's refusal was recorded there, so the adapter's next input
+	// carries Sequence + 1. Zero means the request was recorded at its own
+	// sequence, or not at all.
+	Sequence uint64 `json:"sequence,omitempty"`
 }
 
 func (e *ProtocolError) Error() string {
 	return "transport: " + e.Code + ": " + e.Message
 }
+
+// SequencedError is a Decider's error for a request it recorded at
+// Sequence rather than at the sequence the request carried; the server
+// states Sequence in the reply's ProtocolError, so the adapter can continue
+// from it without reading the message.
+type SequencedError struct {
+	Sequence uint64
+	Err      error
+}
+
+func (e *SequencedError) Error() string { return e.Err.Error() }
+
+func (e *SequencedError) Unwrap() error { return e.Err }
 
 func errorResponse(code, message, causationID string) Response {
 	return Response{Error: &ProtocolError{

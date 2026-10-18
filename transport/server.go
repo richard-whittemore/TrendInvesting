@@ -370,7 +370,11 @@ func (s *Server) respond(frame []byte) Response {
 	}
 	decision, err := s.decideWithTimeout(bar)
 	if err != nil {
-		return errorResponse(decisionErrorCode(err), err.Error(), bar.ID)
+		response := errorResponse(decisionErrorCode(err), err.Error(), bar.ID)
+		if sequenced := (*SequencedError)(nil); errors.As(err, &sequenced) {
+			response.Error.Sequence = sequenced.Sequence
+		}
+		return response
 	}
 	return Response{Envelope: &decision, Error: nil}
 }

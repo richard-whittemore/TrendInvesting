@@ -7,7 +7,8 @@ why it works this way, and what can go wrong.*
 ## What it is
 
 `operator` (source: `cmd/operator`) is a small command you run on the
-server. It never talks to IBKR and never changes a running engine's state
+server, **as the engine's user, `ti-trader`**: `sudo -u ti-trader operator
+...`. It never talks to IBKR and never changes a running engine's state
 by itself. It writes your instruction down, checked, in a place the engine
 reads, and the engine records it in its durable log as one of its inputs
 before acting on it. That is the rule for everything a person tells the
@@ -15,6 +16,16 @@ system (ADR 0026, point 3): an instruction is a recorded input, never a
 setting the program glances at, so the log always shows who said what,
 when, and what the engine did next, and a replay of the log does the same
 thing again.
+
+**Run it as `ti-trader`.** The tool writes each file readable by the user
+that ran it only (mode `0600`), and the engine runs as `ti-trader`, so a file
+written as you, or as root, is one the engine cannot read: the engine would
+report it as waiting at every input and never act on it. So the tool checks
+who owns the inbox (that is the engine's user) and refuses to write when it
+is run as anyone else, saying `run it as the engine's user, sudo -u <engine
+user> operator ...`. Approval files are read by the engine too: write them
+as `ti-trader` as well, into a folder `ti-trader` can read. Every example
+below leaves out the `sudo -u ti-trader` in front to keep it short.
 
 It has three commands:
 
@@ -35,26 +46,53 @@ writes one small file per instruction there, named by the time and the
 kind of instruction, for example `20261017T143005Z-operator.kill-switch.json`.
 Each time the adapter sends the engine something (a price, an account
 figure, a session close), the engine first reads the inbox. Every file it
-has not yet recorded, in time order, becomes an input at the next place in
+has not yet recorded, in the order of the times the files state, becomes an input at the next place in
 the run's numbered stream of inputs. The engine writes it to the durable log,
 flushed to disk, and then handles the adapter's input. The engine only ever
 checks an order while handling an input, so an instruction recorded before
 the next input applies to every order checked from then on.
 
+The time a file states is the one you gave with `-at`, or the time you ran
+the tool. A file written later with an earlier `-at` sorts, and is
+recorded, as of that earlier time.
+
 The file stays in the inbox afterwards; the durable log, not the inbox, is
-the evidence. An instruction already recorded in any log in the engine's log
-folder (including the one a crash resume continues) is never recorded
-again. A file the engine cannot read (hand-edited, damaged) is never used.
+the evidence. Once the engine has flushed an instruction to the log, it
+writes a marker beside the file, ending `.delivered`, saying where it was
+recorded. An instruction with that marker, or already recorded in any log
+in the engine's log folder (including the one a crash resume continues), is
+never recorded again, so moving a damaged log into `quarantine`, or
+starting a run with its log in another folder, does not replay old
+instructions. Leave the markers in place.
+
+Your instructions count in the order of the times they state. A kill-switch
+file stating a time no later than the newest kill switch already recorded
+for its account is refused (with a `.refused` note naming the later one),
+so an old or backdated `released` never undoes a later `engaged`. To change
+the switch, record it again with the current time.
+
+A file the engine cannot read (hand-edited, damaged, or holding more than
+one record) is never used.
 One the engine refuses (for another account, or a clearance that does not
 match) is recorded with no effect. In both cases the engine writes a note
 beside the file, ending `.refused`, saying why, prints the same on its
 output (`journalctl -u ti-engine@<account>`), and never tries that file
 again.
 
+If the engine cannot write an instruction to the durable log (a disk fault
+while it is being flushed), it was not recorded: the engine writes no note,
+stops the run with the error on its output, and leaves the file as it was.
+Resume the run (see [restart](restart.md)) and the engine records it before
+the adapter's first input, so a kill switch is never lost to a disk fault.
+
 The adapter (not built yet) follows the engine's numbering: the decisions
 the engine sends back carry the number of the last input it recorded, and
-the adapter's next input carries the number after it. After a crash resume
-the engine prints `the adapter's next input carries sequence N`.
+the adapter's next input carries the number after it. When the engine
+records your instructions first and then refuses the adapter's input, the
+refusal carries that number too, in its `sequence` field, and the adapter
+continues from it. After a crash resume the engine prints `the adapter's
+next input carries sequence N`; a resume that also records an approval
+prints the number once, on the approval's line.
 
 ## The kill switch
 
@@ -175,6 +213,9 @@ reports ([journal-query](journal-query.md)).
 
 | What happens | What the system does | What you do |
 | --- | --- | --- |
+| You run the tool as yourself or as root, not `ti-trader` | Refused, nothing written: the engine could not read the file | Run it again with `sudo -u ti-trader` |
+| A kill switch backdated with `-at` before one already recorded | Refused, with a `.refused` note naming the later one | Record it again with the current time |
+| The disk fails while the engine records an instruction | No note; the run stops with the error; the file waits | Resume the run; the instruction is recorded first |
 | You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
 | A typing slip in `-state`, or a missing `-by` or `-detail` | Refused, nothing written | Run it again |
 | Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |
@@ -199,10 +240,20 @@ Tests: `TestTheKillSwitchIsRecordedInTheInbox`,
 `TestTheClearanceIsRecordedInTheInbox`,
 `TestAnInputTheToolCannotRecordIsRefused`,
 `TestTheApprovalStatesWhatThePreviousLogEndsIn`,
-`TestTheApprovalWarnsOfAKillSwitchLeftEngaged` (`cmd/operator`, what the
+`TestTheApprovalWarnsOfAKillSwitchLeftEngaged`,
+`TestTheApprovalWarnsOfTheSwitchThisAccountLeftEngaged`,
+`TestTheInboxAndApprovalDirectoriesAreFlushed`,
+`TestEachClearedOrderIDIsTrimmed`,
+`TestARecordTheEngineCouldNotReadIsRefused` (`cmd/operator`, what the
 tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnOperatorInputIsDeliveredOnce`,
 `TestAnOperatorRecordTheEngineRefusesIsNoted`,
+`TestALogFailureWhileDeliveringAnOperatorRecordLeavesItForTheNextStart`,
+`TestADeliveredRecordIsMarkedSoAMovedLogCannotRedeliverIt`,
+`TestAKillSwitchOlderThanTheOneInForceIsRefused`,
+`TestADeliveredRecordIsNotReadAgain`,
+`TestARefusedInputAfterOperatorInputsStatesItsSequence`,
+`TestAResumeWithAnApprovalStatesOneNextSequence`,
 `TestTheOperatorInboxIsForARunThatCanReachABroker`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestTheOwnersClearanceEndsARebalanceInProgress`,
@@ -213,6 +264,7 @@ the engine responds); `TestTheOwnersClearanceEndsARebalanceInProgress`,
 (`internal/restart`); `TestADecodedRecordIsExactlyOneTheToolWrites`,
 `TestARecordIsDeliveredAsAnOperatorInput` (`internal/operator`);
 `TestTheOperatorReportListsEveryOperatorInput` (`internal/journalquery`);
+`TestARefusalRecordedAtAnotherSequenceStatesIt` (`transport`);
 `TestRebalanceClearedValidate` (`internal/event`).
 
 ## Not built yet

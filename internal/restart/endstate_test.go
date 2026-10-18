@@ -28,6 +28,14 @@ func killSwitchEntry(t *testing.T, id string, engaged bool) journal.Entry {
 	})
 }
 
+// otherKillSwitchEntry is a kill switch for account, which may be another
+// account than the log's.
+func otherKillSwitchEntry(t *testing.T, id, account string, engaged bool) journal.Entry {
+	return recorded(t, journal.KindInput, id, event.KillSwitchEventType, event.KillSwitchSchemaVersion, event.KillSwitchPayload{
+		AccountID: account, AsOf: time.Date(2026, time.October, 17, 14, 0, 0, 0, time.UTC), Engaged: engaged, Operator: "owner", Detail: "x",
+	})
+}
+
 // incidentSale is a planned sale back to 98% under the incident's tag.
 func incidentSale(t *testing.T, tag string) journal.Entry {
 	return recorded(t, journal.KindDecision, "order-planned:sale", event.OrderPlannedEventType, event.OrderPlannedSafetyVersion, event.OrderPlannedPayload{
@@ -67,6 +75,8 @@ func TestReadEndStateFindsWhatAFreshRunMustBeToldOf(t *testing.T) {
 		{"nothing", nil, restart.EndState{}},
 		{"latched, switch left on", []journal.Entry{decidedEntry(t, true), killSwitchEntry(t, "k1", true)}, restart.EndState{Latched: true, KillSwitchEngaged: true}},
 		{"switch turned off again", []journal.Entry{killSwitchEntry(t, "k1", true), killSwitchEntry(t, "k2", false)}, restart.EndState{}},
+		{"another account's release, which the gate refused", []journal.Entry{killSwitchEntry(t, "k1", true), otherKillSwitchEntry(t, "k2", "ira", false)}, restart.EndState{KillSwitchEngaged: true}},
+		{"an engagement the gate refused", []journal.Entry{otherKillSwitchEntry(t, "k1", "ira", true)}, restart.EndState{}},
 		{"degraded, no sale", []journal.Entry{degraded}, restart.EndState{IncidentID: incidentID, State: event.EngineStateDegraded, Scope: []string{"SPY"}}},
 		{"halted, sale sent", []journal.Entry{halted, incidentSale(t, incidentID)},
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-1"}},
@@ -79,7 +89,7 @@ func TestReadEndStateFindsWhatAFreshRunMustBeToldOf(t *testing.T) {
 		{"an inherited incident whose sale was attempted", []journal.Entry{inherited},
 			restart.EndState{Latched: true, IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-0"}},
 	} {
-		got, err := restart.ReadEndState(c.entries, "run-1.log")
+		got, err := restart.ReadEndState(c.entries, "joint", "run-1.log")
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue
@@ -98,13 +108,13 @@ func TestReadEndStateRefusesAnUndecodableRecord(t *testing.T) {
 	halted := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x"})
 	for _, broken := range []journal.Entry{decidedEntry(t, true), killSwitchEntry(t, "k1", true), incidentSale(t, incidentID), saleWithheldEntry(t, incidentID, event.SaleWithheldUnreadable)} {
 		broken.Envelope.Payload = json.RawMessage(`not json`)
-		if _, err := restart.ReadEndState([]journal.Entry{halted, broken}, "run-1.log"); err == nil || !strings.Contains(err.Error(), broken.Envelope.ID) || !strings.Contains(err.Error(), "run-1.log") {
+		if _, err := restart.ReadEndState([]journal.Entry{halted, broken}, "joint", "run-1.log"); err == nil || !strings.Contains(err.Error(), broken.Envelope.ID) || !strings.Contains(err.Error(), "run-1.log") {
 			t.Errorf("%s: ReadEndState = %v, want a refusal naming it in run-1.log", broken.Envelope.ID, err)
 		}
 	}
 	state := halted
 	state.Envelope.Payload = json.RawMessage(`not json`)
-	if _, err := restart.ReadEndState([]journal.Entry{state}, "run-1.log"); err == nil || !strings.Contains(err.Error(), state.Envelope.ID) {
+	if _, err := restart.ReadEndState([]journal.Entry{state}, "joint", "run-1.log"); err == nil || !strings.Contains(err.Error(), state.Envelope.ID) {
 		t.Errorf("ReadEndState = %v, want the undecodable state refused", err)
 	}
 }

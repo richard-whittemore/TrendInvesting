@@ -11,7 +11,9 @@ package operator
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -60,8 +62,11 @@ func record(eventType string, version uint32, account string, at time.Time, p in
 	}, nil
 }
 
-// FileName is the record's name in the inbox: its time, then its type, so
-// the inbox sorts in the order the operator recorded it.
+// FileName is the record's name in the inbox: its stated time, then its
+// type, so the inbox sorts by the time each record states. That is the
+// time the operator gave with -at, which may be earlier than when the
+// record was written, so file-name order is the order of the stated times,
+// not of writing.
 func (r Record) FileName() string { return r.At.Format(fileTime) + "-" + r.Type + ".json" }
 
 // Encode returns the record as the tool writes it, one line of JSON and a
@@ -74,15 +79,19 @@ func (r Record) Encode() []byte {
 }
 
 // Decode reads a record back and refuses one the tool would not write: an
-// unknown key, an unknown type or version, a payload its type refuses, or
-// any field that differs from the record rebuilt from the payload, so a
-// hand-edited or damaged file is never read as another instruction.
+// unknown key, anything but white space after the one record, an unknown
+// type or version, a payload its type refuses, or any field that differs
+// from the record rebuilt from the payload, so a hand-edited or damaged
+// file is never read as another instruction.
 func Decode(raw []byte) (Record, error) {
 	var r Record
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&r); err != nil {
 		return Record{}, fmt.Errorf("operator: decode the operator record: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return Record{}, fmt.Errorf("operator: record %s has more after the record: a record file holds exactly one record", r.ID)
 	}
 	var rebuilt Record
 	var err error

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -315,5 +316,141 @@ func TestTheApprovalWarnsOfAKillSwitchLeftEngaged(t *testing.T) {
 	}
 	if !strings.Contains(out, "kill switch") || !strings.Contains(out, "operator kill-switch") {
 		t.Errorf("printed %q, want a warning to engage the kill switch again", out)
+	}
+}
+
+// TestTheInboxAndApprovalDirectoriesAreFlushed: a record or approval is
+// reported only after its directory is flushed, so the name the tool says it
+// recorded survives a power loss with the file (ADR 0027 §3).
+func TestTheInboxAndApprovalDirectoriesAreFlushed(t *testing.T) {
+	var flushed []string
+	original := syncDirectory
+	syncDirectory = func(dir string) error { flushed = append(flushed, dir); return original(dir) }
+	t.Cleanup(func() { syncDirectory = original })
+
+	inbox := t.TempDir()
+	if _, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	if len(flushed) != 1 || flushed[0] != inbox {
+		t.Errorf("flushed %v after recording, want the inbox %s", flushed, inbox)
+	}
+
+	flushed = nil
+	syncDirectory = func(string) error { return errors.New("injected flush fault") }
+	out, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "released", "-by", "owner", "-detail", "x", "-at", "2026-10-17T15:00:00Z")
+	if err == nil || !strings.Contains(err.Error(), "injected flush fault") || strings.Contains(out, "recorded") {
+		t.Errorf("a failed flush: printed %q, err %v; want the fault and nothing reported recorded", out, err)
+	}
+
+	syncDirectory = func(dir string) error { flushed = append(flushed, dir); return original(dir) }
+	dir := t.TempDir()
+	logPath := killSwitchLog(t, dir, "joint")
+	approval := filepath.Join(dir, "approvals", "a.json")
+	if err := os.Mkdir(filepath.Dir(approval), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", approval, "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	if len(flushed) != 1 || flushed[0] != filepath.Dir(approval) {
+		t.Errorf("flushed %v after the approval, want %s", flushed, filepath.Dir(approval))
+	}
+}
+
+// killSwitchLog writes dir/run-1.log: a configuration and the kill switch
+// engaged for account, the log a run that ended with it engaged leaves.
+func killSwitchLog(t *testing.T, dir, account string, more ...operator.Record) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "run-1.log")
+	file, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	log, err := journal.CreateLog(file, journal.NewLogHeader("sha256:cfg", "boost/1.9.0/test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := operator.KillSwitch(event.KillSwitchPayload{AccountID: account, AsOf: time.Date(2026, time.October, 16, 15, 0, 0, 0, time.UTC), Engaged: true, Operator: "owner", Detail: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := r.Envelope(1, "boost/1.9.0/test", "sha256:cfg")
+	cfg.ID, cfg.Type, cfg.SchemaVersion, cfg.Source = "configuration", event.TargetWeightConfigurationEventType, 5, "engine"
+	inputs := []event.Envelope{cfg, r.Envelope(2, "boost/1.9.0/test", "sha256:cfg")}
+	for i, m := range more {
+		inputs = append(inputs, m.Envelope(uint64(3+i), "boost/1.9.0/test", "sha256:cfg"))
+	}
+	for _, e := range inputs {
+		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: e}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return logPath
+}
+
+// TestTheApprovalWarnsOfTheSwitchThisAccountLeftEngaged: only this
+// account's kill switch counts; another account's release, which the
+// engine refused, does not hide this account's engagement.
+func TestTheApprovalWarnsOfTheSwitchThisAccountLeftEngaged(t *testing.T) {
+	dir := t.TempDir()
+	other, err := operator.KillSwitch(event.KillSwitchPayload{AccountID: "ira", AsOf: time.Date(2026, time.October, 16, 16, 0, 0, 0, time.UTC), Engaged: false, Operator: "owner", Detail: "mistyped account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := killSwitchLog(t, dir, "joint", other)
+	out, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", filepath.Join(dir, "a.json"), "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "operator kill-switch") {
+		t.Errorf("printed %q, want a warning to engage the kill switch again", out)
+	}
+}
+
+// TestEachClearedOrderIDIsTrimmed: "-orders a, b" names orders a and b, not
+// " b".
+func TestEachClearedOrderIDIsTrimmed(t *testing.T) {
+	inbox := t.TempDir()
+	if _, err := invoke(t, "rebalance-cleared", "-inbox", inbox, "-account", "ira", "-decision", "targets-decided:ira:2026-09-30T20:00:00Z",
+		"-orders", " ira-buy-2 , ira-buy-1", "-by", "owner", "-detail", "cancelled at IBKR", "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	var p event.RebalanceClearedPayload
+	if err := json.Unmarshal(inboxRecords(t, inbox)[0].Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(p.ClientOrderIDs, ",") != "ira-buy-1,ira-buy-2" {
+		t.Errorf("recorded orders %q, want each ID trimmed", p.ClientOrderIDs)
+	}
+}
+
+// TestARecordTheEngineCouldNotReadIsRefused: the tool writes a record only
+// its own user can read, so run as anyone but the inbox's owner (the
+// engine's user) it would leave a record the engine never reads; it refuses
+// instead, naming the user to run it as.
+func TestARecordTheEngineCouldNotReadIsRefused(t *testing.T) {
+	originalOwner, originalUser := inboxOwner, effectiveUser
+	t.Cleanup(func() { inboxOwner, effectiveUser = originalOwner, originalUser })
+	inboxOwner = func(os.FileInfo) (int, bool) { return 4242, true }
+	effectiveUser = func() int { return 501 }
+
+	inbox := t.TempDir()
+	_, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at)
+	if err == nil || !strings.Contains(err.Error(), "4242") || !strings.Contains(err.Error(), "sudo -u") {
+		t.Errorf("err %v, want a refusal naming the inbox's owner", err)
+	}
+	if entries, _ := os.ReadDir(inbox); len(entries) != 0 {
+		t.Errorf("the inbox holds %d file(s) after a refusal", len(entries))
+	}
+
+	effectiveUser = func() int { return 0 }
+	if _, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at); err == nil {
+		t.Error("root wrote a record the engine's user could not read")
+	}
+	effectiveUser = func() int { return 4242 }
+	if _, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at); err != nil {
+		t.Errorf("the inbox's owner: %v", err)
 	}
 }

@@ -29,16 +29,18 @@ type EndState struct {
 	// (ADR 0019, amended 2026-10-15; saleAttemptAtEnd).
 	SaleAttempted     bool
 	SaleClientOrderID string
-	// KillSwitchEngaged is whether the log's last operator.kill-switch
-	// engaged it. A fresh run starts with it released, so the operator
-	// engages it again.
+	// KillSwitchEngaged is whether the log's last operator.kill-switch the
+	// gate accepted, one for the log's own account that validates, engaged
+	// it; a kill switch for another account was refused and changed nothing
+	// (risklimit.Gate.SetKillSwitch). A fresh run starts with it released,
+	// so the operator engages it again.
 	KillSwitchEngaged bool
 }
 
-// ReadEndState reads the state the approved log's entries end in. A record
-// that is evidence of it and cannot be decoded refuses, naming it in
-// logName, rather than being read as nothing.
-func ReadEndState(entries []journal.Entry, logName string) (EndState, error) {
+// ReadEndState reads the state the approved log's entries, recorded for
+// accountID, end in. A record that is evidence of it and cannot be decoded
+// refuses, naming it in logName, rather than being read as nothing.
+func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState, error) {
 	var end EndState
 	var err error
 	if end.Latched, _, _, err = latchAtEnd(entries, logName); err != nil {
@@ -60,7 +62,9 @@ func ReadEndState(entries []journal.Entry, logName string) (EndState, error) {
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			return EndState{}, fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
 		}
-		end.KillSwitchEngaged = p.Engaged
+		if p.AccountID == accountID && p.Validate() == nil {
+			end.KillSwitchEngaged = p.Engaged
+		}
 	}
 	return end, nil
 }

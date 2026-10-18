@@ -35,6 +35,11 @@ func createLogFile(path string) (*os.File, error) {
 	return file, nil
 }
 
+// durableLogSink is what the durable log is streamed through: the file
+// itself. It is the one seam a test fails a write of the log through, since
+// a file cannot be made to fail a write partway through a run.
+var durableLogSink = func(file *os.File) journal.SyncWriter { return file }
+
 // recoverLogFile reads a previous process's durable log. It never opens the
 // file for writing: the log stays the evidence it is, torn tail included.
 // A log whose content cannot be recovered (ADR 0027 §5) is reported as an
@@ -159,8 +164,11 @@ func resumeRun(ctx context.Context, wireEngine *replay.Engine, recorder *journal
 }
 
 // reportResume states what a restart recovered, and any torn tail it left
-// out, so an operator knows which input the adapter must send again.
-func reportResume(out io.Writer, path string, recovery journal.Recovery) error {
+// out, so an operator knows which input the adapter must send again. When
+// an approval is recorded after the resume (a start cut short), the
+// approval's report states the adapter's next sequence instead, so one
+// line states it.
+func reportResume(out io.Writer, path string, recovery journal.Recovery, approvalFollows bool) error {
 	if _, err := fmt.Fprintf(out, "resumed %d record(s) from %s\n", len(recovery.Entries), path); err != nil {
 		return fmt.Errorf("engine: report the resume: %w", err)
 	}
@@ -170,8 +178,10 @@ func reportResume(out io.Writer, path string, recovery journal.Recovery) error {
 			last = entry.Envelope.Sequence
 		}
 	}
-	if _, err := fmt.Fprintf(out, "the adapter's next input carries sequence %d\n", last+1); err != nil {
-		return fmt.Errorf("engine: report the resume: %w", err)
+	if !approvalFollows {
+		if _, err := fmt.Fprintf(out, "the adapter's next input carries sequence %d\n", last+1); err != nil {
+			return fmt.Errorf("engine: report the resume: %w", err)
+		}
 	}
 	if recovery.Torn == nil {
 		return nil

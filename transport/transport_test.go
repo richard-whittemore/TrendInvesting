@@ -493,6 +493,31 @@ func TestDeciderFailureIsReportedWithoutDroppingTheSession(t *testing.T) {
 	}
 }
 
+// TestARefusalRecordedAtAnotherSequenceStatesIt: a Decider that recorded a
+// request at a later sequence than it carried, after inputs of its own,
+// says so in the reply's Sequence, so the adapter continues from it without
+// reading the message; any other refusal states none.
+func TestARefusalRecordedAtAnotherSequenceStatesIt(t *testing.T) {
+	t.Parallel()
+	failing := func(_ context.Context, bar event.Envelope) (event.Envelope, error) {
+		if bar.ID == "bar-1" {
+			return event.Envelope{}, &transport.SequencedError{Sequence: 3, Err: errors.New("refused after two inputs of the engine's own")}
+		}
+		return event.Envelope{}, errors.New("refused at its own sequence")
+	}
+	_, path := startServer(t, failing, transport.ServerConfig{})
+	client := dial(t, path, transport.ClientConfig{})
+
+	_, err := client.Decide(bounded(t), newBar(t, "bar-1", 1))
+	var protocolErr *transport.ProtocolError
+	if !errors.As(err, &protocolErr) || protocolErr.Code != transport.CodeDeciderFailed || protocolErr.Sequence != 3 {
+		t.Fatalf("err = %#v, want a decider_failed ProtocolError stating sequence 3", err)
+	}
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 4)); !errors.As(err, &protocolErr) || protocolErr.Sequence != 0 {
+		t.Fatalf("err = %#v, want a ProtocolError stating no sequence", err)
+	}
+}
+
 func readResponse(t *testing.T, conn net.Conn) transport.Response {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(testTimeout)); err != nil {

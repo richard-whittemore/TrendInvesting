@@ -87,8 +87,8 @@ The engine reads its settings from
 2. Find the latest log and its final record hash: the `record_hash` of the
    last commit line, `grep '"commit"' <latest>.log | tail -n 1`.
 3. Write the approval, for example `approval-<new TI_RUN>.json` in the
-   account's state directory. `operator approve -log <latest>.log -account
-   <account> -by owner -out <file>` writes it from the log, with the final
+   account's state directory. `sudo -u ti-trader operator approve -log
+   <latest>.log -account <account> -by owner -out <file>` writes it from the log, with the final
    hash, the latch and the incident in force read from the log itself, and
    `-clear-incident <id>` clears the incident instead
    ([operator](../manual/operator.md)); if the kill switch was engaged when
@@ -286,5 +286,7 @@ after the last commit. A resume reports `left out a torn tail of N byte(s)`
 and recovers every committed group before it. Nothing from that input was
 released (journal-before-send, ADR 0027), so the adapter sends it again at
 the sequence the resume reports (`the adapter's next input carries sequence
-N`). There is nothing to do. A partial line anywhere but the end is not a
+N`; a resume of a start cut short that records an approval states it once,
+on the approval's line, `the adapter's first input carries sequence 3`).
+There is nothing to do. A partial line anywhere but the end is not a
 torn tail: it is damage, refused as in "An unrecoverable log".

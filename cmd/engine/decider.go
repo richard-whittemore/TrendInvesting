@@ -110,6 +110,11 @@ type wireGuard struct {
 	mu       sync.Mutex
 	wg       sync.WaitGroup
 	poisoned error
+	// stop, when set, ends the run with its cause; stopped is that cause.
+	// An operator record that could not be delivered stops the run, since
+	// its log has failed (operatorInbox).
+	stop    context.CancelCauseFunc
+	stopped error
 }
 
 // decide applies input through engine while holding g for the call's whole
@@ -117,7 +122,9 @@ type wireGuard struct {
 // moment ctx is found to have been cancelled once engine.Apply returns.
 // With an operator inbox, its pending records are delivered first, in the
 // same hold (operatorInbox), and input is recorded after them; decide
-// returns their decisions before input's, and input as recorded.
+// returns their decisions before input's, and input as recorded. A record
+// that could not be delivered poisons g and stops the run with its error,
+// and input is not applied.
 func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input event.Envelope, inbox *operatorInbox) (decisions []event.Envelope, recorded event.Envelope, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -128,7 +135,14 @@ func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input eve
 	defer g.wg.Done()
 
 	if inbox != nil {
-		decisions, input.Sequence = inbox.deliver(ctx, engine, input)
+		var failed error
+		if decisions, input.Sequence, failed = inbox.deliver(ctx, engine, input); failed != nil {
+			g.poisoned, g.stopped = failed, failed
+			if g.stop != nil {
+				g.stop(failed)
+			}
+			return nil, input, failed
+		}
 	}
 	own, err := engine.Apply(ctx, input)
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -145,6 +159,14 @@ func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input eve
 // returns, and why waiting rather than acting immediately is the fix.
 func (g *wireGuard) awaitIdle() {
 	g.wg.Wait()
+}
+
+// failure is the error an undelivered operator record stopped the run
+// with, or nil.
+func (g *wireGuard) failure() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.stopped
 }
 
 // newDecider composes engine — a *replay.Engine already wrapping a
@@ -275,9 +297,14 @@ func newDecider(guard *wireGuard, engine *replay.Engine, strategyVersion, config
 			// decisionErrorCode maps any non-nil error here to
 			// CodeDeciderFailed, absent a deadline of its own). Nothing is
 			// fabricated in its place. When operator inputs were recorded
-			// first, the error names where the input itself was recorded.
+			// first, the error states where the input itself was recorded,
+			// in the reply's Sequence (transport.SequencedError), so the
+			// adapter continues from it (the wire contract, engine.go).
 			if recorded.Sequence != input.Sequence {
-				return event.Envelope{}, fmt.Errorf("%w (operator inputs were recorded first, so %s was applied at sequence %d)", err, input.ID, recorded.Sequence)
+				return event.Envelope{}, &transport.SequencedError{
+					Sequence: recorded.Sequence,
+					Err:      fmt.Errorf("%w (operator inputs were recorded first, so %s was applied at sequence %d)", err, input.ID, recorded.Sequence),
+				}
 			}
 			return event.Envelope{}, err
 		}

@@ -35,7 +35,8 @@ IBKR view.
    check the account in IBKR's own app. If Excess Liquidity is falling, act
    there (the program cannot), and record the kill switch so the program
    sends nothing new when the gateway returns until you have looked:
-   `operator kill-switch ... -state engaged`.
+   `sudo -u ti-trader operator kill-switch ... -state engaged` (as the
+   engine's user, so the engine can read the record).
 6. **When it is back**, the engines keep running (a gateway restart does not
    restart an engine): confirm each is `active`, and that its first broker
    snapshot after the gap is fresh (the stale episode closes). If any account

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -136,7 +137,9 @@ func rebalanceCleared(args []string, out io.Writer) error {
 	}
 	var ids []string
 	if *orders != "" {
-		ids = strings.Split(*orders, ",")
+		for _, id := range strings.Split(*orders, ",") {
+			ids = append(ids, strings.TrimSpace(id))
+		}
 		sort.Strings(ids)
 	}
 	r, err := operator.RebalanceCleared(event.RebalanceClearedPayload{
@@ -150,18 +153,55 @@ func rebalanceCleared(args []string, out io.Writer) error {
 
 // record installs r in inbox under its file name, whole and never over
 // another record: written to a temporary name the engine does not read,
-// flushed, then linked into place.
+// flushed, linked into place, and the inbox flushed, before it is reported.
+// A record is readable by the user that writes it only, so it is refused
+// unless this tool runs as the inbox's owner, the engine's user: a record
+// the engine cannot read would never take effect.
 func record(inbox string, r operator.Record, what string, out io.Writer) error {
 	if inbox == "" {
 		return errors.New("operator: -inbox is required: the engine's operator inbox, its -operator folder")
+	}
+	info, err := os.Stat(inbox)
+	if err != nil {
+		return fmt.Errorf("operator: the inbox: %w", err)
+	}
+	if owner, known := inboxOwner(info); known && owner != effectiveUser() {
+		return fmt.Errorf("operator: the inbox %s belongs to user %d, the engine's user, but this tool runs as user %d, and a record it writes is readable by its writer only, so the engine could not read it: run it as the engine's user, `sudo -u <engine user> operator ...` (docs/manual/operator.md)",
+			inbox, owner, effectiveUser())
 	}
 	path := filepath.Join(inbox, r.FileName())
 	if err := install(path, r.Encode()); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(out, "recorded %s (%s) in %s; the engine delivers it before the adapter's next input and journals it in its durable log\n", r.ID, what, path)
+	_, err = fmt.Fprintf(out, "recorded %s (%s) in %s; the engine delivers it before the adapter's next input and journals it in its durable log\n", r.ID, what, path)
 	return err
 }
+
+// syncDirectory flushes dir, so a name just linked or created in it
+// survives a power loss along with the file it names (ADR 0027 §3). It is
+// the seam a test observes the flush through.
+var syncDirectory = func(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	return file.Sync()
+}
+
+// inboxOwner returns the user that owns the inbox, the engine's user, when
+// the file system says; effectiveUser is the user this tool runs as. They
+// are the seams a test sets a different owner through.
+var (
+	inboxOwner = func(info os.FileInfo) (uid int, known bool) {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0, false
+		}
+		return int(st.Uid), true
+	}
+	effectiveUser = os.Geteuid
+)
 
 // install writes raw at path, refusing to replace anything there.
 func install(path string, raw []byte) error {
@@ -186,6 +226,9 @@ func install(path string, raw []byte) error {
 			return fmt.Errorf("operator: %s already holds a record, which is never overwritten (ADR 0018); record it again a second later", path)
 		}
 		return fmt.Errorf("operator: install %s: %w", path, err)
+	}
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("operator: flush the inbox %s, so the record's name survives a power loss: %w", dir, err)
 	}
 	return nil
 }
@@ -225,7 +268,7 @@ func approve(args []string, out io.Writer) error {
 	if restart.CutShort(recovery) {
 		return fmt.Errorf("operator: %s holds nothing past its configuration: its start was cut short, so resume it with the engine's -resume, and the approval it was started with if it had one (docs/runbooks/durable-log.md)", name)
 	}
-	end, err := restart.ReadEndState(recovery.Entries, name)
+	end, err := restart.ReadEndState(recovery.Entries, *account, name)
 	if err != nil {
 		return err
 	}
@@ -257,7 +300,14 @@ func create(path string, raw []byte) error {
 	if _, err := file.Write(raw); err != nil {
 		return fmt.Errorf("operator: write the approval: %w", err)
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("operator: flush the approval: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("operator: flush %s, so the approval's name survives a power loss: %w", dir, err)
+	}
+	return nil
 }
 
 // describe says what the approval states and what the operator does next.

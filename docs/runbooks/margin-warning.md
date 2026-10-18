@@ -27,7 +27,7 @@ point 6). Its thresholds are in the account's hashed configuration
    ratio is about 63%, so a warning means either a deep fall in SPY or a
    higher house requirement. If the requirement rose, the boost is riskier
    than the backtest assumed: you may engage the kill switch to stop the
-   next boost buy (`operator kill-switch ... -state engaged`), which still
+   next boost buy (`sudo -u ti-trader operator kill-switch ... -state engaged`), which still
    lets the sale back to 98% go. Selling by hand is your call; if you do,
    engage the kill switch first, so the program sends nothing new while your
    order works.

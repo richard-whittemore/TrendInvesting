@@ -33,8 +33,12 @@
 // returned carry, as their Sequence, the sequence the adapter's input was
 // recorded at, so the adapter's next input always carries the returned
 // Sequence + 1; without operator instructions that is the adapter's own
-// Sequence + 1, as before. A resume reports the sequence the adapter's next
-// input carries.
+// Sequence + 1, as before. When operator instructions were recorded and the
+// adapter's input is then refused, the refusal (transport.ProtocolError)
+// states the sequence the input was recorded at in its Sequence, and the
+// adapter's next input carries that Sequence + 1. A resume reports the
+// sequence the adapter's next input carries, once (with an approval, on the
+// approval's line).
 //
 // The reducer's decisions are received over that socket and written to a
 // journal; that is the whole of this command's job. Four design decisions
@@ -253,7 +257,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 			return err
 		}
 		defer func() { _ = logFile.Close() }()
-		log, err := journal.CreateLog(logFile, logHeader)
+		log, err := journal.CreateLog(durableLogSink(logFile), logHeader)
 		if err != nil {
 			return fmt.Errorf("engine: %w", err)
 		}
@@ -339,7 +343,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		if err := resumeRun(ctx, wireEngine, recorder, recovery); err != nil {
 			return err
 		}
-		if err := reportResume(out, opts.resumePath, recovery); err != nil {
+		if err := reportResume(out, opts.resumePath, recovery, approval != nil); err != nil {
 			return err
 		}
 	} else if _, err := wireEngine.Apply(ctx, configEnvelope); err != nil {
@@ -371,7 +375,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		}
 	}
 
-	guard := &wireGuard{}
+	serveCtx, stopServing := context.WithCancelCause(ctx)
+	defer stopServing(nil)
+	guard := &wireGuard{stop: stopServing}
 	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, strategyVersion, configurationHash, inbox), transport.ServerConfig{
 		MaxFrameBytes:   opts.maxFrameBytes,
 		DecisionTimeout: opts.decisionTimeout,
@@ -443,7 +449,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// until Write runs. With -log, the durable log (ADR 0027) bounds that
 	// loss to the one input whose write the crash interrupted, none of whose
 	// decisions was released, and -resume rebuilds the run from it.
-	serveErr := server.ServeContext(ctx)
+	serveErr := server.ServeContext(serveCtx)
 
 	// ServeContext waits for every accepted CONNECTION's own goroutine, but
 	// not for a decision transport itself gave up waiting on
@@ -454,6 +460,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// while a decision it does not know has finished is still writing to
 	// it.
 	guard.awaitIdle()
+	if failure := guard.failure(); failure != nil {
+		serveErr = errors.Join(serveErr, failure)
+	}
 
 	header, headerErr := recorder.Header(configurationHash, strategyVersion)
 	if headerErr != nil {

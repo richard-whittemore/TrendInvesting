@@ -116,6 +116,16 @@ func boostSession(i int) time.Time {
 
 func (f *boostFeed) send(eventType string, version uint32, id string, at time.Time, payload any) {
 	f.t.Helper()
+	if err := f.trySend(eventType, version, id, at, payload); err != nil {
+		f.t.Fatalf("decide %s: %v", id, err)
+	}
+}
+
+// trySend sends one input as send does, returning the engine's refusal
+// rather than failing the test, and leaves the sequence where it was when
+// the input is refused.
+func (f *boostFeed) trySend(eventType string, version uint32, id string, at time.Time, payload any) error {
+	f.t.Helper()
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		f.t.Fatalf("encode %s: %v", id, err)
@@ -127,7 +137,7 @@ func (f *boostFeed) send(eventType string, version uint32, id string, at time.Ti
 	}
 	reply, err := f.client.Decide(context.Background(), in)
 	if err != nil {
-		f.t.Fatalf("decide %s: %v", id, err)
+		return err
 	}
 	// The decisions carry the last sequence this exchange recorded, after
 	// any operator input the engine recorded first; the next input
@@ -148,6 +158,7 @@ func (f *boostFeed) send(eventType string, version uint32, id string, at time.Ti
 		f.pending = append(f.pending, p)
 		f.released = append(f.released, p)
 	}
+	return nil
 }
 
 // sessions feeds sessions [from, to).

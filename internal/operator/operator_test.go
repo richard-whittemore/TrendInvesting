@@ -104,6 +104,8 @@ func TestADecodedRecordIsExactlyOneTheToolWrites(t *testing.T) {
 		"an engaged null":  {edit(func(m map[string]any) { m["payload"].(map[string]any)["engaged"] = nil }), "engaged must be stated"},
 		"a bad clearance":  {edit(func(m map[string]any) { m["type"] = event.RebalanceClearedEventType }), "rebalance cleared"},
 		"an invalid input": {edit(func(m map[string]any) { m["payload"].(map[string]any)["operator"] = "" }), "operator is required"},
+		"a second record":  {append(good.Encode(), good.Encode()...), "after the record"},
+		"trailing bytes":   {append(good.Encode(), []byte("}")...), "after the record"},
 	} {
 		if _, err := operator.Decode(c.raw); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: Decode = %v, want a refusal saying %q", name, err, c.want)

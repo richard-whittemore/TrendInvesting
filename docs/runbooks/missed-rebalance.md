@@ -39,7 +39,7 @@ holdings IBKR reports.
    ascending order or not (the tool sorts them):
 
    ```
-   operator rebalance-cleared -inbox <inbox> -account <IRA> \
+   sudo -u ti-trader operator rebalance-cleared -inbox <inbox> -account <IRA> \
      -decision targets-decided:<account>:<close time> \
      -orders <client order id>,<client order id> -by owner -detail "cancelled at IBKR"
    ```
