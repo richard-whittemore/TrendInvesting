@@ -2,7 +2,7 @@
 
 Provisioning for the live server in `docs/live-trading/plan.md` section 3: one Ubuntu 24.04 LTS VM running one IB Gateway (kept logged in by IBC), a shared market-data step, three engines (one per account, each with its own adapter client ID, ADR 0026 section 8), a reporter and a read-only dashboard, reachable only over Tailscale. Everything is in `deploy/`.
 
-> **Status:** provisioning only. The engine is built and runs Boost in dry-run (`deploy/build-engine.sh`, below); the broker adapter, the data step, the reporter and the dashboard are not built. Their systemd units exist as placeholders (`/opt/trend-investing/bin/ti-engine`, `ti-data`, `ti-reporter`, `ti-dashboard`) and are skipped, not failed, until the binary is installed; the change that ships each binary fixes its arguments. Nothing here has run against a real IBKR login. Trading mode defaults to **paper** and the API to **read-only** until the limited-live gate (AGENTS.md rule 5).
+> **Status:** provisioning only. The engine is built and runs Boost in dry-run (`deploy/build-engine.sh`, below); the data step is built (`deploy/build-data.sh`, below; it writes the Boost engine's daily input, which the adapter does not yet deliver); the broker adapter, the reporter and the dashboard are not built. Their systemd units exist as placeholders (`/opt/trend-investing/bin/ti-engine`, `ti-reporter`, `ti-dashboard`) and are skipped, not failed, until the binary is installed; the change that ships each binary fixes its arguments. Nothing here has run against a real IBKR login. Trading mode defaults to **paper** and the API to **read-only** until the limited-live gate (AGENTS.md rule 5).
 
 **Owner steps** are marked **[OWNER]**. Agents never sign up, pay or enter credentials.
 
@@ -19,7 +19,7 @@ Provisioning for the live server in `docs/live-trading/plan.md` section 3: one U
 | Firewall | `ufw`: deny inbound, allow only `tailscale0` | Lightsail's own firewall should also close port 22 once Tailscale works. |
 | Updates | `unattended-upgrades`, security pocket only | No automatic reboot (a reboot logs the Gateway out). |
 
-Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:45 PM and does a full re-login every Sunday at 09:00 (`deploy/provision.sh` writes both to `/etc/trend-investing/gateway.env`). The data step runs weekdays 16:30; the reporter 17:30. ADR 0025 point 5 requires the nightly restart to fall after the day's reconciliation and outside trading hours: **confirm 11:45 PM against the real reconciliation time when the engines exist**, then change `TI_GATEWAY_RESTART_TIME`.
+Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:45 PM and does a full re-login every Sunday at 09:00 (`deploy/provision.sh` writes both to `/etc/trend-investing/gateway.env`). The data step runs weekdays 17:05, after the close plus its 60 settle minutes; the reporter 17:30. ADR 0025 point 5 requires the nightly restart to fall after the day's reconciliation and outside trading hours: **confirm 11:45 PM against the real reconciliation time when the engines exist**, then change `TI_GATEWAY_RESTART_TIME`.
 
 ## Setup
 
@@ -42,7 +42,9 @@ Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:
 8. **[OWNER] Start the Gateway and approve 2FA:** `sudo systemctl start ti-gateway`. Approve the IBKR Mobile prompt on your phone within 3 minutes. Check `journalctl -u ti-gateway -n 50` shows a login and no credential.
 9. Publish the dashboard to the tailnet only, once its binary is installed: `sudo tailscale serve --bg 8080` (**[OWNER]**, tailnet configuration).
 
-When the data step, the reporter or the dashboard binary exists, install it at the path in its unit, `sudo systemctl daemon-reload`, and start it. Check each with `systemctl status`.
+**The data step.** Build it on the Mac with `deploy/build-data.sh` (one Python file, `dist/ti-data`, standard library only), copy it to the server as `dist/ti-data` beside the `deploy/` folder, and run `sudo deploy/provision.sh services`, which installs it as `/opt/trend-investing/bin/ti-data`. Put the Massive key on the `MASSIVE_API_KEY=` line of `/etc/trend-investing/secrets.env` (`sudo -e`; a file created by an earlier provisioner has no such line: add it). The unit is skipped until the Boost engine's `run.env` exists; then run the warm-up once (`docs/manual/market-data.md`, "The daily data job") before the timer's first run.
+
+When the reporter or the dashboard binary exists, install it at the path in its unit, `sudo systemctl daemon-reload`, and start it. Check each with `systemctl status`.
 
 **The engine.** Build it on the Mac from a clean checkout with `deploy/build-engine.sh` (linux/amd64, stamped by `scripts/build-stamp.sh` from `git describe --always --dirty`, and it refuses a dirty tree; the engine refuses dry-run, paper and live on an unstamped build). Copy `dist/ti-engine` to the server and `sudo install -m 0755 ti-engine /opt/trend-investing/bin/ti-engine`. `provision.sh services` installs `boost.env` (`TI_MODE=dry-run`) and `boost.config` (mode `dry-run`). The engine units are **not enabled**, and `provision.sh services` disables any engine instance an earlier provisioner enabled: every start is an explicit owner step, written down in `docs/runbooks/durable-log.md`, "Restarting an engine". The unit runs the engine with `-mode`, `-config`, `-socket /run/ti-engine-<account>/engine.sock` (a 0700 directory per engine), `-log`, `-out` and `-as-of`, from the account's `run.env`, and never restarts it by itself (`Restart=no`).
 

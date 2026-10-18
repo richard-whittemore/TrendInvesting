@@ -11,8 +11,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends systemd sudo >/dev/null
 
-# Work from a writable copy, as on the server.
+# Work from a writable copy, as on the server, with the data step's built
+# file beside it as dist/ti-data.
 cp -a /deploy /root/deploy
+cp -a /dist /root/dist
 p=/root/deploy/provision.sh
 
 "$p" base
@@ -108,9 +110,24 @@ test "$status" = 78 || fail "start-gateway exited $status on an empty login, wan
 grep -qx 'RestartPreventExitStatus=64 65 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
 pass "an empty login stops the gateway with 78, which the unit does not restart on"
 
+# The data step is installed and runs under the server's python3: with no
+# Massive key it refuses (exit 1) and writes nothing.
+test -x /opt/trend-investing/bin/ti-data || fail "the data step was not installed"
+cmp /root/dist/ti-data /opt/trend-investing/bin/ti-data || fail "the installed data step is not the built one"
+/opt/trend-investing/bin/ti-data --help | grep -q -- --backfill-from || fail "the data step does not run"
+grep -qx 'MASSIVE_API_KEY=' /etc/trend-investing/secrets.env || fail "the secrets stub has no MASSIVE_API_KEY line"
+scratch=$(mktemp -d)
+status=0
+/opt/trend-investing/bin/ti-data --data "$scratch/data" --config /etc/trend-investing/engines/boost.config \
+  --engine-log "$scratch/run.log" --secrets-file /etc/trend-investing/secrets.env >/dev/null 2>"$scratch/err" || status=$?
+test "$status" = 1 || fail "the data step exited $status with no key and no engine log, want 1"
+grep -q 'ti-data refused' "$scratch/err" || fail "the data step's refusal has no message"
+test ! -e "$scratch/data" || fail "the data step wrote something while refusing"
+pass "the data step is installed, runs, and refuses with nothing written"
+
 # Unit files. The placeholder binaries do not exist; stand-ins let
 # systemd-analyze check the rest of each unit.
-for b in ti-data ti-engine ti-reporter ti-dashboard; do
+for b in ti-engine ti-reporter ti-dashboard; do
   install -m 0755 /dev/null "/opt/trend-investing/bin/$b"
 done
 cd /etc/systemd/system

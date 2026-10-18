@@ -185,6 +185,14 @@ On the Mac mini, the same values go in files in a directory outside the
 repository checkout (not on the iCloud-synced Desktop), and the engine and
 adapter are pointed at them.
 
+### A6. Put the Massive key on the machine [NOW]
+
+The daily data job fetches SPY's prices from Massive with your own key. On
+the server, `sudo -e /etc/trend-investing/secrets.env` and fill in the line
+`MASSIVE_API_KEY=` (add the line if the file predates it). Like the account
+number, it is never committed, pasted into an issue or typed on a command
+line.
+
 ## B. Steps the program and the adapter take
 
 Most of these are commands you start, but nothing in this part needs a
@@ -261,6 +269,10 @@ Order of starting, each on the server, each an explicit step of yours:
    `TI_AS_OF`, and an empty `TI_RESTART_ARGS` for a first run. A log is never
    reused.
 4. Start the adapter, then the engine: `sudo systemctl start ti-engine@boost`.
+   For a run's first paper day, run the data job's one-time warm-up once the
+   engine has started, before the adapter delivers anything
+   (`docs/manual/market-data.md`, "The daily data job"); from then on the
+   timer writes each day's file at 17:05.
    Engines are never started by systemd on their own and never restarted by
    it; every start is yours.
 5. Confirm the engine's log begins with the paper configuration, and that the

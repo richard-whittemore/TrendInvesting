@@ -291,6 +291,90 @@ saved under an earlier date would let a backtest use labels it could not
 have had. A rerun fetches only the source not yet recorded for the session,
 so a source that is down does not block one already saved.
 
+## The daily data job
+
+On the server, one job does all of the above for the Boost engine every
+weekday, with no one at the keyboard: `ti-data` (`adapter/marketdata/tidata.py`,
+installed as `/opt/trend-investing/bin/ti-data` and run by `ti-data.service`).
+
+**When it runs.** At 17:05 New York time, Monday to Friday
+(`ti-data.timer`). The market closes at 4 p.m. (1 p.m. on an early close),
+and a session is not recorded until an hour after its close, so its prices
+are final; 17:05 is after that hour on every trading day, and a test checks
+the timer and the service's `--settle-minutes 60` agree for every session of
+2026 and 2027. On a holiday it finds the last session already written and
+does nothing. If the server was off at 17:05, the run happens when it starts
+again, and catches up every session it missed in one file.
+
+**What it does, in order.**
+
+1. Picks the latest settled session.
+2. Reads the Boost engine's durable log (the `-log` file of the run named by
+   `TI_RUN` in the engine's `run.env`) for the run's configuration hash and
+   strategy version, and uses the run's name as the stream's correlation id,
+   so the stream carries exactly the identity the engine expects.
+3. Fetches from Massive, once, the whole-market bars of each session since
+   the last stream it wrote (one request a session, about 13 seconds each at
+   the free plan's 5 a minute) and the splits and dividends of the last two
+   weeks, and records them.
+4. Writes the engine's input for those sessions: SPY's bar, then the session
+   close, for each session, to
+   `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<YYYY-MM-DD>.jsonl`,
+   named by the last session it holds. Each file follows on from the one
+   before it, and the adapter reads them in date order.
+
+**The one-time warm-up.** The engine's 200-day average and its RSI need
+history before the first decision. Before a run's first paper day, after the
+engine has been started once (so its durable log exists), run the warm-up
+once, with the configuration's `warm_up_start` date:
+
+```sh
+sudo systemd-run --wait --pipe --collect -p User=ti-trader -p Group=ti-trader \
+  -p LoadCredential=secrets:/etc/trend-investing/secrets.env \
+  /opt/trend-investing/bin/ti-data --data /var/lib/trend-investing/data \
+  --config /etc/trend-investing/engines/boost.config \
+  --engine-log /var/lib/trend-investing/engines/boost/<TI_RUN>.log \
+  --backfill-from <warm_up_start>
+```
+
+It records every session from that date (resumable: a second try fetches
+only what is missing), checks there is no missing day and at least as many
+sessions as the longest indicator window (200 for the trend average), and
+writes the run's first file, holding the whole history. Any other date is
+refused, because the indicators are seeded from the configured one. Massive's
+free plan reaches back two years only, so `warm_up_start` must lie within
+the last two years. A new engine run (a fresh `TI_RUN`) starts with no
+files and needs the warm-up again; the recordings are already on disk, so it
+fetches only the days since.
+
+**What you see.** Each run prints the path of the file it wrote, or of the
+file that already held the session; `journalctl -u ti-data` shows it. A
+refusal prints `ti-data refused:` and the reason, exits 1, and the unit
+shows as failed, which the alerting (plan.md section 7) is to watch.
+
+**What can go wrong.** In every case no file is written for the session,
+so the engine never reads half a day. Recordings already made are kept, and
+the next run (or `sudo systemctl start ti-data` once the cause is fixed)
+carries on from them.
+
+- **No Massive key**: the line `MASSIVE_API_KEY=` in
+  `/etc/trend-investing/secrets.env` is empty or missing. The key is never
+  printed.
+- **The session has not settled**: only when a session is named with
+  `--session` before its close plus an hour.
+- **No warm-up yet** for the engine's run: the message gives the warm-up
+  command's date.
+- **The engine's durable log cannot be read**, or the engine has not been
+  started yet (the unit is skipped until its `run.env` exists).
+- **Massive returns nothing for a trading day**, or a recording from an
+  earlier day is missing: the run names the day. A missing earlier day means
+  a recording was removed; restore it from the backup.
+- **A history shorter than the indicators need** at the warm-up.
+- **A file already written differs** from what its recordings now give (a
+  recording changed, or the engine was restarted under the same run name
+  with another configuration). The file is not rewritten; find out why
+  before the adapter reads it.
+
 ## What can go wrong, and what the step does
 
 Every failure writes nothing and exits with status 1 and a message on stderr,
@@ -356,8 +440,11 @@ for the scheduler to alert on.
   with the network disabled), `test_forward_adjust.py` (the forward form
   agrees with the backward one, including two dividends on one ex-date and a
   split dated on a non-trading day just before an ex-date),
-  `test_history.py`, `test_marketdata.py`, `test_nyse_calendar.py` and
-  `test_sectors.py`. All use made-up data.
+  `test_history.py`, `test_marketdata.py`, `test_nyse_calendar.py`,
+  `test_sectors.py` and `test_tidata.py` (the daily job: warm-up, daily and
+  catch-up streams the Go validators accept, every refusal above, the
+  byte-identical second run, the settle time against the timer, and the
+  packed file). All use made-up data.
 - `adapter/marketdata/tests/testdata/envelope_contract.go` decodes the encoded
   stream with the Go engine's own validators, refusing unknown fields, so a
   stream the engines would refuse fails the Python tests first.
