@@ -249,18 +249,23 @@ func causedStates(envelopes []event.Envelope) (map[string]gateState, error) {
 // reconciliationAlert states one reconciliation's differences, the state the
 // account is in after it, as the gate holds it, and what that state still
 // does (ADR 0019's "Every alert states" list). Its public text names the
-// instruments and cash components in doubt and no figure.
+// instruments and cash components in doubt and no figure; evidence that could
+// not be compared is described there only as that, since its reasons can
+// carry cents, dollars and share counts, which go to the private body alone
+// (owner decision 2026-10-17, docs/live-trading/plan.md section 7).
 func reconciliationAlert(account string, e event.Envelope, p event.ReconciliationResultPayload, after gateState) Alert {
 	key := "reconciliation:" + e.ID + "@" + account
 	when := e.EventTime.UTC().Format(time.RFC3339)
 	effect := fmt.Sprintf("The account is Degraded on instruments [%s] and cash [%s]: it opens no new risk and refuses buys; the named instruments are frozen, except, for the joint account, the one sale back toward 98%% (ADR 0019 amendment, 2026-10-16); sells elsewhere continue.",
 		strings.Join(after.instruments, ","), strings.Join(after.cash, ","))
 	doubt := fmt.Sprintf("an unexplained difference in [%s]", strings.Join(slicesConcat(p.ScopeInstrumentIDs, p.ScopeCashComponents), ","))
+	publicDoubt := doubt
 	if after.state == event.EngineStateHalted {
 		effect = "The account is Halted: no order is released, except, for the joint account, the one sale back toward 98% (ADR 0019 amendment, 2026-10-15)."
 	}
 	if p.Action == event.ReconciliationActionHalt {
 		doubt = "evidence that could not be compared: " + strings.Join(p.Unverifiable, "; ")
+		publicDoubt = "that the reconciliation could not be verified; see the private channel for what could not be compared"
 	}
 	recovery := " Leaving the state is never automatic. Recovery is a person's: docs/runbooks/reconciliation.md." + acknowledgeLine(key)
 	book := "with no book recorded"
@@ -273,7 +278,7 @@ func reconciliationAlert(account string, e event.Envelope, p event.Reconciliatio
 		Body: fmt.Sprintf("Reconciliation %s at %s %s found %s. %s. %s Check the named positions and cash at the broker.%s",
 			p.ReconciliationID, when, book, doubt, p.Detail, effect, recovery),
 		PublicBody: fmt.Sprintf("Reconciliation %s at %s found %s. %s Figures are in the journal (journal-query) and the dashboard.%s",
-			p.ReconciliationID, when, doubt, effect, recovery),
+			p.ReconciliationID, when, publicDoubt, effect, recovery),
 	}
 }
 

@@ -106,10 +106,42 @@ func TestAnUnverifiableReconciliationSaysHalted(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("alerts = %+v, %v", got, err)
 	}
-	for _, body := range []string{got[0].Body, got[0].PublicBody} {
-		if !strings.Contains(body, "Halted") || !strings.Contains(body, "could not be read") {
-			t.Errorf("body:\n%s", body)
+	if !strings.Contains(got[0].Body, "Halted") || !strings.Contains(got[0].Body, "could not be read") {
+		t.Errorf("body:\n%s", got[0].Body)
+	}
+	if !strings.Contains(got[0].PublicBody, "Halted") || !strings.Contains(got[0].PublicBody, "could not be verified") {
+		t.Errorf("public body:\n%s", got[0].PublicBody)
+	}
+}
+
+// TestAnUnverifiableReasonNeverReachesThePublicRelay: a reason the
+// reconciliation could not compare can carry cents, dollars and share counts,
+// and the public relay carries no figure (owner decision 2026-10-17), so the
+// public text says only that the reconciliation could not be verified and
+// sends the owner to the private channel, which carries the reasons.
+func TestAnUnverifiableReasonNeverReachesThePublicRelay(t *testing.T) {
+	reasons := []string{"SPY: the broker reports 140 shares and a cost of 4712.30 USD, which do not agree", "total cash: 8530.00 USD is in a second currency"}
+	s := newStream(t)
+	s.add(event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, "reconciliation-result:joint:r", day(1), event.ReconciliationResultPayload{
+		AccountID: "joint", ReconciliationID: "morning", InputID: "r", Classification: event.ReconciliationUnverifiable, Action: event.ReconciliationActionHalt,
+		Components: []event.ReconciliationComponent{}, Unverifiable: reasons, Detail: "unverifiable",
+	})
+	got, err := report.Alerts(s.out)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("alerts = %+v, %v", got, err)
+	}
+	for _, reason := range reasons {
+		if !strings.Contains(got[0].Body, reason) {
+			t.Errorf("the private body carries the reason %q:\n%s", reason, got[0].Body)
 		}
+	}
+	for _, figure := range []string{"140", "4712", "8530", "SPY: the broker", "second currency"} {
+		if strings.Contains(got[0].PublicBody, figure) {
+			t.Errorf("the public body carries %q from a reason:\n%s", figure, got[0].PublicBody)
+		}
+	}
+	if !strings.Contains(got[0].PublicBody, "could not be verified; see the private channel") {
+		t.Errorf("the public body sends the owner to the private channel:\n%s", got[0].PublicBody)
 	}
 }
 

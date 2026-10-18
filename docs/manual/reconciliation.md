@@ -133,7 +133,10 @@ stopped doing. The state is the account's whole state, not just this
 reconciliation's: an account already Halted is told it is still Halted, and a
 Degraded account's scope includes what was already frozen. It repeats until you acknowledge it. On the public ntfy relay
 the alert names what is in doubt but carries no figure; the figures go to
-PagerDuty, your own ntfy server, the dashboard and `journal-query`.
+PagerDuty, your own ntfy server, the dashboard and `journal-query`. A
+reconciliation that could not be verified says only that on the public relay,
+and sends you to the private channel for the reasons, which can carry
+amounts.
 
 ## What the adapter sends
 

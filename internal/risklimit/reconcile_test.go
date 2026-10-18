@@ -250,3 +250,56 @@ func TestAnApprovedCashIncidentStillRefusesBuys(t *testing.T) {
 		t.Error("a Halted incident naming a cash scope was restored")
 	}
 }
+
+// TestACorporateActionDeliveredTwiceCountsOnce: a corporate action is one
+// fact under its envelope ID, so a redelivery of the same fact changes
+// nothing, and the same ID stating another fact is refused, leaving what was
+// recorded as it was. A dividend counted twice would explain cash the broker
+// never paid, and a split applied twice would explain shares that do not
+// exist (ADR 0019, "Explained means").
+func TestACorporateActionDeliveredTwiceCountsOnce(t *testing.T) {
+	dividend := event.CorporateActionPayload{InstrumentID: "SPY", Kind: event.CorporateActionKindDividend, EffectiveAt: at.Add(2 * time.Minute), CashAmount: 1.2, Currency: "USD"}
+	g := booked(t)
+	for range 2 {
+		if err := g.ObserveCorporateAction("ca:1", dividend); err != nil {
+			t.Fatalf("a redelivered dividend is not an error: %v", err)
+		}
+	}
+	if r := reconcileWith(t, g, "reconciliation:1", morningOf(1001.2, 10)); r.Result.Classification != event.ReconciliationExplained {
+		t.Errorf("a dividend delivered twice adds its cash once: %s: %s", r.Result.Classification, r.Result.Detail)
+	}
+
+	split := event.CorporateActionPayload{InstrumentID: "SPY", Kind: event.CorporateActionKindSplit, EffectiveAt: at.Add(2 * time.Minute), NewShares: 2, OldShares: 1, EngineSharesPerRawShare: 1, Currency: "USD"}
+	s := booked(t)
+	for range 2 {
+		if err := s.ObserveCorporateAction("ca:split", split); err != nil {
+			t.Fatalf("a redelivered split is not an error: %v", err)
+		}
+	}
+	if r := reconcileWith(t, s, "reconciliation:1", morningOf(1000, 20)); r.Result.Classification != event.ReconciliationExplained {
+		t.Errorf("a split delivered twice scales the holding once: %s: %s", r.Result.Classification, r.Result.Detail)
+	}
+
+	c := booked(t)
+	if err := c.ObserveCorporateAction("ca:1", dividend); err != nil {
+		t.Fatal(err)
+	}
+	larger := dividend
+	larger.CashAmount = 2.4
+	if err := c.ObserveCorporateAction("ca:1", larger); err == nil || !strings.Contains(err.Error(), "ca:1") || !strings.Contains(err.Error(), "different") {
+		t.Fatalf("the same ID stating another dividend is refused with its reason, got %v", err)
+	}
+	later := dividend
+	later.EffectiveAt = dividend.EffectiveAt.Add(time.Second)
+	if err := c.ObserveCorporateAction("ca:1", later); err == nil {
+		t.Fatal("the same ID at another effective time is refused")
+	}
+	elsewhere := dividend
+	elsewhere.EffectiveAt = dividend.EffectiveAt.In(time.FixedZone("EST", -5*3600))
+	if err := c.ObserveCorporateAction("ca:1", elsewhere); err != nil {
+		t.Fatalf("the same instant in another time zone is the same action: %v", err)
+	}
+	if r := reconcileWith(t, c, "reconciliation:1", morningOf(1001.2, 10)); r.Result.Classification != event.ReconciliationExplained || c.State() != risklimit.StateNormal {
+		t.Errorf("a refused corporate action leaves what was recorded: %s: %s, %s", r.Result.Classification, r.Result.Detail, c.State())
+	}
+}

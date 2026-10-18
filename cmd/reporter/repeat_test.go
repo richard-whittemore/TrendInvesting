@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -163,5 +164,70 @@ func TestTheRepeatIntervalMustBePositive(t *testing.T) {
 	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-repeat-interval", "0s"}
 	if err := run(args, fakeEnv, time.Now, &bytes.Buffer{}, fakeClient); err == nil || !strings.Contains(err.Error(), "-repeat-interval must be positive") {
 		t.Fatalf("a zero interval would page on every run, got %v", err)
+	}
+}
+
+// Each repeat must page again: PagerDuty folds a trigger whose dedup key
+// matches an open incident into that incident, and an incident acknowledged
+// on the phone takes no further triggers, so a repeat under the same key would
+// page no one. The rule (ADR 0019, ADR 0026) is that only an acknowledgement
+// recorded in the journal stops the repeats.
+func TestEachPagerDutyRepeatOpensANewIncidentUntilTheJournalAcknowledges(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	client := &http.Client{Transport: r}
+	dir := t.TempDir()
+	entries := haltedEntries(t)
+	path := writeRun(t, dir, entries)
+	if err := os.Chtimes(path, t0, t0); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty", "-repeat-interval", "30m"}
+	runAt := func(after time.Duration) {
+		t.Helper()
+		if err := run(args, twoChannels(), func() time.Time { return t0.Add(after) }, &bytes.Buffer{}, client); err != nil {
+			t.Fatal(err)
+		}
+	}
+	halted := alertKey(t, entries, report.KindHalted)
+	pages := func() (keys map[string]bool, n int) {
+		t.Helper()
+		keys = map[string]bool{}
+		for _, m := range r.to("events.pagerduty.test") {
+			var e struct {
+				DedupKey string `json:"dedup_key"`
+				Payload  struct {
+					CustomDetails map[string]string `json:"custom_details"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(m[strings.Index(m, "\n")+1:]), &e); err != nil {
+				t.Fatal(err)
+			}
+			if e.Payload.CustomDetails["alert_key"] != halted {
+				continue
+			}
+			keys[e.DedupKey] = true
+			n++
+		}
+		return keys, n
+	}
+	runAt(time.Hour)
+	runAt(time.Hour + 31*time.Minute)
+	runAt(2*time.Hour + 2*time.Minute)
+	keys, n := pages()
+	if n != 3 || len(keys) != 3 {
+		t.Fatalf("the halt and two repeats must be three incidents, got %d triggers under %d dedup keys: %v", n, len(keys), keys)
+	}
+	if !keys[halted] {
+		t.Errorf("the first trigger keeps the alert key as its dedup key, got %v", keys)
+	}
+
+	ack := event.AlertAcknowledgedPayload{AccountID: "joint", AlertKey: halted, AcknowledgedBy: "owner", AcknowledgedAt: t0.Add(time.Hour)}
+	entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 6, event.AlertAcknowledgedEventType, event.AlertAcknowledgedSchemaVersion, "ack", t0, ack)})
+	if err := os.Chtimes(writeRun(t, dir, entries), t0, t0); err != nil {
+		t.Fatal(err)
+	}
+	runAt(4 * time.Hour)
+	if _, after := pages(); after != 3 {
+		t.Fatalf("an acknowledgement recorded in the journal stops the pages, got %d triggers", after)
 	}
 }

@@ -104,13 +104,22 @@ writes to the log like any other input; the reporter reads it there and
 stops repeating that alert. Acknowledging changes no state: the account stays
 Degraded or Halted until recovery (`docs/runbooks/reconciliation.md`). The
 tool you will use to record the acknowledgement from the server comes with
-the operator inputs and is not in this build. Acknowledging the PagerDuty
-incident on your phone stops PagerDuty's own escalation, but not the
-reporter's repeats, which follow the log.
+the operator inputs and is not in this build.
+
+On PagerDuty, each repeat opens a **new incident**: the first alert's
+incident is named by the alert key, and each repeat's by the alert key with
+`#repeat-1`, `#repeat-2` and so on, while the alert key itself is shown in
+the incident's details. So until the acknowledgement is recorded in the
+journal you will see one more incident, and one more page, every
+`-repeat-interval`. Acknowledging or resolving a PagerDuty incident on your
+phone stops that incident's escalation only; it does not stop the repeats,
+which follow the log. Once the journal records the acknowledgement, no further
+incidents open; resolve the ones already open in PagerDuty yourself.
 
 A repeat is timed per channel from when that channel last took the alert, and
-recorded in the state file. A state file written by an earlier reporter has
-no send times, so its unacknowledged alerts repeat once at the next run.
+recorded in the state file with how many repeats that channel has taken. A
+state file written by an earlier reporter has no send times, so its
+unacknowledged alerts repeat once at the next run.
 
 ## Where alerts go
 
@@ -137,7 +146,11 @@ The delivery rules:
   stalled channel cannot hold up the other alerts.
 - On the public ntfy.sh relay, a reconciliation alert is sent in a shorter
   form that names what is in doubt (the instruments and the cash) but no
-  figure; the figures go to PagerDuty and to your own ntfy server.
+  figure; the figures go to PagerDuty and to your own ntfy server. When the
+  reconciliation could not be verified (Halted), the short form says only
+  that, and that you should look at the private channel: the reasons it could
+  not compare can carry amounts and share counts, so they go to PagerDuty and
+  your own ntfy server alone.
 - The daily summary carries your balances, so it never goes through a public
   relay. With ntfy on the public ntfy.sh server the summary skips ntfy and goes
   only to PagerDuty or your own ntfy server. If no such channel is named, the

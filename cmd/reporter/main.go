@@ -41,10 +41,12 @@ func main() {
 }
 
 // delivered is the reporter's state file: the incident keys already sent,
-// per channel, and when each channel last took each, which times a repeat.
+// per channel, when each channel last took each, which times a repeat, and
+// how many repeats each channel has taken, which names each repeat.
 type delivered struct {
-	Keys []string             `json:"keys"`
-	Sent map[string]time.Time `json:"sent,omitempty"`
+	Keys    []string             `json:"keys"`
+	Sent    map[string]time.Time `json:"sent,omitempty"`
+	Repeats map[string]int       `json:"repeats,omitempty"`
 }
 
 func run(args []string, getenv func(string) string, now func() time.Time, out io.Writer, client *http.Client) error {
@@ -88,7 +90,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if err != nil {
 		return err
 	}
-	seen, sent, err := loadState(*statePath)
+	seen, sent, repeats, err := loadState(*statePath)
 	if err != nil {
 		return err
 	}
@@ -143,11 +145,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 
 	at := now()
 	for _, a := range report.Fresh(alerts, nil) {
-		if err := deliver(senders, a, seen, sent, at, *repeat); err != nil {
+		if err := deliver(senders, a, seen, sent, repeats, at, *repeat); err != nil {
 			failures = append(failures, err)
 		}
 	}
-	if err := saveState(*statePath, seen, sent); err != nil {
+	if err := saveState(*statePath, seen, sent, repeats); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
@@ -226,21 +228,22 @@ func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Al
 	}, true, nil
 }
 
-// loadState reads the delivered channel keys and when each was last sent. A
-// key with no send time (a state file written before repeats) is due for its
-// repeat at once, if it repeats.
-func loadState(path string) (seen map[string]bool, sent map[string]time.Time, err error) {
-	seen, sent = map[string]bool{}, map[string]time.Time{}
+// loadState reads the delivered channel keys, when each was last sent and
+// how many repeats each has taken. A key with no send time (a state file
+// written before repeats) is due for its repeat at once, if it repeats; a key
+// with no count has taken no repeat.
+func loadState(path string) (seen map[string]bool, sent map[string]time.Time, repeats map[string]int, err error) {
+	seen, sent, repeats = map[string]bool{}, map[string]time.Time{}, map[string]int{}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return seen, sent, nil
+		return seen, sent, repeats, nil
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("reporter: read state: %w", err)
+		return nil, nil, nil, fmt.Errorf("reporter: read state: %w", err)
 	}
 	var d delivered
 	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, nil, fmt.Errorf("reporter: the state file is unreadable and is not reset, since a reset resends every alert: %w", err)
+		return nil, nil, nil, fmt.Errorf("reporter: the state file is unreadable and is not reset, since a reset resends every alert: %w", err)
 	}
 	for _, k := range d.Keys {
 		seen[k] = true
@@ -248,7 +251,10 @@ func loadState(path string) (seen map[string]bool, sent map[string]time.Time, er
 	for k, at := range d.Sent {
 		sent[k] = at
 	}
-	return seen, sent, nil
+	for k, n := range d.Repeats {
+		repeats[k] = n
+	}
+	return seen, sent, repeats, nil
 }
 
 // syncFile flushes a file to disk; a test replaces it to see a failure.
@@ -258,8 +264,8 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // is on disk before the rename, and the rename before it returns. Without
 // that, a power cut can leave an empty state file, which loadState refuses,
 // and every later run then fails.
-func saveState(path string, seen map[string]bool, sent map[string]time.Time) error {
-	d := delivered{Keys: make([]string, 0, len(seen)), Sent: sent}
+func saveState(path string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
+	d := delivered{Keys: make([]string, 0, len(seen)), Sent: sent, Repeats: repeats}
 	for k := range seen {
 		d.Keys = append(d.Keys, k)
 	}

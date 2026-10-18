@@ -142,6 +142,9 @@ type Gate struct {
 	// order; the classifier applies those inside its window (reconcile).
 	book    *reconcile.Book
 	changes []reconcile.Change
+	// corporateActions is every corporate action recorded as a change, by
+	// envelope ID, so a redelivery is recognised and never counted twice.
+	corporateActions map[string]event.CorporateActionPayload
 }
 
 // saleAttempt is one tag's record of its sale back to 98%, attempted once
@@ -210,7 +213,8 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempts: make(map[string]*saleAttempt), pending: make(map[string]bool),
 		ledger: newSellLedger(), orders: make(map[string]*releasedOrder),
-		fills: make(map[string]event.TargetWeightFillPayload),
+		fills:            make(map[string]event.TargetWeightFillPayload),
+		corporateActions: make(map[string]event.CorporateActionPayload),
 	}, nil
 }
 

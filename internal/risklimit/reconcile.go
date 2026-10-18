@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
@@ -31,7 +32,11 @@ func (g *Gate) SetBook(b reconcile.Book) { g.book = &b }
 // envelope id, as a change a reconciliation's book is bridged by: a
 // dividend's posted cash or a split's new holding (ADRs 0023 and 0024). Any
 // other kind is recorded too, so a reconciliation it falls inside is
-// unverifiable rather than blind to it.
+// unverifiable rather than blind to it. A corporate action is one fact under
+// its envelope ID: a redelivery of the same fact changes nothing, and the ID
+// stating a different one is refused and leaves what was recorded, since a
+// dividend or a split counted twice would explain a difference the broker
+// never made (ADR 0019, "Explained means").
 func (g *Gate) ObserveCorporateAction(id string, p event.CorporateActionPayload) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
@@ -39,8 +44,25 @@ func (g *Gate) ObserveCorporateAction(id string, p event.CorporateActionPayload)
 	if id == "" {
 		return errors.New("risklimit: a corporate action needs its envelope ID")
 	}
+	if seen, ok := g.corporateActions[id]; ok {
+		if sameCorporateAction(seen, p) {
+			return nil
+		}
+		return fmt.Errorf("risklimit: corporate action %s is reused for a different action", id)
+	}
+	g.corporateActions[id] = p
 	g.changes = append(g.changes, reconcile.CorporateActionChange(id, p))
 	return nil
+}
+
+// sameCorporateAction reports whether a and b state the same action: every
+// term equal, and the same effective instant whatever its time zone.
+func sameCorporateAction(a, b event.CorporateActionPayload) bool {
+	if !a.EffectiveAt.Equal(b.EffectiveAt) {
+		return false
+	}
+	a.EffectiveAt, b.EffectiveAt = time.Time{}, time.Time{}
+	return a == b
 }
 
 // Reconcile classifies a recorded account.reconciliation, envelope id,

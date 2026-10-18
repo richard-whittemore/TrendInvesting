@@ -20,7 +20,9 @@ import (
 // sender delivers one alert over one channel.
 type sender interface {
 	name() string
-	send(report.Alert) error
+	// send delivers a; repeat is 0 for the alert's first delivery on this
+	// channel and counts its repeats after that.
+	send(a report.Alert, repeat int) error
 }
 
 // echoOnly marks a sender that shows an alert to whoever is watching the
@@ -103,8 +105,10 @@ func channelKey(channel, alertKey string) string { return channel + "|" + alertK
 // the channel that failed is tried again. The terminal echo shows an alert
 // while any channel still lacks it and never counts. The daily summary skips
 // a channel on a public relay, and is an error when no other delivery channel
-// was named. The error joins every channel failure.
-func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, now time.Time, every time.Duration) error {
+// was named. Each repeat a channel takes is counted in repeats, so the
+// channel can tell a repeat from the first delivery. The error joins every
+// channel failure.
+func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration) error {
 	var pending []sender
 	private := false
 	for _, s := range senders {
@@ -132,7 +136,12 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 	}
 	var failures []error
 	for _, s := range pending {
-		err := s.send(a)
+		key := channelKey(s.name(), a.Key)
+		repeat := 0
+		if seen[key] {
+			repeat = repeats[key] + 1
+		}
+		err := s.send(a, repeat)
 		if _, echo := s.(echoOnly); echo {
 			continue
 		}
@@ -140,9 +149,12 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 			failures = append(failures, fmt.Errorf("%s: %w", s.name(), err))
 			continue
 		}
-		seen[channelKey(s.name(), a.Key)] = true
+		seen[key] = true
 		if a.Repeat {
-			sent[channelKey(s.name(), a.Key)] = now
+			sent[key] = now
+		}
+		if repeat > 0 {
+			repeats[key] = repeat
 		}
 	}
 	return errors.Join(failures...)
@@ -154,7 +166,7 @@ func (stdoutSender) name() string { return "stdout" }
 
 func (stdoutSender) echo() {}
 
-func (s stdoutSender) send(a report.Alert) error {
+func (s stdoutSender) send(a report.Alert, _ int) error {
 	_, err := fmt.Fprintf(s.out, "[%s] %s\n%s\n\n", a.Severity, a.Title, a.Body)
 	return err
 }
@@ -174,7 +186,7 @@ func (n ntfySender) publicRelay() bool { return n.public }
 // send posts the alert's text; through a public relay it posts the alert's
 // public text when it has one, which carries no balance (owner decision
 // 2026-10-17).
-func (n ntfySender) send(a report.Alert) error {
+func (n ntfySender) send(a report.Alert, _ int) error {
 	body := a.Body
 	if n.public && a.PublicBody != "" {
 		body = a.PublicBody
@@ -207,7 +219,11 @@ func (n ntfySender) send(a report.Alert) error {
 // pagerDutySender triggers an incident through the PagerDuty Events API v2
 // (https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pager-duty).
 // The alert key is the dedup key (see dedupKey), so a retried trigger joins
-// the incident it would have opened. The answer is read back: only HTTP 202
+// the incident it would have opened. A repeat carries its ordinal in the dedup
+// key and opens an incident of its own: PagerDuty folds a trigger into an
+// open incident under the same key, and an incident acknowledged on the phone
+// takes no further triggers, while only an acknowledgement recorded in the
+// journal stops the repeats (ADR 0019, ADR 0026). The answer is read back: only HTTP 202
 // with status "success" is an acknowledged delivery, and anything else is a
 // failure. The routing key is the credential and never appears in an error or
 // in output.
@@ -254,13 +270,17 @@ type pagerDutyPayload struct {
 	CustomDetails map[string]string `json:"custom_details"`
 }
 
-func (p pagerDutySender) send(a report.Alert) error {
+func (p pagerDutySender) send(a report.Alert, repeat int) error {
 	severity := "info"
 	if a.Severity == report.Urgent {
 		severity = "critical"
 	}
+	incident := a.Key
+	if repeat > 0 {
+		incident = fmt.Sprintf("%s#repeat-%d", a.Key, repeat)
+	}
 	body, err := json.Marshal(pagerDutyEvent{
-		RoutingKey: p.routingKey, EventAction: "trigger", DedupKey: dedupKey(a.Key),
+		RoutingKey: p.routingKey, EventAction: "trigger", DedupKey: dedupKey(incident),
 		Payload: pagerDutyPayload{Summary: a.Title, Source: a.AccountID, Severity: severity, CustomDetails: map[string]string{"detail": a.Body, "alert_key": a.Key}},
 	})
 	if err != nil {
