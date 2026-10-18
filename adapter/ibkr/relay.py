@@ -30,9 +30,18 @@ open or executed under any client ID, is never sent either: a second order
 with the same tag is unknown to reconciliation. A dry-run release (send
 false) is never sent (ADR 0026 point 3, "Mode").
 
+The relay asks the sender's own check (a sender is an object with check and
+send) before it marks an order, whatever to_request does, so an order the
+sender would refuse is refused before any mark. One the sender refuses for
+good (released for an earlier session, or one that can never be shaped)
+is never marked and stops every exchange; the owner settles it as never
+sent (`resolve ... --never-sent`), a refusal kept with its reason, never a
+cancel of an order at IBKR, which the relay then passes over. The engine
+still holds that order as working: nothing at IBKR will ever report on it.
+
 A person settles a stopped hand-over with the resolve command, never by
 editing the record: `python3 adapter/ibkr/relay.py resolve PENDING_FILE
-CLIENT_ORDER_ID --sent | --resend --reason TEXT`. It writes only a known
+CLIENT_ORDER_ID --sent | --resend | --never-sent --reason TEXT`. It writes only a known
 mark, settles only an order the record marks about to be sent or allowed to
 be sent again (a sent mark is the relay's own proof the sender returned),
 and appends the decision, its
@@ -59,6 +68,12 @@ HandoverRecordInvalid, and the adapter stops before sending.
 An input ID names one input (ADR 0027 section 4): a retry under the ID of
 the input awaiting its reply, with other content, is refused (InputChanged)
 after the saved original is settled, and never replaces it on disk.
+
+The owner acknowledges IBKR's correction of an execution, which stops the
+adapter at every start while IBKR's replay carries it (reports.py), with
+`python3 adapter/ibkr/relay.py acknowledge-correction PENDING_FILE EXEC_ID
+--corrects ORIGINAL_EXEC_ID --reason TEXT`, under the same lock, into a
+sidecar file read strictly at start (PendingInput.acknowledged_corrections).
 """
 import argparse
 import fcntl
@@ -71,11 +86,14 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 RELEASED = "risk.order.released"
-# The write-ahead record holds one of three marks for a client order ID:
-# HANDING_OVER, SENT, or a resend permission "resend:YYYY-MM-DD".
+# The write-ahead record holds one of four marks for a client order ID:
+# HANDING_OVER, SENT, NEVER_SENT, or a resend permission "resend:YYYY-MM-DD".
 HANDING_OVER = "handing-over"
 SENT = "sent"
-MARKS = (HANDING_OVER, SENT)
+# The owner's settlement of an order the sender refused for good: it was
+# never marked, so it never left the process, and it is never sent.
+NEVER_SENT = "never-sent"
+MARKS = (HANDING_OVER, SENT, NEVER_SENT)
 # A person's permission to send an order again, dated with the session it
 # was given in: "resend:YYYY-MM-DD". It is acted on only on that date.
 RESEND = "resend:"
@@ -106,6 +124,10 @@ def _positive_seconds(name, value):
 # The person's decisions on a stopped hand-over.
 DECIDE_SENT = "sent"
 DECIDE_RESEND = "resend"
+DECIDE_NEVER_SENT = "never-sent"
+DECISIONS = (DECIDE_SENT, DECIDE_RESEND, DECIDE_NEVER_SENT)
+# The fields of one acknowledged correction, as acknowledge_correction writes it.
+CORRECTION_FIELDS = ("at", "corrects", "exec_id", "reason")
 
 
 class EngineUnavailable(Exception):
@@ -172,6 +194,7 @@ class PendingInput:
         self.path = path
         self.handover_path = path + ".handover"
         self.decisions_path = path + ".handover.decisions"
+        self.corrections_path = path + ".corrections"
         # Never removed: a lock lives on the file's inode, so deleting it
         # under a live holder would let a second writer lock a new file.
         self.lock_path = path + ".lock"
@@ -237,6 +260,39 @@ class PendingInput:
             os.fsync(f.fileno())
         self._sync_dir()
 
+    def acknowledged_corrections(self):
+        """The owner's acknowledged corrections: each correction's execId to the execId it corrects.
+
+        Read strictly (fail closed, AGENTS.md): a line that is not exactly
+        what acknowledge_correction writes raises HandoverRecordInvalid.
+        """
+        try:
+            with open(self.corrections_path, encoding="utf-8") as f:
+                lines = [line for line in f if line.strip()]
+        except FileNotFoundError:
+            return {}
+        acknowledged = {}
+        for n, line in enumerate(lines, 1):
+            try:
+                entry = json.loads(line)
+            except ValueError as err:
+                raise HandoverRecordInvalid("{} line {} is not JSON: {}".format(self.corrections_path, n, err)) from None
+            if (not isinstance(entry, dict) or tuple(sorted(entry)) != CORRECTION_FIELDS
+                    or not all(isinstance(entry[k], str) and entry[k] for k in CORRECTION_FIELDS)
+                    or acknowledged.get(entry["exec_id"], entry["corrects"]) != entry["corrects"]):
+                raise HandoverRecordInvalid("{} line {} is not an acknowledged correction as "
+                                            "acknowledge-correction writes one".format(self.corrections_path, n))
+            acknowledged[entry["exec_id"]] = entry["corrects"]
+        return acknowledged
+
+    def record_correction(self, entry):
+        """Append one acknowledged correction durably; never removed, as IBKR's execution IDs are never reused."""
+        with open(self.corrections_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self._sync_dir()
+
     def clear(self):
         """Remove the input, then its write-ahead record.
 
@@ -273,14 +329,18 @@ class Relay:
     """Exchanges inputs with the engine and sends each released order once.
 
     connect returns an engine client whose decide(envelope) returns the reply
-    envelope or raises EngineUnavailable. send takes an OrderRequest.
+    envelope or raises EngineUnavailable. sender has check(request), which
+    raises for any request its send would refuse, and send(request); the
+    relay calls check before it marks the order and send after (TypeError at
+    construction for a sender without both).
     broker_orders returns IBKR's open orders and executions
     (orders.BrokerOrders, as orders.collect_broker_orders builds it); an
     open order or execution in either list carrying a released order's client
     order ID means the broker already has that order. to_request maps a
     released order's payload and the session it was released in (its
     input's event time as a New York date, None when that cannot be read)
-    to an OrderRequest. reconnects bounds how often one exchange reconnects and
+    to an OrderRequest; it need refuse nothing the sender's check refuses.
+    reconnects bounds how often one exchange reconnects and
     asks again before EngineUnavailable reaches the caller. today returns
     the session's date (New York), against which a resend permission is
     checked. Each relay takes its own exclusive lock on the pending file at
@@ -293,15 +353,17 @@ class Relay:
     RelayCloseTimeout and keeps the lock, leaving the relay open.
     """
 
-    def __init__(self, connect, send, pending, broker_orders, to_request, reconnects=1, today=None,
+    def __init__(self, connect, sender, pending, broker_orders, to_request, reconnects=1, today=None,
                  close_timeout=CLOSE_TIMEOUT):
         _positive_seconds("close_timeout", close_timeout)
+        if not callable(getattr(sender, "check", None)) or not callable(getattr(sender, "send", None)):
+            raise TypeError("the relay's sender must have check and send: it asks check before every mark")
         self._held = _lock(pending.lock_path)
         if self._held is None:
             raise PendingInUse("{} is held by another adapter or by relay.py resolve".format(pending.path))
         self._today = today or _session_today
         self._connect = connect
-        self._send = send
+        self._sender = sender
         self._pending = pending
         self._broker_orders = broker_orders
         self._to_request = to_request
@@ -364,7 +426,7 @@ class Relay:
         broker = None
         for order in released_orders(reply):
             cid = order["client_order_id"]
-            if cid in self._sent or marks.get(cid) == SENT:
+            if cid in self._sent or marks.get(cid) in (SENT, NEVER_SENT):
                 continue
             if broker is None:
                 broker = _tags(self._broker_orders())
@@ -381,13 +443,15 @@ class Relay:
                         self._require_held()
                         self._pending.mark(cid, HANDING_OVER)
                     raise ResendExpired(cid, allowed_on, today)
-            # Built before the mark: a request that cannot be built never
-            # reaches the sender, so it leaves no mark to stop a restart.
+            # Built and checked by the sender before the mark: a request that
+            # cannot be built, or that the sender would refuse, never reaches
+            # the sender's send, so it leaves no mark to stop a restart.
             request = self._to_request(order, _session_date(envelope))
+            self._sender.check(request)
             with self._step:
                 self._require_held()
                 self._pending.mark(cid, HANDING_OVER)
-                self._send(request)
+                self._sender.send(request)
                 self._require_held()
                 self._pending.mark(cid, SENT)
             self._sent.add(cid)
@@ -454,7 +518,12 @@ def released_orders(reply):
 
 
 def resolve(pending, client_order_id, decision, reason, today=None):
-    """Settle a stopped hand-over: mark it sent, or allow it to be sent again in today's session only.
+    """Settle a stopped hand-over: mark it sent, allow it to be sent again in today's session only, or never sent.
+
+    never-sent settles an order the sender refused for good: the record
+    holds no mark for it (it was never handed over) and an input awaits its
+    reply; any mark, or no input awaiting a reply, refuses it. It is kept as
+    a refusal with its reason, and the relay passes over the order.
 
     Refuses (ResolveRefused, nothing changed) while an adapter holds the
     pending file, an order the record does not hold or does not mark
@@ -470,8 +539,8 @@ def resolve(pending, client_order_id, decision, reason, today=None):
     kept with its UTC time and the session date it was judged against.
     today defaults to today in New York.
     """
-    if decision not in (DECIDE_SENT, DECIDE_RESEND):
-        raise ResolveRefused("decision {!r} is neither {!r} nor {!r}".format(decision, DECIDE_SENT, DECIDE_RESEND))
+    if decision not in DECISIONS:
+        raise ResolveRefused("decision {!r} is not one of {}".format(decision, ", ".join(map(repr, DECISIONS))))
     if not reason or not reason.strip():
         raise ResolveRefused("a reason is required: it is kept with the decision")
     held = _lock(pending.lock_path)
@@ -485,6 +554,19 @@ def resolve(pending, client_order_id, decision, reason, today=None):
 
 def _resolve(pending, client_order_id, decision, reason, today):
     marks = pending.handovers()
+    recorded = {"client_order_id": client_order_id, "decision": decision, "reason": reason,
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "session_date": today.isoformat()}
+    if decision == DECIDE_NEVER_SENT:
+        if pending.load() is None:
+            raise ResolveRefused("no input awaits its reply in {}, so no order is stuck; check the pending "
+                                 "file".format(pending.path))
+        if client_order_id in marks:
+            raise ResolveRefused("order {} is marked {!r}: it was handed over, or settled already, so it may be at "
+                                 "IBKR; settle a stopped hand-over with --sent or --resend after checking "
+                                 "IBKR".format(client_order_id, marks[client_order_id]))
+        pending.record_decision(recorded)
+        pending.mark(client_order_id, NEVER_SENT)
+        return
     if client_order_id not in marks:
         raise ResolveRefused("order {} is not in the hand-over record {}; check the client order ID".format(
             client_order_id, pending.handover_path))
@@ -496,8 +578,6 @@ def _resolve(pending, client_order_id, decision, reason, today):
     if mark != HANDING_OVER and decision == DECIDE_RESEND:
         raise ResolveRefused("order {} is already allowed to be sent again ({!r}); only --sent is accepted, to "
                              "withdraw that permission if IBKR shows the order".format(client_order_id, mark))
-    recorded = {"client_order_id": client_order_id, "decision": decision, "reason": reason,
-                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "session_date": today.isoformat()}
     if decision == DECIDE_RESEND:
         committed = _session_date(pending.load())
         if committed != today:
@@ -511,6 +591,37 @@ def _resolve(pending, client_order_id, decision, reason, today):
     else:
         pending.record_decision(recorded)
         pending.mark(client_order_id, SENT)
+
+
+def acknowledge_correction(pending, exec_id, corrects, reason):
+    """Record the owner's acknowledgement that IBKR's execution exec_id corrects execution corrects.
+
+    Refuses (ResolveRefused, nothing changed) while an adapter holds the
+    pending file, an empty reason, a pair that is not a correction (the same
+    execId base, another last segment: reports.check_acknowledged), and a
+    correction already acknowledged as correcting another execution. The
+    journal then passes over that correction on every start; it is never a
+    fill, so the engine keeps the original's figures and the owner
+    reconciles the difference (ADR 0019).
+    """
+    from reports import check_acknowledged
+    if not reason or not reason.strip():
+        raise ResolveRefused("a reason is required: it is kept with the acknowledgement")
+    try:
+        check_acknowledged({exec_id: corrects})
+    except ValueError as err:
+        raise ResolveRefused(str(err)) from None
+    held = _lock(pending.lock_path)
+    if held is None:
+        raise ResolveRefused("the adapter holds the pending file {}; stop it first".format(pending.path))
+    try:
+        known = pending.acknowledged_corrections().get(exec_id)
+        if known is not None and known != corrects:
+            raise ResolveRefused("execution {} is already acknowledged as a correction of {}".format(exec_id, known))
+        pending.record_correction({"exec_id": exec_id, "corrects": corrects, "reason": reason,
+                                   "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    finally:
+        os.close(held)
 
 
 def _session_date(envelope):
@@ -529,9 +640,11 @@ def _session_date(envelope):
 
 def main(argv=None, today=None):
     """The relay's operator command; returns the process exit status."""
-    parser = argparse.ArgumentParser(prog="relay.py", description="Settle a stopped hand-over (adapter stopped).")
+    parser = argparse.ArgumentParser(prog="relay.py",
+                                     description="The owner's settlements while the adapter is stopped.")
     commands = parser.add_subparsers(dest="command", required=True)
-    cmd = commands.add_parser("resolve", help="mark a stopped hand-over sent, or allow it to be sent again")
+    cmd = commands.add_parser("resolve", help="mark a stopped hand-over sent, allow it to be sent again, or "
+                                              "settle an order the sender refused for good as never sent")
     cmd.add_argument("pending_file", help="the adapter's pending-input file (not the .handover file)")
     cmd.add_argument("client_order_id")
     which = cmd.add_mutually_exclusive_group(required=True)
@@ -539,10 +652,23 @@ def main(argv=None, today=None):
                        help="IBKR shows the order at all (working, filled or cancelled): never send it again")
     which.add_argument("--resend", dest="decision", action="store_const", const=DECIDE_RESEND,
                        help="IBKR has no trace of it and it was committed today: send it again at its original limit")
-    cmd.add_argument("--reason", required=True, help="what IBKR showed; kept with the decision")
+    which.add_argument("--never-sent", dest="decision", action="store_const", const=DECIDE_NEVER_SENT,
+                       help="the sender refused it before any mark and always will: never send it")
+    cmd.add_argument("--reason", required=True, help="what IBKR showed, or why it was refused; kept with the decision")
+    ack = commands.add_parser("acknowledge-correction",
+                              help="acknowledge IBKR's correction of an execution, so the adapter can start again")
+    ack.add_argument("pending_file", help="the adapter's pending-input file")
+    ack.add_argument("exec_id", help="the correction's execution ID")
+    ack.add_argument("--corrects", required=True, help="the execution ID it corrects (the fill the engine holds)")
+    ack.add_argument("--reason", required=True, help="what IBKR's trades show; kept with the acknowledgement")
     args = parser.parse_args(argv)
+    pending = PendingInput(args.pending_file)
     try:
-        resolve(PendingInput(args.pending_file), args.client_order_id, args.decision, args.reason, today=today)
+        if args.command == "acknowledge-correction":
+            acknowledge_correction(pending, args.exec_id, args.corrects, args.reason)
+            print("execution {} acknowledged as a correction of {}".format(args.exec_id, args.corrects))
+            return 0
+        resolve(pending, args.client_order_id, args.decision, args.reason, today=today)
     except (ResolveRefused, HandoverRecordInvalid) as err:
         print("refused: {}".format(err), file=sys.stderr)
         return 1

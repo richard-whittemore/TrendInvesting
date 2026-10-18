@@ -263,3 +263,28 @@ func TestOrderReportsClearsExactlyTheOrdersNotTerminal(t *testing.T) {
 		t.Errorf("a venue report on a cleared order: %v, want it refused as on a terminal order", err)
 	}
 }
+
+// TestAPaperOrderTheAdapterNeverSentIsWorkingUntilTheOwnersClearance is the
+// engine's side of an order the IBKR adapter's sender refused for good and
+// the owner settled as never sent: the adapter journals nothing for it, as
+// paper never records a synthetic terminal report (ADR 0026, point 3,
+// "Mode"), so the release in paper_released.json stays working, which
+// withholds the next rebalance (ADR 0026, point 5), until the owner's
+// clearance naming its rebalance and the order ends it.
+func TestAPaperOrderTheAdapterNeverSentIsWorkingUntilTheOwnersClearance(t *testing.T) {
+	var released event.OrderReleasedPayload
+	readAdapterFile(t, "paper_released.json", &released)
+	r := event.NewOrderReports()
+	r.Release(released)
+	if got := r.Working(); !slices.Equal(got, []string{released.ClientOrderID}) {
+		t.Fatalf("working %v with no venue report, want the release %s", got, released.ClientOrderID)
+	}
+	if err := r.Clear(event.RebalanceClearedPayload{AccountID: released.AccountID, AsOf: time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC),
+		DecisionID: released.Tag, ClientOrderIDs: []string{released.ClientOrderID}, Operator: "owner",
+		Detail: "never sent: refused as stale by the adapter, settled with relay.py resolve --never-sent"}); err != nil {
+		t.Fatalf("the owner's clearance of the never-sent order: %v", err)
+	}
+	if o, _ := r.Order(released.ClientOrderID); !o.Terminal || o.Filled != 0 || len(r.Working()) != 0 {
+		t.Errorf("order %+v, working %v after the clearance; want it ended unfilled and nothing working", o, r.Working())
+	}
+}

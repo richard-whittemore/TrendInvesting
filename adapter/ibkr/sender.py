@@ -67,7 +67,14 @@ class LiveSendingDisabled(Exception):
 
 
 class SendRefused(LiveSendingDisabled):
-    """Paper sending was asked for where it is not bound to a paper configuration and account; nothing is sent."""
+    """A paper send was refused; nothing is sent.
+
+    Either the connection is not bound to a paper configuration and account,
+    or the order cannot go out now: it was released for another session, the
+    login does not manage the account, IBKR has given no order ID, or the
+    client cannot place orders. A subclass of LiveSendingDisabled, so a
+    caller that catches that catches these refusals too.
+    """
 
 
 def _session_today():
@@ -105,6 +112,11 @@ class DryRunSender:
 
     def __init__(self, journal):
         self._journal = journal
+
+    def check(self, request):
+        """Return request if it is well formed, else raise as send would; journals nothing."""
+        validate(request)
+        return request
 
     def send(self, request):
         validate(request)
@@ -147,9 +159,9 @@ class PaperSender:
     def check(self, request):
         """Return request if send would take it now, else raise as send would; sends nothing.
 
-        The relay builds each request through this before it marks the order
-        about to be sent, so an order refused here never left the process and
-        leaves no mark to stop a restart (relay.py). Nothing between this
+        The relay calls this itself before it marks the order about to be
+        sent, whatever its mapper does, so an order refused here never left
+        the process and leaves no mark to stop a restart (relay.py). Nothing between this
         check and the send pumps the connection, so the link's state cannot
         change in between.
         """
@@ -171,8 +183,9 @@ class PaperSender:
         # behind it were made for its own session.
         today = self._today()
         if not _is_date(request.session) or request.session != today:
-            raise SendRefused("order {} was released for the session of {}, not today's ({}); it is not sent: "
-                              "it is never sent, and the adapter stops here for a person (docs/manual/paper-trading.md)".format(
+            raise SendRefused("order {} was released for the session of {}, not today's ({}); it is never sent, "
+                              "and the adapter stops here until a person settles it with relay.py resolve "
+                              "--never-sent (docs/manual/paper-trading.md)".format(
                                   request.client_order_id, request.session, today))
         if not self._conn.api.can_place_orders():
             raise SendRefused("the IBKR client on this connection does not place orders; nothing is sent")

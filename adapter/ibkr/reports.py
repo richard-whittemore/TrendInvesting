@@ -28,7 +28,20 @@ IBKR corrects an execution by reporting it again under an execId with the
 same base (every segment but the last) and a later last segment, without
 withdrawing the original. The engine reads a new fill ID as a new execution,
 so a correction is never journalled as a fill: it raises UnreportableOrder
-and the run stops for a person to reconcile the order (ADR 0019).
+and the run stops for a person to reconcile the order (ADR 0019). IBKR
+replays the day's executions on every start, so the correction would stop
+every restart too; the owner's acknowledgement of it (relay.py
+acknowledge-correction) names the correction and the execution it corrects,
+and a journal given that acknowledgement passes over the correction. It is
+still never journalled: the engine keeps the original fill, and the
+difference is the owner's to reconcile.
+
+A report that would end the order (canceled, invalid) is held while an
+execution of that order still waits for its commission, and journalled
+straight after that execution's fill: the engine reads no fill on an order
+already ended. An order IBKR shows with another side, quantity or limit than
+the one already reported raises UnreportableOrder: IBKR changed a working
+order, and the engine judges each report against the order it released.
 """
 import math
 from datetime import datetime, timezone
@@ -48,6 +61,8 @@ EXECUTION_SIDES = {"BOT": "buy", "SLD": "sell"}
 # ibapi marks an unset price with sys.float_info.max (UNSET_DOUBLE); any
 # figure this large is that marker, never a price or a commission.
 UNSET_FIGURE = Decimal("1.7E308")
+# The ADR 0022 statuses that end an order.
+TERMINAL = ("canceled", "invalid")
 
 
 class UnreportableOrder(Exception):
@@ -74,6 +89,22 @@ def _exec_base(exec_id):
     return base
 
 
+def check_acknowledged(acknowledged):
+    """Refuse (ValueError) an acknowledgement that does not name a correction of the execution it corrects.
+
+    acknowledged maps a correction's execId to the execId it corrects; the
+    two share their base and differ in their last segment.
+    """
+    for corrected, original in dict(acknowledged).items():
+        try:
+            same = corrected != original and _exec_base(corrected) == _exec_base(original)
+        except UnreportableOrder as err:
+            raise ValueError(str(err)) from None
+        if not same:
+            raise ValueError("execution {!r} is not a correction of execution {!r}: a correction keeps the base "
+                             "and changes the last segment".format(corrected, original))
+
+
 def _order_key(order_id):
     """(client ID, IBKR order ID) from a lifecycle record's "order:<clientId>:<orderId>", or None."""
     parts = str(order_id).split(":")
@@ -97,22 +128,29 @@ class OrderReportJournal:
     changes, not for every orderStatus IBKR repeats. A fill is journalled
     when its commission arrives, which IBKR sends after the execution; an
     execution still without one commission_wait seconds after it arrived
-    raises UnreportableOrder, from check_overdue (which the adapter's loop
-    calls after each pump) or the next record, so a fill IBKR made is never
-    silently left unrecorded. now returns the adapter's receipt time, with
-    its zone.
+    raises UnreportableOrder from check_overdue, so a fill IBKR made is never
+    silently left unrecorded. Invariant for the caller: the loop that pumps
+    the connection must call check_overdue after each pump; until it does,
+    the check runs only when the next record arrives (on_record runs it after
+    a commission report and before any other record, so the report that
+    completes a waiting execution is never refused). now returns the
+    adapter's receipt time, with its zone.
 
     journalled holds the records already written for the engine (the
     durable journal, read back on a restart), so IBKR's replay of each
     working order's status and each execution with its commission, which it
     sends on every read after a reconnect, writes nothing twice.
+    acknowledged maps each correction the owner acknowledged to the execId
+    it corrects (check_acknowledged; ValueError otherwise).
     """
 
-    def __init__(self, account_id, client_id, sink, now, commission_wait, journalled=()):
+    def __init__(self, account_id, client_id, sink, now, commission_wait, journalled=(), acknowledged=None):
         if (isinstance(commission_wait, bool) or not isinstance(commission_wait, (int, float))
                 or not math.isfinite(commission_wait) or commission_wait <= 0):
             raise ValueError("commission_wait must be a positive number of seconds, not {!r}".format(
                 commission_wait))
+        check_acknowledged(acknowledged or {})
+        self._acknowledged = dict(acknowledged or {})
         self.account_id = account_id
         self.client_id = client_id
         self._sink = sink
@@ -126,6 +164,12 @@ class OrderReportJournal:
         # Each execution seen, journalled or awaiting its commission, by its
         # execId base: the full execId it was first reported under.
         self._seen = {}
+        # Each order as last reported to the engine: (client order ID,
+        # instrument, side, quantity, limit).
+        self._described = {}
+        # A report ending an order, held until the order's waiting
+        # executions are journalled: order key to (record, status).
+        self._held = {}
         for record in journalled:
             self._seed(record)
 
@@ -137,6 +181,8 @@ class OrderReportJournal:
             key = _order_key(payload.get("order_id"))
             if key is not None:
                 self._status[key] = payload.get("status")
+                self._described[key] = (payload.get("client_order_id"), payload.get("instrument_id"),
+                                        payload.get("side"), payload.get("quantity"), payload.get("limit_price"))
         elif record.event_type == FILL_TYPE:
             self._seen[_exec_base(payload["fill_id"])] = payload["fill_id"]
 
@@ -157,6 +203,10 @@ class OrderReportJournal:
         self._requests[(record.client_id, record.broker_order_id)] = record.request
 
     def on_record(self, record):
+        if isinstance(record, CommissionReport):
+            self._on_commission(record)
+            self.check_overdue()
+            return
         self.check_overdue()
         if isinstance(record, OpenOrderRecord):
             self._on_open_order(record)
@@ -164,21 +214,28 @@ class OrderReportJournal:
             self._on_status(record)
         elif isinstance(record, ExecutionReport):
             self._on_execution(record)
-        elif isinstance(record, CommissionReport):
-            self._on_commission(record)
 
     def _ours(self, client_id, client_order_id):
         return client_id == self.client_id and bool(client_order_id)
 
     def _on_open_order(self, record):
         if record.account_id == self.account_id and self._ours(record.client_id, record.client_order_id):
-            self._orders[(record.client_id, record.broker_order_id)] = record
+            key = (record.client_id, record.broker_order_id)
+            described = self._described.get(key)
+            if described is not None and described != _figures(record):
+                raise UnreportableOrder(
+                    "IBKR shows order {} as {}, not as already reported to the engine ({}): a changed order is "
+                    "not reported; check the order in IBKR (docs/manual/paper-trading.md)".format(
+                        record.client_order_id, _figures(record), described))
+            self._orders[key] = record
 
     def _on_status(self, report):
         key = (report.client_id, report.broker_order_id)
         if report.client_id != self.client_id or report.lifecycle is None:
             return
         if self._status.get(key) == report.lifecycle:
+            return
+        if key in self._held and self._held[key][1] == report.lifecycle:
             return
         held = self._orders.get(key)
         request = self._requests.get(key)
@@ -194,7 +251,7 @@ class OrderReportJournal:
                                                                      report.lifecycle))
         if limit is None or limit <= 0 or action not in SIDES:
             raise UnreportableOrder("order {} is not a buy or sell limit order".format(client_order_id))
-        self._sink(Record(LIFECYCLE_TYPE, LIFECYCLE_VERSION, {
+        record = Record(LIFECYCLE_TYPE, LIFECYCLE_VERSION, {
             "account_id": self.account_id,
             "client_order_id": client_order_id,
             "order_id": "order:{}:{}".format(report.client_id, report.broker_order_id),
@@ -205,8 +262,18 @@ class OrderReportJournal:
             "limit_price": float(limit),
             "occurred_at": _stamp(self._now(), "receipt time"),
             "message": report.reason or "",
-        }))
+        })
+        self._described[key] = (client_order_id, symbol, SIDES[action], _whole(quantity, "order quantity"),
+                                float(limit))
+        if report.lifecycle in TERMINAL and self._waiting(key):
+            self._held[key] = (record, report.lifecycle)
+            return
+        self._sink(record)
         self._status[key] = report.lifecycle
+
+    def _waiting(self, key):
+        """Whether an execution of the order key names still waits for its commission."""
+        return any((r.client_id, r.broker_order_id) == key for r, _ in self._executions.values())
 
     def _on_execution(self, report):
         if report.account_id != self.account_id or not self._ours(report.client_id, report.client_order_id):
@@ -218,6 +285,16 @@ class OrderReportJournal:
         first = self._seen.get(base)
         if first == report.exec_id:
             # IBKR's replay of an execution already seen.
+            return
+        acknowledged = self._acknowledged.get(report.exec_id)
+        if acknowledged is not None:
+            if first != acknowledged:
+                raise UnreportableOrder(
+                    "IBKR reported execution {}, acknowledged as a correction of execution {}, but the execution "
+                    "first reported under its base is {}: check the order's trades in IBKR "
+                    "(docs/manual/paper-trading.md)".format(report.exec_id, acknowledged, first))
+            # The owner acknowledged this correction; the engine keeps the
+            # original fill.
             return
         if first is not None:
             raise UnreportableOrder(
@@ -262,3 +339,16 @@ class OrderReportJournal:
             "filled_at": _stamp(report.occurred_at, "execution time"),
         }))
         del self._executions[commission.exec_id]
+        key = (report.client_id, report.broker_order_id)
+        if key in self._held and not self._waiting(key):
+            record, lifecycle = self._held.pop(key)
+            self._sink(record)
+            self._status[key] = lifecycle
+
+
+def _figures(record):
+    """An OpenOrderRecord's (client order ID, instrument, side, quantity, limit), as a lifecycle report states them."""
+    quantity, limit = record.quantity, record.limit_price
+    whole = int(quantity) if quantity == quantity.to_integral_value() else quantity
+    return (record.client_order_id, record.symbol, SIDES.get(record.action), whole,
+            float(limit) if limit is not None else None)

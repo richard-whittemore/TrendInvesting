@@ -41,6 +41,26 @@ class ConfigTests(unittest.TestCase):
             AdapterConfig.from_mapping(values)
         self.assertIn("commission_wait", str(caught.exception))
 
+    def test_the_contract_map_is_configuration_read_strictly(self):
+        # The engine's instrument ID to IBKR's contract ID: the only way the
+        # adapter names a contract, so it is required and read strictly.
+        self.assertEqual(dict(config(con_ids={"SPY": 756733}).con_ids), {"SPY": 756733})
+        values = config()._asdict()
+        del values["con_ids"]
+        with self.assertRaises(ConfigError) as caught:
+            AdapterConfig.from_mapping(values)
+        self.assertIn("con_ids", str(caught.exception))
+        for bad in (["SPY", 756733], {"SPY": 0}, {"SPY": -1}, {"SPY": True}, {"SPY": "756733"}, {"SPY": 7.5},
+                    {"": 756733}, {7: 756733}):
+            with self.subTest(con_ids=bad), self.assertRaises(ConfigError):
+                config(con_ids=bad)
+        source = {"SPY": 756733}
+        c = config(con_ids=source)
+        source["SPY"] = 1
+        self.assertEqual(c.con_ids["SPY"], 756733, "the configuration keeps its own copy")
+        with self.assertRaises(TypeError):
+            c.con_ids["QQQ"] = 320227571
+
     def test_client_id_zero_is_refused(self):
         with self.assertRaises(ConfigError):
             config(client_id=0)

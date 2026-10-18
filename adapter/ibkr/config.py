@@ -1,6 +1,8 @@
 """The IBKR adapter's connection configuration (ADR 0025; ADR 0026 point 8)."""
 import math
 from collections import namedtuple
+from collections.abc import Mapping
+from types import MappingProxyType
 
 MODES = ("dry-run", "paper", "live")
 # Every IBKR paper trading account ID begins "DU", and no live one does
@@ -12,6 +14,7 @@ _FIELDS = (
     "connect_timeout", "request_timeout",
     "heartbeat_interval", "heartbeat_timeout", "restore_timeout",
     "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
+    "con_ids",
 )
 
 # Any key containing one of these is refused outright. The adapter never
@@ -34,7 +37,10 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     waiting for Gateway's own restoration and reconnects. commission_wait
     is how long an execution may wait for IBKR's commission report, without
     which its fill cannot be recorded, before the adapter stops for a
-    person (reports.OrderReportJournal).
+    person (reports.OrderReportJournal). con_ids is the contract map: the
+    engine's instrument ID to IBKR's contract ID (conId), the only way the
+    adapter names a contract (sender.release_to_request), never a lookup by
+    name; it is kept as a read-only copy.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -56,7 +62,9 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
         missing = [f for f in _FIELDS if f not in values]
         if missing:
             raise ConfigError("missing required keys: {}".format(", ".join(missing)))
-        cfg = cls(**{f: values[f] for f in _FIELDS})
+        fields = {f: values[f] for f in _FIELDS}
+        fields["con_ids"] = _contract_map(values["con_ids"])
+        cfg = cls(**fields)
         cfg._validate()
         return cfg
 
@@ -94,6 +102,20 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("backoff_max must be at least backoff_initial")
         if not _is_int(self.max_connect_attempts) or self.max_connect_attempts < 1:
             raise ConfigError("max_connect_attempts must be a positive integer")
+
+
+def _contract_map(value):
+    """value as a read-only map from instrument ID to IBKR's positive contract ID, else ConfigError."""
+    if not isinstance(value, Mapping):
+        raise ConfigError("con_ids must be an object from instrument ID to IBKR contract ID")
+    for instrument, con_id in value.items():
+        if not isinstance(instrument, str) or not instrument:
+            raise ConfigError("con_ids names instrument {!r}; an instrument ID is a non-empty string".format(
+                instrument))
+        if not _is_int(con_id) or con_id < 1:
+            raise ConfigError("con_ids gives {!r} contract ID {!r}; IBKR's contract ID is a positive "
+                              "integer".format(instrument, con_id))
+    return MappingProxyType(dict(value))
 
 
 def is_paper_account(account_id):
