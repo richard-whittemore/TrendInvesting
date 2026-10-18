@@ -46,7 +46,14 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     keeps one lot short (ADR 0026, point 2, "D7-L", amended 2026-10-18),
 //     are of this version too; the figures are omitted when unset, so a
 //     decision with no such name has the bytes it had before.
-const TargetsDecidedSchemaVersion uint32 = 5
+//   - Version 6 records why a Boost decision re-plans (ADR 0026, point 2,
+//     "Boost", amended 2026-10-18): BoostFigures.Replan, the cause, refused,
+//     part-filled or unfilled, with such an order's client order ID and its
+//     filled and released shares, omitted when the decision entered with no
+//     re-plan pending; and BoostFigures.GapSessions, the sessions with no
+//     bar the decision's readings span (ADR 0026, point 5, amended
+//     2026-10-18), omitted when empty.
+const TargetsDecidedSchemaVersion uint32 = 6
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -57,7 +64,8 @@ const (
 // The closed set of reasons a decision is withheld (ADR 0026, points 1 and 5).
 const (
 	// WithheldMissingBars: a session closed without the instrument's bar.
-	// Boost never computes RSI across a gap (plan.md section 2, "Boost").
+	// Boost skips the session and its next bar continues the indicators
+	// (ADR 0026, point 5, amended 2026-10-18).
 	WithheldMissingBars = "missing-bars"
 	// WithheldStaleAccountSnapshot: no account snapshot as of the session's
 	// close, so nothing can be valued at the previous close (ADR 0020).
@@ -155,6 +163,104 @@ type BoostFigures struct {
 	// last decision with the target in force (ADR 0026, point 5). Omitted
 	// when unset.
 	ReplanPending bool `json:"replan_pending,omitempty"`
+	// Replan is the cause of the re-plan this decision planned, or, on a
+	// withheld decision, of the one still pending after it (ADR 0026, point
+	// 2, "Boost", amended 2026-10-18). Omitted when the decision entered with
+	// none pending.
+	Replan BoostReplan `json:"replan,omitzero"`
+	// GapSessions are the sessions, YYYY-MM-DD and ascending, that closed
+	// with no bar since the last bar the indicators read before this
+	// decision's: the gap this decision's readings span (ADR 0026, point 5,
+	// amended 2026-10-18). Omitted when empty.
+	GapSessions []string `json:"gap_sessions,omitempty"`
+}
+
+// IsZero reports whether b is empty, as a momentum decision's Boost figures
+// are; encoding/json's omitzero reads it.
+func (b BoostFigures) IsZero() bool {
+	return b.InstrumentID == "" && b.Close == 0 && b.RSI == 0 && !b.RSIReady && b.TrendMean == 0 && !b.TrendMeanReady &&
+		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
+		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0
+}
+
+// validateGaps checks the gap sessions against the decided session's date:
+// dates, strictly ascending, each before it.
+func (b BoostFigures) validateGaps(session time.Time) []error {
+	var errs []error
+	day := session.UTC().Format(time.DateOnly)
+	for i, s := range b.GapSessions {
+		switch _, err := time.Parse(time.DateOnly, s); {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("boost gap session %q is not a YYYY-MM-DD date", s))
+		case i > 0 && s <= b.GapSessions[i-1]:
+			errs = append(errs, fmt.Errorf("boost gap sessions must be strictly ascending; %s follows %s", s, b.GapSessions[i-1]))
+		case s >= day:
+			errs = append(errs, fmt.Errorf("boost gap session %s is not before the session %s whose bar the decision read", s, day))
+		}
+	}
+	return errs
+}
+
+// The closed set of causes of a Boost re-plan (ADR 0026, point 2, "Boost",
+// amended 2026-10-18).
+const (
+	// ReplanCauseRefused: the last planned order was refused and the refusal
+	// left the engine Normal.
+	ReplanCauseRefused = "refused"
+	// ReplanCausePartFilled: the last planned order reached a terminal state
+	// with fewer shares filled than released and more than none.
+	ReplanCausePartFilled = "part-filled"
+	// ReplanCauseUnfilled: the last planned order reached a terminal state
+	// with nothing filled.
+	ReplanCauseUnfilled = "unfilled"
+)
+
+// BoostReplan is why a Boost decision plans the difference to the target in
+// force though the target has not changed: the cause and, for an order that
+// ended part-filled or unfilled, its client order ID and its filled and
+// released shares.
+type BoostReplan struct {
+	Cause         string `json:"cause"`
+	ClientOrderID string `json:"client_order_id,omitempty"`
+	Filled        int64  `json:"filled,omitempty"`
+	Released      int64  `json:"released,omitempty"`
+}
+
+func (r BoostReplan) validate() []error {
+	switch r.Cause {
+	case "":
+		if r != (BoostReplan{}) {
+			return []error{errors.New("boost re-plan figures need a re-plan cause")}
+		}
+	case ReplanCauseRefused:
+		if r.ClientOrderID != "" || r.Filled != 0 || r.Released != 0 {
+			return []error{errors.New("a boost re-plan after a refusal names no order or shares")}
+		}
+	case ReplanCausePartFilled:
+		var errs []error
+		if r.ClientOrderID == "" {
+			errs = append(errs, errors.New("a part-fill re-plan names its order"))
+		}
+		if r.Filled <= 0 || r.Filled >= r.Released {
+			errs = append(errs, fmt.Errorf("a part-fill re-plan has filled shares between none and the %d released; got %d", r.Released, r.Filled))
+		}
+		return errs
+	case ReplanCauseUnfilled:
+		var errs []error
+		if r.ClientOrderID == "" {
+			errs = append(errs, errors.New("an unfilled re-plan names its order"))
+		}
+		if r.Filled != 0 {
+			errs = append(errs, fmt.Errorf("an unfilled re-plan has no filled shares; got %d", r.Filled))
+		}
+		if r.Released <= 0 {
+			errs = append(errs, errors.New("an unfilled re-plan names the shares released"))
+		}
+		return errs
+	default:
+		return []error{fmt.Errorf("boost re-plan cause %q is not refused, part-filled or unfilled", r.Cause)}
+	}
+	return nil
 }
 
 // TargetsDecidedPayload is one account's target decision.
@@ -296,6 +402,7 @@ func (p TargetsDecidedPayload) Validate() error {
 	switch p.StrategyID {
 	case TargetWeightStrategyBoost:
 		errs = append(errs, p.Boost.validate()...)
+		errs = append(errs, p.Boost.validateGaps(p.SessionPeriodEnd)...)
 		if !p.Momentum.isZero() {
 			errs = append(errs, errors.New("a boost decision carries no momentum figures"))
 		}
@@ -305,7 +412,7 @@ func (p TargetsDecidedPayload) Validate() error {
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
 		errs = append(errs, p.Glide.validate(p.Momentum.CloseSession)...)
-		if p.Boost != (BoostFigures{}) {
+		if !p.Boost.IsZero() {
 			errs = append(errs, errors.New("a momentum decision carries no boost figures"))
 		}
 	default:
@@ -598,7 +705,7 @@ func (b BoostFigures) validate() []error {
 	case !b.TargetInForceSet && b.TargetInForce != 0:
 		errs = append(errs, errors.New("boost target in force carries a value but none is set"))
 	}
-	return errs
+	return append(errs, b.Replan.validate()...)
 }
 
 // OrderPlannedEventType identifies one order the strategy-independent planner

@@ -455,11 +455,19 @@ func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPaylo
 		// person fixes before the next decision (ADR 0026, points 5 and 8).
 		severity = Urgent
 	}
+	body := fmt.Sprintf("No targets were decided for the session ending %s: %s. %s. Held positions and orders are unchanged.", p.SessionPeriodEnd.UTC().Format(time.DateOnly), p.WithheldReason, p.Detail)
+	if p.StrategyID == event.TargetWeightStrategyBoost && p.WithheldReason == event.WithheldMissingBars {
+		// A Boost gap is skipped, not a stop: the run decides again at the
+		// next bar (ADR 0026, point 5, amended 2026-10-18), so the one page
+		// for the gap says so.
+		body = fmt.Sprintf("%s had no bar for the session ending %s, the first of this gap. Boost skipped that session as a data failure and traded nothing; it decides again at the next session with a bar, computing RSI(2) and both means over the closes it has (the missing close is not filled in). Held positions and orders are unchanged. Check the daily data job.",
+			p.Boost.InstrumentID, p.SessionPeriodEnd.UTC().Format(time.DateOnly))
+	}
 	return Alert{
 		Key:  fmt.Sprintf("%s:%s:%s", kind, p.WithheldReason, start.UTC().Format(time.RFC3339)) + "@" + account,
 		Kind: kind, Severity: severity, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: decision withheld (%s)", account, p.WithheldReason),
-		Body:  fmt.Sprintf("No targets were decided for the session ending %s: %s. %s. Held positions and orders are unchanged.", p.SessionPeriodEnd.UTC().Format(time.DateOnly), p.WithheldReason, p.Detail),
+		Body:  body,
 	}
 }
 

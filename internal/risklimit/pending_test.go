@@ -955,3 +955,21 @@ func TestAListedBuyIsNoUnknownSell(t *testing.T) {
 		t.Errorf("working sells %d, want 0", got)
 	}
 }
+
+// TestFilledCountsEachExecutionOnce: the shares a released order's fill
+// reports executed, a redelivered execution counted once, and none for an
+// order the gate never released.
+func TestFilledCountsEachExecutionOnce(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	sellFill(t, g, "tw-sell", "f1", 10, 1)
+	sellFill(t, g, "tw-sell", "f1", 10, 1)
+	sellFill(t, g, "tw-sell", "f2", 5, 2)
+	if got := g.Filled("tw-sell"); got != 15 {
+		t.Errorf("Filled = %d, want 15", got)
+	}
+	if got := g.Filled("tw-unknown"); got != 0 {
+		t.Errorf("Filled of an order never released = %d, want 0", got)
+	}
+}

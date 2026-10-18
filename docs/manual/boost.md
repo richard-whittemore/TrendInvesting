@@ -33,6 +33,9 @@ and updates three readings:
   included. A close above it means the long trend is up.
 - **The 5-day average**: the mean of the last 5 closes, today's included.
 
+"The last 200 closes" means the last 200 the engine received. A session
+with no SPY bar is skipped, not filled in ([below](#a-session-with-no-spy-bar)).
+
 Then it decides whether the boost is on. This on/off state is called the
 **latch**.
 
@@ -94,7 +97,7 @@ order a session:
 Then the order goes through the hard limits (the risk gate) before
 anything can be sent ([states-and-kill-switch](states-and-kill-switch.md)).
 
-## A refused order is planned again (re-plan)
+## A refused or unfilled order is planned again (re-plan)
 
 Normally Boost orders only when its target changes. But if the gate refuses
 the order **and the account stays Normal** (the kill switch was on, or
@@ -105,12 +108,52 @@ decision of 2026-10-18; ADR 0026, amendment of that date; rules version
 1.16.0). So a buy the kill switch refused goes at the first decided close
 after you release the switch.
 
+The same happens when the order **ends with shares unfilled**: the DAY
+order expires, or IBKR cancels it, having filled only part (`part-filled`)
+or nothing (`unfilled`). The next session that decides plans the rest of
+the difference to the target in force, from the account as it then stands
+(rules version 1.18.0; ADR 0026, amendment of 2026-10-18). The part-filled
+case is the owner's decision of 2026-10-18; the nothing-filled case extends
+it and is put to the owner for confirmation. An order filled in full plans
+nothing more. The program checks at each close, so a fill IBKR reports a
+little after the cancellation still counts.
+
+One exception: if a later decision has already planned a new order (because
+the target changed), an expiry reported after it plans nothing. That new
+order was sized from the account as it stood, so planning again would trade
+drift, or buy twice while the new buy is still working.
+
 A refusal that moves the account to Degraded or Halted does **not** set up a
 re-plan: those states follow their own rules, and the way out is a fresh
 run you approve, whose first decision plans to the target from scratch.
 
 Each decision records whether a re-plan is pending after it
-(`replan_pending`), so a run restarted from that decision picks it up.
+(`replan_pending`), so a run restarted from that decision picks it up. A
+decision that re-plans, or is withheld while one is pending, also records
+why (`replan`): `refused`, or `part-filled` or `unfilled` with the order's
+client order ID and its filled and released shares.
+
+## A session with no SPY bar
+
+If a session closes without SPY's bar (the data job failed, or the vendor
+sent a bad bar that was dropped), that session is **withheld**
+(`missing-bars`) and nothing is traded. The latch does not move. The
+session is **skipped**: at the next session with a bar, RSI(2) and both
+averages carry on over the closes the engine has, as if the missing session
+had not been in the series, and that decision lists the missing sessions
+(`gap_sessions`). From there the run decides as normal, so a gap never
+blocks Boost's exit (owner's decision of 2026-10-18; ADR 0026, point 5,
+amendment of that date; rules version 1.18.0).
+
+This is **not** what the QuantConnect backtest would do. Its engine fills a
+missing daily bar forward: it repeats the previous close, feeds that to the
+readings and decides on it, as if SPY had not moved. That is a made-up
+price, so live trading skips the session instead. The backtest's SPY data
+has no missing sessions, so the two never differed in the recorded runs.
+
+You get one urgent page for the gap, however many sessions in a row are
+missing ([alerts](alerts-and-dashboard.md)). Find why the bar was missing;
+the run carries on by itself.
 
 ## Before the first decision: the warm-up
 
@@ -171,8 +214,9 @@ In dry-run, step 5 never sends (every order says `send: false`); see the
 
 Each decided or withheld session writes one `strategy.targets.decided`
 record. For Boost it carries the close, RSI(2), both averages (and whether
-each was ready), the latch before and after, the target in force and
-whether a re-plan is pending. An order adds `strategy.order.planned`, then
+each was ready), the latch before and after, the target in force,
+whether a re-plan is pending and why (`replan`), and any sessions with no
+bar since the last close it read (`gap_sessions`). An order adds `strategy.order.planned`, then
 `risk.order.released` or `risk.order.refused`. `journal-query orders` and
 `journal-query refusals` list them ([journal-query](journal-query.md)).
 
@@ -180,13 +224,13 @@ whether a re-plan is pending. An order adds `strategy.order.planned`, then
 
 | What happens | What the program does | What you do |
 | --- | --- | --- |
-| A session closes with no SPY bar | That session is withheld (`missing-bars`), and so is **every later session of the run**: the readings are never computed across a gap (plan section 2, "Boost"). The latch is not recomputed. | Find why the bar was missing. The run cannot recover by itself: stop it and start a new run (a fresh `TI_RUN`, its own warm-up and your approval: `docs/runbooks/durable-log.md`). |
+| A session closes with no SPY bar | That session is withheld (`missing-bars`) and nothing trades; the session is skipped and the next session with a bar decides as normal, its readings over the closes received, naming the gap (`gap_sessions`). One page per gap. | Find why the bar was missing (`ti-data`'s log, [market data](market-data.md)). Nothing else: the run recovers by itself. |
 | No account snapshot as of the close, or one taken after it | The session is withheld (`stale-account-snapshot`). The latch still advances, as the backtest's does; a change of target withheld one session is ordered at the next that decides. | Check the adapter and the Gateway (`docs/runbooks/gateway-login.md`). |
 | No mark at or after the close, or the previous close is more than 5% from the mark | A buy is refused (`missing-mark` or `price-band`) and the account goes Degraded on SPY. A risk-reducing sell is not checked against the mark. | `docs/runbooks/halted-account.md`. |
 | The kill switch is on | Every order is refused except the sale back to 98%; the account stays Normal; the order is re-planned at the first decided close after you release the switch. | Nothing more, once released. Check it with `journal-query orders`. |
 | IBKR's latest snapshot is too old when a sell is checked | The sell is refused (`stale-broker-snapshot`), no state change, one urgent alert per outage, re-planned at the next decision. | Check the Gateway. |
 | The exit is refused because the account is Halted, Degraded on SPY or under the kill switch | The one sale back to 98% goes instead ([states-and-kill-switch](states-and-kill-switch.md#the-one-sale-back-to-98)). | Follow the alert; do not sell by hand while that sale is working. |
-| The DAY order expires, or IBKR cancels it, with part or all unfilled | The cancellation is recorded and ends the order. Boost does **not** order the rest by itself: it plans again only when the target changes, or after a refusal. The account stays off its target until then. | Decide whether to buy or sell the rest by hand (engage the kill switch first, so nothing of the program's is working against yours), or wait for the next change of target. A fresh run would plan to the target from scratch. |
+| The DAY order expires, or IBKR cancels it, with part or all unfilled | The cancellation is recorded and ends the order. The next session that decides plans the rest of the difference to the target (`replan` cause `part-filled` or `unfilled`), unless a newer order already replaced it. | Nothing, normally. Do not buy or sell the rest by hand as well: the program will. If you must, engage the kill switch first. |
 | An order is never sent (the adapter refused it for good and you settled it `--never-sent`) | The order stays released in the log. A never-sent **sell** keeps counting as being sold, so every later exit in the run is smaller, or nothing, as in dry-run. A never-sent **buy** is not re-planned (the target in force has not changed). | After settling it, reconcile and start a fresh run you approve: its first decision plans to the target from scratch ([IBKR adapter](ibkr-adapter.md)). |
 | The engine crashes while the boost is on | Resumed from its log, it carries on in the same latch, neither entering nor exiting by mistake (`TestARestartWhileBoostedNeitherEntersNorExits`). | Resume it (`docs/runbooks/durable-log.md`). |
 | A fresh run after a stop | The approval states the latch in force; the engine refuses an approval whose latch is not the one the previous log ended with. | `operator approve` reads it for you ([operator](operator.md)). |
@@ -196,7 +240,8 @@ whether a re-plan is pending. An order adds `strategy.order.planned`, then
 - Plan section 2, "Boost"; plan decision D3; ADR 0026, point 2, "Boost",
   "Order type and price" and "Order identity", point 3 (the limits), point 4
   (risk-reducing), point 5 (state from the record), and its amendment of
-  2026-10-18 (re-plan after a refusal); ADR 0019 (the sale back to 98%).
+  2026-10-18 (re-plan after a refusal) and its amendment of 2026-10-18
+  (a session with no SPY bar; an order that ends unfilled); ADR 0019 (the sale back to 98%).
 - Parity: Go's RSI(2), both averages, the latch and the target matched
   QuantConnect on every one of 7,166 sessions, within the thresholds in
   [parity](parity.md) (`docs/research/parity-2026-10.md`).
@@ -222,7 +267,18 @@ whether a re-plan is pending. An order adds `strategy.order.planned`, then
   `TestAnExitIsNetOfSellsAlreadyWorking`.
 - Tests of the run, in `internal/targetweight`:
   `TestBoostRunDecidesEnterAndExit`,
-  `TestAMissingBarWithholdsAndNeverComputesAcrossTheGap`,
+  `TestAMissingBarIsSkippedAndBoostDecidesAcrossTheGap`,
+  `TestAGapWhileBoostedNeverBlocksTheExit`,
+  `TestAGapRunIsByteIdenticalReplaysAndRestarts`,
+  `TestSyntheticGoldenBoostGap` (a hand-computed case, since QuantConnect's
+  logs hold no missing session),
+  `TestAPartFilledOrderIsReplannedAtTheNextDecision`,
+  `TestAnExpiredUnfilledOrderIsReplannedInFull`,
+  `TestAFullyFilledOrderIsNotReplanned`,
+  `TestAWithheldSessionKeepsThePartFillReplan`,
+  `TestALaterOrderSupersedesAPartFill`,
+  `TestARunRecoveredFromAPendingPartFillReplansIt`,
+  `TestAPartFillRunIsByteIdenticalAndReplays`,
   `TestAStaleSnapshotWithholdsButTheLatchAdvances`,
   `TestAMissingMarkRefusesAndDegrades`,
   `TestARestartWhileBoostedNeitherEntersNorExits`,

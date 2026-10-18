@@ -118,7 +118,24 @@ import (
 //     in docs/research/d7l-held-name-2026-10.md (ADR 0026, point 2, "D7-L",
 //     amended 2026-10-18). A journal holding such a name decides
 //     differently under 1.16.0.
-const RulesVersion = "1.17.0"
+//   - 1.18.0 has Boost re-plan, at the next decided session, the remaining
+//     difference to the target in force after its last order ends
+//     part-filled (canceled or expired with fewer shares filled than
+//     released and more than none), as after a refusal, where 1.17.0 left
+//     the account short until the target changed; an order that ends with
+//     nothing filled is re-planned in full the same way. Each decision records the
+//     cause of the re-plan it planned or carries (refused, part-filled or
+//     unfilled,
+//     with the order and its filled and released shares; targets.decided
+//     schema version 6). A later decision's order supersedes a part-fill
+//     reported after it. A session with no bar is withheld and skipped: the
+//     indicators continue at the next bar over the closes received, and that
+//     decision names the gap (gap_sessions), where 1.17.0 withheld every
+//     later session. Neither copies LEAN, which fills a missing bar forward.
+//     The owner's decisions of 2026-10-18 (ADR 0026, point 2, "Boost", and
+//     point 5, amended 2026-10-18). A journal holding such an order or gap
+//     decides differently under 1.17.0.
+const RulesVersion = "1.18.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -188,8 +205,9 @@ type Options struct {
 // # Fail-closed rules
 //
 // A session that closes without the instrument's bar withholds
-// (missing-bars), and so does every later session: the indicators would span
-// the gap (plan.md section 2, "Boost"). A session with no snapshot as of its
+// (missing-bars) and is skipped: the indicators continue at the next bar
+// over the closes received, and the decision that reads it names the gap
+// (ADR 0026, point 5, amended 2026-10-18). A session with no snapshot as of its
 // close, or only one taken after it, withholds (stale-account-snapshot):
 // orders are valued at the previous close (ADR 0026, point 2). But the latch still advances, as
 // the research's sig does on every bar (template.py:89-94); the target in
@@ -220,8 +238,20 @@ type Handler struct {
 	// target in force again (orderplan.BoostInput.Replan). Every decision
 	// records it as it stands after that decision (BoostFigures.ReplanPending),
 	// so a restart from the decision recovers it.
-	replan     bool
-	gapAt      time.Time
+	replan bool
+	// replanCause is why replan is set: a refusal, or the last planned
+	// order's part-fill (BoostFigures.Replan).
+	replanCause event.BoostReplan
+	// lastOrder is the client order ID of the order the latest decided
+	// session released, until it reaches a terminal state; lastEnded is set
+	// once the venue reports it canceled or invalid. A later decision's order
+	// supersedes it, since that order was sized from the account as it stood.
+	lastOrder string
+	lastEnded bool
+	// gap lists the sessions, YYYY-MM-DD, that closed with no bar since the
+	// last bar the indicators read; the next decision that reads one
+	// records it (BoostFigures.GapSessions).
+	gap        []string
 	lastPeriod time.Time // last session closed
 	bar        *event.CompletedBarAdjustedPayload
 	base       string // the adjusted view's base, fixed by the first bar
@@ -402,6 +432,15 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	// session, by this run as by the earlier one (ADR 0026, point 2, "Boost",
 	// amended 2026-10-18).
 	h.replan = p.Boost.ReplanPending
+	// A withheld decision carries the pending re-plan's cause forward; a
+	// decided one left a re-plan pending only by its own order's refusal.
+	switch {
+	case !h.replan:
+	case p.Outcome == event.TargetsOutcomeWithheld && p.Boost.Replan.Cause != "":
+		h.replanCause = p.Boost.Replan
+	default:
+		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
+	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
 }
@@ -542,31 +581,37 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	h.started = true
 	h.lastPeriod = p.PeriodEnd
 	h.bar = nil
+	h.settlePartFill()
 
 	quiet := p.PeriodEnd.Before(h.decideFrom) || !p.PeriodEnd.After(h.quietUntil)
-	if bar == nil && h.gapAt.IsZero() {
-		h.gapAt = p.PeriodEnd
-	}
 	b := &emissions{h: h, in: in, at: p.PeriodEnd}
-	if !h.gapAt.IsZero() {
+	// A session with no bar is skipped: the indicators and the latch do not
+	// move, nothing is traded, and the next bar continues the series (ADR
+	// 0026, point 5, amended 2026-10-18, the owner's choice for a data
+	// failure). No close is filled in for it, as LEAN's fill-forward would.
+	if bar == nil {
+		h.gap = append(h.gap, p.PeriodEnd.UTC().Format(time.DateOnly))
 		if quiet {
 			return nil, nil
 		}
 		figures := h.figures(boost.Readings{}, h.latched)
 		b.targets(figures, event.WithheldMissingBars,
-			fmt.Sprintf("no %s bar in the session closing %s; the indicators are not computed across the gap", h.cfg.Boost.InstrumentID, h.gapAt.Format(idTime)))
+			fmt.Sprintf("no %s bar in the session closing %s; Boost skips the session and trades nothing, and decides again at the next session with a bar, its indicators continuing over the closes received", h.cfg.Boost.InstrumentID, p.PeriodEnd.Format(idTime)))
 		return b.result()
 	}
 
 	// RSI(2) and the means read the split- and dividend-adjusted close, as
 	// the backtest's adjusted series does (ADR 0026, point 1).
 	readings := h.indicators.Add(bar.Adjusted.Close)
+	gap := h.gap
+	h.gap = nil
 	if quiet {
 		return nil, nil
 	}
 	before := h.latched
 	h.latched = h.params.Next(before, readings)
 	figures := h.figures(readings, before)
+	figures.GapSessions = gap
 	snapshot := h.snapshot
 	switch {
 	case snapshot == nil || snapshot.AsOf.Before(p.PeriodEnd):
@@ -594,7 +639,10 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		Replan:       h.replan,
 	})
 	b.fail(err)
-	h.replan = false
+	h.replan, h.replanCause = false, event.BoostReplan{}
+	// This session's order, or its absence, supersedes the last one: it was
+	// sized from the account as it now stands.
+	h.lastOrder, h.lastEnded = "", false
 	if !ok || order.Side != event.OrderSideSell {
 		// The decision no longer plans the sell that fired a withheld sale.
 		if l := h.gate.LapseExitSale(); l != nil {
@@ -615,6 +663,12 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	// decision (ADR 0026, point 2, "Boost", amended 2026-10-18); one under
 	// Degraded or Halted follows that state's own rules.
 	h.replan = outcome.Refused != nil && h.gate.State() == risklimit.StateNormal
+	if h.replan {
+		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
+	}
+	if outcome.Released != nil {
+		h.lastOrder = outcome.Released.ClientOrderID
+	}
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
 	}
@@ -746,7 +800,33 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	if p.ClientOrderID == h.lastOrder && p.Terminal() {
+		h.lastEnded = true
+	}
 	return nil
+}
+
+// settlePartFill decides, as a session closes, whether the last order a
+// decided session released ended with an unfilled remainder: terminal, with
+// fewer shares filled than released, part-filled or unfilled. Such an order
+// is re-planned at the next decided session like a refusal (ADR 0026, point
+// 2, "Boost", amended 2026-10-18); one filled in full is not. It is read
+// at the session, not at the terminal report, so a fill the venue reports
+// after the cancel but before the session still counts.
+func (h *Handler) settlePartFill() {
+	if h.lastOrder == "" || !h.lastEnded {
+		return
+	}
+	released, filled := h.released[h.lastOrder].Quantity, h.gate.Filled(h.lastOrder)
+	if filled < released {
+		cause := event.ReplanCausePartFilled
+		if filled == 0 {
+			cause = event.ReplanCauseUnfilled
+		}
+		h.replan = true
+		h.replanCause = event.BoostReplan{Cause: cause, ClientOrderID: h.lastOrder, Filled: filled, Released: released}
+	}
+	h.lastOrder, h.lastEnded = "", false
 }
 
 // holdings maps each position to its quantity.
@@ -767,7 +847,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		ExitMean: r.ExitMean, ExitMeanReady: r.ExitMeanReady,
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
-		ReplanPending: h.replan,
+		ReplanPending: h.replan, Replan: h.replanCause,
 	}
 }
 

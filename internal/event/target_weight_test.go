@@ -460,3 +460,55 @@ func TestARefusalAlertBelongsToAKillSwitchOrStaleRefusal(t *testing.T) {
 	}
 	expectInvalid(t, "alert on another reason", validOrderRefused(), func(p *event.OrderRefusedPayload) { p.Alert = true }, "alert")
 }
+
+// TestBoostReplanValidate: a re-plan names its cause, refused or
+// part-filled; a part-fill names the order and filled shares strictly
+// between none and the released shares, and a refusal names neither (ADR
+// 0026, point 2, "Boost", amended 2026-10-18).
+func TestBoostReplanValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Replan = event.BoostReplan{Cause: event.ReplanCausePartFilled, ClientOrderID: "tw-1", Filled: 20, Released: 39}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a part-fill re-plan is valid: %v", err)
+	}
+	refused := v
+	refused.Boost.Replan = event.BoostReplan{Cause: event.ReplanCauseRefused}
+	if err := refused.Validate(); err != nil {
+		t.Fatalf("a refusal re-plan is valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "unknown cause", v, func(p *P) { p.Boost.Replan.Cause = "bored" }, "re-plan cause")
+	expectInvalid(t, "figures without a cause", v, func(p *P) { p.Boost.Replan.Cause = "" }, "re-plan cause")
+	expectInvalid(t, "part-fill without order", v, func(p *P) { p.Boost.Replan.ClientOrderID = "" }, "order")
+	expectInvalid(t, "part-fill filled nothing", v, func(p *P) { p.Boost.Replan.Filled = 0 }, "filled")
+	expectInvalid(t, "part-fill filled in full", v, func(p *P) { p.Boost.Replan.Filled = 39 }, "filled")
+	unfilled := v
+	unfilled.Boost.Replan = event.BoostReplan{Cause: event.ReplanCauseUnfilled, ClientOrderID: "tw-1", Released: 39}
+	if err := unfilled.Validate(); err != nil {
+		t.Fatalf("an unfilled re-plan is valid: %v", err)
+	}
+	expectInvalid(t, "unfilled with a fill", unfilled, func(p *P) { p.Boost.Replan.Filled = 1 }, "filled")
+	expectInvalid(t, "unfilled without order", unfilled, func(p *P) { p.Boost.Replan.ClientOrderID = "" }, "order")
+	expectInvalid(t, "unfilled released nothing", unfilled, func(p *P) { p.Boost.Replan.Released = 0 }, "released")
+	expectInvalid(t, "refusal with figures", refused, func(p *P) { p.Boost.Replan.Filled = 1 }, "refus")
+}
+
+// TestBoostGapSessionsValidate: a Boost decision's gap sessions are dates,
+// strictly ascending and before the session it decided, whose bar the
+// indicators read (ADR 0026, point 5, amended 2026-10-18).
+func TestBoostGapSessionsValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.GapSessions = []string{"2025-02-28", "2025-03-03"}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("gap sessions before the session are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "not a date", v, func(p *P) { p.Boost.GapSessions = []string{"yesterday"} }, "gap session")
+	expectInvalid(t, "descending", v, func(p *P) { p.Boost.GapSessions = []string{"2025-03-03", "2025-02-28"} }, "ascending")
+	expectInvalid(t, "the session itself", v, func(p *P) { p.Boost.GapSessions = []string{"2025-03-04"} }, "before")
+	m := validTargetsDecided()
+	m.Boost = event.BoostFigures{}
+	if !m.Boost.IsZero() || v.Boost.IsZero() {
+		t.Error("IsZero reports only empty Boost figures")
+	}
+}

@@ -433,6 +433,16 @@ func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
 	return nil
 }
 
+// Filled returns the shares the venue's fill reports executed of the
+// released order clientOrderID, each execution counted once, and 0 for an
+// order the gate never released.
+func (g *Gate) Filled(clientOrderID string) int64 {
+	if o, ok := g.orders[clientOrderID]; ok {
+		return o.reported
+	}
+	return 0
+}
+
 // ObserveLifecycle applies a recorded lifecycle report on a released order:
 // canceled or invalid ends a sell's remainder, from the earliest such
 // report's second; submitted and cancel-pending leave it pending. The

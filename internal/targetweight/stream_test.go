@@ -116,11 +116,18 @@ func (a *account) take(t *testing.T, out []event.Envelope) {
 	}
 }
 
-// fill fills every queued order at price and returns the venue's report of
-// each execution, filled at at.
-func (a *account) fill(price float64, at time.Time) []event.TargetWeightFillPayload {
+// fillAtMost fills every queued order at price, each for at most limit
+// shares when capped, and returns the venue's report of each execution, filled
+// at at; an order capped at 0 shares reports none.
+func (a *account) fillAtMost(price float64, at time.Time, limit int64, capped bool) []event.TargetWeightFillPayload {
 	var reports []event.TargetWeightFillPayload
 	for _, o := range a.pending {
+		if capped {
+			o.Quantity = min(o.Quantity, limit)
+		}
+		if o.Quantity == 0 {
+			continue
+		}
 		quantity := o.Quantity
 		if o.Side == event.OrderSideSell {
 			quantity = -quantity
@@ -192,6 +199,22 @@ type options struct {
 	// kill engages (true) or releases (false) the kill switch at the start
 	// of session i.
 	kill map[int]bool
+	// partFill fills each order queued at session i for at most n shares,
+	// after which the venue reports it canceled (a DAY order expiring part
+	// filled); n 0 is an order that expires unfilled. cancelAt delivers the
+	// cancel of an order part-filled at session i at the start of session j
+	// instead, after that session's other reports.
+	partFill map[int]int64
+	cancelAt map[int]int
+}
+
+// cancelAtOr is the session the cancel of an order part-filled at session i
+// is delivered at: cancelAt's, else i itself.
+func (o options) cancelAtOr(i int) int {
+	if j, ok := o.cancelAt[i]; ok {
+		return j
+	}
+	return i
 }
 
 type run struct {
@@ -231,6 +254,7 @@ func simulate(t *testing.T, opts options) run {
 		r.decisions = append(r.decisions, out...)
 		return out
 	}
+	late := map[int][]event.OrderReleasedPayload{} // cancels due at each session
 	start := sessionEnd(0).Add(-time.Hour)
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
 	for _, e := range opts.recorded {
@@ -263,9 +287,23 @@ func simulate(t *testing.T, opts options) run {
 			}
 			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+o.ClientOrderID, ack.OccurredAt, ack))
 		}
-		for _, f := range acct.fill(price, at.Add(-2*time.Hour)) {
+		expiring := acct.pending
+		limit, part := opts.partFill[i]
+		for _, f := range acct.fillAtMost(price, at.Add(-2*time.Hour), limit, part) {
 			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
 		}
+		if part {
+			late[opts.cancelAtOr(i)] = append(late[opts.cancelAtOr(i)], expiring...)
+		}
+		for _, o := range late[i] {
+			cancel := event.LimitOrderLifecyclePayload{
+				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+				Side: o.Side, Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+				OccurredAt: at.Add(-90 * time.Minute), Message: "day order expired",
+			}
+			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "cancel:"+o.ClientOrderID, cancel.OccurredAt, cancel))
+		}
+		delete(late, i)
 		if engaged, ok := opts.kill[i]; ok {
 			apply(s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion, fmt.Sprintf("kill:%d", i), at.Add(-time.Hour),
 				event.KillSwitchPayload{AccountID: "joint", AsOf: at.Add(-time.Hour), Engaged: engaged, Operator: "owner", Detail: "fixture"}))

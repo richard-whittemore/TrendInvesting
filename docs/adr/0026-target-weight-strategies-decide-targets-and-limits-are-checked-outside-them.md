@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L")
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost")
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -132,7 +132,8 @@ want·V / p − q whole shares, rounded toward zero, where want is 0.98 or
 first target, normally 98% from cash, whether or not a boost is on.
 Amended 2026-10-18 (owner): after a refusal that leaves the engine Normal,
 the next decision also plans the difference to the target in force (see the
-amendment of that date).
+amendment of that date); and after its last order ends with shares
+unfilled (see "Amendment (2026-10-18, owner decision, #487 and #488)").
 
 **D7, whole shares, open: both options specified.** The choice is
 configuration (point 6):
@@ -326,7 +327,9 @@ IBKR bars:
 **Missing bars fail closed:**
 - A missing final bar for SPY, IEF or SHY at a decision time gives `withheld`
   (`missing-bars`). Nothing is traded and the owner is alerted. Boost never
-  computes RSI across a gap (`plan.md` lines 152-155).
+  computes RSI across a gap (`plan.md` lines 152-155). *(Amended
+  2026-10-18: Boost skips the session and its readings continue at the next
+  bar; see "Amendment (2026-10-18, owner decision, #487 and #488)".)*
 - A universe stock missing any session in its 253-close window is left out of
   that month's ranking, and the decision records it. *(Amended 2026-10-18:
   a stock the account holds is scored across the gap instead, as the
@@ -858,3 +861,102 @@ which applies no minimum lot, and record no holdings, so no golden month
 changed. The parity tool knows no holdings either; it was re-run on the
 kept exports and its three reports are byte-identical to the
 `_held_gap` reports (`docs/research/parity-2026-10.md`).
+
+## Amendment (2026-10-18, owner decision, #487 and #488): a session with no SPY bar, and an order that ends unfilled
+
+Accepted on 2026-10-18: the owner's decisions on #487 and #488 ("use the
+recommendation"), with two readings settled by the orchestrator and flagged
+to the owner, who can veto them before merge. Each is marked below. It amends
+point 2, "Boost", and point 5, "Missing bars fail closed", for Boost.
+
+### A session with no SPY bar is skipped
+
+**What happened before.** A session that closed without SPY's bar was
+withheld (`missing-bars`), and so was every later session of the run, since
+the indicators were never computed across a gap. The exit included: one
+missing bar stopped Boost until a fresh run the owner approved.
+
+**The rule now.**
+
+- The session with no bar is withheld (`missing-bars`) and nothing is
+  traded. The latch and the indicators do not move: no close is added for
+  it.
+- At the next session with a bar, RSI(2), the 200-session mean and the
+  5-session mean continue over the closes received, as if the missing
+  session were not in the series, and that session decides as any other.
+  The latch moves on its readings, and the exit can fire.
+- The decision that reads the first bar after the gap records the missing
+  sessions (`boost.gap_sessions`, YYYY-MM-DD, ascending, each before the
+  decision's session). A gap during the warm-up, or before a restart's
+  recovered decision, is skipped the same way and recorded by no decision.
+- The reporter pages once per gap, however many sessions in a row are
+  missing, naming the first and saying that decisions continue.
+
+**This is the owner's choice for a data failure, not a copy of the
+backtest.** The owner's recommendation said "as the backtest does"; it does
+not. The Boost template subscribes to SPY with LEAN's default fill-forward
+(`template.py:48`). LEAN puts a filled-forward bar into `data.Bars` and into
+every consolidator, so into `SMA` and `RSI` alike (LEAN's
+`TimeSliceFactory` and `AlgorithmManager`, checked on 2026-10-18): on a
+session its data lacked, the backtest would read the previous close again,
+update all three indicators with it (no change for RSI, a repeated value in
+both means) and decide on it, possibly turning the boost on or off and
+trading. That decides on a price nobody traded. A live gap is a failure of
+the data job or the vendor, not a session SPY did not trade, so live trading
+skips the session instead (the orchestrator's reading of "skipped, not
+filled", flagged to the owner). QuantConnect's SPY daily data has no missing
+session in the recorded runs, so the two rules never differed there, and
+no golden case can come from those logs: the golden case for this rule is
+synthetic and hand-computed (`TestSyntheticGoldenBoostGap`).
+
+### An order that ends with shares unfilled is re-planned
+
+**What happened before.** A Boost DAY limit order that expired or was
+cancelled with part unfilled left the account short of its target until the
+target next changed; point 2 said nothing of a partial fill.
+
+**The rule now.**
+
+- When the last order a decided session released reaches a terminal state
+  (canceled, which includes a DAY order's expiry, or invalid) with fewer
+  shares filled than released, the next decided session plans the
+  remaining difference to the target in force through the same re-plan as a
+  refusal (the amendment of 2026-10-18 above): want·V / p − q whole shares,
+  rounded toward zero, from the account snapshot as of that close.
+- `part-filled`: more than none filled. This is the owner's decision on
+  #488.
+- `unfilled`: none filled; the whole difference is planned. **This extends
+  the owner's part-fill decision and is put to the owner for confirmation**
+  (the orchestrator's reading): without it, one share filled of 39 would be
+  re-planned and none of 39 would not.
+- An order filled in full plans nothing more.
+- **A later order supersedes.** Only the last order a decided session
+  released is watched. If a later decided session plans an order, or plans
+  none, before the earlier order's end is known, a terminal report on the
+  earlier one plans nothing: the later decision was sized from the account
+  as it stood, and re-planning then would trade drift, or buy twice while
+  the later buy still works. The sale back to 98% is never watched: its one
+  attempt is ADR 0019's.
+- The engine reads the order's state at each session's close, not at the
+  terminal report, so a fill the venue reports after the cancellation but
+  before the next close still counts.
+- `boost.replan_pending` is set from that close until the session that
+  plans it; a withheld session carries it. Every decision that enters with
+  a re-plan pending records its cause (`boost.replan`): `refused`, or
+  `part-filled` or `unfilled` with the order's client order ID and its
+  filled and released shares. A run restarted from a withheld decision
+  recovers the cause; one restarted from a decided decision whose own order
+  was refused recovers `refused`.
+
+### Rules and schema
+
+A journal holding a gap or such an order decides differently under an
+earlier build: target-weight rules version **1.18.0** (ADR 0016).
+`strategy.targets.decided` moves to schema version **6** for the two new
+Boost fields, `replan` and `gap_sessions`, both omitted when unset; the
+refused re-plan now records its cause too. The synthetic cases are the
+golden cases for both rules (`TestSyntheticGoldenBoostGap`;
+`TestAPartFilledOrderIsReplannedAtTheNextDecision` and
+`TestAnExpiredUnfilledOrderIsReplannedInFull`, whose quantities are
+computed by hand in their comments). The parity tool's Boost comparison is
+unchanged: QuantConnect's exports have neither a gap nor a partial fill.

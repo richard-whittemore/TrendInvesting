@@ -196,6 +196,35 @@ func TestAWithheldRunIsOneIncidentAndADecisionEndsIt(t *testing.T) {
 	}
 }
 
+// TestABoostGapPagesOnceAndSaysDecisionsContinue: a Boost session with no
+// SPY bar is skipped and the next bar decides again (ADR 0026, point 5,
+// amended 2026-10-18), so one urgent page covers the whole gap, names its
+// first missing session and says decisions continue over the closes
+// received; a later gap is another page.
+func TestABoostGapPagesOnceAndSaysDecisionsContinue(t *testing.T) {
+	s := newStream(t)
+	s.withheld(0, event.WithheldMissingBars)
+	s.withheld(1, event.WithheldMissingBars)
+	s.decided(2, 0.98)
+	s.withheld(3, event.WithheldMissingBars)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("kinds = %v, want one page per gap", kinds(got))
+	}
+	a := got[0]
+	if a.Kind != report.KindMissingData || a.Severity != report.Urgent {
+		t.Errorf("gap page: %s %v", a.Kind, a.Severity)
+	}
+	for _, want := range []string{day(0).Format(time.DateOnly), "skipped", "decides again at the next session with a bar", "not filled in"} {
+		if !contains(a.Body, want) {
+			t.Errorf("gap page lacks %q: %q", want, a.Body)
+		}
+	}
+}
+
 // TestAnAllUnaffordableWithholdIsUrgent: a book D7-L found wholly
 // unaffordable may rest on a bad net liquidation or bad raw closes, so the
 // owner is paged now, with the detail naming the valuation, not left to the

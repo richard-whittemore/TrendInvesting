@@ -120,8 +120,10 @@ worst-case cost. See [momentum](momentum.md).
 the engine, a reboot, a new build, leaving Degraded or Halted. It needs your
 **approval**. See [restart](restart.md).
 
-**Gap.** A session missing from a price series. Boost never computes across
-one; momentum leaves out a stock not held with a gap. See [boost](boost.md)
+**Gap.** A session missing from a price series. Boost skips a session with
+no SPY bar (that session is withheld, nothing trades) and computes its
+readings over the closes it has; the next decision names the gap
+(`gap_sessions`). Momentum leaves out a stock not held with a gap. See [boost](boost.md)
 and [momentum universe](momentum-universe.md).
 
 **Golden case.** A month (momentum) or a session (Boost) logged from
@@ -204,9 +206,12 @@ reads it.
 input, by sending the same input again; the engine answers from its log,
 so an order is never lost or doubled. See [re-delivery](redelivery.md).
 
-**Re-plan.** Boost planning again, at its next decided session, an order
-the gate refused while the account stayed Normal. See
-[boost](boost.md#a-refused-order-is-planned-again-re-plan).
+**Re-plan.** Boost planning again, at its next decided session, the
+difference to its target after its last order did not get there: the gate
+refused it while the account stayed Normal (`refused`), or it ended with
+shares unfilled (`part-filled`, or `unfilled` when none filled). The
+decision records the cause (`replan`). See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Reconciled, reconciliation.** Three different things carry this word:
 
@@ -244,7 +249,7 @@ lower: exempt from the order count, order size and price band.
 **RulesVersion.** A version number declared in the code that changes only
 when a rule changes, so two builds with the same rules version replay each
 other's logs exactly (ADR 0016). The target-weight strategies are at
-**1.17.0**; a log written under an earlier one does not replay. Each
+**1.18.0**; a log written under an earlier one does not replay. Each
 chapter's "since version x" notes say when a rule arrived.
 
 **Run.** One start of an engine to its stop, with its own name (`TI_RUN`),
@@ -274,7 +279,7 @@ for a sell to be checked against it; it carries one urgent alert, however
 many sells it refuses.
 
 **Strategy version.** `<strategy>/<rules version>+<build>`, carried on every
-record, for example `boost/1.17.0+<commit>`.
+record, for example `boost/1.18.0+<commit>`.
 
 **Synthetic report.** In dry-run only, the engine's own "never sent,
 cancelled" record for each order a momentum IRA releases, so the next month
