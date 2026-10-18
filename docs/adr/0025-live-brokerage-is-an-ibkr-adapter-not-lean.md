@@ -145,8 +145,10 @@ The version and checksum the amendment of 2026-10-16 left open are set in
   downloaded on 2026-10-18, as for the Gateway installer. IBKR's link is a
   moving one, so when IBKR replaces the file provisioning stops, which is
   intended (point 5: a version change repeats the paper-account test).
-- **Fetch and verify:** `deploy/provision.sh gateway` downloads the installer
-  and refuses it unless its SHA-256 matches. Installing `ibapi` from it into
+- **Fetch and verify:** `deploy/provision.sh twsapi`, a step of its own that
+  `all` does not run, downloads the installer and refuses it unless its
+  SHA-256 matches; kept apart so that IBKR moving its "latest" link never
+  blocks provisioning the Gateway. Installing `ibapi` from it into
   the adapter's environment is written with, and first run by, the
   paper-account test, since that is the first use of the real client.
   CI still runs against the fake.

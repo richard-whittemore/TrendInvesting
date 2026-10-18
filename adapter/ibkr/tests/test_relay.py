@@ -104,10 +104,10 @@ class CrashingSender:
             raise ConnectionError("adapter stopped after handing over {}".format(request.client_order_id))
 
 
-def to_request(order):
+def to_request(order, session=None):
     return OrderRequest(client_order_id=order["client_order_id"], account_id=order["account_id"], con_id=756733,
                         symbol=order["instrument_id"], action=order["side"].upper(), quantity=Decimal(order["quantity"]),
-                        order_type="LMT", limit_price=order["limit_price"], tif="DAY")
+                        order_type="LMT", limit_price=order["limit_price"], tif="DAY", session=session)
 
 
 def envelope(i):
@@ -197,7 +197,7 @@ class RelayTests(unittest.TestCase):
         log = {}
         decisions = {"session:0": [released("tw-1")]}
 
-        def unshapeable(order):
+        def unshapeable(order, session):
             raise ValueError("cannot shape {}".format(order["client_order_id"]))
 
         unshaping = self.relay(Restarts(log, decisions), mapper=unshapeable)
@@ -209,6 +209,18 @@ class RelayTests(unittest.TestCase):
         self.relay(Restarts(log, decisions)).exchange(envelope(1))
         self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"])
         self.assertIsNone(self.pending.load())
+
+    def test_each_request_is_built_with_the_session_of_the_input_that_released_it(self):
+        # A released order is for its own session (ADR 0026 point 2): the
+        # request carries its input's New York date, or none when the input
+        # has no readable time, and the sender refuses it in another session.
+        log = {}
+        decisions = {"session:0": [released("tw-1")], "session:1": [released("tw-2")]}
+        relay = self.relay(Restarts(log, decisions))
+        relay.exchange(dict(envelope(0), event_time="2026-10-17T01:30:00Z"))
+        relay.exchange(envelope(1))
+        self.assertEqual([(r.client_order_id, r.session) for r in self.sent],
+                         [("tw-1", date(2026, 10, 16)), ("tw-2", None)])
 
     def test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled(self):
         log = {}

@@ -6,6 +6,7 @@ account (IBKR paper account IDs begin "DU") and fails closed otherwise.
 """
 import sys
 import unittest
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,10 +21,15 @@ from sender import (OrderRequest, DryRunSender, LiveSendingDisabled, NotReconcil
                     make_sender, release_to_request)
 
 
+# The New York date of the session the test orders are released in, and the
+# adapter's current session unless a test moves it.
+SESSION = date(2026, 10, 16)
+
+
 def request(**overrides):
     values = dict(client_order_id="tag-1", account_id=ACCOUNT, con_id=756733, symbol="SPY",
                   action="BUY", quantity=Decimal("10"), order_type="MKT", limit_price=None,
-                  tif="DAY")
+                  tif="DAY", session=SESSION)
     values.update(overrides)
     return OrderRequest(**values)
 
@@ -40,6 +46,10 @@ def paper_harness(reconciled=True):
     if reconciled:
         h.conn.mark_reconciled()
     return h
+
+
+def paper_sender(h, journal, today=SESSION):
+    return PaperSender(h.conn, journal.append, today=lambda: today)
 
 
 class SenderTests(unittest.TestCase):
@@ -79,7 +89,7 @@ class PaperSenderTests(unittest.TestCase):
     def test_paper_on_a_paper_account_sends_one_order_to_the_gateway_and_journals_it(self):
         h = paper_harness()
         journal = []
-        sender = make_sender(h.conn.config, journal.append, h.conn)
+        sender = make_sender(h.conn.config, journal.append, h.conn, today=lambda: SESSION)
         self.assertIsInstance(sender, PaperSender)
         record = sender.send(limit_request())
         self.assertEqual(len(h.fake.placed), 1)
@@ -116,7 +126,7 @@ class PaperSenderTests(unittest.TestCase):
     def test_nothing_is_sent_before_reconciliation_or_without_the_link(self):
         h = paper_harness(reconciled=False)
         journal = []
-        sender = PaperSender(h.conn, journal.append)
+        sender = paper_sender(h, journal)
         with self.assertRaises(NotReconciled):
             sender.send(limit_request())
         h.conn.mark_reconciled()
@@ -130,9 +140,10 @@ class PaperSenderTests(unittest.TestCase):
     def test_a_request_the_paper_account_cannot_carry_is_refused_before_the_gateway(self):
         h = paper_harness()
         journal = []
-        sender = PaperSender(h.conn, journal.append)
+        sender = paper_sender(h, journal)
         for bad in (limit_request(account_id="DU0000002"), limit_request(account_id="U0000001"), request(),
-                    limit_request(quantity=Decimal("9.5")), limit_request(con_id=None)):
+                    limit_request(quantity=Decimal("9.5")), limit_request(con_id=None), limit_request(tif="GTC"),
+                    limit_request(tif="GTD")):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 sender.send(bad)
         h.conn.next_order_id = None
@@ -144,13 +155,56 @@ class PaperSenderTests(unittest.TestCase):
     def test_a_gateway_that_raises_leaves_nothing_journalled_and_no_order_id_reused(self):
         h = paper_harness()
         journal = []
-        sender = PaperSender(h.conn, journal.append)
+        sender = paper_sender(h, journal)
         h.fake.place_error = ConnectionError("synthetic socket failure")
         with self.assertRaises(ConnectionError):
             sender.send(limit_request())
         self.assertEqual(journal, [])
         # The ID may have reached IBKR, so it is never handed out again.
         self.assertEqual(h.conn.next_order_id, 8)
+
+    def test_an_order_released_for_another_session_is_refused_before_any_order_id_is_used(self):
+        # A DAY limit order is for the session it was released in (ADR 0026
+        # point 2): released yesterday and asked again today, its limit and
+        # the checks behind it are stale, so it is never sent.
+        h = paper_harness()
+        journal = []
+        sender = paper_sender(h, journal, today=date(2026, 10, 17))
+        for stale in (limit_request(), limit_request(session=None), limit_request(session="2026-10-17")):
+            with self.subTest(session=stale.session), self.assertRaises(SendRefused):
+                sender.check(stale)
+        self.assertEqual(sender.check(limit_request(session=date(2026, 10, 17))).session, date(2026, 10, 17))
+        self.assertEqual(h.fake.placed, [])
+        self.assertEqual(h.conn.next_order_id, 7)
+        self.assertEqual(journal, [])
+
+    def test_a_client_that_cannot_place_orders_is_refused_before_any_order_id_is_used(self):
+        # The real client places nothing until the paper-account test enables
+        # it; the sender asks before the relay marks the order, so the
+        # refusal leaves nothing to settle by hand.
+        h = paper_harness()
+        journal = []
+        sender = paper_sender(h, journal)
+        h.fake.can_place = False
+        with self.assertRaises(SendRefused):
+            sender.check(limit_request())
+        with self.assertRaises(SendRefused):
+            sender.send(limit_request())
+        self.assertEqual(h.fake.called("place_order"), [])
+        self.assertEqual(h.conn.next_order_id, 7)
+        self.assertEqual(journal, [])
+
+    def test_an_account_the_session_does_not_manage_is_refused(self):
+        # IBKR's managedAccounts names the accounts this login trades; an
+        # order for an account outside it is never sent.
+        h = paper_harness()
+        journal = []
+        sender = paper_sender(h, journal)
+        h.conn.managed_accounts = frozenset({"DU0000002"})
+        with self.assertRaises(SendRefused):
+            sender.check(limit_request())
+        self.assertEqual(h.fake.placed, [])
+        self.assertEqual(h.conn.next_order_id, 7)
 
 
 class ReleaseToRequestTests(unittest.TestCase):
@@ -161,18 +215,24 @@ class ReleaseToRequestTests(unittest.TestCase):
         return values
 
     def test_a_paper_release_becomes_a_day_limit_order_for_its_contract(self):
-        r = release_to_request(self.released(), "paper", {"SPY": 756733})
+        r = release_to_request(self.released(), "paper", {"SPY": 756733}, SESSION)
         self.assertEqual(r, OrderRequest(client_order_id="tw-1", account_id=ACCOUNT, con_id=756733, symbol="SPY",
                                          action="BUY", quantity=Decimal("9"), order_type="LMT",
-                                         limit_price=Decimal("401.5"), tif="DAY"))
-        self.assertEqual(release_to_request(self.released(side="sell"), "paper", {"SPY": 756733}).action, "SELL")
+                                         limit_price=Decimal("401.5"), tif="DAY", session=SESSION))
+        self.assertEqual(release_to_request(self.released(side="sell"), "paper", {"SPY": 756733}, SESSION).action,
+                         "SELL")
 
     def test_a_release_this_adapter_must_not_send_is_refused(self):
         for bad in (dict(mode="live"), dict(mode="dry-run", send=False), dict(send=False), dict(side="hold"),
                     dict(instrument_id="QQQ"), dict(quantity=0), dict(quantity=9.5), dict(quantity=True),
                     dict(limit_price=0), dict(limit_price=float("nan"))):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                release_to_request(self.released(**bad), "paper", {"SPY": 756733})
+                release_to_request(self.released(**bad), "paper", {"SPY": 756733}, SESSION)
+
+    def test_a_release_with_no_session_is_refused(self):
+        for session in (None, "2026-10-16"):
+            with self.subTest(session=session), self.assertRaises(ValueError):
+                release_to_request(self.released(), "paper", {"SPY": 756733}, session)
 
 
 if __name__ == "__main__":

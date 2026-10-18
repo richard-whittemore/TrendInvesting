@@ -278,7 +278,9 @@ class Relay:
     (orders.BrokerOrders, as orders.collect_broker_orders builds it); an
     open order or execution in either list carrying a released order's client
     order ID means the broker already has that order. to_request maps a
-    released order's payload to an OrderRequest. reconnects bounds how often one exchange reconnects and
+    released order's payload and the session it was released in (its
+    input's event time as a New York date, None when that cannot be read)
+    to an OrderRequest. reconnects bounds how often one exchange reconnects and
     asks again before EngineUnavailable reaches the caller. today returns
     the session's date (New York), against which a resend permission is
     checked. Each relay takes its own exclusive lock on the pending file at
@@ -381,7 +383,7 @@ class Relay:
                     raise ResendExpired(cid, allowed_on, today)
             # Built before the mark: a request that cannot be built never
             # reaches the sender, so it leaves no mark to stop a restart.
-            request = self._to_request(order)
+            request = self._to_request(order, _session_date(envelope))
             with self._step:
                 self._require_held()
                 self._pending.mark(cid, HANDING_OVER)

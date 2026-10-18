@@ -350,6 +350,10 @@ class ForwardingTests(unittest.TestCase):
             ("disconnect",)])
         self.assertFalse(client.is_connected())
 
+    def test_the_real_client_cannot_place_orders_until_the_paper_account_test(self):
+        client, _ = self.build(False)
+        self.assertFalse(client.can_place_orders())
+
     def test_place_order_is_disabled(self):
         client, _ = self.build(False)
         with self.assertRaises(LiveSendingDisabled):
@@ -361,6 +365,7 @@ class ForwardingTests(unittest.TestCase):
                 client, inbox = self.build(new_sig)
                 w = client._wrapper
                 w.nextValidId(7)
+                w.managedAccounts("DU0000001,DU0000002")
                 if new_sig:
                     w.error(-1, 1_800_000_000_000, 1100, "lost", "")
                 else:
@@ -380,7 +385,7 @@ class ForwardingTests(unittest.TestCase):
                 w.connectionClosed()
                 names = [e.name for e in inbox.events()]
                 self.assertEqual(names, [
-                    "next_valid_id", "error", "current_time", "position", "position_end",
+                    "next_valid_id", "managed_accounts", "error", "current_time", "position", "position_end",
                     "account_summary", "account_summary_end", "open_order", "open_order_end",
                     "order_status", "exec_details", "exec_details_end", "commission_report",
                     "commission_report", "connection_closed"])

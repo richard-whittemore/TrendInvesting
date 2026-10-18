@@ -15,8 +15,10 @@ needs the hashed configuration, which the live engine configuration that
 names adapter ibkr will carry (ADR 0025 point 3).
 """
 from collections import namedtuple
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from config import is_paper_account
 from values import to_decimal
@@ -34,13 +36,20 @@ RELEASE_SIDES = {"buy": "BUY", "sell": "SELL"}
 SEC_TYPE = "STK"
 CURRENCY = "USD"
 EXCHANGE = "SMART"
+# A session's date is its New York date, the calendar relay.py dates
+# sessions by.
+SESSION_ZONE = ZoneInfo("America/New_York")
 
 OrderRequest = namedtuple("OrderRequest", (
-    "client_order_id account_id con_id symbol action quantity order_type limit_price tif"))
+    "client_order_id account_id con_id symbol action quantity order_type limit_price tif session"),
+    defaults=(None,))
 """An order the adapter was asked to place.
 
 client_order_id is the decision's tag, sent to IBKR as orderRef; IBKR's own
-order ID is never part of a request (plan.md section 5).
+order ID is never part of a request (plan.md section 5). session is the New
+York date of the session the order was released in (its input's event
+time); a released order is a limit order for that session only (ADR 0026
+point 2), so it is never sent in another.
 """
 
 DryRunRecord = namedtuple("DryRunRecord", "request send")
@@ -59,6 +68,10 @@ class LiveSendingDisabled(Exception):
 
 class SendRefused(LiveSendingDisabled):
     """Paper sending was asked for where it is not bound to a paper configuration and account; nothing is sent."""
+
+
+def _session_today():
+    return datetime.now(SESSION_ZONE).date()
 
 
 class NotReconciled(Exception):
@@ -114,18 +127,22 @@ class PaperSender:
     Bound to conn's configuration: it refuses to exist unless that is mode
     paper on a paper account, re-checks the binding before every order, and
     sends only a request for that account. An order goes out only while the
-    link is up and reconciled (ADR 0025 point 5), as a whole-share limit
-    order (ADR 0026 point 2), under the next IBKR order ID, which is used
+    link is up and reconciled (ADR 0025 point 5), for an account the
+    session's login manages (IBKR's managedAccounts), through a client that
+    can place orders, as a whole-share DAY limit order released in today's
+    session (ADR 0026 point 2), under the next IBKR order ID, which is used
     once whatever place_order does: a call that raised may still have
     reached IBKR. journal receives the SentRecord only after place_order
     returns; the write-ahead record of the hand-over is the relay's
-    (relay.py), which never hands one client order ID over twice.
+    (relay.py), which never hands one client order ID over twice. today
+    returns the current session's New York date (by default, today's).
     """
 
-    def __init__(self, conn, journal):
+    def __init__(self, conn, journal, today=None):
         _require_paper(conn.config)
         self._conn = conn
         self._journal = journal
+        self._today = today or _session_today
 
     def check(self, request):
         """Return request if send would take it now, else raise as send would; sends nothing.
@@ -144,14 +161,28 @@ class PaperSender:
                 request.account_id, config.account_id))
         if request.order_type != RELEASE_ORDER_TYPE:
             raise ValueError("a released order is a limit order, not {!r}".format(request.order_type))
+        if request.tif != RELEASE_TIF:
+            raise ValueError("a released order is a {} order, not {!r}".format(RELEASE_TIF, request.tif))
         if request.quantity != request.quantity.to_integral_value():
             raise ValueError("quantity {} is not whole shares".format(request.quantity))
         if not isinstance(request.con_id, int) or isinstance(request.con_id, bool) or request.con_id <= 0:
             raise ValueError("con_id must be IBKR's positive contract ID")
+        # A late order needs a person: its limit and the engine's checks
+        # behind it were made for its own session.
+        today = self._today()
+        if not _is_date(request.session) or request.session != today:
+            raise SendRefused("order {} was released for the session of {}, not today's ({}); it is not sent: "
+                              "it is never sent, and the adapter stops here for a person (docs/manual/paper-trading.md)".format(
+                                  request.client_order_id, request.session, today))
+        if not self._conn.api.can_place_orders():
+            raise SendRefused("the IBKR client on this connection does not place orders; nothing is sent")
         self._conn.require_connected()
         if self._conn.needs_reconciliation:
             raise NotReconciled("the link to IB Gateway has not been reconciled since it connected; nothing is "
                                 "sent until IBKR's orders, executions and balances are matched to the journal")
+        if config.account_id not in self._conn.managed_accounts:
+            raise SendRefused("account {!r} is not among the accounts this IBKR login manages; nothing is "
+                              "sent".format(config.account_id))
         if self._conn.next_order_id is None:
             raise SendRefused("IBKR has not given this session an order ID (nextValidId); nothing is sent")
         return request
@@ -173,13 +204,14 @@ class PaperSender:
         return record
 
 
-def release_to_request(order, mode, con_ids):
+def release_to_request(order, mode, con_ids, session=None):
     """The OrderRequest for a released order's payload, or ValueError if this adapter must not send it.
 
     Only a release marked send whose mode is the adapter's own is sent
     (ADR 0026 point 3, "Mode"). con_ids maps the engine's instrument ID to
     IBKR's contract ID; an instrument with none is refused, never looked up
-    by name.
+    by name. session is the New York date of the input whose reply released
+    the order; without one the order is refused.
     """
     if order.get("send") is not True:
         raise ValueError("order {} is not marked to be sent".format(order.get("client_order_id")))
@@ -198,19 +230,26 @@ def release_to_request(order, mode, con_ids):
     limit = to_decimal(order.get("limit_price"), "limit_price")
     if limit <= 0:
         raise ValueError("limit_price must be positive")
+    if not _is_date(session):
+        raise ValueError("order {} has no session it was released in".format(order.get("client_order_id")))
     return OrderRequest(client_order_id=order["client_order_id"], account_id=order["account_id"],
                         con_id=con_ids[symbol], symbol=symbol, action=action, quantity=Decimal(quantity),
-                        order_type=RELEASE_ORDER_TYPE, limit_price=limit, tif=RELEASE_TIF)
+                        order_type=RELEASE_ORDER_TYPE, limit_price=limit, tif=RELEASE_TIF,
+                        session=session)
 
 
-def make_sender(config, journal, conn=None):
+def _is_date(value):
+    return isinstance(value, date) and not isinstance(value, datetime)
+
+
+def make_sender(config, journal, conn=None, today=None):
     """Return the sender for a configuration: dry-run journals only, paper sends on conn, live is refused."""
     if config.mode == "dry-run":
         return DryRunSender(journal)
     if config.mode == "paper":
         if conn is None or conn.config != config:
             raise SendRefused("paper sends only on the connection built from this configuration")
-        return PaperSender(conn, journal)
+        return PaperSender(conn, journal, today)
     if config.mode == "live":
         raise LiveSendingDisabled("mode 'live' is disabled until the limited-live gate (AGENTS.md rule 5)")
     raise ValueError("unknown mode {!r}".format(config.mode))

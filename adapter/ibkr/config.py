@@ -11,7 +11,7 @@ _FIELDS = (
     "host", "port", "client_id", "account_id", "mode",
     "connect_timeout", "request_timeout",
     "heartbeat_interval", "heartbeat_timeout", "restore_timeout",
-    "backoff_initial", "backoff_max", "max_connect_attempts",
+    "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
 )
 
 # Any key containing one of these is refused outright. The adapter never
@@ -31,7 +31,10 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     ADR 0019 makes them versioned operational configuration with no
     permissive defaults. restore_timeout is how long Gateway may stay cut
     off from IBKR's servers (codes 1100/2110) before the adapter gives up
-    waiting for Gateway's own restoration and reconnects.
+    waiting for Gateway's own restoration and reconnects. commission_wait
+    is how long an execution may wait for IBKR's commission report, without
+    which its fill cannot be recorded, before the adapter stops for a
+    person (reports.OrderReportJournal).
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -81,7 +84,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("mode live names account {!r}, but an account ID beginning {!r} is a paper "
                               "account".format(self.account_id, PAPER_ACCOUNT_PREFIX))
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
-                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max"):
+                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max",
+                     "commission_wait"):
             value = getattr(self, name)
             # NaN and infinity pass "> 0" but would switch a deadline off.
             if not _is_number(value) or not math.isfinite(value) or value <= 0:

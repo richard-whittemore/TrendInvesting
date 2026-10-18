@@ -52,8 +52,17 @@ class ClientIdInUse(ConnectFailed):
     """
 
 
+class AccountNotManaged(Exception):
+    """The configured account is not among the accounts this session's IBKR login manages (managedAccounts)."""
+
+
 class NotConnected(Exception):
     """A request was attempted while the link is down."""
+
+
+def _account_list(text):
+    """IBKR's managedAccounts list ("DU1,DU2,") as a set of account IDs."""
+    return frozenset(a.strip() for a in str(text).split(",") if a.strip())
 
 
 def _utc_now():
@@ -89,6 +98,7 @@ class Connection:
         self.connected = False
         self.needs_reconciliation = True
         self.next_order_id = None
+        self.managed_accounts = frozenset()
         self.last_server_time = None
         self._probe_sent_at = None
         self._last_probe_at = None
@@ -119,6 +129,17 @@ class Connection:
             raise NotConnected("IB Gateway link is down")
 
     def mark_reconciled(self):
+        """Record that IBKR's orders, executions and balances were matched; refused for an unmanaged account.
+
+        Matching the journal against a login that does not trade the
+        configured account proves nothing about that account, so the link
+        stays unreconciled (fail closed).
+        """
+        if self.config.account_id not in self.managed_accounts:
+            raise AccountNotManaged("account {!r} is not among the accounts this IBKR login manages ({}); the "
+                                    "link is not reconciled".format(self.config.account_id,
+                                                                    ", ".join(sorted(self.managed_accounts)) or
+                                                                    "none reported"))
         self.needs_reconciliation = False
 
     def now_utc(self):
@@ -178,6 +199,7 @@ class Connection:
         # never be read as part of this one.
         self.inbox = Inbox()
         self._pending.clear()
+        self.managed_accounts = frozenset()
         self._probe_sent_at = None
         self._last_probe_at = None
         self._lost_at = None
@@ -205,6 +227,10 @@ class Connection:
                 self.needs_reconciliation = True
                 self._report("connected")
                 return
+            if event.name == "managed_accounts":
+                # The session's own state, read here: nothing else needs it.
+                self._apply(event)
+                continue
             if event.name == "connection_closed":
                 self._abandon()
                 raise ConnectFailed("Gateway closed the connection during the handshake")
@@ -300,7 +326,9 @@ class Connection:
             yield event
 
     def _apply(self, event):
-        if event.name == "connection_closed":
+        if event.name == "managed_accounts":
+            self.managed_accounts = _account_list(event.args[0])
+        elif event.name == "connection_closed":
             if self.connected or self._lost_at is not None:
                 self.connected = False
                 self._lost_at = None

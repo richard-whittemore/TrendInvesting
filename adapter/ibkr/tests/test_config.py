@@ -34,6 +34,13 @@ class ConfigTests(unittest.TestCase):
             AdapterConfig.from_mapping(values)
         self.assertIn("connect_timeout", str(caught.exception))
 
+    def test_the_wait_for_a_commission_report_is_required(self):
+        values = config()._asdict()
+        del values["commission_wait"]
+        with self.assertRaises(ConfigError) as caught:
+            AdapterConfig.from_mapping(values)
+        self.assertIn("commission_wait", str(caught.exception))
+
     def test_client_id_zero_is_refused(self):
         with self.assertRaises(ConfigError):
             config(client_id=0)
@@ -58,8 +65,9 @@ class ConfigTests(unittest.TestCase):
         # NaN and infinity both pass a "> 0" test, and either would switch the
         # heartbeat deadline or the connect timeout off.
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
-                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max"):
-            for bad in (float("nan"), float("inf")):
+                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max",
+                     "commission_wait"):
+            for bad in (float("nan"), float("inf"), 0, -1):
                 with self.subTest(name=name, value=bad), self.assertRaises(ConfigError):
                     config(**{name: bad})
 

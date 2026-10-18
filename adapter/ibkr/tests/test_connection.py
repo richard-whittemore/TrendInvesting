@@ -10,14 +10,14 @@ if tests_dir not in sys.path:
 
 from fake_tws import FakeTWS, ACCOUNT
 from config import AdapterConfig
-from connection import Connection, ClientIdInUse, ConnectFailed, NotConnected
+from connection import AccountNotManaged, Connection, ClientIdInUse, ConnectFailed, NotConnected
 
 
 def config(**overrides):
     values = dict(host="127.0.0.1", port=4002, client_id=11, account_id=ACCOUNT, mode="dry-run",
                   connect_timeout=0.05, request_timeout=0.05, heartbeat_interval=30.0,
                   heartbeat_timeout=10.0, restore_timeout=60.0, backoff_initial=1.0,
-                  backoff_max=8.0, max_connect_attempts=5)
+                  backoff_max=8.0, max_connect_attempts=5, commission_wait=30.0)
     values.update(overrides)
     return AdapterConfig.from_mapping(values)
 
@@ -64,6 +64,28 @@ class ConnectTests(unittest.TestCase):
         self.assertTrue(h.conn.needs_reconciliation)
         h.conn.mark_reconciled()
         self.assertFalse(h.conn.needs_reconciliation)
+
+    def test_each_session_records_the_accounts_its_login_manages(self):
+        h = Harness()
+        h.fake.managed_accounts = (ACCOUNT, "DU0000002")
+        h.conn.connect()
+        self.assertEqual(h.conn.managed_accounts, frozenset({ACCOUNT, "DU0000002"}))
+        # IBKR may restate the list later in the session; the latest stands.
+        h.fake.callbacks.managed_accounts(" DU0000003 ,{},".format(ACCOUNT))
+        h.conn.pump(0)
+        self.assertEqual(h.conn.managed_accounts, frozenset({ACCOUNT, "DU0000003"}))
+        # A new session starts from its own list, never the last one's.
+        h.fake.managed_accounts = ("DU0000002",)
+        h.conn.reconnect()
+        self.assertEqual(h.conn.managed_accounts, frozenset({"DU0000002"}))
+
+    def test_reconciliation_is_refused_for_an_account_the_login_does_not_manage(self):
+        h = Harness()
+        h.fake.managed_accounts = ("DU0000002",)
+        h.conn.connect()
+        with self.assertRaises(AccountNotManaged):
+            h.conn.mark_reconciled()
+        self.assertTrue(h.conn.needs_reconciliation)
 
     def test_client_id_conflict_fails_closed_without_retry_or_another_id(self):
         h = Harness()

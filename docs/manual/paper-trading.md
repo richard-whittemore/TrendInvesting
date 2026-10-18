@@ -22,8 +22,11 @@ them stops the order:
 2. **The adapter's configuration** is refused the same way: paper must name a
    `DU` account.
 3. **The adapter's sender** checks again before every order: it sends only
-   on a connection set up from that paper configuration, and only an order
-   for that same account.
+   on a connection set up from that paper configuration, only an order for
+   that same account, and only if the IBKR login the adapter is connected
+   to says it manages that account (IBKR sends that list as each session
+   starts). If the login does not manage it, the adapter also refuses to
+   treat the link as matched to IBKR, so nothing is sent at all.
 
 When those all agree, one order goes out like this:
 
@@ -32,10 +35,14 @@ When those all agree, one order goes out like this:
    (see [engine](engine.md) and [re-delivery](redelivery.md)).
 2. The adapter checks the order is one it can send right now: the link to IB
    Gateway is up, IBKR's open orders, trades and balances have been matched
-   since the link last came up, and the order is a whole-share limit order
-   for the session (a DAY order) on a stock it knows IBKR's contract number
-   for. If any of that fails, it sends nothing and records nothing about the
-   order, so it can be sent later without a manual check.
+   since the link last came up, the IBKR client in use is allowed to place
+   orders (the real one is not, until the paper-account test), and the order
+   is a whole-share limit order for the session (a DAY order) on a stock it
+   knows IBKR's contract number for, released in **today's** session (New
+   York date). If any of that fails, it sends nothing and records nothing
+   about the order, and no order number is used. Whether it can go out
+   later depends on why it was refused: see "The link is down" and the rows
+   after it below.
 3. It writes "about to send" for that order on disk, sends it to IB Gateway
    under IBKR's next order number, then writes "sent". Each order number is
    used once, even if the send failed partway.
@@ -43,7 +50,11 @@ When those all agree, one order goes out like this:
    - when IBKR accepts the order (it is **working**), is **cancelling** it,
      has **cancelled** it, or has **refused** it, with IBKR's own reason;
    - each **fill**: shares, price, IBKR's commission and IBKR's time of the
-     trade. A partly filled order shows one fill per execution.
+     trade. A partly filled order shows one fill per execution. A fill is
+     recorded only once IBKR's commission report for it arrives, which IBKR
+     sends just after the trade. If it has not arrived within the
+     configured wait (`commission_wait`, in seconds, in the adapter's
+     configuration), the adapter stops rather than leave a trade unrecorded.
 
    Each report describes the order as IBKR holds it, not as the adapter
    meant it, so the engine can see if the two differ and refuse the report.
@@ -79,11 +90,17 @@ When those all agree, one order goes out like this:
 | What happens | What the program does | What to do |
 | --- | --- | --- |
 | The link to IB Gateway drops after an order was sent | It reconnects with the same client ID, then matches IBKR's open orders, trades and balances before anything else is sent. The order already sent is not sent again. | Nothing, unless the reconnect gives up; then see `docs/runbooks/lightsail-deployment.md`. |
-| The adapter stops after IBKR took the order but before it wrote "sent" | On restart it finds the order in IBKR's open orders or trades and does not send it again. | Nothing. |
+| The adapter stops after IBKR took the order but before it wrote "sent", and the order is still working or has traded | On restart it finds the order in IBKR's open orders or trades and does not send it again. | Nothing. |
+| The adapter stops after IBKR took the order but before it wrote "sent", and IBKR cancelled the order (or it expired) before the restart | A cancelled order is in neither IBKR's open orders nor its trades, so on restart the adapter cannot tell it from an order that never arrived. It stops with "was being handed to the broker when the adapter stopped" and sends nothing more. | Look in IBKR's order history (Client Portal or the mobile app, switched to the paper account: orders, including cancelled ones) for an order whose order reference is the client order ID named. If it is there, cancelled, it reached IBKR: settle it with `python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent --reason "cancelled at IBKR"`, and the next rebalance places a fresh order if one is still wanted. Never use `--resend` for an order IBKR shows at all. The full procedure is in [re-delivery](redelivery.md), "What can go wrong". |
 | The adapter stops mid-send and IBKR shows no trace of the order | It stops with "was being handed to the broker when the adapter stopped" and sends nothing more. | Follow [re-delivery](redelivery.md), "What can go wrong": look in IBKR first, then settle it with the resolve command. |
-| The link is down, or not yet matched to IBKR, when an order is due | The order is refused before "about to send" is written, so nothing is recorded and nothing goes out. | Nothing; it goes out once the link is up and matched. |
+| The link is down, or not yet matched to IBKR, when an order is due | The order is refused before "about to send" is written, so nothing is recorded and nothing goes out. It waits: the adapter asks for it again on every exchange. | Nothing, if the link is back and matched the same day (New York date): it goes out then. |
+| The link stayed down past the end of the order's day | The order was for the session it was released in; its limit and the engine's checks were made for that day. On any later day it is refused ("was released for the session of ... not today's") before "about to send" is written. It is never sent, and the adapter cannot get past it by itself: it stops on that order at every exchange. | Nothing is at IBKR to check. The resolve command does not apply (it settles only an order marked "about to send", and this one never was). Stop the adapter and report it; the engine's next rebalance decides afresh from the reconciled account. |
+| An order the adapter can never send as it stands: no IBKR contract number configured for the stock, or a request that is not a whole-share DAY limit order for the configured account | It is refused before "about to send" is written, every time it is asked for again, so the adapter makes no progress until a person acts. | For a missing contract number: add the stock to the adapter's contract map (`con_ids`, the engine's instrument to IBKR's contract number, looked up in IBKR's contract search, never guessed by name) and start the adapter again the same day; on a later day the order is stale (the row above). Any other shape refusal is a fault in the engine or the adapter: stop and investigate. The resolve command does not apply here either: nothing was marked. |
+| IBKR's login does not manage the configured account | The adapter refuses to treat the link as matched to IBKR ("is not among the accounts this IBKR login manages"), so nothing is sent. | Check the account number in the adapter's configuration against the paper account the Gateway logs in to. A wrong account is a new configuration and a new run. |
 | IBKR refuses the order | It records the refusal with IBKR's reason, and the engine reads the order as ended. | Read IBKR's reason. A margin or permission refusal in paper usually means a paper account setting to change. |
-| IBKR reports on the order in a form the engine cannot read exactly (part shares, a commission in another currency, an order it never showed) | The adapter stops rather than record an approximation. | A fault to investigate before starting again; check the order in IBKR. |
+| IBKR reports on the order in a form the engine cannot read exactly (part shares, a price that is zero or not a number, a commission in another currency, negative, not a number, or as large as the order itself, an order it never showed) | The adapter stops rather than record an approximation. | A fault to investigate before starting again; check the order in IBKR. |
+| IBKR corrects a fill (it reports the same trade again under an execution ID that differs only in its last part) | The adapter stops rather than record the correction as a second fill, which would count the shares twice. | Check the order's trades in IBKR, then reconcile the account ([reconciliation](../runbooks/reconciliation.md)) before starting again. |
+| A trade's commission report never arrives | After `commission_wait` seconds the adapter stops ("has waited ... for IBKR's commission report"): the trade happened at IBKR but cannot be recorded without its commission. | Check the trade in IBKR, then reconcile the account before starting again. |
 | You start the engine or adapter in live mode | It refuses to start and says the limited-live gate has not been passed. | Use paper. |
 | A paper configuration names an account not beginning `DU` | It refuses to start. | Correct the account number in the configuration (a new configuration and a new run). |
 
@@ -116,8 +133,11 @@ When those all agree, one order goes out like this:
 - `adapter/ibkr/tests/test_sender.py`: paper sends one order to the gateway
   and records it; live is refused; paper is refused on any connection that is
   not the paper configuration's; nothing is sent before reconciliation or
-  without the link, or for another account, a market order or part shares;
-  an order number is never reused after a failed send.
+  without the link, or for another account, a market order, part shares or
+  any time in force but DAY; an order released for another session, an
+  account the login does not manage and a client that cannot place orders
+  are all refused before any order number is used; an order number is never
+  reused after a failed send.
 - `adapter/ibkr/tests/test_paper.py`, against the fake gateway:
   - `test_one_spy_order_is_sent_and_its_status_and_fills_are_journalled_as_the_engine_reads_them`:
     one SPY order, accepted, filled in two parts; the records are
@@ -129,7 +149,15 @@ When those all agree, one order goes out like this:
     it is not sent again;
   - `test_a_crash_before_ibkr_shows_the_order_stops_rather_than_resend`;
   - `test_an_order_the_link_cannot_take_yet_leaves_no_mark_and_goes_out_once_reconciled`;
-  - `test_a_reconnect_never_resends_an_order_already_sent`.
+  - `test_a_reconnect_never_resends_an_order_already_sent`;
+  - `test_a_restart_after_reports_and_fills_were_journalled_writes_none_of_them_again`:
+    IBKR replays each working order's status and each trade's commission
+    after a restart, and nothing is recorded twice;
+  - `test_a_corrected_execution_stops_for_a_person_and_is_never_a_second_fill`;
+  - `test_an_execution_whose_commission_never_arrives_stops_for_a_person`;
+  - `test_a_release_left_waiting_past_its_session_is_never_sent`;
+  - `test_a_client_that_cannot_place_orders_leaves_no_mark` and
+    `test_a_login_that_does_not_manage_the_account_is_never_reconciled_or_sent_on`.
 - `internal/event`,
   `TestTheIBKRAdaptersPaperReportsAreReadByOrderReports`: the engine reads
   every record the adapter's paper test wrote, by the same rule it reads

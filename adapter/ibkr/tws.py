@@ -23,11 +23,22 @@ class TWSApi:
     to it, possibly from its own reader thread, and raises ConnectFailed if
     the socket connect and IBKR's handshake take longer than timeout seconds.
     Each connect is a new session: no callback of an earlier session may reach
-    its Inbox. place_order is called only by sender.PaperSender, on a paper
-    configuration (AGENTS.md rule 5); its contract and order carry ibapi's
-    attribute names (Contract: conId, symbol, secType, currency, exchange;
-    Order: orderRef, account, action, totalQuantity, orderType, lmtPrice,
-    tif, transmit), and IBKR answers on the Inbox.
+    its Inbox. managedAccounts arrives as managed_accounts as the session
+    starts.
+
+    place_order is called only by sender.PaperSender, on a paper
+    configuration (AGENTS.md rule 5), and only while can_place_orders()
+    is true, which the sender asks before any order is marked or any order
+    ID used. Its contract and order are the adapter's own request shape,
+    not ibapi objects: plain objects carrying exactly these attributes, by
+    ibapi's names (contract: conId, symbol, secType, currency, exchange;
+    order: orderRef, account, action, totalQuantity, orderType, lmtPrice,
+    tif, transmit). The real client builds ibapi.contract.Contract and
+    ibapi.order.Order from them; every other Order field then takes ibapi's
+    default, and the paper-account test must confirm the ones that change
+    what is sent: outsideRth false, no parent, OCA group or conditions,
+    whatIf false, and an auxPrice of ibapi's unset value. IBKR answers on
+    the Inbox.
     """
 
     def connect(self, host, port, client_id, callbacks, timeout):
@@ -60,6 +71,9 @@ class TWSApi:
     def req_executions(self, req_id, account_id):
         raise NotImplementedError
 
+    def can_place_orders(self):
+        raise NotImplementedError
+
     def place_order(self, order_id, contract, order):
         raise NotImplementedError
 
@@ -81,6 +95,7 @@ class Inbox:
 
     CALLBACKS = (
         "next_valid_id",        # (order_id)
+        "managed_accounts",     # (accounts_list): IBKR's comma-separated account IDs
         "connection_closed",    # ()
         "error",                # (req_id, code, message[, advanced_order_reject_json])
         "current_time",         # (epoch_seconds)
