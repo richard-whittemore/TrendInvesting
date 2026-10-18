@@ -42,6 +42,15 @@ const (
 	// account's book and the broker disagree, or the broker's evidence could
 	// not be compared (ADR 0019).
 	KindReconciliation Kind = "reconciliation"
+	// KindUnacknowledged is an order to be sent that the venue has not
+	// acknowledged within the configured time, and KindAcknowledged the
+	// notice that one already alerted has since been acknowledged.
+	KindUnacknowledged Kind = "order-unacknowledged"
+	KindAcknowledged   Kind = "order-acknowledged"
+	// KindVenueReportUnread is a venue's report the log holds that the
+	// engine did not read: it does not validate, or does not describe the
+	// order it names as released. It acknowledges nothing.
+	KindVenueReportUnread Kind = "venue-report-unread"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
@@ -186,9 +195,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	return out, nil
 }
 
-// acknowledge is the line a repeating alert ends with: the key the owner's
+// acknowledgeLine is the line a repeating alert ends with: the key the owner's
 // acknowledgement names, and that it repeats until then.
-func acknowledge(key string) string {
+func acknowledgeLine(key string) string {
 	return " This alert repeats until you acknowledge it; acknowledge with alert key: " + key
 }
 
@@ -253,7 +262,7 @@ func reconciliationAlert(account string, e event.Envelope, p event.Reconciliatio
 	if p.Action == event.ReconciliationActionHalt {
 		doubt = "evidence that could not be compared: " + strings.Join(p.Unverifiable, "; ")
 	}
-	recovery := " Leaving the state is never automatic. Recovery is a person's: docs/runbooks/reconciliation.md." + acknowledge(key)
+	recovery := " Leaving the state is never automatic. Recovery is a person's: docs/runbooks/reconciliation.md." + acknowledgeLine(key)
 	book := "with no book recorded"
 	if p.AnchorID != "" {
 		book = "against the book " + p.AnchorID
@@ -310,7 +319,7 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 	}
 	key := engineStateKey(p) + ":" + e.EventTime.UTC().Format(time.RFC3339Nano) + "@" + account
 	return Alert{Key: key, Kind: kind, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
-		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledge(key)}
+		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
 func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload, start time.Time) Alert {

@@ -45,12 +45,17 @@ import (
 //     (configuration schema version 6) and refuses version 5, and withholds
 //     a decision session whose ranked members sent neither their bars nor
 //     their histories, so a journal written under 1.5.0 does not replay.
-//   - 1.10.0 reads account.reconciliation, market.corporate-action and
+//   - 1.8.0 has the gate read a venue's lifecycle report on a released order
+//     whose limit is within half a cent of the order's (event.SameLimitPrice,
+//     the cent a limit is rounded to) where 1.6.0 refused any limit not
+//     bit-equal to it, so a journal holding such a report decides differently
+//     under 1.6.0.
+//   - 1.9.0 reads account.reconciliation, market.corporate-action and
 //     operator.alert.acknowledged; a reconciliation's difference degrades or
 //     halts the account (ADR 0019, amended 2026-09-24), and a Degraded scope
-//     can name cash components. 1.7.0 to 1.9.0 are taken by other rule
-//     changes.
-const RulesVersion = "1.10.0"
+//     can name cash components, so a journal written under 1.8.0 does not
+//     replay.
+const RulesVersion = "1.9.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -95,7 +100,11 @@ type Options struct {
 //     account.broker.snapshot, which also evaluates the margin-cushion alarm;
 //   - after an order's release: the venue's execution.fill (version 5) and
 //     execution.order.lifecycle (version 2) reports on it, which resolve a
-//     released sell's pending shares (risklimit.Gate.PendingSells);
+//     released sell's pending shares (risklimit.Gate.PendingSells). A
+//     lifecycle report is recorded and otherwise decides nothing (ADR 0022);
+//     one about an order this run did not release, or that does not describe
+//     it as released, is refused: it is reconciliation's to explain (ADR
+//     0019);
 //   - at any time after the configuration: market.corporate-action, which a
 //     reconciliation's book is bridged by; account.reconciliation, which
 //     classifies IBKR's positions and cash against the latest account
@@ -150,6 +159,9 @@ type Handler struct {
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
 	gate       *risklimit.Gate
+	// released holds every order this run released, by client order ID,
+	// so a venue's report about one can be checked against it.
+	released map[string]event.OrderReleasedPayload
 
 	momentum *momentumRun // set for a momentum configuration, nil for Boost
 }
@@ -542,20 +554,6 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	return nil
 }
 
-// applyLifecycle records a venue's state change of a released order: a
-// canceled or invalid sell's remainder is no longer pending, a
-// cancel-pending one still is (ADR 0026, point 2.5).
-func (h *Handler) applyLifecycle(in event.Envelope) error {
-	p, err := decodeInput[event.LimitOrderLifecyclePayload](in, event.OrderLifecycleLimitVersion)
-	if err != nil {
-		return err
-	}
-	if err := h.gate.ObserveLifecycle(p); err != nil {
-		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
-	}
-	return nil
-}
-
 // applyReconciliation classifies a recorded reconciliation against the
 // journal's book (risklimit.Gate.Reconcile) and journals the result, then
 // the engine state when it moved. Its emissions are timed at the
@@ -632,6 +630,31 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 		b.sale(event.SaleTriggerExit)
 	}
 	return b.result()
+}
+
+// applyLifecycle records the venue's report of a change to an order this
+// run released, and decides nothing else from it (ADR 0022). The report must
+// name the order as released: its account, instrument, side, quantity and
+// limit, the limit within event.LimitPriceTolerance (event's Describes). A
+// canceled or invalid sell's remainder is then no longer pending, a
+// cancel-pending one still is (ADR 0026, point 2.5).
+func (h *Handler) applyLifecycle(in event.Envelope) error {
+	p, err := decodeInput[event.LimitOrderLifecyclePayload](in, event.OrderLifecycleLimitVersion)
+	if err != nil {
+		return err
+	}
+	o, ok := h.released[p.ClientOrderID]
+	if !ok {
+		return fmt.Errorf("targetweight: lifecycle %s reports order %s, which this run did not release", in.ID, p.ClientOrderID)
+	}
+	if !p.Describes(o) {
+		return fmt.Errorf("targetweight: lifecycle %s reports %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
+			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
+	}
+	if err := h.gate.ObserveLifecycle(p); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return nil
 }
 
 // holdings maps each position to its quantity.
@@ -739,6 +762,10 @@ func (b *emissions) order(o risklimit.Order, book risklimit.Book) risklimit.Outc
 		out = outcomes[0]
 	}
 	if out.Released != nil {
+		if b.h.released == nil {
+			b.h.released = map[string]event.OrderReleasedPayload{}
+		}
+		b.h.released[out.Released.ClientOrderID] = *out.Released
 		b.add("risk-order-released:"+o.Planned.ClientOrderID, event.OrderReleasedEventType, out.Released.SchemaVersion(), *out.Released)
 	} else if out.Refused != nil {
 		b.add("risk-order-refused:"+o.Planned.ClientOrderID, event.OrderRefusedEventType, out.Refused.SchemaVersion(), *out.Refused)

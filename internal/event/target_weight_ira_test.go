@@ -349,6 +349,52 @@ func TestTargetWeightFillValidate(t *testing.T) {
 	expectInvalid(t, "quantity", v, func(p *P) { p.Quantity = 0 }, "quantity")
 }
 
+// TestSameLimitPriceIsWithinHalfACent: two limit prices are the same within
+// half the cent a limit is rounded to, and a NaN is the same as nothing
+// (.greptile/rules.md, "Numbers and money").
+func TestSameLimitPriceIsWithinHalfACent(t *testing.T) {
+	for _, c := range []struct {
+		a, b float64
+		want bool
+	}{
+		{401.5, 401.5, true},
+		{401.5, 401.500000001, true},
+		{401.5, 401.504, true},
+		{401.5, 401.51, false},
+		{401.5, 401.49, false},
+		{401.5, math.NaN(), false},
+	} {
+		if got := event.SameLimitPrice(c.a, c.b); got != c.want {
+			t.Errorf("SameLimitPrice(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// TestALifecycleReportDescribesAnOrderAsReleased: a report describes a
+// released order when it names its client order ID, account, instrument,
+// side and quantity, and its limit within half a cent.
+func TestALifecycleReportDescribesAnOrderAsReleased(t *testing.T) {
+	o := event.OrderReleasedPayload{ClientOrderID: "tw-1", AccountID: "joint", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 9, LimitPrice: 101}
+	report := event.LimitOrderLifecyclePayload{ClientOrderID: "tw-1", AccountID: "joint", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 9, LimitPrice: 101.000000001}
+	if !report.Describes(o) {
+		t.Fatalf("%+v does not describe %+v", report, o)
+	}
+	for name, mutate := range map[string]func(*event.LimitOrderLifecyclePayload){
+		"another order":      func(p *event.LimitOrderLifecyclePayload) { p.ClientOrderID = "tw-2" },
+		"another account":    func(p *event.LimitOrderLifecyclePayload) { p.AccountID = "ira" },
+		"another instrument": func(p *event.LimitOrderLifecyclePayload) { p.InstrumentID = "QQQ" },
+		"the other side":     func(p *event.LimitOrderLifecyclePayload) { p.Side = event.OrderSideSell },
+		"another quantity":   func(p *event.LimitOrderLifecyclePayload) { p.Quantity = 8 },
+		"a cent away":        func(p *event.LimitOrderLifecyclePayload) { p.LimitPrice = 101.01 },
+	} {
+		p := report
+		mutate(&p)
+		if p.Describes(o) {
+			t.Errorf("%s: %+v describes %+v", name, p, o)
+		}
+	}
+}
+
 // TestTargetWeightConfigurationSchemaVersionDeclaresTheUniverseInput pins
 // the version that adds Momentum's UniverseInput: version 5 is the
 // margin-cushion thresholds and MaxSnapshotAge, so the universe input is

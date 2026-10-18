@@ -113,17 +113,33 @@ func TestHandlerRefusesAVersion5Configuration(t *testing.T) {
 	mustRefuse(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, 5, "configuration", closeOf("2025-01-02"), cfg), "schema version 5")
 }
 
+// TestRulesVersionDeclaresTheHalfCentLimitMatch pins ADR 0016's
+// same-rules-version replay guarantee for the gate's lifecycle match: a
+// report on a released order whose limit is within half a cent of the order's
+// (event.SameLimitPrice) is read where rules 1.6.0 refused it unless the two
+// were bit-equal, so a journal holding such a report decides differently and
+// the build must not claim 1.6.0 or earlier.
+func TestRulesVersionDeclaresTheHalfCentLimitMatch(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.6.0 once the gate matches a lifecycle report's limit within half a cent", targetweight.RulesVersion)
+		}
+	}
+}
+
 // TestRulesVersionDeclaresReconciliation: the handler reads
 // account.reconciliation, market.corporate-action and
 // operator.alert.acknowledged, and a reconciliation degrades or halts the
 // account, so a journal written under this build cannot replay under an
-// earlier rules version, which refuses those inputs. 1.7.0, 1.8.0 and 1.9.0
-// are claimed by other rule changes, so this one is 1.10.0 (ADR 0016: each
-// rules change takes its own version).
+// earlier rules version, which refuses those inputs. 1.8.0 is the lifecycle
+// match's, so this one is 1.9.0 (ADR 0016: each rules change takes its own
+// version).
 func TestRulesVersionDeclaresReconciliation(t *testing.T) {
 	t.Parallel()
 
-	if targetweight.RulesVersion != "1.10.0" {
-		t.Fatalf("targetweight.RulesVersion = %q, want 1.10.0 once a reconciliation moves the engine state", targetweight.RulesVersion)
+	if targetweight.RulesVersion != "1.9.0" {
+		t.Fatalf("targetweight.RulesVersion = %q, want 1.9.0 once a reconciliation moves the engine state", targetweight.RulesVersion)
 	}
 }

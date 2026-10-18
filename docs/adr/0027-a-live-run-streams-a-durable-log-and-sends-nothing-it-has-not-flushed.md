@@ -359,3 +359,43 @@ owner decided (#365, above); it changes no owner decision. The sentence
   refusal names the step: move the log, unchanged, into the `quarantine`
   folder in that directory. The engine reads only the directory's root, so
   it never reads the quarantine folder.
+
+## Amendment (2026-10-17, proposed: re-delivery on request, and an order's lifecycle state)
+
+*Proposed for the owner's acceptance. It adds to §4 and §6 and changes no
+owner decision: the engine still never resends anything on its own.*
+
+- **The adapter asks for a committed reply by sending the input again.** An
+  input whose ID names a committed group (§2) is answered with the reply
+  built from that group and is not applied again, so the same input never
+  yields a second order. The reply is byte-identical however often it is
+  asked for, before a restart or after one: it is built from the group, and
+  its own `recorded_at` is its input's, never the wall clock. A refused
+  input's reply is its refusal, repeated. An input sent under a committed
+  input's ID with different content is refused and records nothing: an input
+  ID names one input. An input that was never committed (refused before it
+  was recorded, or the torn tail of §5) has no committed reply and is applied
+  as new.
+- **§6's "decisions regenerated during the restart are not sent" stands.**
+  Resume rebuilds the index of committed replies from the log; nothing is
+  pushed to the adapter. After a crash the adapter, which alone knows what it
+  received, asks again for the input it holds no reply to. That closes §4's
+  in-between state for an order the adapter never received: it is served
+  again, unchanged, under the same client order ID.
+- **The adapter's obligations.** It keeps the input awaiting its reply on
+  durable storage until it has acted on the reply, asks for that input again
+  after its own or the engine's restart before sending anything new, sends
+  its next input only once it holds the reply to its last, and hands each
+  released order marked `send` to the broker once, never one the broker
+  already holds under that client order ID (reconnect matching, ADR 0026
+  point 1).
+- **An order's lifecycle state is read from the log.** *Committed*: its
+  `risk.order.released` is in a committed group. *Released*: a later input is
+  committed, which by the adapter's obligation above shows it holds the
+  reply. *Acknowledged*: the venue's report naming its client order ID is
+  committed (`execution.order.lifecycle` version 2, or `execution.fill`
+  version 5). No new record type is needed.
+- **An order not acknowledged in time is an incident** (ADR 0019,
+  "Alerting"): the reporter raises one urgent alert per order marked `send`
+  that is not acknowledged within its configured bound of its commit, and,
+  once it is acknowledged, a routine notice that it cleared.

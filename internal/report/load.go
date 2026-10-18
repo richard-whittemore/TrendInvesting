@@ -17,6 +17,21 @@ import (
 // refused, never partly reported: a summary of tampered evidence would read as
 // true.
 func Load(raw []byte) (journal.Header, []event.Envelope, error) {
+	header, entries, err := LoadEntries(raw)
+	if err != nil {
+		return journal.Header{}, nil, err
+	}
+	envelopes := make([]event.Envelope, len(entries))
+	for i, e := range entries {
+		envelopes[i] = e.Envelope
+	}
+	return header, envelopes, nil
+}
+
+// LoadEntries is Load keeping what each record was in the run, an input or
+// a decision, which an order's lifecycle state is read from
+// (OrderLifecycles).
+func LoadEntries(raw []byte) (journal.Header, []journal.Entry, error) {
 	loaded, err := journalquery.Load("journal", raw)
 	if err != nil {
 		return journal.Header{}, nil, fmt.Errorf("report: %w", err)
@@ -32,9 +47,9 @@ func Load(raw []byte) (journal.Header, []event.Envelope, error) {
 	if err := journal.CheckIdentity(identity, loaded.Records); err != nil {
 		return journal.Header{}, nil, err
 	}
-	envelopes := make([]event.Envelope, len(loaded.Records))
+	entries := make([]journal.Entry, len(loaded.Records))
 	for i, r := range loaded.Records {
-		envelopes[i] = r.Envelope
+		entries[i] = journal.Entry{Kind: r.Kind, Envelope: r.Envelope}
 	}
-	return loaded.Header, envelopes, nil
+	return loaded.Header, entries, nil
 }

@@ -64,6 +64,10 @@ type boostFeed struct {
 	held     int64
 	pending  []event.OrderReleasedPayload
 	released []event.OrderReleasedPayload
+	// last and lastReply are the latest input sent and the reply it got, so
+	// a test can ask for that input's committed reply again.
+	last      event.Envelope
+	lastReply event.Envelope
 }
 
 func newBoostFeed(t *testing.T, socketPath string, cfg event.TargetWeightConfigurationPayload, build string, next uint64) *boostFeed {
@@ -128,6 +132,7 @@ func (f *boostFeed) send(eventType string, version uint32, id string, at time.Ti
 	if err != nil {
 		f.t.Fatalf("decide %s: %v", id, err)
 	}
+	f.last, f.lastReply = in, reply
 	var bundle decisionsPayload
 	if err := json.Unmarshal(reply.Payload, &bundle); err != nil {
 		f.t.Fatalf("decode the decisions for %s: %v", id, err)

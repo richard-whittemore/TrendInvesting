@@ -545,3 +545,31 @@ func TestKillSwitchRequiresAnExplicitEngaged(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestOrderRecordsAreReadAtEveryVersionTheyWereWritten: the planned,
+// released and refused records are read at every version from 1 to the
+// latest, one list each that every reader of the log shares, so a reader
+// cannot fall behind the version the gate writes (ADR 0015).
+func TestOrderRecordsAreReadAtEveryVersionTheyWereWritten(t *testing.T) {
+	for name, c := range map[string]struct {
+		got    []uint32
+		latest uint32
+	}{
+		"planned":  {event.OrderPlannedVersions(), event.OrderPlannedSafetyVersion},
+		"released": {event.OrderReleasedVersions(), event.OrderReleasedSafetyVersion},
+		"refused":  {event.OrderRefusedVersions(), event.OrderRefusedSafetyVersion},
+	} {
+		var want []uint32
+		for v := uint32(1); v <= c.latest; v++ {
+			want = append(want, v)
+		}
+		if fmt.Sprint(c.got) != fmt.Sprint(want) {
+			t.Errorf("%s versions = %v, want %v", name, c.got, want)
+		}
+	}
+	first := event.OrderReleasedVersions()
+	first[0] = 99
+	if event.OrderReleasedVersions()[0] != 1 {
+		t.Error("a reader's change to its list changed the shared one")
+	}
+}

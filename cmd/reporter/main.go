@@ -1,6 +1,7 @@
 // Command reporter reads one account's journal and delivers what a person
 // needs to know: alerts for every refusal, Degraded or Halted state,
-// reconciliation that did not match, withheld decision, missing input, lost
+// reconciliation that did not match, withheld decision, missing input, order
+// not acknowledged in time, venue report the engine did not read, lost
 // heartbeat and journal it cannot read, each once per incident, and
 // optionally the daily summary (docs/live-trading/plan.md section 3; ADR
 // 0019, "Alerting"). A Degraded, Halted or reconciliation alert is sent
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -58,6 +60,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	accountName := flags.String("account", "", "account name for alerts when the journal cannot name its own (default: the journal file's name)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	repeat := flags.Duration("repeat-interval", 30*time.Minute, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
+	ackWithin := flags.Duration("ack-within", 10*time.Minute, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -66,6 +69,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	if *sessions < 2 {
 		return errors.New("reporter: -heartbeat-sessions must be at least 2: a session's close is counted before the engine writes that session's records, so 1 would page on every trading day")
+	}
+	if *ackWithin <= 0 {
+		return errors.New("reporter: -ack-within must be positive: an order is acknowledged some time after its commit, so a bound of zero would page on every order")
 	}
 	if *sendTimeout <= 0 {
 		return errors.New("reporter: -send-timeout must be positive: a send with no bound can hold the run forever, and with it every later alert")
@@ -91,7 +97,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		label = filepath.Base(*journalPath)
 	}
 	info, statErr := os.Stat(*journalPath)
-	envelopes, account, alerts, refused := readJournal(*journalPath)
+	envelopes, account, alerts, refused := readJournal(*journalPath, now(), *ackWithin, seen)
 	if account != "" {
 		label = account
 	}
@@ -148,17 +154,23 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 }
 
 // readJournal reads, verifies and decodes the journal, returning its
-// envelopes, its account and its alerts, or the reason it was refused.
-func readJournal(path string) ([]event.Envelope, string, []report.Alert, error) {
+// envelopes, its account and its alerts, including every venue report the
+// engine did not read and every order to be sent not acknowledged within
+// ackWithin of its commit by now, or the reason it was refused.
+func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) ([]event.Envelope, string, []report.Alert, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("reporter: read journal: %w", err)
 	}
-	_, envelopes, err := report.Load(raw)
+	_, entries, err := report.LoadEntries(raw)
 	if err != nil {
 		return nil, "", nil, err
 	}
-	account, _, err := report.AccountOf(envelopes)
+	envelopes := make([]event.Envelope, len(entries))
+	for i, e := range entries {
+		envelopes[i] = e.Envelope
+	}
+	account, strategy, err := report.AccountOf(envelopes)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -166,7 +178,24 @@ func readJournal(path string) ([]event.Envelope, string, []report.Alert, error) 
 	if err != nil {
 		return nil, account, nil, err
 	}
+	orders, unread, err := report.OrderLifecycles(entries, strategy)
+	if err != nil {
+		return nil, account, nil, err
+	}
+	alerts = append(alerts, report.UnreadReportAlerts(account, unread)...)
+	alerts = append(alerts, report.UnacknowledgedAlerts(orders, now, ackWithin, func(key string) bool { return deliveredAnywhere(seen, key) })...)
 	return envelopes, account, alerts, nil
+}
+
+// deliveredAnywhere reports whether any channel took the alert keyed key, so
+// an owner who was told of an incident is told it cleared.
+func deliveredAnywhere(seen map[string]bool, key string) bool {
+	for k := range seen {
+		if strings.HasSuffix(k, channelKey("", key)) {
+			return true
+		}
+	}
+	return false
 }
 
 // summaryAlert wraps a day's summary as a routine message keyed by account

@@ -336,6 +336,13 @@ func TestFillAndLifecycleReportsAreChecked(t *testing.T) {
 	if err := g.ObserveLifecycle(report); err != nil {
 		t.Error(err)
 	}
+	// The venue's echo of the limit need not be bit-equal to the engine's:
+	// within event.LimitPriceTolerance it is the same price.
+	echo := report
+	echo.LimitPrice += 0.000000001
+	if err := g.ObserveLifecycle(echo); err != nil {
+		t.Errorf("a limit within the tolerance: %v", err)
+	}
 	// A released buy's reports are accepted and pend no sell.
 	buy := order(event.OrderSideBuy, 10, 100)
 	b := gate(t, limits(), event.TradingModeDryRun)
