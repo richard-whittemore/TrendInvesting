@@ -1330,19 +1330,112 @@ class RunLogsTests(unittest.TestCase):
         self.assertEqual(run_logs(third, today=TODAY), [third, second, first])
         self.assertEqual(run_logs(first, today=TODAY), [first])
 
-    def test_the_chain_stops_at_a_run_that_ended_before_todays_session(self):
+    def test_the_chain_stops_at_a_run_that_ended_before_yesterdays_session(self):
         # IBKR's lists reach back only to today's session (the day's DAY
-        # orders, executions since midnight), so a run whose last input is
-        # of an earlier New York date explains nothing in them, and nothing
-        # older than it is read: an archived first run does not stop a start.
+        # orders, executions since midnight), and a DAY order released after
+        # yesterday's close works today, so a run whose last input is of a
+        # New York date before yesterday's session (the weekday before
+        # today) explains nothing in them, and nothing older than it is
+        # read: an archived first run does not stop a start.
         first = self.write("a.log", at="2026-10-15T15:00:00Z")
-        # 03:30 UTC on the 17th is still the 16th in New York.
+        # 03:30 UTC on the 17th is still Friday the 16th in New York.
         second = self.write("b.log", ["a.log"], at="2026-10-17T03:30:00Z")
         third = self.write("c.log", ["b.log"])
-        self.assertEqual(run_logs(third, today=date(2026, 10, 16)), [third, second])
-        self.assertEqual(run_logs(third, today=TODAY), [third])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 16)), [third, second, first])
+        # Saturday and Monday: yesterday's session is Friday's.
+        self.assertEqual(run_logs(third, today=TODAY), [third, second])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 19)), [third, second])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 20)), [third])
+        # The run the walk stops at is read; the runs before it never are.
         os.remove(first)
-        self.assertEqual(run_logs(third, today=TODAY), [third])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 20)), [third])
+
+    def log(self, name, groups, at):
+        """A run's log of the given groups of (kind, type, schema version, payload), each recorded at at."""
+        lines = [log_header()]
+        n = 1
+        for entries in groups:
+            lines += log_group(n, entries, at=at)
+            n += len(entries)
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def test_a_run_of_yesterdays_session_with_nothing_open_never_hides_an_earlier_one_with_an_order_working(self):
+        # Run a released tw-1 after Friday's close, a DAY order that works
+        # Monday; run b, started the same evening, released nothing; run c
+        # starts on Saturday (a reboot) or Monday. IBKR still shows tw-1, so
+        # a must be read: b of yesterday's session never ends the walk.
+        first = self.log("a.log", [[("input", "market.session.closed", 1, {"session": "2026-10-16"}),
+                                    ("decision", "risk.order.released", 1, {"client_order_id": "tw-1", "quantity": 9,
+                                                                             "send": True})]],
+                         at="2026-10-16T21:00:00Z")
+        second = self.log("b.log", [[("input", "operator.run.approved", 2, {
+            "previous_log": "a.log", "previous_log_final_hash": self.final_hash("a.log")})]],
+            at="2026-10-16T23:00:00Z")
+        third = self.write("c.log", ["b.log"])
+        for today in (TODAY, date(2026, 10, 19)):
+            with self.subTest(today=today.isoformat()):
+                self.assertEqual(run_logs(third, today=today), [third, second, first])
+
+    def test_a_dry_run_engines_synthetic_report_in_an_earlier_log_is_its_decision_never_read_as_an_input(self):
+        # The dry-run engine records a synthetic terminal report (version 3,
+        # synthetic: true) for each order it releases and never sends, as its
+        # own decision (CONTEXT.md, "Order lifecycle report"); the first paper
+        # run's approval names that run's log.
+        dry = self.log("dry.log", [[("input", "market.session.closed", 1, {"session": "2026-10-16"}),
+                                    ("decision", "risk.order.released", 1, {"client_order_id": "tw-dry-1",
+                                                                             "quantity": 9, "send": False}),
+                                    ("decision", "execution.order.lifecycle", 3, {
+                                        "client_order_id": "tw-dry-1", "status": "canceled", "synthetic": True}),
+                                    ("decision", "execution.fill", 3, {"client_order_id": "tw-dry-1",
+                                                                       "synthetic": True})]],
+                       at="2026-10-16T21:00:00Z")
+        paper = self.write("paper.log", ["dry.log"])
+        self.assertEqual(run_logs(paper, today=TODAY), [paper, dry])
+
+    def test_an_order_the_adapters_own_records_settle_has_ended_for_the_chain(self):
+        # Nothing at IBKR ever reports on an order settled as never sent or
+        # not handed over, or one a run-ended settlement left unsent, and a
+        # report struck off at that settlement is in no engine's log: the
+        # adapter's own durable records end those orders.
+        canceled = {"client_order_id": "tw-1", "status": "canceled", "occurred_at": "2026-10-15T21:00:01Z"}
+
+        def struck(*reports):
+            return {"unsent": [], "outbox": [{"id": "ibkr:{}:{}".format(t, n), "event_type": t, "schema_version": v,
+                                              "event_time": "2026-10-15T21:00:01Z", "payload": p}
+                                             for n, (t, v, p) in enumerate(reports)]}
+        cases = {
+            "settled never sent": ({"decisions": ["never-sent"]}, False),
+            "settled not handed over": ({"decisions": ["not-handed-over"]}, False),
+            "never sent, then found at IBKR": ({"decisions": ["never-sent", "sent"]}, True),
+            "marked never sent while its input waits": ({"marks": {"tw-1": "never-sent"}}, False),
+            "left unsent at a run-ended settlement": ({"run_ended": {"unsent": ["tw-1"], "outbox": []}}, False),
+            "a cancellation struck at a settlement": ({"run_ended": struck(("execution.order.lifecycle", 2,
+                                                                           canceled))}, False),
+            "fills for the whole quantity struck at a settlement": ({"run_ended": struck(
+                ("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4)),
+                ("execution.fill", 5, dict(fill_payload("e.1.02"), quantity=5)))}, False),
+            "a working status struck at a settlement": ({"run_ended": struck(
+                ("execution.order.lifecycle", 2, dict(canceled, status="submitted")))}, True),
+            "nothing recorded": ({}, True),
+        }
+        first = self.earlier_day_run("a.log")
+        second = self.write("b.log", ["a.log"])
+        for name, (records, kept) in cases.items():
+            with self.subTest(name):
+                pending = PendingInput(str(Path(self.dir.name) / (name.replace(" ", "-") + ".json")))
+                for decision in records.get("decisions", ()):
+                    pending.record_decision({"client_order_id": "tw-1", "decision": decision, "reason": "checked",
+                                             "at": "2026-10-16T12:00:00+00:00", "session_date": "2026-10-16"})
+                for cid, mark in records.get("marks", {}).items():
+                    pending.mark(cid, mark)
+                if "run_ended" in records:
+                    pending.record_run_ended(dict(records["run_ended"], input={"id": "session:9"},
+                                                  refused="run ended", reason="a fresh run", run=None,
+                                                  at="2026-10-16T12:00:00+00:00", session_date="2026-10-16"))
+                self.assertEqual(run_logs(second, today=TODAY, settled=pending.settled_orders()),
+                                 [second, first] if kept else [second])
 
     def earlier_day_run(self, name, reports=()):
         """A run of an earlier day (the 15th) whose one decision released tw-1 for 9, then the reports in reports.

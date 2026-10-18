@@ -44,22 +44,28 @@ before they are sent, written durably, so a report IBKR will not repeat (a
 cancellation of an order no longer open) survives a stop. An outbox entry
 carries its input ID from the moment it is recorded; its sequence and the
 run's identity are taken from the engine's durable log when it is sent
-(relay.read_engine_log), so a stop between the engine's reply and the entry
-being struck off sends nothing twice: an entry the log already holds as a
-committed input, with the same type, schema version and payload, is struck
-off unsent, and one whose ID the log holds with any other content stops
-the adapter (OutboxInvalid). The records already committed, in the outbox,
-or awaiting their reply seed the report journal, so IBKR's replay after a
-restart records nothing twice.
+(relay.read_engine_log). An entry is struck off once its reply has been
+acted on and before the input awaiting its reply is cleared (Relay's
+settled), so a stop between the two leaves that input awaiting its reply,
+which only its own run is asked for again: no entry an earlier run
+answered is ever left for a fresh run to take. A stop before the strike
+sends nothing twice: an entry the log already holds as a committed input,
+with the same type, schema version and payload, is struck off unsent, and
+one whose ID the log holds with any other content stops the adapter
+(OutboxInvalid). The records already committed, in the outbox, or awaiting
+their reply seed the report journal, oldest run first, so IBKR's replay
+after a restart records nothing twice and each order keeps its latest
+status.
 
 The engine must be running, with its durable log begun, before the adapter
 starts: the log is the run's identity. The loop connects to the engine's
 socket before it reads that log or IBKR (EngineUnavailable otherwise): the
 engine opens its socket only after it has recorded its start, a fresh run's
 Run approval included, so the chain of runs is never read without it. The
-chain stops at the first earlier run of an earlier session than today's
-whose released orders have all ended (relay.run_logs), so an older run's
-log is never needed. Nothing here sends when the
+chain stops at the first earlier run whose inputs all predate yesterday's
+session and whose released orders have all ended, at IBKR or in the
+adapter's own records (relay.run_logs, PendingInput.settled_orders), so an
+older run's log is never needed. Nothing here sends when the
 configuration is not paper (sender.make_sender), and the real client sends
 only with paper_sending_enabled on (real_client.IbapiClient.can_place_orders).
 """
@@ -183,7 +189,7 @@ class AdapterLoop:
         self.relay = Relay(lambda: _AskedOnItsOwnThread(self._engine_connect(), self._await_engine), sender,
                            self.pending, lambda: collect_broker_orders(self.conn),
                            lambda order, session: release_to_request(order, cfg.mode, cfg.con_ids, session),
-                           today=self._today)
+                           today=self._today, settled=lambda envelope: self.outbox.strike(envelope["id"]))
         # The engine opens its socket only once its start is recorded, a
         # fresh run's Run approval included (cmd/engine), so nothing of the
         # log is read, and nothing of IBKR's journalled, before it listens:
@@ -192,7 +198,7 @@ class AdapterLoop:
         # The earlier runs' reports too: IBKR replays the day's executions
         # and the session's orders after a fresh run starts, and a report an
         # earlier run's engine recorded is never recorded again.
-        logs = run_logs(self._engine_log_path, self._session())
+        logs = run_logs(self._engine_log_path, self._session(), settled=self.pending.settled_orders())
         engine_logs = [read_engine_log(path) for path in logs]
         self.reports = OrderReportJournal(
             cfg.account_id, cfg.client_id, self._record, now=self._now, commission_wait=cfg.commission_wait,
@@ -225,7 +231,7 @@ class AdapterLoop:
         # approvals chain back to) is this engine's too: IBKR's day lists
         # still show it after a fresh run starts.
         expected = set(self.pending.handovers())
-        for path in run_logs(self._engine_log_path, self._session()):
+        for path in run_logs(self._engine_log_path, self._session(), settled=self.pending.settled_orders()):
             expected |= released_client_order_ids(path)
         match = match_on_reconnect(expected, broker, self.config.client_id)
         if match.unknown_at_broker or match.unknown_executions:
@@ -277,8 +283,13 @@ class AdapterLoop:
 
     # -- the engine side ---------------------------------------------------
     def _journalled(self, engine_logs):
-        """The report records this run's or an earlier run's engine holds, the outbox holds, or that await a reply: never recorded again."""
-        records = [Record(i.event_type, i.schema_version, i.payload) for log_ in engine_logs for i in log_.inputs]
+        """The report records this run's or an earlier run's engine holds, the outbox holds, or that await a reply: never recorded again.
+
+        engine_logs is newest first (relay.run_logs); the journal keeps each
+        order's last status seeded, so the logs are read oldest first.
+        """
+        records = [Record(i.event_type, i.schema_version, i.payload) for log_ in reversed(engine_logs)
+                   for i in log_.inputs]
         records += [Record(e["event_type"], e["schema_version"], e["payload"]) for e in self.outbox.load()]
         settled = self.pending.run_ended()
         records += [Record(e["input"].get("type"), e["input"].get("schema_version"), e["input"].get("payload") or {})
@@ -340,8 +351,9 @@ class AdapterLoop:
         self._exchange(waiting)
 
     def _exchange(self, envelope):
+        # The relay strikes the entry off before it clears the input
+        # awaiting its reply (its settled).
         reply = self.relay.exchange(envelope)
-        self.outbox.strike(envelope["id"])
         kinds = [d.get("type") for d in reply["payload"]["decisions"]]
         log.info("ibkr input=%s type=%s answered with %d decisions %s", envelope["id"], envelope["type"],
                  len(kinds), ",".join(kinds))

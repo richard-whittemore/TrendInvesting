@@ -138,7 +138,7 @@ import os
 import re
 import sys
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 RELEASED = "risk.order.released"
@@ -256,6 +256,10 @@ LATE_FILL_FIELDS = ("after", "at", "exec_id", "reason")
 # its committed fills, and the client order IDs of the orders a committed
 # lifecycle input ended.
 JournalledReports = namedtuple("JournalledReports", ("fills", "ended"))
+# The orders the adapter's own durable records settle (PendingInput.settled_orders),
+# which no engine's log may hold a report on: the client order IDs ended, and
+# each struck-off fill as fill ID to (client order ID, quantity).
+SettledOrders = namedtuple("SettledOrders", ("ended", "fills"))
 # One committed input in the engine's durable log, and the log as the adapter
 # reads it (read_engine_log).
 CommittedInput = namedtuple("CommittedInput", ("id", "event_type", "schema_version", "sequence", "payload"))
@@ -523,7 +527,7 @@ class PendingInput:
             return []
 
     def record_decision(self, decision):
-        """Append one decision durably; the file is kept for the owner and never read by the relay."""
+        """Append one decision durably; the file is kept for the owner, and read only by settled_orders."""
         with open(self.decisions_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(decision, sort_keys=True, separators=(",", ":")) + "\n")
             f.flush()
@@ -602,8 +606,9 @@ class PendingInput:
     def run_ended(self):
         """The inputs settled as left by an earlier run (resolve_run_ended), oldest first.
 
-        Each holds the input, and under "outbox" the other outbox entries
-        struck off with it, recorded before the settlement.
+        Each holds the input, and under "outbox" the outbox entries struck
+        off with it (IBKR's reports on orders an earlier run released),
+        recorded before the settlement.
 
         Read strictly (fail closed, AGENTS.md): a line that is not exactly
         what record_run_ended writes raises HandoverRecordInvalid.
@@ -638,6 +643,50 @@ class PendingInput:
             f.flush()
             os.fsync(f.fileno())
         self._sync_dir()
+
+    def settled_orders(self):
+        """The orders the adapter's own durable records settle, as a SettledOrders (run_logs reads it).
+
+        ended holds each client order ID whose last recorded decision
+        settles it as never sent (--never-sent or --not-handed-over), that
+        the hand-over record marks never sent, that a run-ended settlement
+        left unsent, or that a cancellation or refusal struck off at such a
+        settlement ends; fills each fill struck off at a settlement. Nothing
+        at IBKR ever reports on an order never sent, and a struck report is
+        in no engine's log, so only these records end such an order. A
+        decision line that cannot be read settles nothing, so its order is
+        not taken as ended (fail closed: its run's log is kept); the other
+        records are read strictly, as handovers and run_ended read them.
+        """
+        last = {}
+        try:
+            with open(self.decisions_path, encoding="utf-8") as f:
+                lines = [line for line in f if line.strip()]
+        except FileNotFoundError:
+            lines = []
+        for line in lines:
+            try:
+                decision = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(decision, dict) and _is_text(decision.get("client_order_id")):
+                last[decision["client_order_id"]] = decision.get("decision")
+        ended = {cid for cid, decision in last.items() if decision in (DECIDE_NEVER_SENT, DECIDE_NOT_HANDED_OVER)}
+        ended |= {cid for cid, mark in self.handovers().items() if mark == NEVER_SENT}
+        fills = {}
+        for entry in self.run_ended():
+            ended.update(entry["unsent"])
+            for struck in entry["outbox"]:
+                payload = struck["payload"]
+                cid = payload.get("client_order_id")
+                if not _is_text(cid):
+                    continue
+                if struck["event_type"] == LIFECYCLE_TYPE and payload.get("status") in LIFECYCLE_TERMINAL:
+                    ended.add(cid)
+                elif (struck["event_type"] == FILL_TYPE and _is_text(payload.get("fill_id"))
+                      and _is_count(payload.get("quantity"))):
+                    fills[payload["fill_id"]] = (cid, payload["quantity"])
+        return SettledOrders(frozenset(ended), fills)
 
     def acknowledged_corrections(self):
         """The owner's acknowledged corrections: each correction's execId to the execId it corrects.
@@ -760,8 +809,12 @@ class Relay:
     input's event time as a New York date, None when that cannot be read)
     to an OrderRequest; it need refuse nothing the sender's check refuses.
     reconnects bounds how often one exchange reconnects and
-    asks again before EngineUnavailable reaches the caller. today returns
-    the session's date (New York), against which a resend permission is
+    asks again before EngineUnavailable reaches the caller. settled, when
+    given, is called with each input once its reply has been acted on and
+    before the input awaiting its reply is cleared (the loop strikes it off
+    its outbox there), so a stop between the two leaves the input awaiting
+    its reply, never an outbox entry no input awaiting a reply accounts
+    for. today returns the session's date (New York), against which a resend permission is
     checked. Each relay takes its own exclusive lock on the pending file at
     construction and holds it until close (PendingInUse if another relay or
     resolve has it, in this process or another); once closed it raises
@@ -773,7 +826,7 @@ class Relay:
     """
 
     def __init__(self, connect, sender, pending, broker_orders, to_request, reconnects=1, today=None,
-                 close_timeout=CLOSE_TIMEOUT):
+                 close_timeout=CLOSE_TIMEOUT, settled=None):
         _positive_seconds("close_timeout", close_timeout)
         if not callable(getattr(sender, "check", None)) or not callable(getattr(sender, "send", None)):
             raise TypeError("the relay's sender must have check and send: it asks check before every mark")
@@ -787,6 +840,7 @@ class Relay:
         self._broker_orders = broker_orders
         self._to_request = to_request
         self._reconnects = reconnects
+        self._settled = settled
         self._engine = None
         self._sent = set()
         # Serialises close against each step that edits the record or sends (the
@@ -909,6 +963,8 @@ class Relay:
             self._sent.add(cid)
         with self._step:
             self._require_held()
+            if self._settled is not None:
+                self._settled(envelope)
             self._pending.clear()
         return reply
 
@@ -1101,7 +1157,15 @@ def run_identity(path):
     input, the configuration, which a resume copies first: its ID (the
     configuration's hash) and its recorded time (the run's as-of time), so
     two unapproved starts of other configurations or other as-of times are
-    two runs, never one. Read as journalled_reports reads the log. Fail
+    two runs, never one. The residual: two unapproved starts with the same
+    configuration and as-of time (a first run started again the same day
+    from the same run.env, without -approval) share an identity, so the
+    second is taken for a resume of the first and is asked for the first
+    one's waiting input; nothing in the two logs tells them apart. Never
+    start a first run again without an approval (docs/manual/paper-trading.md,
+    "Starting the adapter"): a crashed first run is resumed, and any other
+    restart is a fresh run with its approval. Read as journalled_reports
+    reads the log. Fail
     closed (ResolveRefused): a log with no committed input names no run,
     and is never read as any run's.
     """
@@ -1143,8 +1207,7 @@ def earlier_run(pending, engine_log_path):
     if sent_to is not None and sent_to["run"] == run_identity(engine_log_path):
         return None
     run = sent_to["run"] if sent_to is not None else None
-    since = _session_date({"event_time": waiting.get("recorded_at")}) or date.min
-    for path in run_logs(engine_log_path, since)[1:]:
+    for path in _earlier_logs(pending, engine_log_path, waiting):
         for group in _committed_groups(path).groups:
             if group[0][2]["id"] != input_id:
                 continue
@@ -1158,6 +1221,12 @@ def earlier_run(pending, engine_log_path):
     return EarlierRun(input_id, sent_to["log"] if sent_to is not None else None, False, (), run)
 
 
+def _earlier_logs(pending, engine_log_path, waiting):
+    """The logs of the earlier runs the chain from engine_log_path reaches, from the session waiting was recorded in (run_logs)."""
+    since = _session_date({"event_time": waiting.get("recorded_at")}) or date.min
+    return run_logs(engine_log_path, since, settled=pending.settled_orders())[1:]
+
+
 def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
     """Settle the input an earlier run left awaiting its reply: refused, with what it released, for "run ended".
 
@@ -1166,13 +1235,18 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
     RUN_ENDED (PendingInput.record_run_ended), never sent and never sent
     again: the adapter journals nothing of the input again, strikes it off
     its outbox unsent, and the next start's reconciliation (ADR 0025 point
-    5) sees the account as it is. Every other entry the outbox holds at the
-    settlement was recorded before it, while no adapter ran or while the
-    earlier run's engine decided (IBKR's reports on that run's orders among
-    them), so none is the fresh run's: each is recorded with the settlement
-    and struck off unsent, never drained into the fresh run under its
-    identity. The pending file is then cleared, so the
-    adapter goes on with the fresh run's own inputs. Refuses (ResolveRefused,
+    5) sees the account as it is. Of the other entries the outbox holds,
+    only those that provably belong to the earlier run are settled with it:
+    IBKR's reports (lifecycle and fill inputs) on an order a run of the
+    chain before engine_log_path released (run_logs from the input's
+    session), recorded while that run's engine decided. Each is recorded
+    with the settlement and struck off unsent, never drained into the fresh
+    run under its identity. Every other entry stays in the outbox and is
+    sent to the fresh run: a producer in another process (the session's
+    close) may have recorded it for the fresh run while the adapter was
+    stopped, and an input that may be the running run's is never discarded
+    (fail closed, AGENTS.md rule 5). The pending file is then cleared, so
+    the adapter goes on with the fresh run's own inputs. Refuses (ResolveRefused,
     nothing changed) while an adapter holds the pending file, an empty
     reason, no input awaiting its reply, another input than the one
     awaiting, and an input of the run whose durable log is engine_log_path
@@ -1199,7 +1273,12 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
         outbox = Outbox(pending.path + OUTBOX_SUFFIX)
         settled = pending.run_ended()
         recorded = {e["input"]["id"] for e in settled} | {o["id"] for e in settled for o in e["outbox"]}
-        behind = [e for e in outbox.load() if e["id"] != input_id and e["id"] not in recorded]
+        earlier = set()
+        for path in _earlier_logs(pending, engine_log_path, waiting):
+            earlier |= released_client_order_ids(path)
+        behind = [e for e in outbox.load() if e["id"] != input_id and e["id"] not in recorded
+                  and e["event_type"] in (LIFECYCLE_TYPE, FILL_TYPE)
+                  and e["payload"].get("client_order_id") in earlier]
         if input_id not in recorded or behind:
             pending.record_run_ended({
                 "input": waiting, "refused": RUN_ENDED, "reason": reason, "run": ended.run,
@@ -1207,7 +1286,8 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "session_date": (today or _session_today()).isoformat()})
         # Recorded first, so a stop before the strike still keeps every
-        # entry from the fresh run (the loop strikes what a settlement names).
+        # entry it names from the fresh run (the loop strikes what a
+        # settlement names).
         for entry in [{"id": input_id}] + behind:
             outbox.strike(entry["id"])
         pending.clear()
@@ -1272,7 +1352,7 @@ def released_client_order_ids(path):
     return released
 
 
-def run_logs(path, today=None):
+def run_logs(path, today=None, settled=None):
     """The engine's durable log at path, then the log of each earlier run its Run approvals name, newest first.
 
     A fresh run's log holds one committed Run approval, whose previous_log
@@ -1282,28 +1362,42 @@ def run_logs(path, today=None):
     executions, the session's open orders), so reconciliation and the
     report journal read the earlier runs of the chain too, but only those
     IBKR's lists can still show: the walk stops at the first earlier run
-    whose committed inputs all fall on an earlier New York date than today
-    (by event time and recorded time alike) and every order it released has
-    ended, and leaves it and every run before it out. An order has ended
-    when a committed report ends it (cancelled or refused) or its committed
-    fills reach its quantity, in that run's log or a later one of the chain
-    (the adapter journals IBKR's reports into the run now running). A
-    calendar date is never taken as proof an order ended: a DAY order sent
-    after the close works the next session, so an earlier day's run with an
-    order not ended is kept, and the walk goes on past it. today defaults
-    to today in New York. Fail closed (ResolveRefused): a log that cannot be
+    whose committed inputs all fall on a New York date before yesterday's
+    session (by event time and recorded time alike; yesterday's session is
+    the weekday before today) and every order it released has ended, and
+    leaves it and every run before it out. Every run of today's or
+    yesterday's session is read whatever it released, so a run that
+    released nothing never hides an earlier run whose order released after
+    yesterday's close works today. An order has ended when a committed
+    report ends it (cancelled or refused) or its committed fills reach its
+    quantity, in that run's log or a later one of the chain (the adapter
+    journals IBKR's reports into the run now running), or when the
+    adapter's own durable records settle it (settled, a SettledOrders from
+    PendingInput.settled_orders: an order never sent, left unsent by a
+    run-ended settlement, or ended by reports struck off there). Only an
+    input's reports count: a decision (the dry-run engine's synthetic
+    terminal report) is the engine's own, never IBKR's. A calendar date is
+    never taken as proof an order ended: an earlier day's run with an order
+    not ended is kept, and the walk goes on past it. The weekday is not the
+    exchange's calendar: when the weekday before today was a holiday, a run
+    of the session before it can be left out although an order it released
+    after that close is still working; reconciliation then stops on that
+    order ("no order the engine released explains"), never sends past it
+    (docs/manual/paper-trading.md). today defaults to today in New York.
+    Fail closed (ResolveRefused): a log that cannot be
     read, more than one Run approval in a log, a previous_log that is not a
     bare file name, a previous_log_final_hash that is not the named log's
     last committed record hash (the engine checks the same at the fresh
     run's start; a log that differs is not the one approved), a named log
     with no committed record, or a chain that names a log twice.
     """
-    today = today or _session_today()
+    yesterday = _yesterdays_session(today or _session_today())
     logs = [path]
     seen = {os.path.realpath(path)}
     current = path
     groups = _committed_groups(path).groups
-    ended, filled = _order_ends(path, groups, set(), {})
+    settled = settled or SettledOrders(frozenset(), {})
+    ended, fills = _order_ends(path, groups, settled.ended, settled.fills)
     while True:
         approvals = [envelope for group in groups for _, kind, envelope in group
                      if kind == LOG_INPUT and envelope["type"] == RUN_APPROVED]
@@ -1329,43 +1423,58 @@ def run_logs(path, today=None):
                 "{}: it is not the log the owner approved, so its orders and reports are not taken as this "
                 "engine's (docs/manual/paper-trading.md)".format(current, name, approved_hash,
                                                                  read.final_hash or "none (it holds no commit)"))
-        ended, filled = _order_ends(previous, read.groups, ended, filled)
-        if _last_session(read.groups) < today and not _open_orders(read.groups, ended, filled):
+        ended, fills = _order_ends(previous, read.groups, ended, fills)
+        if _last_session(read.groups) < yesterday and not _open_orders(read.groups, ended, fills):
             return logs
         seen.add(os.path.realpath(previous))
         logs.append(previous)
         current, groups = previous, read.groups
 
 
-def _order_ends(path, groups, ended, filled):
-    """ended and filled with the reports committed in groups (the log at path) added, as new values.
+def _yesterdays_session(today):
+    """The weekday before today: the session whose DAY orders released after its close may still work today."""
+    day = today - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
 
-    ended is the client order IDs a committed lifecycle report ended;
-    filled the quantity committed fills reached, by client order ID. Each
-    report is read as journalled_reports reads it (ResolveRefused for one
-    that cannot be read).
+
+def _order_ends(path, groups, ended, fills):
+    """ended and fills with the reports committed as inputs in groups (the log at path) added, as new values.
+
+    ended is the client order IDs a committed lifecycle input ended; fills
+    each committed fill input's fill ID to (client order ID, quantity), so
+    a fill both struck at a settlement and committed counts once. Only an
+    input is IBKR's report: a decision (the dry-run engine's synthetic
+    terminal report, version 3, synthetic: true) is skipped. Each input is
+    read as journalled_reports reads it (ResolveRefused for one that cannot
+    be read).
     """
-    ended, filled = set(ended), dict(filled)
+    ended, fills = set(ended), dict(fills)
     for group in groups:
         for at, kind, envelope in group:
+            if kind != LOG_INPUT:
+                continue
             if envelope["type"] == FILL_TYPE:
-                _fill_id(path, at, kind, envelope)
-                cid = envelope["payload"]["client_order_id"]
-                filled[cid] = filled.get(cid, 0) + envelope["payload"]["quantity"]
+                fill_id = _fill_id(path, at, kind, envelope)
+                fills[fill_id] = (envelope["payload"]["client_order_id"], envelope["payload"]["quantity"])
             elif envelope["type"] == LIFECYCLE_TYPE:
                 client_order_id, status = _lifecycle(path, at, kind, envelope)
                 if status in LIFECYCLE_TERMINAL:
                     ended.add(client_order_id)
-    return ended, filled
+    return ended, fills
 
 
-def _open_orders(groups, ended, filled):
+def _open_orders(groups, ended, fills):
     """The client order IDs of the orders the decisions in groups released to be sent that have not ended.
 
-    An order has ended when it is in ended, or when filled reaches its
-    released quantity; a release whose quantity cannot be read as a count
-    is never taken as filled (fail closed: the run is kept).
+    An order has ended when it is in ended, or when its fills in fills
+    reach its released quantity; a release whose quantity cannot be read
+    as a count is never taken as filled (fail closed: the run is kept).
     """
+    filled = {}
+    for cid, quantity in fills.values():
+        filled[cid] = filled.get(cid, 0) + quantity
     still = set()
     for group in groups:
         for _, kind, envelope in group:

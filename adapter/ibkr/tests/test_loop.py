@@ -32,7 +32,7 @@ from engine_client import EngineRejected
 from relay import EngineUnavailable
 from loop import OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch, SOURCE
 from relay import (RELEASED, EarlierRunInput, HandoverRecordInvalid, PendingInput, ResolveRefused, main as relay_main,
-                   read_engine_log)
+                   read_engine_log, run_identity)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 
 TESTDATA = tests_dir / "testdata"
@@ -586,7 +586,7 @@ class LoopTests(unittest.TestCase):
         self.assertNotIn("session:2", [e["id"] for e in second.received])
         self.assertEqual(loop.outbox.load(), [])
 
-    def test_run_ended_settles_every_outbox_entry_the_earlier_run_left_so_none_drains_into_the_fresh_run(self):
+    def test_run_ended_settles_each_report_on_an_earlier_runs_order_so_none_drains_into_the_fresh_run(self):
         # While the earlier run's engine decided, IBKR's report on an order
         # it released was recorded behind the input awaiting its reply.
         self.filled_under_the_first_run()
@@ -605,6 +605,93 @@ class LoopTests(unittest.TestCase):
         loop.start()
         self.settle(loop)
         self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
+        self.assertEqual(loop.outbox.load(), [])
+
+    def test_run_ended_keeps_an_input_recorded_for_the_fresh_run_and_it_is_delivered(self):
+        # The session's close, a producer of its own, records its input for
+        # the fresh run while the adapter sits stopped on the earlier run's
+        # input. Only what provably belongs to the earlier run is struck: a
+        # report on an order that run released.
+        self.filled_under_the_first_run()
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+        report = {"id": "ibkr:execution.order.lifecycle:late", "event_type": LIFECYCLE_TYPE, "schema_version": 2,
+                  "event_time": "2026-10-16T20:00:01Z",
+                  "payload": {"client_order_id": "tw-paper-1", "status": "canceled",
+                              "occurred_at": "2026-10-16T20:00:01Z"}}
+        fresh = {"id": "session:3", "event_type": "market.session.closed", "schema_version": 1,
+                 "event_time": SESSION_CLOSED, "payload": {"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]}}
+        outbox.append(report)
+        outbox.append(fresh)
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        self.assertEqual([e["id"] for e in outbox.load()], ["session:3"])
+        self.assertEqual([[e["id"] for e in r["outbox"]] for r in PendingInput(self.pending).run_ended()],
+                         [[report["id"]]])
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual([e["id"] for e in second.inputs()][1:], ["session:3"])
+        self.assertEqual(loop.outbox.load(), [])
+
+    def test_a_stop_as_an_answered_input_is_struck_off_leaves_it_awaiting_so_a_fresh_run_never_takes_it(self):
+        # The entry is struck off before the input awaiting its reply is
+        # cleared: a stop between the two leaves the input awaiting, which a
+        # fresh run refuses (EarlierRunInput), never an outbox entry it would
+        # take for its own.
+        class Stopped(Exception):
+            pass
+        loop = self.loop()
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        self.session_closed(loop)
+        strike = loop.outbox.strike
+
+        def stop_once(input_id):
+            loop.outbox.strike = strike
+            raise Stopped("the adapter stopped as it struck the input off")
+        loop.outbox.strike = stop_once
+        with self.assertRaises(Stopped):
+            self.settle(loop)
+        loop.close()
+        placed = len(self.fake.placed)
+        second = self.fresh_run("engine.log", "run-2.log")
+        restarted = self.loop(engine=second, engine_log=second.path)
+        with self.assertRaises(EarlierRunInput):
+            restarted.start()
+        restarted.close()
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        settled = self.loop(engine=second, engine_log=second.path)
+        settled.start()
+        self.settle(settled)
+        self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
+        self.assertEqual(settled.outbox.load(), [])
+        self.assertEqual(len(self.fake.placed), placed)
+
+    def test_a_restart_seeds_each_orders_status_from_the_oldest_run_to_the_newest(self):
+        # Run one journals tw-paper-1 working; run two journals IBKR's
+        # cancellation of it. A third run reads both: the later status is the
+        # one the journal holds, so IBKR's replay of the cancellation is
+        # never recorded again.
+        loop = self.loop()
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        self.session_closed(loop)
+        self.settle(loop)
+        loop.close()
+        second = self.fresh_run("engine.log", "run-2.log")
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        self.fake.status(7, "Cancelled", filled="0", remaining="9")
+        self.settle(loop)
+        loop.close()
+        self.assertEqual([e["payload"]["status"] for e in second.inputs(LIFECYCLE_TYPE)], ["canceled"])
+        third = self.fresh_run("run-2.log", "run-3.log")
+        loop = self.loop(engine=third, engine_log=third.path)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual([e["type"] for e in third.received], ["operator.run.approved"])
         self.assertEqual(loop.outbox.load(), [])
 
     def test_an_outbox_entry_recorded_at_a_settlement_is_never_sent_even_if_the_strike_was_cut_short(self):
@@ -654,6 +741,25 @@ class LoopTests(unittest.TestCase):
             restarted.start()
         self.assertIn("session:1", str(caught.exception))
         self.assertEqual(other.received, [])
+
+    def test_two_unapproved_starts_with_the_same_configuration_and_as_of_share_one_identity(self):
+        # The known residual: with no Run approval, a run is named by its
+        # configuration and as-of time, which a second start from the same
+        # run.env repeats, so the second start is taken for a resume of the
+        # first and is asked for the first one's waiting input. The manual
+        # forbids starting a first run again the same day without an
+        # approval (a crashed first run is resumed instead).
+        loop = self.loop(engine=Unanswered(self.engine, commits=False))
+        loop.start()
+        self.session_closed(loop)
+        with self.assertRaises(EngineUnavailable):
+            loop.step()
+        loop.close()
+        again = LoggedEngine(str(Path(self.dir.name) / "again.log"))
+        self.assertEqual(run_identity(str(again.path)), run_identity(self.engine_log))
+        restarted = self.loop(engine=again, engine_log=str(again.path))
+        restarted.start()
+        self.assertEqual([e["id"] for e in again.received], ["session:1"])
 
     def test_an_approved_fresh_run_resumed_after_a_crash_takes_its_own_input_awaiting_its_reply(self):
         self.filled_under_the_first_run()
