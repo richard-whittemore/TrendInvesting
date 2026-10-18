@@ -146,3 +146,20 @@ func TestRulesVersionDeclaresTheHalfCentLimitMatch(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresReconciliation: the handler reads
+// account.reconciliation, market.corporate-action and
+// operator.alert.acknowledged, and a reconciliation degrades or halts the
+// account, so a journal written under this build cannot replay under an
+// earlier rules version, which refuses those inputs. 1.8.0 is the lifecycle
+// match's, so this one is 1.9.0 (ADR 0016: each rules change takes its own
+// version).
+func TestRulesVersionDeclaresReconciliation(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want 1.9.0 or later once a reconciliation moves the engine state", targetweight.RulesVersion)
+		}
+	}
+}

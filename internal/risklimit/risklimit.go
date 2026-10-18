@@ -18,6 +18,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 )
 
 // The gate's states (ADR 0019, amended 2026-09-24; ADR 0026, point 4).
@@ -82,6 +83,10 @@ type Gate struct {
 	decided   map[string]bool
 	state     string
 	scope     []string
+	// cashScope names the cash components a Degraded account's scope holds:
+	// a cash-only discrepancy names no instrument, so it blocks buys and
+	// freezes nothing (ADR 0019, amended 2026-09-24).
+	cashScope []string
 	// incident is the engine-state record that took the account out of
 	// Normal; it tags the incident's one sale back to 98%.
 	incident string
@@ -132,6 +137,14 @@ type Gate struct {
 	account, brokerView view
 	orders              map[string]*releasedOrder
 	fills               map[string]event.TargetWeightFillPayload
+	// book is the journal's book a reconciliation starts from, and changes
+	// every fill and corporate action journalled in the run, in journal
+	// order; the classifier applies those inside its window (reconcile).
+	book    *reconcile.Book
+	changes []reconcile.Change
+	// corporateActions is every corporate action recorded as a change, by
+	// envelope ID, so a redelivery is recognised and never counted twice.
+	corporateActions map[string]event.CorporateActionPayload
 }
 
 // saleAttempt is one tag's record of its sale back to 98%, attempted once
@@ -200,7 +213,8 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempts: make(map[string]*saleAttempt), pending: make(map[string]bool),
 		ledger: newSellLedger(), orders: make(map[string]*releasedOrder),
-		fills: make(map[string]event.TargetWeightFillPayload),
+		fills:            make(map[string]event.TargetWeightFillPayload),
+		corporateActions: make(map[string]event.CorporateActionPayload),
 	}, nil
 }
 
@@ -240,8 +254,9 @@ func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool) error {
 // 0019, amended 2026-09-24, "The state survives a restart"; ADR 0026, point
 // 5). Leaving either state is never automatic, so a record never loosens the
 // gate: a Halted gate refuses a Degraded record, and a Degraded record widens
-// the scope to the union. A scope naming orders or cash components is
-// refused, since this gate holds instruments only and cannot honour it. The
+// the scope, instruments and cash components, to the union. A scope naming
+// orders is refused, since this gate holds no order scope and cannot honour
+// it. The
 // first record out of Normal is the incident, whose one sale back to 98% it
 // tags: moving from Degraded to Halted does not start another (ADR 0019,
 // amendment of 2026-10-17).
@@ -252,10 +267,10 @@ func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion
 	if id == "" {
 		return errors.New("risklimit: a recorded engine state needs its envelope ID")
 	}
-	if len(p.ScopeOrderIDs) > 0 || len(p.ScopeCashComponents) > 0 {
-		return errors.New("risklimit: a recorded scope naming orders or cash components is not one this gate can hold")
+	if len(p.ScopeOrderIDs) > 0 {
+		return errors.New("risklimit: a recorded scope naming orders is not one this gate can hold")
 	}
-	return g.tighten(id, p.State, p.ScopeInstrumentIDs)
+	return g.tighten(id, p.State, p.ScopeInstrumentIDs, p.ScopeCashComponents)
 }
 
 // RestoreIncidentState applies, before any order is checked, the state and
@@ -264,28 +279,30 @@ func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion
 // or restart while Degraded or Halted resumes in that same state and scope"
 // (ADR 0019, amended 2026-09-24, "The state survives a restart"). As with a
 // recorded state, it never loosens the gate. State is event.EngineStateDegraded
-// with the instruments it freezes, or event.EngineStateHalted with none.
-// incidentID, the incident's first engine-state record, tags its one sale
-// back to 98%, as RestoreState's first record out of Normal does.
-func (g *Gate) RestoreIncidentState(incidentID, state string, instrumentIDs []string) error {
+// with the instruments and cash components it freezes, at least one of
+// either, or event.EngineStateHalted with none. incidentID, the incident's
+// first engine-state record, tags its one sale back to 98%, as RestoreState's
+// first record out of Normal does.
+func (g *Gate) RestoreIncidentState(incidentID, state string, instrumentIDs, cashComponents []string) error {
+	scoped := len(instrumentIDs)+len(cashComponents) > 0
 	switch {
-	case state == event.EngineStateHalted && len(instrumentIDs) > 0:
+	case state == event.EngineStateHalted && scoped:
 		return errors.New("risklimit: an approved Halted incident covers the whole account and names no scope")
-	case state == event.EngineStateDegraded && len(instrumentIDs) == 0:
-		return errors.New("risklimit: an approved Degraded incident names its scope instruments")
+	case state == event.EngineStateDegraded && !scoped:
+		return errors.New("risklimit: an approved Degraded incident names its scope instruments or cash components")
 	case state != event.EngineStateHalted && state != event.EngineStateDegraded:
 		return fmt.Errorf("risklimit: an approved incident's state %q is not degraded or halted", state)
 	}
-	return g.tighten(incidentID, state, instrumentIDs)
+	return g.tighten(incidentID, state, instrumentIDs, cashComponents)
 }
 
 // tighten moves the gate to state, a validated Degraded or Halted, without
 // ever loosening it: Halted overrides everything, a Degraded state cannot
-// follow Halted, and a Degraded scope widens to the union. The first move
-// out of Normal is the incident, incidentID, whose one sale back to 98% it
-// tags: moving from Degraded to Halted does not start another (ADR 0019,
-// amendment of 2026-10-17).
-func (g *Gate) tighten(incidentID, state string, instrumentIDs []string) error {
+// follow Halted, and a Degraded scope widens to the union of instruments and
+// of cash components. The first move out of Normal is the incident,
+// incidentID, whose one sale back to 98% it tags: moving from Degraded to
+// Halted does not start another (ADR 0019, amendment of 2026-10-17).
+func (g *Gate) tighten(incidentID, state string, instrumentIDs, cash []string) error {
 	if state != event.EngineStateHalted && g.state == StateHalted {
 		return errors.New("risklimit: a Degraded state cannot follow Halted: leaving Halted is never automatic")
 	}
@@ -294,18 +311,18 @@ func (g *Gate) tighten(incidentID, state string, instrumentIDs []string) error {
 		g.saleTags[incidentID] = true
 	}
 	if state == event.EngineStateHalted {
-		g.state, g.scope = StateHalted, nil
+		g.state, g.scope, g.cashScope = StateHalted, nil, nil
 		return nil
 	}
-	scope := slices.Clone(g.scope)
-	for _, id := range instrumentIDs {
-		if !slices.Contains(scope, id) {
-			scope = append(scope, id)
-		}
-	}
-	slices.Sort(scope)
-	g.state, g.scope = StateDegraded, scope
+	g.state, g.scope, g.cashScope = StateDegraded, union(g.scope, instrumentIDs), union(g.cashScope, cash)
 	return nil
+}
+
+// union is the sorted union of two ID lists.
+func union(a, b []string) []string {
+	out := slices.Concat(a, b)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // Check decides every order of one decision time's plan, or of one phase of
@@ -513,34 +530,41 @@ func (g *Gate) halt(out *Outcome, detail, cause string) {
 	g.enter(out, StateHalted, &event.EngineStatePayload{
 		State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: detail,
 	}, event.EngineStateScopedVersion, cause)
-	g.scope = nil
+	g.scope, g.cashScope = nil, nil
 }
 
 // degrade adds instrumentID to a Degraded account's scope, recording the
-// state change on out. instrumentID is never already named: a Degraded
-// account refuses every order on a named instrument before any limit is
-// checked, and a duplicate would fail the state payload's validation.
+// state change on out with the whole scope, cash components included.
+// instrumentID is never already named: a Degraded account refuses every
+// order on a named instrument before any limit is checked, and a duplicate
+// would fail the state payload's validation.
 func (g *Gate) degrade(out *Outcome, instrumentID, detail, cause string) {
 	scope := append(slices.Clone(g.scope), instrumentID)
 	slices.Sort(scope)
 	g.scope = scope
 	g.enter(out, StateDegraded, &event.EngineStatePayload{
 		State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: detail,
-		ScopeInstrumentIDs: slices.Clone(scope),
+		ScopeInstrumentIDs: slices.Clone(scope), ScopeCashComponents: slices.Clone(g.cashScope),
 	}, event.EngineStateScopedVersion, cause)
 }
 
-// enter records a state change on out. The first change out of Normal is the
-// incident: its ID tags the incident's one sale back to 98% (ADR 0026,
-// point 2, "Order identity").
+// enter records a state change on out.
 func (g *Gate) enter(out *Outcome, state string, payload *event.EngineStatePayload, version uint32, cause string) {
+	out.State, out.StateSchemaVersion, out.StateID = payload, version, g.move(state, cause)
+}
+
+// move puts the account in state and returns the ID of the engine-state
+// record that says so, derived from its cause. The first change out of
+// Normal is the incident: its ID tags the incident's one sale back to 98%
+// (ADR 0026, point 2, "Order identity").
+func (g *Gate) move(state, cause string) string {
 	id := "engine-state:" + g.accountID + ":" + cause
 	if g.state == StateNormal {
 		g.incident = id
 		g.saleTags[id] = true
 	}
 	g.state = state
-	out.State, out.StateSchemaVersion, out.StateID = payload, version, id
+	return id
 }
 
 // breach returns the first limit o breaches and its detail, or "" when none.

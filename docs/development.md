@@ -316,6 +316,7 @@ So when the corpus asks you to add scenarios, ask of each one whether the previo
 - `internal/targetweight/` owns the target-weight strategy module (ADR 0026, point 1): a `replay.Handler` that decides each account's target weights and records them as `strategy.targets.decided`, sharing nothing with `internal/strategy/`. Its rule cores are subpackages (`boost/`, `momentum/` and `glide/`), pure arithmetic over adjusted closes that know nothing of events.
 - `internal/orderplan/` owns the strategy-independent order planner (ADR 0026, point 2): it turns a target decision, the account snapshot and configuration into `strategy.order.planned` orders, and knows no strategy rule.
 - `internal/risklimit/` owns the hard-limit gate outside the strategy (ADR 0026, points 3 and 4): each planned order is released or refused, and a breach moves the account to Degraded or Halted. It also holds the engine state and its scope, the kill switch, the latest broker snapshot and the margin-cushion alarm, and decides when the sale back to 98% goes; the sale's sizing is `internal/orderplan`'s.
+- `internal/reconcile/` owns the reconciliation classifier (ADR 0019, "Explain changes by causing events"): the journal's book, the fills and corporate actions since it, and IBKR's observation give each position and the cash a residual, classified matched, explained, unexplained or unverifiable, with the scope an unexplained result degrades. It is pure and never adopts a broker figure; `internal/risklimit` holds the book and moves the engine state from its result.
 - `internal/restart/` owns the restart rules (ADR 0019, "The state survives a restart"; ADR 0026, point 5; ADR 0027 §6): which earlier log is the latest run, which logs are abandoned resume attempts or abandoned starts, how a log that cannot be read is classified, and whether a fresh run's approval restores the latch and incident the approved log ended in without loosening them. Its functions are pure over already-recovered records; `cmd/engine` finds, orders and reads the logs.
 - `internal/targetweight/momentum/` owns the IRAs' momentum combination rule (ADR 0026 point 1): universe ranking, 12-1 scores, the sector cap, inverse-volatility weights and risk-off, as plain inputs and outputs with no events, sharing nothing with `internal/strategy/` (AGENTS.md rule 4).
 - Future strategy packages must not import LEAN, database, or transport implementations.
@@ -350,7 +351,7 @@ Bot reviews are metered, so:
 - Drafts are not reviewed (`.coderabbit.yaml` and `.greptile/config.json`), so
   stacked work stays draft until its base merges.
 - Review scope: both bots review the capital-safety paths (`internal/risklimit`,
-  `internal/orderplan`, `internal/targetweight`, `internal/journal`,
+  `internal/reconcile`, `internal/orderplan`, `internal/targetweight`, `internal/journal`,
   `internal/event`, `internal/replay`, `cmd/engine`, `adapter/ibkr`,
   `adapter/marketdata/adjust.py`, `adapter/marketdata/history.py`, `transport/`,
   `deploy/`). `transport/` is the live adapter socket path. The review tooling's

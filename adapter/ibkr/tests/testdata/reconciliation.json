@@ -1,0 +1,12 @@
+{
+  "account_id": "DU0000001",
+  "reconciliation_id": "morning:2027-01-15",
+  "trigger": "morning",
+  "as_of": "2027-01-15T08:00:00Z",
+  "unreadable": [],
+  "positions": [
+    {"instrument_id": "SPY", "quantity": 147}
+  ],
+  "total_cash": -4700.0,
+  "currency": "USD"
+}

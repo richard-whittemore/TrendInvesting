@@ -9,6 +9,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/glide"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
@@ -232,6 +233,12 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return r.applyLifecycle(in)
 	case event.FillEventType:
 		return r.applyFill(in)
+	case event.ReconciliationEventType:
+		return r.h.applyReconciliation(in)
+	case event.MarketCorporateActionEventType:
+		return nil, r.h.applyCorporateAction(in)
+	case event.AlertAcknowledgedEventType:
+		return nil, r.h.applyAcknowledgement(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -329,6 +336,7 @@ func (r *momentumRun) applySnapshot(in event.Envelope) error {
 		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, r.snapshot.AsOf)
 	}
 	r.snapshot = &p
+	r.h.gate.SetBook(reconcile.CashBook(in.ID, p))
 	return nil
 }
 

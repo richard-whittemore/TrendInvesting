@@ -81,6 +81,12 @@ var (
 	// the venue's input (event.LimitOrderLifecycleVersions).
 	syntheticVersions        = []uint32{event.OrderLifecycleSyntheticVersion}
 	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
+	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
+	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
+	acknowledgedVersions   = []uint32{event.AlertAcknowledgedSchemaVersion}
+	// A fresh run's approval, for the incident it carries in force: version
+	// 1, which could not state a cash scope, and the current version.
+	approvalVersions = []uint32{1, event.OperatorRunApprovedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }

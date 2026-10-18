@@ -17,6 +17,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/boost"
 )
@@ -49,8 +50,14 @@ import (
 //     the cent a limit is rounded to) where 1.6.0 refused any limit not
 //     bit-equal to it, so a journal holding such a report decides differently
 //     under 1.6.0.
-//   - 1.9.0 and 1.10.0 are reconciliation's and the operator inputs' rule
-//     changes; 1.7.0 was never released.
+//   - 1.9.0 reads account.reconciliation, market.corporate-action and
+//     operator.alert.acknowledged; a reconciliation's difference degrades or
+//     halts the account (ADR 0019, amended 2026-09-24), and a Degraded scope
+//     can name cash components, and it reads operator.run.approved schema
+//     version 2 (the incident in force states its cash scope) and refuses
+//     version 1, so a journal written under 1.8.0, or holding a version 1
+//     approval, does not replay.
+//   - 1.10.0 is the operator inputs' rule change; 1.7.0 was never released.
 //   - 1.11.0 records, in a dry-run momentum run only, a synthetic terminal
 //     report (execution.order.lifecycle version 3) for each order it
 //     releases and plans the buy phase at the same close (ADR 0026, point 3,
@@ -107,7 +114,14 @@ type Options struct {
 //     lifecycle report is recorded and otherwise decides nothing (ADR 0022);
 //     one about an order this run did not release, or that does not describe
 //     it as released, is refused: it is reconciliation's to explain (ADR
-//     0019).
+//     0019);
+//   - at any time after the configuration: market.corporate-action, which a
+//     reconciliation's book is bridged by; account.reconciliation, which
+//     classifies IBKR's positions and cash against the latest account
+//     snapshot and every fill and corporate action since it, and degrades or
+//     halts the account on a difference (ADR 0019, amended 2026-09-24); and
+//     operator.alert.acknowledged, the owner's acknowledgement, which the
+//     reporter reads and which decides nothing here.
 //
 // # The sale back to 98%
 //
@@ -251,6 +265,12 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyFill(in)
 	case event.OrderLifecycleEventType:
 		return nil, h.applyLifecycle(in)
+	case event.ReconciliationEventType:
+		return h.applyReconciliation(in)
+	case event.MarketCorporateActionEventType:
+		return nil, h.applyCorporateAction(in)
+	case event.AlertAcknowledgedEventType:
+		return nil, h.applyAcknowledgement(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -351,7 +371,7 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted); err != nil {
 			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
-		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs); err != nil {
+		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs, incident.ScopeCashComponents); err != nil {
 			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
 	}
@@ -418,6 +438,7 @@ func (h *Handler) applySnapshot(in event.Envelope) error {
 	}
 	h.snapshot = &p
 	h.gate.ObserveAccount(p)
+	h.gate.SetBook(reconcile.PositionsBook(in.ID, p))
 	return nil
 }
 
@@ -548,6 +569,56 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	}
 	if err := h.gate.ObserveFill(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return nil
+}
+
+// applyReconciliation classifies a recorded reconciliation against the
+// journal's book (risklimit.Gate.Reconcile) and journals the result, then
+// the engine state when it moved. Its emissions are timed at the
+// observation.
+func (h *Handler) applyReconciliation(in event.Envelope) ([]event.Envelope, error) {
+	p, err := decodeInput[event.ReconciliationPayload](in, event.ReconciliationSchemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	r, err := h.gate.Reconcile(in.ID, p)
+	if err != nil {
+		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	b := &emissions{h: h, in: in, at: p.AsOf}
+	b.add(r.ResultID, event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, r.Result)
+	if r.State != nil {
+		b.add(r.StateID, event.EngineStateEventType, r.StateSchemaVersion, *r.State)
+	}
+	return b.result()
+}
+
+// applyCorporateAction records a journalled corporate action, at any of the
+// schema versions event.UpcastCorporateActionPayload reads, as a change a
+// reconciliation's book is bridged by. It changes no target or order.
+func (h *Handler) applyCorporateAction(in event.Envelope) error {
+	p, err := event.UpcastCorporateActionPayload(in.SchemaVersion, in.Payload)
+	if err != nil {
+		return fmt.Errorf("targetweight: corporate action %s: %w", in.ID, err)
+	}
+	if err := h.gate.ObserveCorporateAction(in.ID, p); err != nil {
+		return fmt.Errorf("targetweight: corporate action %s: %w", in.ID, err)
+	}
+	return nil
+}
+
+// applyAcknowledgement reads the owner's acknowledgement of an alert, which
+// stops the reporter repeating it (ADR 0019, amended 2026-09-24,
+// "Alerting"). It decides nothing and changes no engine state: leaving
+// Degraded or Halted is the recovery procedure's.
+func (h *Handler) applyAcknowledgement(in event.Envelope) error {
+	p, err := decodeInput[event.AlertAcknowledgedPayload](in, event.AlertAcknowledgedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if p.AccountID != h.cfg.AccountID {
+		return fmt.Errorf("targetweight: acknowledgement %s is for account %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
 	}
 	return nil
 }

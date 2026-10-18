@@ -71,6 +71,7 @@ class FakeTWS(TWSApi):
         self.summary_error = None
         self.drop_during_summary = False
         self.open_orders = []
+        self.end_open_orders = True
         self.executions = []
 
     # -- connection ------------------------------------------------------
@@ -147,7 +148,8 @@ class FakeTWS(TWSApi):
         self.calls.append(("req_all_open_orders",))
         for order_id, con, ord_, state in self.open_orders:
             self.callbacks.open_order(order_id, con, ord_, state)
-        self.callbacks.open_order_end()
+        if self.end_open_orders:
+            self.callbacks.open_order_end()
 
     def req_executions(self, req_id, account_id):
         self.calls.append(("req_executions", req_id, account_id))
