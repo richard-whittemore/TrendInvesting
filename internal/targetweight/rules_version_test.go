@@ -152,8 +152,8 @@ func TestRulesVersionDeclaresTheHalfCentLimitMatch(t *testing.T) {
 // operator.alert.acknowledged, and a reconciliation degrades or halts the
 // account, so a journal written under this build cannot replay under an
 // earlier rules version, which refuses those inputs. 1.8.0 is the lifecycle
-// match's, so this one is 1.9.0 (ADR 0016: each rules change takes its own
-// version).
+// match's, so this build must be above 1.8.0; 1.9.0 is this change's own
+// version (ADR 0016: each rules change takes its own version).
 func TestRulesVersionDeclaresReconciliation(t *testing.T) {
 	t.Parallel()
 
