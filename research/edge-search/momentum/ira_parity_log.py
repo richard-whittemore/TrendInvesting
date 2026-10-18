@@ -9,11 +9,13 @@
 # per buy. Orders are market orders tagged IRAORD1 <month> <phase>; the
 # limit prices at PRICE_BAND are recorded, not sent. Each rebalance's plan
 # inputs and results go in an order tag (IRAPARITY1, on a cancelled 1-share
-# SPY limit order), and a month whose buys never went (a sell still working
+# SPY limit order; a record whose carrier QuantConnect refuses is sent again
+# on a later one), and a month whose buys never went (a sell still working
 # at the next rebalance or the end) is recorded as unfinished. The buys
 # wait for every sell still working, of any month. A target with no price
-# at all waits in PENDING outside the plan; a holding with none is sold by
-# an order tagged IRAORD1 <month> unpriced.
+# at all waits in PENDING outside the plan; a holding with none is sold, net
+# of any sell still working on it, by an order tagged IRAORD1 <month>
+# unpriced.
 #
 # This is momentum/fresh_universe.py with additions only (a test checks
 # that every code line of it is kept); with IRA_EXEC False it trades as

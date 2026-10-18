@@ -148,9 +148,9 @@ The thresholds:
 | `d7l-picks`, `d7l-skipped`, `d7l-kept` | exactly the same, a withheld month included |
 | `ira-plan` | exactly the same sells and buys (shares and limit prices) and the same skips (side, reason, shares) |
 | `ira-scale` | the same shares; the scale within 1e-12 |
-| `ira-orders` | the orders the backtest placed, by stock and phase, exactly the shares Go's sells and scaled buys call for; each one filled, in its phase's direction (a buy positive, a sell negative) and in whole shares. Only quantities: the backtest sends market orders, so no limit price is checked here. An order the backtest could not place because the stock was delisted or acquired at the rebalance passes when the export records how that was detected (below); it is listed as a `delisted` departure |
-| `ira-sequence` | every sell filled before the first buy, and no sell of any month still working when a buy was placed; the sessions from the rebalance to the buys, counted on a trading calendar, are the delay (one session, none when no sell was placed or working), then each session at whose 8:00 the orders listing shows a sell still working, then any waited for a stock's first price |
-| `differences` (IRA) | none: a wait for a price and a stock with no reference price are listed and fail it, since live trading does neither and ADR 0026 point 8 does not list them |
+| `ira-orders` | the orders the backtest placed, by stock and phase, exactly the shares Go's sells and scaled buys call for; each one filled, in its phase's direction (a buy positive, a sell negative) and in whole shares. Only quantities: the backtest sends market orders, so no limit price is checked here. An order the backtest could not place because the stock was delisted or acquired at the rebalance passes when the export records how that was detected (below); it is listed as a `delisted` departure. Every refusal and every unplaced buy is either so listed or fails. Every other order of the run is accounted for too: a never-filled export carrier is skipped, LEAN's own sale at a delisting and the buy of a stock with no reference price are listed differences, and any other order fails. The sale of a holding with no reference price must be of such a stock that was not a target |
+| `ira-sequence` | every sell filled before the first buy, and no sell of any month still working when a buy was placed; the rebalance and the buys each on a trading session; the sessions from the rebalance to the buys, counted on a trading calendar, are the delay (one session, none when no sell was placed or working), then each session at whose 8:00 the orders listing shows a sell still working, then any waited for a stock's first price |
+| `differences` (IRA) | none off ADR 0026 point 8's list: a wait for a price, a stock with no reference price (and its buy outside the planner) and LEAN's own sale of a holding at its delisting (`liquidated`) are listed and fail it, since point 8 does not list them |
 
 These thresholds are settled: the owner confirmed them as the rule on
 2026-10-18 (ADR 0026, amendment of that date, "the remaining parity
@@ -162,7 +162,17 @@ counted on a calendar rather than taken from the export, every working
 sell of any month holds the buys, and a price wait became a listed
 difference. The `ira-orders` rule gained the status, direction and
 whole-share conditions then (`docs/research/parity-2026-10.md`, "Review
-fixes and re-runs, 2026-10-18").
+fixes and re-runs, 2026-10-18"). On the second review the same day the
+rebalance and the buys must each fall on a session, every order of the
+run is accounted for, and a refusal or an unplaced buy is listed only on
+the detection described below ("Second review fixes, 2026-10-18").
+
+The buys wait for every sell of the run still working, of any month or
+tag, not only the rebalance's own; the delay applies when a sell is placed
+or still working at the rebalance. That is how the tool and the template
+apply ADR 0026 point 2 (ADR 0026, amendment of 2026-10-18). What should
+happen when a sell can never complete, as in the held-out IRA run, is an
+owner decision still open.
 
 **Fractional shares (D7-F) are out of the parity scope**: they are not
 built, the owner chose whole shares for the IRAs on 2026-10-16, and on
@@ -174,17 +184,25 @@ universe still ranks such a stock from the session before, so the IRA
 planner plans an order QuantConnect cannot fill. Since 2026-10-18 this is
 one of ADR 0026 point 8's listed causes. The tool lists each such order
 under `delisted` with the detection the export records: QuantConnect
-refused it (its placeholder order ID -10 in a version 1 export, or a
-refusal it gave as "non-tradable" in version 2), or the stock had no price
-within five sessions (`unplaced`). An order refused for any other reason
-still fails `ira-orders`. The cause itself is never inferred by the tool.
+refused it and gave the reason "non-tradable", or the stock had no price
+within five sessions (`unplaced`, listed only when the export records all
+five sessions waited for a price, which `ira-sequence` checks against the
+calendar). Either must name an order Go planned that the backtest did not
+fill. Every other refusal fails `ira-orders`: one for any other reason, one
+with no reason recorded, one of an order that filled after all or that Go
+never planned. A placeholder order ID -10, all a version 1 export records
+of a refusal, says only that QuantConnect refused, not why, so a version 1
+refusal fails. The cause itself is never inferred by the tool.
 
 In the IRA backtest a stock that joins the universe at the rebalance has
 no price until its first trading day, so the backtest cannot order it at
 once. The buys then wait a session (at most five) and the wait is
-recorded; a buy still without a price is recorded as unplaced, which
-fails `ira-orders`. Live trading has the previous close, so it does not
-wait, and the wait is listed as a `price-wait` difference.
+recorded. A buy still without a price after five sessions is recorded as
+unplaced; it passes `ira-orders` and is listed as a `delisted` departure
+(above), while the sessions waited are listed as a `price-wait`
+difference, which fails `differences`. A buy recorded as unplaced without
+the five sessions fails `ira-orders`. Live trading has the previous close,
+so it does not wait.
 
 The IRA sequence counts sessions on a calendar, not by the backtest's
 word: `internal/nysecalendar` from 2022, and before that a list given with
@@ -198,9 +216,19 @@ calendar covers fails `ira-sequence`.
 The IRA template records an order QuantConnect refused apart from the
 placed ones, with the reason it gave (`refused`), and a month whose buys
 were never placed because a sell was still working at the next rebalance
-as `unfinished`; both fail `ira-orders`, and an unfinished month fails
-`ira-sequence`. Exports made before 2026-10-18 (version 1) have neither
-field; the tool reads their refusals from the placeholder order ID -10.
+as `unfinished`. A refusal given as non-tradable, of a planned order the
+backtest did not fill, is listed as `delisted` and passes `ira-orders`;
+every other refusal fails it. An unfinished month fails `ira-orders` on
+every planned buy, and fails `ira-sequence`. Exports made before
+2026-10-18 (version 1) have neither field; the tool reads their refusals
+from the placeholder order ID -10, and each fails, since no reason was
+recorded. Version 3 also records which stocks with no reference price
+were targets (`pending`), which the template keeps waiting and never
+sells, so the sale of a holding with no price can be told from the sale of
+a target; an unpriced sale in an earlier export fails `ira-orders`. A
+record whose carrier QuantConnect refuses is kept and sent again on a
+later carrier; the run's `IraParity` statistic counts as `lost` any that
+never went.
 
 ## Where the inputs come from
 

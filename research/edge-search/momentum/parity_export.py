@@ -23,9 +23,12 @@ IRA_PREFIX = "IRAPARITY1 "
 IRA_ORDER_PREFIX = "IRAORD1 "
 #: The IRAPARITY1 export's version (internal/parity.IRAVersion). Version 1
 #: put a refused order among the placed ones under QuantConnect's
-#: placeholder ID and recorded no unfinished month.
-IRA_VERSION = 2
-_EXPORT_PREFIXES = (PARITY_PREFIX, GLIDE_PREFIX, LOT_PREFIX, IRA_PREFIX)
+#: placeholder ID and recorded no unfinished month; version 2 did not record
+#: which unpriced names were targets (pending).
+IRA_VERSION = 3
+#: Tags attach never overwrites: an export, whose only copy it is, and a
+#: working IRA order's, whose month and phase the comparison reads.
+_KEPT_TAGS = (PARITY_PREFIX, GLIDE_PREFIX, LOT_PREFIX, IRA_PREFIX, IRA_ORDER_PREFIX)
 
 
 def _dumps(record):
@@ -45,17 +48,18 @@ def namer(symbols):
     return name
 
 
-def attach(algo, tag, dummy=False):
+def attach(algo, tag, dummy=False, keep=False):
     """Put ``tag`` on the newest open order (UpdateTag changes no fill),
-    unless it already carries an export, which would be lost (AGENTS.md rule
+    unless its tag is one of _KEPT_TAGS, which would be lost (AGENTS.md rule
     6); with none to use, or when ``dummy``, on a 1-share SPY limit order at
     1% of its price, cancelled at once. A carrier QuantConnect refuses (no
-    order ID of its own) is not in the orders listing: it is counted lost,
-    not logged."""
+    order ID of its own) is not in the orders listing: it is not logged, and
+    is counted lost unless ``keep`` (the caller keeps the tag to send
+    again). Returns whether the tag was logged."""
     done = False
     if not dummy:
         tickets = sorted(algo.Transactions.GetOpenOrderTickets(), key=lambda t: t.OrderId)
-        free = bool(tickets) and not str(getattr(tickets[-1], "Tag", "") or "").startswith(_EXPORT_PREFIXES)
+        free = bool(tickets) and not str(getattr(tickets[-1], "Tag", "") or "").startswith(_KEPT_TAGS)
         done = free and bool(tickets[-1].UpdateTag(tag).IsSuccess)
     if not done:
         price = float(algo.Securities[algo.spy].Price)
@@ -63,18 +67,20 @@ def attach(algo, tag, dummy=False):
         ticket.Cancel()
         algo.export_dummies = getattr(algo, "export_dummies", 0) + 1
         if int(getattr(ticket, "OrderId", 0)) <= 0:
-            algo.export_lost = getattr(algo, "export_lost", 0) + 1
-            return
+            if not keep:
+                algo.export_lost = getattr(algo, "export_lost", 0) + 1
+            return False
     algo.export_logged = getattr(algo, "export_logged", 0) + 1
     algo.export_bytes = getattr(algo, "export_bytes", 0) + len(tag)
+    return True
 
 
 def stat(algo):
-    """The exports' end statistic."""
-    return "logged={} bytes={} dummies={} lost={}".format(getattr(algo, "export_logged", 0),
-                                                          getattr(algo, "export_bytes", 0),
-                                                          getattr(algo, "export_dummies", 0),
-                                                          getattr(algo, "export_lost", 0))
+    """The exports' end statistic; lost counts the IRA records still held
+    back too."""
+    return "logged={} bytes={} dummies={} lost={}".format(
+        getattr(algo, "export_logged", 0), getattr(algo, "export_bytes", 0), getattr(algo, "export_dummies", 0),
+        getattr(algo, "export_lost", 0) + len(getattr(algo, "ira_backlog", [])))
 
 
 def _month(algo):
@@ -372,9 +378,16 @@ def ira_rebalance(algo, targets, closes):
     placed, refused = [], []
     for s in unpriced:
         if s not in targets:
+            # Only the shares no sell still working holds once the name's
+            # orders are cancelled: a cancel not yet confirmed never sells
+            # the holding twice (CONTEXT.md, a sell sized net of every
+            # working or pending sell).
             algo.Transactions.CancelOpenOrders(s)
-            _place(placed, refused, algo.MarketOrder(s, -held[s], tag=IRA_ORDER_PREFIX + month + " unpriced"),
-                   name(s), "unpriced")
+            free = held[s] - sum(int(-(float(t.Quantity) - float(t.QuantityFilled)))
+                                 for t in _open_sells(algo) if t.Symbol == s)
+            if free > 0:
+                _place(placed, refused, algo.MarketOrder(s, -free, tag=IRA_ORDER_PREFIX + month + " unpriced"),
+                       name(s), "unpriced")
     sym_of = {name(s): s for s in syms}
     for inst, q, _ in sells:
         _place(placed, refused, algo.MarketOrder(sym_of[inst], -q, tag=IRA_ORDER_PREFIX + month + " sell"), inst,
@@ -382,7 +395,8 @@ def ira_rebalance(algo, targets, closes):
     waiting = bool(sells) or any(p[1] == "unpriced" for p in placed) or bool(_open_sells(algo))
     algo.ira = {"month": month, "day": algo.Time.date(), "decision": algo.Time.strftime("%Y-%m-%d"), "nlv": nlv,
                 "targets": plan_targets, "held": plan_held, "prices": plan_prices, "working": working,
-                "unpriced": [name(s) for s in unpriced], "sells": sells, "buys": buys, "skipped": skipped,
+                "unpriced": [name(s) for s in unpriced], "pending": [name(s) for s in unpriced if s in targets],
+                "sells": sells, "buys": buys, "skipped": skipped,
                 "sym_of": sym_of, "wait": algo.EXEC_DELAY if waiting else 0, "waited": 0, "for_sells": 0,
                 "for_price": 0, "placed": placed, "refused": refused, "done": False}
     if not waiting:
@@ -413,6 +427,8 @@ def ira_buy_phase(algo):
     working and every bought security has a price (for at most PRICE_WAIT
     sessions), budget and send its buys. The sessions waited for each
     reason are counted, so that waited = the delay + for_sells + for_price."""
+    if getattr(algo, "ira_backlog", None):
+        ira_export(algo, None)
     q = getattr(algo, "ira", None)
     if not q or q["done"] or algo.Time.date() == q["day"]:
         return
@@ -431,24 +447,37 @@ def ira_buy_phase(algo):
 def _record(algo, q):
     record = {k: q[k] for k in ("month", "decision", "nlv", "targets", "held", "prices", "working", "unpriced",
                                 "sells", "buys", "skipped", "waited", "for_sells", "for_price", "placed",
-                                "refused")}
+                                "refused", "pending")}
     record.update({"v": IRA_VERSION, "buy_session": algo.Time.strftime("%Y-%m-%d"), "delay": algo.EXEC_DELAY,
                    "band": algo.REBALANCE_BAND, "price_band": algo.PRICE_BAND, "max_fees": algo.MAX_FEES})
     return record
 
 
+def ira_export(algo, record):
+    """Send ``record`` (None: nothing new) after every IRA record held back,
+    oldest first, each on its own cancelled carrier. A record whose carrier
+    QuantConnect refuses is held back and sent again before the next one, at
+    each session's buy phase and at the run's end, so that a phase replaced
+    by the next rebalance never loses its only export (AGENTS.md rule 6)."""
+    algo.ira_backlog = getattr(algo, "ira_backlog", []) + ([IRA_PREFIX + _dumps(record)] if record else [])
+    while algo.ira_backlog and attach(algo, algo.ira_backlog[0], dummy=True, keep=True):
+        algo.ira_backlog.pop(0)
+
+
 def ira_unfinished(algo):
     """Record a month whose buys were never sent, as unfinished, on the
     session it was given up (the next rebalance's, or the run's end), so
-    that its plan and orders are not lost; once."""
+    that its plan and orders are not lost; once. Any record held back is
+    sent first."""
     q = getattr(algo, "ira", None)
     if not q or q["done"]:
+        ira_export(algo, None)
         return
     record = _record(algo, q)
     record.update({"budget": 0.0, "scale": 0.0, "kept": [], "scaled_skipped": [], "unplaced": [],
                    "unfinished": True})
     q["done"] = True
-    attach(algo, IRA_PREFIX + _dumps(record), dummy=True)
+    ira_export(algo, record)
 
 
 def _ira_buys(algo):
@@ -466,4 +495,4 @@ def _ira_buys(algo):
     record.update({"budget": budget, "scale": scale, "kept": [[i, n] for i, n, _ in kept],
                    "scaled_skipped": scaled_skipped, "unplaced": unplaced, "unfinished": False})
     q["done"] = True
-    attach(algo, IRA_PREFIX + _dumps(record), dummy=True)
+    ira_export(algo, record)

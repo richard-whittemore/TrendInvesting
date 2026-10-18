@@ -94,9 +94,12 @@ const (
 	// KindDelisted: a stock delisted or acquired at the rebalance, which
 	// the backtest could not trade (ADR 0026 point 8, amended 2026-10-18),
 	// detected as the export records it: the order refused by QuantConnect
-	// (its placeholder order ID, or a non-tradable refusal), or no price
-	// within five sessions.
+	// as non-tradable, or no price within five sessions.
 	KindDelisted Kind = "delisted"
+
+	// KindLiquidated: a holding LEAN sold itself at the stock's delisting,
+	// outside the plan. ADR 0026 point 8 does not list it.
+	KindLiquidated Kind = "liquidated"
 
 	// KindUnexplained: a live departure from the backtest-compatible result
 	// that no rule above produces. Never listed.

@@ -878,14 +878,27 @@ stand as recorded (AGENTS.md rule 6).
   ID in the first exports, or a refusal that it gave as "non-tradable"), or
   the stock had no price within five sessions (`unplaced`). An order
   refused for any other reason still fails. The `ira-orders` check passes
-  when every departure is so listed.
+  when every departure is so listed. *(As the tool applies it, after a
+  second review on 2026-10-18: a placeholder order ID records only that
+  QuantConnect refused, not why, so a refusal recorded by it alone fails;
+  an `unplaced` buy is listed only when the export records the five
+  sessions waited for a price, which the sequence check counts on the
+  calendar; and each detection must name an order Go planned that the
+  backtest did not fill. Every other refusal or unplaced buy fails.)*
 - **Point 7, item 2: the thresholds proposed for the remaining runs are
   confirmed** as the rule: the glide path's age and bond share within
   1e-12 absolute; the IRA plan, orders and sequence exact; the IRA buy
   scaling's scale within 1e-12 absolute, its shares and skips exact.
 - **The IRA buy delay** is read as point 2, "IRA execution", states it:
   the buys go only after the rebalance's sells have filled (one session
-  later in the runs), at once when there is no sell. Confirmed.
+  later in the runs), at once when there is no sell. Confirmed. *(As the
+  parity tool and the IRA template apply it: a buy waits until every sell
+  of the run is terminal, of any month or tag, not only the rebalance's
+  own; the delay applies when a sell is placed or still working at the
+  rebalance. What should happen when a sell can never complete, as in the
+  held-out run, where one sell never filled and no later month's buys were
+  placed, is an owner decision still open; this amendment does not decide
+  it.)*
 - **D7-F is dropped from the parity scope.** Point 7, item 2's "repeat
   with each D7 option" reads D7-L only: D7-F, fractional shares, is not
   built (point 2, "D7-L", the owner's choice of 2026-10-16). Point 8's D7
@@ -905,4 +918,9 @@ The thresholds of the remaining parity checks are now:
 | differences | any live departure whose cause point 8 does not list fails |
 
 The comparison was re-run on the kept exports and on the two IRA runs
-made with the fixed template, with no further QuantConnect run.
+made with the fixed template (IRA_PARITY_R2, OOS_IRA_PARITY_R2); no other
+QuantConnect run was made for that review. After a second review the same
+day, the comparison was re-run on the kept exports again and the two IRA
+runs were made once more with the template's further fixes (IRA_PARITY_R3,
+OOS_IRA_PARITY_R3; `docs/research/parity-2026-10.md`, "Second review
+fixes, 2026-10-18").

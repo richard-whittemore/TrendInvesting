@@ -1,6 +1,7 @@
 package parity_test
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -322,31 +323,82 @@ func TestASessionRecordedAsWaitingForASellTheOrdersDoNotShowFails(t *testing.T) 
 	iraFailsOnly(t, ms, orders, parity.CheckIRASequence, parity.CheckDifferences)
 }
 
+func TestWaitCountersThatOverflowFailWithoutAPanic(t *testing.T) {
+	// MaxInt + MaxInt + 3 wraps to 1, the sessions waited.
+	ms, orders := iraRun()
+	ms[0].Delay, ms[0].ForSells, ms[0].ForPrice = math.MaxInt, math.MaxInt, 3
+	iraFailsOnly(t, ms, orders, parity.CheckIRASequence, parity.CheckDifferences)
+}
+
+func TestTheDecisionAndTheBuysMustBeOnTradingSessions(t *testing.T) {
+	// Decided on Thursday 2020-04-02, bought on Saturday the 4th: Friday is
+	// the one session between them, but Saturday is not one.
+	ms, orders := iraRun()
+	m := &ms[0]
+	m.Decision, m.BuySession = "2020-04-02", "2020-04-04"
+	orders[0].Time, orders[0].LastFillTime = "2020-04-02T13:00:00Z", "2020-04-02T20:00:00Z"
+	for i := 1; i < 4; i++ {
+		orders[i].Time, orders[i].LastFillTime = "2020-04-04T13:00:00Z", "2020-04-04T20:00:00Z"
+	}
+	if c := checkNamed(parity.CompareIRA("I", iraPlan, ms, orders, iraSessions), parity.CheckIRASequence); c.Pass() ||
+		!strings.Contains(c.First, "not a trading session") {
+		t.Errorf("Saturday buys: %+v", c)
+	}
+	// With no sell the buys go on the rebalance's day, which must itself be
+	// a session: not a Saturday, nor Memorial Day.
+	for _, day := range []string{"2020-05-02", "2020-05-25"} {
+		ms, orders := iraRun()
+		ms[1].Decision, ms[1].BuySession = day, day
+		for i := 5; i < 7; i++ {
+			orders[i].Time, orders[i].LastFillTime = day+"T13:00:00Z", day+"T20:00:00Z"
+		}
+		if c := checkNamed(parity.CompareIRA("I", iraPlan, ms, orders, iraSessions), parity.CheckIRASequence); c.Pass() ||
+			!strings.Contains(c.First, "not a trading session") {
+			t.Errorf("%s: %+v", day, c)
+		}
+	}
+}
+
+func TestASellEndingAFractionOfASecondAfterABuyStillHoldsIt(t *testing.T) {
+	// The orders listing gives event times in fractional seconds: a sell
+	// cancelled at 13:00:00.5 was working at a buy placed at 13:00:00.
+	raw := `[{"id":0,"symbol":{"value":"OLD","id":"OLD X"},"quantity":-5.0,"status":5,"time":"2020-03-31T13:00:00Z",` +
+		`"events":[{"time":1585832400.5,"status":"canceled"}]}]`
+	old, err := parity.DecodeOrders([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, orders := iraRun()
+	// An untagged order is outside the plan, so the orders fail too.
+	iraFailsOnly(t, ms, append(orders, old...), parity.CheckIRASequence, parity.CheckIRAOrders)
+}
+
 func TestABuyPlacedWhileAnySellWasStillWorkingFails(t *testing.T) {
-	// An earlier sell, untagged, still working when the buys went.
+	// An earlier sell, untagged, still working when the buys went. An
+	// untagged order is outside the plan, so each fails the orders too.
 	ms, orders := iraRun()
 	orders = append(orders, parity.Order{ID: 0, Ticker: "OLD", Quantity: -5, Status: parity.OrderFilled,
 		Time: "2020-03-31T13:00:00Z", LastFillTime: "2020-04-02T15:00:00Z"})
-	iraFailsOnly(t, ms, orders, parity.CheckIRASequence)
+	iraFailsOnly(t, ms, orders, parity.CheckIRASequence, parity.CheckIRAOrders)
 	// One that never became terminal.
 	ms, orders = iraRun()
 	orders = append(orders, parity.Order{ID: 0, Ticker: "OLD", Quantity: -5, Status: 1, Time: "2020-03-02T13:00:00Z"})
-	iraFailsOnly(t, ms, orders, parity.CheckIRASequence)
+	iraFailsOnly(t, ms, orders, parity.CheckIRASequence, parity.CheckIRAOrders)
 	// One of no known time, never terminal.
 	ms, orders = iraRun()
 	orders = append(orders, parity.Order{ID: 0, Ticker: "OLD", Quantity: -5, Status: 1})
-	iraFailsOnly(t, ms, orders, parity.CheckIRASequence)
+	iraFailsOnly(t, ms, orders, parity.CheckIRASequence, parity.CheckIRAOrders)
 	// A sell placed with the buys of a month with no planned sell.
 	ms, orders = iraRun()
 	orders = append(orders, parity.Order{ID: 5, Ticker: "OLD", Quantity: -5, Status: parity.OrderFilled,
 		Time: "2020-05-01T13:00:00Z", LastFillTime: "2020-05-01T20:00:00Z"})
-	iraFailsOnly(t, ms, orders, parity.CheckIRASequence)
+	iraFailsOnly(t, ms, orders, parity.CheckIRASequence, parity.CheckIRAOrders)
 	// One that was cancelled before the buys does not hold them.
 	ms, orders = iraRun()
 	orders = append(orders, parity.Order{ID: 0, Ticker: "OLD", Quantity: -5, Status: 5, Time: "2020-03-31T13:00:00Z",
 		Terminal: "2020-03-31T14:00:00Z"})
-	if r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions); !r.Pass() {
-		t.Fatalf("a sell cancelled before the rebalance failed:\n%s", r.Markdown())
+	if c := checkNamed(parity.CompareIRA("I", iraPlan, ms, orders, iraSessions), parity.CheckIRASequence); !c.Pass() {
+		t.Fatalf("a sell cancelled before the rebalance failed the sequence: %+v", c)
 	}
 }
 
@@ -415,52 +467,111 @@ func TestABuyTheBacktestDidNotFillIsNotBought(t *testing.T) {
 func TestABuyTheBacktestCouldNotTradeIsListedWithItsRecordedDetection(t *testing.T) {
 	// ADR 0026 point 8, as amended 2026-10-18: a stock delisted or acquired
 	// at the rebalance, which the backtest could not trade. Each departure
-	// is listed with the detection the export records, and passes.
+	// is listed with the detection the export records.
 	without := func() ([]parity.IRAMonth, []parity.Order) {
 		ms, orders := iraRun()
 		return ms, append(orders[:3:3], orders[4:]...) // no IEF buy
 	}
-	for name, c := range map[string]struct {
-		alter func(*parity.IRAMonth)
-		size  string
-	}{
-		"placeholder ID": {func(m *parity.IRAMonth) { m.Refused = []parity.IRARefusal{{Ticker: "IEF", Phase: "buy", ID: -10}} },
-			"refused by QuantConnect with its placeholder order ID -10"},
-		"non-tradable": {func(m *parity.IRAMonth) {
-			m.Refused = []parity.IRARefusal{{Ticker: "IEF", Phase: "buy", Reason: "The security with symbol 'IEF X' is marked as non-tradable."}}
-		}, "refused by QuantConnect: The security with symbol 'IEF X' is marked as non-tradable."},
-		"no price": {func(m *parity.IRAMonth) { m.Unplaced = []string{"IEF"} }, "no price within five sessions (unplaced)"},
-	} {
-		ms, orders := without()
-		c.alter(&ms[0])
-		r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
-		want := parity.Difference{Run: "I", Where: "2020-04 buy IEF", Kind: parity.KindDelisted, Size: c.size}
-		if !r.Pass() || len(r.Differences) != 1 || r.Differences[0] != want {
-			t.Errorf("%s: differences %+v\n%s", name, r.Differences, r.Markdown())
-		}
-		if !parity.KindDelisted.Listed() {
-			t.Error("the delisted cause is not listed")
-		}
-	}
-	// A refusal for another reason is not that cause: it fails.
 	ms, orders := without()
-	ms[0].Refused = []parity.IRARefusal{{Ticker: "IEF", Phase: "buy", Reason: "Insufficient buying power"}}
+	ms[0].Refused = []parity.IRARefusal{{Ticker: "IEF", Phase: "buy", Reason: "The security with symbol 'IEF X' is marked as non-tradable."}}
 	r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
-	if c := checkNamed(r, parity.CheckIRAOrders); c.Pass() || !strings.Contains(c.First, "Insufficient buying power") {
-		t.Errorf("another refusal: %+v", c)
+	want := parity.Difference{Run: "I", Where: "2020-04 buy IEF", Kind: parity.KindDelisted,
+		Size: "refused by QuantConnect: The security with symbol 'IEF X' is marked as non-tradable."}
+	if !r.Pass() || len(r.Differences) != 1 || r.Differences[0] != want {
+		t.Errorf("non-tradable: differences %+v\n%s", r.Differences, r.Markdown())
 	}
-	// Nor is a refusal that recorded no reason and no placeholder ID.
+	if !parity.KindDelisted.Listed() {
+		t.Error("the delisted cause is not listed")
+	}
+	// No price within five sessions: the buys waited the delay and the
+	// five sessions the export records, which the calendar confirms.
 	ms, orders = without()
-	ms[0].Refused = []parity.IRARefusal{{Ticker: "IEF", Phase: "buy"}}
-	r = parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
-	if c := checkNamed(r, parity.CheckIRAOrders); c.Pass() || !strings.Contains(c.First, "no reason recorded") {
-		t.Errorf("a refusal with no reason: %+v", c)
+	m := &ms[0]
+	m.Unplaced, m.ForPrice, m.Waited, m.BuySession = []string{"IEF"}, parity.IRAPriceWait, 6, "2020-04-09"
+	for i := 1; i < 3; i++ {
+		orders[i].Time = "2020-04-09T13:00:00Z"
 	}
+	r = parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
+	want = parity.Difference{Run: "I", Where: "2020-04 buy IEF", Kind: parity.KindDelisted, Size: "no price within five sessions (unplaced)"}
+	if len(r.Differences) != 2 || r.Differences[0] != want || r.Differences[1].Kind != parity.KindPriceWait {
+		t.Errorf("unplaced: differences %+v", r.Differences)
+	}
+	iraFailsOnly(t, ms, orders, parity.CheckDifferences) // the price wait is not listed
 	// A recorded detection excuses only the order it names.
 	ms, orders = iraRun()
 	ms[0].Unplaced = []string{"IEF"}
 	orders[3].Quantity = 22
 	iraFailsOnly(t, ms, orders, parity.CheckIRAOrders)
+}
+
+func TestAnUnplacedBuyIsListedOnlyAfterTheFiveSessionPriceWait(t *testing.T) {
+	// Removing a buy and naming it unplaced is no evidence by itself: the
+	// export must record the five sessions waited for a price.
+	for _, forPrice := range []int{0, parity.IRAPriceWait - 1} {
+		ms, orders := iraRun()
+		orders = append(orders[:3:3], orders[4:]...)
+		m := &ms[0]
+		m.Unplaced, m.ForPrice, m.Waited = []string{"IEF"}, forPrice, 1+forPrice
+		if forPrice > 0 {
+			m.BuySession = "2020-04-08"
+			for i := 1; i < 3; i++ {
+				orders[i].Time = "2020-04-08T13:00:00Z"
+			}
+		}
+		r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
+		if c := checkNamed(r, parity.CheckIRAOrders); c.Pass() || !strings.Contains(c.First, "unplaced") {
+			t.Errorf("for_price %d: orders %+v", forPrice, c)
+		}
+		for _, d := range r.Differences {
+			if d.Kind == parity.KindDelisted {
+				t.Errorf("for_price %d: listed %+v", forPrice, d)
+			}
+		}
+	}
+	// An unplaced name with no planned buy to excuse fails too.
+	ms, orders := iraRun()
+	ms[0].Unplaced, ms[0].ForPrice = []string{"ZZZ"}, parity.IRAPriceWait
+	if c := checkNamed(parity.CompareIRA("I", iraPlan, ms, orders, iraSessions), parity.CheckIRAOrders); c.Pass() || !strings.Contains(c.First, "ZZZ") {
+		t.Errorf("unplaced with no buy: %+v", c)
+	}
+}
+
+func TestEveryRefusalIsListedUnderACauseOrFails(t *testing.T) {
+	without := func() ([]parity.IRAMonth, []parity.Order) {
+		ms, orders := iraRun()
+		return ms, append(orders[:3:3], orders[4:]...) // no IEF buy
+	}
+	nonTradable := "The security with symbol 'IEF X' is marked as non-tradable."
+	for name, c := range map[string]struct {
+		refusal parity.IRARefusal
+		filled  bool // the IEF buy filled after all
+		want    string
+	}{
+		// A placeholder order ID says QuantConnect refused, not why.
+		"placeholder ID alone":        {parity.IRARefusal{Ticker: "IEF", Phase: "buy", ID: -10}, false, "no reason recorded"},
+		"another reason":              {parity.IRARefusal{Ticker: "IEF", Phase: "buy", Reason: "Insufficient buying power"}, false, "Insufficient buying power"},
+		"no reason":                   {parity.IRARefusal{Ticker: "IEF", Phase: "buy"}, false, "no reason recorded"},
+		"another reason, then a fill": {parity.IRARefusal{Ticker: "IEF", Phase: "buy", Reason: "Insufficient buying power"}, true, "Insufficient buying power"},
+		"another reason, unplanned":   {parity.IRARefusal{Ticker: "ZZZ", Phase: "buy", Reason: "Insufficient buying power"}, true, "ZZZ"},
+		"non-tradable, then a fill":   {parity.IRARefusal{Ticker: "IEF", Phase: "buy", Reason: nonTradable}, true, "non-tradable"},
+		"non-tradable, unplanned":     {parity.IRARefusal{Ticker: "ZZZ", Phase: "buy", Reason: nonTradable}, true, "ZZZ"},
+		"non-tradable unpriced sale":  {parity.IRARefusal{Ticker: "NEW", Phase: "unpriced", Reason: nonTradable}, true, "NEW"},
+	} {
+		ms, orders := without()
+		if c.filled {
+			ms, orders = iraRun()
+		}
+		ms[0].Refused = []parity.IRARefusal{c.refusal}
+		r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
+		if o := checkNamed(r, parity.CheckIRAOrders); o.Pass() || !strings.Contains(o.First, c.want) || !strings.Contains(o.First, "refused") {
+			t.Errorf("%s: orders %+v", name, o)
+		}
+		for _, d := range r.Differences {
+			if d.Kind == parity.KindDelisted {
+				t.Errorf("%s: listed %+v", name, d)
+			}
+		}
+	}
 }
 
 func TestAnUnpricedNameIsAnUnlistedDifference(t *testing.T) {
@@ -478,7 +589,7 @@ func TestAnUnpricedNameIsAnUnlistedDifference(t *testing.T) {
 
 func TestAnUnpricedHoldingsSaleMustBeOfAnUnpricedName(t *testing.T) {
 	ms, orders := iraRun()
-	ms[0].Unpriced = []string{"NEW"}
+	ms[0].Version, ms[0].Unpriced = parity.IRAVersion, []string{"NEW"}
 	sale := parity.Order{ID: 0, Ticker: "NEW", Quantity: -3, Status: parity.OrderFilled, Time: "2020-04-01T13:00:00Z",
 		LastFillTime: "2020-04-01T20:00:00Z", Tag: "IRAORD1 2020-04 unpriced"}
 	r := parity.CompareIRA("I", iraPlan, ms, append(orders, sale), iraSessions)
@@ -489,6 +600,86 @@ func TestAnUnpricedHoldingsSaleMustBeOfAnUnpricedName(t *testing.T) {
 	iraFailsOnly(t, ms, append(orders, sale), parity.CheckIRAOrders, parity.CheckDifferences)
 	sale.Ticker, sale.Quantity = "NEW", 3
 	iraFailsOnly(t, ms, append(orders, sale), parity.CheckIRAOrders, parity.CheckDifferences)
+}
+
+func TestTheSaleOfAnUnpricedPendingTargetFails(t *testing.T) {
+	// NEW has no reference price and is a target: the template keeps it
+	// pending and never sells it.
+	ms, orders := iraRun()
+	ms[0].Version, ms[0].Unpriced, ms[0].Pending = parity.IRAVersion, []string{"NEW"}, []string{"NEW"}
+	sale := parity.Order{ID: 0, Ticker: "NEW", Quantity: -3, Status: parity.OrderFilled, Time: "2020-04-01T13:00:00Z",
+		LastFillTime: "2020-04-01T20:00:00Z", Tag: "IRAORD1 2020-04 unpriced"}
+	r := parity.CompareIRA("I", iraPlan, ms, append(orders, sale), iraSessions)
+	if c := checkNamed(r, parity.CheckIRAOrders); c.Pass() || !strings.Contains(c.First, "pending target") {
+		t.Errorf("a pending target's sale: %+v", c)
+	}
+	// An export before version 3 does not record which unpriced names
+	// were targets, so no unpriced sale of it can be verified.
+	ms[0].Version, ms[0].Pending = 2, nil
+	r = parity.CompareIRA("I", iraPlan, ms, append(orders, sale), iraSessions)
+	if c := checkNamed(r, parity.CheckIRAOrders); c.Pass() || !strings.Contains(c.First, "version 2") {
+		t.Errorf("a version 2 unpriced sale: %+v", c)
+	}
+}
+
+func TestUnpricedSaleFailuresReportInNameOrder(t *testing.T) {
+	ms, orders := iraRun()
+	ms[0].Version = parity.IRAVersion
+	for _, n := range []string{"ZZZ", "YYY", "XXX", "WWW"} {
+		orders = append(orders, parity.Order{ID: 0, Ticker: n, Quantity: -3, Status: parity.OrderFilled, Time: "2020-04-01T13:00:00Z",
+			LastFillTime: "2020-04-01T20:00:00Z", Tag: "IRAORD1 2020-04 unpriced"})
+	}
+	for i := 0; i < 50; i++ {
+		if c := checkNamed(parity.CompareIRA("I", iraPlan, ms, orders, iraSessions), parity.CheckIRAOrders); !strings.Contains(c.First, "WWW") {
+			t.Fatalf("run %d: first failure %q, not the first name's", i, c.First)
+		}
+	}
+}
+
+func TestOrdersOutsideThePlanAreAccountedFor(t *testing.T) {
+	// A filled order that is neither an IRAORD1 order nor a never-filled
+	// export carrier is a trade the plan does not explain.
+	for name, extra := range map[string]parity.Order{
+		"untagged buy":   {ID: 9, Ticker: "ZZZ", Quantity: 5, Status: parity.OrderFilled, Time: "2020-04-02T13:00:00Z", LastFillTime: "2020-04-02T20:00:00Z"},
+		"filled carrier": {ID: 9, Ticker: "SPY", Quantity: 1, Status: parity.OrderFilled, Time: "2020-04-02T13:00:00Z", LastFillTime: "2020-04-02T20:00:00Z", Tag: "IRAPARITY1 {}"},
+		"other tag":      {ID: 9, Ticker: "AAA", Quantity: 5, Status: parity.OrderFilled, Time: "2020-04-02T13:00:00Z", LastFillTime: "2020-04-02T20:00:00Z", Tag: "rebalance"},
+		"unfilled other": {ID: 9, Ticker: "AAA", Quantity: 5, Status: parity.OrderCanceled, Time: "2020-04-02T13:00:00Z", Tag: "rebalance"},
+	} {
+		ms, orders := iraRun()
+		r := parity.CompareIRA("I", iraPlan, ms, append(orders, extra), iraSessions)
+		if c := checkNamed(r, parity.CheckIRAOrders); c.Pass() || !strings.Contains(c.First, "order 9") {
+			t.Errorf("%s: orders %+v", name, c)
+		}
+	}
+	// LEAN's own sale of a holding at its delisting is listed, and fails
+	// the differences check: ADR 0026 point 8 does not list it.
+	ms, orders := iraRun()
+	orders = append(orders, parity.Order{ID: 9, Ticker: "DDD", Quantity: -100, Status: parity.OrderFilled,
+		Time: "2020-04-20T04:00:00Z", LastFillTime: "2020-04-20T04:00:00Z", Tag: "Liquidate from delisting"})
+	r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
+	want := parity.Difference{Run: "I", Where: "2020-04-20 DDD", Kind: parity.KindLiquidated, Size: "order 9: -100 shares"}
+	if len(r.Differences) != 1 || r.Differences[0] != want || parity.KindLiquidated.Listed() {
+		t.Errorf("a delisting liquidation: %+v", r.Differences)
+	}
+	iraFailsOnly(t, ms, orders, parity.CheckDifferences)
+	// The buy of a name the last rebalance had no reference price for is
+	// that name's trade outside the planner, listed as unpriced.
+	ms, orders = iraRun()
+	ms[0].Unpriced = []string{"NEW"}
+	orders = append(orders, parity.Order{ID: 9, Ticker: "NEW", Quantity: 5, Status: parity.OrderFilled,
+		Time: "2020-04-21T20:00:00Z", LastFillTime: "2020-04-21T20:00:00Z"})
+	r = parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
+	if len(r.Differences) != 2 || r.Differences[1] != (parity.Difference{Run: "I", Where: "2020-04 NEW", Kind: parity.KindUnpriced,
+		Size: "order 9: 5 shares bought outside the planner"}) {
+		t.Errorf("an unpriced target's buy: %+v", r.Differences)
+	}
+	iraFailsOnly(t, ms, orders, parity.CheckDifferences)
+	// A buy of a name no earlier rebalance left unpriced is not explained.
+	ms, orders = iraRun()
+	ms[1].Unpriced = []string{"NEW"}
+	orders = append(orders, parity.Order{ID: 9, Ticker: "NEW", Quantity: 5, Status: parity.OrderFilled,
+		Time: "2020-04-21T20:00:00Z", LastFillTime: "2020-04-21T20:00:00Z"})
+	iraFailsOnly(t, ms, orders, parity.CheckIRAOrders, parity.CheckDifferences)
 }
 
 func TestAnUnfinishedMonthFailsItsBuysAndItsSequence(t *testing.T) {
@@ -556,59 +747,69 @@ func TestAnIRAPayloadDecodesExactly(t *testing.T) {
 }
 
 func TestAMalformedIRAPayloadIsRefused(t *testing.T) {
-	good := `{"month":"2020-04","decision":"2020-04-01","nlv":1.0,"targets":{"A":0.5},"held":{},"prices":{"A":1.0},` +
-		`"working":{},"unpriced":[],"sells":[],"buys":[["A",1,1.05]],"skipped":[],"waited":0,"buy_session":"2020-04-01",` +
-		`"delay":1,"band":0.25,"price_band":0.05,"max_fees":2.0,"budget":1.0,"scale":1.0,"kept":[["A",1]],"scaled_skipped":[],` +
-		`"for_sells":0,"for_price":0,"unplaced":[],"placed":[]}`
-	for _, ok := range []string{good, v2Good} {
+	good := v1Good
+	for _, ok := range []string{good, v2Good, v3()} {
 		if _, err := parity.DecodeIRA([]byte(ok)); err != nil {
 			t.Fatalf("good payload: %v", err)
 		}
 	}
 	for name, raw := range map[string]string{
-		"unknown field":    strings.Replace(good, `"nlv":`, `"x":1,"nlv":`, 1),
-		"no budget":        strings.Replace(good, `"budget":1.0,`, ``, 1),
-		"null scale":       strings.Replace(good, `"scale":1.0`, `"scale":null`, 1),
-		"short order":      strings.Replace(good, `["A",1,1.05]`, `["A",1]`, 1),
-		"part share":       strings.Replace(good, `["A",1,1.05]`, `["A",1.5,1.05]`, 1),
-		"null ticker":      strings.Replace(good, `["A",1,1.05]`, `[null,1,1.05]`, 1),
-		"short skip":       strings.Replace(good, `"skipped":[]`, `"skipped":[["A","buy",0.5]]`, 1),
-		"short kept":       strings.Replace(good, `"kept":[["A",1]]`, `"kept":[["A"]]`, 1),
-		"short scaled":     strings.Replace(good, `"scaled_skipped":[]`, `"scaled_skipped":[["A"]]`, 1),
-		"null weight":      strings.Replace(good, `"targets":{"A":0.5}`, `"targets":{"A":null}`, 1),
-		"no month":         strings.Replace(good, `"month":"2020-04",`, ``, 1),
-		"no kept":          strings.Replace(good, `,"kept":[["A",1]]`, ``, 1),
-		"no unplaced":      strings.Replace(good, `,"unplaced":[]`, ``, 1),
-		"no placed":        strings.Replace(good, `,"placed":[]`, ``, 1),
-		"short placed":     strings.Replace(good, `"placed":[]`, `"placed":[["A","buy"]]`, 1),
-		"placed twice":     strings.Replace(good, `"placed":[]`, `"placed":[["A","buy",1],["B","buy",1]]`, 1),
-		"unknown phase":    strings.Replace(good, `"placed":[]`, `"placed":[["A","Buy",1]]`, 1),
-		"sell twice":       strings.Replace(good, `"sells":[]`, `"sells":[["A",1,1.0],["A",2,1.0]]`, 1),
-		"buy twice":        strings.Replace(good, `["A",1,1.05]`, `["A",1,1.05],["A",1,1.05]`, 1),
-		"skip twice":       strings.Replace(good, `"skipped":[]`, `"skipped":[["B","buy","x",0.5],["B","buy","y",0.5]]`, 1),
-		"kept twice":       strings.Replace(good, `"kept":[["A",1]]`, `"kept":[["A",1],["A",1]]`, 1),
-		"scaled twice":     strings.Replace(good, `"scaled_skipped":[]`, `"scaled_skipped":[["B",0.5],["B",0.5]]`, 1),
-		"unpriced twice":   strings.Replace(good, `"unpriced":[]`, `"unpriced":["N","N"]`, 1),
-		"unplaced twice":   strings.Replace(good, `"unplaced":[]`, `"unplaced":["N","N"]`, 1),
-		"v1 refused":       strings.Replace(good, `"placed":[]`, `"placed":[],"refused":[]`, 1),
-		"v1 unfinished":    strings.Replace(good, `"placed":[]`, `"placed":[],"unfinished":false`, 1),
-		"unknown version":  strings.Replace(good, `"month":`, `"v":3,"month":`, 1),
-		"v2 no refused":    strings.Replace(good, `"month":`, `"v":2,"unfinished":false,"month":`, 1),
-		"v2 no unfinished": strings.Replace(good, `"month":`, `"v":2,"refused":[],"month":`, 1),
-		"v2 refused id":    v2(`"placed":[]`, `"placed":[["A","buy",-10]]`),
-		"v2 short refusal": v2(`"refused":[]`, `"refused":[["A","buy"]]`),
-		"no wait reasons":  strings.Replace(good, `"for_sells":0,`, ``, 1),
-		"bad skip shares":  strings.Replace(good, `"skipped":[]`, `"skipped":[["A","buy","x","y"]]`, 1),
-		"empty ticker":     strings.Replace(good, `["A",1,1.05]`, `["",1,1.05]`, 1),
-		"null holding":     strings.Replace(good, `"held":{}`, `"held":{"A":null}`, 1),
-		"null price":       strings.Replace(good, `"prices":{"A":1.0}`, `"prices":{"A":null}`, 1),
-		"null working":     strings.Replace(good, `"working":{}`, `"working":{"A":null}`, 1),
+		"unknown field":         strings.Replace(good, `"nlv":`, `"x":1,"nlv":`, 1),
+		"no budget":             strings.Replace(good, `"budget":1.0,`, ``, 1),
+		"null scale":            strings.Replace(good, `"scale":1.0`, `"scale":null`, 1),
+		"short order":           strings.Replace(good, `["A",1,1.05]`, `["A",1]`, 1),
+		"part share":            strings.Replace(good, `["A",1,1.05]`, `["A",1.5,1.05]`, 1),
+		"null ticker":           strings.Replace(good, `["A",1,1.05]`, `[null,1,1.05]`, 1),
+		"short skip":            strings.Replace(good, `"skipped":[]`, `"skipped":[["A","buy",0.5]]`, 1),
+		"short kept":            strings.Replace(good, `"kept":[["A",1]]`, `"kept":[["A"]]`, 1),
+		"short scaled":          strings.Replace(good, `"scaled_skipped":[]`, `"scaled_skipped":[["A"]]`, 1),
+		"null weight":           strings.Replace(good, `"targets":{"A":0.5}`, `"targets":{"A":null}`, 1),
+		"no month":              strings.Replace(good, `"month":"2020-04",`, ``, 1),
+		"no kept":               strings.Replace(good, `,"kept":[["A",1]]`, ``, 1),
+		"no unplaced":           strings.Replace(good, `,"unplaced":[]`, ``, 1),
+		"no placed":             strings.Replace(good, `,"placed":[]`, ``, 1),
+		"short placed":          strings.Replace(good, `"placed":[]`, `"placed":[["A","buy"]]`, 1),
+		"placed twice":          strings.Replace(good, `"placed":[]`, `"placed":[["A","buy",1],["B","buy",1]]`, 1),
+		"unknown phase":         strings.Replace(good, `"placed":[]`, `"placed":[["A","Buy",1]]`, 1),
+		"sell twice":            strings.Replace(good, `"sells":[]`, `"sells":[["A",1,1.0],["A",2,1.0]]`, 1),
+		"buy twice":             strings.Replace(good, `["A",1,1.05]`, `["A",1,1.05],["A",1,1.05]`, 1),
+		"skip twice":            strings.Replace(good, `"skipped":[]`, `"skipped":[["B","buy","x",0.5],["B","buy","y",0.5]]`, 1),
+		"kept twice":            strings.Replace(good, `"kept":[["A",1]]`, `"kept":[["A",1],["A",1]]`, 1),
+		"scaled twice":          strings.Replace(good, `"scaled_skipped":[]`, `"scaled_skipped":[["B",0.5],["B",0.5]]`, 1),
+		"unpriced twice":        strings.Replace(good, `"unpriced":[]`, `"unpriced":["N","N"]`, 1),
+		"unplaced twice":        strings.Replace(good, `"unplaced":[]`, `"unplaced":["N","N"]`, 1),
+		"v1 refused":            strings.Replace(good, `"placed":[]`, `"placed":[],"refused":[]`, 1),
+		"v1 unfinished":         strings.Replace(good, `"placed":[]`, `"placed":[],"unfinished":false`, 1),
+		"unknown version":       strings.Replace(good, `"month":`, `"v":4,"month":`, 1),
+		"v2 no refused":         strings.Replace(good, `"month":`, `"v":2,"unfinished":false,"month":`, 1),
+		"v2 no unfinished":      strings.Replace(good, `"month":`, `"v":2,"refused":[],"month":`, 1),
+		"v2 refused id":         v2(`"placed":[]`, `"placed":[["A","buy",-10]]`),
+		"v2 short refusal":      v2(`"refused":[]`, `"refused":[["A","buy"]]`),
+		"refused unknown phase": v2(`"refused":[]`, `"refused":[["A","Buy","x"]]`),
+		"refused no phase":      v2(`"refused":[]`, `"refused":[["A","","x"]]`),
+		"v2 pending":            v2(`"refused":[]`, `"refused":[],"pending":[]`),
+		"v3 no pending":         strings.Replace(v2Good, `"v":2`, `"v":3`, 1),
+		"v3 null pending":       v3(`"pending":[]`, `"pending":null`),
+		"pending twice":         v3(`"unpriced":[]`, `"unpriced":["N"]`, `"pending":[]`, `"pending":["N","N"]`),
+		"pending not unpriced":  v3(`"pending":[]`, `"pending":["N"]`),
+		"no wait reasons":       strings.Replace(good, `"for_sells":0,`, ``, 1),
+		"bad skip shares":       strings.Replace(good, `"skipped":[]`, `"skipped":[["A","buy","x","y"]]`, 1),
+		"empty ticker":          strings.Replace(good, `["A",1,1.05]`, `["",1,1.05]`, 1),
+		"null holding":          strings.Replace(good, `"held":{}`, `"held":{"A":null}`, 1),
+		"null price":            strings.Replace(good, `"prices":{"A":1.0}`, `"prices":{"A":null}`, 1),
+		"null working":          strings.Replace(good, `"working":{}`, `"working":{"A":null}`, 1),
 	} {
 		if _, err := parity.DecodeIRA([]byte(raw)); err == nil {
 			t.Errorf("%s: decoded", name)
 		}
 	}
 }
+
+// v1Good is a good payload of version 1, which had no version field.
+const v1Good = `{"month":"2020-04","decision":"2020-04-01","nlv":1.0,"targets":{"A":0.5},"held":{},"prices":{"A":1.0},` +
+	`"working":{},"unpriced":[],"sells":[],"buys":[["A",1,1.05]],"skipped":[],"waited":0,"buy_session":"2020-04-01",` +
+	`"delay":1,"band":0.25,"price_band":0.05,"max_fees":2.0,"budget":1.0,"scale":1.0,"kept":[["A",1]],"scaled_skipped":[],` +
+	`"for_sells":0,"for_price":0,"unplaced":[],"placed":[]}`
 
 // v2Good is the good payload of TestAMalformedIRAPayloadIsRefused in
 // version 2.
@@ -619,6 +820,31 @@ const v2Good = `{"v":2,"month":"2020-04","decision":"2020-04-01","nlv":1.0,"targ
 
 // v2 is v2Good with from replaced by to.
 func v2(from, to string) string { return strings.Replace(v2Good, from, to, 1) }
+
+// v3 is v2Good in version 3 (an empty pending list), with each pair of
+// pairs replaced: from, to, from, to...
+func v3(pairs ...string) string {
+	s := strings.Replace(strings.Replace(v2Good, `"v":2`, `"v":3`, 1), `"unfinished":false`, `"unfinished":false,"pending":[]`, 1)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		s = strings.Replace(s, pairs[i], pairs[i+1], 1)
+	}
+	return s
+}
+
+func TestAVersion3PayloadRecordsThePendingTargets(t *testing.T) {
+	m, err := parity.DecodeIRA([]byte(v3(`"unpriced":[]`, `"unpriced":["N","H"]`, `"pending":[]`, `"pending":["N"]`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != 3 || len(m.Pending) != 1 || m.Pending[0] != "N" {
+		t.Errorf("decoded version %d, pending %v", m.Version, m.Pending)
+	}
+	for raw, want := range map[string]int{v2Good: 2, v1Good: 1} {
+		if m, err := parity.DecodeIRA([]byte(raw)); err != nil || m.Version != want {
+			t.Errorf("version %d decoded as %d (%v)", want, m.Version, err)
+		}
+	}
+}
 
 func TestTwoRefusalsInAMonthDecodeAndKeepTheirReasons(t *testing.T) {
 	// Before version 2 a refusal was recorded among the placed orders with
@@ -660,8 +886,8 @@ func TestOrdersDecodeFromQuantConnectsOrderObjects(t *testing.T) {
 	if len(orders) != 1 || orders[0] != want {
 		t.Errorf("decoded %+v", orders)
 	}
-	// A cancelled order ends at its last terminal event; a working one has
-	// none.
+	// A cancelled order ends at its last terminal event, to the fraction of
+	// a second; a working one has none.
 	raw = `[{"id":4,"symbol":{"value":"B","id":"B X"},"quantity":-5.0,"status":5,"time":"2020-04-01T13:00:00Z",` +
 		`"events":[{"time":1585746000.0,"status":"submitted"},{"time":1585749600.5,"status":"canceled"}]},` +
 		`{"id":5,"symbol":{"value":"C","id":"C X"},"quantity":-5.0,"status":1,"time":"2020-04-01T13:00:00Z",` +
@@ -670,7 +896,7 @@ func TestOrdersDecodeFromQuantConnectsOrderObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if orders[0].Terminal != "2020-04-01T14:00:00Z" || orders[1].Terminal != "" {
+	if orders[0].Terminal != "2020-04-01T14:00:00.5Z" || orders[1].Terminal != "" {
 		t.Errorf("terminal %q, %q", orders[0].Terminal, orders[1].Terminal)
 	}
 	if orders, _ := parity.DecodeOrders([]byte(`[{"id":1,"status":3,"lastFillTime":"2020-04-01T20:00:00Z"}]`)); orders[0].Terminal != "2020-04-01T20:00:00Z" {

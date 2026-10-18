@@ -172,7 +172,9 @@ class ExportRecordsTest(unittest.TestCase):
     def test_an_open_order_already_carrying_an_export_is_never_overwritten(self):
         # Its export is the only copy: a new one goes on its own order.
         algo = types.SimpleNamespace(spy="SPY", Securities={"SPY": types.SimpleNamespace(Price=300.0)})
-        for prefix in ("PARITY1 ", "GLIDE1 ", "LOTPARITY1 ", "IRAPARITY1 "):
+        # A working IRA order's tag names its month and phase, which the
+        # comparison reads, so it is never overwritten either.
+        for prefix in ("PARITY1 ", "GLIDE1 ", "LOTPARITY1 ", "IRAPARITY1 ", "IRAORD1 "):
             carrier = _Ticket(12, tag=prefix + "{}")
             algo.Transactions = _Transactions([carrier])
             _limit_orders(algo)
@@ -183,8 +185,10 @@ class ExportRecordsTest(unittest.TestCase):
         algo = types.SimpleNamespace(spy="SPY", Securities={"SPY": types.SimpleNamespace(Price=0.0)})
         algo.Transactions = _Transactions([])
         _limit_orders(algo, refused=True)
-        self.x.attach(algo, "T", dummy=True)
+        self.assertFalse(self.x.attach(algo, "T", dummy=True))
         self.assertEqual(self.x.stat(algo), "logged=0 bytes=0 dummies=1 lost=1")
+        _limit_orders(algo)
+        self.assertTrue(self.x.attach(algo, "T", dummy=True))
 
     def test_with_no_open_order_a_cancelled_order_carries_it(self):
         algo = types.SimpleNamespace(spy="SPY", Securities={"SPY": types.SimpleNamespace(Price=300.0)})
@@ -320,7 +324,7 @@ class IRATemplateTest(unittest.TestCase):
         self.assertEqual((rec["scale"], rec["kept"]), (scale, [[b[0], b[1]] for b in algo.market[1:]]))
         self.assertEqual((rec["skipped"], rec["scaled_skipped"], rec["unpriced"], rec["working"]), ([], [], [], {}))
         self.assertEqual((rec["for_sells"], rec["for_price"], rec["unplaced"]), (0, 0, []))
-        self.assertEqual((rec["v"], rec["refused"], rec["unfinished"]), (2, [], False))
+        self.assertEqual((rec["v"], rec["refused"], rec["unfinished"], rec["pending"]), (3, [], False, []))
         # The orders by ID, since the orders listing names a stock by its
         # latest ticker, which a renamed stock no longer shares.
         self.assertEqual(rec["placed"], [["CCC", "sell", 101], ["AAA", "buy", 102], ["BBB", "buy", 103],
@@ -392,7 +396,7 @@ class IRATemplateTest(unittest.TestCase):
         self.module.ira_rebalance(algo, {"AAA": 0.5}, self.closes())
         april = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
         self.assertEqual((april["month"], april["unfinished"], april["v"], april["buy_session"]),
-                         ("2020-04", True, 2, "2020-05-01"))
+                         ("2020-04", True, 3, "2020-05-01"))
         self.assertEqual((april["waited"], april["for_sells"], april["kept"], april["scale"], april["budget"]),
                          (2, 2, [], 0.0, 0.0))
         self.assertEqual(april["placed"], [["CCC", "sell", 101]])
@@ -407,6 +411,36 @@ class IRATemplateTest(unittest.TestCase):
         self.module.ira_unfinished(algo)                                   # once only
         self.assertEqual(len(algo.limits), 1)
 
+    def test_an_unfinished_months_export_survives_a_refused_carrier(self):
+        # April's record goes on a carrier QuantConnect refuses; May's
+        # rebalance replaces April's phase, yet April's record is kept and
+        # sent first on the next carrier accepted.
+        algo = self._algo({"CCC": 40}, cash=0.0)
+        self.module.ira_rebalance(algo, {"AAA": 0.5}, self.closes())
+        stuck = _Ticket(101, tag="IRAORD1 2020-04 sell")
+        stuck.Symbol, stuck.Quantity, stuck.QuantityFilled = "CCC", -40, 0
+        algo.Transactions.tickets = [stuck]
+        _limit_orders(algo, refused=True)
+        algo.Time = _dt.datetime(2020, 5, 1, 8)
+        self.module.ira_rebalance(algo, {"AAA": 0.5}, self.closes())
+        self.assertEqual(algo.ira["month"], "2020-05")
+        self.assertTrue(self.module.stat(algo).endswith("lost=1"), self.module.stat(algo))
+        _limit_orders(algo)
+        algo.Time = _dt.datetime(2020, 5, 4, 8)
+        self.module.ira_buy_phase(algo)
+        april = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
+        self.assertEqual((april["month"], april["unfinished"]), ("2020-04", True))
+        self.assertTrue(self.module.stat(algo).endswith("lost=0"), self.module.stat(algo))
+
+    def test_the_end_sends_a_record_a_refused_carrier_held_back(self):
+        algo = self._algo({}, cash=1000.0)
+        _limit_orders(algo, refused=True)
+        self.module.ira_rebalance(algo, {"AAA": 0.49}, self.closes())    # the buys go at once
+        self.assertTrue(algo.ira["done"])
+        _limit_orders(algo)
+        self.module.ira_unfinished(algo)                                 # the run's end
+        self.assertEqual(_decode(algo.limits[0]["tag"], "IRAPARITY1 ")["month"], "2020-04")
+
     def test_an_unpriced_holding_is_sold_by_a_tagged_order_and_the_buys_wait_for_it(self):
         algo = self._algo({}, cash=1000.0)
         algo.Portfolio = _Book({"NEW": 7}, {"NEW": 0.0}, 1000.0)
@@ -414,6 +448,21 @@ class IRATemplateTest(unittest.TestCase):
         self.module.ira_rebalance(algo, {"AAA": 0.49}, self.closes())
         self.assertEqual(algo.market, [("NEW", "cancel", ""), ("NEW", -7, "IRAORD1 2020-04 unpriced")])
         self.assertEqual((algo.ira["placed"], algo.ira["wait"]), ([["NEW", "unpriced", 102]], 1))   # the cancel is the mock's 101st
+        self.assertEqual((algo.ira["unpriced"], algo.ira["pending"]), (["NEW"], []))
+
+    def test_an_unpriced_holding_is_never_sold_twice_over_a_sell_still_working(self):
+        # A sell of 3 of the 7 shares stays working after the cancel (its
+        # cancel not yet confirmed): only the 4 it does not hold are sold.
+        for working, sale in ((3, [("NEW", -4, "IRAORD1 2020-04 unpriced")]), (7, [])):
+            algo = self._algo({}, cash=1000.0)
+            algo.Portfolio = _Book({"NEW": 7}, {"NEW": 0.0}, 1000.0)
+            old = _Ticket(9, tag="IRAORD1 2020-03 sell")
+            old.Symbol, old.Quantity, old.QuantityFilled = "NEW", -working, 0
+            algo.Transactions.tickets = [old]
+            algo.Transactions.CancelOpenOrders = lambda sym: algo.market.append((sym, "cancel", ""))
+            self.module.ira_rebalance(algo, {"AAA": 0.49}, self.closes())
+            self.assertEqual(algo.market[1:], sale, working)
+
 
     def test_a_refused_order_is_recorded_apart_with_its_reason(self):
         algo = self._algo({}, cash=1000.0)
@@ -427,7 +476,7 @@ class IRATemplateTest(unittest.TestCase):
         rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
         self.assertEqual(rec["placed"], [["AAA", "buy", 7]])
         self.assertEqual(rec["refused"], [["BBB", "buy", ""], ["IEF", "buy", "Security price is zero"]])
-        self.assertEqual((rec["v"], rec["unfinished"]), (2, False))
+        self.assertEqual((rec["v"], rec["unfinished"]), (3, False))
 
     def test_buys_wait_for_a_security_with_no_price_yet(self):
         # NEW joined the universe at the rebalance: the plan sizes it from
@@ -459,7 +508,7 @@ class IRATemplateTest(unittest.TestCase):
         self.module.ira_rebalance(algo, {"AAA": 0.49, "NEW": 0.49}, self.closes())
         self.assertEqual(algo.pending, {"NEW": 0.49})
         rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
-        self.assertEqual((rec["unpriced"], sorted(rec["targets"])), (["NEW"], ["AAA"]))
+        self.assertEqual((rec["unpriced"], sorted(rec["targets"]), rec["pending"]), (["NEW"], ["AAA"], ["NEW"]))
 
     def test_the_reference_price_is_the_last_close_of_the_rebalances_history(self):
         algo = self._algo({}, cash=1000.0)
