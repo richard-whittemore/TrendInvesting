@@ -42,6 +42,18 @@
 // sequence the adapter's next input carries, once (with an approval, on the
 // approval's line).
 //
+// An adapter's input sent again under its ID is the request below: it may
+// carry the sequence it was first sent with, before operator instructions
+// moved it, and no instruction is delivered before it.
+//
+// # Wire contract: an input sent again is a request for its committed reply
+//
+// An input whose ID names a group already committed is answered with the
+// reply built from that group, byte for byte, and is not applied again, so
+// the same input never yields a second order; a resumed run answers alike
+// for every group it recovered (ADR 0027, amendment "re-delivery on
+// request"). A different input under a committed ID is refused.
+//
 // The reducer's decisions are received over that socket and written to a
 // journal; that is the whole of this command's job. Four design decisions
 // this composition had to make, and why, are recorded beside the code that
@@ -383,7 +395,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	serveCtx, stopServing := context.WithCancelCause(ctx)
 	defer stopServing(nil)
 	guard := &wireGuard{stop: stopServing}
-	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, strategyVersion, configurationHash, inbox), transport.ServerConfig{
+	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, recorder, strategyVersion, configurationHash, inbox), transport.ServerConfig{
 		MaxFrameBytes:   opts.maxFrameBytes,
 		DecisionTimeout: opts.decisionTimeout,
 		// Decision 4: at most one connection may be open at a time (see

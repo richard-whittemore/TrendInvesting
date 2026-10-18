@@ -65,6 +65,9 @@ account.
 | A decision was withheld for missing data (bars, account snapshot, universe, the close histories of the stocks ranked) | urgent | run of the same reason |
 | A momentum decision was withheld because no stock with a target was affordable (`all-unaffordable`; the net liquidation or prices may be wrong) | urgent | run of the same reason |
 | A decision was withheld for another reason | routine | run of the same reason |
+| An order to be sent was not acknowledged by IBKR within `-ack-within` of its commit ([order lifecycle](order-lifecycle.md)) | urgent | order (its client order ID) |
+| An order already alerted as unacknowledged has since been acknowledged | routine | order |
+| A report from IBKR in the log that the engine did not read: it does not validate, or does not match the order it names ([order lifecycle](order-lifecycle.md)) | urgent | that report (its input ID) |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
@@ -161,7 +164,9 @@ whose session has closed in the log; a stated day whose session has not
 closed is an error); `-benchmark` (default SPY); `-heartbeat-sessions`
 (default 2 NYSE sessions with nothing written); `-account` (the name for
 alerts when the log cannot name its account; default the log file's name);
-`-send-timeout` (default 30 seconds per send).
+`-send-timeout` (default 30 seconds per send); `-ack-within` (default 10
+minutes: how long an order to be sent may go unacknowledged by IBKR, from its
+commit, before an alert; it must be positive).
 
 If it exits with an error, read it: it names the channel that failed or the
 file it refused. Nothing is lost; the next run tries again.

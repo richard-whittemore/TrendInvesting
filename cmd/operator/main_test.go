@@ -368,7 +368,7 @@ func killSwitchLog(t *testing.T, dir, account string, more ...operator.Record) s
 		t.Fatal(err)
 	}
 	defer func() { _ = file.Close() }()
-	log, err := journal.CreateLog(file, journal.NewLogHeader("sha256:cfg", "boost/1.9.0/test"))
+	log, err := journal.CreateLog(file, journal.NewLogHeader("sha256:cfg", "boost/1.10.0/test"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,11 +376,11 @@ func killSwitchLog(t *testing.T, dir, account string, more ...operator.Record) s
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := r.Envelope(1, "boost/1.9.0/test", "sha256:cfg")
+	cfg := r.Envelope(1, "boost/1.10.0/test", "sha256:cfg")
 	cfg.ID, cfg.Type, cfg.SchemaVersion, cfg.Source = "configuration", event.TargetWeightConfigurationEventType, 5, "engine"
-	inputs := []event.Envelope{cfg, r.Envelope(2, "boost/1.9.0/test", "sha256:cfg")}
+	inputs := []event.Envelope{cfg, r.Envelope(2, "boost/1.10.0/test", "sha256:cfg")}
 	for i, m := range more {
-		inputs = append(inputs, m.Envelope(uint64(3+i), "boost/1.9.0/test", "sha256:cfg"))
+		inputs = append(inputs, m.Envelope(uint64(3+i), "boost/1.10.0/test", "sha256:cfg"))
 	}
 	for _, e := range inputs {
 		if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: e}}); err != nil {

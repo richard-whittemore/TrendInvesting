@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -617,12 +618,48 @@ func TestAFailedDeliveryStatesTheLastSequenceRecorded(t *testing.T) {
 	}
 	adapter := record(at.Add(3*time.Hour)).Envelope(2, "test", hash)
 	adapter.ID, adapter.Source = "adapter:unrecorded", "test-adapter"
-	_, err = newDecider(&wireGuard{}, engine, "test", hash, inbox)(context.Background(), adapter)
+	_, err = newDecider(&wireGuard{}, engine, recorder, "test", hash, inbox)(context.Background(), adapter)
 	var sequenced *transport.SequencedError
 	if !errors.As(err, &sequenced) || sequenced.Sequence != 2 {
 		t.Fatalf("err = %#v, want a refusal stating sequence 2, the journalled record's", err)
 	}
 	if msg := err.Error(); strings.Contains(msg, "applied at") || !strings.Contains(msg, "adapter:unrecorded was not recorded") {
 		t.Errorf("the refusal says %q, want it to say the input was not recorded", msg)
+	}
+}
+
+// TestAnInputMovedByAnOperatorInputIsAnsweredAgain: an operator input
+// delivered before the adapter's input moves that input one sequence later
+// than it was sent at. Sent again as it was first sent, it is the adapter
+// asking for its committed reply, and gets it byte for byte; no operator
+// record is delivered before it, and nothing is recorded (ADR 0027,
+// amendment "re-delivery on request").
+func TestAnInputMovedByAnOperatorInputIsAnsweredAgain(t *testing.T) {
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	stop := startEngine(t, opts)
+	feed := newBoostFeed(t, opts.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	first := ""
+	feed.beforeClose = func(int) {
+		first = writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-time.Hour), true).ID
+	}
+	feed.sessions(0, 1)
+	if feed.lastReply.Sequence != feed.last.Sequence+1 {
+		t.Fatalf("the close was sent at %d and recorded at %d, want it moved by the operator input", feed.last.Sequence, feed.lastReply.Sequence)
+	}
+	writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-time.Minute), false)
+	again, err := feed.client.Decide(context.Background(), feed.last)
+	if err != nil {
+		t.Fatalf("ask again for the committed reply to %s: %v", feed.last.ID, err)
+	}
+	if want, got := wireBytes(t, feed.lastReply), wireBytes(t, again); !bytes.Equal(want, got) {
+		t.Fatalf("the reply served again differs from the one recorded:\n first %s\n again %s", want, got)
+	}
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("stop the engine: %v", err)
+	}
+	if inputs := operatorInputs(recoverFile(t, opts.logPath).Entries); len(inputs) != 1 || inputs[0].ID != first {
+		t.Errorf("the log holds operator inputs %+v, want only %s: an input sent again delivers nothing", inputs, first)
 	}
 }

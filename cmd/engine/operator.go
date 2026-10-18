@@ -38,9 +38,10 @@ const operatorClockSkew = 5 * time.Minute
 // one input sequence, in file-name order, which is the order of the times
 // the records state (the operator's -at, which may backdate a record, not
 // the order they were written in); the adapter's input follows them. Its
-// decisions and theirs return to the adapter together, carrying the last
-// sequence recorded, which the adapter's next input continues (the wire
-// contract, engine.go).
+// decisions return to the adapter carrying the sequence it was recorded at,
+// which the adapter's next input continues; an input sent again is answered
+// from its committed group and delivers nothing (the wire contract,
+// engine.go).
 //
 // The durable log is the evidence (ADR 0027): a record is delivered once,
 // when its ID is in no earlier log of the directory of -log, this run's
@@ -79,7 +80,7 @@ type operatorInbox struct {
 	// decoded holds the records read but not yet delivered, by file name.
 	decoded map[string]operator.Record
 	// recorder is the run's recorder, which says whether a record's input
-	// was appended to the log (journal.Recorder.LastCommitted).
+	// was appended to the log (journal.Recorder.Committed).
 	recorder          *journal.Recorder
 	out               io.Writer
 	strategyVersion   string
@@ -181,23 +182,25 @@ func (b *operatorInbox) settle(name string) {
 }
 
 // deliver applies every pending record through engine at the sequence the
-// adapter's input names, returning their decisions and the sequence the
-// adapter's input is recorded at. When the adapter's input does not
+// adapter's input names, returning the sequence the adapter's input is
+// recorded at. The handlers decide nothing from an operator input (it sets
+// what later decisions read), so the adapter's reply is its own input's
+// committed group. When the adapter's input does not
 // continue the stream, nothing is delivered, and the engine refuses that
 // input as it would without an inbox. A record whose input was not
 // journalled and made durable ends the delivery with failed: it stays
 // pending, unnoted, and the run stops (operatorInbox).
-func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, input event.Envelope) (decisions []event.Envelope, sequence uint64, failed error) {
+func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, input event.Envelope) (sequence uint64, failed error) {
 	next, ok := engine.Next()
 	if !ok || next != input.Sequence {
-		return nil, input.Sequence, nil
+		return input.Sequence, nil
 	}
 	for _, r := range b.pending() {
 		select {
 		case <-ctx.Done():
 			// The wire abandoned this exchange: what remains waits, and the
 			// wire guard refuses the adapter's input.
-			return decisions, next, nil
+			return next, nil
 		default:
 		}
 		if now := time.Now(); r.Type == event.KillSwitchEventType && r.At.After(now.Add(operatorClockSkew)) {
@@ -205,31 +208,30 @@ func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, inpu
 				r.ID, r.At.Format(time.RFC3339), now.UTC().Format(time.RFC3339), operatorClockSkew))
 			continue
 		}
-		out, after, failed := b.apply(ctx, engine, r, next)
+		after, failed := b.apply(ctx, engine, r, next)
 		if failed != nil {
-			return decisions, next, failed
+			return next, failed
 		}
-		decisions, next = append(decisions, out...), after
+		next = after
 	}
-	return decisions, next, nil
+	return next, nil
 }
 
-// apply delivers r at sequence next, returning its decisions and the
-// sequence after it. Whether r was delivered is the recorder's to say, not
+// apply delivers r at sequence next, returning the sequence after it. Whether r was delivered is the recorder's to say, not
 // the error's: the replay engine moves past next on any error, and the
 // recorder refuses an input of its own (its record bound, its emission
 // ceiling, a failed write) without appending it (ADR 0027). An input the
 // recorder took was journalled, and a refusal of it, by the handler, is
 // noted beside r; one it did not take is returned as failed and leaves r
 // pending.
-func (b *operatorInbox) apply(ctx context.Context, engine *replay.Engine, r inboxRecord, next uint64) (decisions []event.Envelope, after uint64, failed error) {
+func (b *operatorInbox) apply(ctx context.Context, engine *replay.Engine, r inboxRecord, next uint64) (after uint64, failed error) {
 	name := r.name
-	out, err := engine.Apply(ctx, r.Envelope(next, b.strategyVersion, b.configurationHash))
-	if committed, ok := b.recorder.LastCommitted(); !ok || committed != next {
+	_, err := engine.Apply(ctx, r.Envelope(next, b.strategyVersion, b.configurationHash))
+	if committed, ok := b.recorder.Committed(r.ID); !ok || committed.Input.Sequence != next {
 		if err == nil {
 			err = errors.New("the recorder did not take it")
 		}
-		return nil, next, fmt.Errorf("engine: operator record %s was not delivered, so it stays in the inbox and is delivered at the next start: %w", name, err)
+		return next, fmt.Errorf("engine: operator record %s was not delivered, so it stays in the inbox and is delivered at the next start: %w", name, err)
 	}
 	after = next + 1
 	b.delivered[r.ID] = true
@@ -238,7 +240,7 @@ func (b *operatorInbox) apply(ctx context.Context, engine *replay.Engine, r inbo
 	if err != nil {
 		b.refuse(name, err)
 	}
-	return out, after, nil
+	return after, nil
 }
 
 // markDelivered writes and flushes the marker beside the record named name

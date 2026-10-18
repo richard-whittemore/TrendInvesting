@@ -66,6 +66,10 @@ type boostFeed struct {
 	released []event.OrderReleasedPayload
 	// beforeClose, when set, runs before session i's close is sent.
 	beforeClose func(i int)
+	// last and lastReply are the latest input sent and the reply it got, so
+	// a test can ask for that input's committed reply again.
+	last      event.Envelope
+	lastReply event.Envelope
 }
 
 func newBoostFeed(t *testing.T, socketPath string, cfg event.TargetWeightConfigurationPayload, build string, next uint64) *boostFeed {
@@ -143,6 +147,7 @@ func (f *boostFeed) trySend(eventType string, version uint32, id string, at time
 	// any operator input the engine recorded first; the next input
 	// continues it (the wire contract, engine.go).
 	f.sequence = reply.Sequence + 1
+	f.last, f.lastReply = in, reply
 	var bundle decisionsPayload
 	if err := json.Unmarshal(reply.Payload, &bundle); err != nil {
 		f.t.Fatalf("decode the decisions for %s: %v", id, err)

@@ -10,23 +10,65 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
 
-// assertCommitted fails unless the recorder's last committed input is want,
-// or, for want zero, unless it has committed none.
-func assertCommitted(t *testing.T, name string, recorder *journal.Recorder, want uint64) {
-	t.Helper()
-	got, ok := recorder.LastCommitted()
-	if want == 0 && ok || want != 0 && (!ok || got != want) {
-		t.Errorf("%s: LastCommitted() = %d, %t; want %d", name, got, ok, want)
+// TestCommittedIsTheGroupTheLogHoldsForAnInput: the committed reply to an
+// input is built from the group committed for it, its decisions stamped as
+// recorded, with the refusal the handler returned, if any. An input never
+// committed, because its group could not be made durable, has none (ADR
+// 0027, amendment "re-delivery on request").
+func TestCommittedIsTheGroupTheLogHoldsForAnInput(t *testing.T) {
+	t.Parallel()
+
+	refused := errors.New("refused")
+	inner := emittingHandler()
+	handler := replay.HandlerFunc(func(ctx context.Context, in event.Envelope) ([]event.Envelope, error) {
+		out, err := inner.Apply(ctx, in)
+		if in.Sequence == 2 {
+			return out, refused
+		}
+		return out, err
+	})
+	d := &disk{}
+	recorder := durableRecorder(t, handler, d)
+	inputs := testInputs(3)
+	for _, in := range inputs[:2] {
+		_, _ = recorder.Apply(context.Background(), in)
+	}
+	entries := recorder.Entries()
+
+	first, ok := recorder.Committed(inputs[0].ID)
+	if !ok || first.Input.ID != inputs[0].ID || first.Refusal != "" || len(first.Decisions) != 2 || first.Decisions[0].ID != entries[1].Envelope.ID || first.Decisions[0].Sequence != entries[1].Envelope.Sequence {
+		t.Fatalf("Committed(%s) = %+v, %v; want its group as recorded", inputs[0].ID, first, ok)
+	}
+	if second, ok := recorder.Committed(inputs[1].ID); !ok || second.Refusal != "refused" {
+		t.Fatalf("Committed(%s) = %+v, %v; want its refusal", inputs[1].ID, second, ok)
+	}
+	d.failSync = true
+	_, _ = recorder.Apply(context.Background(), inputs[2])
+	if _, ok := recorder.Committed(inputs[2].ID); ok {
+		t.Fatalf("Committed(%s) reports a group that was never made durable", inputs[2].ID)
+	}
+	if _, ok := recorder.Committed("never-sent"); ok {
+		t.Fatal("Committed reports an input never applied")
 	}
 }
 
-// TestARecorderStatesTheLastInputItCommitted: a caller that must tell an
+// assertCommitted fails unless the recorder committed in, at its own
+// sequence, exactly when want says it did.
+func assertCommitted(t *testing.T, name string, recorder *journal.Recorder, in event.Envelope, want bool) {
+	t.Helper()
+	got, ok := recorder.Committed(in.ID)
+	if ok != want || ok && got.Input.Sequence != in.Sequence {
+		t.Errorf("%s: Committed(%s) = %+v, %t; want committed %t", name, in.ID, got.Input, ok, want)
+	}
+}
+
+// TestARecorderStatesWhichInputsItCommitted: a caller that must tell an
 // input the recorder took, refused by the handler or not, from one it never
 // appended asks the recorder, which commits an input once its group is held
 // and, for a durable recorder, made durable (ADR 0027). An input refused by
 // the record bound, the emission ceiling or a failed write was not
 // committed, though the handler's own refusal was.
-func TestARecorderStatesTheLastInputItCommitted(t *testing.T) {
+func TestARecorderStatesWhichInputsItCommitted(t *testing.T) {
 	t.Parallel()
 
 	refused := errors.New("refused by the handler")
@@ -34,11 +76,11 @@ func TestARecorderStatesTheLastInputItCommitted(t *testing.T) {
 	inputs := testInputs(3)
 
 	memory := journal.NewRecorder(refusing)
-	assertCommitted(t, "fresh", memory, 0)
+	assertCommitted(t, "fresh", memory, inputs[0], false)
 	if _, err := memory.Apply(context.Background(), inputs[0]); !errors.Is(err, refused) {
 		t.Fatalf("Apply() = %v, want the handler's refusal", err)
 	}
-	assertCommitted(t, "the handler's refusal", memory, 1)
+	assertCommitted(t, "the handler's refusal", memory, inputs[0], true)
 
 	bounded := journal.NewBoundedRecorder(emittingHandler(), 1)
 	if _, err := bounded.Apply(context.Background(), inputs[0]); err != nil {
@@ -48,7 +90,8 @@ func TestARecorderStatesTheLastInputItCommitted(t *testing.T) {
 	if _, err := bounded.Apply(context.Background(), inputs[1]); !errors.As(err, &limit) {
 		t.Fatalf("Apply() = %v, want the record bound", err)
 	}
-	assertCommitted(t, "the record bound", bounded, 1)
+	assertCommitted(t, "under the record bound", bounded, inputs[0], true)
+	assertCommitted(t, "the record bound", bounded, inputs[1], false)
 
 	d := &disk{}
 	durable := journal.NewDurableRecorder(burstHandler(journal.MaxEmissionsPerInput+1, nil), createLog(t, d), journal.DefaultMaxRecords)
@@ -56,18 +99,18 @@ func TestARecorderStatesTheLastInputItCommitted(t *testing.T) {
 	if _, err := durable.Apply(context.Background(), inputs[0]); !errors.As(err, &ceiling) {
 		t.Fatalf("Apply() = %v, want the emission ceiling", err)
 	}
-	assertCommitted(t, "the emission ceiling", durable, 0)
+	assertCommitted(t, "the emission ceiling", durable, inputs[0], false)
 
 	d = &disk{}
 	durable = durableRecorder(t, emittingHandler(), d)
 	if _, err := durable.Apply(context.Background(), inputs[0]); err != nil {
 		t.Fatal(err)
 	}
-	assertCommitted(t, "a durable input", durable, 1)
+	assertCommitted(t, "a durable input", durable, inputs[0], true)
 	d.failSync = true
 	var durability *journal.DurabilityError
 	if _, err := durable.Apply(context.Background(), inputs[1]); !errors.As(err, &durability) {
 		t.Fatalf("Apply() = %v, want a durability failure", err)
 	}
-	assertCommitted(t, "a failed flush", durable, 1)
+	assertCommitted(t, "a failed flush", durable, inputs[1], false)
 }

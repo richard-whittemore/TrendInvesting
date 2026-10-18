@@ -431,7 +431,10 @@ func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
 
 // ObserveLifecycle applies a recorded lifecycle report on a released order:
 // canceled or invalid ends a sell's remainder, from the earliest such
-// report's second; submitted and cancel-pending leave it pending.
+// report's second; submitted and cancel-pending leave it pending. The
+// report's limit is the order's when within event.LimitPriceTolerance of it
+// (event.SameLimitPrice), the rule the engine and the reporter read a report
+// by.
 func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
@@ -440,7 +443,7 @@ func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 	if err != nil {
 		return err
 	}
-	if p.Quantity != o.planned.Quantity || p.LimitPrice != o.planned.LimitPrice {
+	if p.Quantity != o.planned.Quantity || !event.SameLimitPrice(p.LimitPrice, o.planned.LimitPrice) {
 		return fmt.Errorf("risklimit: a lifecycle report on order %s reports %d at %v; the order is %d at %v", p.ClientOrderID, p.Quantity, p.LimitPrice, o.planned.Quantity, o.planned.LimitPrice)
 	}
 	if s := g.ledger.sells[p.ClientOrderID]; s != nil && p.Terminal() {

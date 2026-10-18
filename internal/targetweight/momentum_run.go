@@ -109,8 +109,9 @@ type momentumRun struct {
 	snapshot *event.AccountCashSnapshotPayload
 	marks    map[string]event.MarkRecordedPayload
 
-	orders    map[string]*trackedOrder
-	fills     map[string]event.TargetWeightFillPayload // every accepted fill, by fill id
+	// orders reads the venue's reports on the orders released, by the rule
+	// the reporter reads the log by (event.OrderReports).
+	orders    *event.OrderReports
 	rebalance *rebalance
 
 	// histories holds the ranked members' close histories until their
@@ -124,14 +125,6 @@ type momentumRun struct {
 	retracted map[string]bool
 	compact   bool
 	pending   *pendingDecision
-}
-
-// trackedOrder is one released order and what the venue has reported of it.
-type trackedOrder struct {
-	planned  event.OrderPlannedPayload
-	filled   int64
-	terminal bool
-	fills    map[string]event.TargetWeightFillPayload
 }
 
 // rebalance is the decision time in progress: what its buy phase needs.
@@ -187,8 +180,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		bars:     map[string]event.CompletedBarAdjustedPayload{},
 		bases:    map[string]string{},
 		marks:    map[string]event.MarkRecordedPayload{},
-		orders:   map[string]*trackedOrder{},
-		fills:    map[string]event.TargetWeightFillPayload{},
+		orders:   event.NewOrderReports(),
 
 		histories: map[string]event.CloseHistoryPayload{},
 		retracted: map[string]bool{},
@@ -653,10 +645,8 @@ func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (re
 			return event.WithheldMissingBars, fmt.Sprintf("no %s bar in the session closing %s; it is held or targeted", id, end.Format(idTime))
 		}
 	}
-	for _, id := range slices.Sorted(maps.Keys(r.orders)) {
-		if !r.orders[id].terminal {
-			return event.WithheldRebalanceInProgress, fmt.Sprintf("order %s of an earlier rebalance is not terminal", id)
-		}
+	if working := r.orders.Working(); len(working) > 0 {
+		return event.WithheldRebalanceInProgress, fmt.Sprintf("order %s of an earlier rebalance is not terminal", working[0])
 	}
 	return "", ""
 }
@@ -670,7 +660,7 @@ func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (re
 // broker; each is then terminal and the rebalance plans nothing more, so its
 // buy phase, if still pending, is never planned and the next decision time
 // decides afresh. A later venue report on a cleared order is refused as one
-// on a terminal order (tracked). The gate's pending sells are left to the
+// on a terminal order (event.OrderReports). The gate's pending sells are left to the
 // broker snapshots, which show what each cleared sell sold (ADR 0026, point
 // 2.5).
 func (r *momentumRun) applyCleared(in event.Envelope) error {
@@ -681,12 +671,7 @@ func (r *momentumRun) applyCleared(in event.Envelope) error {
 	if p.AccountID != r.h.cfg.AccountID {
 		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, r.h.cfg.AccountID)
 	}
-	var working []string
-	for _, id := range slices.Sorted(maps.Keys(r.orders)) {
-		if !r.orders[id].terminal {
-			working = append(working, id)
-		}
-	}
+	working := r.orders.Working()
 	switch {
 	case len(working) == 0:
 		return fmt.Errorf("targetweight: clearance %s: no rebalance is in progress, every order released is terminal", in.ID)
@@ -697,9 +682,9 @@ func (r *momentumRun) applyCleared(in event.Envelope) error {
 			in.ID, p.ClientOrderIDs, r.rebalance.decisionID, working)
 	}
 	for _, id := range working {
-		o := r.orders[id]
-		o.terminal = true
-		if o.planned.Side == event.OrderSideBuy {
+		o, _ := r.orders.Order(id)
+		o.Terminal = true
+		if o.Released.Side == event.OrderSideBuy {
 			r.rebalance.budget.Close(id)
 		}
 	}
@@ -745,9 +730,9 @@ func (r *momentumRun) unexplainedCashDrop(reb *rebalance) float64 {
 	expected := r.cash(reb.snapshot)
 	if r.exec.CashRule == event.CashRuleTotal {
 		for _, id := range reb.sells {
-			o := r.orders[id]
-			for _, fillID := range slices.Sorted(maps.Keys(o.fills)) {
-				if f := o.fills[fillID]; !f.FilledAt.After(latest.AsOf) {
+			o, _ := r.orders.Order(id)
+			for _, fillID := range slices.Sorted(maps.Keys(o.Fills)) {
+				if f := o.Fills[fillID]; !f.FilledAt.After(latest.AsOf) {
 					expected += float64(float64(f.Quantity)*f.Price) - f.Commission
 				}
 			}
@@ -785,7 +770,7 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 		o := orders[i]
 		if out.Released != nil {
 			b.add("risk-order-released:"+o.ClientOrderID, event.OrderReleasedEventType, out.Released.SchemaVersion(), *out.Released)
-			r.orders[o.ClientOrderID] = &trackedOrder{planned: o, fills: map[string]event.TargetWeightFillPayload{}}
+			r.orders.Release(*out.Released)
 			released = append(released, o)
 		} else {
 			b.add("risk-order-refused:"+o.ClientOrderID, event.OrderRefusedEventType, out.Refused.SchemaVersion(), *out.Refused)
@@ -797,21 +782,18 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 	return released
 }
 
-// tracked returns the released order a venue report names, checking that the
-// report describes that order.
-func (r *momentumRun) tracked(in event.Envelope, account, client, instrument, side string) (*trackedOrder, error) {
-	o, ok := r.orders[client]
-	switch {
-	case account != r.h.cfg.AccountID:
-		return nil, fmt.Errorf("targetweight: %s %s is for account %q; this run decides %q", in.Type, in.ID, account, r.h.cfg.AccountID)
-	case !ok:
-		return nil, fmt.Errorf("targetweight: %s %s names order %s, which this run never released", in.Type, in.ID, client)
-	case o.planned.InstrumentID != instrument || o.planned.Side != side:
-		return nil, fmt.Errorf("targetweight: %s %s describes %s %s, but order %s is %s %s", in.Type, in.ID, side, instrument, client, o.planned.Side, o.planned.InstrumentID)
-	case o.terminal:
-		return nil, fmt.Errorf("targetweight: %s %s reports on order %s, which is already terminal", in.Type, in.ID, client)
+// refusal is a venue report the rule refuses (event.OrderReports), naming
+// the report.
+func refusal(in event.Envelope, err error) error {
+	return fmt.Errorf("targetweight: %s %s %w", in.Type, in.ID, err)
+}
+
+// forAccount refuses a venue report for another account than this run's.
+func (r *momentumRun) forAccount(in event.Envelope, account string) error {
+	if account != r.h.cfg.AccountID {
+		return fmt.Errorf("targetweight: %s %s is for account %q; this run decides %q", in.Type, in.ID, account, r.h.cfg.AccountID)
 	}
-	return o, nil
+	return nil
 }
 
 func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error) {
@@ -819,16 +801,19 @@ func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error
 	if err != nil {
 		return nil, err
 	}
-	o, err := r.tracked(in, p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side)
-	if err != nil {
+	if err := r.forAccount(in, p.AccountID); err != nil {
 		return nil, err
 	}
-	// The gate checks the report's quantity and limit against the order and
-	// nets every pending sell from later sizing (ADR 0026, point 2.5).
+	o, err := r.orders.Lifecycle(p)
+	if err != nil {
+		return nil, refusal(in, err)
+	}
+	// The gate nets every pending sell from later sizing (ADR 0026, point
+	// 2.5); it reads a report the rule above has read.
 	if err := r.h.gate.ObserveLifecycle(p); err != nil {
 		return nil, fmt.Errorf("targetweight: lifecycle %s: %w", in.ID, err)
 	}
-	if p.Terminal() {
+	if o.Terminal {
 		return r.terminal(in, o, p.OccurredAt)
 	}
 	return nil, nil
@@ -839,26 +824,21 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A fill id names one execution across the account
-	// (TargetWeightFillPayload), so it is checked across every order.
-	if seen, dup := r.fills[p.FillID]; dup {
-		if seen.SameExecution(p) {
-			return nil, nil // a redelivery of the same execution
-		}
-		return nil, fmt.Errorf("targetweight: fill %s reuses fill id %s for a different execution", in.ID, p.FillID)
-	}
-	o, err := r.tracked(in, p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side)
-	if err != nil {
+	if err := r.forAccount(in, p.AccountID); err != nil {
 		return nil, err
 	}
-	// The gate refuses a fill past the order's shares and nets every
-	// pending sell from later sizing (ADR 0026, point 2.5).
+	o, redelivery, err := r.orders.Fill(p)
+	if err != nil {
+		return nil, refusal(in, err)
+	}
+	if redelivery {
+		return nil, nil
+	}
+	// The gate nets every pending sell from later sizing (ADR 0026, point
+	// 2.5); it reads a fill the rule above has read.
 	if err := r.h.gate.ObserveFill(p); err != nil {
 		return nil, fmt.Errorf("targetweight: fill %s: %w", in.ID, err)
 	}
-	r.fills[p.FillID] = p
-	o.fills[p.FillID] = p
-	o.filled += p.Quantity
 	value, reb := float64(float64(p.Quantity)*p.Price), r.rebalance
 	if p.Side == event.OrderSideSell {
 		reb.sold[p.InstrumentID] += p.Quantity
@@ -868,28 +848,28 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	} else {
 		reb.budget.Fill(p.ClientOrderID, value+p.Commission)
 	}
-	if o.filled == o.planned.Quantity {
+	if o.Terminal {
 		return r.terminal(in, o, p.FilledAt)
 	}
 	return nil, nil
 }
 
-// terminal marks o terminal and, when it was the last working sell of the
-// rebalance in progress, plans the buy phase, caused by this report.
+// terminal follows a report that made o terminal: when it was the last
+// working sell of the rebalance in progress, it plans the buy phase, caused
+// by this report.
 //
 // Every order not yet terminal belongs to the rebalance in progress: a new
 // rebalance is planned only once every order is terminal (withhold). And the
 // buys are planned only once every sell is terminal, so no sell becomes
 // terminal after them.
-func (r *momentumRun) terminal(in event.Envelope, o *trackedOrder, at time.Time) ([]event.Envelope, error) {
-	o.terminal = true
+func (r *momentumRun) terminal(in event.Envelope, o *event.ReportedOrder, at time.Time) ([]event.Envelope, error) {
 	reb := r.rebalance
-	if o.planned.Side == event.OrderSideBuy {
-		reb.budget.Close(o.planned.ClientOrderID)
+	if o.Released.Side == event.OrderSideBuy {
+		reb.budget.Close(o.Released.ClientOrderID)
 		return nil, nil
 	}
 	for _, id := range reb.sells {
-		if !r.orders[id].terminal {
+		if s, _ := r.orders.Order(id); !s.Terminal {
 			return nil, nil
 		}
 	}
