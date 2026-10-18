@@ -25,7 +25,7 @@ dying: that needs an outside watcher, which is not built (below).
 | User | Runs | Can see |
 | --- | --- | --- |
 | `ti-gateway` | IB Gateway and IBC | the IBKR login, handed to it alone |
-| `ti-trader` | the data step, the engines, the reporter, the dashboard, and the `operator` tool when you run it | the market data, the engines' logs, the other secrets file; never the IBKR login |
+| `ti-trader` | the data step, the engines, the Boost adapter, the reporter, the dashboard, and the `operator` tool when you run it | the market data, the engines' logs, the secrets file, the Boost account's file; never the IBKR login |
 
 Both are system users with no login shell. You log in as `ubuntu` and use
 `sudo`.
@@ -68,13 +68,16 @@ then refuses to start in paper, which is safe, but your edits are gone.
 | File | What it holds | Who reads it |
 | --- | --- | --- |
 | `/etc/trend-investing/ibkr-login.env` (root only, mode 0600) | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
-| `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_BOOST`, `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `NTFY_URL`, `HEALTHCHECK_URL` | handed as a file to the data job, the engines, the reporter and the dashboard |
+| `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `NTFY_URL`, `HEALTHCHECK_URL` | handed as a file to the data job, the engines, the reporter and the dashboard |
+| `/etc/trend-investing/accounts/boost.env` (root only, mode 0600, in a root-only folder, mode 0700) | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter only (`ti-adapter-boost.service`) |
 
 What each program actually reads today:
 
 - `ti-data` reads **only** `MASSIVE_API_KEY` from that file.
-- **No program reads** the `IBKR_ACCOUNT_*` lines: the account an engine
-  trades is the `account_id` in its configuration file.
+- **No program reads** `IBKR_ACCOUNT_TRAD_IRA` or `IBKR_ACCOUNT_ROTH_IRA` yet.
+  The Boost adapter reads `IBKR_ACCOUNT_BOOST` from its own file and from no
+  other. The account an engine trades is the `account_id` in its
+  configuration file.
 - **No program reads** `NTFY_URL` or `HEALTHCHECK_URL`.
 - The reporter reads its channels' secrets from **environment variables**,
   `TI_NTFY_TOPIC` (and optionally `TI_NTFY_SERVER`) and
