@@ -22,6 +22,11 @@ func clearance() event.RebalanceClearedPayload {
 		ClientOrderIDs: []string{"ira-buy-1"}, Operator: "owner", Detail: "cancelled at IBKR"}
 }
 
+func acknowledgement() event.AlertAcknowledgedPayload {
+	return event.AlertAcknowledgedPayload{AccountID: "joint", AlertKey: "engine-state:halted:risk-limit-breached:||:2026-10-17T14:00:00Z@joint",
+		AcknowledgedBy: "owner", AcknowledgedAt: at, Detail: "seen; reconciling at IBKR"}
+}
+
 // TestARecordNamesItsInputByTypeAccountAndTime: an operator input is
 // recorded under an ID made of its type, account and time, and a file name
 // that sorts by time, so the engine applies the inbox in the order the
@@ -43,6 +48,14 @@ func TestARecordNamesItsInputByTypeAccountAndTime(t *testing.T) {
 	if c.ID != "operator.rebalance.cleared:ira:2026-10-17T14:30:05Z" || c.Type != event.RebalanceClearedEventType || c.FileName() != "20261017T143005Z-operator.rebalance.cleared.json" {
 		t.Errorf("record %+v", c)
 	}
+	a, err := operator.AlertAcknowledged(acknowledgement())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != "operator.alert.acknowledged:joint:2026-10-17T14:30:05Z" || a.Type != event.AlertAcknowledgedEventType ||
+		a.SchemaVersion != event.AlertAcknowledgedSchemaVersion || !a.At.Equal(at) || a.FileName() != "20261017T143005Z-operator.alert.acknowledged.json" {
+		t.Errorf("record %+v", a)
+	}
 }
 
 // TestAnInvalidInputIsNeverRecorded: the tool refuses an input its payload
@@ -58,6 +71,11 @@ func TestAnInvalidInputIsNeverRecorded(t *testing.T) {
 	if _, err := operator.RebalanceCleared(empty); err == nil || !strings.Contains(err.Error(), "client order ids") {
 		t.Errorf("RebalanceCleared = %v", err)
 	}
+	keyless := acknowledgement()
+	keyless.AlertKey = ""
+	if _, err := operator.AlertAcknowledged(keyless); err == nil || !strings.Contains(err.Error(), "alert key is required") {
+		t.Errorf("AlertAcknowledged = %v", err)
+	}
 }
 
 // TestADecodedRecordIsExactlyOneTheToolWrites: the engine reads back only a
@@ -67,6 +85,7 @@ func TestADecodedRecordIsExactlyOneTheToolWrites(t *testing.T) {
 	for _, build := range []func() (operator.Record, error){
 		func() (operator.Record, error) { return operator.KillSwitch(engage()) },
 		func() (operator.Record, error) { return operator.RebalanceCleared(clearance()) },
+		func() (operator.Record, error) { return operator.AlertAcknowledged(acknowledgement()) },
 	} {
 		r, err := build()
 		if err != nil {
@@ -94,18 +113,19 @@ func TestADecodedRecordIsExactlyOneTheToolWrites(t *testing.T) {
 		raw  []byte
 		want string
 	}{
-		"not json":         {[]byte("not json"), "decode the operator record"},
-		"an unknown key":   {edit(func(m map[string]any) { m["extra"] = 1 }), "unknown field"},
-		"an unknown type":  {edit(func(m map[string]any) { m["type"] = "operator.unknown" }), "not an operator input"},
-		"another version":  {edit(func(m map[string]any) { m["schema_version"] = 2 }), "schema version 2"},
-		"a released ID":    {edit(func(m map[string]any) { m["id"] = "operator.kill-switch:joint:2026-10-17T14:30:06Z" }), "is not the record"},
-		"an edited detail": {edit(func(m map[string]any) { m["payload"].(map[string]any)["detail"] = "other" }), "is not the record"},
-		"a payload key":    {edit(func(m map[string]any) { m["payload"].(map[string]any)["extra"] = true }), "is not the record"},
-		"an engaged null":  {edit(func(m map[string]any) { m["payload"].(map[string]any)["engaged"] = nil }), "engaged must be stated"},
-		"a bad clearance":  {edit(func(m map[string]any) { m["type"] = event.RebalanceClearedEventType }), "rebalance cleared"},
-		"an invalid input": {edit(func(m map[string]any) { m["payload"].(map[string]any)["operator"] = "" }), "operator is required"},
-		"a second record":  {append(good.Encode(), good.Encode()...), "after the record"},
-		"trailing bytes":   {append(good.Encode(), []byte("}")...), "after the record"},
+		"not json":              {[]byte("not json"), "decode the operator record"},
+		"an unknown key":        {edit(func(m map[string]any) { m["extra"] = 1 }), "unknown field"},
+		"an unknown type":       {edit(func(m map[string]any) { m["type"] = "operator.unknown" }), "not an operator input"},
+		"another version":       {edit(func(m map[string]any) { m["schema_version"] = 2 }), "schema version 2"},
+		"a released ID":         {edit(func(m map[string]any) { m["id"] = "operator.kill-switch:joint:2026-10-17T14:30:06Z" }), "is not the record"},
+		"an edited detail":      {edit(func(m map[string]any) { m["payload"].(map[string]any)["detail"] = "other" }), "is not the record"},
+		"a payload key":         {edit(func(m map[string]any) { m["payload"].(map[string]any)["extra"] = true }), "is not the record"},
+		"an engaged null":       {edit(func(m map[string]any) { m["payload"].(map[string]any)["engaged"] = nil }), "engaged must be stated"},
+		"a bad clearance":       {edit(func(m map[string]any) { m["type"] = event.RebalanceClearedEventType }), "rebalance cleared"},
+		"a bad acknowledgement": {edit(func(m map[string]any) { m["type"] = event.AlertAcknowledgedEventType }), "alert acknowledged"},
+		"an invalid input":      {edit(func(m map[string]any) { m["payload"].(map[string]any)["operator"] = "" }), "operator is required"},
+		"a second record":       {append(good.Encode(), good.Encode()...), "after the record"},
+		"trailing bytes":        {append(good.Encode(), []byte("}")...), "after the record"},
 	} {
 		if _, err := operator.Decode(c.raw); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: Decode = %v, want a refusal saying %q", name, err, c.want)
