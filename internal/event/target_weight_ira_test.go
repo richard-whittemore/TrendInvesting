@@ -244,6 +244,9 @@ func TestMomentumDecisionValidate(t *testing.T) {
 		p := validMomentumDecided()
 		p.Momentum.Names = append([]event.MomentumName(nil), p.Momentum.Names...)
 		p.Momentum.Names[1].Status = status
+		if status == event.MomentumStatusGap {
+			p.Momentum.Names[1].GapSessions = []string{"2025-02-20"}
+		}
 		if err := p.Validate(); err != nil {
 			t.Errorf("status %s: %v", status, err)
 		}

@@ -113,6 +113,7 @@ type momentumRun struct {
 
 	adjusted map[string]map[string]float64 // instrument -> session -> adjusted close
 	raw      map[string]float64            // instrument -> raw close in the last session
+	barred   map[string]bool               // instruments with their own bar in the last session
 	bars     map[string]event.CompletedBarAdjustedPayload
 	bases    map[string]string // instrument -> its adjusted view's base
 	universe *event.UniverseSnapshotPayload
@@ -385,6 +386,7 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		}
 	}
 	r.raw = make(map[string]float64, len(r.bars))
+	r.barred = make(map[string]bool, len(r.bars))
 	for id, bar := range r.bars {
 		if !bar.PeriodEnd.Equal(p.PeriodEnd) {
 			return nil, fmt.Errorf("targetweight: bar %s for %s is not the session %s being closed", bar.PeriodEnd, id, p.PeriodEnd)
@@ -396,6 +398,7 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		// dividend-adjusted close (ADR 0026, point 1).
 		r.adjusted[id][date] = bar.Adjusted.Close
 		r.raw[id] = bar.Raw.Close
+		r.barred[id] = true
 	}
 	r.bars = map[string]event.CompletedBarAdjustedPayload{}
 	reason, missing, err := r.mergeHistories(date, at)
@@ -496,7 +499,7 @@ func (r *momentumRun) trim(at int) {
 // b, ranking the universe snapshot u when it is that session's.
 func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.UniverseSnapshotPayload) ([]event.Envelope, error) {
 	h := r.h
-	input := momentum.Input{Sessions: r.calendar[max(0, at+1-r.window) : at+1], Closes: r.adjusted}
+	input := momentum.Input{Sessions: r.calendar[max(0, at+1-r.window) : at+1], Closes: r.adjusted, Held: r.held()}
 	if u != nil && u.Session == r.last {
 		input.Universe = momentum.Snapshot{Session: u.Session, Rows: rows(u.Rows)}
 	}
@@ -561,6 +564,33 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 		r.planBuys(b)
 	}
 	return b.result()
+}
+
+// held returns the instruments the latest account snapshot holds that sent
+// their own bar in the last session of a compact run: a held member whose
+// window has a gap is scored across it (momentum.ScoreHeld; ADR 0026 point
+// 5, amended 2026-10-18). With no snapshot it holds none, and the decision
+// is withheld as stale-account-snapshot anyway.
+//
+// Invariant: a score across a gap must never span a split or dividend the
+// market-data step could not adjust. A holding named to that step refuses
+// the stream on one, so a gap in its own bars is a session it did not trade.
+// Only the compact stream's bars are the named holdings'; a holding seen
+// only through its close history is not known to be named, so its gap
+// leaves it out as for a stock not held. A bars stream carries every
+// member's bars, named or not, and marks no gap as a plain missing session,
+// so a bars run holds none here and keeps the complete-window rule for
+// every name (fail closed).
+func (r *momentumRun) held() map[string]bool {
+	held := map[string]bool{}
+	if r.snapshot != nil && r.compact {
+		for _, p := range r.snapshot.Positions {
+			if p.Quantity != 0 && r.barred[p.InstrumentID] {
+				held[p.InstrumentID] = true
+			}
+		}
+	}
+	return held
 }
 
 // sellsTerminal reports whether every sell the rebalance released is
@@ -958,6 +988,7 @@ func (r *momentumRun) payload(d momentum.Decision, end time.Time) event.TargetsD
 			Sector: n.Sector, SectorSource: n.SectorSource, Status: string(n.Status), Closes: n.Closes,
 			Score: n.Score, Volatility: n.Volatility, ScoreRank: n.ScoreRank, Weight: n.Weight,
 			BacktestWouldPick: n.BacktestWouldPick, OneShare: n.OneShare, TargetValue: n.TargetValue,
+			GapSessions: n.GapSessions,
 		})
 	}
 	for _, t := range d.Targets {

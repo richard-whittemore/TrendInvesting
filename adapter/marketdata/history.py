@@ -1,8 +1,8 @@
 """Raw bar history and corporate actions, recorded once and read back.
 
 History is Massive's grouped daily endpoint, one recorded request per
-session for every US stock (unadjusted), so 253 sessions of closes for the
-whole market cost 253 requests (about 53 minutes at 5 a minute). Splits and
+session for every US stock (unadjusted), so 260 sessions of closes for the
+whole market cost 260 requests (about 54 minutes at 5 a minute). Splits and
 dividends come from the bulk reference endpoints, filtered by date and
 paginated, and are recorded per window; windows overlap, so an action read
 from several is counted once (by Massive's id, or the whole row when it has

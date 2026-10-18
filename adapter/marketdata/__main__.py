@@ -29,7 +29,7 @@ def parse(argv, now=steps._now):
     ap.add_argument("--instruments", default="SPY,IEF,SHY")
     ap.add_argument("--secrets-file")
     ap.add_argument("--lookback-days", type=int, default=400)
-    ap.add_argument("--sessions", type=int, default=253, help="backfill: sessions of history to record")
+    ap.add_argument("--sessions", type=int, default=260, help="backfill: sessions of history to record (the 260 the momentum engine keeps)")
     ap.add_argument("--settle-minutes", type=int, default=int(steps.SETTLE.total_seconds() // 60),
                     help="minutes after the close before a session may be recorded")
     ap.add_argument("--first", type=dt.date.fromisoformat, help="encode: first session written")

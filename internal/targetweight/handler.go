@@ -83,7 +83,19 @@ import (
 //     labels-missing when more than the configuration's MaxUnlabelledShare
 //     of the ranked members has no label (configuration version 7, so a
 //     version 6 configuration is refused).
-//   - 1.14.0 has Boost re-plan, at the next decided session, the difference
+//   - 1.14.0 was reserved for the Boost re-plan and never released; no
+//     journal carries it.
+//   - 1.15.0 scores a held momentum name whose window has a gap across it,
+//     from the last ScoreLookback+1 closes it has in the last 260 sessions,
+//     as the backtest did (defensive_v2.py:271,286-291), where 1.13.0 left
+//     it out as short-history and sold it: the owner's decision of
+//     2026-10-18 (ADR 0026 point 5, amended). A candidate not held still
+//     needs a complete window. The run keeps 260 sessions of closes, a
+//     name left out for a gap reads gap, and every gap's sessions are
+//     recorded, so a journal written under 1.13.0 does not replay. Only a
+//     run reading the compact universe input scores a held name so; a bars
+//     run keeps the complete-window rule for every name, held or not.
+//   - 1.16.0 has Boost re-plan, at the next decided session, the difference
 //     between the account's position and the target in force after a
 //     refusal that leaves the engine Normal (the kill switch, a stale broker
 //     snapshot), where earlier versions ordered only when the target changed
@@ -94,8 +106,8 @@ import (
 //     from the decision restores it; the gate flags only the first
 //     kill-switch refusal of an engagement for the alert (ADR 0026, point 3,
 //     kill switch: "alert once"). A journal holding such a refusal decides
-//     differently under 1.13.0.
-const RulesVersion = "1.14.0"
+//     differently under 1.15.0.
+const RulesVersion = "1.16.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -814,7 +826,11 @@ func (b *emissions) targets(figures event.BoostFigures, reason, detail string) (
 // the input's, never the wall clock. Sequence, causation and correlation are
 // the engine's to set (replay.Handler).
 func (h *Handler) stamp(id, eventType string, version uint32, at time.Time, in event.Envelope, payload interface{ Validate() error }) (event.Envelope, error) {
-	if err := payload.Validate(); err != nil {
+	check := payload.Validate
+	if w, ok := payload.(interface{ ValidateWritten() error }); ok {
+		check = w.ValidateWritten
+	}
+	if err := check(); err != nil {
 		return event.Envelope{}, fmt.Errorf("targetweight: %s %s: %w", eventType, id, err)
 	}
 	raw, err := json.Marshal(payload)

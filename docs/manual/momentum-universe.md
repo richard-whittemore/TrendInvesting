@@ -20,7 +20,9 @@ can decide. The owner chose a smaller shape on 2026-10-16:
   (the trend), IEF and SHY (risk-off and bonds), and whatever is held;
 - **at each month's last session, one price history per ranked stock**: the
   500 stocks the engine will rank from that day's snapshot, each with its last
-  253 sessions of split- and dividend-adjusted closes, in one record.
+  260 sessions of split- and dividend-adjusted closes, in one record (253
+  are scored; the extra seven let a stock you hold be scored across a
+  missing day, below).
 
 The engine never reads a bar for every listed stock in a session.
 
@@ -58,8 +60,11 @@ trades.
 The histories carry exactly the closes the stock's daily bars would have
 carried, adjusted the same way from the same base, and a session missing from
 a stock's bars (bad data, a day it did not trade) is missing from its history
-too. So the engine decides the same thing from either stream. Two tests hold
-this in place:
+too. So the engine decides the same thing from either stream, with one
+difference: a stock you hold with a missing day is scored across it in the
+compact stream only, where the stocks you hold are named to the market-data
+step; a bars run sells it as `gap` (see "A stock you hold with a missing day"
+below). Two tests hold this in place for the stocks without such a day:
 
 - `TestTheCompactStreamDecidesAsTheFullBarsDo`
   (`internal/targetweight/momentum_universe_test.go`) runs two months of
@@ -246,7 +251,61 @@ withheld as `histories-missing` or `missing-bars` (above).
 
 A stock whose history is short or has a gap is recorded in the decision as
 `short-history` or `gap` and left out of that month, exactly as with daily
-bars (ADR 0026, point 5).
+bars (ADR 0026, point 5), unless you hold it (next section).
+
+## A stock you hold with a missing day
+
+Sometimes a stock has no price for a day inside its last 253 sessions: it
+did not trade (a halt), or the vendor recorded no bar for that day. An
+absent bar is a gap the engine can score across (below). A bar that is
+there but unusable (a missing or negative price, a split or dividend that
+cannot be adjusted) is different for a stock you hold: if you named it with
+`--optional`, the market-data step's `encode` refuses the whole stream, so
+there is no stream and no decision until the data is fixed, and nothing is
+scored across a gap.
+
+- **A stock you do not hold** is not ranked that month. The decision lists
+  it as `gap` and names the missing days in `gap_sessions`. It can be
+  ranked again once its last 253 sessions are complete.
+- **A stock you hold** is scored the way the backtest scored every stock:
+  from its last 253 prices in the last 260 sessions, skipping the missing
+  day (one daily return then spans two days). It is then kept, trimmed,
+  topped up or sold on its score like any other stock. Its line in the
+  decision shows its usual status (`picked`, `sector-capped`, ...) with
+  `gap_sessions` naming the missing days, so you can see it was scored
+  across a hole.
+- **A stock you hold that has fewer than 253 prices in those 260 sessions**
+  (more than seven missing days, or too new) is `short-history` and is sold
+  at the rebalance, as the backtest left it out too.
+
+Before 2026-10-18 a held stock with one missing day was listed as
+`short-history` and sold whole, and could not be bought back for about a
+year (owner's decision of 2026-10-18, ADR 0026 point 5, amended; rules
+version 1.15.0).
+
+This applies only in a compact run, and only to a holding the engine
+receives its own daily bars for, which is every holding you name to the
+market-data step with `--optional`. That step refuses the whole stream when
+a split or dividend of a named stock cannot be adjusted, so a missing day in
+a holding's bars is never an unadjusted price jump. A holding the engine
+sees only through its monthly history (you did not name it) is treated like
+a stock you do not hold: `gap`, no target, sold. Naming everything you hold
+with `--optional` is mandatory.
+
+A bars run (a stream written with `--universe-members`) never scores a
+holding across a gap. There every stock has its own bars, named or not, and
+a missing day may be the session of a split the market-data step could not
+adjust, so the engine cannot tell it is safe: a held stock with a gap is
+`gap`, no target, sold, as before 2026-10-18.
+
+Tests: `TestAHeldStockWithOneMissingSessionIsDecidedAcrossTheGap`,
+`TestABarsRunDoesNotScoreAHoldingAcrossAGap`,
+`TestACandidateNotHeldWithAGapIsStillNotRanked`,
+`TestAHeldStockWithTooFewClosesIsStillShortHistory`,
+`TestAHeldStockWithoutItsOwnBarsIsNotScoredAcrossItsGap`
+(`internal/targetweight`), and
+`TestDecideScoresAHeldNameAcrossItsGapAsTheBacktestDoes` and its neighbours
+in `internal/targetweight/momentum/held_gap_test.go`.
 
 ## What backs it
 

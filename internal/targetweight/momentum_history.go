@@ -276,7 +276,9 @@ func momentumRule(m event.MomentumConfiguration) momentum.Config {
 
 // momentumWindow is how many calendar sessions of closes the run keeps: the
 // longest lookback, the score's ScoreLookback+1 closes or the trend's
-// TrendCloses.
+// TrendCloses, and at least the BacktestHistorySessions a held name with a
+// gap is scored across (momentum.ScoreHeld; ADR 0026 point 5, amended
+// 2026-10-18).
 func momentumWindow(m event.MomentumConfiguration) int {
-	return max(m.ScoreLookback+1, m.TrendCloses)
+	return max(m.ScoreLookback+1, m.TrendCloses, momentum.BacktestHistorySessions)
 }

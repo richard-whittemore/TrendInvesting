@@ -278,8 +278,9 @@ class RetractionTest(unittest.TestCase):
 
 
 # The Go ranker over a synthetic momentum configuration: lookbacks of 3 and
-# 3 closes (a window of 4 sessions), a universe of 2 and the encoder's own
-# universe and sector sources.
+# 3 closes, a universe of 2 and the encoder's own universe and sector
+# sources. Its window is the 260 sessions the engine keeps (ADR 0026 point
+# 5, amended 2026-10-18), longer than the fixture's recordings.
 GO_RANKER = encode.go_ranker(["go", "run", "./cmd/universe-rank", "-config",
                               os.path.join(REPO, "cmd/universe-rank/testdata/momentum.json")])
 
@@ -303,7 +304,8 @@ class GoRankerTest(unittest.TestCase):
             stream = compact(d, ranker=go_ranker)
         # 11-30 closes: AAA 20.30 x 1000, BBB 50 x 400, CCC 49 x 1000, DDD 7.50 x 1000.
         self.assertEqual([e["payload"]["instrument_id"] for e in of(stream, HISTORY)], ["AAA", "CCC"])
-        self.assertEqual(len(of(stream, HISTORY)[0]["payload"]["closes"]), 4)
+        # Every recorded session falls inside the 260-session window.
+        self.assertEqual(len(of(stream, HISTORY)[0]["payload"]["closes"]), 5)
 
     def test_the_compact_stream_satisfies_the_go_validators(self):
         with tempfile.TemporaryDirectory() as d:
