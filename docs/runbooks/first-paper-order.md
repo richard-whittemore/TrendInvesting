@@ -165,7 +165,7 @@ files never contain it, because the repository is public.
 | Where | What | Why |
 | --- | --- | --- |
 | `/etc/trend-investing/secrets.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo -e`; root-only, mode 0600) | your paper account (DU…) | The shipped file holds names only; each engine reads only its own line |
-| The Boost engine's paper configuration, `/etc/trend-investing/engines/boost.config`: a copy of the shipped dry-run file with `"mode": "paper"` and `"account_id"` set to your paper account (DU…) | the mode and the account | The engine refuses to start if the mode in this file is not the mode you start it with, or if a paper configuration names an account not beginning `DU`. The file is hashed into the run (ADR 0016), so a change is a new run |
+| The Boost engine's paper configuration, `/etc/trend-investing/engines/boost.config`: a copy of the shipped dry-run file with `"mode": "paper"`, `"account_id"` set to your paper account (DU…), and `"warm_up_start": "2025-01-02"` | the mode, the account and the warm-up start | The engine refuses to start if the mode in this file is not the mode you start it with, or if a paper configuration names an account not beginning `DU`. The file is hashed into the run (ADR 0016), so a change is a new run. `warm_up_start` must lie within Massive's two-year window, or the data job's warm-up cannot fetch the history: the shipped 2024-01-02 is outside it. 2025-01-02 is the recommended value (your choice: any session inside the window with at least 200 sessions before the first paper day); it stays inside the window until 2 January 2027. It changes the paper configuration's hash only (`docs/manual/market-data.md`, "The one-time warm-up") |
 | `/etc/trend-investing/engines/boost.env`: set `TI_MODE=paper` | the engine's start mode | It must equal the mode in the configuration |
 | The adapter's configuration: `mode` paper, `account_id` your paper account (DU…), `host` 127.0.0.1, `port` 4002, the engine's `client_id` (Boost is 11), the timing values and `con_ids` with SPY's IBKR contract number | the adapter's side of the binding | See B2 |
 
@@ -184,6 +184,14 @@ Two cautions:
 On the Mac mini, the same values go in files in a directory outside the
 repository checkout (not on the iCloud-synced Desktop), and the engine and
 adapter are pointed at them.
+
+### A6. Put the Massive key on the machine [NOW]
+
+The daily data job fetches SPY's prices from Massive with your own key. On
+the server, `sudo -e /etc/trend-investing/secrets.env` and fill in the line
+`MASSIVE_API_KEY=` (add the line if the file predates it). Like the account
+number, it is never committed, pasted into an issue or typed on a command
+line.
 
 ## B. Steps the program and the adapter take
 
@@ -261,6 +269,10 @@ Order of starting, each on the server, each an explicit step of yours:
    `TI_AS_OF`, and an empty `TI_RESTART_ARGS` for a first run. A log is never
    reused.
 4. Start the adapter, then the engine: `sudo systemctl start ti-engine@boost`.
+   For a run's first paper day, run the data job's one-time warm-up once the
+   engine has started, before the adapter delivers anything
+   (`docs/manual/market-data.md`, "The daily data job"); from then on the
+   timer writes each day's file at 17:05.
    Engines are never started by systemd on their own and never restarted by
    it; every start is yours.
 5. Confirm the engine's log begins with the paper configuration, and that the

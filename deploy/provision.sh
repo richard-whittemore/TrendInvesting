@@ -73,7 +73,7 @@ step_base() {
   apt-get update -qq
   apt-get install -y -qq --no-install-recommends \
     ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
-    libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 iptables >/dev/null
+    libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata iptables >/dev/null
 
   log "service users (non-root, no login shell)"
   ensure_user ti-gateway /var/lib/ti-gateway
@@ -187,6 +187,15 @@ GATEWAY_MAJOR=${GATEWAY_MAJOR}
 TI_GATEWAY_RESTART_TIME=11:45 PM
 TI_GATEWAY_COLD_RESTART=09:00
 CONF
+  # The data step (deploy/build-data.sh), when its file is beside deploy/;
+  # without it the unit fails when the timer fires, so the gap is seen.
+  local data_job=${TI_DATA_BUILD:-$here/../dist/ti-data}
+  if test -f "$data_job"; then
+    install -m 0755 "$data_job" /opt/trend-investing/bin/ti-data
+    log "installed the data step from $data_job"
+  else
+    log "no $data_job: the data step is not installed (deploy/build-data.sh builds it)"
+  fi
   write_stub "$etc/ibkr-login.env" "$here/etc/ibkr-login.env.example"
   write_stub "$etc/secrets.env" "$here/etc/secrets.env.example"
   install -d -o ti-trader -g ti-trader -m 0750 \
@@ -208,9 +217,10 @@ CONF
     # restart model). Disabling stops nothing that is running.
     systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
     # The gateway starts only once the owner has filled
-    # the login file; the unit's own check refuses an empty one. The data
-    # step, reporter and dashboard are skipped (a unit condition) until their
-    # binaries are installed.
+    # the login file; the unit's own check refuses an empty one. The
+    # reporter and dashboard are skipped (a unit condition) until their
+    # binaries are installed. The data step fails, with a message, until its
+    # file is installed and the Boost engine's run.env exists.
     log "enabled; start with: systemctl start ti-gateway (after the owner enters the IBKR login)"
   fi
 }

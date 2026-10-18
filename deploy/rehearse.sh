@@ -21,7 +21,14 @@ if test -n "$platform"; then
 else
   args+=(-e TI_REHEARSAL_ANY_ARCH=1 -e TI_REHEARSAL_SKIP_INSTALLER=1)
 fi
+# The data step's file, installed by provision.sh from beside deploy/, and
+# a durable log the engine wrote for the shipped Boost configuration, which
+# the rehearsal runs it against.
+dist=$(mktemp -d)
+"$repo/deploy/build-data.sh" "$dist/ti-data" >/dev/null
+cp "$repo/adapter/marketdata/tests/testdata/boost-fixture.log" "$dist/boost-fixture.log"
 id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)
-trap 'docker rm -f "$id" >/dev/null 2>&1 || true' EXIT
+trap 'docker rm -f "$id" >/dev/null 2>&1 || true; rm -rf "$dist"' EXIT
 docker cp "$repo/deploy" "$id:/deploy"
+docker cp "$dist" "$id:/dist"
 docker start -a "$id"

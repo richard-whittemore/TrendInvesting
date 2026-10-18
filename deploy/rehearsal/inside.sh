@@ -11,8 +11,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends systemd sudo >/dev/null
 
-# Work from a writable copy, as on the server.
+# Work from a writable copy, as on the server, with the data step's built
+# file beside it as dist/ti-data.
 cp -a /deploy /root/deploy
+cp -a /dist /root/dist
 p=/root/deploy/provision.sh
 
 "$p" base
@@ -108,9 +110,29 @@ test "$status" = 78 || fail "start-gateway exited $status on an empty login, wan
 grep -qx 'RestartPreventExitStatus=64 65 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
 pass "an empty login stops the gateway with 78, which the unit does not restart on"
 
+# The data step is installed and runs under the server's python3. Given a
+# durable log the engine wrote for the shipped Boost configuration
+# (adapter/marketdata/tests/testdata/boost-fixture.log, copied beside the
+# built file), everything but the key is in place, so the refusal exercised
+# is the missing Massive key: exit 1, the key's name in the message, and
+# nothing written.
+test -x /opt/trend-investing/bin/ti-data || fail "the data step was not installed"
+cmp /root/dist/ti-data /opt/trend-investing/bin/ti-data || fail "the installed data step is not the built one"
+/opt/trend-investing/bin/ti-data --help | grep -q -- --backfill-from || fail "the data step does not run"
+grep -qx 'MASSIVE_API_KEY=' /etc/trend-investing/secrets.env || fail "the secrets stub has no MASSIVE_API_KEY line"
+scratch=$(mktemp -d)
+cp /root/dist/boost-fixture.log "$scratch/run.log"
+status=0
+/opt/trend-investing/bin/ti-data --data "$scratch/data" --config /etc/trend-investing/engines/boost.config \
+  --engine-log "$scratch/run.log" --secrets-file /etc/trend-investing/secrets.env >/dev/null 2>"$scratch/err" || status=$?
+test "$status" = 1 || fail "the data step exited $status with no key, want 1"
+grep -q 'ti-data refused: .*MASSIVE_API_KEY' "$scratch/err" || fail "the data step's refusal does not name the missing key"
+test ! -e "$scratch/data" || fail "the data step wrote something while refusing"
+pass "the data step is installed, runs, and refuses a missing key with nothing written"
+
 # Unit files. The placeholder binaries do not exist; stand-ins let
 # systemd-analyze check the rest of each unit.
-for b in ti-data ti-engine ti-reporter ti-dashboard; do
+for b in ti-engine ti-reporter ti-dashboard; do
   install -m 0755 /dev/null "/opt/trend-investing/bin/$b"
 done
 cd /etc/systemd/system
@@ -140,9 +162,10 @@ cat "$verify_log"
 grep -qi 'credential' "$verify_log" || fail "systemd-analyze verify is silent on an invalid LoadCredential= name"
 pass "systemd-analyze verify reports an invalid LoadCredential= name"
 
-# Client IDs are unique and the data step's 10 is not reused.
+# Client IDs are unique. The data step uses Massive, not IB Gateway, and
+# holds none.
 ids=$(grep -h '^TI_ADAPTER_CLIENT_ID=' /etc/trend-investing/engines/*.env | sort)
 test "$(echo "$ids" | uniq | wc -l)" -eq 3 || fail "engine client IDs not unique"
-echo "$ids" | grep -qx 'TI_ADAPTER_CLIENT_ID=10' && fail "an engine uses the data step's client ID"
-pass "three distinct engine client IDs, none equal to the data step's 10"
+grep -q 'TI_ADAPTER_CLIENT_ID' /etc/systemd/system/ti-data.service && fail "the data step names an IB Gateway client ID"
+pass "three distinct engine client IDs, and none for the data step"
 echo "REHEARSAL COMPLETE"
