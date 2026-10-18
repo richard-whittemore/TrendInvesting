@@ -391,7 +391,7 @@ func TestAFigureBeyondTheCentRangeIsUnverifiable(t *testing.T) {
 		obs     event.ReconciliationPayload
 	}{
 		"broker cash":     {bookWith(512.3), nil, observed(huge)},
-		"book cash":       {bookWith(huge), nil, observed(huge)},
+		"book cash":       {bookWith(huge), nil, observed(512.3)},
 		"fill value":      {bookWith(512.3), []reconcile.Change{fill(huge, 0)}, observed(512.3, held("SPY", 1))},
 		"fill commission": {bookWith(512.3), []reconcile.Change{fill(1, huge)}, observed(512.3, held("SPY", 1))},
 	}
@@ -415,6 +415,39 @@ func TestACorporateActionBeyondTheCentRangeIsUnverifiable(t *testing.T) {
 		r := classify(t, iraBook(), []reconcile.Change{c}, observed(512.3, held("SPY", 147), held("TLT", 20)))
 		if r.Classification != event.ReconciliationUnverifiable || r.Action != event.ReconciliationActionHalt {
 			t.Errorf("%s: got %s/%s, want unverifiable and halt", name, r.Classification, r.Action)
+		}
+	}
+}
+
+// TestSumsOfInRangeFiguresThatWrapAreUnverifiable: each figure fits an int64
+// of cents but a sum of two does not, so the fill's cash, the running expected
+// cash, the cash parts and the residual are checked sums, and an overflow
+// makes the reconciliation unverifiable instead of comparing a wrapped count.
+func TestSumsOfInRangeFiguresThatWrapAreUnverifiable(t *testing.T) {
+	const big = 5e16 // 5e18 cents, in range; two of them wrap
+	bookWith := func(cash float64) *reconcile.Book {
+		b := reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
+			AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "ira", AsOf: closeAt, Currency: "USD", Positions: []event.AccountPosition{}},
+			SettledCash:                     cash, TotalCash: cash,
+		})
+		return &b
+	}
+	at := closeAt.Add(time.Hour)
+	dividend := reconcile.CorporateActionChange("ca:1", event.CorporateActionPayload{Kind: event.CorporateActionKindDividend, InstrumentID: "SPY", EffectiveAt: at, CashAmount: big, Currency: "USD"})
+	cases := map[string]struct {
+		book    *reconcile.Book
+		changes []reconcile.Change
+		obs     event.ReconciliationPayload
+	}{
+		"buy value and commission":  {bookWith(0), []reconcile.Change{reconcile.FillChange(event.TargetWeightFillPayload{FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 1, Price: big, Commission: big, FilledAt: at})}, observed(0, held("SPY", 1))},
+		"sell value and commission": {bookWith(0), []reconcile.Change{reconcile.FillChange(event.TargetWeightFillPayload{FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 1, Price: big, Commission: -big, FilledAt: at})}, observed(0, held("SPY", -1))},
+		"running expected cash":     {bookWith(big), []reconcile.Change{dividend}, observed(0)},
+		"residual":                  {bookWith(-big), nil, observed(big)},
+	}
+	for name, c := range cases {
+		r := classify(t, c.book, c.changes, c.obs)
+		if r.Classification != event.ReconciliationUnverifiable || r.Action != event.ReconciliationActionHalt || len(r.Unverifiable) == 0 {
+			t.Errorf("%s: got %s/%s %v, want unverifiable and halt", name, r.Classification, r.Action, r.Unverifiable)
 		}
 	}
 }

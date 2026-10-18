@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -101,11 +102,18 @@ type Change struct {
 func FillChange(p event.TargetWeightFillPayload) Change {
 	value, valueErr := roundCents(new(big.Rat).Mul(decimal(p.Price), new(big.Rat).SetInt64(p.Quantity)))
 	commission, commissionErr := Cents(p.Commission)
-	c := Change{ID: p.FillID, Kind: ChangeFill, InstrumentID: p.InstrumentID, At: p.FilledAt, Shares: p.Quantity, Cash: -value - commission, Commission: commission}
+	c := Change{ID: p.FillID, Kind: ChangeFill, InstrumentID: p.InstrumentID, At: p.FilledAt, Shares: p.Quantity, Commission: commission}
+	var sumErr error
 	if p.Side == event.OrderSideSell {
-		c.Shares, c.Cash = -p.Quantity, value-commission
+		c.Shares = -p.Quantity
+		c.Cash, sumErr = subCents(value, commission)
+	} else {
+		var cost int64
+		if cost, sumErr = addCents(value, commission); sumErr == nil {
+			c.Cash, sumErr = subCents(0, cost)
+		}
 	}
-	if err := errors.Join(valueErr, commissionErr); err != nil {
+	if err := errors.Join(valueErr, commissionErr, sumErr); err != nil {
 		c.Fault = fmt.Sprintf("fill %s: %v", p.FillID, err)
 	}
 	return c
@@ -140,6 +148,23 @@ func CorporateActionChange(id string, p event.CorporateActionPayload) Change {
 // anything else. A finite figure whose cents do not fit an int64 is an error,
 // never a wrapped count.
 func Cents(x float64) (int64, error) { return roundCents(decimal(x)) }
+
+// addCents is a+b in whole cents; it is an error when the sum does not fit an
+// int64, never a wrapped count.
+func addCents(a, b int64) (int64, error) {
+	if (b > 0 && a > math.MaxInt64-b) || (b < 0 && a < math.MinInt64-b) {
+		return 0, fmt.Errorf("%d cents plus %d cents is more cents than a book can count", a, b)
+	}
+	return a + b, nil
+}
+
+// subCents is a-b in whole cents, with addCents' guarantee.
+func subCents(a, b int64) (int64, error) {
+	if (b < 0 && a > math.MaxInt64+b) || (b > 0 && a < math.MinInt64+b) {
+		return 0, fmt.Errorf("%d cents less %d cents is more cents than a book can count", a, b)
+	}
+	return a - b, nil
+}
 
 // decimal is x's shortest decimal figure, exactly.
 func decimal(x float64) *big.Rat {
@@ -250,6 +275,14 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			reasons = append(reasons, c.Fault)
 			continue
 		}
+		nextCash, err := addCents(cash, c.Cash)
+		if err == nil {
+			err = parts.add(c)
+		}
+		if err != nil {
+			reasons = append(reasons, fmt.Sprintf("%s: the expected cash: %v", c.ID, err))
+			continue
+		}
 		if c.Kind == ChangeSplit {
 			expected[c.InstrumentID] = expected[c.InstrumentID] * c.NewShares / c.OldShares
 		} else {
@@ -259,16 +292,15 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			explained[c.InstrumentID] = append(explained[c.InstrumentID], c.ID)
 		}
 		if c.Cash != 0 || c.Kind == ChangeFill {
-			cash += c.Cash
+			cash = nextCash
 			cashExplained = append(cashExplained, c.ID)
-			parts.add(c)
 		}
 	}
 
 	if cashRead {
-		r.Components = append(r.Components, entry(event.ReconciliationComponent{
+		appendEntry(&r, &reasons, event.ReconciliationComponent{
 			Component: event.ReconciliationComponentCash, Book: book.Cash, Expected: cash, Observed: observedCash, Explanations: cashExplained,
-		}))
+		})
 	}
 	if positionsRead {
 		observedQ := map[string]int64{}
@@ -278,35 +310,53 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 		ids := slices.Concat(slices.Collect(maps.Keys(expected)), slices.Collect(maps.Keys(observedQ)))
 		slices.Sort(ids)
 		for _, id := range slices.Compact(ids) {
-			r.Components = append(r.Components, entry(event.ReconciliationComponent{
+			appendEntry(&r, &reasons, event.ReconciliationComponent{
 				Component: event.ReconciliationComponentPosition, InstrumentID: id,
 				Book: book.Positions[id], Expected: expected[id], Observed: observedQ[id], Explanations: append([]string{}, explained[id]...),
-			}))
+			})
 		}
 	}
 	return finish(r, reasons, parts.String(book.Cash))
 }
 
-// entry completes a component's residual and whether it is explained.
-func entry(c event.ReconciliationComponent) event.ReconciliationComponent {
-	c.Residual = c.Observed - c.Expected
-	c.Explained = c.Residual == 0
-	return c
+// appendEntry completes c's residual and whether it is explained, and adds it
+// to r; a residual that does not fit an int64 is an unverifiable reason
+// instead.
+func appendEntry(r *event.ReconciliationResultPayload, reasons *[]string, c event.ReconciliationComponent) {
+	residual, err := subCents(c.Observed, c.Expected)
+	if err != nil {
+		*reasons = append(*reasons, fmt.Sprintf("the %s residual: %v", c.Component, err))
+		return
+	}
+	c.Residual, c.Explained = residual, residual == 0
+	r.Components = append(r.Components, c)
 }
 
 // cashParts are the journalled parts of the expected cash, in whole cents.
 type cashParts struct{ fills, commissions, dividends, inLieu int64 }
 
-func (p *cashParts) add(c Change) {
+// add counts c in its part; it is an error, leaving p unchanged, when a part
+// no longer fits an int64.
+func (p *cashParts) add(c Change) error {
+	next := *p
+	var err error
 	switch c.Kind {
 	case ChangeFill:
-		p.fills += c.Cash + c.Commission
-		p.commissions -= c.Commission
+		var value int64
+		if value, err = addCents(c.Cash, c.Commission); err == nil {
+			if next.fills, err = addCents(next.fills, value); err == nil {
+				next.commissions, err = subCents(next.commissions, c.Commission)
+			}
+		}
 	case ChangeDividend:
-		p.dividends += c.Cash
+		next.dividends, err = addCents(next.dividends, c.Cash)
 	case ChangeSplit:
-		p.inLieu += c.Cash
+		next.inLieu, err = addCents(next.inLieu, c.Cash)
 	}
+	if err == nil {
+		*p = next
+	}
+	return err
 }
 
 // String states the book's cash and each part, the terms the expected cash
