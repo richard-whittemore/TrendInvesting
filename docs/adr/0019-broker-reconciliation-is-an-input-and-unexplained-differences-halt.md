@@ -575,5 +575,6 @@ written at, arrival order and stated order can differ. The rule:
    instruction, kill switch or clearance.
 
 Rule 2 changes what the gate decides from a journalled input, so it is a
-rules change under ADR 0016: target-weight RulesVersion 1.10.0. The owner's
-manual states the rule in [the operator chapter](../manual/operator.md).
+rules change under ADR 0016: target-weight RulesVersion 1.12.0 (1.10.0 was
+reserved for it, but 1.11.0 landed first). The owner's manual states the rule
+in [the operator chapter](../manual/operator.md).

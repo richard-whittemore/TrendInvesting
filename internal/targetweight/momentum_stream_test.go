@@ -14,7 +14,10 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
-const iraAccount = "ira"
+// iraAccount is a paper account: the harness plays the venue, which reports
+// on every order it is sent, and only a paper or live run sends one (ADR 0026,
+// point 3, "Mode").
+const iraAccount = "DUIRA"
 
 // momentumConfiguration is the momentum rule with short lookbacks (a 6-session
 // score skipping 1, 4 returns of volatility, a 5-close trend), a top 2 with
@@ -24,7 +27,7 @@ const iraAccount = "ira"
 // b is 0 and the book is the rule's own; glideBirth puts b on the path.
 func momentumConfiguration() event.TargetWeightConfigurationPayload {
 	return event.TargetWeightConfigurationPayload{
-		StrategyID: event.TargetWeightStrategyMomentum, AccountID: iraAccount, Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
+		StrategyID: event.TargetWeightStrategyMomentum, AccountID: iraAccount, Mode: event.TradingModePaper, Adapter: event.AdapterIBKR,
 		Momentum: event.MomentumConfiguration{
 			Rule: event.MomentumRuleTrend, ListingType: "CS", UniverseSize: 5, MinPrice: 5,
 			ScoreLookback: 6, ScoreSkip: 1, VolatilityReturns: 4, TopN: 2, SectorCap: 1,
@@ -114,10 +117,11 @@ func (n name) price(cal []string, i int, janFall bool) float64 {
 	return math.Round(float64(p*(1+float64(0.002*float64((i*7)%5))))*100) / 100
 }
 
-// ira simulates the IRA at the venue: each released order is acknowledged and
+// ira simulates the IRA at the venue: each order released to send is acknowledged and
 // fills at the next session's open, at that session's close capped by its
 // limit, with a commission of 0.5. A sale's proceeds settle a session later.
 type ira struct {
+	account            string
 	settled, unsettled float64
 	held               map[string]int64
 	pending            []event.OrderReleasedPayload
@@ -134,7 +138,7 @@ func (a *ira) snapshot(at time.Time, prices map[string]float64) event.AccountCas
 	}
 	return event.AccountCashSnapshotPayload{
 		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
-			AccountID: iraAccount, AsOf: at, NetLiquidation: net, Currency: "USD", Positions: positions,
+			AccountID: a.account, AsOf: at, NetLiquidation: net, Currency: "USD", Positions: positions,
 		},
 		SettledCash: a.settled, TotalCash: float64(a.settled + a.unsettled),
 	}
@@ -226,7 +230,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	rec := journal.NewRecorder(handler)
 	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
 	res := momentumResult{run: run{recorder: rec, hash: s.hash}, stream: s}
-	acct := &ira{settled: 10000, held: map[string]int64{}}
+	acct := &ira{account: cfg.AccountID, settled: 10000, held: map[string]int64{}}
 	for id, q := range opts.held {
 		acct.held[id] = q
 	}
@@ -304,7 +308,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			acct.pending = acct.pending[1:]
 			at := end.Add(time.Duration(-390+minute+1) * time.Minute)
 			venue(event.LimitOrderLifecyclePayload{
-				AccountID: iraAccount, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+				AccountID: cfg.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
 				Side: o.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at,
 			}, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+o.ClientOrderID)
 			price := prices[o.InstrumentID]
@@ -329,7 +333,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				}
 				acct.held[o.InstrumentID] += signed
 				venue(event.TargetWeightFillPayload{
-					AccountID: iraAccount, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					AccountID: cfg.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
 					Side: o.Side, Quantity: quantity, Price: price, Commission: 0.5, FilledAt: at,
 				}, event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID)
 				if amount, ok := opts.withdrawFill[o.InstrumentID]; ok && o.Side == event.OrderSideSell {
@@ -340,7 +344,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			if quantity < o.Quantity {
 				at = end.Add(time.Duration(-390+minute+1) * time.Minute)
 				venue(event.LimitOrderLifecyclePayload{
-					AccountID: iraAccount, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					AccountID: cfg.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
 					Side: o.Side, Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at,
 				}, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "cancel:"+o.ClientOrderID)
 			}

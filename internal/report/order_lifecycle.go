@@ -82,7 +82,9 @@ type Order struct {
 // In a momentum run the owner's clearance (operator.rebalance.cleared) is
 // read by event.OrderReports too, as the engine reads it, so a report on an
 // order it cleared is refused as on a terminal order.
-// A fill in a Boost run, readable or not, changes nothing and raises no
+// A dry-run momentum run's synthetic report on an order it never sent, a
+// decision, ends the order by the same rule and acknowledges nothing
+// (endSynthetic). A fill in a Boost run, readable or not, changes nothing and raises no
 // alert: the Boost engine reads fills by the risk gate's check
 // (risklimit.Gate.ObserveFill), not by event.OrderReports, so this reader
 // does not count them.
@@ -110,6 +112,12 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 			}
 			continue
 		}
+		if e.Type == event.OrderLifecycleEventType {
+			if err := endSynthetic(e, reports); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
 		if e.Type != event.OrderReleasedEventType {
 			continue
 		}
@@ -134,6 +142,23 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 		out[i] = *o
 	}
 	return out, unread, nil
+}
+
+// endSynthetic reads a dry-run engine's synthetic report on an order it
+// released and never sent (event.LimitOrderLifecyclePayload's Synthetic) by
+// the rule the engine applied, so the order ends here as it ended there. It
+// acknowledges nothing and counts no fill: no venue made it. A synthetic
+// report the engine could not have recorded refuses the log, as a release
+// that does not read does.
+func endSynthetic(e event.Envelope, reports *event.OrderReports) error {
+	var p event.LimitOrderLifecyclePayload
+	if err := read(e, syntheticVersions, &p); err != nil {
+		return err
+	}
+	if _, err := reports.Lifecycle(p); err != nil {
+		return fmt.Errorf("report: %s %q %w", e.Type, e.ID, err)
+	}
+	return nil
 }
 
 // UnreadReport is a venue's report the log holds that the engine did not

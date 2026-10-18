@@ -97,6 +97,24 @@ func TestRulesVersionDeclaresTheDeclaredUniverseInput(t *testing.T) {
 	}
 }
 
+// TestRulesVersionDeclaresTheDryRunSyntheticReports pins ADR 0016's
+// same-rules-version replay guarantee for dry-run: a dry-run momentum run
+// records a synthetic terminal report (execution.order.lifecycle version 3)
+// for each order it releases and plans its buys at the same close, where an
+// earlier build waited and withheld later months as rebalance-in-progress, so a
+// dry-run journal written under rules 1.10.0 or earlier cannot replay under
+// this build and the build must not claim 1.10.0 or earlier (ADR 0026, point
+// 3, "Mode", amended 2026-10-17).
+func TestRulesVersionDeclaresTheDryRunSyntheticReports(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.10.0 once a dry-run records synthetic terminal reports", targetweight.RulesVersion)
+		}
+	}
+}
+
 // TestHandlerRefusesAVersion5Configuration: version 5 has no universe input,
 // so a momentum run cannot know which input shape it reads from a version-5
 // configuration; the handler refuses it rather than inferring the shape (ADR
@@ -134,14 +152,14 @@ func TestRulesVersionDeclaresTheHalfCentLimitMatch(t *testing.T) {
 // operator.alert.acknowledged, and a reconciliation degrades or halts the
 // account, so a journal written under this build cannot replay under an
 // earlier rules version, which refuses those inputs. 1.8.0 is the lifecycle
-// match's, so the reconciliation's is 1.9.0 (ADR 0016: each rules change
-// takes its own version).
+// match's, so this build must be above 1.8.0; 1.9.0 is this change's own
+// version (ADR 0016: each rules change takes its own version).
 func TestRulesVersionDeclaresReconciliation(t *testing.T) {
 	t.Parallel()
 
 	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"} {
 		if targetweight.RulesVersion == earlier {
-			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.8.0 once a reconciliation moves the engine state", targetweight.RulesVersion)
+			t.Fatalf("targetweight.RulesVersion = %q, want 1.9.0 or later once a reconciliation moves the engine state", targetweight.RulesVersion)
 		}
 	}
 }
@@ -152,14 +170,15 @@ func TestRulesVersionDeclaresReconciliation(t *testing.T) {
 // and ends a rebalance in progress (ADR 0026, point 5), and the gate refuses
 // a kill switch stating a time earlier than the last one it applied (ADR
 // 0019, amendment of 2026-10-17), so the build must not claim a version a
-// journal written without those rules carries. 1.9.0 is the
-// reconciliation's, so this one is 1.10.0.
+// journal written without those rules carries. 1.10.0 was reserved for
+// these rules but 1.11.0 (dry-run synthetic reports) landed first, so this
+// one is 1.12.0.
 func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
 	t.Parallel()
 
-	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0"} {
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0"} {
 		if targetweight.RulesVersion == earlier {
-			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.9.0 once a momentum run reads the owner's clearance of a rebalance in progress and the gate orders kill switches by their stated time", targetweight.RulesVersion)
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.11.0 once a momentum run reads the owner's clearance of a rebalance in progress and the gate orders kill switches by their stated time", targetweight.RulesVersion)
 		}
 	}
 }

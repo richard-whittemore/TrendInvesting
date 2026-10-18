@@ -7,7 +7,7 @@ import (
 )
 
 // januaryDecision is the synthetic run's first rebalance decision.
-const januaryDecision = "targets-decided:ira:2025-01-31T21:00:00Z"
+const januaryDecision = "targets-decided:" + iraAccount + ":2025-01-31T21:00:00Z"
 
 // clearedAt is an operator.rebalance.cleared input for the IRA at
 // session's close, naming decision and orders.
@@ -95,7 +95,7 @@ func TestAClearanceMustNameTheRebalanceInProgress(t *testing.T) {
 					clearedAt(t, s, "other account", session, "joint", januaryDecision, orders),
 					bad,
 					clearedAt(t, s, "invalid", session, iraAccount, januaryDecision, nil),
-					clearedAt(t, s, "other", session, iraAccount, "targets-decided:ira:2024-12-31T21:00:00Z", orders),
+					clearedAt(t, s, "other", session, iraAccount, "targets-decided:"+iraAccount+":2024-12-31T21:00:00Z", orders),
 					clearedAt(t, s, "short", session, iraAccount, januaryDecision, orders[:len(orders)-1]),
 				}
 			}
@@ -114,4 +114,40 @@ func TestBoostReadsNoClearance(t *testing.T) {
 	mustRefuse(t, h, s.envelope(t, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared", sessionEnd(0),
 		event.RebalanceClearedPayload{AccountID: "joint", AsOf: sessionEnd(0), DecisionID: "d", ClientOrderIDs: []string{"o"}, Operator: "owner", Detail: "x"}),
 		"not one this handler reads")
+}
+
+// TestADryRunHasNothingToClear: a dry-run momentum run ends each order it
+// releases with its own synthetic terminal report (ADR 0026, point 3,
+// "Mode"), so no rebalance is ever in progress and the owner's clearance is
+// refused as one with nothing to clear (ADR 0026, point 5). An order is
+// therefore never ended twice, once by a synthetic report and once by a
+// clearance, and February decides with or without one.
+func TestADryRunHasNothingToClear(t *testing.T) {
+	opts := dryRun(event.TradingModeDryRun)
+	plain := simulateMomentum(t, opts)
+	all := released(t, plain.decisions)
+	if len(all) == 0 {
+		t.Fatal("setup: the dry-run released nothing")
+	}
+	account, january := all[0].AccountID, all[0].Tag
+	var orders []string
+	for _, o := range all {
+		if o.Tag == january {
+			orders = append(orders, o.ClientOrderID)
+		}
+	}
+	opts.refusals = map[string]string{"cleared": "no rebalance is in progress"}
+	opts.beforeClose = func(s *stream, session string) []event.Envelope {
+		if session != "2025-02-28" {
+			return nil
+		}
+		return []event.Envelope{clearedAt(t, s, "cleared", session, account, january, orders)}
+	}
+	r := simulateMomentum(t, opts)
+	if got := withheldReasons(t, r); !equalStrings(got, []string{"decided:", "decided:"}) {
+		t.Fatalf("decisions %v, want both months decided in a dry-run", got)
+	}
+	if got, want := len(ofType(r.decisions, event.OrderLifecycleEventType)), len(ofType(plain.decisions, event.OrderLifecycleEventType)); got != want {
+		t.Errorf("%d synthetic reports with the refused clearance, want %d as without it", got, want)
+	}
 }
