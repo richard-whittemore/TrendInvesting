@@ -171,6 +171,17 @@ func TestAnOrderNamedByItsSecurityIDIsMatched(t *testing.T) {
 	}
 }
 
+func TestAnOrderOfARenamedStockIsMatchedByItsOrderID(t *testing.T) {
+	// The orders listing names AAA by its later ticker, AAA2.
+	ms, orders := iraRun()
+	orders[1].Ticker = "AAA2"
+	iraFailsOnly(t, ms, orders, parity.CheckIRAOrders)
+	ms[0].Placed = map[int]string{2: "AAA"}
+	if r := parity.CompareIRA("I", iraPlan, ms, orders); !r.Pass() {
+		t.Fatalf("renamed stock failed:\n%s", r.Markdown())
+	}
+}
+
 func TestBuysBeforeTheSellsFilledOrOnAnotherSessionFailTheSequence(t *testing.T) {
 	ms, orders := iraRun()
 	orders[0].LastFillTime = "2020-04-02T14:00:00Z"
@@ -261,7 +272,8 @@ func TestAnIRAPayloadDecodesExactly(t *testing.T) {
 		`"prices":{"AAA":50.0,"CCC":20.0},"working":{"CCC":0},"unpriced":["NEW"],"sells":[["CCC",40,19.0]],` +
 		`"buys":[["AAA",50,52.5]],"skipped":[["ZZZ","buy","below-one-share",0.25]],"waited":1,` +
 		`"buy_session":"2020-04-02","delay":1,"band":0.25,"price_band":0.05,"max_fees":2.0,"budget":7500.5,` +
-		`"scale":0.9,"kept":[["AAA",45]],"scaled_skipped":[["BBB",0.5]],"for_sells":2,"for_price":3,"unplaced":["Q"]}`
+		`"scale":0.9,"kept":[["AAA",45]],"scaled_skipped":[["BBB",0.5]],"for_sells":2,"for_price":3,"unplaced":["Q"],` +
+		`"placed":[["CCC","sell",7],["AAA","buy",9]]}`
 	m, err := parity.DecodeIRA([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +285,7 @@ func TestAnIRAPayloadDecodesExactly(t *testing.T) {
 		m.Waited != 1 || m.Delay != 1 || m.Band != 0.25 || m.PriceBand != 0.05 || m.MaxFees != 2 ||
 		m.Budget != 7500.5 || m.Scale != 0.9 || m.Kept[0] != (parity.IRAKept{Ticker: "AAA", Shares: 45}) ||
 		m.ScaledSkipped[0] != (parity.IRAScaledSkip{Ticker: "BBB", Shares: 0.5}) || m.ForSells != 2 || m.ForPrice != 3 ||
-		m.Unplaced[0] != "Q" {
+		m.Unplaced[0] != "Q" || m.Placed[7] != "CCC" || m.Placed[9] != "AAA" || len(m.Placed) != 2 {
 		t.Errorf("decoded %+v", m)
 	}
 }
@@ -282,7 +294,7 @@ func TestAMalformedIRAPayloadIsRefused(t *testing.T) {
 	good := `{"month":"2020-04","decision":"2020-04-01","nlv":1.0,"targets":{"A":0.5},"held":{},"prices":{"A":1.0},` +
 		`"working":{},"unpriced":[],"sells":[],"buys":[["A",1,1.05]],"skipped":[],"waited":0,"buy_session":"2020-04-01",` +
 		`"delay":1,"band":0.25,"price_band":0.05,"max_fees":2.0,"budget":1.0,"scale":1.0,"kept":[["A",1]],"scaled_skipped":[],` +
-		`"for_sells":0,"for_price":0,"unplaced":[]}`
+		`"for_sells":0,"for_price":0,"unplaced":[],"placed":[]}`
 	if _, err := parity.DecodeIRA([]byte(good)); err != nil {
 		t.Fatalf("good payload: %v", err)
 	}
@@ -300,6 +312,9 @@ func TestAMalformedIRAPayloadIsRefused(t *testing.T) {
 		"no month":        strings.Replace(good, `"month":"2020-04",`, ``, 1),
 		"no kept":         strings.Replace(good, `,"kept":[["A",1]]`, ``, 1),
 		"no unplaced":     strings.Replace(good, `,"unplaced":[]`, ``, 1),
+		"no placed":       strings.Replace(good, `,"placed":[]`, ``, 1),
+		"short placed":    strings.Replace(good, `"placed":[]`, `"placed":[["A","buy"]]`, 1),
+		"placed twice":    strings.Replace(good, `"placed":[]`, `"placed":[["A","buy",1],["B","buy",1]]`, 1),
 		"no wait reasons": strings.Replace(good, `"for_sells":0,`, ``, 1),
 		"bad skip shares": strings.Replace(good, `"skipped":[]`, `"skipped":[["A","buy","x","y"]]`, 1),
 		"empty ticker":    strings.Replace(good, `["A",1,1.05]`, `["",1,1.05]`, 1),

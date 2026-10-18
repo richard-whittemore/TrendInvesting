@@ -18,7 +18,7 @@ func glideShare(age float64) float64 {
 	case age <= 53:
 		return 0.308 * (age - 38) / 15
 	case age <= 65:
-		return 0.308 + 0.016*(age-53)
+		return 0.308 + float64(0.016*(age-53))
 	case age <= 72:
 		return 0.50 + 0.20*(age-65)/7
 	}

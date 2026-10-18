@@ -339,18 +339,28 @@ def ira_rebalance(algo, targets, closes):
         if s not in targets:
             algo.Liquidate(s)
     sym_of = {name(s): s for s in syms}
+    placed = []
     for inst, q, _ in sells:
-        algo.MarketOrder(sym_of[inst], -q, tag=IRA_ORDER_PREFIX + month + " sell")
+        _place(placed, algo.MarketOrder(sym_of[inst], -q, tag=IRA_ORDER_PREFIX + month + " sell"), inst, "sell")
     algo.ira = {"month": month, "day": algo.Time.date(), "decision": algo.Time.strftime("%Y-%m-%d"), "nlv": nlv,
                 "targets": plan_targets, "held": plan_held, "prices": plan_prices, "working": working,
                 "unpriced": [name(s) for s in unpriced], "sells": sells, "buys": buys, "skipped": skipped,
                 "sym_of": sym_of, "wait": algo.EXEC_DELAY if sells else 0, "waited": 0, "for_sells": 0,
-                "for_price": 0, "done": False}
+                "for_price": 0, "placed": placed, "done": False}
     if not sells:
         if all(_priced(algo, sym_of[b[0]]) for b in buys):
             _ira_buys(algo)
         else:
             algo.ira["for_price"] = 1             # the next session's buy phase sends them
+
+
+def _place(placed, ticket, inst, phase):
+    """Record an order's ID by the name the export uses: the orders listing
+    names a stock by its latest ticker, which a renamed stock no longer
+    shares with the backtest's."""
+    order_id = getattr(ticket, "OrderId", None)
+    if order_id is not None:
+        placed.append([inst, phase, int(order_id)])
 
 
 def ira_buy_phase(algo):
@@ -382,11 +392,12 @@ def _ira_buys(algo):
     unplaced = []
     for inst, n, _ in kept:
         if _priced(algo, q["sym_of"][inst]):
-            algo.MarketOrder(q["sym_of"][inst], n, tag=IRA_ORDER_PREFIX + q["month"] + " buy")
+            _place(q["placed"], algo.MarketOrder(q["sym_of"][inst], n, tag=IRA_ORDER_PREFIX + q["month"] + " buy"),
+                   inst, "buy")
         else:
             unplaced.append(inst)
     record = {k: q[k] for k in ("month", "decision", "nlv", "targets", "held", "prices", "working", "unpriced",
-                                "sells", "buys", "skipped", "waited", "for_sells", "for_price")}
+                                "sells", "buys", "skipped", "waited", "for_sells", "for_price", "placed")}
     record.update({"buy_session": algo.Time.strftime("%Y-%m-%d"), "delay": algo.EXEC_DELAY,
                    "band": algo.REBALANCE_BAND, "price_band": algo.PRICE_BAND, "max_fees": algo.MAX_FEES,
                    "budget": budget, "scale": scale, "kept": [[i, n] for i, n, _ in kept],

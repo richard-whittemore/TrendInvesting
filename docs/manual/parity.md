@@ -107,6 +107,63 @@ backtest's for it, and a live result that left one out would be listed as
 
 A check that had nothing to compare fails too: it proves nothing.
 
+## The glide path, the minimum lot and the IRA orders
+
+The first comparisons covered the momentum book and Boost. Three more
+parts of the IRAs' rules are compared the same way
+(`docs/research/parity-2026-10.md`, "Remaining scope, plan, 2026-10-19"):
+
+- **the glide path** (`-glide`): each month, does Go work out the owner's
+  age, the bond share it gives (0% at 38 rising to 70% at 72), and the
+  combined targets, the momentum stocks scaled down and the bond sleeve
+  added, half IEF and half SHY, with IEF held once when both the momentum
+  book and the bond sleeve hold it?
+- **the minimum lot, D7-L** (`-lot`): given the backtest's ranked stocks,
+  their raw prices, the account's value and what it holds, does Go skip
+  the same stocks whose one share costs more than their target, keep the
+  same held ones, pick the same replacements, and give the same weights?
+  A month in which every stock was skipped must be withheld by both.
+- **the IRA orders** (`-ira`): given the backtest's targets, holdings,
+  prices and account value, does Go plan the same sells and buys (shares
+  and limit prices) and skip the same trades; scale the buys to the cash on
+  hand the same way; did the backtest place exactly those orders; and were
+  the buys placed only after every sell had filled?
+
+The minimum lot and the IRA planner were not in the original backtests,
+which sized every order with QuantConnect's `SetHoldings`, and the glide
+path had no export. Each has a backtest template that adds
+the Go rule, ported line for line (`momentum/glide_parity_log.py`,
+`momentum/minimum_lot_parity_log.py`, `momentum/ira_parity_log.py`, with
+the shared code in `momentum/parity_export.py`). So for the minimum lot and
+the IRA orders, parity shows that the backtest that measured the rule
+decided what the Go code decides, given the backtest's own data; it is not
+a check against an older backtest.
+
+The thresholds:
+
+| Check | Must hold |
+| --- | --- |
+| `glide-age`, `glide-share` | within 1e-12 |
+| `glide-weights`, `glide-sleeves`, `d7l-weights` | the same stocks; each weight within 1e-12 |
+| `d7l-picks`, `d7l-skipped`, `d7l-kept` | exactly the same, a withheld month included |
+| `ira-plan`, `ira-orders` | exactly the same shares, limit prices and skip reasons |
+| `ira-scale` | the same shares; the scale within 1e-12 |
+| `ira-sequence` | every sell filled before the first buy; the buys a set number of sessions after the rebalance (one), or at once when there is no sell, plus each session the backtest recorded waiting for a sell still working or for a stock's first price |
+
+The `glide-age`, `glide-share` and IRA thresholds are not in the parity
+specification (#324); they were proposed in the plan, before any run, for
+the owner to confirm.
+
+**Fractional shares (D7-F) are not compared**: they are not built. The
+owner chose whole shares for the IRAs on 2026-10-16.
+
+In the IRA backtest a stock that joins the universe at the rebalance has
+no price until its first trading day, so the backtest cannot order it at
+once. The buys then wait a session (at most five) and the wait is
+recorded; a buy still without a price is recorded as unplaced, which
+fails `ira-orders`. Live trading has the previous close, so it does not
+wait.
+
 ## Where the inputs come from
 
 QuantConnect's free plan keeps only 10 KB of log per backtest and does not
@@ -144,6 +201,20 @@ go run ./cmd/parity \
   -sessions BX_PARITY=research/edge-search/boost/parity_plan.json
 ```
 
+and, for the remaining checks,
+
+```sh
+go run ./cmd/parity \
+  -glide G_IS_P38_PARITY=$D/G_IS_P38_PARITY_orders.json -glide-months G_IS_P38_PARITY=2002-08..2015-12 \
+  -lot D7L_PARITY=$D/D7L_PARITY_orders.json -lot-months D7L_PARITY=1999-03,1999-11,... \
+  -ira IRA_PARITY=$D/IRA_PARITY_orders.json -ira-months IRA_PARITY=1999-03,1999-11,...
+```
+
+A months list can give a range, `2002-08..2015-12`, every month from the
+first to the last. A glide, lot or IRA run may export more months than were
+planned (every month, or every month the rule acted); those are compared
+too, and the input line says how many were planned.
+
 Each `-momentum` run needs its `-months` list: the months chosen in advance.
 Each `-boost` run needs its `-sessions` plan file, a JSON file of the first
 session, last session and session count, committed before the run (the
@@ -172,6 +243,9 @@ valid, a run with no planned months).
 
 ## When something goes wrong
 
+- **`ira-orders` fails on a buy the backtest never placed**: look at the
+  export's `unplaced` list (a stock that had no price for five sessions)
+  before suspecting the planner.
 - **A planned month is missing** (`months` fails): the backtest did not
   rebalance that month, or the tag was lost. Check the run's `Parity`
   statistic, which counts the months it exported.

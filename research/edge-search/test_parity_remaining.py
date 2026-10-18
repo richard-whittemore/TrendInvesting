@@ -243,7 +243,10 @@ class IRATemplateTest(unittest.TestCase):
         algo.Transactions = _Transactions(list(open_tickets))
         algo.pending, algo.pending_tickets = {}, {}
         algo.market = []
-        algo.MarketOrder = lambda sym, qty, tag="": algo.market.append((sym, qty, tag))
+        def market(sym, qty, tag=""):
+            algo.market.append((sym, qty, tag))
+            return types.SimpleNamespace(OrderId=100 + len(algo.market))
+        algo.MarketOrder = market
         algo.Liquidate = lambda sym: algo.market.append((sym, "liquidate", ""))
         _limit_orders(algo)
         algo.Time = _dt.datetime(2020, 4, 1, 8)
@@ -282,6 +285,10 @@ class IRATemplateTest(unittest.TestCase):
         self.assertEqual((rec["scale"], rec["kept"]), (scale, [[b[0], b[1]] for b in algo.market[1:]]))
         self.assertEqual((rec["skipped"], rec["scaled_skipped"], rec["unpriced"], rec["working"]), ([], [], [], {}))
         self.assertEqual((rec["for_sells"], rec["for_price"], rec["unplaced"]), (0, 0, []))
+        # The orders by ID, since the orders listing names a stock by its
+        # latest ticker, which a renamed stock no longer shares.
+        self.assertEqual(rec["placed"], [["CCC", "sell", 101], ["AAA", "buy", 102], ["BBB", "buy", 103],
+                                         ["IEF", "buy", 104]])
         algo.Time = _dt.datetime(2020, 4, 3, 8)
         self.module.ira_buy_phase(algo)                                   # done: nothing more
         self.assertEqual((len(algo.market), len(algo.limits)), (4, 1))
@@ -395,6 +402,19 @@ class IRATemplateTest(unittest.TestCase):
             self.assertEqual((c.pop("IRA_EXEC"), c.pop("EXEC_DELAY"), c.pop("PRICE_BAND"), c.pop("MAX_FEES")),
                              (True, 1, 0.05, 2.0), name)
             self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
+
+
+class RenderedRunsTest(unittest.TestCase):
+    def test_every_remaining_parity_run_renders_within_the_free_plans_file_limit(self):
+        names = [n for n in build_variants.VARIANTS if n.endswith("_PARITY") and
+                 build_variants.VARIANTS[n][0] in ("momentum/glide_parity_log.py",
+                                                   "momentum/minimum_lot_parity_log.py",
+                                                   "momentum/ira_parity_log.py")]
+        self.assertEqual(len(names), 10)
+        for name in names:
+            template, params = build_variants.VARIANTS[name]
+            with open(os.path.join(HERE, template)) as f:
+                self.assertLess(len(build_variants.render(f.read(), params, {})), 32_000, name)
 
 
 class LotTemplateTest(unittest.TestCase):

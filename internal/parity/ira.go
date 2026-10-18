@@ -80,6 +80,10 @@ type IRAMonth struct {
 	Skipped                                      []IRASkip
 	Kept                                         []IRAKept
 	ScaledSkipped                                []IRAScaledSkip
+	// Placed names each order the run placed, by order ID: the orders
+	// listing names a stock by its latest ticker, which a renamed stock
+	// no longer shares with the backtest.
+	Placed map[int]string
 }
 
 // Order is one QuantConnect order of a run, as its orders listing gives it.
@@ -230,8 +234,8 @@ func (r *iraRun) month(m *IRAMonth) {
 		goSells[o.InstrumentID] = -o.Quantity
 	}
 	o := r.checks[CheckIRAOrders]
-	compareShares(o, m.Month+" sell orders", goSells, orderShares(placed["sell"], names))
-	compareShares(o, m.Month+" buy orders", goKept, orderShares(placed["buy"], names))
+	compareShares(o, m.Month+" sell orders", goSells, orderShares(placed["sell"], names, m.Placed))
+	compareShares(o, m.Month+" buy orders", goKept, orderShares(placed["buy"], names, m.Placed))
 	r.sequence(m, len(plan.Sells) > 0, placed)
 }
 
@@ -309,14 +313,19 @@ func compareShares(c *Check, where string, goShares, qcShares map[string]int64) 
 }
 
 // orderShares sums the placed orders' shares by the name the export uses:
-// the security ID when the export names one, else the ticker. An order of
-// a fraction of a share is reported as a shares count no plan can match.
-func orderShares(orders []Order, names map[string]bool) map[string]int64 {
+// the one it records for the order's ID, else the security ID when the
+// export names one, else the ticker. An order of a fraction of a share is
+// reported as a shares count no plan can match.
+func orderShares(orders []Order, names map[string]bool, byID map[int]string) map[string]int64 {
 	out := map[string]int64{}
 	for _, o := range orders {
-		name := o.Ticker
-		if names[o.SecurityID] {
+		name, ok := byID[o.ID]
+		switch {
+		case ok:
+		case names[o.SecurityID]:
 			name = o.SecurityID
+		default:
+			name = o.Ticker
 		}
 		q := int64(o.Quantity)
 		if float64(q) != o.Quantity {
@@ -413,6 +422,7 @@ type iraPayload struct {
 	ForSells      *int                `json:"for_sells"`
 	ForPrice      *int                `json:"for_price"`
 	Unplaced      []string            `json:"unplaced"`
+	Placed        [][]json.RawMessage `json:"placed"`
 }
 
 // DecodeIRA decodes one IRAPARITY1 payload, refusing an unknown field, a
@@ -437,6 +447,7 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 		{"price_band", p.PriceBand != nil}, {"max_fees", p.MaxFees != nil}, {"budget", p.Budget != nil},
 		{"scale", p.Scale != nil}, {"kept", p.Kept != nil}, {"scaled_skipped", p.ScaledSkipped != nil},
 		{"for_sells", p.ForSells != nil}, {"for_price", p.ForPrice != nil}, {"unplaced", p.Unplaced != nil},
+		{"placed", p.Placed != nil},
 	} {
 		if !f.present {
 			return IRAMonth{}, fmt.Errorf("parity: %s: %s missing or null", *p.Month, f.name)
@@ -444,7 +455,8 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 	}
 	m := IRAMonth{Month: *p.Month, Decision: *p.Decision, BuySession: *p.BuySession, Delay: *p.Delay, Waited: *p.Waited,
 		NLV: *p.NLV, Band: *p.Band, PriceBand: *p.PriceBand, MaxFees: *p.MaxFees, Budget: *p.Budget, Scale: *p.Scale,
-		Unpriced: p.Unpriced, ForSells: *p.ForSells, ForPrice: *p.ForPrice, Unplaced: p.Unplaced}
+		Unpriced: p.Unpriced, ForSells: *p.ForSells, ForPrice: *p.ForPrice, Unplaced: p.Unplaced,
+		Placed: map[int]string{}}
 	var err error
 	if m.Targets, err = required(m.Month, "targets", p.Targets); err != nil {
 		return IRAMonth{}, err
@@ -479,6 +491,18 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 				return err
 			}
 			m.Kept = append(m.Kept, k)
+			return nil
+		}},
+		{"placed", p.Placed, func(r []json.RawMessage) error {
+			var name, phase string
+			var id int
+			if err := fields(r, &name, &phase, &id); err != nil {
+				return err
+			}
+			if _, dup := m.Placed[id]; dup {
+				return fmt.Errorf("order %d placed twice", id)
+			}
+			m.Placed[id] = name
 			return nil
 		}},
 		{"scaled_skipped", p.ScaledSkipped, func(r []json.RawMessage) error {

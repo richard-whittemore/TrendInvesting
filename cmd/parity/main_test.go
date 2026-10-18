@@ -274,7 +274,7 @@ const lotTag = lotPrefix + `{"month":"2002-08","mode":"held","nlv":1000.0,"risk_
 const iraTag = iraPrefix + `{"month":"2002-08","decision":"2002-08-01","nlv":1000.0,"targets":{"AAA":0.98},` +
 	`"held":{},"prices":{"AAA":10.0},"working":{},"unpriced":[],"sells":[],"buys":[["AAA",98,10.5]],"skipped":[],` +
 	`"waited":0,"buy_session":"2002-08-01","delay":1,"band":0.25,"price_band":0.05,"max_fees":2.0,"budget":1100.0,` +
-	`"scale":1.0,"kept":[["AAA",98]],"scaled_skipped":[],"for_sells":0,"for_price":0,"unplaced":[]}`
+	`"scale":1.0,"kept":[["AAA",98]],"scaled_skipped":[],"for_sells":0,"for_price":0,"unplaced":[],"placed":[["AAA","buy",1]]}`
 
 func TestGlideLotAndIRAExportsAreComparedAgainstTheirPlannedMonths(t *testing.T) {
 	fill := "2002-08-01T20:00:00Z"
