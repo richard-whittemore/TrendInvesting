@@ -241,8 +241,9 @@ What follows from the rule:
   listing that shows more remaining than the one before, and if fills
   between two listings outweigh the raise, so IBKR never lists more
   remaining than before, they are never counted. Do not sell by hand, or change a hand sale, while a sale
-  of the program's is working; if you must, engage the kill switch
-  first, which stops every new order but the sale back to 98%.
+  of the program's is working; if you must, first stop new orders as the
+  failed-sale bullet below says (the kill switch where it exists, otherwise
+  the engine), and cancel the working sale in IBKR's app.
 
 The exit and the broker-holding check use this same rule, so a sell still
 working is never sold again, and a sell that was cancelled stops holding the
@@ -397,10 +398,16 @@ the dashboard read every version. See [journal-query](journal-query.md).
 - **The sale fills only partly, or IBKR rejects it.** It is not retried. The
   account stays in its state until you recover. The reporter sends an urgent
   "sale back to 98% failed" alert saying how many shares filled. Check the
-  account at IBKR; if it is still above 98%, engage the kill switch (it does not cancel orders
-  already at IBKR), cancel any remaining sale in IBKR, and confirm that no
-  `working`, `pending` or `cancel-pending` sell remains before selling the rest
-  by hand (`docs/runbooks/margin-warning.md`).
+  account at IBKR; if it is still above 98%, stop the program from sending
+  anything new. Where the operator tool and its inbox exist and the engine was
+  started with `-operator`, engage the kill switch (`operator kill-switch
+  -state engaged`, [operator](operator.md)). Until then there is no recorded
+  kill switch on the server, so stop the engine instead:
+  `sudo systemctl stop ti-engine@<account>` ([server](server.md), "Reading the
+  logs and the kill switch on the server"). Neither stops orders already at
+  IBKR. Then cancel any remaining sale in IBKR's app, confirm that no
+  `working`, `pending` or `cancel-pending` sell remains, and only then sell
+  the rest by hand (`docs/runbooks/margin-warning.md`).
 - **The kill switch is on and the margin alarm turns urgent.** The sale still
   goes. That is intended: the switch never keeps you borrowed.
 - **You release the kill switch after it refused a Boost order.** Nothing
