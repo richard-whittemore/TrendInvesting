@@ -90,6 +90,7 @@ func TestAnUnreadableOperatorInputIsRefusedByEveryReport(t *testing.T) {
 		{journal.KindInput, event.KillSwitchEventType, event.KillSwitchSchemaVersion, d, map[string]any{"account_id": "A"}},
 		{journal.KindInput, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, d, "x"},
 		{journal.KindInput, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, d, map[string]any{}},
+		{journal.KindInput, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion + 1, d, map[string]any{}},
 		{journal.KindInput, event.KillSwitchEventType, 9, d, map[string]any{}},
 	} {
 		js := []journalquery.Journal{load(t, "j", build(t, r))}

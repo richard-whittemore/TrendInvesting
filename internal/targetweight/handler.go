@@ -45,8 +45,8 @@ import (
 //     (configuration schema version 6) and refuses version 5, and withholds
 //     a decision session whose ranked members sent neither their bars nor
 //     their histories, so a journal written under 1.5.0 does not replay.
-//   - 1.7.0 is reserved by a rules change landing in parallel, so it is not
-//     defined here.
+//   - 1.7.0 was reserved for a rules change landing in parallel and never
+//     released; no journal carries it.
 //   - 1.8.0 has the gate read a venue's lifecycle report on a released order
 //     whose limit is within half a cent of the order's (event.SameLimitPrice,
 //     the cent a limit is rounded to) where 1.6.0 refused any limit not
@@ -60,7 +60,7 @@ import (
 //     version 1, so a journal written under 1.8.0, or holding a version 1
 //     approval, does not replay.
 //   - 1.10.0 was reserved for the operator inputs below, but they were
-//     released as 1.12.0 after 1.11.0 landed first; 1.7.0 was never released.
+//     released as 1.12.0 after 1.11.0 landed first.
 //   - 1.11.0 records, in a dry-run momentum run only, a synthetic terminal
 //     report (execution.order.lifecycle version 3) for each order it
 //     releases and plans the buy phase at the same close (ADR 0026, point 3,
