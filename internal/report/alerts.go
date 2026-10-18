@@ -218,13 +218,16 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			}
 			out = append(out, marginAlarmAlert(account, e, p))
 		case event.OrderPlannedEventType:
-			// A plan that does not read refuses the daily summary, which
-			// reports it; here it only names no sale, so it never holds back
-			// the refusals and states that are what must reach a person.
+			// A plan is a decision, and the one that names a sale back to
+			// 98%: one that does not read would silence that sale's sent,
+			// filled and failed alerts, so it is an error, never skipped,
+			// and the reporter pages that it cannot read the journal (ADR
+			// 0019, "Alerting").
 			var p event.OrderPlannedPayload
-			if read(e, plannedVersions, &p) == nil {
-				pending.plan(p)
+			if err := read(e, plannedVersions, &p); err != nil {
+				return nil, err
 			}
+			pending.plan(p)
 		case event.OrderReleasedEventType:
 			var p event.OrderReleasedPayload
 			if err := read(e, releasedVersions, &p); err != nil {

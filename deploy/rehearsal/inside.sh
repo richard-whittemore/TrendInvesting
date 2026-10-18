@@ -141,18 +141,23 @@ for b in operator journal-query; do
   out=$(sudo -u ti-trader "$b" 2>&1 || true)
   case $out in "usage: $b"*) ;; *) fail "sudo -u ti-trader $b does not run the installed tool: $out" ;; esac
 done
-test ! -e /etc/systemd/system/ti-reporter.timer || fail "the old single reporter timer is still installed"
+for u in ti-reporter.timer ti-reporter.service timers.target.wants/ti-reporter.timer; do
+  test ! -e "/etc/systemd/system/$u" || fail "the old single reporter's $u is still installed"
+done
 pass "reporter, dashboard, operator and journal-query installed; the tools run under sudo -u ti-trader"
 
 # The reporter, run with its unit's own command line (systemd is not running
 # here, so the line is expanded as systemd would: %i, %d, and the unit's and
 # run.env's variables), against the engine's durable log and a stand-in for
 # both channels on loopback. Its secrets come only from the credential file.
-# It must deliver, write its state file, and send nothing new the second
-# time.
+# It runs as the unit's user, ti-trader, on files owned as on the server, so
+# the check fails if that user cannot read the log or write its state. It
+# must deliver, write its state file, and send nothing new the second time.
 rep=$(mktemp -d)
 mkdir -p "$rep/engines/boost" "$rep/reports" "$rep/creds"
 cp /root/dist/boost-fixture.log "$rep/engines/boost/run-rehearsal.log"
+chown -R ti-trader:ti-trader "$rep"
+chmod 0750 "$rep/engines" "$rep/engines/boost" "$rep/reports"
 python3 - "$rep/posts" <<'PY' &
 import http.server
 import sys
@@ -182,6 +187,8 @@ for _ in $(seq 50); do
   sleep 0.1
 done
 printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\n' >"$rep/creds/secrets"
+chown ti-trader:ti-trader "$rep/creds/secrets"
+chmod 0400 "$rep/creds/secrets"
 line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
 line=${line//%i/boost}
 line=${line//%d/$rep/creds}
@@ -190,16 +197,17 @@ line=${line//'${TI_REPORTS_DIR}'/$rep/reports}
 line=${line//'${TI_RUN}'/run-rehearsal}
 case $line in *'$'* | *%*) fail "the reporter's ExecStart has a variable the rehearsal does not expand: $line" ;; esac
 # shellcheck disable=SC2086
-env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter, run as its unit runs it, failed"
+sudo -u ti-trader env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
 test -s "$rep/reports/boost.reporter.json" || fail "the reporter wrote no state file"
+test "$(stat -c %U "$rep/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state file is not ti-trader's"
 grep -q '^/rehearsal$' "$rep/posts" || fail "the reporter reached no ntfy topic"
 grep -q '^/v2/enqueue$' "$rep/posts" || fail "the reporter reached no PagerDuty endpoint"
 sent=$(wc -l <"$rep/posts")
 # shellcheck disable=SC2086
-env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter's second run failed"
+sudo -u ti-trader env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter's second run failed"
 test "$(wc -l <"$rep/posts")" = "$sent" || fail "the reporter's second run sent its alerts again"
 kill "$fake"
-pass "the reporter runs as its unit runs it, delivers to both channels once, and keeps its state"
+pass "the reporter runs as its unit runs it, as ti-trader, delivers to both channels once, and keeps its state"
 
 # Unit files. The engine's binary is installed by hand on the server; a
 # stand-in lets systemd-analyze check the rest of its unit.

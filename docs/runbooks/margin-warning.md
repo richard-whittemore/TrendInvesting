@@ -10,7 +10,7 @@ point 6). Its thresholds are in the account's hashed configuration
 "margin cushion clear" as routine messages, "margin cushion urgent" as an
 urgent one, each with the reading and the thresholds
 ([alerts-and-dashboard](../manual/alerts-and-dashboard.md); on the server the
-reporter checks every 5 minutes on weekdays, 09:00 to 20:55 New York).
+reporter checks every 5 minutes, around the clock, seven days a week).
 
 | Level | When | What the program does | What you do |
 | --- | --- | --- | --- |

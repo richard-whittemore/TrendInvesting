@@ -157,9 +157,15 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 	}
 
+	// Each delivery is saved as soon as a channel takes it, so a run stopped
+	// before it ends (systemd stops one at its TimeoutStartSec) never makes
+	// the next run send again what this one delivered (ADR 0019, "Alerting":
+	// each incident once). The state is saved once more at the end, so the
+	// file exists after a run that delivered nothing.
 	at := now()
+	record := func() error { return saveState(*statePath, seen, sent, repeats) }
 	for _, a := range report.Fresh(alerts, nil) {
-		if err := deliver(senders, a, seen, sent, repeats, at, *repeat); err != nil {
+		if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
 		}
 	}

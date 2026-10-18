@@ -293,19 +293,22 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 	}
 }
 
-var onCalendar = regexp.MustCompile(`^Mon\.\.Fri (\d\d)\.\.(\d\d):00/(\d+)(?::00)? America/New_York$`)
+// onCalendar is a calendar that fires every N minutes of every hour of
+// every day, New York time.
+var onCalendar = regexp.MustCompile(`^\*:0?0/(\d+) America/New_York$`)
 
 // TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue: a Degraded,
-// Halted or reconciliation alert repeats every -repeat-interval and an order
+// Halted or reconciliation alert repeats every -repeat-interval until it is
+// acknowledged, every transition out of Normal alerts at once, and an order
 // unacknowledged for -ack-within pages the owner (ADR 0019, "Alerting"); the
 // reporter only checks when its timer fires. The timer fires every few
-// minutes through the trading day, from before the open to after the data
-// step's last retry (20:05 New York, deploy/systemd/ti-data.timer), so a
-// repeat is never later than one period after it is due, an unacknowledged
-// order is reported within one period of its bound, and the day's summary
-// goes the evening its session closes. Its period divides the repeat
-// interval, and a run is stopped before the next firing, which systemd would
-// otherwise skip.
+// minutes around the clock, seven days a week, so an alert that arises
+// overnight or at a weekend (a reconciliation at the nightly Gateway
+// restart's reconnect) pages then and repeats as the rule says, a repeat is
+// never later than one period after it is due, an unacknowledged order is
+// reported within one period of its bound, and the day's summary goes the
+// evening its session closes. Its period divides the repeat interval, and a
+// run is stopped before the next firing, which systemd would otherwise skip.
 func TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue(t *testing.T) {
 	var calendars []string
 	unit := ""
@@ -325,12 +328,9 @@ func TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue(t *testing.T) {
 	}
 	m := onCalendar.FindStringSubmatch(calendars[0])
 	if m == nil {
-		t.Fatalf("OnCalendar=%s is not Mon..Fri HH..HH:00/N America/New_York", calendars[0])
+		t.Fatalf("OnCalendar=%s does not run around the clock every day: want *:0/N America/New_York", calendars[0])
 	}
-	first, last, step := atoi(t, m[1]), atoi(t, m[2]), time.Duration(atoi(t, m[3]))*time.Minute
-	if first > 9 || last < 20 {
-		t.Errorf("the timer runs %02d:00 to %02d:59, want from before the 09:30 open to after the data step's 20:05 retry", first, last)
-	}
+	step := time.Duration(atoi(t, m[1])) * time.Minute
 	if step <= 0 || step > defaultAckWithin/2 || defaultRepeatInterval%step != 0 {
 		t.Errorf("the timer's period %s must divide the repeat interval %s and be at most half the acknowledgement bound %s", step, defaultRepeatInterval, defaultAckWithin)
 	}
@@ -373,7 +373,40 @@ func TestTheProvisionerInstallsAndEnablesTheReporter(t *testing.T) {
 			t.Errorf("deploy/provision.sh does not mention %q", want)
 		}
 	}
-	if strings.Contains(text, " ti-reporter.timer") {
+	if strings.Contains(text, "enable ti-reporter.timer") || strings.Contains(text, " ti-reporter.timer ti-dashboard") {
 		t.Error("deploy/provision.sh still enables the old ti-reporter.timer")
+	}
+}
+
+// TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves: `systemctl
+// enable` only creates the links a boot follows, so on a server that is not
+// rebooted the reporter's timer and the dashboard are started too (the
+// reporter is the owner's one eye on the engine, ADR 0019, "Alerting"), and
+// the dashboard is restarted so it runs the build just installed. The old
+// single reporter is stopped and disabled before its files are removed:
+// systemd keeps a running unit loaded after its file is gone.
+func TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves(t *testing.T) {
+	raw, err := os.ReadFile(provisionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	at := func(s string) int {
+		t.Helper()
+		i := strings.Index(text, s)
+		if i < 0 {
+			t.Errorf("deploy/provision.sh does not run %q", s)
+		}
+		return i
+	}
+	at("systemctl enable --now ti-data.timer ti-reporter@boost.timer")
+	enable, restart := at("systemctl enable ti-dashboard.service"), at("systemctl restart ti-dashboard.service")
+	if enable >= 0 && restart >= 0 && restart < enable {
+		t.Error("the dashboard is restarted before it is enabled")
+	}
+	disable, stop := at("systemctl disable --now ti-reporter.timer"), at("systemctl stop ti-reporter.service")
+	remove := at("rm -f /etc/systemd/system/ti-reporter.service")
+	if disable >= 0 && stop >= 0 && remove >= 0 && (remove < disable || remove < stop) {
+		t.Error("the old single reporter's files are removed before it is stopped and disabled")
 	}
 }

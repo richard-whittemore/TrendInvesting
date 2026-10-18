@@ -38,7 +38,7 @@ engine applies. That includes the configuration record that names the
 account.
 
 - A file that does not verify, a configuration that fails, or a record of
-  what the engine decided (targets, orders, refusals, engine state) that
+  what the engine decided (targets, orders planned or released, refusals, engine state) that
   fails is a sign of a damaged or mismatched file. The reporter then sends an
   urgent "the reporter cannot read the journal" alert naming the problem,
   still checks the heartbeat (unless the file is missing altogether or the calendar cannot answer, and then the alert says "The heartbeat is NOT checked" and why), sends nothing else from the file, and exits
@@ -113,7 +113,7 @@ or by `-account`, or by the log file's name.
 
 A Degraded, Halted or reconciliation alert is sent again, on every channel,
 each `-repeat-interval` (default 30 minutes, your setting under ADR 0019),
-for as long as you have not acknowledged it, while the reporter's timer runs
+for as long as you have not acknowledged it, overnight and at weekends too
 (below, "When the reporter runs"). Every other alert is sent once. ADR 0019
 asks for "a fixed interval" and leaves its length to you; 30 minutes is the
 program's default and the server's setting, not a recorded decision of yours.
@@ -156,9 +156,8 @@ unacknowledged alerts repeat once at the next run.
 ## When the reporter runs
 
 The reporter checks the log only when it runs. On the server
-`ti-reporter@boost.timer` runs it **every 5 minutes from 09:00 to 20:55 New
-York time, Monday to Friday**: from before the 09:30 open to after the data
-step's last retry at 20:05. So, within those hours:
+`ti-reporter@boost.timer` runs it **every 5 minutes, around the clock, seven
+days a week** (New York time). So, at any hour:
 
 - an alert is sent at most 5 minutes after the engine writes its record;
 - a repeat comes every 30 minutes (a multiple of 5, so on time);
@@ -167,13 +166,19 @@ step's last retry at 20:05. So, within those hours:
 - the daily summary goes at the first run after the log records that day's
   session closed.
 
-Outside those hours, and at weekends, nothing is sent until 09:00 the next
-weekday. The engine trades only at the session's close and reads IBKR's
-snapshots while the market is open, so its records fall inside them; a
-heartbeat loss or a refused journal noticed overnight waits for 09:00. A run
-that takes more than 4 minutes is stopped, so the next firing is never
-skipped. `cmd/reporter`'s unit test checks that the timer's period divides
-the repeat interval and is at most half the acknowledgement bound.
+An alert that arises overnight or at a weekend (a reconciliation at the
+reconnect after the Gateway's nightly restart, a lost heartbeat, a refused
+journal) pages you then, and **its repeats continue overnight, every 30
+minutes, until you acknowledge it**. To silence one, acknowledge it with
+`operator acknowledge` ([operator](operator.md), "Acknowledging an alert");
+acknowledging changes no state. If you want quiet hours, that is your
+decision to make: narrow the timer's `OnCalendar=` and record the choice
+here. A run that takes more than 4 minutes is stopped, so the next firing is
+never skipped; each delivery is saved as it is made, so a stopped run's
+alerts are not sent again. `cmd/reporter`'s unit test checks that the timer
+runs around the clock, that its period divides the repeat interval and is at
+most half the acknowledgement bound, and that a run is stopped before the
+next firing.
 
 ## Where alerts go
 

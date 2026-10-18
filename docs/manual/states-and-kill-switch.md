@@ -20,9 +20,10 @@ server: `operator kill-switch` ([operator](operator.md)). The reporter alerts
 you when a state changes, and repeats the alert until you acknowledge it. It
 also alerts each change of the margin alarm's level, each step of the sale
 back to 98% (sent, each fill, and IBKR ending it unfilled), and a withheld
-sale you must make by hand. On the server it checks every 5 minutes on
-weekdays from 09:00 to 20:55 New York time, so that is when these reach you
-([alerts-and-dashboard](alerts-and-dashboard.md), "When the reporter runs").
+sale you must make by hand. On the server it checks every 5 minutes, around
+the clock, seven days a week, so these reach you within 5 minutes, overnight
+and at weekends too ([alerts-and-dashboard](alerts-and-dashboard.md), "When
+the reporter runs").
 
 ## The three states
 

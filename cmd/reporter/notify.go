@@ -139,9 +139,10 @@ func channelKey(channel, alertKey string) string { return channel + "|" + alertK
 // while any channel still lacks it and never counts. The daily summary skips
 // a channel on a public relay, and is an error when no other delivery channel
 // was named. Each repeat a channel takes is counted in repeats, so the
-// channel can tell a repeat from the first delivery. The error joins every
-// channel failure.
-func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration) error {
+// channel can tell a repeat from the first delivery. After each success,
+// record saves the state, so a run stopped midway has saved every delivery
+// it made. The error joins every channel failure and every failed save.
+func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration, record func() error) error {
 	var pending []sender
 	private := false
 	for _, s := range senders {
@@ -188,6 +189,9 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 		}
 		if repeat > 0 {
 			repeats[key] = repeat
+		}
+		if err := record(); err != nil {
+			failures = append(failures, err)
 		}
 	}
 	return errors.Join(failures...)

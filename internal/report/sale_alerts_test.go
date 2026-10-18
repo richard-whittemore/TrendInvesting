@@ -284,19 +284,25 @@ func TestSaleAlertsAreStableAcrossReadings(t *testing.T) {
 	}
 }
 
-// TestAPlanThatDoesNotReadNamesNoSaleAndHoldsBackNoAlert: a plan this build
-// cannot read refuses the daily summary, which reports it; for the alerts it
-// only names no sale, so the refusals and states that must reach a person
-// still go.
-func TestAPlanThatDoesNotReadNamesNoSaleAndHoldsBackNoAlert(t *testing.T) {
-	s := newStream(t)
-	s.salePlanned(0, "sale-1")
-	s.out[len(s.out)-1].SchemaVersion = 99
-	s.saleReleased(0, "sale-1", true)
-	s.refused(0, "tw-b", event.RefusedOrderSize)
-	got := alertsOf(t, s)
-	if len(got) != 1 || got[0].Kind != report.KindRefusal {
-		t.Fatalf("alerts = %+v, want the refusal alone", got)
+// TestAnUnreadablePlanRefusesTheAlerts: a plan is a decision, and the one
+// that names a sale back to 98%; one this build cannot read would silence
+// that sale's sent, filled and failed alerts, so the alerts refuse the log
+// over it, naming the record, and the reporter pages that it cannot read the
+// journal (ADR 0019, "Alerting": an alert is a safety requirement).
+func TestAnUnreadablePlanRefusesTheAlerts(t *testing.T) {
+	for name, spoil := range map[string]func(e *event.Envelope){
+		"unknown version": func(e *event.Envelope) { e.SchemaVersion = 99 },
+		"corrupt payload": func(e *event.Envelope) { e.Payload = []byte(`{`) },
+	} {
+		s := newStream(t)
+		s.salePlanned(0, "sale-1")
+		spoil(&s.out[len(s.out)-1])
+		s.saleReleased(0, "sale-1", true)
+		s.refused(0, "tw-b", event.RefusedOrderSize)
+		_, err := report.Alerts(s.out)
+		if err == nil || !strings.Contains(err.Error(), "plan:sale-1") {
+			t.Errorf("%s: Alerts err = %v, want a refusal naming plan:sale-1", name, err)
+		}
 	}
 }
 

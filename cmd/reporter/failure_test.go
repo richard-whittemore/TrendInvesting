@@ -75,6 +75,14 @@ func TestAJournalTheReporterCannotReadStillAlertsAndChecksTheHeartbeat(t *testin
 			},
 			account: "joint", want: "schema version 99",
 		},
+		"an order plan at an unknown schema version": {
+			write: func(t *testing.T, path string) {
+				plan := event.OrderPlannedPayload{AccountID: "joint", ClientOrderID: "sale-1", InstrumentID: "SPY"}
+				entries := append(haltedEntries(t), journal.Entry{Kind: journal.KindDecision, Envelope: envelope(t, 6, event.OrderPlannedEventType, 99, "plan-sale-1", t0, plan)})
+				writeEntries(t, path, entries)
+			},
+			account: "joint", want: `"plan-sale-1" is at schema version 99`,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

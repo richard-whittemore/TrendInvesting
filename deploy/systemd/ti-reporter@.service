@@ -7,7 +7,9 @@ Description=Reporter for account %i: alerts, their repeats and the daily summary
 [Service]
 Type=oneshot
 # Stopped well before the timer's next firing (ti-reporter@.timer, every 5
-# minutes), which systemd would otherwise skip while this run is active.
+# minutes), which systemd would otherwise skip while this run is active. The
+# reporter saves each delivery to its state file as a channel takes it, so a
+# run stopped here never makes the next one send again what it delivered.
 TimeoutStartSec=4min
 User=ti-trader
 Group=ti-trader

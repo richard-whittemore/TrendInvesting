@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
@@ -155,12 +154,11 @@ func TestASummaryWithOnlyThePublicRelayIsRefusedButTheAlertsStillGo(t *testing.T
 
 func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
 	dir := t.TempDir()
-	// A decision at a schema version this build does not read refuses the
-	// summary; the refusal, the halt and the heartbeat loss must still go out.
-	planned := envelope(t, 6, event.OrderPlannedEventType, 99, "plan", t0, map[string]string{"client_order_id": "tw-a"})
+	// A summary date that is not a date refuses the summary; the refusal,
+	// the halt and the heartbeat loss must still go out. (Every record the
+	// summary refuses the alerts refuse too, so a record cannot be the cause.)
 	var buf bytes.Buffer
-	entries := append(haltedEntries(t), journal.Entry{Kind: journal.KindDecision, Envelope: planned})
-	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0), entries); err != nil {
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0), haltedEntries(t)); err != nil {
 		t.Fatal(err)
 	}
 	journalPath := filepath.Join(dir, "joint.journal")
@@ -172,11 +170,11 @@ func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
 	}
 	r := &relay{sent: map[string][]string{}}
 	state := filepath.Join(dir, "s.json")
-	args := []string{"-journal", journalPath, "-state", state, "-channel", "pagerduty", "-summary"}
+	args := []string{"-journal", journalPath, "-state", state, "-channel", "pagerduty", "-summary", "-date", "January 2"}
 	environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
 	// Two sessions (January 3 and 4) have closed since the journal last changed.
 	err := run(args, environment, func() time.Time { return t0.AddDate(0, 0, 2).Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
-	if err == nil || !strings.Contains(err.Error(), "schema version 99") {
+	if err == nil || !strings.Contains(err.Error(), "is not YYYY-MM-DD") {
 		t.Fatalf("the summary's failure must be reported, got %v", err)
 	}
 	sent := strings.Join(r.to("events.pagerduty.test"), "\n")
@@ -188,5 +186,66 @@ func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
 	raw, _ := os.ReadFile(state)
 	if !strings.Contains(string(raw), "pagerduty|") || strings.Contains(string(raw), "summary:") {
 		t.Fatalf("the alerts' deliveries must be saved and the summary's must not: %s", raw)
+	}
+}
+
+// killedAt is a channel that takes every send, and at its second send copies
+// the state file as it stands then: the file a run killed at that moment (by
+// its unit's TimeoutStartSec) leaves behind.
+type killedAt struct {
+	state, left string
+	sends       []string
+}
+
+func (k *killedAt) RoundTrip(req *http.Request) (*http.Response, error) {
+	k.sends = append(k.sends, req.Header.Get("Title"))
+	if len(k.sends) == 2 {
+		raw, err := os.ReadFile(k.state)
+		if err == nil {
+			err = os.WriteFile(k.left, raw, 0o600)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: req}, nil
+}
+
+// TestARunKilledMidwayNeverResendsWhatItDelivered: each delivery is saved
+// as it is made, so a run stopped before it finishes (systemd stops one at
+// TimeoutStartSec) leaves a state file holding every alert it delivered, and
+// the next run sends only the rest (ADR 0019, "Alerting": each incident once).
+func TestARunKilledMidwayNeverResendsWhatItDelivered(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "s.json")
+	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "ntfy"}
+	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.example.test"})
+	now := func() time.Time { return t0.Add(time.Hour) }
+	killed := &killedAt{state: state, left: filepath.Join(dir, "left.json")}
+	if err := run(args, environment, now, &bytes.Buffer{}, &http.Client{Transport: killed}); err != nil {
+		t.Fatal(err)
+	}
+	if len(killed.sends) != 2 {
+		t.Fatalf("sends = %q, want the refusal and the halt", killed.sends)
+	}
+	// The run is killed during its second send: what it left is the state.
+	raw, err := os.ReadFile(killed.left)
+	if err != nil {
+		raw = nil
+	}
+	if err := os.WriteFile(state, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 {
+		if err := os.Remove(state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resumed := &killedAt{state: filepath.Join(dir, "unused.json"), left: filepath.Join(dir, "unused-left.json")}
+	if err := run(args, environment, now, &bytes.Buffer{}, &http.Client{Transport: resumed}); err != nil {
+		t.Fatal(err)
+	}
+	if len(resumed.sends) != 1 || resumed.sends[0] != killed.sends[1] {
+		t.Fatalf("the resumed run sent %q, want only %q, the send the killed run did not finish", resumed.sends, killed.sends[1])
 	}
 }
