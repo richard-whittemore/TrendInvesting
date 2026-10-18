@@ -62,7 +62,7 @@ account.
 | --- | --- | --- |
 | An order was refused | urgent | refused order |
 | The engine went Degraded or Halted | urgent | change of state, reason and scope; the same state coming back after another is a new alert |
-| A decision was withheld for missing data (bars, account snapshot, universe) | urgent | run of the same reason |
+| A decision was withheld for missing data (bars, account snapshot, universe, the close histories of the stocks ranked) | urgent | run of the same reason |
 | A momentum decision was withheld because no stock with a target was affordable (`all-unaffordable`; the net liquidation or prices may be wrong) | urgent | run of the same reason |
 | A decision was withheld for another reason | routine | run of the same reason |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |

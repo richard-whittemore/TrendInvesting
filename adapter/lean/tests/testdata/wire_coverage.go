@@ -139,6 +139,8 @@ var notYetCrossed = map[string]string{
 	"operator.rebalance.cleared": "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
 	"market.universe.snapshot":   "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
 	"market.session.calendar":    "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.close.history":       "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
+	"market.session.retracted":   "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
 	"strategy.order.skipped":     "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 }
 

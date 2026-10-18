@@ -40,9 +40,14 @@ import (
 //     gate reads the kill switch, broker snapshots and the venue's reports on
 //     released orders, and issues ADR 0019's sale back to 98%, so a journal
 //     written under 1.4.0 does not replay.
-//   - 1.6.0 reads the owner's operator.rebalance.cleared in a momentum run,
-//     which ends a rebalance in progress (ADR 0026, point 5).
-const RulesVersion = "1.6.0"
+//   - 1.6.0 reads the universe input shape the configuration declares
+//     (configuration schema version 6) and refuses version 5, and withholds
+//     a decision session whose ranked members sent neither their bars nor
+//     their histories, so a journal written under 1.5.0 does not replay.
+//   - 1.9.0 reads the owner's operator.rebalance.cleared in a momentum run,
+//     which ends a rebalance in progress (ADR 0026, point 5), so a journal
+//     written under an earlier version does not replay.
+const RulesVersion = "1.9.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

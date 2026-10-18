@@ -1,0 +1,74 @@
+{
+  "strategy_id": "momentum",
+  "account_id": "ira",
+  "mode": "dry-run",
+  "adapter": "ibkr",
+  "momentum": {
+    "rule": "mom_trend",
+    "listing_type": "CS",
+    "universe_size": 2,
+    "min_price": 5,
+    "score_lookback": 3,
+    "score_skip": 1,
+    "volatility_returns": 2,
+    "top_n": 1,
+    "sector_cap": 1,
+    "inverse_volatility": true,
+    "invested": 0.98,
+    "trend_instrument": "SPY",
+    "trend_closes": 3,
+    "risk_off_instrument": "IEF",
+    "risk_off_fraction": 0.5,
+    "rebalance_band": 0.25,
+    "universe_source": "massive",
+    "sector_sources": [
+      "ishares-iwv-gics",
+      "nasdaq-screener"
+    ],
+    "universe_input": "bars"
+  },
+  "glide": {
+    "anchors": [
+      {
+        "age_years": 38,
+        "share": 0
+      },
+      {
+        "age_years": 53,
+        "share": 0.308
+      },
+      {
+        "age_years": 65,
+        "share": 0.5
+      },
+      {
+        "age_years": 72,
+        "share": 0.7
+      }
+    ],
+    "retirement_age_years": 65,
+    "bond_funds": [
+      {
+        "instrument_id": "IEF",
+        "fraction": 0.5
+      },
+      {
+        "instrument_id": "SHY",
+        "fraction": 0.5
+      }
+    ],
+    "birth": "1995-06"
+  },
+  "execution": {
+    "cash_rule": "settled-cash",
+    "share_quantity": "minimum-lot",
+    "max_fees_per_order": 1,
+    "max_snapshot_age_minutes": 30
+  },
+  "limits": {
+    "max_exposure": 1,
+    "max_orders_per_decision": 10,
+    "max_order_fraction": 0.9,
+    "price_band": 0.05
+  }
+}

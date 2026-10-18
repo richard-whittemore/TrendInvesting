@@ -197,9 +197,14 @@ class UniverseTest(unittest.TestCase):
             {"instrument_id": "DDD", "type": "CS", "close": 7.5, "volume": 1000.0, "sector": "", "sector_source": ""},
         ])
 
-    def test_universe_members_adds_every_common_stock_with_a_bar_to_the_bars_written(self):
+    def test_universe_members_adds_every_listed_stock_with_a_bar_to_the_bars_written(self):
         with tempfile.TemporaryDirectory() as d:
             build(d)
+            path = os.path.join(d, "universe_2026-11-30.json")
+            rec = record.read(path)
+            os.remove(path)
+            next(t for t in rec["tickers"] if t["ticker"] == "CCC")["type"] = "ETF"   # members are of any type
+            record.write(d, rec)
             stream = run(d, optional=[], universe_members=True)
         ids = of(stream, "market.session.closed", "2026-11-30")[0]["payload"]["instrument_ids"]
         self.assertEqual(ids, ["AAA", "BBB", "CCC", "DDD", "IEF", "SPY"])
@@ -311,12 +316,21 @@ class UniverseMemberExclusionTest(unittest.TestCase):
         self.assertEqual([r["instrument_id"] for r in rows], ["BBB", "CCC", "DDD"])
         self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(LAST, LAST)])
 
-    def test_the_universe_snapshot_still_lists_an_excluded_member_whose_row_is_good(self):
-        stream, excluded = self.encoded(lambda d: rewrite(d, "universe", LAST.isoformat(), "AAA", h=1.0))
-        self.assertLeftOutOf(stream, "AAA", "2026-11-30")   # a high below the close: no bar, but the row stays
-        self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(LAST, LAST)])
-        rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
-        self.assertIn("AAA", [r["instrument_id"] for r in rows])
+    def test_a_member_left_out_of_a_session_is_left_out_of_its_snapshot_whatever_bars_are_written(self):
+        """A good row of a member left out of the session for bad data (here a
+        high below the close) is left out of that session's snapshot too, in
+        a stream with or without the members' bars: the snapshot records that
+        the member was left out, so a momentum run configured for bars can
+        require a bar for every member it ranks (ADR 0026 point 5)."""
+        for universe_members in (True, False):
+            with self.subTest(universe_members=universe_members):
+                stream, excluded = self.encoded(lambda d: rewrite(d, "universe", LAST.isoformat(), "AAA", h=1.0),
+                                                universe_members=universe_members)
+                if universe_members:
+                    self.assertLeftOutOf(stream, "AAA", "2026-11-30")
+                self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(LAST, LAST)])
+                rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
+                self.assertEqual([r["instrument_id"] for r in rows], ["BBB", "CCC", "DDD"])
 
     def test_a_required_or_named_optional_instrument_is_still_refused(self):
         with tempfile.TemporaryDirectory() as d:

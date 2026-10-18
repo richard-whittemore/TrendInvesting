@@ -3,6 +3,7 @@ package targetweight_test
 import (
 	"testing"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
@@ -79,12 +80,51 @@ func TestRulesVersionDeclaresTheVersion5ConfigurationBreak(t *testing.T) {
 	}
 }
 
-func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
+// TestRulesVersionDeclaresTheDeclaredUniverseInput pins ADR 0016's
+// same-rules-version replay guarantee for the declared universe input:
+// configuration schema version 6 is required and version 5 refused (ADR
+// 0015), and a decision session whose ranked members sent neither a bar nor
+// a history is withheld where it was decided, so a journal written under
+// rules 1.5.0 cannot replay under this build and the build must not claim
+// 1.5.0 or earlier.
+func TestRulesVersionDeclaresTheDeclaredUniverseInput(t *testing.T) {
 	t.Parallel()
 
 	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"} {
 		if targetweight.RulesVersion == earlier {
-			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.5.0 once a momentum run reads the owner's clearance of a rebalance in progress", targetweight.RulesVersion)
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.5.0 once the configuration declares the universe input", targetweight.RulesVersion)
+		}
+	}
+}
+
+// TestHandlerRefusesAVersion5Configuration: version 5 has no universe input,
+// so a momentum run cannot know which input shape it reads from a version-5
+// configuration; the handler refuses it rather than inferring the shape (ADR
+// 0015).
+func TestHandlerRefusesAVersion5Configuration(t *testing.T) {
+	t.Parallel()
+
+	cfg := momentumConfiguration()
+	h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf("2025-01-02")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &stream{hash: h.ConfigurationHash()}
+	mustRefuse(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, 5, "configuration", closeOf("2025-01-02"), cfg), "schema version 5")
+}
+
+// TestRulesVersionDeclaresTheOwnersClearance pins ADR 0016's
+// same-rules-version replay guarantee for the owner's clearance: a momentum
+// run reads operator.rebalance.cleared and ends a rebalance in progress (ADR
+// 0026, point 5), so the build must not claim a version a journal written
+// without that rule carries. 1.7.0 and 1.8.0 are taken by other rule
+// changes, so this one is 1.9.0.
+func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.8.0 once a momentum run reads the owner's clearance of a rebalance in progress", targetweight.RulesVersion)
 		}
 	}
 }
