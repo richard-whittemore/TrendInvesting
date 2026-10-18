@@ -355,9 +355,8 @@ session it missed in one file. A run that hangs is stopped after an hour
    session close, for each session, to
    `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<YYYY-MM-DD>.jsonl`,
    named by the last session it holds. Each file follows on from the one
-   before it, to be read in date order. **Not built yet:** nothing reads
-   these files and delivers them to the engine; that is the adapter's work
-   ([IBKR adapter](ibkr-adapter.md)).
+   before it, to be read in date order. The adapter delivers each file to
+   the engine ("What happens to the file", below).
 
 **The file format.** One event per line, in the order they are to be
 delivered. The `sequence` on each line is its position in that file (1, 2,
@@ -366,8 +365,9 @@ of a run in one series, whatever it came from (the configuration, the Run
 approval, fills, account snapshots, these files), so only the program that
 delivers the files, which sends one input at a time and reads the engine's
 answer, knows the next number: it is to replace each line's `sequence` with
-it as it sends the line, and send everything else as written. (That program
-is not built yet.) A file therefore
+it, stamp the line's `recorded_at` with the time it sends it, and send
+everything else as written. The adapter
+is that program ("What happens to the file", below). A file therefore
 never claims a number another input could already have taken.
 
 **The one-time warm-up.** The engine's 200-day average and its RSI need
@@ -406,6 +406,118 @@ A new engine run (a fresh `TI_RUN`) starts with no files and needs the
 warm-up again; the recordings are already on disk, so it fetches only the
 days since.
 
+**A crash resume.** After a crash the engine is resumed under a new
+`TI_RUN` ([durable log](../runbooks/durable-log.md), "Resume after a
+crash"): a new log that holds a copy of the crashed run's records. It is the
+same run, not a new one, so it needs **no** warm-up and gets no folder of
+its own. The data job and the adapter both find the run's folder by the
+run's identity, not by the log's name: its Run approval (or, for the
+engine's very first run, its configuration and as-of time), which the
+copied log carries. The folder is the one named after the run that began
+the chain, the `TI_RUN` its warm-up was run for, and stays so through any
+number of resumes:
+
+- the data job writes the next day's file into
+  `/var/lib/trend-investing/data/streams/boost/<first TI_RUN>/`, and every
+  line still carries that first run's name, so the files already written
+  still check byte for byte;
+- the adapter, started on the new log, carries on with the files it had
+  written down before the crash: whatever the crashed run had already
+  recorded (it is in the copied log) is struck off and never sent again,
+  the input it was waiting on is asked for again and answered from the
+  copied log, and the rest of the batch goes to the resumed run, behind the
+  snapshot already taken, once.
+
+Keep the first run's log (`<first TI_RUN>.log`) in the engine's folder
+while its resumes run: the folder is matched to the run through it. If it
+is missing, both stop, and say so from the resumed log itself: a log that
+already holds committed delivered inputs (bars, session closes and the
+data job's other inputs, and the adapter's broker snapshots; an operator input such as a kill switch, the
+approval and the configuration never count) holds copied history, which a
+fresh run's log cannot, so the message says "the log <path> already holds
+N committed delivered inputs beyond its configuration", N counting delivered
+inputs only (market data and the adapter's broker snapshots), that if it is a crash resume
+of an earlier run you restore that run's log beside it and start again, and
+that you do not run a warm-up under this name; if a stream folder with no
+log beside it exists, the message names it as the likely first run's.
+Restore the log from the backup rather than running a warm-up for the new
+name. A fresh run's log holds nothing but its configuration and approval,
+and only that gets the "No warm-up yet" instruction (below). While the
+first log is there, a warm-up run for the resumed `TI_RUN` makes no second
+folder: it writes the next day into the first run's folder like any day. If
+a folder named after the resumed `TI_RUN` exists anyway, once the first log
+is back the data job and the adapter both stop, naming both folders ("more
+than one stream folder"), as they do for any two folders of one run, the
+one named after the running `TI_RUN` included. Move the one you made out of
+`streams/boost/` (keep it, it is evidence) and start them again. A fresh run
+after an earlier one (with your approval) is a new run with its own
+identity: it never takes the earlier run's folder, and needs its own
+warm-up.
+
+Only the logs of folders in `streams/boost/` are read, and each one first
+by its first records alone (its configuration and, for a fresh run, its
+approval: the run's identity). A log whose first records name another run
+is read no further. A log whose first records cannot be read (one an older
+build wrote, or one damaged after its run ended) cannot be matched to any
+run. The data job prints a `ti-data warning:` line (the adapter logs a
+warning) naming its folder, and both stop, naming the skipped folders
+("cannot be matched to any run"), whether or not a folder of the running
+run's own name exists: the skipped log may be this resumed run's own first
+log with a damaged head, and a warm-up for the new name would deliver the
+whole warm-up again to a run whose log already holds it. If this run is a
+crash resume, restore its first run's log from the backup as the engine
+wrote it; if the log is an old run's, once that run has ended move its
+folder out of `streams/boost/` and its log out of the engine's log folder
+(`/var/lib/trend-investing/engines/<account>/`, beside the running log),
+and keep both as evidence in a folder outside both: a durable log is never
+edited or deleted. A log whose first records name this run is read
+whole: if it cannot be read, both stop, naming it ("names this run in its
+first records but cannot be read"); restore it from the backup as the
+engine wrote it.
+
+A run is taken for a resume of the run whose folder it finds only when its
+log begins with that run's records, copied exactly: `-resume` writes the
+crashed run's records into the new log one for one under the same header,
+so each keeps its `record_hash`, and the earlier log's committed records
+are the first records of the new one, hash for hash, in the same order (the
+resumed run's own records follow). The hashes are not taken on trust: each
+one compared is computed again from its record and the one before it, the
+way the engine chains them, in both logs, and a log whose stated hashes are
+not the ones its records give was changed after the engine wrote it. Both
+stop, naming it ("does not follow its record hash chain"); restore it from
+the backup as the engine wrote it, never edit it. That run must also have committed more
+than its configuration: the hash chain cannot tell a resume of a run that
+committed only its configuration from a second start of the same run,
+whose configuration record is the same, byte for byte. Otherwise both stop,
+naming both logs ("nothing shows it is that run's crash resume"), the
+message names the three cases below with the remedy for each, and nothing
+is written or sent:
+
+- **the engine's first run started again without an approval** (same
+  `run.env`, same configuration and as-of time): it has the first run's
+  identity but not its records, and is never handed the first run's
+  folder, record of files sent and stream without its own warm-up. Stop
+  it, and start it as a fresh run, with its approval and its warm-up
+  ([paper trading](paper-trading.md), "Never start the engine's first run
+  again without an approval");
+- **a first run that crashed having committed nothing but its
+  configuration**: nothing in the two logs tells its resume from a second
+  start, so it is not taken for either. Nothing of it needs keeping: start
+  a fresh run with its approval and its own warm-up;
+- **a log that is not a copy of that run's records**: one that repeats the
+  run's input IDs with other content, say, or a copy the engine is still
+  writing (the data job ran while `-resume` was copying). It is not that
+  run's resume: resume the crashed run's own log with `engine -resume`, or,
+  if the engine was still copying, run the job again once it is listening.
+  The check is against the first run of a chain of resumes, the one whose
+  folder it is: a copy still being written is refused until it holds all
+  of that run's records, and taken from then on, even while a later
+  resume's records are still being copied behind them. That does no harm:
+  the data job only learns which folder to write into, and writes market
+  data under the first run's name, whatever the rest of the copy holds; the
+  adapter reads the log only once the engine listens, when the copy is
+  whole.
+
 **What you see.** Each run prints the build it is (`ti-data <commit>`), then
 the path of the file it wrote, or of the file that already held the session;
 `journalctl -u ti-data` shows it. `ti-data --version` prints the build too. A
@@ -427,7 +539,17 @@ carries on from them.
 - **The session has not settled**: only when a session is named with
   `--session` before its close plus an hour.
 - **No warm-up yet** for the engine's run: the message gives the warm-up
-  command's date.
+  command's date. It is given only to a fresh run, whose log holds nothing
+  but its configuration, approval and any operator inputs; a log that
+  already holds committed delivered inputs is a crash resume whose first log is missing, and the
+  message says to restore that log instead (next but one, below).
+- **A log that already holds committed delivered inputs, with no stream folder of its
+  run** (a crash resume whose first run's log is missing from the engine's
+  folder: "A crash resume", above): the data job and the adapter refuse,
+  naming the log and its count of committed delivered inputs, and the stream folder with no
+  log beside it as the likely first run's. Restore the first run's log
+  from the backup, unchanged, and start again; do not run a warm-up under
+  the new name.
 - **The engine has not been started yet** (no `run.env`: the unit fails
   before the job runs, naming the file), or **its durable log cannot be
   read**, or its first input is not a Boost configuration.
@@ -492,6 +614,216 @@ carries on from them.
      Massive publishes, and the paper run waits while you decide.
   5. If the corrected figure falls inside a file already written, the run
      then stops at "A file already written differs" (above): start a new run.
+
+### What happens to the file
+
+The file is the engine's input for those sessions, and the Boost adapter
+(`ti-adapter-boost`) carries it there. Nothing else reads it.
+
+**When.** The adapter looks in the run's folder,
+`/var/lib/trend-investing/data/streams/boost/<TI_RUN>/`, on every turn of
+its loop (about once a second) while its link to IB Gateway is up and
+matched. A new file is picked up within a second or two of the data job
+writing it, which on a normal day is a few minutes after 17:05 New York.
+If the adapter is not running then, it picks the file up when you next
+start it. If several files are waiting (the adapter was stopped for some
+days), it takes them all, oldest first.
+
+**What it sends, in order.**
+
+1. **The broker snapshot.** Just before the file goes, the adapter reads
+   the account at IBKR (positions, cash, net liquidation, Excess Liquidity
+   and every open order) and asks IBKR for SPY's last traded price, which
+   is the "mark" the snapshot gives each holding. It also says whether the
+   market was open at that moment (by the NYSE calendar the data job uses:
+   9:30 to 4 p.m. New York, 1 p.m. on an early close). After 17:05 that is
+   always "closed". A price counts only if IBKR's answer for it finished in
+   time (IBKR finishes it at the end of an 11-second window, so the adapter
+   waits up to `mark_timeout`, which the configuration sets and the
+   example sets to 15 seconds) and every last price in it was a real price above zero; otherwise
+   the holding is listed with no mark ("mark set false"), as it is when IBKR
+   gives no last price at all (the paper login has no market data for SPY,
+   say). The engine then cannot size the joint account's emergency sale
+   back to 98% from that snapshot, holds that sale back and asks you to act
+   by hand. This mark is read only by that sale. A buy is checked against a
+   different mark, one recorded at or after the session's close
+   (`market.mark.recorded`), and is refused without one (`missing-mark`,
+   which leaves the account Degraded). Nothing records that mark today, so
+   every buy is refused that way in paper; where it will come from (IBKR's
+   last price, as here, or the data job) is still your decision
+   ([paper trading](paper-trading.md), "Not built yet").
+
+   The account read and the marks are one reading. The adapter first
+   applies every report IBKR has already sent, so a fill or a cancellation
+   received before the read reaches the engine ahead of the snapshot; it
+   does not read while a fill waits for its commission; and after the marks
+   it reads the account a second time. If a fill or an order report
+   arrives between the start of the first read and the end of the second
+   (an execution of any client's order counts, not only the engine's), if
+   the holdings, open orders or cash differ between the two reads (a trade
+   you placed in IBKR's own app, which IBKR reports to that app only, still
+   shows there), or if any part of the account could not be read (IBKR
+   timed out on the balances, say), it reads the whole account again, up
+   to three times. The snapshot is the second read, with its IBKR time.
+   IBKR's answers for the positions and the open orders carry no request
+   number, so if IBKR does not finish either list in time, or Gateway
+   loses IBKR's servers part-way through (it restores them on the same
+   link), a late end of it
+   could be taken for the end of the next read's list on the same link:
+   the adapter then drops the link instead of reading again on it, and
+   takes the snapshot once the link is back and matched (`ibkr broker
+   snapshot: IBKR had not ended its ...` in its log). The log line `ibkr
+   broker snapshot as_of=... cutoff: ...` names the last report recorded
+   before each snapshot.
+2. **The file, line by line, as written**: each session's SPY bar, then that
+   session's close. The engine therefore records the snapshot before the
+   bars, and each session closes only after its bar, before anything for
+   that day is decided (ADR 0019, ADR 0021). Each line goes with the
+   engine's next input number in place of the file's own (the file format,
+   above), and with the time it is sent as its "recorded" time, as every
+   input the adapter sends, so the snapshot is never recorded later than
+   the close it serves while the server's clock keeps time with IBKR's
+   (ADR 0019 measures the snapshot's age at the close's recorded time, from
+   the snapshot's IBKR time); nothing else in it changes. If the server's
+   clock is behind IBKR's by more than the moment it takes to send the
+   file, the snapshot's IBKR time is later than the close's recorded time:
+   the engine counts that negative age as stale (ADR 0019) and blocks
+   every sell at that close (reason `stale-broker-snapshot`) rather than
+   trust it: the sale back to 98% is withheld (`risk.sale.withheld`), and
+   any other sell, such as an ordinary strategy sale, is refused
+   (`risk.order.refused`). Either at every close is the sign: check the
+   server's clock (`timedatectl`) against IBKR's. A fill or a cancellation IBKR reports
+   while the engine works through the file goes to the engine before the
+   file's next line, so no session is decided on an account behind a
+   report already received. A trade IBKR has reported but whose commission
+   has not come yet holds the file's next line back until the fill is
+   recorded and sent; if the commission never comes, the adapter stops
+   after `commission_wait` seconds, as it always does
+   ([paper trading](paper-trading.md), "What can go wrong").
+
+Several waiting files go behind one snapshot, oldest first. The next day's
+file gets its own snapshot.
+
+**Exactly once.** Before anything is sent, the adapter writes down which
+files it is about to hand over, beside its pending file
+(`/var/lib/trend-investing/adapters/boost/pending.json.delivered`). It then
+puts the snapshot and every line of the files in its outbox in one write,
+and marks the files handed over. From the outbox each input goes once, as
+every other input does ([re-delivery](redelivery.md)). So:
+
+- a file it has handed over is never sent again to its run, after a
+  restart, a reconnect, or a later file;
+- if it stops partway through a file, the next start carries on from the
+  next line; the lines already sent are not sent again;
+- if it stops between writing down the files and the outbox write, the next
+  start finds nothing of them in the outbox or in the engine's log, takes a
+  fresh snapshot and hands them over then; if it stops just after the
+  outbox write, the next start finds the snapshot there and does not hand
+  them over a second time;
+- if the engine stopped after recording an input but before answering, the
+  adapter asks for that input's answer again under the same name, and the
+  engine answers from its log without applying it twice.
+
+**What you see.** In the adapter's log (`journalctl -u ti-adapter-boost`):
+`ibkr stream queued run=<TI_RUN> files=boost-<date>.jsonl inputs=<n>` when a
+file is handed over, then one `ibkr input=... answered with ...` line per
+input as the engine answers. In the engine's journal (`journal-query`), the
+broker snapshot, the bar and the session close, and whatever the engine
+decided at that close. Never edit the `.delivered` file; the adapter reads
+it strictly and stops on anything it did not write.
+
+**What can go wrong, and what the adapter does.** In every case below it
+sends nothing from the file (or from any file after it), and stops for you
+with a message naming the file. To settle a refused file: with the adapter
+stopped, move the file out of the run's folder (keep it, it is evidence;
+never edit it), run the data job again (`sudo systemctl start ti-data`),
+which writes the sessions again from its recordings, and start the adapter
+(`sudo systemctl start ti-adapter-boost`).
+
+- **The file is not as the data job writes it**: a line that is not JSON or
+  not complete, a field missing or extra, a kind of input, version or source
+  the data job does not write, a line whose contents do not match its own
+  checksum (`payload_hash`), one input named twice, line numbers that are
+  not 1, 2, 3, ... in order, or a last line that is not the close of the
+  session the file's name gives. Something other than the data job wrote or
+  changed it. Every waiting file is checked before anything is written down,
+  so a refused file leaves nothing behind in the outbox.
+- **Two waiting files overlap**: a second file for the same session (a copy
+  under another name, say), a file whose first session is not after the
+  last session of the file before it, or two files naming the same input.
+  One input may repeat: a momentum stream's calendar reaches back to the
+  run's start, so every file writes each recorded session retraction
+  (`market.session.retracted`) again under the same name. A repeat with the
+  same contents is sent once; one whose contents differ is refused.
+  The message names the later file; move it out as below (the earlier one
+  is then delivered).
+- **The file is not this run's** ("it is not this run's"): it carries
+  another run's name, configuration hash or build than the engine now
+  running. A file copied from another run's folder, or a run restarted under
+  another configuration or build without a fresh `TI_RUN`.
+- **A file older than one already delivered** appears: the sessions would go
+  to the engine out of order. A file put back by hand, or a clock problem.
+- **The run's folder does not exist** when the adapter starts: the warm-up
+  has not been written for this `TI_RUN`. The adapter refuses to start and
+  names the warm-up command. Run the warm-up ("The one-time warm-up",
+  above), then start the adapter.
+- **The `.delivered` file cannot be read**: something other than the adapter
+  changed it. The adapter stops before delivering anything. Restore it from
+  the backup as it was ([server](server.md), "Backups"); never edit it.
+- **The link to IB Gateway drops while the snapshot is read**: nothing is
+  written down or sent. Once the link is back and matched, the adapter takes
+  a fresh snapshot and hands the file over then.
+- **IBKR cannot give the whole account three times running** (the message
+  begins "the account could not be read in full for the broker snapshot"
+  and names what could not be read): nothing is written down or sent, and
+  the adapter stops, since a snapshot missing a figure would hold back the
+  sale back to 98% for nothing. Check IB Gateway's link (`journalctl -u
+  ti-gateway`), and that the account holds only whole US-dollar shares and
+  reports its balances in US dollars, then start the adapter again; the
+  file is delivered then. This is not one of the refused-file cases: leave
+  the file where it is.
+- **The adapter was not running at 17:05** and starts the next morning: it
+  delivers the file then, and an order the engine releases at that close is
+  for a session already past, so it is never sent (the adapter stops on it:
+  [paper trading](paper-trading.md), "What can go wrong"). Keep the adapter
+  running through the evening of a paper day.
+- **A fresh run with the old run's file still in the outbox** (you started a
+  new `TI_RUN` before the old file was all sent): its snapshot and lines are
+  dropped unsent together, in one write, with one log line, so a stop
+  partway never leaves the lines without their snapshot; the new run's own
+  warm-up carries
+  the whole history again. The old run's files are then marked "dropped" in
+  `.delivered`, not delivered, as they are when a stop left them written
+  down but not yet in the outbox. If you later resume the old run (its own
+  under a new `TI_RUN` with its log's copy, after a crash: [durable
+  log](../runbooks/durable-log.md), and "A crash resume", above), the
+  adapter hands its dropped files over again behind a fresh snapshot; any
+  line its engine had already recorded is skipped, never sent twice.
+- **More than one stream folder of one run** (a warm-up run for a resumed
+  `TI_RUN` while the first run's log was missing, then the log restored,
+  say: "A crash resume", above): the adapter refuses to start, naming both
+  folders, and sends nothing. Move the folder that should not
+  be there out of `streams/boost/`, keep it, and start the adapter again.
+- **A run that only shares the identity of the run whose folder it finds**
+  ("nothing shows it is that run's crash resume": the engine's first run
+  started again without an approval, a resume of a first run that committed
+  only its configuration, or a log that is not a copy of that run's
+  records: "A crash resume", above): the adapter refuses to start, naming
+  both logs, and sends nothing. For the first two, start a fresh run with
+  its approval and its own warm-up; for the third, resume the crashed run's
+  own log with `engine -resume`.
+- **A log beside a stream folder that cannot be read**: one whose first
+  records cannot be read cannot be matched to any run. The adapter warns,
+  naming its folder, and refuses to start ("cannot be matched to any run"),
+  whether or not a folder of the running run's own name exists: after a
+  crash resume, restore the first run's log from the backup; for an old
+  run's log, once its run has ended, move the folder out of `streams/boost/`
+  and its log out of the engine's log folder, beside the running log,
+  keeping both as evidence. One whose first records name this run but whose later
+  records cannot be read stops the adapter ("names this run in its first
+  records but cannot be read"), and one whose stated record hashes are not
+  the ones its records give stops it too ("does not follow its record hash
+  chain"): restore that log from the backup as the engine wrote it.
 
 ## What can go wrong, and what the step does
 

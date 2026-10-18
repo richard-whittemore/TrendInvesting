@@ -16,13 +16,25 @@ IBKR does not timestamp positions or balances, so as_of is IBKR's server time
 asked for after every component was read; if the link failed before IBKR
 could answer, it is the adapter's own receipt time, and every component is
 then unreadable.
+
+A holding's mark is IBKR's last price for its contract, from a one-off
+market-data snapshot (read_marks): only IBKR's LAST tick counts, so a
+quote, a previous close or a delayed price is never stated as the mark,
+and only from a request that completed with no price that is not valid.
+A holding IBKR gives no last price for, or whose contract number the
+configuration does not hold, is stated with mark_set false, which the
+engine reads as no mark (ADR 0019: the sale back to 98% is then withheld
+and the owner acts by hand).
 """
+import math
 from collections import namedtuple
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from account import EXCESS_LIQUIDITY, NET_LIQUIDATION, SUMMARY_GROUP, SUMMARY_TAGS, TOTAL_CASH
 from account import SnapshotIncomplete, SnapshotInvalid, _add_balance, _add_position, _server_time
 from orders import UnrecognisedOrderReport, open_order_record, order_key
+from sender import CURRENCY, EXCHANGE, SEC_TYPE
 from values import to_decimal
 
 BROKER_SNAPSHOT_TYPE = "account.broker.snapshot"
@@ -37,6 +49,10 @@ NET = "net-liquidation"
 OPEN_ORDERS = "open-orders"
 POSITIONS = "positions"
 CASH = "total-cash"
+
+# IBKR's tick type for the last traded price (TWS API "Tick Types": 4, LAST),
+# the only tick read_marks takes as a mark.
+LAST_PRICE_TICK = 4
 
 # The currency the engine's balances are in; a balance in another is unreadable.
 BASE_CURRENCY = "USD"
@@ -60,10 +76,16 @@ Record = namedtuple("Record", "event_type schema_version payload")
 """One recorded input: its event type, schema version and JSON-ready payload."""
 
 AccountReading = namedtuple("AccountReading", (
-    "account_id positions balances open_orders unread as_of"))
+    "account_id positions balances open_orders unread as_of unended"), defaults=(frozenset(),))
 """One read of the account. positions maps symbol to whole shares, balances
 tag to Money, open_orders lists open-order payload rows; unread holds the
-components that could not be read; as_of is a whole-second UTC datetime."""
+components that could not be read; as_of is a whole-second UTC datetime.
+unended names the components whose answers carry no request ID (positions,
+open orders) that were asked for and that IBKR had not ended when the read
+gave up, however it gave up (a timeout, Gateway losing IBKR's servers,
+which it restores on the same socket, or the link closing): their late
+answers may still arrive on that link, where nothing tells them from a
+later read's, so no later read on that link can be trusted to be complete."""
 
 
 def read_account(conn):
@@ -78,7 +100,8 @@ def read_account(conn):
     positions, balances, orders = {}, {}, {}
     received = conn.now_utc()
     done = {"positions": False, "summary": False, "orders": False}
-    if conn.connected:
+    asked = conn.connected
+    if asked:
         summary_id = conn.new_req_id()
         conn.api.req_positions()
         conn.api.req_account_summary(summary_id, SUMMARY_GROUP, ",".join(SUMMARY_TAGS))
@@ -116,7 +139,14 @@ def read_account(conn):
     for component, tag in ((NET, NET_LIQUIDATION), (EXCESS, EXCESS_LIQUIDITY), (CASH, TOTAL_CASH)):
         if tag in balances and balances[tag].currency != BASE_CURRENCY:
             unread.add(component)
+    unended = set()
+    if asked:
+        if not done["positions"]:
+            unended.add(POSITIONS)
+        if not done["orders"]:
+            unended.add(OPEN_ORDERS)
     return AccountReading(
+        unended=frozenset(unended),
         account_id=account,
         positions={} if POSITIONS in unread else positions,
         balances=balances,
@@ -197,6 +227,59 @@ def _take_order(orders, account, unread, order_id, contract, order, order_state)
         # can only be smaller, never sell a share not held.
         "remaining_quantity": int(record.quantity),
     }
+
+
+def read_marks(conn, con_ids):
+    """IBKR's mark for each symbol of con_ids (symbol to IBKR's contract ID): {symbol: Decimal}.
+
+    One market-data snapshot per contract, asked together and waited for up
+    to the configuration's mark_timeout, which outlasts the 11-second window
+    at whose end IBKR ends a snapshot (config.MARK_TIMEOUT). A symbol has a mark only when
+    its request completed (IBKR ended its snapshot) and every LAST price it
+    carried was finite and positive, the mark being the last of them. A
+    request refused (IBKR's error under it, such as no market-data
+    permission), one that ended with no LAST price or carried any price
+    that is not finite and positive, and one not ended in time (cancelled)
+    give no mark: an uncertain price is never stated as the mark (ADR 0019).
+    Nothing here raises: with the link down there are no marks.
+    """
+    if not conn.connected or not con_ids:
+        return {}
+    asked = {}
+    for symbol in sorted(con_ids):
+        req_id = conn.new_req_id()
+        asked[req_id] = symbol
+        conn.api.req_mkt_data(req_id, SimpleNamespace(conId=con_ids[symbol], symbol=symbol, secType=SEC_TYPE,
+                                                      currency=CURRENCY, exchange=EXCHANGE))
+    prices, failed, ended = {}, set(), set()
+    try:
+        for event in conn.events(conn.config.mark_timeout):
+            if not conn.connected:
+                break
+            # Another callback (an order report, say) may carry no request ID.
+            req_id = event.args[0] if event.args else None
+            if not isinstance(req_id, int) or req_id not in asked or req_id in ended:
+                continue
+            if event.name == "tick_price" and event.args[1] == LAST_PRICE_TICK:
+                price = event.args[2]
+                if isinstance(price, (int, float)) and not isinstance(price, bool) and math.isfinite(price) \
+                        and price > 0:
+                    prices[req_id] = to_decimal(price, "mark")
+                else:
+                    failed.add(req_id)
+            elif event.name in ("tick_snapshot_end", "error"):
+                if event.name == "error":
+                    failed.add(req_id)
+                ended.add(req_id)
+            if len(ended) == len(asked):
+                break
+    finally:
+        if conn.connected:
+            for req_id in sorted(set(asked) - ended):
+                conn.api.cancel_mkt_data(req_id)
+    if not conn.connected:
+        return {}
+    return {asked[r]: prices[r] for r in sorted(ended - failed) if r in prices}
 
 
 def _stamp(at):

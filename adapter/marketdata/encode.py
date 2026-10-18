@@ -96,18 +96,13 @@ import subprocess
 import tempfile
 
 from . import adjust, history, nyse_calendar, record, sectors
+# The event types, schema versions and source the stream carries: one table
+# with the adapter that delivers it.
+from .kinds import BAR, CALENDAR, HISTORY, RETRACTED, SESSION_CLOSED, SOURCE, UNIVERSE
 from .massive import MarketDataError
 from .steps import MissingData, _now
 
-SOURCE = "marketdata"
 CALENDAR_SOURCE = "nyse-calendar"
-# Go's event type and schema-version constants (internal/event), ADR 0015.
-CALENDAR = ("market.session.calendar", 1)     # SessionCalendarSchemaVersion
-UNIVERSE = ("market.universe.snapshot", 1)    # UniverseSnapshotSchemaVersion
-BAR = ("market.bar.completed", 2)             # CompletedBarAdjustedVersion
-SESSION_CLOSED = ("market.session.closed", 1)  # SessionClosedSchemaVersion
-HISTORY = ("market.close.history", 1)          # CloseHistorySchemaVersion
-RETRACTED = ("market.session.retracted", 1)    # SessionRetractedSchemaVersion
 RETRACTION_SOURCE = "marketdata-retraction"
 
 ENGINES = ("momentum", "boost")

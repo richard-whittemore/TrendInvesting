@@ -18,8 +18,8 @@ if str(tests_dir) not in sys.path:
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order
 from test_account import connected, full_summary
-from snapshot import (BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION, RECONCILIATION_TYPE,
-                      RECONCILIATION_VERSION, broker_snapshot_record, read_account,
+from snapshot import (BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION, LAST_PRICE_TICK, RECONCILIATION_TYPE,
+                      RECONCILIATION_VERSION, broker_snapshot_record, read_account, read_marks,
                       reconciliation_record)
 
 TESTDATA = tests_dir / "testdata"
@@ -153,6 +153,22 @@ class BrokerSnapshotTests(unittest.TestCase):
         self.assertEqual(rec["unreadable"], ["positions", "total-cash"])
         self.assertEqual((rec["total_cash"], rec["currency"]), (0, ""))
 
+    def test_a_list_cut_off_by_gateway_losing_ibkrs_servers_is_unended(self):
+        # Gateway restores the same socket itself (1101/1102) after losing
+        # IBKR's servers (1100), so the abandoned list's late end could
+        # complete a later read on it, as after a timeout.
+        h = scripted()
+        h.fake.end_open_orders = False
+        asked = h.fake.req_all_open_orders
+
+        def lost():
+            asked()
+            h.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+        h.fake.req_all_open_orders = lost
+        reading = read_account(h.conn)
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(reading.unended, frozenset({"open-orders"}))
+
     def test_no_server_time_after_the_read_leaves_it_unbounded_and_unreadable(self):
         h = scripted()
         h.fake.answer_current_time = False
@@ -176,6 +192,86 @@ class BrokerSnapshotTests(unittest.TestCase):
         h = scripted()
         payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
         self.assertEqual(payload["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 0, "mark_set": False}])
+
+
+class MarkTests(unittest.TestCase):
+    """IBKR's mark for each holding: the last price of a one-off market-data snapshot of its contract."""
+
+    def test_each_symbol_is_asked_for_by_its_contract_and_its_last_price_is_its_mark(self):
+        h = connected()
+        h.fake.marks = {756733: 401.17, 8314: 95.5}
+        marks = read_marks(h.conn, {"SPY": 756733, "IEF": 8314})
+        self.assertEqual(marks, {"IEF": Decimal("95.5"), "SPY": Decimal("401.17")})
+        asked = h.fake.called("req_mkt_data")
+        self.assertEqual(sorted(c[2].conId for c in asked), [8314, 756733])
+        self.assertEqual(h.fake.called("cancel_mkt_data"), [], "a finished snapshot needs no cancel")
+
+    def test_only_the_last_price_counts_as_the_mark(self):
+        self.assertEqual(LAST_PRICE_TICK, 4, "IBKR's tick type 4 is LAST")
+        h = connected()
+        h.fake.marks = {756733: 401.17}
+        h.fake.mark_tick = 9  # the previous close, not the last price
+        self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {})
+
+    def test_an_error_a_non_positive_price_or_no_answer_gives_no_mark(self):
+        for setup in (lambda f: setattr(f, "mark_errors", {756733: (354, "synthetic: not subscribed")}),
+                      lambda f: setattr(f, "marks", {756733: -1.0}),
+                      lambda f: setattr(f, "marks", {756733: float("nan")}),
+                      lambda f: setattr(f, "answer_marks", False)):
+            with self.subTest(setup=setup):
+                h = connected()
+                h.fake.marks = {756733: 401.17}
+                setup(h.fake)
+                self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {})
+
+    def test_a_later_last_price_that_is_not_valid_leaves_no_mark(self):
+        # A valid price and then an invalid one under the same request: the
+        # request did not end with a valid price, so it gives no mark.
+        for bad in (-1.0, 0.0, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                h = connected()
+                h.fake.mark_ticks = {756733: [(LAST_PRICE_TICK, 401.17), (LAST_PRICE_TICK, bad)]}
+                self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {})
+
+    def test_a_price_whose_snapshot_never_ended_is_no_mark(self):
+        # IBKR sent a price but not the snapshot's end within the timeout:
+        # the request did not complete, so its price is not the mark.
+        h = connected()
+        h.fake.marks = {756733: 401.17, 8314: 95.5}
+        h.fake.end_marks = False
+        self.assertEqual(read_marks(h.conn, {"SPY": 756733, "IEF": 8314}), {})
+        self.assertEqual(sorted(c[1] for c in h.fake.called("cancel_mkt_data")),
+                         sorted(c[1] for c in h.fake.called("req_mkt_data")))
+
+    def test_a_snapshot_ibkr_ends_at_the_end_of_its_window_gives_its_mark(self):
+        # IBKR ends a snapshot at the end of its 11-second window, after the
+        # account reads' request_timeout: the marks wait mark_timeout.
+        h = connected(request_timeout=0.05, mark_timeout=15.0)
+        h.fake.marks = {756733: 401.17}
+        h.fake.mark_end_delay = 11.0
+        h.conn.subscribe(h.fake.late_end(h.clock))
+        self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {"SPY": Decimal("401.17")})
+        self.assertEqual(h.fake.called("cancel_mkt_data"), [], "the snapshot ended, so it needs no cancel")
+
+    def test_a_request_left_unanswered_is_cancelled(self):
+        h = connected()
+        h.fake.answer_marks = False
+        read_marks(h.conn, {"SPY": 756733})
+        self.assertEqual([c[1] for c in h.fake.called("cancel_mkt_data")],
+                         [c[1] for c in h.fake.called("req_mkt_data")])
+
+    def test_a_dropped_link_gives_no_marks(self):
+        h = connected()
+        h.fake.drop()
+        self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {})
+
+    def test_the_marks_reach_the_snapshot(self):
+        h = scripted()
+        h.fake.marks = {756733: 401.17}
+        reading = read_account(h.conn)
+        payload = broker_snapshot_record(reading, market_open=False, marks=read_marks(h.conn, {"SPY": 756733})).payload
+        self.assertEqual(payload["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 401.17,
+                                                 "mark_set": True}])
 
 
 class ReconciliationTests(unittest.TestCase):

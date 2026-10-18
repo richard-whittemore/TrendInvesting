@@ -42,6 +42,12 @@ class TWSApi:
     the defaults the paper test confirms from IBKR's own view of the order
     (not every field ibapi's Order has). IBKR answers on the Inbox.
 
+    req_mkt_data asks for one market-data snapshot of a contract (a plain
+    object with conId, symbol, secType, currency and exchange, as
+    place_order's contract): IBKR answers with tick_price callbacks under
+    req_id and ends it with tick_snapshot_end, or answers error under
+    req_id. cancel_mkt_data cancels one not yet ended.
+
     can_place_orders is the sending switch alone (configuration and login);
     is_connected reports the link, and the sender asks it first, so a link
     down holds the input rather than read as the switch being off.
@@ -75,6 +81,12 @@ class TWSApi:
         raise NotImplementedError
 
     def req_executions(self, req_id, account_id):
+        raise NotImplementedError
+
+    def req_mkt_data(self, req_id, contract):
+        raise NotImplementedError
+
+    def cancel_mkt_data(self, req_id):
         raise NotImplementedError
 
     def can_place_orders(self):
@@ -116,6 +128,8 @@ class Inbox:
         "exec_details",         # (req_id, contract, execution)
         "exec_details_end",     # (req_id)
         "commission_report",    # (report)
+        "tick_price",           # (req_id, tick_type, price, attrib)
+        "tick_snapshot_end",    # (req_id)
     )
 
     def __init__(self):

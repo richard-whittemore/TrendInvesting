@@ -18,7 +18,7 @@ def config(**overrides):
                   connect_timeout=0.05, request_timeout=0.05, heartbeat_interval=30.0,
                   heartbeat_timeout=10.0, restore_timeout=60.0, backoff_initial=1.0,
                   backoff_max=8.0, max_connect_attempts=5, commission_wait=30.0,
-                  con_ids={"SPY": 756733})
+                  con_ids={"SPY": 756733}, mark_timeout=0.05)
     values.update(overrides)
     return AdapterConfig.from_mapping(values)
 
@@ -312,6 +312,68 @@ class MaintainTests(unittest.TestCase):
         self.assertEqual(len(h.fake.called("disconnect")), 1)
         self.assertIn("connectivity-not-restored", [s.reason for s in h.statuses])
         self.assertTrue(h.conn.needs_reconciliation)
+
+    def test_a_drop_asked_for_while_gateway_has_lost_ibkr_waits_for_the_restoration(self):
+        # An upstream outage Gateway restores within restore_timeout must not
+        # use up connect attempts: the drop waits for 1101/1102, then happens.
+        h = Harness(max_connect_attempts=1)
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.conn.drop("untagged-read-interrupted")
+        h.clock.now += 30.0
+        h.conn.maintain()
+        self.assertEqual(len(h.fake.called("disconnect")), 0, "the restore wait is still honoured")
+        self.assertEqual(len(h.fake.called("connect")), 1)
+        h.fake.callbacks.error(-1, 1102, "restored")
+        h.conn.pump(0.01)
+        self.assertFalse(h.conn.connected, "the restored socket is not taken back")
+        self.assertEqual(len(h.fake.called("disconnect")), 1)
+        self.assertIn("untagged-read-interrupted", [s.reason for s in h.statuses])
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+
+    def test_a_drop_asked_for_during_an_outage_never_restored_reconnects_at_restore_timeout(self):
+        h = Harness()
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.conn.drop("untagged-read-interrupted")
+        h.clock.now += 60.0
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        h.fake.callbacks.error(-1, 1102, "restored")
+        h.conn.pump(0.01)
+        self.assertTrue(h.conn.connected, "a stale drop does not cut the new link")
+
+    def test_a_deferred_drop_does_not_outlive_a_socket_that_closes_during_the_outage(self):
+        # Whichever way the socket closes while the drop waits, the next link
+        # starts with no deferred drop, and nothing is read on the old socket.
+        closes = (("connection-closed", lambda h: h.fake.drop()),
+                  ("504", lambda h: h.fake.callbacks.error(-1, 504, "Not connected")),
+                  ("1300", lambda h: h.fake.callbacks.error(-1, 1300, "Socket port reset")))
+        for name, close in closes:
+            with self.subTest(close=name):
+                h = Harness()
+                h.conn.connect()
+                h.conn.mark_reconciled()
+                h.fake.callbacks.error(-1, 1100, "lost")
+                h.conn.pump(0.01)
+                h.conn.drop("untagged-read-interrupted")
+                close(h)
+                h.conn.pump(0.01)
+                self.assertFalse(h.conn.connected)
+                old_inbox = h.conn.inbox
+                h.conn.connect()
+                self.assertIsNot(h.conn.inbox, old_inbox, "the new link reads its own inbox")
+                h.fake.callbacks.error(-1, 1102, "restored")
+                h.conn.pump(0.01)
+                self.assertTrue(h.conn.connected, "no stale drop cuts the new link")
+                self.assertEqual(len(h.fake.called("disconnect")), 0)
 
     def test_a_healthy_link_is_left_alone(self):
         h = Harness()

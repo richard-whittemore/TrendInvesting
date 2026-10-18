@@ -14,8 +14,14 @@ _FIELDS = (
     "connect_timeout", "request_timeout",
     "heartbeat_interval", "heartbeat_timeout", "restore_timeout",
     "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
-    "con_ids", "paper_sending_enabled",
+    "con_ids", "paper_sending_enabled", "mark_timeout",
 )
+# The recommended mark_timeout, as the deployed example sets it: IBKR ends a
+# market-data snapshot only at the end of its 11-second snapshot window (TWS
+# API "Market Data: Snapshot", tickSnapshotEnd), so the wait outlasts it. A
+# configuration must still set it (ADR 0019): there is no default.
+MARK_TIMEOUT = 15
+
 # The keys a configuration may leave out, with the value an omission means.
 # paper_sending_enabled is the switch that lets the real IBKR client place
 # an order (real_client.IbapiClient.can_place_orders): left out, it is off.
@@ -34,9 +40,9 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     """Where one engine's adapter connects, and its fail-closed timing bounds.
 
     One engine per account, each with its own client ID to one IB Gateway
-    (ADR 0026 point 8, decided 2026-10-16). Every timing value is required:
-    ADR 0019 makes them versioned operational configuration with no
-    permissive defaults. restore_timeout is how long Gateway may stay cut
+    (ADR 0026 point 8, decided 2026-10-16). Every timing value is
+    required: ADR 0019 makes them versioned operational configuration with
+    no permissive defaults. restore_timeout is how long Gateway may stay cut
     off from IBKR's servers (codes 1100/2110) before the adapter gives up
     waiting for Gateway's own restoration and reconnects. commission_wait
     is how long an execution may wait for IBKR's commission report, without
@@ -48,7 +54,11 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     read-only copy. paper_sending_enabled is the switch that lets the real
     IBKR client place an order (AGENTS.md rule 5; real_client.IbapiClient.
     can_place_orders): optional, off when left out, strictly a bool, and
-    refused on any mode but paper.
+    refused on any mode but paper. mark_timeout is how long the marks wait
+    for IBKR to end its market-data snapshots (snapshot.read_marks), apart
+    from request_timeout, which bounds the account reads: IBKR ends a
+    snapshot only at the end of its 11-second window, so MARK_TIMEOUT (15
+    seconds) is the recommended value; a value at or under 11 seconds can give no mark for a price IBKR did send.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -101,7 +111,7 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
                               "account".format(self.account_id, PAPER_ACCOUNT_PREFIX))
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
                      "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max",
-                     "commission_wait"):
+                     "commission_wait", "mark_timeout"):
             value = getattr(self, name)
             # NaN and infinity pass "> 0" but would switch a deadline off.
             if not _is_number(value) or not math.isfinite(value) or value <= 0:

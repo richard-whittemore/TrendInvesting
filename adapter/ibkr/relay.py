@@ -206,6 +206,12 @@ RUN_ENDED_FIELDS = ("at", "input", "outbox", "reason", "refused", "run", "sessio
 # one of its entries.
 OUTBOX_SUFFIX = ".outbox"
 OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
+# An entry from a market-data stream (delivery.py) also carries the
+# envelope as the data job wrote it, which is sent as written but for its
+# sequence and recorded time; a stream batch's broker snapshot carries the
+# run it was read for, so neither is ever sent to another run.
+OUTBOX_STREAM_FIELDS = tuple(sorted(OUTBOX_FIELDS + ("envelope",)))
+OUTBOX_RUN_FIELDS = tuple(sorted(OUTBOX_FIELDS + ("run",)))
 # An input that awaits its reply from an earlier run (earlier_run): its ID,
 # the earlier run's log file name (None when no log of the chain holds it
 # and the adapter recorded none), whether that run committed it, the orders
@@ -238,6 +244,8 @@ ENVELOPE_FIELDS = frozenset(("id", "type", "envelope_version", "schema_version",
 ENVELOPE_OPTIONAL = frozenset(("correlation_id", "causation_id"))
 PAYLOAD_HASH = re.compile(r"[0-9a-f]{64}")
 TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})")
+TIME_PARTS = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?"
+                        r"(?:Z|([+-])([0-9]{2}):([0-9]{2}))")
 WHOLE_SECOND = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})")
 # A fill input, as the IBKR adapter journals it (reports.FILL_TYPE and
 # FILL_VERSION: internal/event TargetWeightFillPayload).
@@ -265,8 +273,12 @@ SettledOrders = namedtuple("SettledOrders", ("ended", "fills"))
 CommittedInput = namedtuple("CommittedInput", ("id", "event_type", "schema_version", "sequence", "payload"))
 EngineLog = namedtuple("EngineLog", ("configuration_hash", "strategy_version", "inputs", "next_sequence"))
 # The durable log as _committed_groups reads it: the header, each committed
-# group, and the record hash of the last commit (None when there is none).
-CommittedLog = namedtuple("CommittedLog", ("header", "groups", "final_hash"))
+# group, the record hash of the last commit (None when there is none), and
+# every committed record's hash in log order (its hash chain).
+# chain_break is the sequence of the first committed record whose stored
+# record_hash is not the one LOG_CHAIN_ALGORITHM gives over the records
+# before it (log_chain_next), or None when every committed record's is.
+CommittedLog = namedtuple("CommittedLog", ("header", "groups", "final_hash", "record_hashes", "chain_break"))
 
 
 class EngineUnavailable(Exception):
@@ -416,14 +428,39 @@ class Outbox:
         return entries
 
     def append(self, entry):
+        self.extend([entry])
+
+    def extend(self, entries):
+        """Add entries behind every entry already recorded, in order, in one write: all of them or none.
+
+        The whole list is checked as load reads it before anything is
+        written (OutboxInvalid), so an entry the outbox could not be read
+        with is never recorded.
+        """
         with self._locked():
-            self._write(self.load() + [entry])
+            merged = self.load() + list(entries)
+            if not all(_is_outbox_entry(e) for e in merged):
+                raise OutboxInvalid("an input for {} is not as the adapter records one; nothing was recorded".format(
+                    self.path))
+            if len({e["id"] for e in merged}) != len(merged):
+                raise OutboxInvalid("an input for {} names an input the outbox or the same write already names; "
+                                    "nothing was recorded".format(self.path))
+            self._write(merged)
 
     def strike(self, input_id):
         """Remove the entry for input_id; one not there is already struck off."""
         with self._locked():
             entries = self.load()
             kept = [e for e in entries if e["id"] != input_id]
+            if len(kept) != len(entries):
+                self._write(kept)
+
+    def strike_all(self, input_ids):
+        """Remove the entries for every one of input_ids in one write: all of them or none."""
+        gone = set(input_ids)
+        with self._locked():
+            entries = self.load()
+            kept = [e for e in entries if e["id"] not in gone]
             if len(kept) != len(entries):
                 self._write(kept)
 
@@ -1187,7 +1224,9 @@ def run_identity(path):
     configuration and as-of time (a first run started again the same day
     from the same run.env, without -approval) share an identity, so the
     second is taken for a resume of the first and is asked for the first
-    one's waiting input; nothing in the two logs tells them apart. Never
+    one's waiting input; nothing in the two logs tells them apart by
+    identity (delivering market data, delivery.stream_run stops such a
+    start: its log does not begin with the first run's record hash chain). Never
     start a first run again without an approval (docs/manual/paper-trading.md,
     "Starting the adapter"): a crashed first run is resumed, and any other
     restart is a fresh run with its approval. Read as journalled_reports
@@ -1195,7 +1234,11 @@ def run_identity(path):
     closed (ResolveRefused): a log with no committed input names no run,
     and is never read as any run's.
     """
-    groups = _committed_groups(path).groups
+    return _identity(path, _committed_groups(path).groups)
+
+
+def _identity(path, groups):
+    """run_identity of the log at path from its committed groups (all of them, or its first two: head_identity)."""
     for group in groups:
         _, kind, envelope = group[0]
         if kind == LOG_INPUT and envelope["type"] == RUN_APPROVED:
@@ -1206,6 +1249,49 @@ def run_identity(path):
                              "engine now running".format(path))
     first = groups[0][0][2]
     return "{}@{}".format(first["id"], first["recorded_at"])
+
+
+def head_identity(path):
+    """The run identity the first records of the durable log at path name, read no further than its second commit.
+
+    A run's identity is in its log's first two committed inputs: the
+    configuration, and a fresh run's Run approval, which cmd/engine records
+    as its second input before it listens (a resume copies both first), so
+    this is run_identity's answer for every log the engine writes, read
+    without the rest of the log. It sorts the logs beside a run's by
+    identity without reading any other run's log whole: only the first
+    lines' shape is checked, so a log the head names as the run's is then
+    read strictly (run_identity, _committed_groups). Fail closed
+    (ResolveRefused): first lines that cannot be read as the engine writes
+    them name no run.
+    """
+    groups, group = [], []
+    try:
+        with open(path, "rb") as f:
+            lines = iter(f)
+            first = next(lines, b"")
+            if not first.endswith(b"\n"):
+                raise _unreadable(path, 1, "it has no complete header line")
+            header = _log_json(path, 1, first)
+            if not isinstance(header, dict) or header.get("log_version") != LOG_VERSION:
+                raise _unreadable(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
+            for n, raw in enumerate(lines, 2):
+                if len(groups) == 2 or not raw.endswith(b"\n"):
+                    break
+                line = _log_json(path, n, raw)
+                record = line.get("record") if isinstance(line, dict) and len(line) == 1 else None
+                envelope = record.get("envelope") if isinstance(record, dict) else None
+                if (isinstance(envelope, dict) and record.get("kind") == (LOG_DECISION if group else LOG_INPUT)
+                        and all(_is_text(envelope.get(k)) for k in ("id", "type", "recorded_at"))):
+                    group.append((n, record["kind"], record["envelope"]))
+                elif isinstance(line, dict) and len(line) == 1 and "commit" in line and group:
+                    groups.append(group)
+                    group = []
+                else:
+                    raise _unreadable(path, n, "it is not a record or commit as the engine writes one")
+    except OSError as err:
+        raise ResolveRefused("cannot read the engine's durable log {}: {}".format(path, err)) from None
+    return _identity(path, groups)
 
 
 def earlier_run(pending, engine_log_path):
@@ -1566,7 +1652,7 @@ def read_engine_log(path):
     that cannot be read as the engine writes it raises ResolveRefused, never
     read as holding no inputs.
     """
-    header, groups, _ = _committed_groups(path)
+    header, groups = _committed_groups(path)[:2]
     inputs = []
     for group in groups:
         envelope = group[0][2]
@@ -1603,9 +1689,13 @@ def _committed_groups(path):
         raise _unreadable(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
     groups = []
     group = []
+    hashes = []
+    pending = []
     sequence = 0
     last_hash = None
     final_hash = None
+    chain = log_chain_seed(header)
+    chain_break = pending_break = None
     for n, raw in enumerate(lines[1:], 2):
         line = _log_json(path, n, raw)
         if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
@@ -1620,18 +1710,25 @@ def _committed_groups(path):
                 raise _unreadable(path, n, "a group is one input followed by its decisions")
             if not isinstance(record["record_hash"], str) or not RECORD_HASH.fullmatch(record["record_hash"]):
                 raise _unreadable(path, n, "its record hash is not a SHA-256")
-            _check_envelope(path, n, raw, record)
+            payload = _check_envelope(path, n, raw, record)
+            if pending_break is None and chain_break is None:
+                chain = log_chain_next(chain, record["kind"], record["envelope"], payload)
+                if chain is None or "sha256:" + chain.hex() != record["record_hash"]:
+                    pending_break = record["sequence"]
             sequence, last_hash = record["sequence"], record["record_hash"]
             group.append((n, record["kind"], record["envelope"]))
+            pending.append(last_hash)
             continue
         commit = line["commit"]
         if (not isinstance(commit, dict) or tuple(sorted(commit)) != LOG_COMMIT_FIELDS or not group
                 or commit["sequence"] != sequence or commit["record_hash"] != last_hash):
             raise _unreadable(path, n, "it is not the commit of the group before it")
         groups.append(group)
-        group = []
+        hashes.extend(pending)
+        group, pending = [], []
         final_hash = last_hash
-    return CommittedLog(header, groups, final_hash)
+        chain_break = chain_break if chain_break is not None else pending_break
+    return CommittedLog(header, groups, final_hash, tuple(hashes), chain_break)
 
 
 def _unreadable(path, n, why):
@@ -1649,7 +1746,7 @@ def _log_json(path, n, raw):
 
 
 def _check_envelope(path, n, raw, record):
-    """Refuse an envelope not as internal/event writes one, or whose payload's bytes do not match its hash."""
+    """The payload's bytes as stored; refuse an envelope not as internal/event writes one, or whose payload's bytes do not match its hash."""
     envelope = record["envelope"]
     if (not isinstance(envelope, dict) or not ENVELOPE_FIELDS <= set(envelope)
             or not set(envelope) <= ENVELOPE_FIELDS | ENVELOPE_OPTIONAL
@@ -1667,9 +1764,72 @@ def _check_envelope(path, n, raw, record):
     marker = '"payload_hash":"{}","payload":'.format(envelope["payload_hash"]).encode()
     suffix = '}},"record_hash":"{}"}}}}'.format(record["record_hash"]).encode()
     start = raw.find(marker)
-    if start < 0 or not raw.endswith(suffix) or hashlib.sha256(
-            raw[start + len(marker):len(raw) - len(suffix)]).hexdigest() != envelope["payload_hash"]:
+    payload = raw[start + len(marker):len(raw) - len(suffix)]
+    if start < 0 or not raw.endswith(suffix) or hashlib.sha256(payload).hexdigest() != envelope["payload_hash"]:
         raise _unreadable(path, n, "its payload does not match its payload hash")
+    return payload
+
+
+def log_chain_seed(header):
+    """The seed of a durable log's record hash chain: sha256 of its header's canonical bytes (LOG_CHAIN_ALGORITHM).
+
+    internal/journal newLogChain: the header's four fields through the
+    project's one canonical encoder (event.CanonicalBytes, ADR 0016).
+    """
+    return hashlib.sha256(_canonical_bytes({k: header[k] for k in LOG_HEADER_FIELDS})).digest()
+
+
+def log_chain_next(previous, kind, envelope, payload):
+    """The record hash, as raw SHA-256 bytes, of a record of kind after previous (LOG_CHAIN_ALGORITHM), else None.
+
+    internal/journal Chain.Next: sha256(previous || kind ||
+    event.CanonicalEnvelopeBytes(envelope)), where the canonical bytes cover
+    every envelope field, both times rendered in UTC as RFC 3339 with
+    nanoseconds, an absent correlation or causation ID as "", and the
+    payload as its bytes exactly as stored (payload, which its hash
+    attests). None when the envelope cannot be rendered so (a time the
+    engine would not write): such a record follows no chain.
+    """
+    try:
+        fields = {k: envelope[k] for k in ENVELOPE_FIELDS if k != "payload"}
+        fields.update((k, envelope.get(k, "")) for k in ENVELOPE_OPTIONAL)
+        fields["event_time"], fields["recorded_at"] = _utc(envelope["event_time"]), _utc(envelope["recorded_at"])
+        fields["payload"] = payload.decode("utf-8")
+        canonical = _canonical_bytes(fields)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return hashlib.sha256(previous + kind.encode("utf-8") + canonical).digest()
+
+
+def _canonical_bytes(fields):
+    """fields (text and whole-number values) as internal/event canonicalJSON renders them: keys sorted, compact."""
+    parts = []
+    for key in sorted(fields):
+        value = fields[key]
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise TypeError("a canonical field is text or a whole number")
+        parts.append(_go_string(key) + ":" + (str(value) if isinstance(value, int) else _go_string(value)))
+    return ("{" + ",".join(parts) + "}").encode("utf-8")
+
+
+def _go_string(text):
+    """text as Go's encoding/json writes a string: UTF-8 kept, and <, >, &, U+2028 and U+2029 escaped."""
+    return (json.dumps(text, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
+def _utc(text):
+    """An RFC 3339 time as Go's Time.UTC().Format(time.RFC3339Nano) renders it: UTC, "Z", no trailing zeros."""
+    year, month, day, hour, minute, second, fraction, sign, hours, minutes = TIME_PARTS.fullmatch(text).groups()
+    at = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
+    if sign:
+        if int(hours) > 23 or int(minutes) > 59:
+            raise ValueError("a zone offset is 00:00 to 23:59")
+        offset = timedelta(hours=int(hours), minutes=int(minutes))
+        at = at - offset if sign == "+" else at + offset
+    fraction = (fraction or "").rstrip("0")
+    return "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}{}Z".format(at.year, at.month, at.day, at.hour, at.minute,
+                                                              at.second, "." + fraction if fraction else "")
 
 
 def _fill_id(path, n, kind, envelope):
@@ -1702,9 +1862,25 @@ def _is_text(value):
 
 
 def _is_outbox_entry(entry):
-    """Whether entry is one outbox entry as Outbox writes it."""
-    return (isinstance(entry, dict) and tuple(sorted(entry)) == OUTBOX_FIELDS and _is_text(entry["id"])
-            and isinstance(entry["payload"], dict))
+    """Whether entry is one outbox entry as Outbox writes it.
+
+    A stream entry's envelope must name the same input as the entry itself:
+    its ID, type, schema version, event time and payload.
+    """
+    if not isinstance(entry, dict) or tuple(sorted(entry)) not in (OUTBOX_FIELDS, OUTBOX_STREAM_FIELDS,
+                                                                   OUTBOX_RUN_FIELDS):
+        return False
+    if not _is_text(entry["id"]) or not isinstance(entry["payload"], dict):
+        return False
+    if "run" in entry:
+        return _is_text(entry["run"])
+    if "envelope" not in entry:
+        return True
+    envelope = entry["envelope"]
+    return isinstance(envelope, dict) and all(
+        envelope.get(k) == entry[f] for k, f in (("id", "id"), ("type", "event_type"),
+                                                  ("schema_version", "schema_version"),
+                                                  ("event_time", "event_time"), ("payload", "payload")))
 
 
 def _is_count(value):
@@ -1724,7 +1900,7 @@ def _is_time(value, shape):
         datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         return False
-    return True
+    return value[-1] == "Z" or (int(value[-5:-3]) <= 23 and int(value[-2:]) <= 59)
 
 
 def acknowledge_correction(pending, exec_id, corrects, reason, fills):
