@@ -79,16 +79,20 @@ after the saved original is settled, and never replaces it on disk.
 The owner acknowledges IBKR's correction of an execution, which stops the
 adapter at every start while IBKR's replay carries it (reports.py), with
 `python3 adapter/ibkr/relay.py acknowledge-correction PENDING_FILE --journal
-ENGINE_JOURNAL EXEC_ID --corrects ORIGINAL_EXEC_ID --reason TEXT`, under the
+ENGINE_LOG EXEC_ID --corrects ORIGINAL_EXEC_ID --reason TEXT`, under the
 same lock, into a sidecar file read strictly at start
-(PendingInput.acknowledged_corrections). Only a correction of an execution
-the engine's journal already holds as a fill is acknowledged: the engine
-keeps that original fill, and one never recorded leaves the shares in no
+(PendingInput.acknowledged_corrections). ENGINE_LOG is the engine's durable
+log (its -log file), which it streams as it runs (ADR 0027), so it is read
+while the engine runs (journalled_fills). Only a correction of an execution
+the engine's durable log already holds as a committed fill is
+acknowledged: the engine keeps that original fill, and one never recorded leaves the shares in no
 fill, which only a reconciliation by hand can settle (ADR 0019).
 """
 import argparse
 import fcntl
+import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -141,10 +145,37 @@ DECISIONS = (DECIDE_SENT, DECIDE_RESEND, DECIDE_NEVER_SENT)
 CORRECTION_FIELDS = ("at", "corrects", "exec_id", "reason")
 # The fields of the relay's record of the order it is refusing.
 REFUSAL_FIELDS = ("client_order_id", "input_id", "reason")
-# The engine journal's record of an input, and the input type of a fill
-# (reports.FILL_TYPE).
-JOURNAL_INPUT = "input"
+# The engine's durable log (internal/journal durable_log.go; ADR 0027;
+# docs/runbooks/durable-log.md), which the engine streams as it runs: a
+# header line, then for each input one group (the input's record, the
+# records of the decisions it caused, then a commit naming the group's last
+# record). Only a committed group was made durable; the lines after the last
+# commit are a group the engine is still writing, or a crash's torn tail.
+LOG_VERSION = 1
+LOG_CHAIN_ALGORITHM = ("seed=sha256(canonical_log_header_bytes); "
+                       "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
+LOG_HEADER_FIELDS = ("chain_algorithm", "configuration_hash", "log_version", "strategy_version")
+LOG_RECORD_FIELDS = ("envelope", "kind", "record_hash", "sequence")
+LOG_COMMIT_FIELDS = ("record_hash", "sequence")
+LOG_INPUT = "input"
+LOG_DECISION = "decision"
+RECORD_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+# An event envelope (internal/event Envelope): its required fields, and the
+# two it leaves out when empty.
+ENVELOPE_VERSION = 1
+ENVELOPE_FIELDS = frozenset(("id", "type", "envelope_version", "schema_version", "event_time", "recorded_at",
+                             "sequence", "source", "strategy_version", "configuration_hash", "payload_hash",
+                             "payload"))
+ENVELOPE_OPTIONAL = frozenset(("correlation_id", "causation_id"))
+PAYLOAD_HASH = re.compile(r"[0-9a-f]{64}")
+TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})")
+WHOLE_SECOND = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})")
+# A fill input, as the IBKR adapter journals it (reports.FILL_TYPE and
+# FILL_VERSION: internal/event TargetWeightFillPayload).
 FILL_TYPE = "execution.fill"
+FILL_VERSION = 5
+FILL_FIELDS = ("account_id", "client_order_id", "commission", "fill_id", "filled_at", "instrument_id", "price",
+               "quantity", "side")
 
 
 class EngineUnavailable(Exception):
@@ -178,7 +209,8 @@ class NeverSentAtBroker(HandoverUnconfirmed):
         Exception.__init__(
             self,
             "order {0} was settled as never sent, but IBKR shows an open order or execution whose orderRef is {0}; "
-            "nothing else is sent: check the order at IBKR, then mark it sent with relay.py resolve {0} --sent "
+            "nothing else is sent: check the order at IBKR, then, with the adapter stopped, mark it sent with "
+            "python3 adapter/ibkr/relay.py resolve PENDING_FILE {0} --sent --reason \"what IBKR shows\" "
             "(docs/manual/redelivery.md)".format(client_order_id))
         self.client_order_id = client_order_id
 
@@ -460,6 +492,10 @@ class Relay:
         finally:
             self._step.release()
 
+    def holds(self):
+        """Whether this relay still holds the adapter's exclusive lock on the pending file (until close)."""
+        return self._held is not None
+
     def exchange(self, envelope):
         """Send one input and act on its reply, after settling any input still awaiting one."""
         waiting = self._pending.load()
@@ -686,40 +722,153 @@ def _resolve(pending, client_order_id, decision, reason, today):
 
 
 def journalled_fills(path):
-    """The fill IDs of every fill input in the engine's journal at path (one JSON object per line).
+    """The fill IDs of every committed fill input in the engine's durable log at path (the engine's -log file).
 
-    Read strictly (fail closed, AGENTS.md): a missing file, a line that is
-    not a JSON object, or a fill input without a fill ID raises
-    ResolveRefused.
+    The engine streams that log as it runs (ADR 0027), so it is read while
+    the engine runs: the lines after the last commit are a group not yet
+    made durable, and a last line without its newline is one still being
+    written; neither holds a fill the engine recorded. Everything else is
+    read strictly (fail closed, AGENTS.md): a log that cannot be opened, a
+    header, record or commit not exactly as internal/journal writes it, a
+    broken sequence or group, an envelope whose payload does not match its
+    hash, or a fill input that is not a whole execution.fill version 5
+    raises ResolveRefused naming the line. An unreadable log is never read
+    as holding no fills. The record chain is the engine's own to verify
+    (engine -resume, journal-query); this reads the shape and each payload.
     """
-    fills = set()
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = [line for line in f if line.strip()]
+        with open(path, "rb") as f:
+            data = f.read()
     except OSError as err:
-        raise ResolveRefused("cannot read the engine's journal {}: {}".format(path, err)) from None
-    for n, line in enumerate(lines, 1):
-        try:
-            entry = json.loads(line)
-        except ValueError as err:
-            raise ResolveRefused("{} line {} is not JSON: {}".format(path, n, err)) from None
-        if not isinstance(entry, dict):
-            raise ResolveRefused("{} line {} is not a journal record".format(path, n))
-        envelope = entry.get("envelope")
-        if entry.get("kind") != JOURNAL_INPUT or not isinstance(envelope, dict) or envelope.get("type") != FILL_TYPE:
+        raise ResolveRefused("cannot read the engine's durable log {}: {}".format(path, err)) from None
+    # The last element is empty when the log ends with a newline, else a
+    # line the engine is still writing.
+    lines = data.split(b"\n")[:-1]
+    if not lines:
+        raise _unreadable(path, 1, "it has no complete header line")
+    header = _log_json(path, 1, lines[0])
+    if isinstance(header, dict) and "journal_version" in header:
+        raise _unreadable(path, 1, "it is the journal the engine writes when it stops, not the durable log it "
+                                   "streams as it runs (its -log file)")
+    if (not isinstance(header, dict) or tuple(sorted(header)) != LOG_HEADER_FIELDS
+            or not _is_count(header["log_version"]) or header["log_version"] != LOG_VERSION
+            or header["chain_algorithm"] != LOG_CHAIN_ALGORITHM or not _is_text(header["configuration_hash"])
+            or not _is_text(header["strategy_version"])):
+        raise _unreadable(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
+    fills = set()
+    group = []
+    sequence = 0
+    last_hash = None
+    for n, raw in enumerate(lines[1:], 2):
+        line = _log_json(path, n, raw)
+        if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
+            raise _unreadable(path, n, "a line is exactly one of a record and a commit")
+        if "record" in line:
+            record = line["record"]
+            if not isinstance(record, dict) or tuple(sorted(record)) != LOG_RECORD_FIELDS:
+                raise _unreadable(path, n, "it is not a record as the engine writes one")
+            if not _is_count(record["sequence"]) or record["sequence"] != sequence + 1:
+                raise _unreadable(path, n, "its sequence does not follow {}".format(sequence))
+            if record["kind"] != (LOG_DECISION if group else LOG_INPUT):
+                raise _unreadable(path, n, "a group is one input followed by its decisions")
+            if not isinstance(record["record_hash"], str) or not RECORD_HASH.fullmatch(record["record_hash"]):
+                raise _unreadable(path, n, "its record hash is not a SHA-256")
+            _check_envelope(path, n, raw, record)
+            sequence, last_hash = record["sequence"], record["record_hash"]
+            group.append((n, record["kind"], record["envelope"]))
             continue
-        payload = envelope.get("payload")
-        fill_id = payload.get("fill_id") if isinstance(payload, dict) else None
-        if not isinstance(fill_id, str) or not fill_id:
-            raise ResolveRefused("{} line {} is a fill with no fill ID".format(path, n))
-        fills.add(fill_id)
+        commit = line["commit"]
+        if (not isinstance(commit, dict) or tuple(sorted(commit)) != LOG_COMMIT_FIELDS or not group
+                or commit["sequence"] != sequence or commit["record_hash"] != last_hash):
+            raise _unreadable(path, n, "it is not the commit of the group before it")
+        for at, kind, envelope in group:
+            if envelope["type"] == FILL_TYPE:
+                fills.add(_fill_id(path, at, kind, envelope))
+        group = []
     return fills
+
+
+def _unreadable(path, n, why):
+    return ResolveRefused(
+        "the engine's durable log {} cannot be read at line {}: {}. It is not read as holding no fills, and "
+        "nothing is acknowledged: give the engine's -log file as the engine writes it "
+        "(docs/runbooks/durable-log.md)".format(path, n, why))
+
+
+def _log_json(path, n, raw):
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError as err:
+        raise _unreadable(path, n, "it is not JSON ({})".format(err)) from None
+
+
+def _check_envelope(path, n, raw, record):
+    """Refuse an envelope not as internal/event writes one, or whose payload's bytes do not match its hash."""
+    envelope = record["envelope"]
+    if (not isinstance(envelope, dict) or not ENVELOPE_FIELDS <= set(envelope)
+            or not set(envelope) <= ENVELOPE_FIELDS | ENVELOPE_OPTIONAL
+            or not all(_is_text(envelope[k]) for k in ("id", "type", "source", "strategy_version",
+                                                       "configuration_hash"))
+            or envelope["envelope_version"] != ENVELOPE_VERSION or not _is_count(envelope["envelope_version"])
+            or not _is_count(envelope["schema_version"]) or not _is_count(envelope["sequence"])
+            or not all(_is_time(envelope[k], TIME) for k in ("event_time", "recorded_at"))
+            or not all(isinstance(envelope.get(k, ""), str) for k in ENVELOPE_OPTIONAL)
+            or not isinstance(envelope["payload_hash"], str) or not PAYLOAD_HASH.fullmatch(envelope["payload_hash"])):
+        raise _unreadable(path, n, "its envelope is not an event envelope as the engine writes one")
+    # The payload's bytes exactly as stored, which its hash attests: the
+    # writer puts payload last in the envelope, straight after its hash,
+    # and the record hash last in the record.
+    marker = '"payload_hash":"{}","payload":'.format(envelope["payload_hash"]).encode()
+    suffix = '}},"record_hash":"{}"}}}}'.format(record["record_hash"]).encode()
+    start = raw.find(marker)
+    if start < 0 or not raw.endswith(suffix) or hashlib.sha256(
+            raw[start + len(marker):len(raw) - len(suffix)]).hexdigest() != envelope["payload_hash"]:
+        raise _unreadable(path, n, "its payload does not match its payload hash")
+
+
+def _fill_id(path, n, kind, envelope):
+    """The fill ID of a committed fill input exactly as the engine reads one, else ResolveRefused."""
+    payload = envelope["payload"]
+    if (kind != LOG_INPUT or envelope["schema_version"] != FILL_VERSION or not isinstance(payload, dict)
+            or tuple(sorted(payload)) != FILL_FIELDS
+            or not all(_is_text(payload[k]) for k in ("account_id", "client_order_id", "fill_id", "instrument_id"))
+            or payload["side"] not in ("buy", "sell") or not _is_count(payload["quantity"])
+            or not _is_number(payload["price"]) or payload["price"] <= 0
+            or not _is_number(payload["commission"]) or payload["commission"] < 0
+            or not _is_time(payload["filled_at"], WHOLE_SECOND)):
+        raise _unreadable(path, n, "it is a fill but not an input {} version {} as the engine reads one".format(
+            FILL_TYPE, FILL_VERSION))
+    return payload["fill_id"]
+
+
+def _is_text(value):
+    return isinstance(value, str) and bool(value)
+
+
+def _is_count(value):
+    """Whether value is a whole number above zero (not a bool)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _is_time(value, shape):
+    """Whether value is an RFC 3339 time with its zone, of the given shape, naming a real instant."""
+    if not isinstance(value, str) or not shape.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return True
 
 
 def acknowledge_correction(pending, exec_id, corrects, reason, fills):
     """Record the owner's acknowledgement that IBKR's execution exec_id corrects execution corrects.
 
-    fills holds the fill IDs the engine's journal holds (journalled_fills).
+    fills holds the fill IDs the engine's durable log holds (journalled_fills).
     Refuses (ResolveRefused, nothing changed) while an adapter holds the
     pending file, an empty reason, a pair that is not a correction (the same
     execId base, another last segment: reports.check_acknowledged), a
@@ -739,7 +888,7 @@ def acknowledge_correction(pending, exec_id, corrects, reason, fills):
         raise ResolveRefused(str(err)) from None
     if corrects not in fills:
         raise ResolveRefused(
-            "execution {} was never recorded as a fill in the engine's journal, so there is no original fill for "
+            "execution {} was never recorded as a fill in the engine's durable log, so there is no original fill for "
             "the engine to keep: the correction is not acknowledged. Reconcile the order's shares by hand "
             "(docs/runbooks/reconciliation.md) before the adapter starts again".format(corrects))
     held = _lock(pending.lock_path)
@@ -791,8 +940,9 @@ def main(argv=None, today=None):
     ack = commands.add_parser("acknowledge-correction",
                               help="acknowledge IBKR's correction of an execution, so the adapter can start again")
     ack.add_argument("pending_file", help="the adapter's pending-input file")
-    ack.add_argument("--journal", required=True,
-                     help="the engine's journal, which must hold the corrected execution as a fill")
+    ack.add_argument("--journal", required=True, metavar="ENGINE_LOG",
+                     help="the engine's durable log (its -log file, which it writes as it runs; ADR 0027), which "
+                          "must hold the corrected execution as a committed fill")
     ack.add_argument("exec_id", help="the correction's execution ID")
     ack.add_argument("--corrects", required=True, help="the execution ID it corrects (the fill the engine holds)")
     ack.add_argument("--reason", required=True, help="what IBKR's trades show; kept with the acknowledgement")

@@ -7,6 +7,7 @@ under its ID; the engine answers with the reply it recorded, and never
 applies the input twice. The adapter sends each released order once.
 """
 import copy
+import hashlib
 import json
 import sys
 import tempfile
@@ -22,9 +23,11 @@ if tests_dir not in sys.path:
 
 from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
-                   PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
+                   NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
                    acknowledge_correction, journalled_fills, main, resolve)
 from sender import OrderRequest
+
+TESTDATA = Path(__file__).resolve().parent / "testdata"
 
 
 def released(client_order_id, send=True):
@@ -127,18 +130,58 @@ def to_request(order, session=None):
                         order_type="LMT", limit_price=order["limit_price"], tif="DAY", session=session)
 
 
-# The fills the engine's journal holds, for the acknowledgement tests.
+# The fills the engine's durable log holds, for the acknowledgement tests.
 FILLS = frozenset({"e.1.01"})
+# The engine's durable log as internal/journal writes it (ADR 0027): a
+# header, then each input's group of records closed by a commit.
+LOG_CHAIN = ("seed=sha256(canonical_log_header_bytes); "
+             "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
+LOG_CONFIGURATION = "sha256:" + "0" * 64
+LOG_STRATEGY = "target-weight-ira/1.0.0+test"
+
+
+def log_header():
+    return json.dumps({"log_version": 1, "chain_algorithm": LOG_CHAIN, "configuration_hash": LOG_CONFIGURATION,
+                       "strategy_version": LOG_STRATEGY}, separators=(",", ":")) + "\n"
+
+
+def fill_payload(fill_id, account_id="DU1234567"):
+    return {"account_id": account_id, "client_order_id": "tw-1", "fill_id": fill_id, "instrument_id": "SPY",
+            "side": "buy", "quantity": 4, "price": 401.25, "commission": 1.0, "filled_at": "2026-10-17T13:30:01Z"}
+
+
+def log_group(sequence, entries, committed=True):
+    """One group of the engine's durable log from sequence on: (kind, type, schema version, payload) lines, then its commit.
+
+    The record hashes are stand-ins: the relay reads the log's shape and each
+    payload against its hash, and the chain is the engine's to verify
+    (testdata/engine_log.jsonl is a log the engine's own writer made).
+    """
+    lines = []
+    for n, (kind, event_type, schema_version, payload) in enumerate(entries, sequence):
+        raw = json.dumps(payload, separators=(",", ":"))
+        envelope = json.dumps({"id": "e:{}".format(n), "type": event_type, "envelope_version": 1,
+                               "schema_version": schema_version, "event_time": "2026-10-17T13:30:00Z",
+                               "recorded_at": "2026-10-17T13:30:00Z", "sequence": n, "source": "ibkr-adapter",
+                               "strategy_version": LOG_STRATEGY, "configuration_hash": LOG_CONFIGURATION,
+                               "payload_hash": hashlib.sha256(raw.encode()).hexdigest()}, separators=(",", ":"))
+        record_hash = "sha256:" + hashlib.sha256("record {}".format(n).encode()).hexdigest()
+        lines.append('{{"record":{{"sequence":{},"kind":"{}","envelope":{},"payload":{}}},"record_hash":"{}"}}}}\n'
+                     .format(n, kind, envelope[:-1], raw, record_hash))
+    if committed:
+        lines.append(json.dumps({"commit": {"sequence": sequence + len(entries) - 1, "record_hash": record_hash}},
+                                separators=(",", ":")) + "\n")
+    return lines
 
 
 def write_engine_journal(path, fill_ids):
-    """An engine journal (one JSON object per line) holding an input fill for each of fill_ids, among other lines."""
-    lines = [{"sequence": 1, "kind": "input", "envelope": {"type": "market.session.closed", "payload": {}}}]
-    for n, fill_id in enumerate(fill_ids, 2):
-        lines.append({"sequence": n, "kind": "input", "envelope": {
-            "type": "execution.fill", "schema_version": 5, "payload": {"account_id": "DU1234567", "fill_id": fill_id}}})
-    lines.append({"sequence": len(lines) + 1, "kind": "decision", "envelope": {"type": "risk.order.released"}})
-    Path(path).write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    """The engine's durable log holding a committed input fill for each of fill_ids, among other groups."""
+    lines = [log_header()]
+    lines += log_group(1, [("input", "market.session.closed", 1, {"session": "2026-10-16"}),
+                           ("decision", "risk.order.released", 1, {"client_order_id": "tw-1"})])
+    for n, fill_id in enumerate(fill_ids, 3):
+        lines += log_group(n, [("input", "execution.fill", 5, fill_payload(fill_id))])
+    Path(path).write_text("".join(lines), encoding="utf-8")
     return str(path)
 
 
@@ -957,16 +1000,75 @@ class RelayTests(unittest.TestCase):
             f.write("[]\n")
         self.assertEqual(main(ack + ["e.1.03", "--corrects", "e.1.01", "--reason", "x"]), 1)
 
-    def test_the_engine_journal_is_read_strictly_for_its_fills(self):
-        journal = Path(write_engine_journal(Path(self.dir.name) / "journal.jsonl", ["e.1.01", "e.2.01"]))
+    def test_the_never_sent_at_broker_stop_names_a_resolve_command_that_runs(self):
+        message = str(NeverSentAtBroker("tw-1"))
+        self.assertIn("relay.py resolve PENDING_FILE tw-1 --sent --reason", message)
+
+    def test_the_fills_are_read_from_the_engines_durable_log_as_its_own_writer_makes_it(self):
+        # testdata/engine_log.jsonl was written by internal/journal's
+        # LogWriter (internal/journal pins it with RecoverLog): one committed
+        # fill, and a torn tail holding a fill record not yet committed,
+        # which is no proof the engine recorded that fill.
+        self.assertEqual(journalled_fills(str(TESTDATA / "engine_log.jsonl")), {"0001f4e8.paper.01.01"})
+
+    def test_only_committed_fills_count_and_a_line_still_being_written_is_not_read(self):
+        journal = Path(write_engine_journal(Path(self.dir.name) / "log.jsonl", ["e.1.01", "e.2.01"]))
         self.assertEqual(journalled_fills(str(journal)), {"e.1.01", "e.2.01"})
         good = journal.read_text(encoding="utf-8")
-        fill = {"sequence": 9, "kind": "input", "envelope": {"type": "execution.fill", "payload": {}}}
-        for bad in ("{not json\n", "[]\n", json.dumps(fill) + "\n"):
-            with self.subTest(bad=bad):
-                journal.write_text(good + bad, encoding="utf-8")
-                with self.assertRaises(ResolveRefused):
+        uncommitted = "".join(log_group(5, [("input", "execution.fill", 5, fill_payload("e.3.01"))], committed=False))
+        journal.write_text(good + uncommitted, encoding="utf-8")
+        self.assertEqual(journalled_fills(str(journal)), {"e.1.01", "e.2.01"}, "a group without its commit")
+        journal.write_text(good + uncommitted[:40], encoding="utf-8")
+        self.assertEqual(journalled_fills(str(journal)), {"e.1.01", "e.2.01"}, "a line the engine is writing")
+
+    def test_a_durable_log_not_as_the_engine_writes_it_is_reported_unreadable_never_as_no_fills(self):
+        journal = Path(self.dir.name) / "log.jsonl"
+        write_engine_journal(journal, ["e.1.01"])
+        good = journal.read_text(encoding="utf-8").splitlines(keepends=True)
+        header, groups = good[0], good[1:]
+
+        def fill(payload, version=5, kind="input", sequence=5, committed=True):
+            return "".join(log_group(sequence, [(kind, "execution.fill", version, payload)], committed=committed))
+
+        partial = {"fill_id": "e.1.01"}
+        record = json.loads(groups[-2])
+        bad_hash = json.dumps(dict(record, record=dict(record["record"], envelope=dict(
+            record["record"]["envelope"], payload_hash="0" * 64))), separators=(",", ":")) + "\n"
+        cases = {
+            "empty": "",
+            "a header only being written": header[:-1],
+            "an end-of-run journal": json.dumps({"journal_version": 1, "chain_algorithm": LOG_CHAIN}) + "\n",
+            "another log version": header.replace('"log_version":1', '"log_version":2'),
+            "a header field missing": header.replace('"strategy_version"', '"strategy"'),
+            "not JSON": header + "{not json\n",
+            "a bare object": header + "{}\n",
+            "a record and a commit": header + json.dumps({"record": {}, "commit": {}}) + "\n",
+            "a sequence gap": header + "".join(groups) + fill(fill_payload("e.2.01"), sequence=6),
+            "a decision first": header + fill(fill_payload("e.2.01"), kind="decision", sequence=1),
+            "a commit naming another record": header + "".join(groups[:-1]) + json.dumps(
+                {"commit": {"sequence": 3, "record_hash": "sha256:" + "f" * 64}}) + "\n",
+            "a commit with nothing to commit": header + "".join(groups) + groups[-1],
+            "a fill with only a fill ID": header + "".join(groups) + fill(partial),
+            "a fill of another schema": header + "".join(groups) + fill(fill_payload("e.2.01"), version=4),
+            "a fill of no shares": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), quantity=0)),
+            "a fill at no price": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), price=0)),
+            "a fill with a negative commission": header + "".join(groups) + fill(
+                dict(fill_payload("e.2.01"), commission=-1)),
+            "a fill of no side": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), side="short")),
+            "a fill with an extra field": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), extra=1)),
+            "a fill time with no zone": header + "".join(groups) + fill(
+                dict(fill_payload("e.2.01"), filled_at="2026-10-17T13:30:01")),
+            "a fill decided, not input": header + groups[0][:0] + "".join(log_group(1, [
+                ("input", "market.session.closed", 1, {}), ("decision", "execution.fill", 5,
+                                                            fill_payload("e.2.01"))])),
+            "a payload that does not match its hash": header + "".join(groups[:-2]) + bad_hash + groups[-1],
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                journal.write_text(text, encoding="utf-8")
+                with self.assertRaises(ResolveRefused) as raised:
                     journalled_fills(str(journal))
+                self.assertIn("durable log", str(raised.exception))
         with self.assertRaises(ResolveRefused):
             journalled_fills(str(journal) + ".missing")
 
