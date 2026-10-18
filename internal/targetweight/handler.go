@@ -74,7 +74,16 @@ import (
 //     applied (risklimit.Gate.SetKillSwitch; ADR 0019, amendment of
 //     2026-10-17), so a journal written under an earlier version does not
 //     replay.
-const RulesVersion = "1.12.0"
+//   - 1.13.0 is reserved for a rules change landing in parallel.
+//   - 1.14.0 has Boost re-plan, at the next decided session, the difference
+//     between the account's position and the target in force after a
+//     refusal that leaves the engine Normal (the kill switch, a stale broker
+//     snapshot), where earlier versions ordered only when the target changed
+//     (owner's decision of 2026-10-18; ADR 0026, point 2, "Boost", amended
+//     2026-10-18, after ADR 0019 reading 10). A refusal under Degraded or
+//     Halted follows that state's own rules, as before. A journal holding
+//     such a refusal decides differently under 1.12.0.
+const RulesVersion = "1.14.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -171,6 +180,10 @@ type Handler struct {
 	latched    bool
 	inForce    float64
 	inForceSet bool
+	// replan is set when the last planned order was refused and the engine
+	// stayed Normal, so the next decided session plans the difference to the
+	// target in force again (orderplan.BoostInput.Replan).
+	replan     bool
 	gapAt      time.Time
 	lastPeriod time.Time // last session closed
 	bar        *event.CompletedBarAdjustedPayload
@@ -536,8 +549,10 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		Tag: decisionID, Decision: decided, Snapshot: *snapshot,
 		ReferencePrice: bar.Raw.Close, PriceBand: h.cfg.Limits.PriceBand,
 		WorkingSells: h.gate.PendingSells(h.cfg.Boost.InstrumentID),
+		Replan:       h.replan,
 	})
 	b.fail(err)
+	h.replan = false
 	if !ok || order.Side != event.OrderSideSell {
 		// The decision no longer plans the sell that fired a withheld sale.
 		if l := h.gate.LapseExitSale(); l != nil {
@@ -552,7 +567,12 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
 	}
 	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}, At: b.at}
-	if outcome := b.order(gateOrder, book); order.Side == event.OrderSideSell && outcome.Refused != nil {
+	outcome := b.order(gateOrder, book)
+	// A refusal that leaves the engine Normal is re-planned at the next
+	// decision (ADR 0026, point 2, "Boost", amended 2026-10-18); one under
+	// Degraded or Halted follows that state's own rules.
+	h.replan = outcome.Refused != nil && h.gate.State() == risklimit.StateNormal
+	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
 	}
 	return b.result()

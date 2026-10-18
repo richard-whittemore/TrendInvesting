@@ -19,7 +19,10 @@ import (
 // the instrument's raw previous close (ADR 0004: orders are priced on raw
 // prices) and the configured price band. WorkingSells are the shares of the
 // instrument already being sold (risklimit.Gate.PendingSells), which the
-// account snapshot does not report.
+// account snapshot does not report. Replan is true when the last order
+// planned for this account was refused and the refusal left the engine
+// Normal (the kill switch, a stale broker snapshot): the difference to the
+// target in force is then planned though the target has not changed.
 type BoostInput struct {
 	Tag            string
 	Decision       event.TargetsDecidedPayload
@@ -27,14 +30,18 @@ type BoostInput struct {
 	ReferencePrice float64
 	PriceBand      float64
 	WorkingSells   int64
+	Replan         bool
 }
 
 // PlanBoost plans Boost's one order (ADR 0026, point 2, "Boost";
 // template.py:96-100): only when the decided target differs from the target in
-// force, or no target is in force yet (the first decision), one order of
-// want x V / p - q whole shares, rounded toward zero, as a limit at the band's
-// edge. It reports false when no order is planned: no state change, or a
-// difference that rounds to zero shares.
+// force, or no target is in force yet (the first decision), or the last order
+// was refused leaving the engine Normal (Replan; ADR 0026, point 2, amended
+// 2026-10-18, after ADR 0019 reading 10: a refused order is re-planned at the
+// next decision), one order of want x V / p - q whole shares, rounded toward
+// zero, as a limit at the band's edge. It reports false when no order is
+// planned: no state change and no re-plan, or a difference that rounds to
+// zero shares.
 //
 // Rounding toward zero never sells below the target on an exit nor buys above
 // it on an entry, and a sell never exceeds the holding, since want x V / p is
@@ -76,7 +83,7 @@ func PlanBoost(in BoostInput) (event.OrderPlannedPayload, bool, error) {
 	if held < 0 {
 		return event.OrderPlannedPayload{}, false, fmt.Errorf("orderplan: account holds %d %s; the planner never plans against a short", held, target.InstrumentID)
 	}
-	if d.Boost.TargetInForceSet && d.Boost.TargetInForce == target.Weight {
+	if d.Boost.TargetInForceSet && d.Boost.TargetInForce == target.Weight && !in.Replan {
 		return event.OrderPlannedPayload{}, false, nil
 	}
 

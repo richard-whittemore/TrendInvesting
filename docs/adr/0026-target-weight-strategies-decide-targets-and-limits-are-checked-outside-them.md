@@ -71,7 +71,8 @@ contract are Turtle-shaped too (Consequences).
   cited in source comments to that section and the research lines above. Two
   clarifications from the sources:
   - Boost trades only when its state changes (`template.py:97-100`); drift is
-    not traded.
+    not traded. Amended 2026-10-18: a refusal that leaves the engine Normal
+    is re-planned at the next decision (point 2).
   - Weights use split- and dividend-adjusted closes; the planner (point 2)
     uses raw closes, which are what trades (ADR 0004).
 - **Floating point:** every product feeding a sum is rounded first
@@ -129,6 +130,9 @@ want·V / p − q whole shares, rounded toward zero, where want is 0.98 or
 **first** decision has no state in force (the research starts with
 `last_want = None`, `template.py`), so it always produces the order to the
 first target, normally 98% from cash, whether or not a boost is on.
+Amended 2026-10-18 (owner): after a refusal that leaves the engine Normal,
+the next decision also plans the difference to the target in force (see the
+amendment of that date).
 
 **D7, whole shares, open: both options specified.** The choice is
 configuration (point 6):
@@ -559,3 +563,35 @@ whose target weight is positive; the three cases below follow from that.
   picks: a book decided under it, or one withheld as `all-unaffordable`. They
   stay if the run then withholds a decided book; a decision the rule
   withheld for any other reason compared no pick and records none.
+
+## Amendment (2026-10-18, owner decision): Boost re-plans after a refusal that leaves the engine Normal
+
+Accepted by the owner on 2026-10-18. It amends point 2, "Boost", and the
+clarification in point 1 that Boost trades only when its state changes.
+
+- **The rule.** After Boost's planned order is refused and the refusal
+  leaves the engine Normal, the next decided session plans the difference
+  between the account's position and the target in force, want·V / p − q
+  whole shares rounded toward zero as before, even though the target has not
+  changed. This is consistent with ADR 0019 reading 10: a refused sell "is
+  re-planned at the next decision". The refusals that leave the engine
+  Normal are the kill switch and `stale-broker-snapshot` (point 3).
+- **Why.** Ordering on a state change only left the account away from its
+  target after such a refusal until Boost's target next changed: the kill
+  switch engaged at the first decision refused the 98% entry, and after its
+  release the account stayed in cash.
+- **What does not change.** A refusal under Degraded or Halted, or one that
+  degrades or halts the account (a limit breach, an undecided order),
+  follows those states' own rules (ADR 0019, amended 2026-09-24), including
+  the sale back to 98% that a refused exit fires. Drift is still not
+  traded: with no refusal before it, an unchanged target plans nothing. A
+  withheld session plans nothing, so the re-plan waits for the next decided
+  one. If the re-planned order is refused again while the engine is still
+  Normal (the switch still on), the decision after it re-plans again, so a
+  switch left on records one refusal per decision. A sell is still net of
+  the sells already working, so it never sells below the target alongside
+  the sale back to 98%.
+- **Replay.** The re-plan is derived from the journal's own refusal, so a
+  resumed run rebuilds it by replaying its durable log (ADR 0027). A journal
+  holding such a refusal decides differently from an earlier build, so this
+  is a rules change: target-weight RulesVersion 1.14.0 (ADR 0016).

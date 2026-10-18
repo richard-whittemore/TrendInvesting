@@ -182,3 +182,20 @@ func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheReplanAfterARefusal pins ADR 0016's
+// same-rules-version replay guarantee for Boost's re-plan: after a refusal
+// that leaves the engine Normal, the next decision plans the difference to
+// the target in force though the target is unchanged (ADR 0026, point 2,
+// "Boost", amended 2026-10-18), so a journal holding such a refusal decides
+// differently under an earlier rules version. 1.13.0 is reserved for a rules
+// change landing in parallel, so this one is 1.14.0.
+func TestRulesVersionDeclaresTheReplanAfterARefusal(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.13.0 once Boost re-plans a refused order at the next decision", targetweight.RulesVersion)
+		}
+	}
+}
