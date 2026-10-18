@@ -3,6 +3,9 @@ import math
 from collections import namedtuple
 
 MODES = ("dry-run", "paper", "live")
+# Every IBKR paper trading account ID begins "DU", and no live one does
+# (ADR 0025 point 3; the engine's event.PaperAccountPrefix).
+PAPER_ACCOUNT_PREFIX = "DU"
 
 _FIELDS = (
     "host", "port", "client_id", "account_id", "mode",
@@ -67,6 +70,16 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("account_id must be a non-empty string")
         if self.mode not in MODES:
             raise ConfigError("mode must be one of {}".format(", ".join(MODES)))
+        # The account is bound to the mode, as the engine binds it: paper
+        # names a paper account and live does not, so a paper adapter can
+        # never send to a live account. A dry-run sends nothing.
+        paper = is_paper_account(self.account_id)
+        if self.mode == "paper" and not paper:
+            raise ConfigError("mode paper names account {!r}, but an IBKR paper account ID begins {!r}".format(
+                self.account_id, PAPER_ACCOUNT_PREFIX))
+        if self.mode == "live" and paper:
+            raise ConfigError("mode live names account {!r}, but an account ID beginning {!r} is a paper "
+                              "account".format(self.account_id, PAPER_ACCOUNT_PREFIX))
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
                      "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max"):
             value = getattr(self, name)
@@ -77,6 +90,11 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("backoff_max must be at least backoff_initial")
         if not _is_int(self.max_connect_attempts) or self.max_connect_attempts < 1:
             raise ConfigError("max_connect_attempts must be a positive integer")
+
+
+def is_paper_account(account_id):
+    """Whether account_id is an IBKR paper trading account's ID."""
+    return isinstance(account_id, str) and account_id.startswith(PAPER_ACCOUNT_PREFIX)
 
 
 def _is_int(value):

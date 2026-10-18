@@ -565,8 +565,8 @@ so Pro's margin rate does not help them.
 | 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Timing decided 2026-10-16: live ranks the latest session (section 10, D8); its effect on returns was measured (+1.69 pp/yr in-sample, -1.41 pp/yr held out, drawdown slightly shallower in both, 6-7% more orders) and choice A stands (`docs/research/universe-massive-2026-10.md`) |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
-| 4 | IBKR paper trading | 2–3 clean months |
-| 5 | Limited live, one account at a time | A clean month each. The joint account goes live only after the margin-warning runbook has been rehearsed in paper trading (an injected low Excess Liquidity reading, handled end to end) |
+| 4 | IBKR paper trading, the three accounts in parallel | 2–3 clean months, per account |
+| 5 | Limited live: each account goes live as soon as its own gates are met, in parallel, with no serialisation between accounts (owner decision 2026-10-17, superseding "one account at a time") | A clean live month for each account, judged per account. The joint account goes live only after the margin-warning runbook has been rehearsed in paper trading (an injected low Excess Liquidity reading, handled end to end) |
 
 Each phase is a ticket with its own work log, worked test-first and merged
 only after the findings of whichever reviewers ran are addressed. Greptile

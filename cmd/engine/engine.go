@@ -202,6 +202,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if err := checkModeBinding(opts.mode, comp); err != nil {
 		return err
 	}
+	if err := checkSendingGate(opts.mode); err != nil {
+		return err
+	}
 	approval, err := freshRunApproval(opts, comp)
 	if err != nil {
 		return err

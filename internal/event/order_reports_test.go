@@ -1,8 +1,12 @@
 package event_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -108,5 +112,108 @@ func TestOrderReportsRefusesAFillPastTheOrderWhateverItsSize(t *testing.T) {
 	}
 	if o, _ := r.Order("tw-1"); o.Filled != 5 || o.Terminal {
 		t.Errorf("order %+v, want it left at 5 filled and working", o)
+	}
+}
+
+// adapterRecord is one input as the IBKR adapter's paper sender journals it
+// (adapter/ibkr/reports.py): its event type, schema version and payload.
+type adapterRecord struct {
+	EventType     string          `json:"event_type"`
+	SchemaVersion uint32          `json:"schema_version"`
+	Payload       json.RawMessage `json:"payload"`
+}
+
+// readAdapterFile decodes one of the IBKR adapter's test files, refusing a
+// field the engine does not know.
+func readAdapterFile(t *testing.T, name string, into any) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "adapter", "ibkr", "tests", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict(t, name, raw, into)
+}
+
+func strict(t *testing.T, name string, raw []byte, into any) {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(into); err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+}
+
+// TestTheIBKRAdaptersPaperReportsAreReadByOrderReports is the contract with
+// the IBKR adapter's paper sender: its test sends the released order in
+// paper_released.json to the fake gateway and journals exactly the records
+// in each reports file, and the engine reads every one of them by the rule
+// it reads a venue's reports by (OrderReports), at the versions it reads a
+// venue's reports at (lifecycle version 2, fill version 5), to the order's
+// end: filled in two executions, or refused by IBKR.
+func TestTheIBKRAdaptersPaperReportsAreReadByOrderReports(t *testing.T) {
+	var released event.OrderReleasedPayload
+	readAdapterFile(t, "paper_released.json", &released)
+	if err := released.ValidateSchema(released.SchemaVersion()); err != nil {
+		t.Fatal(err)
+	}
+	if released.Mode != event.TradingModePaper || !released.Send || !strings.HasPrefix(released.AccountID, event.PaperAccountPrefix) {
+		t.Fatalf("released %+v, want a paper release to send to a paper account", released)
+	}
+	for _, tc := range []struct {
+		file             string
+		lifecycles       int
+		fills            int
+		filled           int64
+		finalStatusWants string
+	}{
+		{"paper_reports.json", 1, 2, released.Quantity, event.OrderLifecycleStatusSubmitted},
+		{"paper_rejected.json", 1, 0, 0, event.OrderLifecycleStatusInvalid},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			var records []adapterRecord
+			readAdapterFile(t, tc.file, &records)
+			r := event.NewOrderReports()
+			r.Release(released)
+			var lifecycles, fills int
+			var last string
+			for i, rec := range records {
+				switch rec.EventType {
+				case event.OrderLifecycleEventType:
+					var p event.LimitOrderLifecyclePayload
+					strict(t, tc.file, rec.Payload, &p)
+					if rec.SchemaVersion != event.OrderLifecycleLimitVersion || p.SchemaVersion() != rec.SchemaVersion {
+						t.Fatalf("record %d: lifecycle at version %d, want a venue's report at %d", i, rec.SchemaVersion, event.OrderLifecycleLimitVersion)
+					}
+					if err := p.ValidateSchema(rec.SchemaVersion); err != nil {
+						t.Fatalf("record %d: %v", i, err)
+					}
+					if _, err := r.Lifecycle(p); err != nil {
+						t.Fatalf("record %d: OrderReports refused the lifecycle report: %v", i, err)
+					}
+					lifecycles++
+					last = p.Status
+				case event.FillEventType:
+					var p event.TargetWeightFillPayload
+					strict(t, tc.file, rec.Payload, &p)
+					if rec.SchemaVersion != event.FillTargetWeightVersion {
+						t.Fatalf("record %d: fill at version %d, want %d", i, rec.SchemaVersion, event.FillTargetWeightVersion)
+					}
+					if err := p.Validate(); err != nil {
+						t.Fatalf("record %d: %v", i, err)
+					}
+					if _, redelivery, err := r.Fill(p); err != nil || redelivery {
+						t.Fatalf("record %d: OrderReports read the fill as redelivery %v, err %v", i, redelivery, err)
+					}
+					fills++
+				default:
+					t.Fatalf("record %d: event type %q is neither a lifecycle report nor a fill", i, rec.EventType)
+				}
+			}
+			o, _ := r.Order(released.ClientOrderID)
+			if lifecycles != tc.lifecycles || fills != tc.fills || o.Filled != tc.filled || !o.Terminal || last != tc.finalStatusWants {
+				t.Errorf("%d lifecycle reports (last %q), %d fills, %d filled, terminal %v; want %d (last %q), %d, %d, terminal",
+					lifecycles, last, fills, o.Filled, o.Terminal, tc.lifecycles, tc.finalStatusWants, tc.fills, tc.filled)
+			}
+		})
 	}
 }

@@ -245,5 +245,10 @@ class IbapiClient(TWSApi):
         self._client.reqExecutions(req_id, flt)
 
     def place_order(self, order_id, contract, order):
-        """Disabled: no order reaches IBKR before the paper and limited-live gates (AGENTS.md rule 5)."""
-        raise LiveSendingDisabled("placeOrder is disabled until the paper and limited-live gates")
+        """Disabled: the real client sends nothing until the paper-account test enables it under review.
+
+        The paper path is exercised against the fake client only (AGENTS.md
+        rule 5; ADR 0025 Consequences: the paper-account test is run by hand).
+        """
+        raise LiveSendingDisabled("placeOrder on the real client is disabled until the paper-account test "
+                                  "enables it")

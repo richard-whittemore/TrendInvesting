@@ -20,6 +20,9 @@ prints, and what happens when something goes wrong.
 - [redelivery](redelivery.md): how an order the engine decided reaches IBKR
   exactly once, even when the engine or the adapter stops at the wrong
   moment.
+- [paper-trading](paper-trading.md): the one mode that sends orders, and
+  only to a paper account; what is sent, what never is, what you see, and
+  what happens when the link drops or the adapter stops mid-send.
 - [order-lifecycle](order-lifecycle.md): reading an order's state from the
   log (committed, released, acknowledged), and the alert for an order IBKR
   never acknowledged.

@@ -70,6 +70,7 @@ Every download in `deploy/versions.env` is verified by SHA-256 and provisioning 
 
 - **IBC:** release and asset at `https://github.com/IbcAlpha/IBC/releases`. The release publishes no checksum, so compute it yourself from the downloaded asset and say so in the PR.
 - **IB Gateway:** IBKR's stable installer link is a moving target and publishes no checksum; the version is read from `https://download2.interactivebrokers.com/installers/ibgateway/stable-standalone/version.json`. When the file changes, provisioning fails closed. ADR 0025 point 5: repeat the paper-account execution-coverage test on the new version first, then change `GATEWAY_BUILD`, `GATEWAY_MAJOR` and `GATEWAY_SHA256` together.
+- **TWS API (`ibapi`):** IBKR's download page, `https://download2.interactivebrokers.com/installers/tws-api/index.html`. Only the "Latest" Mac/Linux build includes the Python API, so the pin is Latest; its link is a moving target and publishes no checksum, so compute the SHA-256 of the downloaded installer and say so in the PR. Provisioning fetches and verifies it; it is not yet installed into the adapter's environment (that step comes with the paper-account test). ADR 0025 point 5: repeat the paper-account coverage test on the new version first, then change `TWSAPI_VERSION` and `TWSAPI_SHA256` together.
 - **Tailscale:** `https://pkgs.tailscale.com/stable/`, with the checksum from the `.sha256` file beside the tarball.
 
 ## What was rehearsed, and what was not

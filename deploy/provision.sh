@@ -3,7 +3,7 @@
 # x86_64, a Lightsail VM). Safe to run again after any partial failure.
 #
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
-#   sudo deploy/provision.sh gateway    IBC and IB Gateway (pinned, checksummed)
+#   sudo deploy/provision.sh gateway    IBC, IB Gateway and the TWS API (pinned, checksummed)
 #   sudo deploy/provision.sh services   systemd units, directories, config stubs
 #   sudo deploy/provision.sh firewall   close everything except Tailscale
 #   sudo deploy/provision.sh all        base, gateway, services, then firewall
@@ -128,6 +128,13 @@ step_gateway() {
     touch "/opt/ibc/.version-${IBC_VERSION}"
     rm -rf "$tmp"
   fi
+
+  # IBKR's TWS API (the adapter's ibapi), fetched and verified against its
+  # pinned checksum (ADR 0025 point 4, amended 2026-10-16). It is not yet
+  # installed into the adapter's environment: that step is written and run
+  # with the paper-account test, the first use of the real client.
+  log "TWS API ${TWSAPI_VERSION} (fetched and verified, not installed)"
+  fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
 
   log "IB Gateway ${GATEWAY_BUILD}"
   local target=/var/lib/ti-gateway/Jts/ibgateway/${GATEWAY_MAJOR}

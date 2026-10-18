@@ -50,7 +50,7 @@ func parseAndRunWithBuild(ctx context.Context, args []string, out io.Writer, bui
 	resumePath := flags.String("resume", "", "path of a previous process's durable log to rebuild state from before listening; requires -log")
 	approvalPath := flags.String("approval", "", "path of the owner's operator.run.approved file: required for a fresh run when the -log directory already holds an earlier run's durable log; never with -resume")
 	asOf := flags.String("as-of", "", "required nonzero run start as an RFC 3339 time; warm-up bars may precede it (ADR 0012)")
-	mode := flags.String("mode", "", "required: what the adapter does with decisions: backtest, dry-run, paper or live; every mode but backtest requires -log (ADR 0027)")
+	mode := flags.String("mode", "", "required: what the adapter does with decisions: backtest, dry-run, paper or live (live is refused until the limited-live gate); every mode but backtest requires -log (ADR 0027)")
 	maxFrame := flags.Int("max-frame", transport.DefaultMaxFrameBytes, "maximum frame size in bytes")
 	decisionTimeout := flags.Duration("decision-timeout", 5*time.Second, "per-decision timeout; 0 disables")
 	if err := flags.Parse(args); err != nil {

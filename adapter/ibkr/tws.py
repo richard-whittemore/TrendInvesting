@@ -23,9 +23,11 @@ class TWSApi:
     to it, possibly from its own reader thread, and raises ConnectFailed if
     the socket connect and IBKR's handshake take longer than timeout seconds.
     Each connect is a new session: no callback of an earlier session may reach
-    its Inbox. place_order exists so the
-    order path has a seam; no implementation may send before the paper and
-    limited-live gates (AGENTS.md rule 5).
+    its Inbox. place_order is called only by sender.PaperSender, on a paper
+    configuration (AGENTS.md rule 5); its contract and order carry ibapi's
+    attribute names (Contract: conId, symbol, secType, currency, exchange;
+    Order: orderRef, account, action, totalQuantity, orderType, lmtPrice,
+    tif, transmit), and IBKR answers on the Inbox.
     """
 
     def connect(self, host, port, client_id, callbacks, timeout):

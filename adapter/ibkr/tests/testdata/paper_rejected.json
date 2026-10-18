@@ -1,0 +1,18 @@
+[
+  {
+    "event_type": "execution.order.lifecycle",
+    "schema_version": 2,
+    "payload": {
+      "account_id": "DU0000001",
+      "client_order_id": "tw-paper-1",
+      "order_id": "order:11:7",
+      "instrument_id": "SPY",
+      "side": "buy",
+      "status": "invalid",
+      "quantity": 9,
+      "limit_price": 401.5,
+      "occurred_at": "2026-10-16T13:30:00Z",
+      "message": "Order rejected - reason: synthetic margin"
+    }
+  }
+]

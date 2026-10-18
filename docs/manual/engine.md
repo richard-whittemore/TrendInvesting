@@ -28,6 +28,9 @@ and records everything, and marks every order "do not send".
      configuration;
    - a paper configuration names a live account, or a live configuration a
      paper account (IBKR paper account numbers begin "DU");
+   - the mode is live: no live order goes out before the limited-live gate,
+     so only paper, bound to a paper account, releases orders to send (see
+     [paper trading](paper-trading.md));
    - there is no durable log (`-log`) for a mode that can reach a broker;
    - this is a fresh run after an earlier one and you have not approved it,
      or the approval leaves out the state in force (see `restart.md`);
@@ -47,7 +50,8 @@ and records everything, and marks every order "do not send".
    anything (ADR 0027). A crash can lose at most the one input it was
    writing, and nothing from that input was ever released.
 6. **In dry-run, every released order says `send: false`.** The adapter must
-   never send it. Paper and live say `send: true`.
+   never send it. Paper says `send: true` (live would too, but the engine
+   refuses to start in live until the limited-live gate).
 7. **When stopped** (SIGTERM, which `systemctl stop` sends), it also writes a
    journal of the whole run (ADR 0017).
 

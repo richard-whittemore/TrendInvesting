@@ -309,6 +309,26 @@ func TestTheAccountMustMatchTheMode(t *testing.T) {
 	}
 }
 
+// TestSendingIsEnabledOnlyInPaperUntilTheLimitedLiveGate: a live
+// configuration naming a live account is valid, but an engine in -mode live
+// would release orders marked to be sent to it, so it refuses to start
+// until the limited-live gate (AGENTS.md rule 5; plan.md section 9, Phase
+// 5). Only -mode paper, bound to a paper account, releases orders to send.
+func TestSendingIsEnabledOnlyInPaperUntilTheLimitedLiveGate(t *testing.T) {
+	dir := t.TempDir()
+	opts := boostOptions(t, dir)
+	opts.mode, opts.configPath = modeLive, writeBoostConfiguration(t, dir, modeLive, "U1234567")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := run(ctx, opts, io.Discard)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "limited-live gate") {
+		t.Fatalf("-mode live with a live account: run() = %v, want a refusal naming the limited-live gate", err)
+	}
+	if _, statErr := os.Stat(opts.logPath); !os.IsNotExist(statErr) {
+		t.Error("the refused live run left a durable log behind")
+	}
+}
+
 // TestAMomentumConfigurationIsRefusedAsNotComposedHere: cmd/engine composes
 // Boost as its one target-weight strategy (ADR 0026, point 6); a momentum
 // configuration is refused by name rather than read as a Turtle

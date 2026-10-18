@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -130,6 +131,19 @@ func composeTargetWeight(path string, raw []byte, build string, asOf time.Time) 
 		handler: handler, configurationHash: hash, strategyVersion: strategyVersion,
 		configEnvelope: envelope, mode: cfg.Mode, accountID: cfg.AccountID,
 	}, nil
+}
+
+// checkSendingGate refuses -mode live: a live engine releases its orders
+// marked to be sent to a live account, and no live order goes out before the
+// limited-live gate (AGENTS.md rule 5; docs/live-trading/plan.md section 9,
+// Phase 5). Paper sends only to a paper account, which the configuration
+// binds to its mode (event.PaperAccountPrefix), so -mode paper is the one
+// mode that releases orders to send. Checked before anything is created.
+func checkSendingGate(declared string) error {
+	if declared == modeLive {
+		return errors.New("engine: -mode live is refused until the limited-live gate (AGENTS.md rule 5; docs/live-trading/plan.md section 9, Phase 5): only -mode paper, bound to a paper account, releases orders to send")
+	}
+	return nil
 }
 
 // checkModeBinding refuses a run whose declared -mode is not the mode its

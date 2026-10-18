@@ -45,6 +45,15 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ConfigError):
                 config(**bad)
 
+    def test_the_account_is_bound_to_the_mode(self):
+        # IBKR paper account IDs begin "DU" and live ones do not, so a paper
+        # configuration can never point the adapter at a live account.
+        self.assertEqual(config(mode="paper", account_id="DU0000001").mode, "paper")
+        for bad in (dict(mode="paper", account_id="U0000001"), dict(mode="live", account_id="DU0000001")):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError) as caught:
+                config(**bad)
+            self.assertIn("DU", str(caught.exception))
+
     def test_timing_values_must_be_finite(self):
         # NaN and infinity both pass a "> 0" test, and either would switch the
         # heartbeat deadline or the connect timeout off.

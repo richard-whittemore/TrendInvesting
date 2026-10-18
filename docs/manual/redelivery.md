@@ -155,5 +155,6 @@ and after a crash.
 | The engine refuses to resume | The log could not be resumed (see [restart](restart.md)). No reply can be re-delivered from a run that did not resume. | Follow `docs/runbooks/durable-log.md`. A fresh run starts from a reconciled baseline, so check IBKR's open orders first. |
 
 What this does **not** do yet: the IBKR adapter does not speak the engine's
-socket yet, and sending to IBKR is still switched off for paper and live
-(AGENTS.md rule 5). The relay is ready for both and is tested against fakes.
+socket yet. Sending is built for paper only and is tested against a fake
+gateway (see [paper trading](paper-trading.md)); live stays switched off
+(AGENTS.md rule 5).
