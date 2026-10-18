@@ -212,6 +212,25 @@ VARIANTS = {
                                                  "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "CASH": 30_000}),
     "OOS_F_COMBO_30K": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
                                                          RISK_OFF_FRACTION=0.5, CASH=30_000)),
+    # D7-L and the held name (docs/research/d7l-held-name-2026-10.md):
+    # FU_COMBO_30K and OOS_FU_COMBO_30K with ADR 0026's minimum-lot rule as
+    # written ("literal"), or with a held pick D7-L would skip kept ("held");
+    # None is the template unchanged, the same-day control.
+    "D7L_NONE_30K": ("momentum/minimum_lot.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                 "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                 "FRESH_SELECTION": True, "CASH": 30_000, "MIN_LOT": None}),
+    "D7L_LIT_30K": ("momentum/minimum_lot.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                "FRESH_SELECTION": True, "CASH": 30_000, "MIN_LOT": "literal"}),
+    "D7L_HELD_30K": ("momentum/minimum_lot.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                 "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                 "FRESH_SELECTION": True, "CASH": 30_000, "MIN_LOT": "held"}),
+    "OOS_D7L_LIT_30K": ("momentum/minimum_lot.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                        RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                        CASH=30_000, MIN_LOT="literal")),
+    "OOS_D7L_HELD_30K": ("momentum/minimum_lot.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                         RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                         CASH=30_000, MIN_LOT="held")),
     # combination books of F_HALF / F_COMBO and their held-out runs, traded
     # 1 or 3 sessions after the month's book is computed.
     "XF_HALF_D3": ("momentum/execution.py", dict(_HALF, EXEC_DELAY=3)),
@@ -372,7 +391,7 @@ def render(template_src, params, rates):
 #: Templates whose long-only modes ignore VOL_TARGET: their book comes from
 #: defensive_book, which has no volatility scaling.
 NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py",
-                 "momentum/fresh_universe.py", "momentum/parity_log.py")
+                 "momentum/fresh_universe.py", "momentum/parity_log.py", "momentum/minimum_lot.py")
 
 
 def check_variant(template, params):
