@@ -114,3 +114,31 @@ func TestARecorderStatesWhichInputsItCommitted(t *testing.T) {
 	}
 	assertCommitted(t, "a failed flush", durable, inputs[1], false)
 }
+
+// TestInputsRecordedBeforeCountsBackToTheFirstThatDoesNotMatch: the inputs
+// recorded immediately before a committed input, decisions skipped, are
+// counted back to the nearest input that does not match, so a caller can
+// tell how far inputs of its own moved an input from the sequence it was
+// sent with (ADR 0027, amendment "re-delivery on request"). An input never
+// committed has none before it.
+func TestInputsRecordedBeforeCountsBackToTheFirstThatDoesNotMatch(t *testing.T) {
+	t.Parallel()
+
+	recorder := journal.NewRecorder(emittingHandler())
+	inputs := testInputs(5)
+	for _, i := range []int{1, 2} {
+		inputs[i].Source = "own"
+	}
+	driveRecorder(t, recorder, inputs)
+	own := func(e event.Envelope) bool { return e.Source == "own" }
+	for _, c := range []struct {
+		id   string
+		want uint64
+	}{
+		{inputs[0].ID, 0}, {inputs[1].ID, 0}, {inputs[2].ID, 1}, {inputs[3].ID, 2}, {inputs[4].ID, 0}, {"never-sent", 0},
+	} {
+		if got := recorder.InputsRecordedBefore(c.id, own); got != c.want {
+			t.Errorf("InputsRecordedBefore(%s) = %d, want %d", c.id, got, c.want)
+		}
+	}
+}

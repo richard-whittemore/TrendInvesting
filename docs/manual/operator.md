@@ -163,7 +163,8 @@ The momentum engine is not composed into the running program yet (only
 Boost is), so today a clearance is read by the momentum strategy and its
 tests only. Clear only after IBKR shows the order finished. A later IBKR
 report on a cleared order is refused, which stops the engine until you
-reconcile.
+reconcile. The reporter reads the clearance the same way, so that report
+also raises the urgent "venue report not read" alert.
 
 ## An approval
 

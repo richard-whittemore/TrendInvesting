@@ -58,7 +58,8 @@ type ProtocolError struct {
 	// exchange, set because the engine recorded inputs of its own before the
 	// request (a Decider's *SequencedError): the request's own, where its
 	// refusal was recorded, or, when the request was not recorded, the last
-	// of the engine's own inputs; the message says which. Either way the
+	// of the engine's own inputs, or the request's sequence when the engine
+	// spent it without recording it; the message says which. Either way the
 	// adapter's next input carries Sequence + 1. Zero means the engine
 	// recorded no input of its own first: the request was recorded at its
 	// own sequence, or not at all.
@@ -71,8 +72,9 @@ func (e *ProtocolError) Error() string {
 
 // SequencedError is a Decider's error for an exchange in which it recorded
 // inputs of its own before the request: Sequence is the last sequence it
-// recorded, the request's own or, the request not recorded, its own last.
-// The server states Sequence in the reply's ProtocolError, so the adapter
+// recorded, the request's own or, the request not recorded, its own last,
+// or the request's when it spent that sequence without recording it. The
+// server states Sequence in the reply's ProtocolError, so the adapter
 // can continue from it without reading the message.
 type SequencedError struct {
 	Sequence uint64

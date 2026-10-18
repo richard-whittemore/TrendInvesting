@@ -409,3 +409,42 @@ func TestAnOrderStillCommittedSaysTheAdapterMayNotHaveIt(t *testing.T) {
 		t.Fatalf("alerts %+v, want one saying the adapter may never have received the order", alerts)
 	}
 }
+
+// TestAVenueReportAfterTheOwnersClearanceIsUnread: the reporter reads the
+// owner's clearance by the rule the engine applies (event.OrderReports), so
+// a venue report on an order the owner cleared, which the engine refuses as
+// on a terminal order, is unread here too and raises its alert; a clearance
+// the engine refused clears nothing, and the report then acknowledges the
+// order (ADR 0026, point 5; ADR 0019, "Alerting").
+func TestAVenueReportAfterTheOwnersClearanceIsUnread(t *testing.T) {
+	order := releasedOrder("tw-1", event.TradingModePaper)
+	at := day(0).Add(time.Minute)
+	cleared := func(r *logRun, id string, orders ...string) {
+		r.add(journal.KindInput, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, id, at,
+			event.RebalanceClearedPayload{AccountID: order.AccountID, AsOf: at, DecisionID: order.Tag, ClientOrderIDs: orders, Operator: "owner", Detail: "cancelled at IBKR"})
+	}
+	run := func(clearing func(*logRun)) ([]report.Order, []report.UnreadReport) {
+		t.Helper()
+		r := &logRun{t: t}
+		r.session(0)
+		r.release(0, order)
+		clearing(r)
+		r.acknowledge(order, at.Add(time.Minute))
+		orders, unread, err := report.OrderLifecycles(r.out, event.TargetWeightStrategyMomentum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return orders, unread
+	}
+	orders, unread := run(func(r *logRun) { cleared(r, "cleared", "tw-1") })
+	if len(unread) != 1 || unread[0].InputID != "ack:tw-1" || !strings.Contains(unread[0].Reason, "already terminal") {
+		t.Errorf("unread %+v, want the report after the clearance unread as on a terminal order", unread)
+	}
+	if o := stateOf(t, orders, "tw-1"); o.State == report.LifecycleAcknowledged {
+		t.Errorf("order %+v acknowledged by a report the engine refuses", o)
+	}
+	orders, unread = run(func(r *logRun) { cleared(r, "refused", "tw-1", "tw-2") })
+	if len(unread) != 0 || stateOf(t, orders, "tw-1").State != report.LifecycleAcknowledged {
+		t.Errorf("after a refused clearance: unread %+v, order %+v; want the report read", unread, stateOf(t, orders, "tw-1"))
+	}
+}

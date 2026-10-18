@@ -724,3 +724,170 @@ func TestAnInputMovedByAnOperatorInputIsAnsweredAgain(t *testing.T) {
 		t.Errorf("the log holds operator inputs %+v, want only %s: an input sent again delivers nothing", inputs, first)
 	}
 }
+
+// directInbox is an operator inbox in a fresh directory over recorder, for
+// tests that drive the decider directly.
+func directInbox(t *testing.T, recorder *journal.Recorder, hash string) *operatorInbox {
+	t.Helper()
+	return &operatorInbox{
+		dir: t.TempDir(), delivered: map[string]bool{}, settled: map[string]bool{}, decoded: map[string]operator.Record{},
+		recorder: recorder, out: io.Discard, strategyVersion: "test", configurationHash: hash,
+	}
+}
+
+// adapterInput is an adapter's input under id at sequence, for tests that
+// drive the decider directly.
+func adapterInput(t *testing.T, id string, sequence uint64, hash string) event.Envelope {
+	t.Helper()
+	r, err := operator.KillSwitch(event.KillSwitchPayload{AccountID: "joint", AsOf: time.Date(2024, time.January, 2, 15, 0, 0, 0, time.UTC), Engaged: true, Operator: "owner", Detail: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := r.Envelope(sequence, "test", hash)
+	in.ID, in.Source = id, "test-adapter"
+	return in
+}
+
+// TestAnInputSentAgainIsAnsweredOnlyAtTheSequenceItWasSentWith: an input
+// sent again is answered from its committed group only at the sequence it
+// was recorded at or the one it was sent with, which is that less the
+// operator inputs recorded immediately before it. At any other sequence it
+// is another input under a committed ID and is refused, with an inbox
+// configured or not, moved or not (ADR 0027, amendment "re-delivery on
+// request").
+func TestAnInputSentAgainIsAnsweredOnlyAtTheSequenceItWasSentWith(t *testing.T) {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	guard, engine, recorder := newTestWiring(t, replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	inbox := directInbox(t, recorder, hash)
+	decide := newDecider(guard, engine, recorder, "test", hash, inbox)
+	for n := uint64(1); n <= 3; n++ {
+		if _, err := decide(context.Background(), adapterInput(t, fmt.Sprintf("adapter:%d", n), n, hash)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refusedAt := func(id string, sequence uint64) {
+		t.Helper()
+		if _, err := decide(context.Background(), adapterInput(t, id, sequence, hash)); err == nil || !strings.Contains(err.Error(), "committed with different content") {
+			t.Errorf("%s sent again at %d: err = %v, want it refused", id, sequence, err)
+		}
+	}
+	answeredAt := func(id string, sequence uint64) {
+		t.Helper()
+		if _, err := decide(context.Background(), adapterInput(t, id, sequence, hash)); err != nil {
+			t.Errorf("%s sent again at %d: %v, want its committed reply", id, sequence, err)
+		}
+	}
+	answeredAt("adapter:3", 3)
+	refusedAt("adapter:3", 1)
+
+	r, err := operator.KillSwitch(event.KillSwitchPayload{AccountID: "joint", AsOf: time.Date(2024, time.January, 2, 16, 0, 0, 0, time.UTC), Engaged: true, Operator: "owner", Detail: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inbox.dir, r.FileName()), r.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := decide(context.Background(), adapterInput(t, "adapter:4", 4, hash))
+	if err != nil || reply.Sequence != 5 {
+		t.Fatalf("adapter:4 sent at 4: reply at %d, %v; want it recorded at 5, after the operator input", reply.Sequence, err)
+	}
+	answeredAt("adapter:4", 4)
+	answeredAt("adapter:4", 5)
+	refusedAt("adapter:4", 3)
+	refusedAt("adapter:4", 6)
+	if got := len(recorder.Entries()); got != 5 {
+		t.Errorf("the recorder holds %d records, want 5: an input sent again records nothing", got)
+	}
+}
+
+// TestAnInputTheRecorderRefusesAfterOperatorInputsStatesTheSequenceSpent:
+// when operator inputs were recorded before the adapter's input and the
+// recorder then refuses that input of its own (here at its record bound,
+// ADR 0017), without committing it, the refusal still states in its
+// Sequence the last sequence the engine spent, so the adapter's next input,
+// at Sequence + 1, continues the stream (the wire contract, engine.go).
+func TestAnInputTheRecorderRefusesAfterOperatorInputsStatesTheSequenceSpent(t *testing.T) {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	recorder := journal.NewBoundedRecorder(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }), 2)
+	engine, err := replay.New(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := directInbox(t, recorder, hash)
+	decide := newDecider(&wireGuard{}, engine, recorder, "test", hash, inbox)
+	if _, err := decide(context.Background(), adapterInput(t, "adapter:1", 1, hash)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := operator.KillSwitch(event.KillSwitchPayload{AccountID: "joint", AsOf: time.Date(2024, time.January, 2, 16, 0, 0, 0, time.UTC), Engaged: true, Operator: "owner", Detail: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inbox.dir, r.FileName()), r.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = decide(context.Background(), adapterInput(t, "adapter:2", 2, hash))
+	var limit *journal.RecordLimitError
+	var sequenced *transport.SequencedError
+	if !errors.As(err, &limit) || !errors.As(err, &sequenced) {
+		t.Fatalf("err = %#v, want the record bound's refusal stating a sequence", err)
+	}
+	if next, _ := engine.Next(); sequenced.Sequence+1 != next {
+		t.Errorf("the refusal states sequence %d, so the adapter continues at %d, but the engine expects %d", sequenced.Sequence, sequenced.Sequence+1, next)
+	}
+	if msg := err.Error(); strings.Contains(msg, "applied at") || !strings.Contains(msg, "adapter:2 was not recorded") {
+		t.Errorf("the refusal says %q, want it to say the input was not recorded", msg)
+	}
+}
+
+// TestAMovedInputSentAgainChangedOrLaterIsRefused: with an inbox, an input
+// an operator input moved is answered again only as it was sent. Sent again
+// with different content at the sequence it was sent with, or unchanged at a
+// later sequence, it is another input under a committed ID, refused, and
+// nothing is recorded (ADR 0027, amendment "re-delivery on request": an
+// input sent under a committed input's ID with different content is
+// refused).
+func TestAMovedInputSentAgainChangedOrLaterIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	stop := startEngine(t, opts)
+	feed := newBoostFeed(t, opts.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.beforeClose = func(int) {
+		writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-time.Hour), true)
+	}
+	feed.sessions(0, 1)
+	if feed.lastReply.Sequence != feed.last.Sequence+1 {
+		t.Fatalf("the close was sent at %d and recorded at %d, want it moved by the operator input", feed.last.Sequence, feed.lastReply.Sequence)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(feed.last.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["instrument_ids"] = []string{"QQQ"}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := feed.last
+	changed.Payload, changed.PayloadHash = raw, event.HashPayload(raw)
+	later := feed.last
+	later.Sequence = feed.lastReply.Sequence + 1
+	for name, in := range map[string]event.Envelope{"with different content": changed, "at a later sequence": later} {
+		if _, err := feed.client.Decide(context.Background(), in); err == nil || !strings.Contains(err.Error(), "committed with different content") {
+			t.Errorf("%s sent again %s: err = %v, want it refused", in.ID, name, err)
+		}
+	}
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("stop the engine: %v", err)
+	}
+	entries := recoverFile(t, opts.logPath).Entries
+	var inputs []string
+	for _, e := range entries {
+		if e.Kind == journal.KindInput {
+			inputs = append(inputs, e.Envelope.ID)
+		}
+	}
+	if n := len(inputs); n == 0 || inputs[n-1] != feed.last.ID || slices.Index(inputs, feed.last.ID) != n-1 {
+		t.Errorf("the log's inputs are %v, want %s once and last: a refused input records nothing", inputs, feed.last.ID)
+	}
+}

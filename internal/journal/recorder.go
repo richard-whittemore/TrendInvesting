@@ -147,6 +147,31 @@ func (r *Recorder) Committed(inputID string) (Committed, bool) {
 	return c, true
 }
 
+// InputsRecordedBefore returns how many inputs recorded immediately before
+// the input committed under inputID match, counted back, decisions skipped,
+// to the nearest input that does not; 0 when no input with that ID was
+// committed. A caller that records inputs of its own ahead of another's
+// learns from it how far they moved that input from the sequence it was
+// sent with (ADR 0027, amendment "re-delivery on request").
+func (r *Recorder) InputsRecordedBefore(inputID string, match func(event.Envelope) bool) uint64 {
+	g, ok := r.committed[inputID]
+	if !ok {
+		return 0
+	}
+	var n uint64
+	for i := g.start - 1; i >= 0; i-- {
+		e := r.entries[i]
+		if e.Kind != KindInput {
+			continue
+		}
+		if !match(e.Envelope) {
+			break
+		}
+		n++
+	}
+	return n
+}
+
 // NewRecorder returns a Recorder wrapping handler, which is required, holding
 // up to DefaultMaxRecords records.
 func NewRecorder(handler replay.Handler) *Recorder {

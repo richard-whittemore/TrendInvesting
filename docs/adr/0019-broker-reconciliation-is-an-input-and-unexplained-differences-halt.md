@@ -555,12 +555,18 @@ written at, arrival order and stated order can differ. The rule:
 1. **Instructions count in the order of the times they state**, not the
    order they arrive in. The engine delivers the instructions waiting in its
    inbox in the order of their stated times.
-2. **A backdated instruction is journalled and refused.** A kill switch
+2. **A backdated kill switch is journalled and refused.** A kill switch
    stating a time earlier than the newest kill switch already applied for
    its account is recorded in the durable log and refused, with no effect,
    naming the later one. A stale `released` therefore never undoes a later
    `engaged`, and the log still shows it was tried. One stating the same
-   time is applied, the later recorded winning.
+   time is applied, the later recorded winning. A clearance's stated time
+   orders it among the instructions waiting in the inbox (rule 1), and so
+   puts it before or after a kill switch delivered with it. It is not
+   checked against an earlier clearance's time: a clearance is applied when
+   it names the rebalance in progress and exactly its orders not terminal,
+   whatever time it states. A stale clearance names a rebalance no longer in
+   progress, or orders already terminal, and is journalled and refused.
 3. **An instruction stating a time more than five minutes ahead of the
    engine's clock is refused before delivery.** It is never journalled: it
    would put every instruction stating the true time before it. Five minutes

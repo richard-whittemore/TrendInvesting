@@ -60,13 +60,13 @@ const operatorClockSkew = 5 * time.Minute
 // it is never delivered.
 //
 // A record the engine cannot read, or that states a time more than
-// operatorClockSkew ahead of the engine's clock, is never delivered; one the run refuses is journalled as delivered with no
-// effect. Each is noted beside it in the inbox (refusedSuffix) and on the
-// engine's output, and never delivered again. A record whose input the
-// recorder did not take (a failed write or flush, which ends the log, ADR
-// 0027 §3, or the recorder's record bound or emission ceiling, ADR 0017)
-// was not delivered: it gets no note, and the run stops, so the next start
-// delivers it.
+// operatorClockSkew ahead of the engine's clock, is never delivered; one
+// the run refuses is journalled as delivered with no effect. Each is noted
+// beside it in the inbox (refusedSuffix) and on the engine's output, and
+// never delivered again. A record whose input the recorder did not take (a
+// failed write or flush, which ends the log, ADR 0027 §3, or the recorder's
+// record bound or emission ceiling, ADR 0017) was not delivered: it gets no
+// note, and the run stops, so the next start delivers it.
 //
 // Each record is read once: what was decoded, and which names are settled,
 // is kept, so an adapter input re-reads only the inbox's listing. Every
@@ -219,13 +219,13 @@ func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, inpu
 	return next, nil
 }
 
-// apply delivers r at sequence next, returning the sequence after it. Whether r was delivered is the recorder's to say, not
-// the error's: the replay engine moves past next on any error, and the
-// recorder refuses an input of its own (its record bound, its emission
-// ceiling, a failed write) without appending it (ADR 0027). An input the
-// recorder took was journalled, and a refusal of it, by the handler, is
-// noted beside r; one it did not take is returned as failed and leaves r
-// pending.
+// apply delivers r at sequence next, returning the sequence after it.
+// Whether r was delivered is the recorder's to say, not the error's: the
+// replay engine moves past next on any error, and the recorder refuses an
+// input of its own (its record bound, its emission ceiling, a failed write)
+// without appending it (ADR 0027). An input the recorder took was
+// journalled, and a refusal of it, by the handler, is noted beside r; one it
+// did not take is returned as failed and leaves r pending.
 func (b *operatorInbox) apply(ctx context.Context, engine *replay.Engine, r inboxRecord, next uint64) (after uint64, failed error) {
 	name := r.name
 	_, err := engine.Apply(ctx, r.Envelope(next, b.strategyVersion, b.configurationHash))

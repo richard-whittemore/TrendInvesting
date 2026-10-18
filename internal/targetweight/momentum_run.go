@@ -659,10 +659,11 @@ func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (re
 // the orders of it not terminal, which the owner has dealt with at the
 // broker; each is then terminal and the rebalance plans nothing more, so its
 // buy phase, if still pending, is never planned and the next decision time
-// decides afresh. A later venue report on a cleared order is refused as one
-// on a terminal order (event.OrderReports). The gate's pending sells are left to the
-// broker snapshots, which show what each cleared sell sold (ADR 0026, point
-// 2.5).
+// decides afresh. The orders are cleared by the rule the reporter reads the
+// log by (event.OrderReports' Clear), so a later venue report on a cleared
+// order is refused as on a terminal order by both. The gate's pending sells
+// are left to the broker snapshots, which show what each cleared sell sold
+// (ADR 0026, point 2.5).
 func (r *momentumRun) applyCleared(in event.Envelope) error {
 	p, err := decodeInput[event.RebalanceClearedPayload](in, event.RebalanceClearedSchemaVersion)
 	if err != nil {
@@ -671,20 +672,11 @@ func (r *momentumRun) applyCleared(in event.Envelope) error {
 	if p.AccountID != r.h.cfg.AccountID {
 		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, r.h.cfg.AccountID)
 	}
-	working := r.orders.Working()
-	switch {
-	case len(working) == 0:
-		return fmt.Errorf("targetweight: clearance %s: no rebalance is in progress, every order released is terminal", in.ID)
-	case p.DecisionID != r.rebalance.decisionID:
-		return fmt.Errorf("targetweight: clearance %s names %s, but the rebalance in progress is %s", in.ID, p.DecisionID, r.rebalance.decisionID)
-	case !slices.Equal(p.ClientOrderIDs, working):
-		return fmt.Errorf("targetweight: clearance %s names orders %v, but the orders of %s not terminal are %v: name exactly those, each dealt with at the broker",
-			in.ID, p.ClientOrderIDs, r.rebalance.decisionID, working)
+	if err := r.orders.Clear(p); err != nil {
+		return fmt.Errorf("targetweight: clearance %s: %w", in.ID, err)
 	}
-	for _, id := range working {
-		o, _ := r.orders.Order(id)
-		o.Terminal = true
-		if o.Released.Side == event.OrderSideBuy {
+	for _, id := range p.ClientOrderIDs {
+		if o, _ := r.orders.Order(id); o.Released.Side == event.OrderSideBuy {
 			r.rebalance.budget.Close(id)
 		}
 	}

@@ -78,6 +78,9 @@ var (
 	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
 	lifecycleVersions        = []uint32{event.OrderLifecycleLimitVersion}
 	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
+	// The owner's clearance of a momentum run's rebalance in progress (ADR
+	// 0026, point 5).
+	clearedVersions = []uint32{event.RebalanceClearedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }
