@@ -98,7 +98,8 @@ after a full log start a fresh one (see [restart](restart.md)), and the
 engine records it before the adapter's first input, so a kill switch is
 never lost to a disk fault or a full log.
 
-The adapter (not built yet) follows the engine's numbering: the decisions
+The adapter follows the engine's numbering (its link to the engine's socket
+is not built yet: [IBKR adapter](ibkr-adapter.md)): the decisions
 the engine sends back carry the number of the last input it recorded, and
 the adapter's next input carries the number after it. When the engine
 records your instructions first and then refuses the adapter's input, the
@@ -349,8 +350,10 @@ reports ([journal-query](journal-query.md)).
 | A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
 | The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-trader`) |
 
-The kill switch stops new orders from this program only. To stop everything,
-including orders already at IBKR, stop the gateway or use IBKR's own app.
+The kill switch stops new orders from this program only. To cancel orders
+already at IBKR, cancel them in IBKR's own app. Stopping the Gateway is not a
+cancel: it only delays an order the engine has released, which goes out once
+the Gateway is back the same day.
 
 ## What backs this
 

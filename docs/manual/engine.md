@@ -6,10 +6,13 @@ each claim, and what happens when something goes wrong.*
 ## What it is
 
 The engine is one program, `ti-engine` (source: `cmd/engine`). It makes every
-trading decision. It does not talk to IBKR: a separate adapter (not built yet)
-sends it market data and account figures and carries out what it decides.
-The two talk over a private socket on the server, one message at a time
-(ADR 0014, ADR 0025).
+trading decision. It does not talk to IBKR: a separate program, the
+[IBKR adapter](ibkr-adapter.md), is to send it market data and account
+figures and carry out what it decides. The two talk over a private socket on
+the server, one message at a time (ADR 0014, ADR 0025). The adapter's
+connection, account reads, sending and re-delivery are built and tested
+against a stand-in gateway, but it does not yet talk to the engine's socket,
+so today the engine is fed by tests and by `make demo-boost-dry-run`.
 
 One engine runs per account. Today only the Boost account (the joint margin
 account) has a configuration, and it runs in **dry-run**: the engine decides
@@ -130,6 +133,9 @@ each in its durable log before its next input from the adapter
 | A session has no SPY bar | Withholds the decision; no order (ADR 0026, point 5). |
 | The account figures are missing or stale | Withholds the decision; no order. |
 | The process crashes | Stays stopped. You resume it from its log (`restart.md`). |
+| The server reboots | Stays stopped: engines do not start at boot. A reboot is not a crash, so the next start is a fresh run you approve (`restart.md`). |
+| The configuration file is edited while it runs | Nothing changes for the running run: it decided under the configuration it recorded first. The next start refuses to resume under a different configuration; an edited configuration is a new run. The daily data job refuses too ([market data](market-data.md)). |
+| The disk fills | The write fails, so it stops deciding and releases nothing more (ADR 0027). |
 
 ## Try it
 
@@ -165,7 +171,15 @@ from the first one's log and checks the two logs are identical byte for byte.
 
 ## Not built yet
 
-The IBKR adapter (so nothing can be sent at all yet), reconciliation against
-IBKR on every start (#394), and the IRA accounts' momentum configuration.
+- The adapter's link to the engine's socket, its main loop, and the real IBKR
+  client's sending: until they exist, nothing the engine releases reaches
+  IBKR ([IBKR adapter](ibkr-adapter.md)).
+- The reconciliation against IBKR at every start (ADR 0019). The morning
+  reconciliation's engine side is built ([reconciliation](reconciliation.md)).
+- The IRAs: this program refuses a momentum configuration (`compose.go`), and
+  no IRA configuration exists ([momentum](momentum.md)).
+
 Re-delivery of released orders after a restart is built: see
-[re-delivery](redelivery.md).
+[re-delivery](redelivery.md). The README's
+[built today / not built yet](README.md#built-today-and-not-built-yet) table
+is the one list for the whole program.
