@@ -127,7 +127,7 @@ func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order)
 		{CheckIRAPlan, "exact"},
 		{CheckIRAScale, fmt.Sprintf("shares exact; scale abs <= %g", WeightTolerance)},
 		{CheckIRAOrders, "exact"},
-		{CheckIRASequence, "sells filled before the buys; buys on the logged session, at least the delay after"},
+		{CheckIRASequence, "sells filled before the buys; buys on the logged session, the delay plus the recorded waits after"},
 	} {
 		r.checks[c.name] = &Check{Run: run, Name: c.name, Threshold: c.threshold}
 		order = append(order, r.checks[c.name])

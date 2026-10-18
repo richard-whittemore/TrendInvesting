@@ -171,6 +171,15 @@ def glide_export(algo, targets, closes, spy, risk_off, mom, vol, ranked):
 
 # --- D7-L
 
+def _canonical(held, symbols):
+    """``held`` keyed by the symbol objects of ``symbols`` where they are the
+    same security. LEAN's symbols are equal by security ID, but a holding's
+    can keep the ticker a stock had when it was bought while the
+    universe's carries the new one, and the export names by ticker."""
+    same = {s: s for s in symbols}
+    return {same.get(s, s): q for s, q in held.items()}
+
+
 def lot_record(month, mode, nlv, risk_off, ranked, scores, vol, sectors, prices, held, targets, skipped, kept,
                name):
     """D7-L's inputs (every ranked name, best first, with score, volatility
@@ -199,8 +208,9 @@ def lot_export(algo):
     planned = (algo.Time.year, algo.Time.month) in tuple(tuple(m) for m in algo.LOT_PARITY_MONTHS)
     if not (planned or skipped or kept or book is None):
         return
+    held = _canonical({s: algo.Portfolio[s].Quantity for s in longs}, ranked)
     ranked_set = set(ranked)
-    held = {s: algo.Portfolio[s].Quantity for s in longs if s in ranked_set}
+    held = {s: q for s, q in held.items() if s in ranked_set}
     name = namer(list(ranked) + list(book or {}) + [algo.spy])
     attach(algo, lot_record(_month(algo), algo.MIN_LOT, nlv, risk_off, ranked, algo.lot_scores, vol,
                             algo.sectors if algo.SECTOR_CAP else None, algo.raw_close, held, book, skipped, kept,
@@ -313,7 +323,8 @@ def ira_rebalance(algo, targets, closes):
     has a price. A target with no price at all waits in pending, outside
     the plan, as fresh_universe.py's unpriced targets do."""
     month = _month(algo)
-    held = {kvp.Key: int(kvp.Value.Quantity) for kvp in algo.Portfolio if kvp.Value.Invested and kvp.Value.IsLong}
+    held = _canonical({kvp.Key: int(kvp.Value.Quantity) for kvp in algo.Portfolio
+                       if kvp.Value.Invested and kvp.Value.IsLong}, targets)
     syms = list(targets) + [s for s in held if s not in targets]
     name = namer(syms + [algo.spy])
     prices, unpriced = {}, []

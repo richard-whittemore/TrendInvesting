@@ -223,6 +223,24 @@ class _Closes:
         return _Column(self.cols[k])
 
 
+class _Renamed:
+    """A symbol equal to another of the same security ID whatever its
+    ticker, as LEAN's are: a holding's symbol can keep the ticker a stock had
+    when bought after the universe's symbol has the new one."""
+
+    def __init__(self, value, sid):
+        self.Value, self.ID = value, sid
+
+    def __eq__(self, other):
+        return isinstance(other, _Renamed) and other.ID == self.ID
+
+    def __hash__(self):
+        return hash(self.ID)
+
+    def __repr__(self):
+        return self.Value
+
+
 class IRATemplateTest(unittest.TestCase):
     """momentum/ira_parity_log.py: fresh_universe.py with the month's book
     traded by the ported IRA planner, the buys EXEC_DELAY sessions after the
@@ -358,6 +376,16 @@ class IRATemplateTest(unittest.TestCase):
         # history: its security's price.
         self.assertEqual(rec["prices"], {"AAA": 49.0, "BBB": 30.0})
 
+    def test_a_holding_whose_ticker_changed_is_named_as_the_book_names_it(self):
+        old, new = _Renamed("OLD", "X1"), _Renamed("NEW2", "X1")
+        algo = self._algo({}, cash=500.0)
+        algo.Portfolio = _Book({old: 10}, {old: 50.0}, 500.0)
+        algo.Securities[new] = types.SimpleNamespace(Price=50.0, HasData=True)
+        closes = _Closes({"AAA": [50.0, 50.0], new: [50.0, 50.0], "SPY": [1.0, 2.0]})
+        self.module.ira_rebalance(algo, {new: 0.49, "AAA": 0.49}, closes)
+        rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
+        self.assertEqual((rec["held"], sorted(rec["prices"])), ({"NEW2": 10}, ["AAA", "NEW2"]))
+
     def test_working_sells_at_the_rebalance_are_recorded_and_netted(self):
         t = _Ticket(4)
         t.Symbol, t.Quantity, t.QuantityFilled, t.Tag = "CCC", -10, -4, ""
@@ -479,6 +507,20 @@ class LotTemplateTest(unittest.TestCase):
         self.module.lot_export(algo)
         r = _decode(algo.Transactions.tickets[0].tags[0], "LOTPARITY1 ")
         self.assertEqual((r["kept"], r["held"], r["skipped"]), (["C"], {"C": 4}, []))
+
+    def test_a_holding_whose_ticker_changed_is_named_as_the_ranking_names_it(self):
+        old, new = _Renamed("OLD", "X1"), _Renamed("C", "X1")
+        algo = self._algo({}, raw={"C": 150.0})
+        ranked = ["A", "B", new, "E", "F"]
+        algo.raw_close[new] = algo.raw_close.pop("C")
+        algo.lot_scores = {**self.SCORES, new: self.SCORES["C"]}
+        algo.sectors = {**self.SECTOR, new: self.SECTOR["C"]}
+        vol = {**self.VOL, new: self.VOL["C"]}
+        algo.Portfolio = _Book({old: 4}, {old: 100.0}, 600.0)
+        algo._minimum_lot(ranked, vol, None, False)
+        self.module.lot_export(algo)
+        r = _decode(algo.Transactions.tickets[0].tags[0], "LOTPARITY1 ")
+        self.assertEqual((r["kept"], r["held"]), (["C"], {"C": 4}))
 
     def test_a_withheld_month_is_exported_with_no_weights(self):
         algo = self._algo({}, raw={n: 5000.0 for n in self.RANKED})
