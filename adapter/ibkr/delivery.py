@@ -18,7 +18,11 @@ write (relay.Outbox.extend), so the engine journals the snapshot before the
 bars, and each session's bars before its close: ADR 0019's snapshot rule
 (the latest snapshot at or before the trigger, by journal sequence) and ADR
 0021 (a session closes before its entries are decided). The outbox then
-sends each once, in order (loop.AdapterLoop._drain).
+sends each once, in order (loop.AdapterLoop._drain), every input stamped
+with its send time as its recorded time, so the snapshot is never recorded
+after an input it serves. The snapshot's entry names the run it was read
+for, as every stream entry's envelope does, so an earlier run's batch is
+never sent to a fresh run.
 
 Exactly once: before the outbox write, the delivery record (DELIVERED_SUFFIX
 beside the pending file, read strictly) names the files, their SHA-256 and
@@ -27,21 +31,34 @@ the two leaves it queuing, and the next start looks for the snapshot's ID in
 the outbox and among the inputs the engine committed: found, the write was
 made (it is one write) and the batch is marked queued; not found, nothing
 of it was recorded or sent, and it is queued again from a fresh snapshot
-under the same ID. A file the record names is never queued again, and the
-outbox's own rules send nothing twice across a stop (an entry the engine
-committed is struck off unsent; one awaiting its reply is asked for again
-under its ID, ADR 0027). A new batch waits until no stream entry is left in
-the outbox, so a partly sent file resumes where it stopped.
+under the same ID. A file a queued batch names is never queued again, and
+the outbox's own rules send nothing twice across a stop (an entry the
+engine committed is struck off unsent; one awaiting its reply is asked for
+again under its ID, ADR 0027). A new batch waits until no stream entry is
+left in the outbox, so a partly sent file resumes where it stopped.
 
-Fail closed (AGENTS.md): a file that is not as the data job writes it (JSON
-shape, envelope fields, a payload that does not match its hash, an input ID
-twice, the file-local sequence not 1..N), one whose run identity
+A batch not delivered to its run is marked dropped: one a stop left queuing
+before its outbox write when a fresh run then started (nothing of it was
+recorded or sent), and one whose entries a fresh run struck off the outbox
+unsent (loop.AdapterLoop._drain, through dropped). Its files are not
+delivered: if that run is resumed (a crash resumes the same run, ADR 0027),
+they are queued for it again behind a fresh snapshot, and any of their
+inputs its engine already committed is struck off unsent, as every
+committed outbox entry is.
+
+Fail closed (AGENTS.md): every file of a batch is read and checked before
+anything of the batch is written. A file that is not as the data job writes
+it (JSON shape, envelope fields, a type, schema version or source the data
+job does not write, kinds.py, a payload that does not match its hash, an
+input ID twice, the file-local sequence not 1..N, or a last line that is not
+the close of the session its name gives), one whose run identity
 (configuration hash, strategy version, run name) is not the engine's run
-now running, or one whose session is not after every file already
-delivered, is refused (StreamRefused): nothing of that batch is recorded or
-sent, and the adapter stops for a person, naming the file and how to settle
-it. A run whose stream folder does not exist yet stops the start: its
-warm-up has not been written.
+now running, one whose first session is not after the last session already
+delivered or of the file before it in the batch, and one naming an input
+another file of the batch or the outbox names, is refused (StreamRefused):
+nothing of that batch is recorded or sent, and the adapter stops for a
+person, naming the file and how to settle it. A run whose stream folder
+does not exist yet stops the start: its warm-up has not been written.
 """
 import hashlib
 import importlib.util
@@ -50,7 +67,7 @@ import logging
 import os
 import re
 from collections import namedtuple
-from datetime import date, datetime, time as clock_time
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 
 from relay import ENVELOPE_VERSION, PAYLOAD_HASH, TIME, _is_count, _is_text, _is_time, read_engine_log
 from snapshot import BROKER_SNAPSHOT_TYPE
@@ -80,32 +97,39 @@ SETTLE = ("with the adapter stopped, move the file out of the run's stream folde
           "(sudo systemctl start ti-adapter-boost) (docs/manual/market-data.md, \"What happens to the file\")")
 
 
-def _calendar():
-    """The committed NYSE calendar the data job uses (adapter/marketdata/nyse_calendar.py), loaded from its file.
+def _marketdata(name):
+    """The data job's module adapter/marketdata/<name>.py, loaded from its file.
 
     The adapter is installed beside it in the same layout (provision.sh
-    adapter), so both read one calendar.
+    adapter), so both read one NYSE calendar (nyse_calendar.py) and one
+    table of the inputs the data job writes (kinds.py).
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "marketdata", "nyse_calendar.py")
-    spec = importlib.util.spec_from_file_location("nyse_calendar", path)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "marketdata", name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-nyse_calendar = _calendar()
+nyse_calendar = _marketdata("nyse_calendar")
+kinds = _marketdata("kinds")
 
 
 class StreamRefused(Exception):
     """A stream file, or the run's stream folder, is not one the adapter delivers; it stops for a person."""
 
 
+class SnapshotRefused(StreamRefused):
+    """The account could not be read in full for the broker snapshot within its attempts; nothing is delivered."""
+
+
 class DeliveryRecordInvalid(ValueError):
     """The delivery record is not as the adapter writes it; the adapter stops before delivering anything."""
 
 
-Stream = namedtuple("Stream", "name session sha256 envelopes")
-"""One stream file read strictly: its file name, its last session, the SHA-256 of its bytes and its envelopes."""
+Stream = namedtuple("Stream", "name session first sha256 envelopes")
+"""One stream file read strictly: its file name, its last session (which its name gives and its last line
+closes), the first session it closes, the SHA-256 of its bytes and its envelopes."""
 
 
 def market_open(at):
@@ -161,7 +185,32 @@ def read_stream(path, run, configuration_hash, strategy_version):
                                      "(a file the data job wrote for another run or another configuration)".format(
                                          n, field, envelope[field], want))
         envelopes.append(envelope)
-    return Stream(name, session, hashlib.sha256(data).hexdigest(), envelopes)
+    closed = []
+    for n, envelope in enumerate(envelopes, 1):
+        if (envelope["type"], envelope["schema_version"]) == kinds.SESSION_CLOSED:
+            day = _closed_session(envelope["payload"])
+            if day is None:
+                raise _refused(path, "line {} closes a session with no period_end that can be read".format(n))
+            closed.append(day)
+    if (envelopes[-1]["type"], envelopes[-1]["schema_version"]) != kinds.SESSION_CLOSED:
+        raise _refused(path, "its last line is not a session's close; the data job ends every file with the "
+                             "close of its last session")
+    if closed[-1] != session:
+        raise _refused(path, "its name gives session {}, but its last line closes session {}".format(
+            session, closed[-1]))
+    return Stream(name, session, closed[0], hashlib.sha256(data).hexdigest(), envelopes)
+
+
+def _closed_session(payload):
+    """The New York date of a session close's period_end, or None if it is not a time with its zone."""
+    text = payload.get("period_end")
+    if not _is_time(text, TIME):
+        return None
+    zone = TIME.fullmatch(text).group(2)
+    offset = timedelta(0) if zone == "Z" else (1 if zone[0] == "+" else -1) * timedelta(
+        hours=int(zone[1:3]), minutes=int(zone[4:6]))
+    at = datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc) - offset
+    return at.astimezone(nyse_calendar.NEW_YORK).date()
 
 
 def _envelope_fault(envelope, n):
@@ -177,6 +226,11 @@ def _envelope_fault(envelope, n):
         return "is not envelope version {}".format(ENVELOPE_VERSION)
     if not _is_count(envelope["schema_version"]):
         return "has no schema version"
+    if (envelope["type"], envelope["schema_version"]) not in kinds.KINDS:
+        return "is {} version {}, which the data job does not write".format(envelope["type"],
+                                                                            envelope["schema_version"])
+    if envelope["source"] != kinds.SOURCE:
+        return "names source {!r}; the data job writes {!r}".format(envelope["source"], kinds.SOURCE)
     if not all(_is_time(envelope[k], TIME) for k in ("event_time", "recorded_at")):
         return "has an event or recorded time that is not an RFC 3339 time with its zone"
     if envelope["sequence"] != n or not _is_count(envelope["sequence"]):
@@ -200,10 +254,10 @@ class DeliveryRecord:
     "state"}]}: the run the files were written for, the input ID of the
     broker snapshot recorded before them, the files in delivery order, and
     QUEUING until the outbox write is made, then QUEUED; DROPPED for a batch
-    of an earlier run that a stop left QUEUING before its outbox write, so
-    nothing of it was ever recorded or sent. Read strictly:
-    anything else raises DeliveryRecordInvalid. Written whole, atomically
-    and synced, only by the adapter holding the pending file's lock.
+    not delivered to its run (see the module): its files may be named again
+    by a later batch of that run. Read strictly: anything else raises
+    DeliveryRecordInvalid. Written whole, atomically and synced, only by the
+    adapter holding the pending file's lock.
     """
 
     def __init__(self, path):
@@ -235,6 +289,8 @@ class DeliveryRecord:
                         or not _is_count(entry["lines"])):
                     raise self._invalid("batch {} names a file not as the adapter records one".format(n))
                 key = (batch["run"], entry["name"])
+                if batch["state"] == DROPPED:
+                    continue
                 if key in named:
                     raise self._invalid("it names {} of run {} twice".format(entry["name"], batch["run"]))
                 named.add(key)
@@ -251,6 +307,16 @@ class DeliveryRecord:
     def mark_dropped(self):
         """Mark the last batch DROPPED: an earlier run's, never written to the outbox."""
         self._mark(DROPPED)
+
+    def drop_queued(self, run):
+        """Mark run's last batch DROPPED if it is QUEUED: a fresh run struck its entries off the outbox unsent."""
+        batches = self.load()
+        last = max((n for n, b in enumerate(batches) if b["run"] == run), default=None)
+        if last is None or batches[last]["state"] != QUEUED:
+            return False
+        batches[last] = dict(batches[last], state=DROPPED)
+        self._write(batches)
+        return True
 
     def _mark(self, state):
         batches = self.load()
@@ -287,8 +353,10 @@ class Deliverer:
 
     outbox is the adapter's relay.Outbox; record_path the delivery record's
     file; snapshot() returns the broker snapshot's snapshot.Record, or None
-    when the link went during the read (nothing is then delivered); new_id
-    an input ID for an event type.
+    when it cannot be taken now (the link went during the read, say; nothing
+    is then delivered, and the next step tries again), and raises
+    SnapshotRefused when it cannot be taken at all; new_id an input ID for
+    an event type.
     """
 
     def __init__(self, streams, record_path, outbox, engine_log_path, snapshot, new_id):
@@ -319,55 +387,83 @@ class Deliverer:
             batches = self.record.load()
         if any("envelope" in e for e in self._outbox.load()):
             return  # a batch is still being sent: the next waits behind it
-        delivered = [f["name"] for b in batches if b["run"] == self.run for f in b["files"]]
+        delivered = [f["name"] for b in batches if b["run"] == self.run and b["state"] != DROPPED
+                     for f in b["files"]]
         latest = max((_session_of(n) for n in delivered), default=None)
         new = sorted((_session_of(n), n) for n in os.listdir(self.folder)
                      if STREAM_FILE.fullmatch(n) and n not in delivered)
         if not new:
             return
-        engine_log = read_engine_log(self._engine_log_path)
-        streams = []
         for session, name in new:
-            path = os.path.join(self.folder, name)
             if latest is not None and session <= latest:
-                raise _refused(path, "its session {} is not after {}, the last session already delivered".format(
-                    session, latest))
-            streams.append(read_stream(path, self.run, engine_log.configuration_hash, engine_log.strategy_version))
+                raise _refused(os.path.join(self.folder, name),
+                               "its session {} is not after {}, the last session already delivered".format(
+                                   session, latest))
+        streams = self._read_batch([name for _, name in new], latest)
         snapshot = self._snapshot()
         if snapshot is None:
             return
         batch = {"run": self.run, "snapshot": self._new_id(BROKER_SNAPSHOT_TYPE),
                  "files": [{"name": s.name, "sha256": s.sha256, "lines": len(s.envelopes)} for s in streams]}
         self.record.begin(batch)
-        self._outbox.extend(_entries(batch["snapshot"], snapshot, streams))
+        self._outbox.extend(_entries(self.run, batch["snapshot"], snapshot, streams))
         self.record.mark_queued()
         log.info("ibkr stream queued run=%s files=%s inputs=%d", self.run, ",".join(s.name for s in streams),
                  1 + sum(len(s.envelopes) for s in streams))
 
+    def dropped(self, run):
+        """A fresh run struck run's entries off the outbox unsent: its last batch is not delivered (see the module)."""
+        if self.record.drop_queued(run):
+            log.info("ibkr stream batch of run %s struck off unsent; dropped, so a resumed run %s gets its files "
+                     "again", run, run)
+
+    def _read_batch(self, names, latest):
+        """The files names of this run, in order, each read strictly and checked against the others (see the module)."""
+        engine_log = read_engine_log(self._engine_log_path)
+        recorded = {e["id"] for e in self._outbox.load()}
+        streams, named, previous = [], {}, latest
+        for name in names:
+            path = os.path.join(self.folder, name)
+            stream = read_stream(path, self.run, engine_log.configuration_hash, engine_log.strategy_version)
+            if previous is not None and stream.first <= previous:
+                raise _refused(path, "its first session {} is not after {}, the last session before it".format(
+                    stream.first, previous))
+            for envelope in stream.envelopes:
+                if envelope["id"] in named:
+                    raise _refused(path, "it names input {}, which {} names too".format(
+                        envelope["id"], named[envelope["id"]]))
+                if envelope["id"] in recorded:
+                    raise _refused(path, "it names input {}, which the outbox already holds".format(envelope["id"]))
+                named[envelope["id"]] = name
+            streams.append(stream)
+            previous = stream.session
+        return streams
+
     def _finish(self, batch):
-        """Settle a batch a stop left QUEUING; True once it is QUEUED."""
+        """Settle a batch a stop left QUEUING; True once it is QUEUED (or DROPPED, an earlier run's)."""
         recorded = {e["id"] for e in self._outbox.load()}
         if batch["snapshot"] not in recorded and batch["snapshot"] not in {
                 i.id for i in read_engine_log(self._engine_log_path).inputs}:
             if batch["run"] != self.run:
-                # Never recorded or sent, and its run has ended: the run now
-                # running has its own stream from its warm-up.
+                # Never recorded or sent, and its run is not running: the run
+                # now running has its own stream from its warm-up.
                 log.info("ibkr stream batch of run %s was never queued; dropped, since the engine now runs %s",
                          batch["run"], self.run)
                 self.record.mark_dropped()
                 return True
-            engine_log = read_engine_log(self._engine_log_path)
-            streams = []
-            for entry in batch["files"]:
-                path = os.path.join(self.folder, entry["name"])
-                stream = read_stream(path, self.run, engine_log.configuration_hash, engine_log.strategy_version)
+            batches = self.record.load()
+            delivered = [f["name"] for b in batches[:-1] if b["run"] == self.run and b["state"] != DROPPED
+                         for f in b["files"]]
+            latest = max((_session_of(n) for n in delivered), default=None)
+            streams = self._read_batch([entry["name"] for entry in batch["files"]], latest)
+            for entry, stream in zip(batch["files"], streams):
                 if stream.sha256 != entry["sha256"]:
-                    raise _refused(path, "it changed since the adapter recorded it for delivery")
-                streams.append(stream)
+                    raise _refused(os.path.join(self.folder, entry["name"]),
+                                   "it changed since the adapter recorded it for delivery")
             snapshot = self._snapshot()
             if snapshot is None:
                 return False
-            self._outbox.extend(_entries(batch["snapshot"], snapshot, streams))
+            self._outbox.extend(_entries(self.run, batch["snapshot"], snapshot, streams))
         self.record.mark_queued()
         return True
 
@@ -376,10 +472,10 @@ def _session_of(name):
     return date.fromisoformat(STREAM_FILE.fullmatch(name).group(1))
 
 
-def _entries(snapshot_id, snapshot, streams):
-    """The outbox entries of one batch: the broker snapshot, then every envelope of each file, in order."""
+def _entries(run, snapshot_id, snapshot, streams):
+    """The outbox entries of one batch: the broker snapshot, naming the run it was read for, then every envelope of each file, in order."""
     entries = [{"id": snapshot_id, "event_type": snapshot.event_type, "schema_version": snapshot.schema_version,
-                "event_time": snapshot.payload["as_of"], "payload": snapshot.payload}]
+                "event_time": snapshot.payload["as_of"], "payload": snapshot.payload, "run": run}]
     for stream in streams:
         entries.extend({"id": e["id"], "event_type": e["type"], "schema_version": e["schema_version"],
                         "event_time": e["event_time"], "payload": e["payload"], "envelope": e}

@@ -37,7 +37,8 @@ class RehearsalTests(unittest.TestCase):
         for line in ("PASS: the data job wrote the warm-up and the day's stream for the run",
                      "PASS: the warm-up reached the engine behind one broker snapshot, in file order",
                      "PASS: the day's stream reached the engine as its broker snapshot, its bar, then its close",
-                     "PASS: the order went out only after the day's close, which released it",
+                     "PASS: the order went out only after the day's close, which the engine's log shows released it "
+                     "(its broker snapshot fresh at the close)",
                      "PASS: no stream input reached the engine twice across the reconnect and the restart"):
             self.assertIn(line, out)
 

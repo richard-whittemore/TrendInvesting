@@ -19,7 +19,8 @@ then unreadable.
 
 A holding's mark is IBKR's last price for its contract, from a one-off
 market-data snapshot (read_marks): only IBKR's LAST tick counts, so a
-quote, a previous close or a delayed price is never stated as the mark.
+quote, a previous close or a delayed price is never stated as the mark,
+and only from a request that completed with no price that is not valid.
 A holding IBKR gives no last price for, or whose contract number the
 configuration does not hold, is stated with mark_set false, which the
 engine reads as no mark (ADR 0019: the sale back to 98% is then withheld
@@ -218,12 +219,14 @@ def read_marks(conn, con_ids):
     """IBKR's mark for each symbol of con_ids (symbol to IBKR's contract ID): {symbol: Decimal}.
 
     One market-data snapshot per contract, asked together and waited for up
-    to the configuration's request_timeout. A symbol whose snapshot ended
-    with no LAST price, was refused (IBKR's error under its request, such
-    as no market-data permission), carried a price that is not finite and
-    positive, or was not answered in time has no mark; a request not ended
-    is cancelled. Nothing here raises: with the link down there are no
-    marks.
+    to the configuration's request_timeout. A symbol has a mark only when
+    its request completed (IBKR ended its snapshot) and every LAST price it
+    carried was finite and positive, the mark being the last of them. A
+    request refused (IBKR's error under it, such as no market-data
+    permission), one that ended with no LAST price or carried any price
+    that is not finite and positive, and one not ended in time (cancelled)
+    give no mark: an uncertain price is never stated as the mark (ADR 0019).
+    Nothing here raises: with the link down there are no marks.
     """
     if not conn.connected or not con_ids:
         return {}
@@ -233,22 +236,25 @@ def read_marks(conn, con_ids):
         asked[req_id] = symbol
         conn.api.req_mkt_data(req_id, SimpleNamespace(conId=con_ids[symbol], symbol=symbol, secType=SEC_TYPE,
                                                       currency=CURRENCY, exchange=EXCHANGE))
-    marks, ended = {}, set()
+    prices, failed, ended = {}, set(), set()
     try:
         for event in conn.events(conn.config.request_timeout):
             if not conn.connected:
                 break
+            # Another callback (an order report, say) may carry no request ID.
             req_id = event.args[0] if event.args else None
-            if req_id not in asked:
+            if not isinstance(req_id, int) or req_id not in asked or req_id in ended:
                 continue
             if event.name == "tick_price" and event.args[1] == LAST_PRICE_TICK:
                 price = event.args[2]
                 if isinstance(price, (int, float)) and not isinstance(price, bool) and math.isfinite(price) \
                         and price > 0:
-                    marks[asked[req_id]] = to_decimal(price, "mark")
+                    prices[req_id] = to_decimal(price, "mark")
+                else:
+                    failed.add(req_id)
             elif event.name in ("tick_snapshot_end", "error"):
                 if event.name == "error":
-                    marks.pop(asked[req_id], None)
+                    failed.add(req_id)
                 ended.add(req_id)
             if len(ended) == len(asked):
                 break
@@ -256,7 +262,9 @@ def read_marks(conn, con_ids):
         if conn.connected:
             for req_id in sorted(set(asked) - ended):
                 conn.api.cancel_mkt_data(req_id)
-    return marks if conn.connected else {}
+    if not conn.connected:
+        return {}
+    return {asked[r]: prices[r] for r in sorted(ended - failed) if r in prices}
 
 
 def _stamp(at):

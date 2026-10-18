@@ -172,14 +172,16 @@ def _engine_connect(path, timeout):
 
 
 def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL,
-         ibapi_version=None, today=None):
+         ibapi_version=None, today=None, now=None):
     """Run the command; returns the process exit status.
 
     api_factory, engine_connect, should_stop and ibapi_version replace the
     real IBKR client, the engine's socket, the signal handlers and the
     imported ibapi's version (for the tests and the rehearsal, which run
     without ibapi); today replaces the session's date (the rehearsal's
-    synthetic session); poll is how long one step waits for a callback.
+    synthetic session) and now the adapter's clock (the rehearsal's, kept
+    with its synthetic IBKR clock); poll is how long one step waits for a
+    callback.
     """
     err = err or sys.stderr
     args = _parser().parse_args(argv)
@@ -208,7 +210,8 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
         loop = AdapterLoop(cfg, (api_factory or _real_api)(cfg),
                            (engine_connect or _engine_connect)(args.socket, ENGINE_TIMEOUT), args.pending,
                            args.engine_log, poll=poll, streams=args.streams,
-                           **({"today": today} if today is not None else {}))
+                           **({"today": today} if today is not None else {}),
+                           **({"now": now} if now is not None else {}))
         loop.run(should_stop)
         logger.info("ibkr adapter stopped on request")
     except Exception as stopped:  # every stop is reported, never swallowed

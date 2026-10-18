@@ -297,10 +297,13 @@ snapshot. From then on the timer writes each day's file at 5:05 p.m.
 naming the file, and nothing from that file is sent; the settling steps are
 in [market data](market-data.md), "What happens to the file": a file not as
 the data job writes it, a file of another run or configuration ("it is not
-this run's"), a file older than one already delivered, or the adapter's
-record of delivered files (`pending.json.delivered`) changed by something
-else. A link that drops while the snapshot is read stops nothing: the
-adapter waits, and delivers once the link is back and matched.
+this run's"), a file older than one already delivered, two waiting files
+that overlap, or the adapter's record of delivered files
+(`pending.json.delivered`) changed by something else. An account IBKR
+cannot read in full for the snapshot three times running stops the adapter
+too, with the file left in place. A link that drops while the snapshot is
+read stops nothing: the adapter waits, and delivers once the link is back
+and matched.
 
 **Not built yet.** These are known gaps, each needing your decision before
 the first real paper order:
@@ -312,16 +315,22 @@ the first real paper order:
   a buy with none is refused, "missing-mark", and the account goes
   Degraded). Nothing produces either in paper yet, so the engine withholds
   every session ("stale-account-snapshot") and releases nothing. The broker
-  snapshot's mark is a different figure, read only by the sale back to 98%. The adapter reads the
+  snapshot's mark is a different figure, read only by the sale back to 98%.
+  Where the recorded mark comes from (IBKR's last price, which the adapter
+  already reads for the broker snapshot, or the data job's close) is your
+  decision. The adapter reads the
   account after the close, so an account snapshot "as of the close" would
   be the adapter's statement that nothing changed between the close and its
   read; whether that is acceptable is a rule decision (ADR 0026 point 1).
-- **The broker snapshot is taken after the close.** ADR 0019's snapshot
-  rule calls a snapshot stamped later than the decision it serves stale, so
-  a sell the engine plans at that close would be refused
-  ("stale-broker-snapshot") and re-planned at the next decision. A snapshot
-  taken shortly before the close (within the configured 30-minute limit)
-  would be fresh; choosing when the adapter takes it is your decision.
+- **The broker snapshot is taken after the close.** The adapter reads it
+  just before it sends the day's file, and records every line of the file
+  at the time it sends it, so the snapshot is never stamped later than the
+  close it serves, and a sell the engine plans at that close finds it fresh
+  (within the configured 30-minute limit) and is sized against it. It is
+  the account some minutes after the close, not at it: whether a reading
+  taken after the close may serve a decision made at the close is ADR
+  0019's rule question, and choosing when the adapter takes it (after the
+  close, as now, or shortly before it) is your decision.
 - **The morning reconciliation record.** The engine compares IBKR's
   positions and cash against its book, which comes from the account
   snapshot. With no account snapshot recorded, a reconciliation is

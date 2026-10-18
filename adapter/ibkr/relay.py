@@ -208,8 +208,10 @@ OUTBOX_SUFFIX = ".outbox"
 OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
 # An entry from a market-data stream (delivery.py) also carries the
 # envelope as the data job wrote it, which is sent as written but for its
-# sequence.
+# sequence and recorded time; a stream batch's broker snapshot carries the
+# run it was read for, so neither is ever sent to another run.
 OUTBOX_STREAM_FIELDS = tuple(sorted(OUTBOX_FIELDS + ("envelope",)))
+OUTBOX_RUN_FIELDS = tuple(sorted(OUTBOX_FIELDS + ("run",)))
 # An input that awaits its reply from an earlier run (earlier_run): its ID,
 # the earlier run's log file name (None when no log of the chain holds it
 # and the adapter recorded none), whether that run committed it, the orders
@@ -423,9 +425,21 @@ class Outbox:
         self.extend([entry])
 
     def extend(self, entries):
-        """Add entries behind every entry already recorded, in order, in one write: all of them or none."""
+        """Add entries behind every entry already recorded, in order, in one write: all of them or none.
+
+        The whole list is checked as load reads it before anything is
+        written (OutboxInvalid), so an entry the outbox could not be read
+        with is never recorded.
+        """
         with self._locked():
-            self._write(self.load() + list(entries))
+            merged = self.load() + list(entries)
+            if not all(_is_outbox_entry(e) for e in merged):
+                raise OutboxInvalid("an input for {} is not as the adapter records one; nothing was recorded".format(
+                    self.path))
+            if len({e["id"] for e in merged}) != len(merged):
+                raise OutboxInvalid("an input for {} names an input the outbox or the same write already names; "
+                                    "nothing was recorded".format(self.path))
+            self._write(merged)
 
     def strike(self, input_id):
         """Remove the entry for input_id; one not there is already struck off."""
@@ -1715,10 +1729,13 @@ def _is_outbox_entry(entry):
     A stream entry's envelope must name the same input as the entry itself:
     its ID, type, schema version, event time and payload.
     """
-    if not isinstance(entry, dict) or tuple(sorted(entry)) not in (OUTBOX_FIELDS, OUTBOX_STREAM_FIELDS):
+    if not isinstance(entry, dict) or tuple(sorted(entry)) not in (OUTBOX_FIELDS, OUTBOX_STREAM_FIELDS,
+                                                                   OUTBOX_RUN_FIELDS):
         return False
     if not _is_text(entry["id"]) or not isinstance(entry["payload"], dict):
         return False
+    if "run" in entry:
+        return _is_text(entry["run"])
     if "envelope" not in entry:
         return True
     envelope = entry["envelope"]

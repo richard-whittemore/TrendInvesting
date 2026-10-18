@@ -514,17 +514,41 @@ days), it takes them all, oldest first.
    is the "mark" the snapshot gives each holding. It also says whether the
    market was open at that moment (by the NYSE calendar the data job uses:
    9:30 to 4 p.m. New York, 1 p.m. on an early close). After 17:05 that is
-   always "closed". If IBKR gives no last price (the paper login has no
-   market data for SPY, say), the holding is listed with no mark ("mark set
-   false"): the engine then cannot size the joint account's emergency sale
+   always "closed". A price counts only if IBKR's answer for it finished in
+   time and every last price in it was a real price above zero; otherwise
+   the holding is listed with no mark ("mark set false"), as it is when IBKR
+   gives no last price at all (the paper login has no market data for SPY,
+   say). The engine then cannot size the joint account's emergency sale
    back to 98% from that snapshot, holds that sale back and asks you to act
-   by hand; nothing else it decides needs the mark.
+   by hand. This mark is read only by that sale. A buy is checked against a
+   different mark, one recorded at or after the session's close
+   (`market.mark.recorded`), and is refused without one (`missing-mark`,
+   which leaves the account Degraded). Nothing records that mark today, so
+   every buy is refused that way in paper; where it will come from (IBKR's
+   last price, as here, or the data job) is still your decision
+   ([paper trading](paper-trading.md), "Not built yet").
+
+   The account read and the marks are one reading. The adapter first
+   applies every report IBKR has already sent, so a fill or a cancellation
+   received before the read reaches the engine ahead of the snapshot; it
+   does not read while a fill waits for its commission; and if a fill or an
+   order report arrives between the start of the account read and the end
+   of the marks, or any part of the account could not be read (IBKR timed
+   out on the positions or the balances, say), it reads the whole account
+   again, up to three times. The log line `ibkr broker snapshot as_of=...
+   cutoff: ...` names the last report recorded before each snapshot.
 2. **The file, line by line, as written**: each session's SPY bar, then that
    session's close. The engine therefore records the snapshot before the
    bars, and each session closes only after its bar, before anything for
    that day is decided (ADR 0019, ADR 0021). Each line goes with the
    engine's next input number in place of the file's own (the file format,
-   above); nothing else in it changes.
+   above), and with the time it is sent as its "recorded" time, as every
+   input the adapter sends, so the snapshot is never recorded later than
+   the close it serves (ADR 0019 measures the snapshot's age at the close's
+   recorded time); nothing else in it changes. A fill or a cancellation IBKR
+   reports while the engine works through the file goes to the engine
+   before the file's next line, so no session is decided on an account
+   behind a report already received.
 
 Several waiting files go behind one snapshot, oldest first. The next day's
 file gets its own snapshot.
@@ -536,8 +560,8 @@ puts the snapshot and every line of the files in its outbox in one write,
 and marks the files handed over. From the outbox each input goes once, as
 every other input does ([re-delivery](redelivery.md)). So:
 
-- a file it has handed over is never sent again, after a restart, a
-  reconnect, or a later file;
+- a file it has handed over is never sent again to its run, after a
+  restart, a reconnect, or a later file;
 - if it stops partway through a file, the next start carries on from the
   next line; the lines already sent are not sent again;
 - if it stops between writing down the files and the outbox write, the next
@@ -566,10 +590,18 @@ which writes the sessions again from its recordings, and start the adapter
 (`sudo systemctl start ti-adapter-boost`).
 
 - **The file is not as the data job writes it**: a line that is not JSON or
-  not complete, a field missing or extra, a line whose contents do not match
-  its own checksum (`payload_hash`), one input named twice, or line numbers
-  that are not 1, 2, 3, ... in order. Something other than the data job
-  wrote or changed it.
+  not complete, a field missing or extra, a kind of input, version or source
+  the data job does not write, a line whose contents do not match its own
+  checksum (`payload_hash`), one input named twice, line numbers that are
+  not 1, 2, 3, ... in order, or a last line that is not the close of the
+  session the file's name gives. Something other than the data job wrote or
+  changed it. Every waiting file is checked before anything is written down,
+  so a refused file leaves nothing behind in the outbox.
+- **Two waiting files overlap**: a second file for the same session (a copy
+  under another name, say), a file whose first session is not after the
+  last session of the file before it, or two files naming the same input.
+  The message names the later file; move it out as below (the earlier one
+  is then delivered).
 - **The file is not this run's** ("it is not this run's"): it carries
   another run's name, configuration hash or build than the engine now
   running. A file copied from another run's folder, or a run restarted under
@@ -586,15 +618,29 @@ which writes the sessions again from its recordings, and start the adapter
 - **The link to IB Gateway drops while the snapshot is read**: nothing is
   written down or sent. Once the link is back and matched, the adapter takes
   a fresh snapshot and hands the file over then.
+- **IBKR cannot give the whole account three times running** (the message
+  begins "the account could not be read in full for the broker snapshot"
+  and names what could not be read): nothing is written down or sent, and
+  the adapter stops, since a snapshot missing a figure would hold back the
+  sale back to 98% for nothing. Check IB Gateway's link (`journalctl -u
+  ti-gateway`), and that the account holds only whole US-dollar shares and
+  reports its balances in US dollars, then start the adapter again; the
+  file is delivered then. This is not one of the refused-file cases: leave
+  the file where it is.
 - **The adapter was not running at 17:05** and starts the next morning: it
   delivers the file then, and an order the engine releases at that close is
   for a session already past, so it is never sent (the adapter stops on it:
   [paper trading](paper-trading.md), "What can go wrong"). Keep the adapter
   running through the evening of a paper day.
-- **A fresh run with lines of the old run's file still in the outbox** (you
-  started a new `TI_RUN` before the old file was all sent): those lines are
+- **A fresh run with the old run's file still in the outbox** (you started a
+  new `TI_RUN` before the old file was all sent): its snapshot and lines are
   dropped unsent, each with a log line; the new run's own warm-up carries
-  the whole history again.
+  the whole history again. The old run's files are then marked "dropped" in
+  `.delivered`, not delivered, as they are when a stop left them written
+  down but not yet in the outbox. If you later resume the old run (its own
+  `TI_RUN` again, after a crash: [durable log](../runbooks/durable-log.md)),
+  the adapter hands its dropped files over again behind a fresh snapshot;
+  any line its engine had already recorded is skipped, never sent twice.
 
 ## What can go wrong, and what the step does
 

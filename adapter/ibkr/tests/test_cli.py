@@ -232,11 +232,12 @@ class DeployTests(unittest.TestCase):
             self.assertIn("--engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log", unit)
         self.assertIn("ReadOnlyPaths=/var/lib/trend-investing/engines/boost -" + read, adapter)
 
-    def test_the_adapter_is_installed_with_the_calendar_it_reads(self):
+    def test_the_adapter_is_installed_with_the_calendar_and_the_input_table_it_reads(self):
         provision = (repo / "deploy" / "provision.sh").read_text()
         body = provision[provision.index("step_adapter() {"):]
         body = body[:body.index("\n}\n")]
-        self.assertIn('"$here/../adapter/marketdata/nyse_calendar.py" "$adapter_root.new/adapter/marketdata/"', body)
+        for name in ("nyse_calendar.py", "kinds.py"):
+            self.assertIn('"$here/../adapter/marketdata/{}" "$adapter_root.new/adapter/marketdata/"'.format(name), body)
 
     def test_the_adapter_is_handed_its_own_account_file_and_nothing_else(self):
         # One engine per account (ADR 0026 point 8): the Boost adapter never

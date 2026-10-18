@@ -67,9 +67,31 @@ broker snapshot (the account read with IBKR's marks for its holdings), all
 recorded in the outbox in one write, so the snapshot is journalled before
 the bars and each session's bars before its close (ADR 0019's snapshot
 rule; ADR 0021). A stream entry is sent as the data job wrote it, with the
-engine's next sequence (the file's own is a file-local ordinal); one an
-earlier run's stream left in the outbox is struck off unsent, since a run's
-own stream carries its whole history from its warm-up.
+engine's next sequence (the file's own is a file-local ordinal) and its
+send time as its recorded time, as every input the adapter sends, so the
+snapshot is never recorded after the input it serves (ADR 0019's snapshot
+rule measures its age at the trigger's recorded time). An earlier run's
+batch left in the outbox, its snapshot and its stream entries, is struck
+off unsent, since a run's own stream carries its whole history from its
+warm-up, and the batch is marked dropped, so that run gets its files again
+if it is resumed (delivery.py).
+
+The broker snapshot is one consistent reading (ADR 0019: its components
+share one cutoff): every callback already received is applied first, so a
+report IBKR sent before the read is recorded ahead of it; it is not taken
+while an execution awaits its commission (its fill is not yet recorded);
+and if an order report is recorded or an execution arrives between the
+start of the account read and the end of the marks, it is read again, as
+it is when any component could not be read, up to SNAPSHOT_ATTEMPTS times.
+A reading still incomplete then stops the adapter for a person
+(delivery.SnapshotRefused); one still overtaken by reports waits for the
+next step. Each snapshot's cutoff is logged: the last report recorded
+before it.
+
+The outbox goes oldest first, but a broker report recorded behind a stream
+entry (a fill or a cancellation IBKR reported while the engine decided a
+bar) is sent before that stream entry, so no decision runs on a state
+behind a report already received.
 
 The engine must be running, with its durable log begun, before the adapter
 starts: the log is the run's identity. The loop connects to the engine's
@@ -93,7 +115,7 @@ import uuid
 from datetime import datetime, timezone
 
 from connection import Connection, NotConnected
-from delivery import DELIVERED_SUFFIX, Deliverer, market_open, run_name
+from delivery import DELIVERED_SUFFIX, Deliverer, SnapshotRefused, market_open, run_name
 from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect
 from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
                    read_engine_log, released_client_order_ids, run_identity, run_logs)
@@ -116,6 +138,9 @@ EVENT_TIME_FIELD = {LIFECYCLE_TYPE: "occurred_at", FILL_TYPE: "filled_at"}
 # How long, in seconds, the loop waits on the engine's thread between reads
 # of IB Gateway's callbacks while the engine decides.
 ENGINE_WAIT_POLL = 0.05
+# How many times one delivery reads the account and the marks for a broker
+# snapshot that is complete and not overtaken by an order report.
+SNAPSHOT_ATTEMPTS = 3
 
 
 class ReconcileIncomplete(Exception):
@@ -132,6 +157,22 @@ class ReportRecordInvalid(ValueError):
 
 def _utc_now():
     return datetime.now(timezone.utc)
+
+
+def _batch_run(entry):
+    """The run a stream batch's outbox entry was recorded for (its envelope's, or its snapshot's), or None for any other."""
+    if "envelope" in entry:
+        return entry["envelope"].get("correlation_id")
+    return entry.get("run")
+
+
+def _next_entry(entries):
+    """The outbox entry to send next: the oldest, except that a broker report behind a stream entry goes before it."""
+    if "envelope" in entries[0]:
+        for entry in entries[1:]:
+            if _batch_run(entry) is None:
+                return entry
+    return entries[0]
 
 
 def _event_time_readable(payload, field):
@@ -208,6 +249,10 @@ class AdapterLoop:
         self.tracker = None
         self.outbox = Outbox(pending_path + OUTBOX_SUFFIX)
         self.pending = PendingInput(pending_path)
+        # The order reports recorded by this adapter: how many, and the last
+        # one's input ID (a broker snapshot's cutoff).
+        self._reports_recorded = 0
+        self._last_report = None
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._broker_snapshot, new_id)
 
@@ -393,8 +438,11 @@ class AdapterLoop:
 
     def _record(self, record):
         """The report journal's sink: record IBKR's report as the engine's next input."""
+        input_id = self._new_id(record.event_type)
         self.submit(record.event_type, record.schema_version, record.payload,
-                    record.payload[EVENT_TIME_FIELD[record.event_type]])
+                    record.payload[EVENT_TIME_FIELD[record.event_type]], input_id=input_id)
+        self._reports_recorded += 1
+        self._last_report = input_id
 
     def _sent(self, record):
         log.info("ibkr sent client_order_id=%s client_id=%d order_id=%d", record.request.client_order_id,
@@ -408,37 +456,81 @@ class AdapterLoop:
             # Read after the worker is seen finished too, so whatever arrived
             # during the exchange is applied before anything else.
             alive = worker.is_alive()
-            while self.conn.pump(0) is not None:
-                pass
-            self.reports.check_overdue()
+            self._pump_all()
             if not alive:
                 return
             worker.join(ENGINE_WAIT_POLL)
 
-    def _broker_snapshot(self):
-        """The account.broker.snapshot of one account read, with IBKR's marks; None if the link went meanwhile.
+    def _pump_all(self):
+        """Apply every callback IB Gateway has already sent, then check for overdue commissions."""
+        while self.conn.pump(0) is not None:
+            pass
+        self.reports.check_overdue()
 
+    def _activity(self):
+        """The order reports recorded and the executions seen so far: a broker snapshot's cutoff watermark."""
+        return self._reports_recorded, self.reports.executions_seen()
+
+    def _broker_snapshot(self):
+        """The account.broker.snapshot of one consistent account read, with IBKR's marks (see the module).
+
+        None when it cannot be taken now (the link went, an execution awaits
+        its commission, or reports overtook every attempt); SnapshotRefused
+        when the account could not be read in full within SNAPSHOT_ATTEMPTS.
         Marks are asked for each holding the configuration has IBKR's
         contract number for; any other holding is stated with no mark.
         market_open is the NYSE session's state at the read's time.
         """
-        reading = read_account(self.conn)
-        con_ids = {s: self.config.con_ids[s] for s in reading.positions if s in self.config.con_ids}
-        marks = read_marks(self.conn, con_ids)
-        if not self.ready():
-            log.info("ibkr link went during the broker snapshot; the stream waits until it is reconciled")
-            return None
-        return broker_snapshot_record(reading, market_open(reading.as_of), marks)
+        unread = None
+        for attempt in range(1, SNAPSHOT_ATTEMPTS + 1):
+            self._pump_all()
+            if not self.ready():
+                log.info("ibkr link went during the broker snapshot; the stream waits until it is reconciled")
+                return None
+            if self.reports.awaiting_commission():
+                log.info("ibkr broker snapshot waits: an execution awaits its commission, so its fill is not "
+                         "recorded yet")
+                return None
+            before = self._activity()
+            reading = read_account(self.conn)
+            con_ids = {s: self.config.con_ids[s] for s in reading.positions if s in self.config.con_ids}
+            marks = read_marks(self.conn, con_ids)
+            if not self.ready():
+                log.info("ibkr link went during the broker snapshot; the stream waits until it is reconciled")
+                return None
+            if self._activity() != before:
+                log.info("ibkr broker snapshot read again (attempt %d of %d): an order report or execution "
+                         "arrived between its reads", attempt, SNAPSHOT_ATTEMPTS)
+                unread = None
+                continue
+            if reading.unread:
+                unread = sorted(reading.unread)
+                log.info("ibkr broker snapshot read again (attempt %d of %d): %s could not be read", attempt,
+                         SNAPSHOT_ATTEMPTS, ",".join(unread))
+                continue
+            log.info("ibkr broker snapshot as_of=%s cutoff: no order report or execution between its reads; "
+                     "the last report recorded before it %s", _stamp(reading.as_of), self._last_report or "none")
+            return broker_snapshot_record(reading, market_open(reading.as_of), marks)
+        if unread is not None:
+            raise SnapshotRefused(
+                "the account could not be read in full for the broker snapshot in {} attempts ({} could not be "
+                "read), so the day's stream is not delivered: a snapshot with values IBKR did not give would "
+                "withhold the sale back to 98% for nothing. Check IB Gateway's link and the account's currency "
+                "and positions, then start the adapter again (docs/manual/market-data.md, \"What happens to the "
+                "file\")".format(SNAPSHOT_ATTEMPTS, ", ".join(unread)))
+        return None
 
     def _envelope(self, entry, engine_log):
         """The input envelope for an outbox entry: the run's identity and next sequence from the engine's log.
 
         A stream entry is its envelope as the data job wrote it, with the
-        engine's next sequence in place of the file's own.
+        engine's next sequence in place of the file's own and its send time
+        as its recorded time, as every input's (see the module).
         """
         if "envelope" in entry:
             envelope = dict(entry["envelope"])
             envelope["sequence"] = engine_log.next_sequence
+            envelope["recorded_at"] = _stamp(self._now())
             return envelope
         encoded = json.dumps(entry["payload"], separators=(",", ":"), allow_nan=False).encode("utf-8")
         return {"id": entry["id"], "type": entry["event_type"], "envelope_version": ENVELOPE_VERSION,
@@ -479,7 +571,7 @@ class AdapterLoop:
                 entries = self.outbox.load()
                 if not entries:
                     return
-                entry = entries[0]
+                entry = _next_entry(entries)
                 settled = self.pending.run_ended()
                 if entry["id"] in {e["input"]["id"] for e in settled} | {o["id"] for e in settled
                                                                         for o in e["outbox"]}:
@@ -487,11 +579,14 @@ class AdapterLoop:
                     # an input so settled: never sent.
                     self.outbox.strike(entry["id"])
                     continue
-                if "envelope" in entry and entry["envelope"].get("correlation_id") != run_name(
-                        self._engine_log_path):
-                    # An earlier run's stream: the run now running has its own.
+                batch_run = _batch_run(entry)
+                if batch_run is not None and batch_run != run_name(self._engine_log_path):
+                    # An earlier run's stream batch: the run now running has
+                    # its own, and the earlier run gets it again if resumed.
                     log.info("ibkr stream input %s of run %s struck off unsent: the engine now runs %s",
-                             entry["id"], entry["envelope"].get("correlation_id"), run_name(self._engine_log_path))
+                             entry["id"], batch_run, run_name(self._engine_log_path))
+                    if self.delivery is not None:
+                        self.delivery.dropped(batch_run)
                     self.outbox.strike(entry["id"])
                     continue
                 engine_log = read_engine_log(self._engine_log_path)

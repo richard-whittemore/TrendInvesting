@@ -4,7 +4,9 @@
 # answers; the IBKR adapter's start command, with --streams, delivers each
 # behind a broker snapshot to an engine stand-in on a real socket, with a
 # paper configuration and sending switched on; the stand-in releases one
-# order on the day's close, which goes out once to the fake gateway, is
+# order on the day's close, only if the broker snapshot ahead of it is
+# fresh at the close's recorded time, and its log shows the release, which
+# goes out once to the fake gateway, is
 # filled and journalled; a reconnect and a restart send nothing twice.
 # Exits non-zero at the first check that fails or if the adapter stops.
 # Nothing reaches Massive or IBKR, and no ibapi is needed. Run it from a

@@ -16,6 +16,7 @@ Everything here is synthetic.
 import copy
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 LOG_CHAIN = ("seed=sha256(canonical_log_header_bytes); "
@@ -25,6 +26,7 @@ CONFIGURATION_TYPE = "strategy.target-weight.configuration"
 STARTED_AT = "2026-10-16T13:30:00Z"
 STRATEGY_VERSION = "target-weight-boost/1.0.0+rehearsal"
 COMPACT = (",", ":")
+BROKER_SNAPSHOT_TYPE = "account.broker.snapshot"
 
 
 class EngineRefused(Exception):
@@ -46,12 +48,23 @@ class LoggedEngine:
     bare Boost strategy ID when not given; the data job reads a whole Boost
     configuration from it). Calling the engine is the relay's connect: it
     returns itself, and connects counts each call.
+
+    With snapshot_age (a timedelta), the decisions scripted for an input are
+    committed only when the latest broker snapshot committed before it was
+    taken at or before the input's recorded time and no longer before it
+    than snapshot_age: ADR 0019's snapshot rule, which the engine applies to
+    a sell (orderplan.StaleDetail), applied here to every scripted decision.
+    An input that fails it commits no decisions, and withheld names it with
+    the reason.
     """
 
     def __init__(self, log_path, decisions=None, configuration_hash=CONFIGURATION_HASH,
-                 strategy_version=STRATEGY_VERSION, started_at=STARTED_AT, configuration=None):
+                 strategy_version=STRATEGY_VERSION, started_at=STARTED_AT, configuration=None, snapshot_age=None):
         self.path = Path(log_path)
         self.decisions = decisions or {}
+        self.snapshot_age = snapshot_age
+        self.withheld = {}
+        self._snapshot_as_of = None
         self.configuration_hash = configuration_hash
         self.strategy_version = strategy_version
         self.committed = {}
@@ -103,6 +116,13 @@ class LoggedEngine:
         if hashlib.sha256(raw.encode()).hexdigest() != envelope.get("payload_hash"):
             raise EngineRefused("input {} payload does not match its hash".format(envelope["id"]))
         decisions = copy.deepcopy(self.decisions.get(envelope["id"], []))
+        if decisions and self.snapshot_age is not None:
+            stale = self._stale(envelope)
+            if stale:
+                self.withheld[envelope["id"]] = stale
+                decisions = []
+        if envelope["type"] == BROKER_SNAPSHOT_TYPE:
+            self._snapshot_as_of = _instant(envelope["payload"]["as_of"])
         lines = []
         head = {k: v for k, v in envelope.items() if k != "payload"}
         head.pop("payload_hash")
@@ -130,3 +150,28 @@ class LoggedEngine:
                  "strategy_version": self.strategy_version, "payload": {"decisions": decisions}}
         self.committed[envelope["id"]] = (copy.deepcopy(envelope), reply)
         return copy.deepcopy(reply)
+
+    def _stale(self, envelope):
+        """Why the latest broker snapshot is stale at envelope's recorded time, or "" when it is fresh."""
+        if self._snapshot_as_of is None:
+            return "no broker snapshot is committed before it"
+        age = _instant(envelope["recorded_at"]) - self._snapshot_as_of
+        if age.total_seconds() < 0:
+            return "the broker snapshot was taken {} after it was recorded".format(-age)
+        if age > self.snapshot_age:
+            return "the broker snapshot is {} old at it".format(age)
+        return ""
+
+    def decisions_for(self, input_id):
+        """The decisions the durable log commits for input_id, as written: [(type, payload)]."""
+        out = []
+        for line in self.path.read_text(encoding="utf-8").splitlines()[1:]:
+            record = json.loads(line).get("record")
+            if record and record["kind"] == "decision" and record["envelope"].get("causation_id") == input_id:
+                out.append((record["envelope"]["type"], record["envelope"]["payload"]))
+        return out
+
+
+def _instant(text):
+    """An RFC 3339 UTC time as the adapter and the data job stamp it ("...Z", whole seconds) as a datetime."""
+    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)

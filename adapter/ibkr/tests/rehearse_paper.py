@@ -19,10 +19,12 @@ It proves, in order, and stops at the first that fails, exiting 1:
 2. the adapter starts, reads and matches the account before anything else,
    and delivers the warm-up behind one broker snapshot, in file order;
 3. the day's stream reaches the engine as its broker snapshot (with IBKR's
-   mark for the holding), its bar, then its close, and the order the
-   stand-in releases on that close goes out once, only after it: a
-   whole-share DAY limit order for the account, tagged with its client
-   order ID;
+   mark for the holding), its bar, then its close; the stand-in releases
+   one order on that close only if the snapshot is fresh at the close's
+   recorded time (ADR 0019's snapshot rule, as the engine checks a sell),
+   its durable log shows that release, and the order goes out once, only
+   after it, as released: a whole-share DAY limit order for the account,
+   tagged with its client order ID;
 4. IBKR's acceptance reaches the engine as a lifecycle input, and each of
    two fills as a fill input once its commission arrives;
 5. a dropped link is reconnected and matched again, and neither the order
@@ -229,8 +231,11 @@ def rehearse(work, account):
     config.write_text(json.dumps(cfg))
     (work / "secrets.env").write_text("MASSIVE_API_KEY={}\n".format(SYNTHETIC_KEY))
     engine_log = work / (RUN + ".log")
+    # The stand-in releases on the day's close only if the broker snapshot
+    # ahead of it is fresh at its recorded time, as the engine sizes a sell.
     engine = LoggedEngine(str(engine_log), {day_close: [{"type": RELEASED, "payload": released}]},
-                          configuration=cfg)
+                          configuration=cfg,
+                          snapshot_age=dt.timedelta(minutes=cfg["execution"]["max_snapshot_age_minutes"]))
     streams = work / "data" / "streams" / "boost"
     warm = data_job(work, config, engine_log, settled(eve), "--backfill-from", warm_up_start.isoformat())
     sock_path = str(work / "engine.sock")
@@ -269,7 +274,8 @@ def rehearse(work, account):
     def run(phase):
         status = adapter_main(argv, api_factory=lambda cfg: gateway, should_stop=phase, err=log, poll=0.01,
                               ibapi_version=lambda: tuple(int(p) for p in version.split(".")),
-                              today=lambda: session)
+                              today=lambda: session,
+                              now=lambda: datetime.fromtimestamp(gateway.server_time, timezone.utc))
         log.flush()
         if status != 0:
             raise RehearsalFailed("the adapter stopped (exit {}): {}".format(
@@ -338,9 +344,14 @@ def rehearse(work, account):
                                                  "mark_set": True}]
               and snapshot.get("market_open") is False and snapshot.get("unreadable") == [],
               "the day's stream reached the engine as its broker snapshot, its bar, then its close")
-        check(written["placed_before"] == 0 and placed() == 1,
-              "the order went out only after the day's close, which released it")
-        _, contract, order = gateway.placed[0]
+        committed = engine.decisions_for(day_close)
+        _, contract, order = gateway.placed[0] if gateway.placed else (None, None, None)
+        check(written["placed_before"] == 0 and placed() == 1 and committed == [(RELEASED, released)]
+              and not engine.withheld
+              and (order.orderRef, str(order.totalQuantity), order.lmtPrice) == (
+                  released["client_order_id"], str(released["quantity"]), released["limit_price"]),
+              "the order went out only after the day's close, which the engine's log shows released it "
+              "(its broker snapshot fresh at the close)")
         check((contract.conId, contract.secType, contract.currency, contract.exchange) == (SPY_CON_ID, "STK", "USD",
                                                                                            "SMART")
               and (order.orderType, order.tif, order.transmit, str(order.totalQuantity), order.lmtPrice)

@@ -97,9 +97,13 @@ class FakeTWS(TWSApi):
         # IBKR's market-data snapshots: the price for each conId, sent as
         # mark_tick (LAST) and ended; an (code, message) error for a conId in
         # mark_errors instead; nothing at all with answer_marks false; the
-        # link dropped as the snapshot is asked for with drop_on_mark.
+        # link dropped as the snapshot is asked for with drop_on_mark;
+        # mark_ticks gives a conId's (tick type, price) ticks in place of
+        # its one mark, and end_marks false leaves every snapshot unended.
         self.marks = {}
         self.mark_tick = 4
+        self.mark_ticks = {}
+        self.end_marks = True
         self.mark_errors = {}
         self.answer_marks = True
         self.drop_on_mark = False
@@ -209,9 +213,13 @@ class FakeTWS(TWSApi):
         if contract_.conId in self.mark_errors:
             self.callbacks.error(req_id, *self.mark_errors[contract_.conId])
             return
-        if contract_.conId in self.marks:
+        if contract_.conId in self.mark_ticks:
+            for tick, price in self.mark_ticks[contract_.conId]:
+                self.callbacks.tick_price(req_id, tick, price, SimpleNamespace())
+        elif contract_.conId in self.marks:
             self.callbacks.tick_price(req_id, self.mark_tick, self.marks[contract_.conId], SimpleNamespace())
-        self.callbacks.tick_snapshot_end(req_id)
+        if self.end_marks:
+            self.callbacks.tick_snapshot_end(req_id)
 
     def cancel_mkt_data(self, req_id):
         self.calls.append(("cancel_mkt_data", req_id))

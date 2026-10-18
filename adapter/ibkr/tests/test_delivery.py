@@ -30,9 +30,11 @@ from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine
 from fake_tws import ACCOUNT, FakeTWS, contract
 from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
-from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, StreamRefused, market_open, read_stream)
+from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, StreamRefused, market_open,
+                      read_stream)
 from loop import AdapterLoop, Outbox
-from relay import RELEASED, EngineUnavailable, PendingInput, read_engine_log
+from relay import RELEASED, EngineUnavailable, OutboxInvalid, PendingInput, read_engine_log
+from reports import FILL_TYPE, LIFECYCLE_TYPE
 from snapshot import BROKER_SNAPSHOT_TYPE
 
 RUN = "engine"
@@ -88,14 +90,14 @@ class DeliveryTests(unittest.TestCase):
         self.fake.marks = {SPY_CON_ID: 401.17}
         self.new_id = Ids()  # one sequence of input IDs across restarts, as uuid4 gives
 
-    def loop(self, engine=None, fake=None, streams=True):
+    def loop(self, engine=None, fake=None, streams=True, engine_log=None, now=RECEIVED):
         clock = Clock()
 
         def sleep(seconds):
             clock.now += seconds
         loop = AdapterLoop(config(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT),
-                           fake or self.fake, engine or self.engine, self.pending, self.engine_log,
-                           now=lambda: RECEIVED, today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
+                           fake or self.fake, engine or self.engine, self.pending, engine_log or self.engine_log,
+                           now=lambda: now, today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
                            new_id=self.new_id, streams=str(self.streams) if streams else None)
         self.addCleanup(loop.close)
         return loop
@@ -121,8 +123,9 @@ class DeliveryTests(unittest.TestCase):
         # The engine's sequence, set as each is sent: its configuration is 1.
         self.assertEqual([e["sequence"] for e in sent], [2, 3, 4, 5, 6])
         for want, got in zip(written, sent[1:]):
-            self.assertEqual({k: v for k, v in got.items() if k != "sequence"},
-                             {k: v for k, v in want.items() if k != "sequence"}, "sent as written")
+            self.assertEqual({k: v for k, v in got.items() if k not in ("sequence", "recorded_at")},
+                             {k: v for k, v in want.items() if k not in ("sequence", "recorded_at")},
+                             "sent as written")
         snapshot = sent[0]["payload"]
         self.assertEqual(snapshot["account_id"], ACCOUNT)
         self.assertEqual(snapshot["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 401.17,
@@ -417,6 +420,303 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn(str(path), str(caught.exception))
         self.assertEqual(self.types(), [])
 
+    # -- one batch, read whole before anything is written ------------------
+    def assert_refused_and_nothing_recorded(self, path):
+        loop = self.loop()
+        try:
+            loop.start()
+            with self.assertRaises(StreamRefused) as caught:
+                self.settle(loop)
+        finally:
+            loop.close()
+        self.assertIn(str(path), str(caught.exception))
+        self.assertEqual(self.types(), [])
+        self.assertEqual(Outbox(self.pending + ".outbox").load(), [])
+        self.assertFalse(Path(self.pending + DELIVERED_SUFFIX).exists(), "nothing of the batch is recorded")
+        return caught.exception
+
+    def test_two_files_of_one_session_in_one_batch_are_refused_and_nothing_is_recorded(self):
+        envelopes = session_envelopes([FRIDAY])
+        write_stream(self.folder, FRIDAY, envelopes)
+        copy = write_stream(self.folder, FRIDAY, envelopes, prefix="boost-copy")
+        self.assert_refused_and_nothing_recorded(copy)
+
+    def test_files_sharing_an_input_id_in_one_batch_are_refused_before_anything_is_written(self):
+        thursday = date(2027, 1, 13)
+        first = session_envelopes([thursday])
+        write_stream(self.folder, thursday, first)
+        second = write_stream(self.folder, FRIDAY, [dict(e, sequence=n) for n, e in enumerate(
+            first[:1] + session_envelopes([FRIDAY]), 1)])
+        refused = self.assert_refused_and_nothing_recorded(second)
+        self.assertIn(first[0]["id"], str(refused))
+
+    def test_a_file_whose_name_is_not_the_session_its_content_closes_is_refused(self):
+        cases = {
+            "it closes another session": session_envelopes([date(2027, 1, 13)]),
+            "it does not end with a session's close": session_envelopes([FRIDAY])[:1],
+            "its close has no period_end that can be read": session_envelopes([FRIDAY])[:1] + [_envelope(
+                CLOSED, 1, "marketdata:session-closed:2027-01-14", "2027-01-14T21:00:00Z",
+                {"period_end": "Friday", "instrument_ids": ["SPY"]}, sequence=2)],
+        }
+        for why, envelopes in cases.items():
+            with self.subTest(why):
+                for p in self.folder.iterdir():
+                    p.unlink()
+                Path(self.pending + DELIVERED_SUFFIX).unlink(missing_ok=True)
+                path = write_stream(self.folder, FRIDAY, envelopes)
+                self.assert_refused_and_nothing_recorded(path)
+
+    def test_an_event_type_schema_version_or_source_the_data_job_does_not_write_is_refused(self):
+        good = session_envelopes([FRIDAY])
+        cases = {
+            "an unknown type": dict(good[0], type="market.bar.unknown"),
+            "an unknown schema version": dict(good[0], schema_version=999),
+            "another type's version": dict(good[1], schema_version=2),
+            "another source": dict(good[0], source="ibkr"),
+        }
+        for why, line in cases.items():
+            with self.subTest(why):
+                for p in self.folder.iterdir():
+                    p.unlink()
+                envelopes = [line, good[1]] if line["id"] == good[0]["id"] else [good[0], line]
+                path = write_stream(self.folder, FRIDAY, envelopes)
+                self.assert_refused_and_nothing_recorded(path)
+
+    # -- the snapshot's time against its trigger's ----------------------------
+    def test_every_stream_input_is_recorded_at_its_send_time_never_before_its_snapshot(self):
+        # The data job wrote the file at 22:05 UTC; IBKR's clock reads the
+        # snapshot at 08:00 UTC the next day, and the adapter sends at 08:30.
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        sending = datetime(2027, 1, 15, 8, 30, tzinfo=timezone.utc)
+        loop = self.loop(now=sending)
+        loop.start()
+        self.settle(loop)
+        sent = self.engine.inputs()
+        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual([e["recorded_at"] for e in sent], ["2027-01-15T08:30:00Z"] * 3)
+        as_of = sent[0]["payload"]["as_of"]
+        for e in sent[1:]:
+            self.assertLessEqual(as_of, e["recorded_at"], "the snapshot is never after the input it serves")
+
+    # -- an earlier run's batch ---------------------------------------------
+    def queue_unsent(self):
+        """This run's batch recorded in the outbox, and the adapter stopped before sending any of it."""
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        with mock.patch.object(AdapterLoop, "_drain"):
+            loop.step()
+        loop.close()
+        self.assertEqual(len(loop.outbox.load()), 3)
+
+    def fresh_run(self, name="run-b"):
+        log = str(Path(self.dir.name) / (name + ".log"))
+        engine = LoggedEngine(log)
+        write_stream(self.streams / name, FRIDAY, session_envelopes([FRIDAY], run=name))
+        return log, engine
+
+    def test_an_earlier_runs_whole_batch_left_in_the_outbox_never_reaches_a_fresh_run(self):
+        self.queue_unsent()
+        log, engine = self.fresh_run()
+        fresh = self.loop(engine=engine, engine_log=log)
+        fresh.start()
+        self.settle(fresh)
+        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual([e["id"] for e in engine.inputs()][1:], ["marketdata:bar:SPY:2027-01-14",
+                                                                  "marketdata:session-closed:2027-01-14"])
+        self.assertEqual(len(engine.inputs(BROKER_SNAPSHOT_TYPE)), 1, "only the fresh run's own snapshot")
+        self.assertEqual(self.types(), [], "nothing reached the earlier run either")
+        self.assertEqual(fresh.outbox.load(), [])
+
+    def test_a_resumed_run_gets_the_files_a_fresh_run_struck_off_unsent(self):
+        self.queue_unsent()
+        log, engine = self.fresh_run()
+        fresh = self.loop(engine=engine, engine_log=log)
+        fresh.start()
+        self.settle(fresh)
+        fresh.close()
+        resumed = self.loop()
+        resumed.start()
+        self.settle(resumed)
+        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        batches = json.loads(Path(self.pending + DELIVERED_SUFFIX).read_text())["batches"]
+        self.assertEqual([(b["run"], b["state"]) for b in batches],
+                         [(RUN, "dropped"), ("run-b", "queued"), (RUN, "queued")])
+
+    def test_a_resumed_run_gets_the_files_of_its_batch_a_fresh_run_dropped_unqueued(self):
+        earlier = "run-earlier"
+        path = write_stream(self.streams / earlier, date(2027, 1, 13), session_envelopes([date(2027, 1, 13)],
+                                                                                           run=earlier))
+        Path(self.pending + DELIVERED_SUFFIX).write_text(json.dumps({"batches": [{
+            "run": earlier, "snapshot": "ibkr:account.broker.snapshot:old", "state": "queuing",
+            "files": [{"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "lines": 2}]}]}))
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        self.settle(loop)
+        loop.close()
+        log = str(Path(self.dir.name) / (earlier + ".log"))
+        engine = LoggedEngine(log)
+        resumed = self.loop(engine=engine, engine_log=log)
+        resumed.start()
+        self.settle(resumed)
+        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(engine.inputs()[1]["id"], "marketdata:bar:SPY:2027-01-13")
+
+    # -- the account read the snapshot is made from -----------------------
+    def test_a_partial_account_read_is_read_again_and_never_delivered_as_the_snapshot(self):
+        class PartialOnce(FakeTWS):
+            reads = 0
+
+            def req_account_summary(self, req_id, group, tags):
+                # The second read (the first is the start's reconciliation)
+                # times out: IBKR never ends the summary.
+                self.reads += 1
+                self.end_summary = self.reads != 2
+                super().req_account_summary(req_id, group, tags)
+        fake = PartialOnce()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop(fake=fake)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.engine.inputs()[0]["payload"]["unreadable"], [])
+        self.assertEqual(fake.reads, 3)
+
+    def test_an_account_read_that_stays_partial_stops_for_a_person_and_records_nothing(self):
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        self.fake.end_summary = False
+        import delivery
+        with self.assertRaises(getattr(delivery, "SnapshotRefused", StreamRefused)) as caught:
+            self.settle(loop)
+        self.assertIn("net-liquidation", str(caught.exception))
+        self.assertEqual(self.types(), [])
+        self.assertEqual(loop.outbox.load(), [])
+        self.assertFalse(Path(self.pending + DELIVERED_SUFFIX).exists())
+
+    # -- the broker's reports and the stream --------------------------------
+    def place_the_days_order(self):
+        """FRIDAY's close releases the paper order; IBKR accepts it."""
+        released = json.loads((tests_dir / "testdata" / "paper_released.json").read_text())
+        self.engine.decisions = {"marketdata:session-closed:{}".format(FRIDAY): [{"type": RELEASED,
+                                                                               "payload": released}]}
+        self.fake.on_place = self.fake.accept
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+
+    def test_a_fill_during_the_snapshots_reads_makes_the_adapter_read_the_account_again(self):
+        class FillsDuringMarks(FakeTWS):
+            fill_next = False
+
+            def req_mkt_data(self, req_id, contract_):
+                if self.fill_next:
+                    self.fill_next = False
+                    self.fill(7, shares="9", price=401.25, exec_id="0001f4e8.t.01.01", cum_qty="9",
+                              time="20270114 15:59:00 US/Eastern")
+                    self.positions = [(ACCOUNT, contract(), Decimal("156"), 312.5)]
+                super().req_mkt_data(req_id, contract_)
+        fake = FillsDuringMarks()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        self.place_the_days_order()
+        loop = self.loop(fake=fake)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(len(fake.placed), 1)
+        fake.fill_next = True
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        self.settle(loop)
+        types = self.types()
+        second = [n for n, t in enumerate(types) if t == BROKER_SNAPSHOT_TYPE][1]
+        self.assertLess(types.index(FILL_TYPE), second, "the fill is journalled before the snapshot")
+        self.assertEqual(self.engine.inputs()[second]["payload"]["positions"][0]["quantity"], 156,
+                         "the snapshot was read again after the fill, so it holds it")
+
+    def test_a_snapshot_overtaken_by_reports_on_every_attempt_waits_for_the_next_step(self):
+        class FillsDuringEveryMark(FakeTWS):
+            fills = 0
+
+            def req_mkt_data(self, req_id, contract_):
+                if 0 < self.fills <= 3:
+                    n = self.fills
+                    self.fills += 1
+                    self.fill(7, shares="3", price=401.25, exec_id="0001f4e8.t.0{}.01".format(n), cum_qty=str(3 * n),
+                              time="20270114 15:59:00 US/Eastern")
+                super().req_mkt_data(req_id, contract_)
+        fake = FillsDuringEveryMark()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        self.place_the_days_order()
+        loop = self.loop(fake=fake)
+        loop.start()
+        self.settle(loop)
+        fake.fills = 1
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        loop.step()
+        self.assertEqual(self.types().count(BROKER_SNAPSHOT_TYPE), 1, "no snapshot overtaken by a fill is sent")
+        self.assertEqual(self.types().count(FILL_TYPE), 3)
+        self.settle(loop)
+        self.assertEqual(self.types()[-3:], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+
+    def test_no_snapshot_is_taken_while_an_execution_awaits_its_commission(self):
+        self.place_the_days_order()
+        loop = self.loop()
+        loop.start()
+        self.settle(loop)
+        self.fake.fill(7, shares="9", price=401.25, exec_id="0001f4e8.t.01.01", cum_qty="9", commission=None,
+                       time="20270114 15:59:00 US/Eastern")
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        self.settle(loop, steps=5)
+        self.assertEqual(self.types().count(BROKER_SNAPSHOT_TYPE), 1, "the snapshot waits for the fill")
+        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commission=Decimal("1.00"),
+                                                        currency="USD"))
+        self.settle(loop)
+        types = self.types()
+        self.assertLess(types.index(FILL_TYPE), len(types) - 3)
+        self.assertEqual(types[-3:], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+
+    def test_a_file_naming_an_input_the_outbox_already_holds_is_refused(self):
+        path = write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.outbox.append({"id": "marketdata:bar:SPY:2027-01-14", "event_type": "t", "schema_version": 1,
+                            "event_time": "2027-01-14T21:00:00Z", "payload": {}})
+        loop.start()
+        with self.assertRaises(StreamRefused) as caught:
+            loop.step()
+        self.assertIn(str(path), str(caught.exception))
+        self.assertIn("outbox already holds", str(caught.exception))
+        self.assertEqual(self.types(), [])
+
+    def test_a_fill_received_during_a_bar_reaches_the_engine_before_the_next_stream_input(self):
+        class FillsOn:
+            def __init__(self, engine, input_id, act):
+                self.engine, self.input_id, self.act = engine, input_id, act
+
+            def __call__(self):
+                self.engine()
+                return self
+
+            def decide(self, envelope):
+                if envelope["id"] == self.input_id and self.act is not None:
+                    act, self.act = self.act, None
+                    act()
+                return self.engine.decide(envelope)
+        self.place_the_days_order()
+        later = [date(2027, 1, 15), date(2027, 1, 19)]
+        engine = FillsOn(self.engine, "marketdata:bar:SPY:2027-01-15", lambda: self.fake.fill(
+            7, shares="9", price=401.25, exec_id="0001f4e8.t.01.01", cum_qty="9", time="20270114 15:59:00 US/Eastern"))
+        loop = self.loop(engine=engine)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(len(self.fake.placed), 1)
+        write_stream(self.folder, later[-1], session_envelopes(later))
+        self.settle(loop)
+        ids = self.ids()
+        self.assertLess(self.types().index(FILL_TYPE), ids.index("marketdata:session-closed:2027-01-15"),
+                        "the fill reached the engine before the session it arrived in closed")
+
     def test_the_released_order_of_the_days_close_goes_out_once(self):
         released = json.loads((tests_dir / "testdata" / "paper_released.json").read_text())
         self.engine.decisions = {"marketdata:session-closed:{}".format(FRIDAY): [{"type": RELEASED,
@@ -441,6 +741,16 @@ class StreamReadTests(unittest.TestCase):
         self.assertEqual((stream.name, stream.session, stream.sha256), (path.name, FRIDAY, digest))
 
 
+    def test_a_close_stamped_with_an_offset_closes_its_new_york_session(self):
+        with tempfile.TemporaryDirectory() as d:
+            written = session_envelopes([FRIDAY])
+            written[1] = _envelope(CLOSED, 1, written[1]["id"], written[1]["event_time"],
+                                   {"period_end": "2027-01-14T16:00:00-05:00", "instrument_ids": ["SPY"]}, sequence=2)
+            path = write_stream(Path(d), FRIDAY, written)
+            stream = read_stream(str(path), RUN, CONFIGURATION_HASH, STRATEGY_VERSION)
+        self.assertEqual((stream.first, stream.session), (FRIDAY, FRIDAY))
+
+
 class MarketOpenTests(unittest.TestCase):
     def test_open_only_from_the_open_to_the_close_of_an_nyse_session(self):
         cases = [
@@ -461,3 +771,17 @@ class MarketOpenTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutboxExtendTests(unittest.TestCase):
+    def test_an_extend_that_would_name_an_input_twice_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            outbox = Outbox(str(Path(d) / "outbox"))
+            entry = {"id": "a", "event_type": "t", "schema_version": 1, "event_time": "2027-01-14T21:00:00Z",
+                     "payload": {}}
+            outbox.append(entry)
+            with self.assertRaises(OutboxInvalid):
+                outbox.extend([dict(entry, payload={"x": 1})])
+            with self.assertRaises(OutboxInvalid):
+                outbox.extend([{"id": "b"}])
+            self.assertEqual(outbox.load(), [entry])

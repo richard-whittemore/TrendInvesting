@@ -208,6 +208,25 @@ class MarkTests(unittest.TestCase):
                 setup(h.fake)
                 self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {})
 
+    def test_a_later_last_price_that_is_not_valid_leaves_no_mark(self):
+        # A valid price and then an invalid one under the same request: the
+        # request did not end with a valid price, so it gives no mark.
+        for bad in (-1.0, 0.0, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                h = connected()
+                h.fake.mark_ticks = {756733: [(LAST_PRICE_TICK, 401.17), (LAST_PRICE_TICK, bad)]}
+                self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {})
+
+    def test_a_price_whose_snapshot_never_ended_is_no_mark(self):
+        # IBKR sent a price but not the snapshot's end within the timeout:
+        # the request did not complete, so its price is not the mark.
+        h = connected()
+        h.fake.marks = {756733: 401.17, 8314: 95.5}
+        h.fake.end_marks = False
+        self.assertEqual(read_marks(h.conn, {"SPY": 756733, "IEF": 8314}), {})
+        self.assertEqual(sorted(c[1] for c in h.fake.called("cancel_mkt_data")),
+                         sorted(c[1] for c in h.fake.called("req_mkt_data")))
+
     def test_a_request_left_unanswered_is_cancelled(self):
         h = connected()
         h.fake.answer_marks = False
