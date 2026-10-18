@@ -20,8 +20,10 @@ point 6). Its thresholds are in the account's hashed configuration
 > while the joint account holds a position, check at least twice each market
 > day (after the open and before the close): Excess Liquidity and net
 > liquidation in IBKR's app, and that the program's last reading is recent
-> (the newest `risk.margin.alarm` or account record in the log). Read the
-> alarm's records with `grep '"risk.margin.alarm"' <log>`. If you cannot
+> (the time of the newest `account.broker.snapshot` record in the log; the
+> `risk.margin.alarm` record is written only when the level changes, so an
+> old one is expected while the level has not moved). Read the alarm's
+> records with `grep '"risk.margin.alarm"' <log>`. If you cannot
 > keep this check, do not run the joint account live until the alert exists.
 
 | Level | When | What the program does | What you do |

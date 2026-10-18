@@ -131,12 +131,22 @@ that is why the approval is your attestation and must follow a real check.
    yet ([server](../manual/server.md), "Reading the logs without the tools
    on the server"), so until it is, run it on the Mac against a copy of the
    log (`scp` the stopped engine's log into a folder outside the repository
-   and iCloud, run `go run ./cmd/operator approve -log <copy> ...` with the
-   same flags, minus `sudo -u ti-trader` and with `-out` pointing at a local
-   file), then `scp` the approval file back into the account's state
-   directory, owned by `ti-trader`, and check that the file name in it
-   matches the log you copied. Once the tool is installed, run it on the
-   server:
+   and iCloud, keeping the log's original file name, because the approval
+   records that name and the engine checks it; run
+   `go run ./cmd/operator approve -log <copy> ...` from the commit the server
+   is deployed from, with the same flags, minus `sudo -u ti-trader` and with
+   `-out` pointing at a local file). Then return the approval to the server:
+   `scp` it to a staging path (your login's home folder, say), and install it
+   into the account's state directory with the owner and mode the engine
+   needs, since the tool writes mode 0600 for the Mac user and the engine
+   runs as `ti-trader`:
+
+   ```
+   sudo install -o ti-trader -g ti-trader -m 0600 <staged file> /var/lib/trend-investing/engines/<account>/<approval name>
+   ```
+
+   Check that the file name the tool printed matches the log you copied.
+   Once the tool is installed on the server, run it there:
 
    ```
    sudo -u ti-trader operator approve -log <latest run>.log -account <account> -by owner \
@@ -150,7 +160,12 @@ that is why the approval is your attestation and must follow a real check.
    in the same state and scope (`total-cash` included), and the new run
    starts under it. Buys stay refused until you clear it in a later run.
 6. If the tool warns that the kill switch was engaged, and you still want
-   it on, record it again now: a fresh run starts with it released.
+   it on: a fresh run starts with it released, and the switch is recorded
+   with the `operator` tool, which is not on the server. Follow the
+   `-operator` prerequisite in `docs/runbooks/durable-log.md` ("Start a fresh
+   run after an earlier one"). If `-operator` is not set on the engine, do
+   not start the run wanting the switch on: keep the engine stopped, or
+   cancel and hold the positions in IBKR.
 7. **Start the fresh run**: `docs/runbooks/durable-log.md`, "Start a fresh
    run after an earlier one", steps 4 and 5, with `-approval` the file from
    step 4 or 5.
