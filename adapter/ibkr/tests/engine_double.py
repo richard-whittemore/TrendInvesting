@@ -1,5 +1,9 @@
 """A stand-in for the engine on the adapter's side of the socket, writing its durable log as internal/journal does.
 
+A new log begins, as cmd/engine's does, with the run's configuration
+committed as its first input (ID "configuration:" + the configuration hash,
+recorded at the run's as-of time, started_at); a log that exists already is
+a resumed run's copy, and the stand-in takes its next sequence from it.
 It commits each new input before it replies (ADR 0027 section 4): the input
 and the decisions scripted for its ID go to the log file as one group closed
 by a commit, in the layout relay.read_engine_log reads (the record hashes are
@@ -17,6 +21,8 @@ from pathlib import Path
 LOG_CHAIN = ("seed=sha256(canonical_log_header_bytes); "
              "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
 CONFIGURATION_HASH = "sha256:" + "1" * 64
+CONFIGURATION_TYPE = "strategy.target-weight.configuration"
+STARTED_AT = "2026-10-16T13:30:00Z"
 STRATEGY_VERSION = "target-weight-boost/1.0.0+rehearsal"
 COMPACT = (",", ":")
 
@@ -41,7 +47,7 @@ class LoggedEngine:
     """
 
     def __init__(self, log_path, decisions=None, configuration_hash=CONFIGURATION_HASH,
-                 strategy_version=STRATEGY_VERSION):
+                 strategy_version=STRATEGY_VERSION, started_at=STARTED_AT):
         self.path = Path(log_path)
         self.decisions = decisions or {}
         self.configuration_hash = configuration_hash
@@ -51,10 +57,24 @@ class LoggedEngine:
         self.connects = 0
         self.records = 0
         self.next_sequence = 1
-        if not self.path.exists():
-            self.path.write_text(json.dumps({"log_version": 1, "chain_algorithm": LOG_CHAIN,
-                                             "configuration_hash": configuration_hash,
-                                             "strategy_version": strategy_version}, separators=COMPACT) + "\n")
+        if self.path.exists():
+            lines = self.path.read_text(encoding="utf-8").splitlines()[1:]
+            self.records = sum(1 for line in lines if line.startswith('{"record"'))
+            self.next_sequence = sum(1 for line in lines if line.startswith('{"commit"')) + 1
+            return
+        self.path.write_text(json.dumps({"log_version": 1, "chain_algorithm": LOG_CHAIN,
+                                         "configuration_hash": configuration_hash,
+                                         "strategy_version": strategy_version}, separators=COMPACT) + "\n")
+        raw = json.dumps({"strategy_id": "boost"}, separators=COMPACT)
+        head = {"id": "configuration:" + configuration_hash, "type": CONFIGURATION_TYPE, "envelope_version": 1,
+                "schema_version": 7, "event_time": started_at, "recorded_at": started_at, "sequence": 1,
+                "source": "engine", "strategy_version": strategy_version, "configuration_hash": configuration_hash,
+                "payload_hash": hashlib.sha256(raw.encode()).hexdigest()}
+        self.records = 1
+        last, line = _record_line(1, "input", head, raw)
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(line + json.dumps({"commit": {"sequence": 1, "record_hash": last}}, separators=COMPACT) + "\n")
+        self.next_sequence = 2
 
     def __call__(self):
         self.connects += 1

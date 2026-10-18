@@ -31,7 +31,8 @@ from connection import AccountNotManaged
 from engine_client import EngineRejected
 from relay import EngineUnavailable
 from loop import OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch, SOURCE
-from relay import RELEASED, EarlierRunInput, PendingInput, ResolveRefused, main as relay_main, read_engine_log
+from relay import (RELEASED, EarlierRunInput, HandoverRecordInvalid, PendingInput, ResolveRefused, main as relay_main,
+                   read_engine_log)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 
 TESTDATA = tests_dir / "testdata"
@@ -190,14 +191,15 @@ class LoopTests(unittest.TestCase):
         self.session_closed(loop)
         self.settle(loop)
         envelopes = self.engine.inputs()
-        self.assertEqual([e["sequence"] for e in envelopes], [1, 2])
+        # The engine's configuration is its log's first input (sequence 1).
+        self.assertEqual([e["sequence"] for e in envelopes], [2, 3])
         for e in envelopes:
             self.assertEqual((e["configuration_hash"], e["strategy_version"], e["source"], e["envelope_version"]),
                              (CONFIGURATION_HASH, STRATEGY_VERSION, SOURCE, 1))
         lifecycle = envelopes[1]
         self.assertEqual(lifecycle["event_time"], lifecycle["payload"]["occurred_at"])
         self.assertEqual(lifecycle["recorded_at"], "2026-10-17T13:30:00Z")
-        self.assertEqual(read_engine_log(self.engine_log).next_sequence, 3)
+        self.assertEqual(read_engine_log(self.engine_log).next_sequence, 4)
 
     def test_nothing_is_sent_before_ibkr_is_read_and_matched(self):
         loop = self.loop()
@@ -391,7 +393,8 @@ class LoopTests(unittest.TestCase):
         raw = json.dumps(payload, separators=(",", ":"))
         engine.decide({"id": "operator-run-approved:" + payload["previous_log_final_hash"],
                        "type": "operator.run.approved", "envelope_version": 1, "schema_version": 2,
-                       "event_time": "2026-10-17T14:00:00Z", "recorded_at": "2026-10-17T14:00:00Z", "sequence": 1,
+                       "event_time": "2026-10-17T14:00:00Z", "recorded_at": "2026-10-17T14:00:00Z",
+                       "sequence": engine.next_sequence,
                        "source": "engine", "configuration_hash": CONFIGURATION_HASH,
                        "strategy_version": STRATEGY_VERSION, "payload": payload,
                        "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
@@ -582,6 +585,97 @@ class LoopTests(unittest.TestCase):
         self.assertEqual([e["id"] for e in second.inputs()][1:], ["session:3"])
         self.assertNotIn("session:2", [e["id"] for e in second.received])
         self.assertEqual(loop.outbox.load(), [])
+
+    def test_run_ended_settles_every_outbox_entry_the_earlier_run_left_so_none_drains_into_the_fresh_run(self):
+        # While the earlier run's engine decided, IBKR's report on an order
+        # it released was recorded behind the input awaiting its reply.
+        self.filled_under_the_first_run()
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        behind = {"id": "ibkr:execution.order.lifecycle:late", "event_type": LIFECYCLE_TYPE, "schema_version": 2,
+                  "event_time": "2026-10-16T20:00:01Z",
+                  "payload": {"client_order_id": "tw-paper-1", "status": "canceled",
+                              "occurred_at": "2026-10-16T20:00:01Z"}}
+        Outbox(self.pending + OUTBOX_SUFFIX).append(behind)
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        self.assertEqual(Outbox(self.pending + OUTBOX_SUFFIX).load(), [], "struck off at the settlement")
+        recorded = PendingInput(self.pending).run_ended()
+        self.assertEqual([[e["id"] for e in r["outbox"]] for r in recorded], [[behind["id"]]])
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
+        self.assertEqual(loop.outbox.load(), [])
+
+    def test_an_outbox_entry_recorded_at_a_settlement_is_never_sent_even_if_the_strike_was_cut_short(self):
+        # A stop between the settlement's record and its strike: the record
+        # alone keeps the entry from the fresh run.
+        self.filled_under_the_first_run()
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+        behind = {"id": "ibkr:execution.order.lifecycle:late", "event_type": LIFECYCLE_TYPE, "schema_version": 2,
+                  "event_time": "2026-10-16T20:00:01Z", "payload": {"client_order_id": "tw-paper-1"}}
+        outbox.append(behind)
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        if behind["id"] not in {e["id"] for e in outbox.load()}:
+            outbox.append(behind)
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
+        self.assertEqual(loop.outbox.load(), [])
+
+    def test_a_settlement_record_whose_outbox_entries_are_not_as_the_adapter_writes_them_is_refused(self):
+        self.filled_under_the_first_run()
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        path = Path(self.pending + ".run-ended")
+        good = json.loads(path.read_text(encoding="utf-8"))
+        for bad in ("not a list", [{"id": "x"}], [7]):
+            with self.subTest(outbox=bad):
+                path.write_text(json.dumps(dict(good, outbox=bad)) + "\n", encoding="utf-8")
+                with self.assertRaises(HandoverRecordInvalid):
+                    PendingInput(self.pending).run_ended()
+
+    def test_two_unapproved_starts_are_two_runs_and_the_first_ones_input_stops_the_second(self):
+        # Neither run holds a Run approval; each is named by its log's first
+        # committed input, the configuration, which a resume copies.
+        loop = self.loop(engine=Unanswered(self.engine, commits=False))
+        loop.start()
+        self.session_closed(loop)
+        with self.assertRaises(EngineUnavailable):
+            loop.step()
+        loop.close()
+        other = LoggedEngine(str(Path(self.dir.name) / "other.log"), started_at="2026-10-17T13:30:00Z")
+        restarted = self.loop(engine=other, engine_log=str(other.path))
+        with self.assertRaises(EarlierRunInput) as caught:
+            restarted.start()
+        self.assertIn("session:1", str(caught.exception))
+        self.assertEqual(other.received, [])
+
+    def test_an_approved_fresh_run_resumed_after_a_crash_takes_its_own_input_awaiting_its_reply(self):
+        self.filled_under_the_first_run()
+        second = self.fresh_run("engine.log", "run-2.log")
+        loop = self.loop(engine=Unanswered(second, commits=False), engine_log=second.path)
+        loop.start()
+        loop.submit("market.session.closed", 1, {"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]},
+                    SESSION_CLOSED, input_id="session:3")
+        with self.assertRaises(EngineUnavailable):
+            loop.step()
+        loop.close()
+        # The resume copies the crashed run's records, its Run approval
+        # included, into a log of its own.
+        resumed_path = Path(self.dir.name) / "run-2-resumed.log"
+        resumed_path.write_text(Path(second.path).read_text(encoding="utf-8"), encoding="utf-8")
+        resumed = LoggedEngine(str(resumed_path))
+        restarted = self.loop(engine=resumed, engine_log=str(resumed_path))
+        restarted.start()
+        self.settle(restarted)
+        self.assertEqual([e["id"] for e in resumed.received], ["session:3"])
+        self.assertIsNone(PendingInput(self.pending).load())
+        self.assertEqual(restarted.outbox.load(), [])
 
     def test_ibkr_refusing_the_order_in_read_only_mode_reaches_the_engine_as_invalid_with_its_reason(self):
         def read_only(order_id, contract_, order_):

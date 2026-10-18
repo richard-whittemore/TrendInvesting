@@ -26,7 +26,7 @@ from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
                    acknowledge_correction, acknowledge_late_fill, journalled_fills, journalled_reports, main,
-                   resolve, run_logs)
+                   resolve, run_identity, run_logs)
 from sender import OrderRequest
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -1344,6 +1344,68 @@ class RunLogsTests(unittest.TestCase):
         os.remove(first)
         self.assertEqual(run_logs(third, today=TODAY), [third])
 
+    def earlier_day_run(self, name, reports=()):
+        """A run of an earlier day (the 15th) whose one decision released tw-1 for 9, then the reports in reports.
+
+        With a fill of more than 9 among reports, the release's quantity is
+        written as one that cannot be read, so fills never end it.
+        """
+        quantity = "9" if any(r[2].get("quantity", 0) > 9 for r in reports) else 9
+        lines = [log_header()]
+        lines += log_group(1, [("input", "market.session.closed", 1, {"session": "2026-10-15"}),
+                               ("decision", "risk.order.released", 1, {"client_order_id": "tw-1",
+                                                                        "quantity": quantity, "send": True})],
+                           at="2026-10-15T21:00:00Z")
+        for n, (event_type, version, payload) in enumerate(reports, 3):
+            lines += log_group(n, [("input", event_type, version, payload)], at="2026-10-15T21:00:00Z")
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def test_the_chain_keeps_an_earlier_day_run_whose_released_order_has_no_terminal_report(self):
+        # A DAY order placed after the close works the next session, so
+        # IBKR's open orders still show it on the day after its run's last
+        # input: that run's log is read until its order ends.
+        canceled = {"client_order_id": "tw-1", "status": "canceled"}
+        cases = {
+            "no report at all": ((), True),
+            "a partial fill": ((("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4)),), True),
+            "a working status only": ((("execution.order.lifecycle", 2, dict(canceled, status="submitted")),), True),
+            "a cancellation": ((("execution.order.lifecycle", 2, canceled),), False),
+            "a refusal": ((("execution.order.lifecycle", 2, dict(canceled, status="invalid")),), False),
+            "fills for the whole quantity": ((("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4)),
+                                              ("execution.fill", 5, dict(fill_payload("e.1.02"), quantity=5))), False),
+            "fills beyond a quantity that cannot be read": ((("execution.fill", 5, dict(fill_payload("e.1.01"),
+                                                                                         quantity=20)),), True),
+        }
+        for name, (reports, kept) in cases.items():
+            with self.subTest(name):
+                first = self.earlier_day_run("a.log", reports)
+                second = self.write("b.log", ["a.log"])
+                self.assertEqual(run_logs(second, today=TODAY), [second, first] if kept else [second])
+
+    def test_the_chain_walks_on_past_each_earlier_day_run_that_still_has_an_order_open(self):
+        # The report that ends an earlier run's order may be journalled into
+        # a later run's log: the adapter records IBKR's reports into the run
+        # now running.
+        first = self.earlier_day_run("a.log")
+        canceled = {"client_order_id": "tw-1", "status": "canceled"}
+        for name, b_reports, kept in (("still open", [], True),
+                                      ("ended in the later run", [("execution.order.lifecycle", 2, canceled)], False)):
+            with self.subTest(name):
+                lines = [log_header()]
+                lines += log_group(1, [("input", "operator.run.approved", 2, {
+                    "previous_log": "a.log", "previous_log_final_hash": self.final_hash("a.log")}),
+                    ("decision", "risk.order.released", 1, {"client_order_id": "tw-2", "quantity": 1,
+                                                             "send": True})], at="2026-10-16T21:00:00Z")
+                for n, (event_type, version, payload) in enumerate(b_reports, 3):
+                    lines += log_group(n, [("input", event_type, version, payload)], at="2026-10-16T21:00:00Z")
+                second = Path(self.dir.name) / "b.log"
+                second.write_text("".join(lines), encoding="utf-8")
+                third = self.write("c.log", ["b.log"])
+                self.assertEqual(run_logs(third, today=TODAY),
+                                 [third, str(second), first] if kept else [third, str(second)])
+
     def test_an_approval_whose_final_hash_is_not_the_named_logs_is_refused(self):
         self.write("a.log")
         wrong = self.write("b.log", ["a.log"], final_hash="sha256:" + "f" * 64)
@@ -1375,6 +1437,46 @@ class RunLogsTests(unittest.TestCase):
         for previous in ("", ".", "..", "../a.log", "d/a.log", 7):
             with self.subTest(previous=previous), self.assertRaises(ResolveRefused):
                 run_logs(self.write("n.log", [previous]), today=TODAY)
+
+
+
+class RunIdentityTests(unittest.TestCase):
+    """A run's identity: its Run approval's ID, else its log's first committed input, which a resume copies."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def write(self, name, groups, at="2026-10-16T13:30:00Z"):
+        lines = [log_header()]
+        n = 1
+        for entries in groups:
+            lines += log_group(n, entries, at=at)
+            n += len(entries)
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def test_a_run_with_no_approval_is_named_by_its_first_committed_input_never_by_nothing(self):
+        configuration = [("input", "strategy.target-weight.configuration", 7, {"strategy_id": "boost"})]
+        first = self.write("a.log", [configuration])
+        resumed = self.write("a-resumed.log", [configuration])
+        later = self.write("b.log", [configuration], at="2026-10-17T13:30:00Z")
+        self.assertNotEqual(run_identity(first), "")
+        self.assertEqual(run_identity(first), run_identity(resumed))
+        self.assertNotEqual(run_identity(first), run_identity(later))
+
+    def test_a_log_with_no_committed_input_has_no_identity_and_is_refused(self):
+        empty = Path(self.dir.name) / "empty.log"
+        empty.write_text(log_header(), encoding="utf-8")
+        with self.assertRaises(ResolveRefused) as raised:
+            run_identity(str(empty))
+        self.assertIn("no committed input", str(raised.exception))
+
+    def test_a_run_with_an_approval_is_named_by_it(self):
+        path = self.write("c.log", [[("input", "strategy.target-weight.configuration", 7, {})],
+                                    [("input", "operator.run.approved", 2, {"previous_log": "a.log"})]])
+        self.assertEqual(run_identity(path), "e:2")
 
 
 if __name__ == "__main__":

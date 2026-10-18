@@ -87,9 +87,11 @@ class HandoverNotConfirmed(HandoverUnconfirmed):
                     "Gateway and IBKR cannot have the order; it is not taken as sent and nothing else is sent. "
                     "With the adapter stopped, settle it with python3 adapter/ibkr/relay.py resolve PENDING_FILE "
                     "{0} --resend --reason \"socket closed before placeOrder\" in the session the order was "
-                    "committed (New York date), and it goes out once the link is back; on a later day, or if it "
-                    "is not to go out, check IBKR's order history shows no order whose orderRef is {0}, then "
-                    "settle it with the same command and --not-handed-over in place of --resend "
+                    "committed (New York date), and it goes out once the link is back on that same day; on a "
+                    "later day the adapter stops again (the permission is dated) and the order is settled with "
+                    "--not-handed-over. On a later day, or if it is not to go out, check IBKR's order history "
+                    "shows no order whose orderRef is {0}, then settle it with the same command and "
+                    "--not-handed-over in place of --resend "
                     "(docs/manual/paper-trading.md)")
         else:
             text = ("order {0}: IB Gateway's socket was closed {1} placeOrder, so whether IBKR has the order is "

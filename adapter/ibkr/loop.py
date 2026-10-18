@@ -58,12 +58,11 @@ socket before it reads that log or IBKR (EngineUnavailable otherwise): the
 engine opens its socket only after it has recorded its start, a fresh run's
 Run approval included, so the chain of runs is never read without it. The
 chain stops at the first earlier run of an earlier session than today's
-(relay.run_logs), so an older run's log is never needed. Nothing here sends when the
+whose released orders have all ended (relay.run_logs), so an older run's
+log is never needed. Nothing here sends when the
 configuration is not paper (sender.make_sender), and the real client sends
 only with paper_sending_enabled on (real_client.IbapiClient.can_place_orders).
 """
-import contextlib
-import fcntl
 import hashlib
 import json
 import logging
@@ -75,8 +74,8 @@ from datetime import datetime, timezone
 
 from connection import Connection, NotConnected
 from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect
-from relay import (EarlierRunInput, PendingInput, Relay, earlier_run, read_engine_log, released_client_order_ids,
-                   run_identity, run_logs)
+from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
+                   read_engine_log, released_client_order_ids, run_identity, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from snapshot import Record, read_account
@@ -89,10 +88,8 @@ SOURCE = "ibkr"
 ENVELOPE_VERSION = 1
 # The adapter's files beside its pending file (relay.PendingInput's own
 # suffixes are .handover, .refused, .not-handed-over, .run, .run-ended,
-# .corrections, .late-fills and .lock).
-OUTBOX_SUFFIX = ".outbox"
+# .corrections, .late-fills and .lock, and relay.OUTBOX_SUFFIX the outbox's).
 HELD_SUFFIX = ".held"
-OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
 # The input types whose event time is in their payload.
 EVENT_TIME_FIELD = {LIFECYCLE_TYPE: "occurred_at", FILL_TYPE: "filled_at"}
 # How long, in seconds, the loop waits on the engine's thread between reads
@@ -108,10 +105,6 @@ class ReconcileMismatch(Exception):
     """IBKR shows an open order or execution the journal does not explain; the link is not reconciled."""
 
 
-class OutboxInvalid(ValueError):
-    """The outbox file is not as the adapter writes it; the adapter stops before sending anything."""
-
-
 def _utc_now():
     return datetime.now(timezone.utc)
 
@@ -122,73 +115,6 @@ def _stamp(at):
 
 def _new_id(event_type):
     return "{}:{}:{}".format(SOURCE, event_type, uuid.uuid4().hex)
-
-
-class Outbox:
-    """The inputs recorded for the engine and not yet struck off, oldest first, in a JSON file rewritten atomically.
-
-    Every change is a read-modify-write of the whole file, made only under
-    an exclusive lock on lock_path (path + ".lock"), held for that one
-    change: the adapter and any producer of its inputs in another process
-    (the session's close, say) write it only through append, so neither
-    loses the other's entry. Never edit the file by hand while either runs.
-    Reads need no lock: each write replaces the file whole.
-    """
-
-    def __init__(self, path):
-        self.path = path
-        self.lock_path = path + ".lock"
-
-    def load(self):
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                entries = json.load(f)
-        except FileNotFoundError:
-            return []
-        except ValueError as err:
-            raise OutboxInvalid("{} is not JSON: {}".format(self.path, err)) from None
-        if not isinstance(entries, list) or not all(
-                isinstance(e, dict) and tuple(sorted(e)) == OUTBOX_FIELDS and isinstance(e["id"], str) and e["id"]
-                and isinstance(e["payload"], dict) for e in entries):
-            raise OutboxInvalid("{} is not a list of inputs as the adapter records them".format(self.path))
-        if len({e["id"] for e in entries}) != len(entries):
-            raise OutboxInvalid("{} names one input twice".format(self.path))
-        return entries
-
-    def append(self, entry):
-        with self._locked():
-            self._write(self.load() + [entry])
-
-    def strike(self, input_id):
-        """Remove the entry for input_id; one not there is already struck off."""
-        with self._locked():
-            entries = self.load()
-            kept = [e for e in entries if e["id"] != input_id]
-            if len(kept) != len(entries):
-                self._write(kept)
-
-    @contextlib.contextmanager
-    def _locked(self):
-        # Never removed: the lock lives on the file's inode.
-        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            os.close(fd)
-
-    def _write(self, entries):
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(entries, f, separators=(",", ":"), allow_nan=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)
-        fd = os.open(os.path.dirname(os.path.abspath(self.path)), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
 
 
 class _AskedOnItsOwnThread:
@@ -354,8 +280,10 @@ class AdapterLoop:
         """The report records this run's or an earlier run's engine holds, the outbox holds, or that await a reply: never recorded again."""
         records = [Record(i.event_type, i.schema_version, i.payload) for log_ in engine_logs for i in log_.inputs]
         records += [Record(e["event_type"], e["schema_version"], e["payload"]) for e in self.outbox.load()]
+        settled = self.pending.run_ended()
         records += [Record(e["input"].get("type"), e["input"].get("schema_version"), e["input"].get("payload") or {})
-                    for e in self.pending.run_ended()]
+                    for e in settled]
+        records += [Record(o["event_type"], o["schema_version"], o["payload"]) for e in settled for o in e["outbox"]]
         waiting = self.pending.load()
         if waiting is not None:
             records.append(Record(waiting.get("type"), waiting.get("schema_version"), waiting.get("payload") or {}))
@@ -426,8 +354,11 @@ class AdapterLoop:
                 if not entries:
                     return
                 entry = entries[0]
-                if entry["id"] in {e["input"]["id"] for e in self.pending.run_ended()}:
-                    # Settled as left by an earlier run: never sent.
+                settled = self.pending.run_ended()
+                if entry["id"] in {e["input"]["id"] for e in settled} | {o["id"] for e in settled
+                                                                        for o in e["outbox"]}:
+                    # Settled as left by an earlier run, or recorded behind
+                    # an input so settled: never sent.
                     self.outbox.strike(entry["id"])
                     continue
                 engine_log = read_engine_log(self._engine_log_path)

@@ -152,6 +152,14 @@ and after a crash.
     `test_after_an_earlier_runs_input_is_settled_the_fresh_runs_own_first_input_goes_through`:
     the settlement is refused for the running run's own input, and once it
     is made the fresh run's own inputs go through.
+    `test_run_ended_settles_every_outbox_entry_the_earlier_run_left_so_none_drains_into_the_fresh_run`
+    and `test_an_outbox_entry_recorded_at_a_settlement_is_never_sent_even_if_the_strike_was_cut_short`:
+    every input waiting behind the settled one is settled with it and never
+    sent to the fresh run.
+    `test_two_unapproved_starts_are_two_runs_and_the_first_ones_input_stops_the_second`
+    and `test_an_approved_fresh_run_resumed_after_a_crash_takes_its_own_input_awaiting_its_reply`:
+    a run with no Run approval still has an identity of its own, and a
+    resumed run, approved or not, is asked for its own input again.
   - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
     a changed copy under the waiting input's ID is refused; the original's
     reply is asked for and its order sent once.
