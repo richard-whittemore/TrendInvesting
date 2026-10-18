@@ -503,6 +503,34 @@ func TestACashFigureNothingComparesCannotHalt(t *testing.T) {
 	}
 }
 
+// TestACashFaultOfAChangeIsIgnoredWhenCashIsNotCompared: a fill whose value
+// alone exceeds any cent count, a dividend or a split's cash in lieu that does
+// too, cannot halt a positions-only book, while a share-arithmetic fault in
+// the same book still does.
+func TestACashFaultOfAChangeIsIgnoredWhenCashIsNotCompared(t *testing.T) {
+	b := reconcile.PositionsBook("snapshot:joint", event.AccountPositionsSnapshotPayload{
+		AccountID: "joint", AsOf: closeAt, Currency: "USD",
+		Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 1}},
+	})
+	at := closeAt.Add(time.Hour)
+	buy := func(q int64, price float64) reconcile.Change {
+		return reconcile.FillChange(event.TargetWeightFillPayload{FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: q, Price: price, FilledAt: at})
+	}
+	obs := func(q int64) event.ReconciliationPayload {
+		o := observed(0, held("SPY", q))
+		o.AccountID = "joint"
+		return o
+	}
+	r := classify(t, &b, []reconcile.Change{buy(1, 1e17)}, obs(2))
+	if r.Action != event.ReconciliationActionContinue || r.CashCompared {
+		t.Fatalf("got %s/%s %v, want positions to explain the fill", r.Classification, r.Action, r.Unverifiable)
+	}
+	r = classify(t, &b, []reconcile.Change{buy(math.MaxInt64, 1e17)}, obs(2))
+	if r.Classification != event.ReconciliationUnverifiable || r.Action != event.ReconciliationActionHalt {
+		t.Fatalf("got %s/%s, want a share fault to halt", r.Classification, r.Action)
+	}
+}
+
 // TestOnlyTheCashPartsWrapping: the book's cash offsets two large dividends,
 // so the running cash never leaves range but the dividends part does; the
 // reason names the expected cash.

@@ -88,10 +88,12 @@ type Change struct {
 	// fill, which is in the account's own.
 	Currency             string
 	NewShares, OldShares int64
-	// Fault, when set, is why a figure of the change is no cent count:
+	// CashFault, when set, is why a cash figure of the change (a fill's value
+	// or commission, a dividend's amount, cash in lieu) is no cent count:
 	// Classify reports the reconciliation unverifiable if it applies the
-	// change.
-	Fault string
+	// change while comparing cash, and ignores it when it does not. Share
+	// counts are int64 already; their arithmetic is checked as it is applied.
+	CashFault string
 }
 
 // FillChange is fill p's change: a buy adds its shares and costs its value
@@ -114,7 +116,7 @@ func FillChange(p event.TargetWeightFillPayload) Change {
 		}
 	}
 	if err := errors.Join(valueErr, commissionErr, sumErr); err != nil {
-		c.Fault = fmt.Sprintf("fill %s: %v", p.FillID, err)
+		c.CashFault = fmt.Sprintf("fill %s: %v", p.FillID, err)
 	}
 	return c
 }
@@ -134,7 +136,7 @@ func CorporateActionChange(id string, p event.CorporateActionPayload) Change {
 		c.Cash, err = Cents(p.CashInLieu)
 	}
 	if err != nil {
-		c.Fault = fmt.Sprintf("corporate action %s: %v", id, err)
+		c.CashFault = fmt.Sprintf("corporate action %s: %v", id, err)
 	}
 	return c
 }
@@ -292,8 +294,8 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			reasons = append(reasons, fmt.Sprintf("%s pays cash in %s; the book's is in %s", c.ID, c.Currency, book.Currency))
 			continue
 		}
-		if c.Fault != "" {
-			reasons = append(reasons, c.Fault)
+		if cashRead && c.CashFault != "" {
+			reasons = append(reasons, c.CashFault)
 			continue
 		}
 		nextShares, err := sharesAfter(expected[c.InstrumentID], c)
