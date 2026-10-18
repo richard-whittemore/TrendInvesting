@@ -23,6 +23,15 @@ type BoostSession struct {
 	Target    float64
 }
 
+// BoostPlan is the session range of a Boost run, recorded before the run:
+// its first and last session and how many there are. A complete export
+// covers exactly it.
+type BoostPlan struct {
+	First    string
+	Last     string
+	Sessions int
+}
+
 // BacktestBoost returns the parameters BX_SPY ran with: SPY at 98%, 1.5x
 // while RSI(2) is under 10 above the 200-day mean, until a close above the
 // 5-day mean (research/edge-search/boost/template.py:33-37, 96).
@@ -32,13 +41,13 @@ func BacktestBoost() boost.Parameters {
 
 // CompareBoost rebuilds Boost's indicators from the logged closes, from the
 // first, and runs the rule from the first session after warm-up, unlatched,
-// on its own readings; it checks every session's RSI(2), both means and
+// on its own readings, once the export covers the planned range; it checks every session's RSI(2), both means and
 // their readiness, and the state and target, all exactly (ADR 0026 point
 // 7, item 2: "Boost's state must match day by day").
 //
 // The state is carried on Go's own readings, never reset to QuantConnect's,
 // so a difference on one session shows on every session it affects.
-func CompareBoost(p boost.Parameters, run string, sessions []BoostSession) Report {
+func CompareBoost(p boost.Parameters, run string, plan BoostPlan, sessions []BoostSession) Report {
 	export := Check{Run: run, Name: CheckExport, Threshold: "well-formed"}
 	rsi := Check{Run: run, Name: CheckBoostRSI, Threshold: "exact, readiness included"}
 	sma := Check{Run: run, Name: CheckBoostSMA, Threshold: "exact, readiness included"}
@@ -51,7 +60,7 @@ func CompareBoost(p boost.Parameters, run string, sessions []BoostSession) Repor
 		export.compare(false, 0, err.Error())
 		return done()
 	}
-	if err := wellFormedBoost(sessions); err != nil {
+	if err := wellFormedBoost(plan, sessions); err != nil {
 		export.compare(false, 0, err.Error())
 		return done()
 	}
@@ -90,7 +99,24 @@ func reading(c *Check, where string, got float64, ready bool, want *float64) {
 	}
 }
 
-func wellFormedBoost(sessions []BoostSession) error {
+// wellFormedBoost refuses an export that is out of order or malformed, or
+// that does not cover the planned range: the plan was recorded before the
+// run, so an export that stops short of it, starts after it or holds
+// another number of sessions is not the run that was planned.
+func wellFormedBoost(plan BoostPlan, sessions []BoostSession) error {
+	if plan.First == "" || plan.Last == "" || plan.Sessions <= 0 {
+		return fmt.Errorf("no planned session range (first %q, last %q, %d sessions)", plan.First, plan.Last, plan.Sessions)
+	}
+	if len(sessions) > 0 {
+		switch first, last := sessions[0].Date, sessions[len(sessions)-1].Date; {
+		case first != plan.First:
+			return fmt.Errorf("export starts at %s, planned first session %s", first, plan.First)
+		case last != plan.Last:
+			return fmt.Errorf("export ends at %s, planned last session %s", last, plan.Last)
+		case len(sessions) != plan.Sessions:
+			return fmt.Errorf("export holds %d sessions, planned %d", len(sessions), plan.Sessions)
+		}
+	}
 	decided := false
 	for i, s := range sessions {
 		if i > 0 && s.Date <= sessions[i-1].Date {

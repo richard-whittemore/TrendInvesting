@@ -9,7 +9,11 @@
 // written. A momentum run names its months, chosen before any comparison:
 //
 //	parity -momentum FU_PARITY=orders.json -months FU_PARITY=1999-01,1999-09 \
-//	       -boost BX_PARITY=boost-orders.json
+//	       -boost BX_PARITY=boost-orders.json \
+//	       -sessions BX_PARITY=1998-01-02,2026-09-30,7166
+//
+// and a Boost run names its planned first and last session and session
+// count, recorded before the run, which its export must cover.
 //
 // It exits 0 when every check passes, 1 when any fails, and 2 when an
 // input cannot be read or compared at all.
@@ -23,6 +27,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/parity"
@@ -69,12 +74,13 @@ func (n *named) set(s string) error {
 }
 
 func run(args []string, stdout, stderr io.Writer) (bool, error) {
-	var mom, months, bst named
+	var mom, months, bst, sess named
 	flags := flag.NewFlagSet("parity", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Func("momentum", "NAME=FILE: a momentum run's orders (repeatable)", mom.set)
 	flags.Func("months", "NAME=YYYY-MM,...: that run's planned months (repeatable)", months.set)
 	flags.Func("boost", "NAME=FILE: a Boost run's orders (repeatable)", bst.set)
+	flags.Func("sessions", "NAME=FIRST,LAST,COUNT: that Boost run's planned first and last session and session count (repeatable)", sess.set)
 	if err := flags.Parse(args); err != nil {
 		return false, err
 	}
@@ -84,6 +90,11 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 	for _, name := range months.names {
 		if _, ok := mom.values[name]; !ok {
 			return false, fmt.Errorf("%s has months but no export", name)
+		}
+	}
+	for _, name := range sess.names {
+		if _, ok := bst.values[name]; !ok {
+			return false, fmt.Errorf("%s has sessions but no export", name)
 		}
 	}
 	var reports []parity.Report
@@ -109,6 +120,14 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 		reports = append(reports, parity.CompareMomentum(momentum.FCombo(), name, strings.Split(plan, ","), ms))
 	}
 	for _, name := range bst.names {
+		spec, ok := sess.values[name]
+		if !ok {
+			return false, fmt.Errorf("%s has no planned sessions", name)
+		}
+		sp, err := sessionPlan(spec)
+		if err != nil {
+			return false, fmt.Errorf("%s: sessions %w", name, err)
+		}
 		tags, total, err := tagged(bst.values[name], boostPrefix)
 		if err != nil {
 			return false, fmt.Errorf("%s: %w", name, err)
@@ -122,13 +141,26 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 			sessions = append(sessions, s...)
 		}
 		inputs = append(inputs, fmt.Sprintf("- %s: %d sessions from %d tagged orders of %d", name, len(sessions), len(tags), total))
-		reports = append(reports, parity.CompareBoost(parity.BacktestBoost(), name, sessions))
+		reports = append(reports, parity.CompareBoost(parity.BacktestBoost(), name, sp, sessions))
 	}
 	r := parity.Merge(reports...)
 	if _, err := fmt.Fprintf(stdout, "%s\n\n%s", strings.Join(inputs, "\n"), r.Markdown()); err != nil {
 		return false, err
 	}
 	return r.Pass(), nil
+}
+
+// sessionPlan parses FIRST,LAST,COUNT.
+func sessionPlan(spec string) (parity.BoostPlan, error) {
+	parts := strings.Split(spec, ",")
+	if len(parts) != 3 {
+		return parity.BoostPlan{}, fmt.Errorf("%q is not FIRST,LAST,COUNT", spec)
+	}
+	n, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return parity.BoostPlan{}, fmt.Errorf("%q: count: %w", spec, err)
+	}
+	return parity.BoostPlan{First: parts[0], Last: parts[1], Sessions: n}, nil
 }
 
 type tag struct {

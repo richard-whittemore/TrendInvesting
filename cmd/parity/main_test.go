@@ -87,6 +87,11 @@ func pad(n int) string {
 	return strconv.Itoa(n)
 }
 
+// plan is the planned sessions flag value of rows: first, last, count.
+func plan(rows [][]any) string {
+	return rows[0][0].(string) + "," + rows[len(rows)-1][0].(string) + "," + strconv.Itoa(len(rows))
+}
+
 func boostTag(t *testing.T, rows [][]any) string {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{"rows": rows})
@@ -104,7 +109,7 @@ func TestABoostExportSplitAcrossOrdersIsJoinedInOrderIDOrderAndPasses(t *testing
 		{ID: 2, Tag: boostTag(t, rows[:150])},
 	})
 	var out, errs bytes.Buffer
-	pass, err := run([]string{"-boost", "BX_SYN=" + path}, &out, &errs)
+	pass, err := run([]string{"-boost", "BX_SYN=" + path, "-sessions", "BX_SYN=" + plan(rows)}, &out, &errs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,9 +127,24 @@ func TestChunksInTheWrongOrderFail(t *testing.T) {
 	rows := boostRows(t, 300, 210)
 	path := writeOrders(t, []order{{ID: 2, Tag: boostTag(t, rows[150:])}, {ID: 9, Tag: boostTag(t, rows[:150])}})
 	var out, errs bytes.Buffer
-	pass, err := run([]string{"-boost", "BX_SYN=" + path}, &out, &errs)
+	pass, err := run([]string{"-boost", "BX_SYN=" + path, "-sessions", "BX_SYN=" + plan(rows)}, &out, &errs)
 	if err != nil || pass {
 		t.Fatalf("pass=%v err=%v: sessions out of order must fail the comparison", pass, err)
+	}
+}
+
+func TestABoostExportMissingItsFinalChunkFailsAgainstThePlan(t *testing.T) {
+	rows := boostRows(t, 300, 210)
+	path := writeOrders(t, []order{{ID: 2, Tag: boostTag(t, rows[:150])}})
+	var out, errs bytes.Buffer
+	pass, err := run([]string{"-boost", "BX_SYN=" + path, "-sessions", "BX_SYN=" + plan(rows)}, &out, &errs)
+	if err != nil || pass {
+		t.Fatalf("pass=%v err=%v: an export short of the planned sessions must fail", pass, err)
+	}
+	for _, want := range []string{"- BX_SYN: 150 sessions from 1 tagged orders of 1", "| BX_SYN | export |", "FAIL"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("report lacks %q:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -162,18 +182,22 @@ func TestTheCommandRefusesWhatItCannotCompare(t *testing.T) {
 		args []string
 		want string
 	}{
-		"no input":                {nil, "nothing to compare"},
-		"a bad flag":              {[]string{"-nope"}, "flag provided but not defined"},
-		"a run without a name":    {[]string{"-boost", good}, "NAME=VALUE"},
-		"a run named twice":       {[]string{"-boost", "A=" + good, "-boost", "A=" + good}, "named twice"},
-		"months for no run":       {[]string{"-momentum", "A=" + good, "-months", "A=2009-06", "-months", "B=2009-06"}, "B has months but no export"},
-		"a run without months":    {[]string{"-momentum", "A=" + good}, "A has no planned months"},
-		"a missing file":          {[]string{"-boost", "A=/nonexistent/orders.json"}, "no such file"},
-		"a file that is not JSON": {[]string{"-boost", "A=" + notJSON}, "unexpected end"},
-		"a malformed month":       {[]string{"-momentum", "A=" + bad, "-months", "A=2009-06"}, "order 1"},
-		"a malformed chunk":       {[]string{"-boost", "A=" + badBoost}, "order 1"},
-		"no tagged order":         {[]string{"-boost", "A=" + none}, "no tagged order"},
-		"no tagged month":         {[]string{"-momentum", "A=" + none, "-months", "A=2009-06"}, "no tagged order"},
+		"no input":                             {nil, "nothing to compare"},
+		"a bad flag":                           {[]string{"-nope"}, "flag provided but not defined"},
+		"a run without a name":                 {[]string{"-boost", good}, "NAME=VALUE"},
+		"a run named twice":                    {[]string{"-boost", "A=" + good, "-boost", "A=" + good}, "named twice"},
+		"months for no run":                    {[]string{"-momentum", "A=" + good, "-months", "A=2009-06", "-months", "B=2009-06"}, "B has months but no export"},
+		"sessions for no run":                  {[]string{"-boost", "A=" + good, "-sessions", "A=2001-01-01,2001-01-02,2", "-sessions", "B=2001-01-01,2001-01-02,2"}, "B has sessions but no export"},
+		"a boost run without sessions":         {[]string{"-boost", "A=" + good}, "A has no planned sessions"},
+		"a malformed session plan":             {[]string{"-boost", "A=" + good, "-sessions", "A=2001-01-01,x"}, "A: sessions"},
+		"a session count that is not a number": {[]string{"-boost", "A=" + good, "-sessions", "A=2001-01-01,2001-01-02,many"}, "count"},
+		"a run without months":                 {[]string{"-momentum", "A=" + good}, "A has no planned months"},
+		"a missing file":                       {[]string{"-boost", "A=/nonexistent/orders.json", "-sessions", "A=2001-01-01,2001-01-02,2"}, "no such file"},
+		"a file that is not JSON":              {[]string{"-boost", "A=" + notJSON, "-sessions", "A=2001-01-01,2001-01-02,2"}, "unexpected end"},
+		"a malformed month":                    {[]string{"-momentum", "A=" + bad, "-months", "A=2009-06"}, "order 1"},
+		"a malformed chunk":                    {[]string{"-boost", "A=" + badBoost, "-sessions", "A=2001-01-01,2001-01-02,2"}, "order 1"},
+		"no tagged order":                      {[]string{"-boost", "A=" + none, "-sessions", "A=2001-01-01,2001-01-02,2"}, "no tagged order"},
+		"no tagged month":                      {[]string{"-momentum", "A=" + none, "-months", "A=2009-06"}, "no tagged order"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out, errs bytes.Buffer
@@ -190,9 +214,10 @@ type brokenWriter struct{}
 func (brokenWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
 
 func TestAReportThatCannotBeWrittenIsAnError(t *testing.T) {
-	path := writeOrders(t, []order{{ID: 1, Tag: boostTag(t, boostRows(t, 300, 210))}})
+	rows := boostRows(t, 300, 210)
+	path := writeOrders(t, []order{{ID: 1, Tag: boostTag(t, rows)}})
 	var errs bytes.Buffer
-	if _, err := run([]string{"-boost", "BX_SYN=" + path}, brokenWriter{}, &errs); err == nil {
+	if _, err := run([]string{"-boost", "BX_SYN=" + path, "-sessions", "BX_SYN=" + plan(rows)}, brokenWriter{}, &errs); err == nil {
 		t.Error("a failed write must be reported")
 	}
 }

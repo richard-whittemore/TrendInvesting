@@ -122,10 +122,16 @@ statistics) per run.
 go run ./cmd/parity \
   -momentum FU_PARITY=$HOME/Desktop/Trend_Investing/data/parity/FU_PARITY_orders.json \
   -months FU_PARITY=1999-03,1999-11,... \
-  -boost BX_PARITY=$HOME/Desktop/Trend_Investing/data/parity/BX_PARITY_orders.json
+  -boost BX_PARITY=$HOME/Desktop/Trend_Investing/data/parity/BX_PARITY_orders.json \
+  -sessions BX_PARITY=1998-01-02,2026-06-30,7166
 ```
 
 Each `-momentum` run needs its `-months` list: the months chosen in advance.
+Each `-boost` run needs its `-sessions` plan (first session, last session,
+session count), written down before the run: an export that stops short of it,
+for example one missing its final chunk, fails the `export` check. The
+momentum report also lists, for each month, how many comparisons each check
+made, so a month that compared less cannot hide behind the others.
 The exact command used for the recorded result, with every month, is in
 `docs/research/parity-2026-10.md`.
 

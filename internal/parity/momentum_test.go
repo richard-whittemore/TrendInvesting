@@ -226,14 +226,11 @@ func TestTiedScoresRankedInAnotherOrderAreAListedDifference(t *testing.T) {
 	// Two names beyond the book with one score: the backtest kept its
 	// universe's order (defensive_v2.py:323); Go breaks the tie by ID.
 	a, b := m.Ranked[38], m.Ranked[39]
-	b.Score = a.Score
+	tieNames(m, &a, &b)
 	if a.Ticker < b.Ticker {
 		a, b = b, a
 	}
 	m.Ranked[38], m.Ranked[39] = a, b
-	// Their logged scores no longer come from their closes.
-	delete(m.Closes, m.Ranked[38].Ticker)
-	delete(m.Closes, m.Ranked[39].Ticker)
 	r := compare(ms)
 	if !r.Pass() {
 		t.Fatalf("a tie is on the list: %+v", r.Checks)
@@ -253,8 +250,7 @@ func TestAZeroVolatilityPickIsAListedDifference(t *testing.T) {
 	m := &ms[1]
 	// defensive_book weighted a zero volatility as 1 (defensive_v2.py:76);
 	// live leaves the name out, which changes the book.
-	m.Ranked[0].Volatility = 0
-	delete(m.Closes, m.Ranked[0].Ticker)
+	zeroVolatility(m, &m.Ranked[0])
 	markAndWeigh(m)
 	r := compare(ms)
 	if !r.Pass() {
@@ -389,13 +385,11 @@ func TestANoSectorNameOutsideTheBookLeavesTheWeightsCompared(t *testing.T) {
 func tieBeyondTheBook(ms []parity.MomentumMonth) {
 	m := &ms[1]
 	a, b := m.Ranked[38], m.Ranked[39]
-	b.Score = a.Score
+	tieNames(m, &a, &b)
 	if a.Ticker < b.Ticker {
 		a, b = b, a
 	}
 	m.Ranked[38], m.Ranked[39] = a, b
-	delete(m.Closes, m.Ranked[38].Ticker)
-	delete(m.Closes, m.Ranked[39].Ticker)
 }
 
 // A listed cause is a live departure, not an excuse: every mark and
@@ -467,4 +461,94 @@ func TestTooFewTrendClosesThatQuantConnectDidNotCountFails(t *testing.T) {
 	}
 	// QuantConnect counted 260 closes, so it was not short of history.
 	failsOnly(t, compare(ms), parity.CheckRiskOff)
+}
+
+// A sampled name whose close column is missing cannot be recomputed, so its
+// score and volatility would go unchecked; the history check fails naming
+// it, and the month's count shows the shortfall.
+
+func TestAPickedNameWithNoCloseColumnFailsHistory(t *testing.T) {
+	ms := months()
+	var pick string
+	for _, e := range ms[1].Ranked {
+		if e.Mark == parity.MarkPicked {
+			pick = e.Ticker
+			break
+		}
+	}
+	delete(ms[1].Closes, pick)
+	r := compare(ms)
+	failsOnly(t, r, parity.CheckHistory)
+	if c := checkNamed(r, parity.CheckHistory); !strings.Contains(c.First, pick) || !strings.Contains(c.First, "2009-06") {
+		t.Errorf("first failure %q must name the month and the missing column %s", c.First, pick)
+	}
+	counts := map[string]int{}
+	for _, m := range r.Months {
+		counts[m.Month] = m.Counts[parity.CheckHistory]
+	}
+	if counts["2008-11"] != 42 || counts["2009-06"] != 41 {
+		t.Errorf("history compared per month %v, want 42 and 41", counts)
+	}
+}
+
+func TestEverySampleTheExportPromisesMustHaveAColumn(t *testing.T) {
+	// The logging template samples up to 5 each of the capped names, names
+	// beyond the book and names too short to score.
+	for name, mark := range map[string]parity.Mark{"capped": parity.MarkCapped, "beyond the book": parity.MarkBeyond} {
+		t.Run(name, func(t *testing.T) {
+			ms := months()
+			var of []string
+			for _, e := range ms[0].Ranked {
+				if e.Mark == mark {
+					of = append(of, e.Ticker)
+				}
+			}
+			if len(of) < 6 {
+				t.Fatalf("fixture: %d %s names, want more than the sample of 5", len(of), name)
+			}
+			for _, tk := range of[1:] {
+				delete(ms[0].Closes, tk) // one column left: fewer than 5 sampled
+			}
+			failsOnly(t, compare(ms), parity.CheckHistory)
+		})
+	}
+	t.Run("too short", func(t *testing.T) {
+		ms := months()
+		delete(ms[0].Closes, "S1")
+		delete(ms[0].Closes, "S2")
+		failsOnly(t, compare(ms), parity.CheckHistory)
+	})
+}
+
+func TestTheReportShowsEveryMonthsComparisonCounts(t *testing.T) {
+	r := compare(months())
+	if len(r.Months) != 2 {
+		t.Fatalf("%d months counted, want 2", len(r.Months))
+	}
+	for _, m := range r.Months {
+		if m.Run != "SYN" || m.Counts[parity.CheckRankedOrder] != 40 || m.Counts[parity.CheckHistory] != 42 {
+			t.Errorf("month counts %+v", m)
+		}
+	}
+	md := r.Markdown()
+	for _, want := range []string{"| Run | Month | risk-off | ranked-order | cap-marks | weights | scores | volatility | history |",
+		"| SYN | 2008-11 | 1 | 40 | 40 | 26 | 40 | 40 | 42 |", "| SYN | 2009-06 | 1 | 40 | 40 | 25 | 40 | 40 | 42 |"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("report lacks %q:\n%s", want, md)
+		}
+	}
+}
+
+func TestAMonthThatComparedNothingShowsZeroCounts(t *testing.T) {
+	ms := months()
+	ms[1].Index = nil
+	r := compare(ms)
+	for _, m := range r.Months {
+		if m.Month == "2009-06" && (m.Counts[parity.CheckHistory] != 0 || m.Counts[parity.CheckRankedOrder] != 0) {
+			t.Errorf("a malformed month compared %+v", m.Counts)
+		}
+	}
+	if md := r.Markdown(); !strings.Contains(md, "| SYN | 2009-06 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |") {
+		t.Errorf("a skipped month must show its zero counts:\n%s", md)
+	}
 }

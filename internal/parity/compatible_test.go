@@ -22,14 +22,12 @@ func inBookTie(t *testing.T, ms []parity.MomentumMonth) {
 	if a.Mark != parity.MarkPicked || b.Mark != parity.MarkPicked {
 		t.Fatal("fixture: ranks 2 and 3 must be picks")
 	}
-	b.Score = a.Score
+	tieNames(m, &a, &b)
 	if a.Ticker < b.Ticker {
 		a, b = b, a
 	}
 	m.Ranked[1], m.Ranked[2] = a, b
-	// Their logged scores no longer come from their closes.
-	delete(m.Closes, a.Ticker)
-	delete(m.Closes, b.Ticker)
+	markAndWeigh(m)
 }
 
 // lastPick and firstBeyond return the index of the second month's last
@@ -101,8 +99,7 @@ func TestAZeroVolatilityNameQuantConnectCappedExcusesNothing(t *testing.T) {
 	if m.Ranked[3].Mark != parity.MarkCapped || m.Ranked[5].Mark != parity.MarkCapped {
 		t.Fatal("fixture: ranks 4 and 6 must be capped")
 	}
-	m.Ranked[3].Volatility = 0
-	delete(m.Closes, m.Ranked[3].Ticker)
+	zeroVolatility(m, &m.Ranked[3])
 	m.Ranked[5].Mark = parity.MarkBeyond // Go caps it
 	r := compare(ms)
 	if c := checkNamed(r, parity.CheckCapMarks); c.Pass() {
@@ -158,8 +155,7 @@ func TestANoSectorPickIsComparedAsTheBacktestHandledItAndItsLiveDeparturesListed
 func TestAZeroVolatilityPickIsComparedAsTheBacktestWeightedItAndItsLiveDeparturesListed(t *testing.T) {
 	ms := months()
 	m := &ms[1]
-	m.Ranked[0].Volatility = 0
-	delete(m.Closes, m.Ranked[0].Ticker)
+	zeroVolatility(m, &m.Ranked[0])
 	markAndWeigh(m)
 	r := compare(ms)
 	everyItemCompared(t, r)

@@ -2,13 +2,20 @@ package parity_test
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/parity"
 )
 
+// planOf is the session range recorded before a run: what a complete
+// export covers.
+func planOf(s []parity.BoostSession) parity.BoostPlan {
+	return parity.BoostPlan{First: s[0].Date, Last: s[len(s)-1].Date, Sessions: len(s)}
+}
+
 func compareBoost(s []parity.BoostSession) parity.Report {
-	return parity.CompareBoost(boostParams(), "BSYN", s)
+	return parity.CompareBoost(boostParams(), "BSYN", planOf(syntheticBoost(400, 210)), s)
 }
 
 func TestMatchingBoostExportPassesEveryCheck(t *testing.T) {
@@ -129,7 +136,7 @@ func TestAnEmptyBoostExportFails(t *testing.T) {
 func TestBoostParametersWithNoIndicatorLengthFail(t *testing.T) {
 	p := boostParams()
 	p.RSIPeriod = 0
-	if r := parity.CompareBoost(p, "BSYN", syntheticBoost(400, 210)); r.Pass() || checkNamed(r, parity.CheckExport).Pass() {
+	if r := parity.CompareBoost(p, "BSYN", planOf(syntheticBoost(400, 210)), syntheticBoost(400, 210)); r.Pass() || checkNamed(r, parity.CheckExport).Pass() {
 		t.Error("parameters the indicators refuse must fail the export check")
 	}
 }
@@ -138,5 +145,41 @@ func TestTheBacktestBoostParametersAreTemplatePy(t *testing.T) {
 	// research/edge-search/boost/template.py:33-37 and 96 (98% invested).
 	if got := parity.BacktestBoost(); got != boostParams() {
 		t.Errorf("BacktestBoost() = %+v", got)
+	}
+}
+
+// An export that stops short of the planned range, or starts late, or holds
+// another number of sessions, is not the run that was planned: every check
+// on what it does hold would pass (the plan is recorded before the run).
+
+func TestABoostExportMissingItsFinalChunkFails(t *testing.T) {
+	full := syntheticBoost(400, 210)
+	plan := planOf(full)
+	r := parity.CompareBoost(boostParams(), "BSYN", plan, full[:300])
+	if r.Pass() {
+		t.Fatal("an export that ends before the planned last session must fail")
+	}
+	c := checkNamed(r, parity.CheckExport)
+	if c.Pass() || !strings.Contains(c.First, plan.Last) {
+		t.Errorf("export check %+v must fail naming the planned last session %s", c, plan.Last)
+	}
+}
+
+func TestABoostExportThatStartsLateOrCountsOtherwiseFails(t *testing.T) {
+	full := syntheticBoost(400, 210)
+	for name, c := range map[string]struct {
+		plan parity.BoostPlan
+		got  []parity.BoostSession
+	}{
+		"a missing first chunk": {planOf(full), full[100:]},
+		"another session count": {parity.BoostPlan{First: full[0].Date, Last: full[399].Date, Sessions: 401}, full},
+		"a plan with no range":  {parity.BoostPlan{}, full},
+		"a plan with no count":  {parity.BoostPlan{First: full[0].Date, Last: full[399].Date}, full},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if r := parity.CompareBoost(boostParams(), "BSYN", c.plan, c.got); r.Pass() || checkNamed(r, parity.CheckExport).Pass() {
+				t.Errorf("%s must fail the export check", name)
+			}
+		})
 	}
 }

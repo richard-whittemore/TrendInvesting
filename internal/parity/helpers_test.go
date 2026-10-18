@@ -240,3 +240,24 @@ func checkNamed(r parity.Report, name string) parity.Check {
 	}
 	panic("no check " + name)
 }
+
+// tieNames gives names a and b one history, so that their scores and
+// volatilities recomputed from the closes tie exactly, as they are logged.
+func tieNames(m *parity.MomentumMonth, a, b *parity.RankedEntry) {
+	m.Closes[b.Ticker] = m.Closes[a.Ticker]
+	b.Score, b.Volatility = a.Score, a.Volatility
+}
+
+// zeroVolatility gives a ranked name a history whose volatility is exactly
+// zero (it doubles each session, so every return is 1) and the score that
+// history gives.
+func zeroVolatility(m *parity.MomentumMonth, e *parity.RankedEntry) {
+	px := make([]float64, len(m.Index))
+	p := 1.0
+	for i := range px {
+		px[i] = p
+		p *= 2
+	}
+	m.Closes[e.Ticker] = ptrs(px)
+	e.Score, e.Volatility = backtestScore(px), backtestVol(px)
+}

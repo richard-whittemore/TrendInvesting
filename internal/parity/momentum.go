@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
 )
@@ -86,14 +87,37 @@ func CompareMomentum(cfg momentum.Config, run string, planned []string, months [
 	r.monthsCheck(planned, months)
 	sorted := append([]MomentumMonth(nil), months...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Month < sorted[j].Month })
+	var counts []MonthCounts
 	for i := range sorted {
+		before := r.compared()
 		r.month(&sorted[i])
+		counts = append(counts, MonthCounts{Run: run, Month: sorted[i].Month, Counts: r.since(before)})
 	}
-	out := Report{Differences: r.diffs}
+	out := Report{Differences: r.diffs, Months: counts}
 	for _, c := range order {
 		out.Checks = append(out.Checks, *c)
 	}
 	out.Checks = append(out.Checks, differencesCheck(run, r.diffs))
+	return out
+}
+
+// monthChecks are the checks counted month by month, in report order.
+var monthChecks = []string{CheckRiskOff, CheckRankedOrder, CheckCapMarks, CheckWeights, CheckScores, CheckVolatility, CheckHistory}
+
+func (r *momentumRun) compared() map[string]int {
+	out := map[string]int{}
+	for _, name := range monthChecks {
+		out[name] = r.checks[name].Compared
+	}
+	return out
+}
+
+// since returns the comparisons made after before was taken.
+func (r *momentumRun) since(before map[string]int) map[string]int {
+	out := map[string]int{}
+	for name, n := range r.compared() {
+		out[name] = n - before[name]
+	}
 	return out
 }
 
@@ -280,6 +304,7 @@ func (r *momentumRun) histories(m *MomentumMonth) (map[string]bool, error) {
 		}
 	}
 	sort.Strings(names)
+	r.coverage(m)
 	type result struct {
 		name     string
 		bt, live momentum.History
@@ -306,6 +331,51 @@ func (r *momentumRun) histories(m *MomentumMonth) (map[string]bool, error) {
 		}
 	}
 	return gaps, nil
+}
+
+// sampleSize is how many names of each kind the logging template samples
+// besides the picks (research/edge-search/momentum/parity_log.py,
+// PARITY_SAMPLE).
+const sampleSize = 5
+
+// coverage fails the history check for each sampled name the export
+// promises and does not carry a close column for: every pick, and as many
+// of the capped names, the names beyond the book and the names too short
+// to score as the template samples. Without its column a name cannot be
+// recomputed, so its score and volatility would go unchecked.
+func (r *momentumRun) coverage(m *MomentumMonth) {
+	var missing []string
+	kinds := map[Mark][]string{}
+	for _, e := range m.Ranked {
+		kinds[e.Mark] = append(kinds[e.Mark], e.Ticker)
+	}
+	short := make([]string, 0, len(m.Short))
+	for name := range m.Short {
+		short = append(short, name)
+	}
+	sort.Strings(short)
+	for _, group := range []struct {
+		names []string
+		need  int
+	}{
+		{kinds[MarkPicked], len(kinds[MarkPicked])},
+		{kinds[MarkCapped], min(sampleSize, len(kinds[MarkCapped]))},
+		{kinds[MarkBeyond], min(sampleSize, len(kinds[MarkBeyond]))},
+		{short, min(sampleSize, len(short))},
+	} {
+		var absent []string
+		for _, n := range group.names {
+			if _, ok := m.Closes[n]; !ok {
+				absent = append(absent, n)
+			}
+		}
+		if shortfall := group.need - (len(group.names) - len(absent)); shortfall > 0 {
+			missing = append(missing, absent[:shortfall]...)
+		}
+	}
+	if len(missing) > 0 {
+		r.checks[CheckHistory].fail(fmt.Sprintf("%s: no close column for %s", m.Month, strings.Join(missing, ", ")))
+	}
 }
 
 // history compares one sampled name's backtest-compatible history with

@@ -155,6 +155,16 @@ func (d Difference) Listed() bool { return d.Kind.Listed() }
 type Report struct {
 	Checks      []Check
 	Differences []Difference
+	Months      []MonthCounts
+}
+
+// MonthCounts is how many comparisons each check made in one month of a
+// momentum run, so that a month that compared less than the others cannot
+// hide behind their counts.
+type MonthCounts struct {
+	Run    string
+	Month  string
+	Counts map[string]int
 }
 
 // Pass reports whether every check held.
@@ -173,6 +183,7 @@ func Merge(reports ...Report) Report {
 	for _, r := range reports {
 		out.Checks = append(out.Checks, r.Checks...)
 		out.Differences = append(out.Differences, r.Differences...)
+		out.Months = append(out.Months, r.Months...)
 	}
 	return out
 }
@@ -209,6 +220,7 @@ func (r Report) Markdown() string {
 		}
 		b.WriteString("\n")
 	}
+	r.writeMonths(&b)
 	if len(r.Differences) == 0 {
 		b.WriteString("No differences.\n")
 		return b.String()
@@ -223,6 +235,24 @@ func (r Report) Markdown() string {
 		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", d.Run, d.Where, d.Kind, listed, d.Size)
 	}
 	return b.String()
+}
+
+// writeMonths renders the comparisons each month made, so that a month
+// that compared less cannot hide behind the others' counts.
+func (r Report) writeMonths(b *strings.Builder) {
+	if len(r.Months) == 0 {
+		return
+	}
+	b.WriteString("Comparisons per month:\n\n| Run | Month | " + strings.Join(monthChecks, " | ") + " |\n")
+	b.WriteString("| --- | --- |" + strings.Repeat(" --- |", len(monthChecks)) + "\n")
+	for _, m := range r.Months {
+		fmt.Fprintf(b, "| %s | %s |", m.Run, m.Month)
+		for _, name := range monthChecks {
+			fmt.Fprintf(b, " %d |", m.Counts[name])
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 }
 
 func formatDiff(x float64) string {
