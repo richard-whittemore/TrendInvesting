@@ -96,6 +96,14 @@ func (s *stream) refused(n int, clientID, reason string) {
 			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures", Figures: figures})
 }
 
+// flaggedRefusal is a kill-switch or stale-broker-snapshot refusal, which
+// the gate journals at the safety version, carrying alert as the gate set it.
+func (s *stream) flaggedRefusal(n int, clientID, reason string, alert bool) {
+	s.add(event.OrderRefusedEventType, event.OrderRefusedSafetyVersion, "refuse:"+clientID, day(n),
+		event.OrderRefusedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
+			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures", Figures: figures, Alert: alert})
+}
+
 func (s *stream) engineState(n int, state, reason string, scope ...string) {
 	p := event.EngineStatePayload{State: state, Reason: reason, Detail: "figures"}
 	if state == event.EngineStateDegraded {

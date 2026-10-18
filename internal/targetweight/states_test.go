@@ -3,6 +3,7 @@ package targetweight_test
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -288,6 +289,11 @@ func TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision(t *testin
 				if p.Reason != event.RefusedKillSwitch || p.Side != event.OrderSideBuy || !e.EventTime.Equal(sessionEnd(i)) {
 					t.Errorf("refusal %d: %s %+v", i, e.EventTime, p)
 				}
+				// One engagement alerts once (ADR 0026, point 3, kill
+				// switch: "alert once"): only its first refusal pages.
+				if p.Alert != (i == 0) {
+					t.Errorf("refusal %d: alert %v, want %v", i, p.Alert, i == 0)
+				}
 			}
 			if got := ofType(r.decisions, event.EngineStateEventType); len(got) != 0 {
 				t.Fatalf("the kill switch changes no state: %d", len(got))
@@ -308,6 +314,58 @@ func TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision(t *testin
 				t.Errorf("released %d orders, want %d as without the switch", len(got), len(baseline))
 			}
 		})
+	}
+}
+
+// TestAWithheldSessionKeepsTheReplanForTheNextDecidedOne: a withheld
+// session plans nothing, so the re-plan waits for the next decided session
+// (ADR 0026, point 2, "Boost", amended 2026-10-18), and the withheld
+// decision records that it is still pending.
+func TestAWithheldSessionKeepsTheReplanForTheNextDecidedOne(t *testing.T) {
+	r := simulate(t, options{brokers: true, kill: map[int]bool{0: true, 1: false}, noSnap: map[int]bool{1: true}})
+	decisions := ofType(r.decisions, event.TargetsDecidedEventType)
+	pending := make([]bool, 3)
+	for i := range pending {
+		var p event.TargetsDecidedPayload
+		decode(t, decisions[i], &p)
+		pending[i] = p.Boost.ReplanPending
+		if i == 1 && (p.Outcome != event.TargetsOutcomeWithheld || p.WithheldReason != event.WithheldStaleAccountSnapshot) {
+			t.Fatalf("session 1: %s %s, want withheld for the missing account snapshot", p.Outcome, p.WithheldReason)
+		}
+	}
+	if want := []bool{true, true, false}; !slices.Equal(pending, want) {
+		t.Errorf("re-plan pending after sessions 0-2: %v, want %v", pending, want)
+	}
+	got := released(t, r.decisions)
+	if len(got) == 0 {
+		t.Fatal("the refused entry is never planned again")
+	}
+	wantTag := "targets-decided:joint:" + sessionEnd(2).Format(time.RFC3339)
+	if first := got[0]; first.Side != event.OrderSideBuy || first.Tag != wantTag || first.Quantity != int64(0.98*4000/syntheticCloses()[2]) {
+		t.Errorf("first release %+v, want the refused entry re-planned by %s", first, wantTag)
+	}
+}
+
+// TestARunRecoveredFromARefusedDecisionReplansIt: the recorded decision
+// carries the pending re-plan, so a run restarted from it (ADR 0026, point
+// 5) plans the refused entry at its first decided session, as the earlier
+// run would have, though the target has not changed.
+func TestARunRecoveredFromARefusedDecisionReplansIt(t *testing.T) {
+	full := simulate(t, options{brokers: true, kill: map[int]bool{0: true}})
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[0]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	if !p.Boost.ReplanPending {
+		t.Fatalf("the decision whose entry the kill switch refused records no pending re-plan: %+v", p.Boost)
+	}
+	r := simulate(t, options{brokers: true, recovery: &recovery, snapshots: full.inputs})
+	got := released(t, r.decisions)
+	if len(got) == 0 {
+		t.Fatal("the recovered run never plans the refused entry")
+	}
+	wantTag := "targets-decided:joint:" + sessionEnd(1).Format(time.RFC3339)
+	if first := got[0]; first.Side != event.OrderSideBuy || first.Tag != wantTag || first.Quantity != int64(0.98*4000/syntheticCloses()[1]) {
+		t.Errorf("first release %+v, want the refused entry re-planned by %s", first, wantTag)
 	}
 }
 

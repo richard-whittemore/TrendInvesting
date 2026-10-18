@@ -82,7 +82,11 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 
 // Alerts returns the journal's alerts in recording order, each incident once.
 //
-//   - Every risk.order.refused is its own incident.
+//   - Every risk.order.refused is its own incident, except that a kill-switch
+//     engagement and a stale episode alert once: a kill-switch or
+//     stale-broker-snapshot refusal alerts only when the gate flagged it as
+//     the first of its engagement or episode (ADR 0026, point 3, kill
+//     switch: "alert once"; ADR 0019, amendment of 2026-10-17, reading 10).
 //   - A strategy.engine.state record is an incident when its state, reason and
 //     scope differ from the previous one: a repeat of the same state is the
 //     same incident, and Degraded to Halted is a new one (ADR 0019). The
@@ -287,6 +291,9 @@ func reconciliationAlert(account string, e event.Envelope, p event.Reconciliatio
 func slicesConcat(a, b []string) []string { return append(append([]string{}, a...), b...) }
 
 func refusalAlerts(account string, e event.Envelope, p event.OrderRefusedPayload) []Alert {
+	if (p.Reason == event.RefusedKillSwitch || p.Reason == event.RefusedStaleBrokerSnapshot) && !p.Alert {
+		return nil
+	}
 	out := []Alert{{
 		Key: "refusal:" + e.ID, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order refused (%s)", account, p.Reason),

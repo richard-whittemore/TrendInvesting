@@ -73,8 +73,13 @@ the adapter ([operator](operator.md)). While it is on:
   next decision, after the next close: Boost orders the difference between
   what the account holds and its target, even though the target has not
   changed. So if the switch refused the first buy to 98%, the account buys
-  at the first close after you turn the switch off; while it stays on, each
-  close is refused again. This holds for any refusal that leaves the engine
+  at the first close after you turn the switch off that decides (a withheld
+  close waits), while the account is Normal; while the switch stays on,
+  each close is refused again, but only the engagement's first refusal
+  sends you an alert. If the refused order was a sell, a later engagement
+  may send one more small sale back to 98% for the share or two left over.
+  A run restarted from the last decision of an earlier run picks the
+  re-plan up from that decision. This holds for any refusal that leaves the engine
   Normal, a too-old IBKR snapshot included; a refusal while Degraded or
   Halted follows those states' rules below (owner's decision, 2026-10-18).
   The IRAs plan afresh at every decision time.

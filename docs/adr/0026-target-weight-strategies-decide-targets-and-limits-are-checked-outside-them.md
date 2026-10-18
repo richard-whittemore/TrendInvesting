@@ -672,10 +672,23 @@ clarification in point 1 that Boost trades only when its state changes.
   withheld session plans nothing, so the re-plan waits for the next decided
   one. If the re-planned order is refused again while the engine is still
   Normal (the switch still on), the decision after it re-plans again, so a
-  switch left on records one refusal per decision. A sell is still net of
-  the sells already working, so it never sells below the target alongside
-  the sale back to 98%.
-- **Replay.** The re-plan is derived from the journal's own refusal, so a
-  resumed run rebuilds it by replaying its durable log (ADR 0027). A journal
-  holding such a refusal decides differently from an earlier build, so this
-  is a rules change: target-weight RulesVersion 1.14.0 (ADR 0016).
+  switch left on records one refusal per decision. The switch still alerts
+  once per engagement (point 3, limits table, kill switch: "alert once"):
+  the gate flags the engagement's first refusal (`risk.order.refused`
+  `alert`), as it flags a stale episode's first (ADR 0019 reading 10), and
+  the reporter sends nothing for the later ones. A refused re-planned sell
+  is the strategy's exit firing again (ADR 0019 reading 7), so a switch
+  released and engaged again, a new engagement, may send one more sale back
+  to 98% for the difference left after the first: a share or two, since the
+  sale keeps ceil(0.98·V/mark) shares at the broker's mark and the planner
+  sizes from the close. A sell is still net of the sells already working,
+  so it never sells below the target alongside the sale back to 98%.
+- **Replay and restart.** The re-plan is derived from the journal's own
+  refusal, so a resumed run rebuilds it by replaying its durable log (ADR
+  0027). Each Boost decision also records whether a re-plan is pending
+  after it (`strategy.targets.decided` version 5, `boost.replan_pending`,
+  omitted when unset; ADR 0015), so a run restarted from an earlier run's
+  last decision (point 5) re-plans as that run would have; a withheld
+  decision carries the pending re-plan forward. A journal holding such a
+  refusal decides differently from an earlier build, so this is a rules
+  change: target-weight RulesVersion 1.14.0 (ADR 0016).

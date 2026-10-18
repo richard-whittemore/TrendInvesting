@@ -162,7 +162,11 @@ If you engaged the switch while Boost wanted to buy, the buy goes at the
 first close after you release it; if Boost wanted to sell, the sale back
 to 98% has gone anyway, and the next decision sells whatever is still above
 the target. While the switch stays on, each close plans the order again and
-the switch refuses it again, so you see one `kill-switch` refusal per close.
+the switch refuses it again, so you see one `kill-switch` refusal per close
+in the journal, but the reporter alerts you only for the first one of each
+engagement. A close that withholds its decision (no bar, or no account
+snapshot as of it) plans nothing, so the order waits for the next close
+that decides.
 This applies to any refusal that leaves the engine Normal (the kill switch,
 or an IBKR snapshot that is too old); a refusal while the account is
 Degraded or Halted follows that state's own rules

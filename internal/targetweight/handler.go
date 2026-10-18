@@ -89,8 +89,12 @@ import (
 //     snapshot), where earlier versions ordered only when the target changed
 //     (owner's decision of 2026-10-18; ADR 0026, point 2, "Boost", amended
 //     2026-10-18, after ADR 0019 reading 10). A refusal under Degraded or
-//     Halted follows that state's own rules, as before. A journal holding
-//     such a refusal decides differently under 1.13.0.
+//     Halted follows that state's own rules, as before. Each decision
+//     records whether a re-plan is pending after it, and a run recovered
+//     from the decision restores it; the gate flags only the first
+//     kill-switch refusal of an engagement for the alert (ADR 0026, point 3,
+//     kill switch: "alert once"). A journal holding such a refusal decides
+//     differently under 1.13.0.
 const RulesVersion = "1.14.0"
 
 // source names this handler on every envelope it emits.
@@ -116,8 +120,8 @@ type Options struct {
 //     configuration the handler was built with;
 //   - optionally, straight after it, one recorded strategy.targets.decided:
 //     the last decision of an earlier run. A restart recovers the latched
-//     boost and the target in force from it, never by recomputing (ADR 0026,
-//     point 5); sessions up to its session then only feed the indicators,
+//     boost, the target in force and any pending re-plan from it, never by
+//     recomputing (ADR 0026, point 5); sessions up to its session then only feed the indicators,
 //     which are rebuilt from the journal's own bars from the warm-up start;
 //   - optionally, straight after the configuration and before any other
 //     input, the owner's operator.run.approved: a fresh run after an earlier
@@ -190,7 +194,9 @@ type Handler struct {
 	inForceSet bool
 	// replan is set when the last planned order was refused and the engine
 	// stayed Normal, so the next decided session plans the difference to the
-	// target in force again (orderplan.BoostInput.Replan).
+	// target in force again (orderplan.BoostInput.Replan). Every decision
+	// records it as it stands after that decision (BoostFigures.ReplanPending),
+	// so a restart from the decision recovers it.
 	replan     bool
 	gapAt      time.Time
 	lastPeriod time.Time // last session closed
@@ -369,6 +375,10 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	if p.Outcome == event.TargetsOutcomeDecided {
 		h.inForce, h.inForceSet = p.Targets[0].Weight, true
 	}
+	// A refusal that left the engine Normal is re-planned at the next decided
+	// session, by this run as by the earlier one (ADR 0026, point 2, "Boost",
+	// amended 2026-10-18).
+	h.replan = p.Boost.ReplanPending
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
 }
@@ -547,6 +557,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		return b.result()
 	}
 	decisionID, decided := b.targets(figures, "", "")
+	at := len(b.out) - 1
 	h.inForce, h.inForceSet = decided.Targets[0].Weight, true
 	h.gate.RecordDecision(decisionID)
 
@@ -568,6 +579,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		}
 	}
 	if !ok {
+		b.settleReplan(at, decided)
 		return b.result()
 	}
 	gateOrder := risklimit.Order{Planned: order}
@@ -583,6 +595,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
 	}
+	b.settleReplan(at, decided)
 	return b.result()
 }
 
@@ -731,6 +744,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		ExitMean: r.ExitMean, ExitMeanReady: r.ExitMeanReady,
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
+		ReplanPending: h.replan,
 	}
 }
 
@@ -741,6 +755,20 @@ type emissions struct {
 	at  time.Time
 	out []event.Envelope
 	err error
+}
+
+// settleReplan rewrites the decided session's decision, emitted at index i,
+// with the re-plan as the session's order left it: a withheld session leaves
+// it as it was, which figures already records, but a decided one plans,
+// clearing it or, on a refusal that leaves the engine Normal, setting it.
+func (b *emissions) settleReplan(i int, decided event.TargetsDecidedPayload) {
+	if decided.Boost.ReplanPending == b.h.replan {
+		return
+	}
+	decided.Boost.ReplanPending = b.h.replan
+	e, err := b.h.stamp(b.out[i].ID, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, b.at, b.in, decided)
+	b.fail(err)
+	b.out[i] = e
 }
 
 func (b *emissions) fail(err error) {

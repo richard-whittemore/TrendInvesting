@@ -40,6 +40,32 @@ func TestEveryRefusalAlertsOnceUrgently(t *testing.T) {
 	}
 }
 
+// TestAKillSwitchOrStaleRefusalAlertsOnlyWhenFlagged: a kill-switch
+// engagement alerts once (ADR 0026, point 3, kill switch: "alert once") and a
+// stale episode once (ADR 0019, amendment of 2026-10-17, reading 10): the
+// gate flags the first refusal of each, and the later refusals it records
+// without the flag send nothing, so a switch left on is not paged at every
+// close.
+func TestAKillSwitchOrStaleRefusalAlertsOnlyWhenFlagged(t *testing.T) {
+	s := newStream(t)
+	s.flaggedRefusal(0, "tw-a", event.RefusedKillSwitch, true)
+	s.flaggedRefusal(1, "tw-b", event.RefusedKillSwitch, false)
+	s.flaggedRefusal(2, "tw-c", event.RefusedStaleBrokerSnapshot, true)
+	s.flaggedRefusal(3, "tw-d", event.RefusedStaleBrokerSnapshot, false)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Key != "refusal:refuse:tw-a" || got[1].Key != "refusal:refuse:tw-c" {
+		t.Fatalf("alerts = %+v, want the flagged refusals tw-a and tw-c only", got)
+	}
+	for _, a := range got {
+		if a.Kind != report.KindRefusal || a.Severity != report.Urgent {
+			t.Errorf("alert = %+v", a)
+		}
+	}
+}
+
 func TestADegradedOrHaltedStateAlertsOncePerIncident(t *testing.T) {
 	s := newStream(t)
 	s.engineState(0, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "SPY")

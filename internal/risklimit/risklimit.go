@@ -93,6 +93,10 @@ type Gate struct {
 
 	killEngaged bool
 	killID      string
+	// killAlerted is set once the engagement's first kill-switch refusal
+	// has carried its one alert (ADR 0026, point 3, kill switch: "alert
+	// once"); a new engagement clears it.
+	killAlerted bool
 	// lastKill is the kill switch last applied, by envelope ID, and the time
 	// it states; lastKillSet whether there is one (SetKillSwitch).
 	lastKill    string
@@ -471,7 +475,9 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 		g.halt(&out, fmt.Sprintf("order %s refused: %s; a defect in the order path, so its scope cannot be bounded", p.ClientOrderID, event.RefusedUndecidedOrder), p.ClientOrderID)
 		return out
 	case g.killEngaged:
-		return Outcome{Refused: g.refusal(o, f, event.RefusedKillSwitch, fmt.Sprintf("the kill switch is engaged (%s): every order is refused except the margin account's one sale back to 98%%", g.killID))}
+		out := Outcome{Refused: g.refusal(o, f, event.RefusedKillSwitch, fmt.Sprintf("the kill switch is engaged (%s): every order is refused except the margin account's one sale back to 98%%", g.killID))}
+		out.Refused.Alert, g.killAlerted = !g.killAlerted, true
+		return out
 	case g.state == StateDegraded && (p.Side == event.OrderSideBuy || slices.Contains(g.scope, p.InstrumentID)):
 		// ADR 0019, amended 2026-09-24: "Nothing that opens or adds to a
 		// position is allowed while not Normal", and named instruments are
