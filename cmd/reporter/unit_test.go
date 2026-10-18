@@ -404,9 +404,14 @@ func TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves(t *testing.T) {
 	if enable >= 0 && restart >= 0 && restart < enable {
 		t.Error("the dashboard is restarted before it is enabled")
 	}
-	disable, stop := at("systemctl disable --now ti-reporter.timer"), at("systemctl stop ti-reporter.service")
+	// Stopped when active (a server whose unit file is already gone but whose
+	// unit is still loaded), disabled only when its file exists; neither may
+	// trip set -e.
+	active := at("if systemctl is-active --quiet ti-reporter.timer; then systemctl stop ti-reporter.timer; fi")
+	at("if systemctl is-active --quiet ti-reporter.service; then systemctl stop ti-reporter.service; fi")
+	disable := at("systemctl disable ti-reporter.timer")
 	remove := at("rm -f /etc/systemd/system/ti-reporter.service")
-	if disable >= 0 && stop >= 0 && remove >= 0 && (remove < disable || remove < stop) {
+	if active >= 0 && disable >= 0 && remove >= 0 && (remove < active || remove < disable) {
 		t.Error("the old single reporter's files are removed before it is stopped and disabled")
 	}
 }

@@ -174,8 +174,10 @@ minutes, until you acknowledge it**. To silence one, acknowledge it with
 acknowledging changes no state. If you want quiet hours, that is your
 decision to make: narrow the timer's `OnCalendar=` and record the choice
 here. A run that takes more than 4 minutes is stopped, so the next firing is
-never skipped; each delivery is saved as it is made, so a stopped run's
-alerts are not sent again. `cmd/reporter`'s unit test checks that the timer
+never skipped; each delivery is saved as it is made, so a run stopped
+between a channel taking an alert and the save sends that one alert again on
+that one channel (delivery is at-least-once: PagerDuty folds the repeat by
+its key, ntfy posts it twice); every other alert is not sent again. `cmd/reporter`'s unit test checks that the timer
 runs around the clock, that its period divides the repeat interval and is at
 most half the acknowledgement bound, and that a run is stopped before the
 next firing.

@@ -9,7 +9,9 @@ Type=oneshot
 # Stopped well before the timer's next firing (ti-reporter@.timer, every 5
 # minutes), which systemd would otherwise skip while this run is active. The
 # reporter saves each delivery to its state file as a channel takes it, so a
-# run stopped here never makes the next one send again what it delivered.
+# run stopped here makes the next one send again at most the one alert on the
+# one channel that had taken it but was not yet saved (at-least-once:
+# PagerDuty folds the repeat by its key, ntfy posts it twice).
 TimeoutStartSec=4min
 User=ti-trader
 Group=ti-trader

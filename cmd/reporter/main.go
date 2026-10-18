@@ -158,9 +158,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 
 	// Each delivery is saved as soon as a channel takes it, so a run stopped
-	// before it ends (systemd stops one at its TimeoutStartSec) never makes
-	// the next run send again what this one delivered (ADR 0019, "Alerting":
-	// each incident once). The state is saved once more at the end, so the
+	// before it ends (systemd stops one at its TimeoutStartSec) makes the
+	// next run send again at most the one alert on the one channel that had
+	// taken it but was not yet saved: delivery is at-least-once, PagerDuty
+	// folds the repeat by its key and ntfy posts it twice (ADR 0019,
+	// "Alerting"). The state is saved once more at the end, so the
 	// file exists after a run that delivered nothing.
 	at := now()
 	record := func() error { return saveState(*statePath, seen, sent, repeats) }

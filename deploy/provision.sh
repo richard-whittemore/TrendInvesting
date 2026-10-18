@@ -230,9 +230,15 @@ CONF
   # earlier provisioner's single unit and its timer link are removed. It is
   # stopped and disabled first: systemd keeps a running unit loaded after its
   # file is gone, firing a service that no longer exists.
-  if test "$rehearsal" != 1 && test -e /etc/systemd/system/ti-reporter.timer; then
-    systemctl disable --now ti-reporter.timer
-    systemctl stop ti-reporter.service
+  if test "$rehearsal" != 1; then
+    # Stopped when active even if its file is already gone (the unit stays
+    # loaded); disabled only while its file exists. The test sits in an if,
+    # so its failure does not trip set -e.
+    if systemctl is-active --quiet ti-reporter.timer; then systemctl stop ti-reporter.timer; fi
+    if systemctl is-active --quiet ti-reporter.service; then systemctl stop ti-reporter.service; fi
+    if test -e /etc/systemd/system/ti-reporter.timer; then
+      systemctl disable ti-reporter.timer
+    fi
   fi
   rm -f /etc/systemd/system/ti-reporter.service /etc/systemd/system/ti-reporter.timer \
     /etc/systemd/system/timers.target.wants/ti-reporter.timer
