@@ -353,11 +353,8 @@ func (r *momentumRun) coverage(m *MomentumMonth) {
 	}
 	short := m.ShortOrder
 	if len(short) != len(m.Short) {
-		short = make([]string, 0, len(m.Short))
-		for name := range m.Short {
-			short = append(short, name)
-		}
-		sort.Strings(short)
+		r.checks[CheckHistory].fail(fmt.Sprintf("%s: the order lists %d short names, the counts %d", m.Month, len(short), len(m.Short)))
+		return
 	}
 	var missing []string
 	for _, names := range [][]string{

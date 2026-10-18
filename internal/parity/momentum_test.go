@@ -561,6 +561,14 @@ func TestTheSampledNamesThemselvesMustHaveColumns(t *testing.T) {
 			t.Errorf("a sixth capped name is not sampled: %+v", checkNamed(r, parity.CheckHistory))
 		}
 	})
+	t.Run("an order that does not list the short names fails the check", func(t *testing.T) {
+		ms := months()
+		ms[0].ShortOrder = ms[0].ShortOrder[:1]
+		r := compare(ms)
+		if c := checkNamed(r, parity.CheckHistory); c.Pass() || !strings.Contains(c.First, "short") {
+			t.Errorf("history %+v must fail on the short names", c)
+		}
+	})
 	t.Run("too short, in the export's order", func(t *testing.T) {
 		ms := months()
 		ms[0].Short["S3"] = 50

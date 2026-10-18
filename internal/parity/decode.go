@@ -92,9 +92,15 @@ func (o *orderedCounts) UnmarshalJSON(raw []byte) error {
 	// The object is valid JSON by now, so its tokens read without error.
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	_, _ = dec.Token()
+	seen := map[string]struct{}{}
 	for dec.More() {
 		key, _ := dec.Token()
-		o.order = append(o.order, key.(string))
+		name := key.(string)
+		if _, seen := seen[name]; seen {
+			return fmt.Errorf("parity: short lists %q twice", name)
+		}
+		seen[name] = struct{}{}
+		o.order = append(o.order, name)
 		var value json.RawMessage
 		_ = dec.Decode(&value)
 	}

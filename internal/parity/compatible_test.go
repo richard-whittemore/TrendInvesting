@@ -96,11 +96,15 @@ func TestAnUnrelatedPickInAMonthWithAnInBookTieFailsWeights(t *testing.T) {
 func TestAZeroVolatilityNameQuantConnectCappedExcusesNothing(t *testing.T) {
 	ms := months()
 	m := &ms[1]
-	if m.Ranked[3].Mark != parity.MarkCapped || m.Ranked[5].Mark != parity.MarkCapped {
-		t.Fatal("fixture: ranks 4 and 6 must be capped")
+	z := cappedZeroVolatility(m)
+	if m.Ranked[z].Volatility != 0 || m.Ranked[z].Mark != parity.MarkCapped || z+1 >= len(m.Ranked) ||
+		m.Ranked[z+1].Mark != parity.MarkCapped {
+		t.Fatalf("fixture: rank %d must be a capped zero volatility with a capped name after it", z+1)
 	}
-	zeroVolatility(m, &m.Ranked[3])
-	m.Ranked[5].Mark = parity.MarkBeyond // Go caps it
+	if c := checkNamed(compare(ms), parity.CheckCapMarks); !c.Pass() {
+		t.Fatalf("fixture: the export is the backtest's own book, so the marks must agree: %+v", c)
+	}
+	m.Ranked[z+1].Mark = parity.MarkBeyond // Go caps it
 	r := compare(ms)
 	if c := checkNamed(r, parity.CheckCapMarks); c.Pass() {
 		t.Errorf("a capped zero volatility changes nothing after it, so the changed mark must fail: %+v", c)

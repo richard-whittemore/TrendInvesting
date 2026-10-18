@@ -145,3 +145,10 @@ func TestAShortCountThatIsNotANumberOrAnObjectIsRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestADuplicateShortNameIsRefused(t *testing.T) {
+	raw := strings.Replace(momentumPayload, `"short":{"NEW":2}`, `"short":{"NEW":2,"OLD":3,"NEW":4}`, 1)
+	if _, err := parity.DecodeMomentum([]byte(raw)); err == nil {
+		t.Error("an export that lists a short name twice must be refused")
+	}
+}

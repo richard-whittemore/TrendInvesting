@@ -116,6 +116,7 @@ func syntheticMonth(month string, riskOff bool) parity.MomentumMonth {
 	}
 	m.SPYClose, m.SPYMean, m.SPYCloses = spy[rows-1], sum/200, rows
 	m.RiskOff = m.SPYClose < m.SPYMean
+	m.ShortOrder = []string{"S1", "S2"}
 	for short, n := range m.Short {
 		col := make([]*float64, rows)
 		copy(col[rows-n:], ptrs(path(n, 1.001, n)))
@@ -260,4 +261,37 @@ func zeroVolatility(m *parity.MomentumMonth, e *parity.RankedEntry) {
 	}
 	m.Closes[e.Ticker] = ptrs(px)
 	e.Score, e.Volatility = backtestScore(px), backtestVol(px)
+}
+
+// cappedZeroVolatility makes the second month's rank 4 a zero-volatility
+// name that the backtest-compatible book caps. Its history is flat, so its
+// score is zero and it ranks below every rising name; the last fifteen
+// names fall instead, in the full sector, so the book has fewer than
+// TopN picks when it reaches the flat name and sector 101 already holds
+// its three. It returns the flat name's rank after the book is rebuilt.
+func cappedZeroVolatility(m *parity.MomentumMonth) int {
+	flat := m.Ranked[3].Ticker
+	px := make([]float64, len(m.Index))
+	for i := range px {
+		px[i] = 1
+	}
+	m.Closes[flat] = ptrs(px)
+	for i := range m.Ranked {
+		e := &m.Ranked[i]
+		switch {
+		case e.Ticker == flat:
+			e.Score, e.Volatility = backtestScore(px), backtestVol(px)
+		case i >= 25:
+			fall := path(len(m.Index), 0.9995, i)
+			m.Closes[e.Ticker] = ptrs(fall)
+			e.Score, e.Volatility, e.Sector = backtestScore(fall), backtestVol(fall), "101"
+		}
+	}
+	rebook(m)
+	for i, e := range m.Ranked {
+		if e.Ticker == flat {
+			return i
+		}
+	}
+	panic("no flat name")
 }
