@@ -45,13 +45,23 @@ raises HandoverUnconfirmed (NeverSentAtBroker) and stops for a person, who
 marks it sent once IBKR is checked. The engine still holds a never-sent
 order as working: nothing at IBKR will ever report on it.
 
+A sender whose send raises a HandoverUnconfirmed with handed_over False
+says nothing reached the broker (the real client's socket closed before
+placeOrder): the order stays marked about to be sent, and the relay records
+that fact for that order and input beside the pending file
+(PendingInput.not_handed_over), which only resolve's not-handed-over
+decision reads. The record is removed before every hand-over, so it never
+outlives a later attempt that may have reached the broker.
+
 A person settles a stopped hand-over with the resolve command, never by
 editing the record: `python3 adapter/ibkr/relay.py resolve PENDING_FILE
-CLIENT_ORDER_ID --sent | --resend | --never-sent --reason TEXT`. It writes only a known
+CLIENT_ORDER_ID --sent | --resend | --never-sent | --not-handed-over
+--reason TEXT`. It writes only a known
 mark, settles only an order the record marks about to be sent or allowed to
 be sent again (a sent mark is the relay's own proof the sender returned),
-or, as never sent, the unmarked order the relay is refusing, or, as sent,
-a never-sent order IBKR shows after all, and appends the decision, its
+or, as never sent, the unmarked order the relay is refusing or a marked
+order the relay recorded was not handed over, or, as sent, a never-sent
+order IBKR shows after all, and appends the decision, its
 reason, its UTC time and the session date it was judged against to a
 sidecar file. A resend is allowed only for an order committed in today's
 session (in New York): an order from an earlier session may have filled or
@@ -162,7 +172,10 @@ def _positive_seconds(name, value):
 DECIDE_SENT = "sent"
 DECIDE_RESEND = "resend"
 DECIDE_NEVER_SENT = "never-sent"
-DECISIONS = (DECIDE_SENT, DECIDE_RESEND, DECIDE_NEVER_SENT)
+# A marked order the relay recorded its sender did not hand over: settled
+# as never sent, on any day, after the owner checks IBKR's order history.
+DECIDE_NOT_HANDED_OVER = "not-handed-over"
+DECISIONS = (DECIDE_SENT, DECIDE_RESEND, DECIDE_NEVER_SENT, DECIDE_NOT_HANDED_OVER)
 # The fields of one acknowledged correction, as acknowledge_correction writes it.
 CORRECTION_FIELDS = ("at", "corrects", "exec_id", "reason")
 # The fields of the relay's record of the order it is refusing.
@@ -213,6 +226,9 @@ JournalledReports = namedtuple("JournalledReports", ("fills", "ended"))
 # reads it (read_engine_log).
 CommittedInput = namedtuple("CommittedInput", ("id", "event_type", "schema_version", "sequence", "payload"))
 EngineLog = namedtuple("EngineLog", ("configuration_hash", "strategy_version", "inputs", "next_sequence"))
+# The durable log as _committed_groups reads it: the header, each committed
+# group, and the record hash of the last commit (None when there is none).
+CommittedLog = namedtuple("CommittedLog", ("header", "groups", "final_hash"))
 
 
 class EngineUnavailable(Exception):
@@ -224,7 +240,12 @@ class HandoverUnconfirmed(Exception):
 
     It is never sent again: the adapter stops, and a person checks IBKR for
     an order whose orderRef is client_order_id before anything else is sent.
+    handed_over is None: whether the broker has the order is not known. A
+    sender's subclass sets it False only when it knows nothing reached the
+    broker, which the relay records for resolve's not-handed-over decision.
     """
+
+    handed_over = None
 
     def __init__(self, client_order_id):
         super().__init__(
@@ -300,6 +321,7 @@ class PendingInput:
         self.corrections_path = path + ".corrections"
         self.late_fills_path = path + ".late-fills"
         self.refused_path = path + ".refused"
+        self.not_handed_over_path = path + ".not-handed-over"
         # Never removed: a lock lives on the file's inode, so deleting it
         # under a live holder would let a second writer lock a new file.
         self.lock_path = path + ".lock"
@@ -372,23 +394,46 @@ class PendingInput:
         Read strictly (fail closed, AGENTS.md): anything but what
         record_refusal writes raises HandoverRecordInvalid.
         """
+        return self._read_entry(self.refused_path, "a refusal")
+
+    def _read_entry(self, path, what):
         try:
-            with open(self.refused_path, encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 entry = json.load(f)
         except FileNotFoundError:
             return None
         except ValueError as err:
-            raise HandoverRecordInvalid("{} is not JSON: {}".format(self.refused_path, err)) from None
+            raise HandoverRecordInvalid("{} is not JSON: {}".format(path, err)) from None
         if (not isinstance(entry, dict) or tuple(sorted(entry)) != REFUSAL_FIELDS
                 or not all(isinstance(entry[k], str) for k in REFUSAL_FIELDS)
                 or not entry["client_order_id"] or not entry["input_id"]):
-            raise HandoverRecordInvalid("{} is not a refusal as the relay writes one".format(self.refused_path))
+            raise HandoverRecordInvalid("{} is not {} as the relay writes one".format(path, what))
         return entry
 
     def record_refusal(self, input_id, client_order_id, reason):
         """Record durably which order of which input the relay is refusing, replacing any earlier refusal."""
         self._write(self.refused_path, {"client_order_id": client_order_id, "input_id": input_id,
                                         "reason": reason})
+
+    def not_handed_over(self):
+        """The marked order whose last hand-over the sender said reached nothing, as {client_order_id, input_id, reason}, or None.
+
+        Read strictly (fail closed, AGENTS.md), as refusal is.
+        """
+        return self._read_entry(self.not_handed_over_path, "a record of an order not handed over")
+
+    def record_not_handed_over(self, input_id, client_order_id, reason):
+        """Record durably that the sender handed nothing over for this order of this input."""
+        self._write(self.not_handed_over_path, {"client_order_id": client_order_id, "input_id": input_id,
+                                                "reason": reason})
+
+    def forget_not_handed_over(self):
+        """Remove the record before a hand-over, which may reach the broker."""
+        try:
+            os.remove(self.not_handed_over_path)
+        except FileNotFoundError:
+            return
+        self._sync_dir()
 
     def acknowledged_corrections(self):
         """The owner's acknowledged corrections: each correction's execId to the execId it corrects.
@@ -464,14 +509,14 @@ class PendingInput:
         self._sync_dir()
 
     def clear(self):
-        """Remove the input, then its write-ahead record, then the record of any order refused for it.
+        """Remove the input, then its write-ahead record, then the records of any order refused or not handed over for it.
 
         In that order: a stop between the two leaves marks for orders whose
         input is settled, which are harmless since a client order ID names one
         order; the other order would leave an input to settle again with no
         record of what was handed over.
         """
-        for path in (self.path, self.handover_path, self.refused_path):
+        for path in (self.path, self.handover_path, self.refused_path, self.not_handed_over_path):
             try:
                 os.remove(path)
             except FileNotFoundError:
@@ -570,6 +615,12 @@ class Relay:
         finally:
             self._step.release()
 
+    def connect_engine(self):
+        """Open the connection to the engine now, as the first exchange would; EngineUnavailable if none listens."""
+        self._require_held()
+        if self._engine is None:
+            self._engine = self._connect()
+
     def holds(self):
         """Whether this relay still holds the adapter's exclusive lock on the pending file (until close)."""
         return self._held is not None
@@ -638,8 +689,17 @@ class Relay:
                 raise
             with self._step:
                 self._require_held()
+                self._pending.forget_not_handed_over()
                 self._pending.mark(cid, HANDING_OVER)
-                self._sender.send(request)
+                try:
+                    self._sender.send(request)
+                except HandoverUnconfirmed as err:
+                    # The sender's own word that nothing reached the broker:
+                    # recorded so the owner can settle the order truthfully on
+                    # a later day, when a resend is refused.
+                    if err.handed_over is False:
+                        self._pending.record_not_handed_over(envelope.get("id"), cid, str(err))
+                    raise
                 self._require_held()
                 self._pending.mark(cid, SENT)
             self._sent.add(cid)
@@ -708,6 +768,15 @@ def released_orders(reply):
 def resolve(pending, client_order_id, decision, reason, today=None):
     """Settle a stopped hand-over: mark it sent, allow it to be sent again in today's session only, or never sent.
 
+    not-handed-over settles, as never sent, an order the record marks
+    HANDING_OVER whose last hand-over the relay recorded its sender said
+    reached nothing (PendingInput.not_handed_over), for the input awaiting
+    its reply; any other mark, no such record, a record for another order or
+    input, or no input awaiting a reply refuses it. It is accepted on any
+    day: the owner checks IBKR's order history first, and the relay passes
+    over the order, as any never-sent one, only while IBKR shows nothing
+    under its tag.
+
     never-sent settles an order the sender refused for good: the record
     holds no mark for it (it was never handed over), an input awaits its
     reply, and the order is the one the relay recorded it is refusing for
@@ -747,6 +816,24 @@ def _resolve(pending, client_order_id, decision, reason, today):
     marks = pending.handovers()
     recorded = {"client_order_id": client_order_id, "decision": decision, "reason": reason,
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "session_date": today.isoformat()}
+    if decision == DECIDE_NOT_HANDED_OVER:
+        waiting = pending.load()
+        if waiting is None:
+            raise ResolveRefused("no input awaits its reply in {}, so no order is stuck; check the pending "
+                                 "file".format(pending.path))
+        if marks.get(client_order_id) != HANDING_OVER:
+            raise ResolveRefused("order {} is marked {!r}, not {!r}: only an order stopped as it was handed over can "
+                                 "have been not handed over; check the client order ID".format(
+                                     client_order_id, marks.get(client_order_id), HANDING_OVER))
+        record = pending.not_handed_over()
+        if (record is None or record["input_id"] != waiting.get("id")
+                or record["client_order_id"] != client_order_id):
+            raise ResolveRefused("the adapter recorded no stop before placeOrder for order {}: it may have reached "
+                                 "IBKR, so settle it with --sent, or --resend in the session it was committed, after "
+                                 "checking IBKR".format(client_order_id))
+        pending.record_decision(recorded)
+        pending.mark(client_order_id, NEVER_SENT)
+        return
     if decision == DECIDE_NEVER_SENT:
         waiting = pending.load()
         if waiting is None:
@@ -827,7 +914,7 @@ def journalled_reports(path):
     """
     fills = set()
     ended = set()
-    for group in _committed_groups(path)[1]:
+    for group in _committed_groups(path).groups:
         for at, kind, envelope in group:
             if envelope["type"] == FILL_TYPE:
                 fills.add(_fill_id(path, at, kind, envelope))
@@ -847,7 +934,7 @@ def released_client_order_ids(path):
     against them (orders.match_on_reconnect).
     """
     released = set()
-    for group in _committed_groups(path)[1]:
+    for group in _committed_groups(path).groups:
         for _, kind, envelope in group:
             payload = envelope["payload"]
             if (kind == LOG_DECISION and envelope["type"] == RELEASED and isinstance(payload, dict)
@@ -856,23 +943,33 @@ def released_client_order_ids(path):
     return released
 
 
-def run_logs(path):
-    """The engine's durable log at path, then each earlier run's its Run approvals name, newest first.
+def run_logs(path, today=None):
+    """The engine's durable log at path, then the log of each earlier run its Run approvals name, newest first.
 
     A fresh run's log holds one committed Run approval, whose previous_log
-    is the run before it in the same directory; that run's log may hold one
-    in turn, back to the first run, which holds none. IBKR's lists reach
-    back past a restart (the day's executions, the session's open orders),
-    so reconciliation and the report journal read every run of the chain,
-    not only the current one. Fail closed (ResolveRefused): a log that
-    cannot be read, more than one Run approval in a log, a previous_log
-    that is not a bare file name, or a chain that names a log twice.
+    is the run before it in the same directory, with that log's final
+    record hash; that run's log may hold one in turn, back to the first run,
+    which holds none. IBKR's lists reach back past a restart (the day's
+    executions, the session's open orders), so reconciliation and the
+    report journal read the earlier runs of the chain too, but only those
+    of today's session: the walk stops at the first earlier run whose
+    committed inputs all fall on an earlier New York date than today (by
+    event time and recorded time alike), and leaves it and every run before
+    it out, since nothing of theirs is in today's lists. today defaults to
+    today in New York. Fail closed (ResolveRefused): a log that cannot be
+    read, more than one Run approval in a log, a previous_log that is not a
+    bare file name, a previous_log_final_hash that is not the named log's
+    last committed record hash (the engine checks the same at the fresh
+    run's start; a log that differs is not the one approved), a named log
+    with no committed record, or a chain that names a log twice.
     """
+    today = today or _session_today()
     logs = [path]
     seen = {os.path.realpath(path)}
     current = path
+    groups = _committed_groups(path).groups
     while True:
-        approvals = [envelope for group in _committed_groups(current)[1] for _, kind, envelope in group
+        approvals = [envelope for group in groups for _, kind, envelope in group
                      if kind == LOG_INPUT and envelope["type"] == RUN_APPROVED]
         if not approvals:
             return logs
@@ -884,12 +981,37 @@ def run_logs(path):
         if not _is_text(name) or os.path.basename(name) != name or name in (".", ".."):
             raise ResolveRefused("the Run approval in {} names previous_log {!r}, not a log file name in its "
                                  "directory".format(current, name))
-        current = os.path.join(os.path.dirname(path), name)
-        if os.path.realpath(current) in seen:
+        approved_hash = payload.get("previous_log_final_hash")
+        previous = os.path.join(os.path.dirname(path), name)
+        if os.path.realpath(previous) in seen:
             raise ResolveRefused("the Run approvals from {} name {} twice; the chain of runs must end at the first "
                                  "run".format(path, name))
-        seen.add(os.path.realpath(current))
-        logs.append(current)
+        read = _committed_groups(previous)
+        if read.final_hash is None or read.final_hash != approved_hash:
+            raise ResolveRefused(
+                "the Run approval in {} names {} with final record hash {!r}, but that log's final record hash is "
+                "{}: it is not the log the owner approved, so its orders and reports are not taken as this "
+                "engine's (docs/manual/paper-trading.md)".format(current, name, approved_hash,
+                                                                 read.final_hash or "none (it holds no commit)"))
+        if _last_session(read.groups) < today:
+            return logs
+        seen.add(os.path.realpath(previous))
+        logs.append(previous)
+        current, groups = previous, read.groups
+
+
+def _last_session(groups):
+    """The latest New York date among the event and recorded times of the committed inputs in groups.
+
+    A time that cannot be read counts as no earlier than any day, so the
+    walk goes on past it rather than leave a run out.
+    """
+    latest = date.min
+    for group in groups:
+        envelope = group[0][2]
+        for k in ("event_time", "recorded_at"):
+            latest = max(latest, _session_date({"event_time": envelope[k]}) or date.max)
+    return latest
 
 
 def read_engine_log(path):
@@ -903,7 +1025,7 @@ def read_engine_log(path):
     that cannot be read as the engine writes it raises ResolveRefused, never
     read as holding no inputs.
     """
-    header, groups = _committed_groups(path)
+    header, groups, _ = _committed_groups(path)
     inputs = []
     for group in groups:
         envelope = group[0][2]
@@ -914,7 +1036,11 @@ def read_engine_log(path):
 
 
 def _committed_groups(path):
-    """(header, committed groups) of the durable log at path; each group a list of (line number, kind, envelope)."""
+    """The durable log at path as a CommittedLog: its header, its committed groups and its last commit's record hash.
+
+    Each group is a list of (line number, kind, envelope); final_hash is
+    None for a log with no commit.
+    """
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -938,6 +1064,7 @@ def _committed_groups(path):
     group = []
     sequence = 0
     last_hash = None
+    final_hash = None
     for n, raw in enumerate(lines[1:], 2):
         line = _log_json(path, n, raw)
         if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
@@ -962,7 +1089,8 @@ def _committed_groups(path):
             raise _unreadable(path, n, "it is not the commit of the group before it")
         groups.append(group)
         group = []
-    return header, groups
+        final_hash = last_hash
+    return CommittedLog(header, groups, final_hash)
 
 
 def _unreadable(path, n, why):
@@ -1189,6 +1317,9 @@ def main(argv=None, today=None):
     which.add_argument("--never-sent", dest="decision", action="store_const", const=DECIDE_NEVER_SENT,
                        help="the order the adapter is refusing before any mark, which it always will: never "
                             "send it")
+    which.add_argument("--not-handed-over", dest="decision", action="store_const", const=DECIDE_NOT_HANDED_OVER,
+                       help="an order the adapter stopped on before placeOrder (it recorded that nothing was handed "
+                            "to IB Gateway), once IBKR's order history shows no order under its tag: never send it")
     cmd.add_argument("--reason", required=True, help="what IBKR showed, or why it was refused; kept with the decision")
     ack = commands.add_parser("acknowledge-correction",
                               help="acknowledge IBKR's correction of an execution, so the adapter can start again")

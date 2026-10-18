@@ -9,6 +9,7 @@ applies the input twice. The adapter sends each released order once.
 import copy
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -109,6 +110,16 @@ class CrashingSender:
             raise ConnectionError("adapter stopped after handing over {}".format(request.client_order_id))
 
 
+class NotHandedOver(HandoverUnconfirmed):
+    """A send that knows nothing reached the broker, as the real client's socket closed before placeOrder."""
+
+    handed_over = False
+
+    def __init__(self, client_order_id):
+        Exception.__init__(self, "socket closed before placeOrder: {}".format(client_order_id))
+        self.client_order_id = client_order_id
+
+
 class Sending:
     """A sender as the relay takes one: check refuses what send would, before any mark; send hands it over."""
 
@@ -139,6 +150,8 @@ LOG_CHAIN = ("seed=sha256(canonical_log_header_bytes); "
              "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
 LOG_CONFIGURATION = "sha256:" + "0" * 64
 LOG_STRATEGY = "target-weight-ira/1.0.0+test"
+# The session the run-chain tests are read against (New York date).
+TODAY = date(2026, 10, 17)
 
 
 def log_header():
@@ -151,7 +164,7 @@ def fill_payload(fill_id, account_id="DU1234567"):
             "side": "buy", "quantity": 4, "price": 401.25, "commission": 1.0, "filled_at": "2026-10-17T13:30:01Z"}
 
 
-def log_group(sequence, entries, committed=True):
+def log_group(sequence, entries, committed=True, at="2026-10-17T13:30:00Z"):
     """One group of the engine's durable log from sequence on: (kind, type, schema version, payload) lines, then its commit.
 
     The record hashes are stand-ins: the relay reads the log's shape and each
@@ -162,8 +175,8 @@ def log_group(sequence, entries, committed=True):
     for n, (kind, event_type, schema_version, payload) in enumerate(entries, sequence):
         raw = json.dumps(payload, separators=(",", ":"))
         envelope = json.dumps({"id": "e:{}".format(n), "type": event_type, "envelope_version": 1,
-                               "schema_version": schema_version, "event_time": "2026-10-17T13:30:00Z",
-                               "recorded_at": "2026-10-17T13:30:00Z", "sequence": n, "source": "ibkr-adapter",
+                               "schema_version": schema_version, "event_time": at,
+                               "recorded_at": at, "sequence": n, "source": "ibkr-adapter",
                                "strategy_version": LOG_STRATEGY, "configuration_hash": LOG_CONFIGURATION,
                                "payload_hash": hashlib.sha256(raw.encode()).hexdigest()}, separators=(",", ":"))
         record_hash = "sha256:" + hashlib.sha256("record {}".format(n).encode()).hexdigest()
@@ -937,6 +950,91 @@ class RelayTests(unittest.TestCase):
                               today=date(2026, 10, 16)), 0)
         self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"})
 
+    def stopped_not_handed_over(self, log, decisions):
+        """The sender's send says nothing reached the broker (IB Gateway's socket closed before placeOrder)."""
+        def closed_before(request):
+            raise NotHandedOver(request.client_order_id)
+
+        stopped = self.relay(Restarts(log, decisions), send=closed_before)
+        with self.assertRaises(HandoverUnconfirmed):
+            stopped.exchange(envelope(0))
+        stopped.close()
+
+    def test_a_send_that_says_nothing_was_handed_over_is_recorded_beside_its_mark(self):
+        log, decisions = {}, {"session:0": [released("tw-1")]}
+        self.stopped_not_handed_over(log, decisions)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        self.assertEqual(self.pending.not_handed_over(), {"client_order_id": "tw-1", "input_id": "session:0",
+                                                          "reason": "socket closed before placeOrder: tw-1"})
+
+    def test_a_send_that_cannot_say_whether_it_handed_over_records_nothing_and_clears_an_earlier_record(self):
+        # An earlier attempt's "before" stays true only until the order is
+        # handed over again: a later attempt that may have reached IBKR must
+        # not leave it behind for resolve to read.
+        log, decisions = {}, {"session:0": [released("tw-1")]}
+        self.stopped_not_handed_over(log, decisions)
+        self.pending.mark("tw-1", "resend:2026-10-16")
+
+        def closed_during(request):
+            raise HandoverUnconfirmed(request.client_order_id)
+
+        during = self.relay(Restarts(log, decisions), send=closed_during)
+        with self.assertRaises(HandoverUnconfirmed):
+            during.exchange(envelope(0))
+        during.close()
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        self.assertIsNone(self.pending.not_handed_over())
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=date(2026, 10, 17))
+
+    def test_an_order_not_handed_over_is_settled_on_a_later_day_and_the_relay_goes_on(self):
+        log, decisions = {}, {"session:0": [released("tw-1")]}
+        self.stopped_not_handed_over(log, decisions)
+        later = date(2026, 10, 17)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "resend", "a day late", today=later)
+        self.assertEqual(main(["resolve", self.pending.path, "tw-1", "--not-handed-over", "--reason",
+                               "IBKR's order history shows no order tagged tw-1"], today=later), 0)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"})
+        [recorded] = self.pending.decisions()
+        self.assertEqual((recorded["decision"], recorded["session_date"]), ("not-handed-over", "2026-10-17"))
+        goes_on = self.relay(Restarts(log, decisions), today=later)
+        goes_on.exchange(envelope(1))
+        goes_on.close()
+        self.assertEqual(self.sent, [], "an order never handed over is not sent")
+        self.assertIsNone(self.pending.load())
+        self.assertIsNone(self.pending.not_handed_over(), "the record goes with its input")
+
+    def test_not_handed_over_is_refused_without_the_relays_record_for_that_order_and_input(self):
+        today = date(2026, 10, 17)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "not-handed-over", "nothing is pending", today=today)
+        decisions = {"session:0": [released("tw-1")]}
+        # Stopped mid-send: it may be at IBKR, and the relay recorded nothing.
+        self.stopped_mid_send(envelope(0), decisions)
+        with self.assertRaises(ResolveRefused) as raised:
+            resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=today)
+        self.assertIn("--sent", str(raised.exception))
+        # Only an order marked about to be sent can have been not handed over.
+        with self.assertRaises(ResolveRefused) as raised:
+            resolve(self.pending, "tw-9", "not-handed-over", "a typo", today=today)
+        self.assertIn("'handing-over'", str(raised.exception))
+        for entry in ({"input_id": "session:9", "client_order_id": "tw-1", "reason": "before"},
+                      {"input_id": "session:0", "client_order_id": "tw-2", "reason": "before"}):
+            with self.subTest(entry=entry):
+                with open(self.pending.not_handed_over_path, "w", encoding="utf-8") as f:
+                    json.dump(entry, f)
+                with self.assertRaises(ResolveRefused):
+                    resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=today)
+        for bad in ("{not json", "[]", json.dumps({"input_id": "session:0", "client_order_id": "tw-1"})):
+            with self.subTest(bad=bad):
+                with open(self.pending.not_handed_over_path, "w", encoding="utf-8") as f:
+                    f.write(bad)
+                with self.assertRaises(HandoverRecordInvalid):
+                    resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=today)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        self.assertEqual(self.pending.decisions(), [])
+
     def test_a_sender_without_a_check_is_refused_before_anything_is_held(self):
         # The relay itself asks the sender's check before every mark, so a
         # sender that offers none is refused rather than trusted.
@@ -1206,34 +1304,77 @@ class RunLogsTests(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
 
-    def write(self, name, previous=()):
+    def write(self, name, previous=(), at="2026-10-17T13:30:00Z", final_hash=None):
+        """A run's log: one Run approval per name in previous, each with that log's final record hash, else one input."""
         lines = [log_header()]
-        lines += log_group(1, [("input", "operator.run.approved", 2, {"previous_log": p}) for p in previous]
-                           or [("input", "market.session.closed", 1, {"session": "2026-10-16"})])
+        lines += log_group(1, [("input", "operator.run.approved", 2, {
+            "previous_log": p, "previous_log_final_hash": final_hash or self.final_hash(p)}) for p in previous]
+                           or [("input", "market.session.closed", 1, {"session": "2026-10-16"})], at=at)
         path = Path(self.dir.name) / name
         path.write_text("".join(lines), encoding="utf-8")
         return str(path)
+
+    def final_hash(self, name):
+        """The record hash of the last commit in the log called name, or a stand-in for one not written."""
+        path = Path(self.dir.name) / str(name)
+        if not isinstance(name, str) or not name or not path.is_file():
+            return "sha256:" + "2" * 64
+        commits = [json.loads(line)["commit"] for line in path.read_text(encoding="utf-8").splitlines()
+                   if line.startswith('{"commit"')]
+        return commits[-1]["record_hash"] if commits else "sha256:" + "2" * 64
 
     def test_the_chain_runs_from_the_newest_run_back_to_the_first(self):
         first = self.write("a.log")
         second = self.write("b.log", ["a.log"])
         third = self.write("c.log", ["b.log"])
-        self.assertEqual(run_logs(third), [third, second, first])
-        self.assertEqual(run_logs(first), [first])
+        self.assertEqual(run_logs(third, today=TODAY), [third, second, first])
+        self.assertEqual(run_logs(first, today=TODAY), [first])
+
+    def test_the_chain_stops_at_a_run_that_ended_before_todays_session(self):
+        # IBKR's lists reach back only to today's session (the day's DAY
+        # orders, executions since midnight), so a run whose last input is
+        # of an earlier New York date explains nothing in them, and nothing
+        # older than it is read: an archived first run does not stop a start.
+        first = self.write("a.log", at="2026-10-15T15:00:00Z")
+        # 03:30 UTC on the 17th is still the 16th in New York.
+        second = self.write("b.log", ["a.log"], at="2026-10-17T03:30:00Z")
+        third = self.write("c.log", ["b.log"])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 16)), [third, second])
+        self.assertEqual(run_logs(third, today=TODAY), [third])
+        os.remove(first)
+        self.assertEqual(run_logs(third, today=TODAY), [third])
+
+    def test_an_approval_whose_final_hash_is_not_the_named_logs_is_refused(self):
+        self.write("a.log")
+        wrong = self.write("b.log", ["a.log"], final_hash="sha256:" + "f" * 64)
+        with self.assertRaises(ResolveRefused) as raised:
+            run_logs(wrong, today=TODAY)
+        self.assertIn("final record hash", str(raised.exception))
+        for bad in ("", "f" * 64, 7, None):
+            with self.subTest(final_hash=bad):
+                path = Path(self.dir.name) / "bad.log"
+                path.write_text("".join([log_header()] + log_group(1, [("input", "operator.run.approved", 2, {
+                    "previous_log": "a.log", "previous_log_final_hash": bad})])), encoding="utf-8")
+                with self.assertRaises(ResolveRefused):
+                    run_logs(str(path), today=TODAY)
+        # A named log with no committed group has no final record to match.
+        Path(self.dir.name, "empty.log").write_text(log_header(), encoding="utf-8")
+        with self.assertRaises(ResolveRefused):
+            run_logs(self.write("e.log", ["empty.log"]), today=TODAY)
 
     def test_a_log_with_two_approvals_or_a_chain_that_loops_is_refused(self):
         self.write("a.log")
         for name, previous in (("two.log", ["a.log", "a.log"]), ("self.log", ["self.log"])):
             with self.subTest(name), self.assertRaises(ResolveRefused):
-                run_logs(self.write(name, previous))
+                run_logs(self.write(name, previous), today=TODAY)
         self.write("x.log", ["y.log"])
         with self.assertRaises(ResolveRefused):
-            run_logs(self.write("y.log", ["x.log"]))
+            run_logs(self.write("y.log", ["x.log"]), today=TODAY)
 
     def test_an_approval_naming_no_log_file_name_is_refused(self):
         for previous in ("", ".", "..", "../a.log", "d/a.log", 7):
             with self.subTest(previous=previous), self.assertRaises(ResolveRefused):
-                run_logs(self.write("n.log", [previous]))
+                run_logs(self.write("n.log", [previous]), today=TODAY)
 
 
 if __name__ == "__main__":

@@ -758,6 +758,12 @@ class PlacingOrdersTests(unittest.TestCase):
         self.assertIn("nothing was handed to IB Gateway", message)
         self.assertIn("--resend", message)
         self.assertNotIn("is not known", message)
+        # The relay records that nothing reached IBKR, so the owner can
+        # settle it on a later day with the one decision resolve accepts for
+        # it; --never-sent is refused for any marked order.
+        self.assertIs(caught.exception.handed_over, False)
+        self.assertIn("--not-handed-over", message)
+        self.assertNotIn("--never-sent", message)
 
     def test_an_order_whose_socket_closed_during_placeorder_is_unconfirmed_never_taken_as_sent(self):
         client = self.client(paper_config())
@@ -770,6 +776,8 @@ class PlacingOrdersTests(unittest.TestCase):
             client.place_order(7, *request_shape(paper_request()))
         self.assertIn("tw-paper-1", str(caught.exception))
         self.assertIn("is not known", str(caught.exception))
+        self.assertIsNone(caught.exception.handed_over)
+        self.assertNotIn("--not-handed-over", str(caught.exception))
 
 
 if __name__ == "__main__":

@@ -72,18 +72,25 @@ class HandoverNotConfirmed(HandoverUnconfirmed):
     Never taken as sent and never sent again by itself: the relay's mark
     stays "about to send", and the adapter stops for a person. Closed
     before placeOrder ("before"), nothing was handed to IB Gateway, so
-    IBKR cannot have the order and a resend in the same session settles
-    it; closed during it ("during"), the order may or may not have reached
-    IBKR, and a person checks IBKR as for any hand-over a stop interrupted.
+    IBKR cannot have the order: handed_over is False, which the relay
+    records beside its mark, and the owner settles it with a resend in the
+    session it was committed, or, on any day, as not handed over once
+    IBKR's order history shows nothing under its tag (relay.resolve).
+    Closed during it ("during"), the order may or may not have reached
+    IBKR (handed_over None), and a person checks IBKR as for any hand-over
+    a stop interrupted.
     """
 
     def __init__(self, client_order_id, when):
         if when == "before":
             text = ("order {0}: IB Gateway's socket was closed before placeOrder, so nothing was handed to IB "
-                    "Gateway and IBKR cannot have the order; it is not taken as sent and nothing else is sent: "
-                    "with the adapter stopped, settle it with python3 adapter/ibkr/relay.py resolve PENDING_FILE "
-                    "{0} --resend --reason \"socket closed before placeOrder\" in this session, or --never-sent "
-                    "after checking IBKR shows no order whose orderRef is {0} (docs/manual/redelivery.md)")
+                    "Gateway and IBKR cannot have the order; it is not taken as sent and nothing else is sent. "
+                    "With the adapter stopped, settle it with python3 adapter/ibkr/relay.py resolve PENDING_FILE "
+                    "{0} --resend --reason \"socket closed before placeOrder\" in the session the order was "
+                    "committed (New York date), and it goes out once the link is back; on a later day, or if it "
+                    "is not to go out, check IBKR's order history shows no order whose orderRef is {0}, then "
+                    "settle it with the same command and --not-handed-over in place of --resend "
+                    "(docs/manual/paper-trading.md)")
         else:
             text = ("order {0}: IB Gateway's socket was closed {1} placeOrder, so whether IBKR has the order is "
                     "not known; it is not taken as sent, it is not sent again and nothing else is sent: check "
@@ -91,6 +98,7 @@ class HandoverNotConfirmed(HandoverUnconfirmed):
                     "(docs/manual/redelivery.md)")
         Exception.__init__(self, text.format(client_order_id, when))
         self.client_order_id = client_order_id
+        self.handed_over = False if when == "before" else None
 
 
 # ibapi marks an unset price with sys.float_info.max (ibapi.const.UNSET_DOUBLE;

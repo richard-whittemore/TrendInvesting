@@ -29,6 +29,7 @@ from fake_tws import ACCOUNT, FakeTWS, contract, execution, order
 from test_connection import Clock, config
 from connection import AccountNotManaged
 from engine_client import EngineRejected
+from relay import EngineUnavailable
 from loop import OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch, SOURCE
 from relay import RELEASED, PendingInput, ResolveRefused, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
@@ -363,7 +364,8 @@ class LoopTests(unittest.TestCase):
     def fresh_run(self, previous_log, name):
         """A fresh run's engine in the same directory, its Run approval naming previous_log committed first."""
         engine = LoggedEngine(str(Path(self.dir.name) / name))
-        payload = {"account_id": ACCOUNT, "previous_log": previous_log, "previous_log_final_hash": "sha256:" + "2" * 64,
+        payload = {"account_id": ACCOUNT, "previous_log": previous_log,
+                   "previous_log_final_hash": self.final_hash(previous_log),
                    "incident_id": "", "approved_by": "owner", "approved_at": "2026-10-17T14:00:00Z",
                    "boost": {"latched": False}, "incident_in_force": None}
         raw = json.dumps(payload, separators=(",", ":"))
@@ -374,6 +376,15 @@ class LoopTests(unittest.TestCase):
                        "strategy_version": STRATEGY_VERSION, "payload": payload,
                        "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
         return engine
+
+    def final_hash(self, name):
+        """The record hash of the last commit in the log called name beside the others, as the engine approves it."""
+        path = Path(self.dir.name) / name
+        if not name or not path.is_file():
+            return "sha256:" + "2" * 64
+        commits = [json.loads(line)["commit"] for line in path.read_text(encoding="utf-8").splitlines()
+                   if line.startswith('{"commit"')]
+        return commits[-1]["record_hash"]
 
     def filled_under_the_first_run(self):
         """Run engine.log until its order is sent and filled, then stop the adapter, as before a reboot."""
@@ -407,6 +418,40 @@ class LoopTests(unittest.TestCase):
         self.assertFalse(loop.conn.needs_reconciliation)
         self.assertEqual([e["type"] for e in third.inputs()], ["operator.run.approved"])
         self.assertEqual(len(self.fake.placed), 1)
+
+    def test_the_adapter_reads_nothing_and_records_nothing_until_the_engine_is_listening(self):
+        # The engine records a fresh run's Run approval before it opens its
+        # socket. An adapter that read the log first would see a chain of one
+        # run, and IBKR's replay of the earlier run's fills would be journalled
+        # into the outbox as new inputs before the approval named that run.
+        self.filled_under_the_first_run()
+        starting = LoggedEngine(str(Path(self.dir.name) / "run-2.log"))
+
+        def not_listening():
+            raise EngineUnavailable("cannot connect to the engine's socket: not listening yet")
+        loop = self.loop(engine=not_listening, engine_log=str(starting.path))
+        with self.assertRaises(EngineUnavailable):
+            loop.start()
+        self.assertEqual(loop.outbox.load(), [])
+        self.assertEqual(self.fake.placed[1:], [])
+        self.assertTrue(loop.conn is None or loop.conn.needs_reconciliation)
+
+    def test_an_approval_whose_final_hash_is_not_the_named_logs_stops_the_adapter(self):
+        self.filled_under_the_first_run()
+        second = self.fresh_run("engine.log", "run-2.log")
+        # The earlier run's log holds another commit than the one approved.
+        payload = {"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]}
+        raw = json.dumps(payload, separators=(",", ":"))
+        self.engine.decide({"id": "session:late", "type": "market.session.closed", "envelope_version": 1,
+                            "schema_version": 1, "event_time": SESSION_CLOSED, "recorded_at": SESSION_CLOSED,
+                            "sequence": self.engine.next_sequence, "source": SOURCE,
+                            "configuration_hash": CONFIGURATION_HASH, "strategy_version": STRATEGY_VERSION,
+                            "payload": payload, "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+        loop = self.loop(engine=second, engine_log=second.path)
+        with self.assertRaises(ResolveRefused) as caught:
+            loop.start()
+        self.assertIn("final record hash", str(caught.exception))
+        self.assertEqual(loop.outbox.load(), [])
 
     def test_a_fresh_run_still_stops_on_an_execution_no_run_released(self):
         self.filled_under_the_first_run()

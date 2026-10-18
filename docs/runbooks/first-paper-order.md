@@ -167,7 +167,7 @@ files never contain it, because the repository is public.
 | `/etc/trend-investing/accounts/boost.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo -e`; root-only, mode 0600) | your paper account (DU…), with no quotes and no spaces | The shipped file holds the name only. It is the only file the Boost adapter is given: no other account's number and no alert URL |
 | The Boost engine's paper configuration, `/etc/trend-investing/engines/boost.config`: a copy of the shipped dry-run file with `"mode": "paper"` and `"account_id"` set to your paper account (DU…) | the mode and the account | The engine refuses to start if the mode in this file is not the mode you start it with, or if a paper configuration names an account not beginning `DU`. The file is hashed into the run (ADR 0016), so a change is a new run |
 | `/etc/trend-investing/engines/boost.env`: set `TI_MODE=paper` | the engine's start mode | It must equal the mode in the configuration |
-| The adapter's configuration: `mode` paper, `account_id` your paper account (DU…), `host` 127.0.0.1, `port` 4002, the engine's `client_id` (Boost is 11), the timing values and `con_ids` with SPY's IBKR contract number | the adapter's side of the binding | See B2 |
+| The adapter's configuration, `/etc/trend-investing/adapters/boost.json`: `"mode": "paper"`, `"paper_sending_enabled": true`, `host` 127.0.0.1, `port` 4002, the engine's `client_id` (Boost is 11), the timing values and `con_ids` with SPY's IBKR contract number. No `account_id`: the account comes from `accounts/boost.env` only, and naming it in both places is refused | the adapter's side of the binding | See B2 |
 
 Two cautions:
 
@@ -202,9 +202,12 @@ amended). It is its own step and is not part of `all`, so a change at IBKR
 never blocks the Gateway or the services. The file is not stored in the
 repository (IBKR's licence terms) and the step only fetches and verifies it.
 
-**Installing `ibapi` into the adapter's environment [AFTER SECOND HALF]**:
-the second half adds that step and its command. Until then the real client
-cannot connect.
+**Installing `ibapi` into the adapter's environment [NOW]**: the same
+`provision.sh twsapi` step installs the verified build's Python client into
+the adapter's own environment and records it; then install the adapter's
+code and pin file with `sudo deploy/provision.sh adapter` from the same
+checkout ([paper trading](../manual/paper-trading.md), "Starting the
+adapter").
 
 ### B2. The configuration binds paper mode to the DU account [NOW]
 
@@ -260,17 +263,21 @@ Order of starting, each on the server, each an explicit step of yours:
    section of `docs/runbooks/durable-log.md` says: a new `TI_RUN`, a
    `TI_AS_OF`, and an empty `TI_RESTART_ARGS` for a first run. A log is never
    reused.
-4. Start the adapter, then the engine: `sudo systemctl start ti-engine@boost`.
-   Engines are never started by systemd on their own and never restarted by
-   it; every start is yours.
+4. Start the engine, then the adapter: `sudo systemctl start ti-engine@boost`,
+   then, once the engine's log (`journalctl -u ti-engine@boost`) shows its
+   start, `sudo systemctl start ti-adapter-boost`. The adapter refuses to
+   start until the engine's socket is open and its durable log exists; for a
+   fresh run the engine records the Run approval before it opens its socket.
+   Neither is started or restarted by systemd on its own; every start is
+   yours.
 5. Confirm the engine's log begins with the paper configuration, and that the
    adapter says it connected on 4002, read the account's balances in full
    and matched IBKR's open orders and today's trades to the orders the
    engine released ("reconciled") before anything else. The adapter does this on
    every start and reconnect (ADR 0025 point 5).
 
-The adapter's startup command and service unit are added by the second half;
-this document does not guess them.
+The adapter's startup command, its options and its service unit are in
+[paper trading](../manual/paper-trading.md), "Starting the adapter".
 
 ### B5. What the first order is [AFTER SECOND HALF]
 

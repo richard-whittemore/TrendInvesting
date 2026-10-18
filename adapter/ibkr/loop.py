@@ -51,7 +51,12 @@ or awaiting their reply seed the report journal, so IBKR's replay after a
 restart records nothing twice.
 
 The engine must be running, with its durable log begun, before the adapter
-starts: the log is the run's identity. Nothing here sends when the
+starts: the log is the run's identity. The loop connects to the engine's
+socket before it reads that log or IBKR (EngineUnavailable otherwise): the
+engine opens its socket only after it has recorded its start, a fresh run's
+Run approval included, so the chain of runs is never read without it. The
+chain stops at the first earlier run of an earlier session than today's
+(relay.run_logs), so an older run's log is never needed. Nothing here sends when the
 configuration is not paper (sender.make_sender), and the real client sends
 only with paper_sending_enabled on (real_client.IbapiClient.can_place_orders).
 """
@@ -80,7 +85,8 @@ log = logging.getLogger("ibkr")
 SOURCE = "ibkr"
 ENVELOPE_VERSION = 1
 # The adapter's files beside its pending file (relay.PendingInput's own
-# suffixes are .handover, .refused, .corrections, .late-fills and .lock).
+# suffixes are .handover, .refused, .not-handed-over, .corrections,
+# .late-fills and .lock).
 OUTBOX_SUFFIX = ".outbox"
 HELD_SUFFIX = ".held"
 OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
@@ -249,10 +255,15 @@ class AdapterLoop:
                            self.pending, lambda: collect_broker_orders(self.conn),
                            lambda order, session: release_to_request(order, cfg.mode, cfg.con_ids, session),
                            today=self._today)
+        # The engine opens its socket only once its start is recorded, a
+        # fresh run's Run approval included (cmd/engine), so nothing of the
+        # log is read, and nothing of IBKR's journalled, before it listens:
+        # a log read earlier could lack the approval naming the run before.
+        self.relay.connect_engine()
         # The earlier runs' reports too: IBKR replays the day's executions
         # and the session's orders after a fresh run starts, and a report an
         # earlier run's engine recorded is never recorded again.
-        logs = run_logs(self._engine_log_path)
+        logs = run_logs(self._engine_log_path, self._session())
         engine_logs = [read_engine_log(path) for path in logs]
         self.reports = OrderReportJournal(
             cfg.account_id, cfg.client_id, self._record, now=self._now, commission_wait=cfg.commission_wait,
@@ -264,6 +275,10 @@ class AdapterLoop:
         self.conn.connect_with_backoff()
         self.reconcile()
         self._settle_waiting()
+
+    def _session(self):
+        """Today's session date (New York) as the loop was given it, or None for the relay's own default."""
+        return self._today() if self._today is not None else None
 
     def ready(self):
         """Whether the link is up and reconciled since it last connected or was restored."""
@@ -281,7 +296,7 @@ class AdapterLoop:
         # approvals chain back to) is this engine's too: IBKR's day lists
         # still show it after a fresh run starts.
         expected = set(self.pending.handovers())
-        for path in run_logs(self._engine_log_path):
+        for path in run_logs(self._engine_log_path, self._session()):
             expected |= released_client_order_ids(path)
         match = match_on_reconnect(expected, broker, self.config.client_id)
         if match.unknown_at_broker or match.unknown_executions:
