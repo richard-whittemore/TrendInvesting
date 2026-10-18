@@ -285,8 +285,9 @@ class Relay:
     construction and holds it until close (PendingInUse if another relay or
     resolve has it, in this process or another); once closed it raises
     PendingInUse rather than edit the record or send. close_timeout (a finite
-    number of seconds greater than zero, else ValueError) bounds how long
-    close waits for the step in flight; a close that times out raises
+    number of seconds greater than zero and at most MAX_CLOSE_TIMEOUT (24
+    hours); other values raise ValueError) bounds how long close waits for
+    the step in flight; a close that times out raises
     RelayCloseTimeout and keeps the lock, leaving the relay open.
     """
 
