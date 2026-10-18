@@ -111,6 +111,14 @@ journals it only when it takes its next input from the adapter, so with the
 engine stopped the repeats continue until it runs; the reporter's first run
 after that sends the alert no more.
 
+Only an acknowledgement for the account counts. One recorded for another
+account has no effect, so the alert keeps coming until an acknowledgement for
+this account is in the log. One the engine refuses (its time is more than five
+minutes ahead of the engine's clock, or it cannot be read) is never recorded;
+you see a `.refused` note beside the file saying why in the engine's inbox and
+on the engine's output (`journalctl -u ti-engine@<account>`). Record the
+acknowledgement again with the right account and the current time.
+
 On both channels, ntfy and PagerDuty, repeats come every `-repeat-interval` (default 30 minutes). On PagerDuty, each repeat opens a **new incident**: the first alert's
 incident is named by the alert key, and each repeat's by the alert key with
 `#repeat-1`, `#repeat-2` and so on, while the alert key itself is shown in

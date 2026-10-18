@@ -252,6 +252,13 @@ see them, and the log is the only evidence of what you acknowledged.
 Two acknowledgements in the same second share a file name, so the second is
 refused; run it again a second later.
 
+The engine refuses an acknowledgement stating a time more than five minutes
+ahead or a file it cannot read: it is never recorded, and you see a `.refused`
+note beside the file in the inbox and on the engine's output. One recorded for
+another account has no effect: the reporter does not count it and the alert
+keeps repeating. Record the acknowledgement again with the right account and
+the current time.
+
 ## An approval
 
 A fresh run (anything but a crash resume: see [restart](restart.md)) starts
@@ -333,6 +340,8 @@ reports ([journal-query](journal-query.md)).
 | A typing slip in `-state`, or a missing `-by` or `-detail` (`-detail` is optional only for `acknowledge`) | Refused, nothing written | Run it again |
 | An acknowledgement with no `-alert` or no `-by`, or a key holding a newline (surrounding whitespace is trimmed) | Refused, nothing written | Run it again with the key from the alert |
 | An acknowledgement naming a key with a typing slip | Recorded; it acknowledges nothing, and the alert keeps repeating | Copy the key from the alert again, in single quotes |
+| An acknowledgement the engine refuses (a time more than five minutes ahead, an unreadable file) | Never recorded; a `.refused` note beside the file says why | Record it again with the current time |
+| An acknowledgement recorded for another account | Recorded with no effect; the reporter does not count it, so the alert keeps repeating | Record it again with the right account |
 | Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |
 | Someone edits a file in the inbox | The engine refuses it, writes `<file>.refused` saying why, and never uses it | Record the instruction again with the tool |
 | A clearance that names the wrong orders | Recorded with no effect; `.refused` note says which orders are open | Clear again naming exactly those |

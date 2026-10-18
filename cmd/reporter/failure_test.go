@@ -67,6 +67,14 @@ func TestAJournalTheReporterCannotReadStillAlertsAndChecksTheHeartbeat(t *testin
 			},
 			account: "joint", want: "schema version 99",
 		},
+		"an acknowledgement at an unknown schema version": {
+			write: func(t *testing.T, path string) {
+				ack := event.AlertAcknowledgedPayload{AccountID: "joint", AlertKey: "k", AcknowledgedBy: "owner", AcknowledgedAt: t0}
+				entries := append(haltedEntries(t), journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 6, event.AlertAcknowledgedEventType, 99, "ack", t0, ack)})
+				writeEntries(t, path, entries)
+			},
+			account: "joint", want: "schema version 99",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
