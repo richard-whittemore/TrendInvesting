@@ -128,14 +128,58 @@ class PaperSenderTests(unittest.TestCase):
         journal = []
         sender = paper_sender(h, journal)
         with self.assertRaises(NotReconciled):
-            sender.send(limit_request())
+            sender.check(limit_request())
         h.conn.mark_reconciled()
         h.fake.drop()
         h.conn.pump(0)
         with self.assertRaises(NotConnected):
-            sender.send(limit_request())
+            sender.check(limit_request())
         self.assertEqual(h.fake.placed, [])
         self.assertEqual(journal, [])
+
+    def test_a_link_down_is_reported_as_link_down_before_the_sending_switch_is_asked(self):
+        # A link known to be down holds the input (NotConnected, NotReconciled);
+        # the switch's refusal (SendRefused) would stop the adapter instead.
+        dropped = paper_harness()
+        dropped.fake.can_place = False
+        dropped.fake.drop()
+        dropped.conn.pump(0)
+        # The socket closed underneath, before any callback said so.
+        silent = paper_harness()
+        silent.fake.can_place = False
+        silent.fake.connected = False
+        for name, h in (("dropped", dropped), ("socket closed", silent)):
+            with self.subTest(name), self.assertRaises(NotConnected):
+                paper_sender(h, []).check(limit_request())
+        unreconciled = paper_harness(reconciled=False)
+        unreconciled.fake.can_place = False
+        with self.assertRaises(NotReconciled):
+            paper_sender(unreconciled, []).check(limit_request())
+        for h in (dropped, silent, unreconciled):
+            self.assertEqual(h.fake.placed, [])
+
+    def test_send_after_check_does_not_test_the_link_again(self):
+        # The relay's check before its mark is the one link check before the
+        # hand-over; the client's own socket test inside place_order is the
+        # one after. A socket that closes between the relay's check and send
+        # reaches place_order, which reports the hand-over as not confirmed,
+        # rather than a NotConnected refusal that leaves the mark behind.
+        h = paper_harness()
+        journal = []
+        sender = paper_sender(h, journal)
+        sender.check(limit_request())
+        h.fake.connected = False
+        record = sender.send(limit_request())
+        self.assertEqual(h.fake.called("place_order"), [("place_order", 7)])
+        self.assertEqual(journal, [record])
+
+    def test_send_still_refuses_a_request_out_of_shape(self):
+        h = paper_harness()
+        sender = paper_sender(h, [])
+        for bad in (limit_request(account_id="DU0000002"), request(), limit_request(tif="GTC")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                sender.send(bad)
+        self.assertEqual(h.fake.placed, [])
 
     def test_a_request_the_paper_account_cannot_carry_is_refused_before_the_gateway(self):
         h = paper_harness()
@@ -148,7 +192,7 @@ class PaperSenderTests(unittest.TestCase):
                 sender.send(bad)
         h.conn.next_order_id = None
         with self.assertRaises(SendRefused):
-            sender.send(limit_request())
+            sender.check(limit_request())
         self.assertEqual(h.fake.placed, [])
         self.assertEqual(journal, [])
 
@@ -188,8 +232,6 @@ class PaperSenderTests(unittest.TestCase):
         h.fake.can_place = False
         with self.assertRaises(SendRefused):
             sender.check(limit_request())
-        with self.assertRaises(SendRefused):
-            sender.send(limit_request())
         self.assertEqual(h.fake.called("place_order"), [])
         self.assertEqual(h.conn.next_order_id, 7)
         self.assertEqual(journal, [])

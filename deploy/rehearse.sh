@@ -13,7 +13,9 @@
 # TI_REHEARSAL_PLATFORM=linux/amd64 on an x86_64 host to run the installer too.
 # One platform is pinned for the container and for the Go tools: it is
 # TI_REHEARSAL_PLATFORM, else DOCKER_DEFAULT_PLATFORM, else the daemon's own,
-# and the tools are cross-compiled for it, whatever the host.
+# and the tools are cross-compiled for it, whatever the host. Only
+# TI_REHEARSAL_PLATFORM enables the installer step: DOCKER_DEFAULT_PLATFORM
+# alone pins the platform but the installer is still skipped.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

@@ -5,6 +5,9 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=/dev/null
 . "$here/platform.sh"
+# The caller's environment must not decide any case: set only inside the
+# precedence cases below.
+unset TI_REHEARSAL_PLATFORM DOCKER_DEFAULT_PLATFORM
 
 failures=0
 expect() { # description expected actual

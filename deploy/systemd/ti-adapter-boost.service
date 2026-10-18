@@ -1,0 +1,45 @@
+[Unit]
+Description=IBKR adapter for the Boost engine (sends only in paper, with paper_sending_enabled on)
+After=ti-gateway.service ti-engine@boost.service
+Wants=ti-gateway.service
+# Skipped, not failed, until ibapi is installed and recorded (provision.sh
+# twsapi), the adapter's code is installed (provision.sh adapter), and its
+# configuration exists (provision.sh services creates it from the example).
+ConditionFileIsExecutable=/opt/trend-investing/adapter-venv/bin/python3
+ConditionPathExists=/opt/trend-investing/twsapi/INSTALLED
+ConditionPathExists=/opt/trend-investing/adapter/adapter/ibkr/cli.py
+ConditionPathExists=/etc/trend-investing/adapters/boost.json
+
+[Service]
+Type=simple
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+# TI_RUN names the engine's durable log, which the adapter reads: the same
+# run file the engine starts from (docs/runbooks/durable-log.md). Start the
+# engine first; the adapter refuses to start without its log.
+EnvironmentFile=/var/lib/trend-investing/engines/boost/run.env
+# The account number is read from the IBKR_ACCOUNT_BOOST line of this
+# adapter's own root-only account file, handed to this service as a private
+# copy; nothing else (no other account's number, no alert URL) is. The
+# adapter's configuration names no account.
+LoadCredential=account:/etc/trend-investing/accounts/boost.env
+WorkingDirectory=/opt/trend-investing/adapter
+ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
+# Never restarted by systemd: every stop is for a person to read (the reason
+# is in the journal: journalctl -u ti-adapter-boost), and every start is the
+# owner's. SIGTERM stops it cleanly.
+Restart=no
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/adapters/boost
+ReadOnlyPaths=/var/lib/trend-investing/engines/boost
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

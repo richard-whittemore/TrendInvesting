@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from config import is_paper_account
+from connection import NotConnected
 from values import to_decimal
 
 ACTIONS = ("BUY", "SELL")
@@ -161,10 +162,46 @@ class PaperSender:
 
         The relay calls this itself before it marks the order about to be
         sent, whatever its mapper does, so an order refused here never left
-        the process and leaves no mark to stop a restart (relay.py). Nothing between this
-        check and the send pumps the connection, so the link's state cannot
-        change in between.
+        the process and leaves no mark to stop a restart (relay.py). It is
+        the one link check before the hand-over. Nothing between this check
+        and the send pumps the connection, so the state the main thread
+        keeps (the link's flag, its reconciliation, the next order ID)
+        cannot change in between; ibapi's socket can, from its reader
+        thread, so send does not test the link again: the client's own
+        socket test inside place_order is the one after the mark, and
+        reports a socket closed in between as a hand-over not confirmed
+        (real_client.HandoverNotConfirmed).
         """
+        config = self._check_shape(request)
+        # A late order needs a person: its limit and the engine's checks
+        # behind it were made for its own session.
+        today = self._today()
+        if not _is_date(request.session) or request.session != today:
+            raise SendRefused("order {} was released for the session of {}, not today's ({}); it is never sent, "
+                              "and the adapter stops here until a person settles it with relay.py resolve "
+                              "--never-sent (docs/manual/paper-trading.md)".format(
+                                  request.client_order_id, request.session, today))
+        # The link first: a link down or not yet reconciled holds the input
+        # until it is back (NotConnected, NotReconciled), where the switch's
+        # refusal below stops the adapter for a person.
+        self._conn.require_connected()
+        if not self._conn.api.is_connected():
+            raise NotConnected("IB Gateway's socket is closed; nothing is sent")
+        if self._conn.needs_reconciliation:
+            raise NotReconciled("the link to IB Gateway has not been reconciled since it connected; nothing is "
+                                "sent until IBKR's open orders and executions are matched to the journal and its "
+                                "account read in full")
+        if not self._conn.api.can_place_orders():
+            raise SendRefused("the IBKR client on this connection does not place orders; nothing is sent")
+        if config.account_id not in self._conn.managed_accounts:
+            raise SendRefused("account {!r} is not among the accounts this IBKR login manages; nothing is "
+                              "sent".format(config.account_id))
+        if self._conn.next_order_id is None:
+            raise SendRefused("IBKR has not given this session an order ID (nextValidId); nothing is sent")
+        return request
+
+    def _check_shape(self, request):
+        """Refuse a request out of the released-order shape or for another account; returns the configuration."""
         config = self._conn.config
         _require_paper(config)
         validate(request)
@@ -179,42 +216,33 @@ class PaperSender:
             raise ValueError("quantity {} is not whole shares".format(request.quantity))
         if not isinstance(request.con_id, int) or isinstance(request.con_id, bool) or request.con_id <= 0:
             raise ValueError("con_id must be IBKR's positive contract ID")
-        # A late order needs a person: its limit and the engine's checks
-        # behind it were made for its own session.
-        today = self._today()
-        if not _is_date(request.session) or request.session != today:
-            raise SendRefused("order {} was released for the session of {}, not today's ({}); it is never sent, "
-                              "and the adapter stops here until a person settles it with relay.py resolve "
-                              "--never-sent (docs/manual/paper-trading.md)".format(
-                                  request.client_order_id, request.session, today))
-        if not self._conn.api.can_place_orders():
-            raise SendRefused("the IBKR client on this connection does not place orders; nothing is sent")
-        self._conn.require_connected()
-        if self._conn.needs_reconciliation:
-            raise NotReconciled("the link to IB Gateway has not been reconciled since it connected; nothing is "
-                                "sent until IBKR's orders, executions and balances are matched to the journal")
-        if config.account_id not in self._conn.managed_accounts:
-            raise SendRefused("account {!r} is not among the accounts this IBKR login manages; nothing is "
-                              "sent".format(config.account_id))
-        if self._conn.next_order_id is None:
-            raise SendRefused("IBKR has not given this session an order ID (nextValidId); nothing is sent")
-        return request
+        return config
 
     def send(self, request):
-        self.check(request)
-        config = self._conn.config
+        """Place a request check has passed: only its shape is checked again, never the link (see check)."""
+        config = self._check_shape(request)
         order_id = self._conn.next_order_id
         self._conn.next_order_id = order_id + 1
-        contract = SimpleNamespace(conId=request.con_id, symbol=request.symbol, secType=SEC_TYPE,
-                                   currency=CURRENCY, exchange=EXCHANGE)
-        order = SimpleNamespace(orderRef=request.client_order_id, account=request.account_id,
-                                action=request.action, totalQuantity=request.quantity,
-                                orderType=request.order_type, lmtPrice=float(request.limit_price),
-                                tif=request.tif, transmit=True)
-        self._conn.api.place_order(order_id, contract, order)
+        self._conn.api.place_order(order_id, *request_shape(request))
         record = SentRecord(request=request, send=True, client_id=config.client_id, broker_order_id=order_id)
         self._journal(record)
         return record
+
+
+def request_shape(request):
+    """The (contract, order) a request is handed to TWSApi.place_order as: plain objects with ibapi's attribute names.
+
+    Exactly the attributes tws.TWSApi.place_order promises, which the real
+    client maps onto ibapi's Contract and Order (real_client.ibapi_contract,
+    real_client.ibapi_order).
+    """
+    contract = SimpleNamespace(conId=request.con_id, symbol=request.symbol, secType=SEC_TYPE,
+                               currency=CURRENCY, exchange=EXCHANGE)
+    order = SimpleNamespace(orderRef=request.client_order_id, account=request.account_id,
+                            action=request.action, totalQuantity=request.quantity,
+                            orderType=request.order_type, lmtPrice=float(request.limit_price),
+                            tif=request.tif, transmit=True)
+    return contract, order
 
 
 def release_to_request(order, mode, con_ids, session=None):

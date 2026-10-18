@@ -12,6 +12,7 @@ if tests_dir not in sys.path:
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order, execution
 from test_connection import Harness
+from connection import REQUEST_ID_BASE
 from orders import (OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
                     CommissionReport, UnrecognisedOrderReport, collect_broker_orders,
                     match_on_reconnect, parse_execution_time)
@@ -101,6 +102,30 @@ class OrderStatusTests(unittest.TestCase):
         self.assertEqual(statuses[0].ibkr_code, 201)
         self.assertIn("insufficient funds", statuses[0].reason)
         self.assertEqual(statuses[0].client_order_id, "tag-1")
+
+    def test_an_order_level_refusal_of_an_order_this_client_placed_is_invalid_with_ibkr_reason(self):
+        # IBKR answers an order it will not take (the Read-Only API, code 321)
+        # with an error under the order's ID and no openOrder: the order never
+        # worked, and the engine is told so.
+        t = Tracked()
+        t.tracker.placed(7)
+        t.cb.error(7, 321, "Error validating request.-'bW' : cause - The API interface is currently in Read-Only mode.")
+        status(t.cb, 7, "Inactive", "0", "10")
+        t.drain()
+        statuses = t.of(OrderStatusReport)
+        self.assertEqual([(s.lifecycle, s.ibkr_code, s.broker_order_id) for s in statuses], [("invalid", 321, 7)])
+        self.assertIn("Read-Only", statuses[0].reason)
+
+    def test_an_order_level_code_on_anything_but_an_order_placed_and_not_yet_shown_is_no_order_report(self):
+        # Code 321 also answers other requests, whose IDs may equal an order's.
+        t = Tracked()
+        t.cb.error(7, 321, "Error validating request.-'bW' : cause - synthetic")
+        t.tracker.placed(8)
+        t.cb.open_order(8, contract(), order(order_ref="tag-8"), STATE)
+        status(t.cb, 8, "Submitted", "0", "10")
+        t.cb.error(8, 321, "Error validating request.-'bW' : cause - synthetic")
+        t.drain()
+        self.assertEqual([s.lifecycle for s in t.of(OrderStatusReport)], ["submitted"])
 
     def test_inactive_without_a_rejection_fails_closed(self):
         t = Tracked()
@@ -336,6 +361,33 @@ class OrderStatusTests(unittest.TestCase):
         for bad in ("20261016  09:30:01", "yesterday", "20261016 09:30:01 Mars/Olympus"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_execution_time(bad)
+
+
+class RequestIdTests(unittest.TestCase):
+    def test_an_error_on_a_request_is_never_read_as_an_orders_rejection(self):
+        # IBKR answers a request's error under its request ID and an order's
+        # rejection under its order ID, with codes shared by both (321).
+        # Request IDs start far above any order ID, so an error on
+        # reqExecutions cannot name an order this client placed.
+        h = Harness()
+        # A fresh paper account's first valid order ID is 1.
+        h.fake.next_order_id = 1
+        h.conn.connect()
+        reports = []
+        tracker = OrderTracker(ACCOUNT, 11, reports.append)
+        h.conn.subscribe(tracker.on_event)
+        tracker.placed(h.conn.next_order_id)
+        h.fake.executions_error = (321, "Error validating request")
+        collect_broker_orders(h.conn)
+        self.assertEqual([r for r in reports if isinstance(r, OrderStatusReport)], [])
+        self.assertGreaterEqual(h.fake.called("req_executions")[0][1], REQUEST_ID_BASE)
+
+    def test_request_ids_start_above_the_order_id_space_and_never_repeat(self):
+        h = Harness()
+        h.conn.connect()
+        ids = [h.conn.new_req_id() for _ in range(3)]
+        self.assertEqual(ids, [REQUEST_ID_BASE, REQUEST_ID_BASE + 1, REQUEST_ID_BASE + 2])
+        self.assertEqual(REQUEST_ID_BASE, 1 << 30)
 
 
 class ReconnectMatchTests(unittest.TestCase):

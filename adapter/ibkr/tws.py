@@ -27,18 +27,24 @@ class TWSApi:
     starts.
 
     place_order is called only by sender.PaperSender, on a paper
-    configuration (AGENTS.md rule 5), and only while can_place_orders()
-    is true, which the sender asks before any order is marked or any order
-    ID used. Its contract and order are the adapter's own request shape,
+    configuration (AGENTS.md rule 5), and only while is_connected() and
+    can_place_orders() are true, which the sender asks before any order is
+    marked or any order ID used. Its contract and order are the adapter's own request shape,
     not ibapi objects: plain objects carrying exactly these attributes, by
     ibapi's names (contract: conId, symbol, secType, currency, exchange;
     order: orderRef, account, action, totalQuantity, orderType, lmtPrice,
     tif, transmit). The real client builds ibapi.contract.Contract and
-    ibapi.order.Order from them; every other Order field then takes ibapi's
-    default, and the paper-account test must confirm the ones that change
-    what is sent: outsideRth false, no parent, OCA group or conditions,
-    whatIf false, and an auxPrice of ibapi's unset value. IBKR answers on
-    the Inbox.
+    ibapi.order.Order from them (real_client.ibapi_contract and
+    ibapi_order), and sets every other Order field that changes what is
+    sent to its plain value (real_client.ORDER_FIELDS_SET: outsideRth
+    false, no parent, OCA group or conditions, whatIf false, an auxPrice of
+    ibapi's unset value, and more); real_client.DEFAULTS_TO_CONFIRM lists
+    the defaults the paper test confirms from IBKR's own view of the order
+    (not every field ibapi's Order has). IBKR answers on the Inbox.
+
+    can_place_orders is the sending switch alone (configuration and login);
+    is_connected reports the link, and the sender asks it first, so a link
+    down holds the input rather than read as the switch being off.
     """
 
     def connect(self, host, port, client_id, callbacks, timeout):
