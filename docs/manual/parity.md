@@ -60,6 +60,12 @@ QuantConnect's own order, so the ranked-order check proves that every
 other pair of stocks is in the right order, but not the order within a
 tie.
 
+The same applies to gaps in a stock's prices. The export carries the
+prices of the stocks picked and of at most five more stocks with a gap in
+each month, so the gap rule is applied to those stocks only. A month with
+more gapped stocks than that has the rest unchecked, and the tool does not
+list their live difference.
+
 **Second, it lists every live departure.** Go then runs the live rule on
 the same inputs and lists every way the live result differs from that
 backtest-compatible one, each with its cause. It works this out by

@@ -50,6 +50,8 @@ func TestAMalformedMomentumPayloadIsRefused(t *testing.T) {
 		"a text volatility":       strings.Replace(momentumPayload, `0.012345678901234568`, `"v"`, 1),
 		"no month":                strings.Replace(momentumPayload, `"month":"2009-06",`, ``, 1),
 		"trailing data":           momentumPayload + "{}",
+		"a trailing brace":        momentumPayload + "}",
+		"a trailing bracket":      momentumPayload + "]",
 		"a ranked row not a list": strings.Replace(momentumPayload, `["BBB",0.25,0.02,null,"-"]`, `{}`, 1),
 		"a null ticker":           strings.Replace(momentumPayload, `["AAA"`, `[null`, 1),
 		"an empty ticker":         strings.Replace(momentumPayload, `["AAA"`, `[""`, 1),

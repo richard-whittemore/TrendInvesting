@@ -187,3 +187,19 @@ func TestALiveGapTheClosesDoNotShowIsUnexplained(t *testing.T) {
 	}
 	onlyUnexplained(t, r, "a gap with every close present")
 }
+
+func TestAGapTheClosesDoNotShowIsKeptInEveryBook(t *testing.T) {
+	r, m := internalRun(), twoNames()
+	cands := []momentum.Candidate{
+		{InstrumentID: "AAA", Sector: "101", Score: 0.5, Volatility: 0.01},
+		{InstrumentID: "BBB", Sector: "102", Score: 0.4, Volatility: 0.02},
+	}
+	b, err := r.books(m, cands, map[string]bool{"AAA": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := func(k momentum.Book) int { return len(k.Ranked) }
+	if got, want := names(b.live), names(b.stages[1].book); got != 2 || want != 2 {
+		t.Errorf("a gap not shown by the closes must stay in the gap stage (%d) and the live book (%d)", want, got)
+	}
+}

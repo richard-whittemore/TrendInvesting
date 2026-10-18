@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 )
@@ -189,7 +190,7 @@ func strictDecode(raw []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("parity: %w", err)
 	}
-	if dec.More() {
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("parity: trailing data after the payload")
 	}
 	return nil

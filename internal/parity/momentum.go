@@ -143,8 +143,10 @@ func (r *momentumRun) monthsCheck(planned []string, months []MomentumMonth) {
 	}
 }
 
-// month compares one month. A malformed export fails the export check and
-// the month is compared no further.
+// month compares one month. A malformed export fails the export check
+// before anything is compared. One whose histories or books cannot be
+// computed fails it after the history comparisons and the differences found
+// there are recorded, and the trend, book and departures are not compared.
 func (r *momentumRun) month(m *MomentumMonth) {
 	export := r.checks[CheckExport]
 	if err := r.wellFormed(m); err != nil {
@@ -370,7 +372,8 @@ type books struct {
 // show it). The stages apply, in turn: the live tie order (ascending ID),
 // leaving out each name whose closes show a gap, each zero volatility and
 // each name with no sector. The live book is SelectBook given every
-// candidate but the live rule's gaps. Every book takes QuantConnect's
+// candidate but the gaps the closes show. A gap they do not show is kept
+// in every book, so it is never explained away. Every book takes QuantConnect's
 // risk-off flag.
 func (r *momentumRun) books(m *MomentumMonth, cands []momentum.Candidate, gaps map[string]bool) (books, error) {
 	var b books
@@ -406,7 +409,7 @@ func (r *momentumRun) books(m *MomentumMonth, cands []momentum.Candidate, gaps m
 	}
 	var liveCands []momentum.Candidate
 	for _, c := range cands {
-		if _, gap := gaps[c.InstrumentID]; !gap {
+		if !gaps[c.InstrumentID] {
 			liveCands = append(liveCands, c)
 		}
 	}
