@@ -1401,7 +1401,14 @@ class StreamFolderRuleTests(unittest.TestCase):
                 log = str(engine.path)
                 self.assertEqual(head_identity(log), run_identity(log))
                 self.assertEqual(tidata.head_identity(log), tidata.read_engine_log(log).identity)
-        for text in ("", '{"log_version":1}', '{"log_version":1}\n', '{"log_version":1}\n{"commit":{}}\n'):
+        def record(kind, ident):
+            return ('{"record":{"kind":"%s","envelope":{"id":"%s","type":"t","recorded_at":"2026-10-16T13:30:00Z"}}}'
+                    '\n' % (kind, ident))
+        # The second group opening with a decision: no group but an input's.
+        decision_first = ('{"log_version":1}\n' + record("input", "configuration:x") + '{"commit":{}}\n'
+                          + record("decision", "d") + '{"commit":{}}\n')
+        for text in ("", '{"log_version":1}', '{"log_version":1}\n', '{"log_version":1}\n{"commit":{}}\n',
+                     decision_first):
             with self.subTest(log=text):
                 Path(self.root, "bad.log").write_text(text)
                 with self.assertRaises(ResolveRefused):
@@ -1416,6 +1423,208 @@ class StreamFolderRuleTests(unittest.TestCase):
         with open(first.path, "a", encoding="utf-8") as f:
             f.write("a damaged tail\n")
         self.assertEqual(self.found(resumed), ("refused", "refused"))
+
+    def test_a_log_whose_records_do_not_follow_their_record_hashes_is_never_taken_for_the_run(self):
+        # An envelope field changed after the engine wrote it, its stored
+        # record hash kept: the stored hashes still match, the chain over the
+        # records does not.
+        for edited in ("the first run's", "the resume's", "both"):
+            with self.subTest(edited=edited):
+                self.setUp()
+                first = self.first_run()
+                commit(first, "input-b")
+                resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+                commit(resumed, "input-c")
+                logs = {"the first run's": [first.path], "the resume's": [resumed.path],
+                        "both": [first.path, resumed.path]}[edited]
+                for path in logs:
+                    text = Path(path).read_text(encoding="utf-8")
+                    self.assertIn('"id":"input-b"', text)
+                    Path(path).write_text(text.replace('"id":"input-b"', '"id":"input-z"', 1), encoding="utf-8")
+                self.assertEqual(self.found(resumed), ("refused", "refused"))
+
+    def test_a_resume_whose_first_logs_head_cannot_be_read_stops_and_is_never_sent_to_a_warm_up(self):
+        from delivery import stream_run
+        from marketdata import tidata
+        first = self.first_run()
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        commit(resumed, "input-c")
+        lines = Path(first.path).read_bytes().splitlines(keepends=True)
+        Path(first.path).write_bytes(b"a damaged header\n" + b"".join(lines[1:]))
+        log = str(resumed.path)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(StreamRefused) as adapter:
+                stream_run(str(self.streams), log)
+            with self.assertRaises(tidata.Refused) as data:
+                tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log), warn=lambda text: None)
+        for refusal in (str(adapter.exception), str(data.exception)):
+            self.assertIn(str(self.streams / "run-a"), refusal)
+            self.assertIn("restore", refusal)
+
+    def test_a_skipped_logs_remedy_names_the_engines_log_folder_not_the_streams(self):
+        from marketdata import tidata
+        self.folder("run-old")
+        (self.root / "run-old.log").write_text("written by another build\n")
+        fresh = self.first_run(approved=True)
+        warnings = []
+        with self.assertLogs("ibkr", level="WARNING") as logs:
+            from delivery import stream_run
+            stream_run(str(self.streams), str(fresh.path))
+        log = str(fresh.path)
+        tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log), warn=warnings.append)
+        for text in (logs.output[0], warnings[0]):
+            self.assertIn("cannot be matched to any run", text)
+            self.assertIn("the engine's log folder {}".format(self.root), text)
+
+
+class LogChainTests(unittest.TestCase):
+    """Both readers recompute a durable log's record hash chain as internal/journal does (LOG_CHAIN_ALGORITHM)."""
+
+    def setUp(self):
+        adapter_dir = str(tests_dir.parents[1])
+        if adapter_dir not in sys.path:
+            sys.path.insert(0, adapter_dir)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def breaks(self, path):
+        """(the adapter's chain_break, the data job's) for the log at path."""
+        from marketdata import tidata
+        from relay import _committed_groups
+        return _committed_groups(str(path)).chain_break, tidata.read_engine_log(str(path)).chain_break
+
+    def test_the_canonical_envelope_bytes_are_the_engines(self):
+        # internal/event CanonicalEnvelopeBytes of this envelope, as Go
+        # computes it: Go's string escapes, UTC times without trailing zeros,
+        # an absent correlation ID as "", the payload as stored text.
+        import relay
+        from marketdata import tidata
+        envelope = {"id": "a<b>&c\u2028d\u2029\u00e9\x01\x7f", "type": "t", "envelope_version": 1,
+                    "schema_version": 2, "event_time": "2026-10-16T09:30:00.120000000-04:00",
+                    "recorded_at": "2026-10-16T09:30:00.120000000-04:00", "sequence": 3, "causation_id": "c",
+                    "source": "s", "strategy_version": "v", "configuration_hash": "h", "payload_hash": "p"}
+        payload = '{"x":"<&>\u2028"}'
+        want = "2f151b29fe7c95a751cee7fedd2c3281d614360c49aedfb2b38bf88daebf04bd"
+        fields = {k: envelope.get(k, "") for k in (relay.ENVELOPE_FIELDS | relay.ENVELOPE_OPTIONAL) - {"payload"}}
+        fields.update(event_time="2026-10-16T13:30:00.12Z", recorded_at="2026-10-16T13:30:00.12Z", payload=payload)
+        self.assertEqual(hashlib.sha256(relay._canonical_bytes(fields)).hexdigest(), want)
+        self.assertEqual(hashlib.sha256(tidata._canonical_bytes(fields)).hexdigest(), want)
+        previous = bytes(32)
+        expected = hashlib.sha256(previous + b"input" + relay._canonical_bytes(fields)).digest()
+        self.assertEqual(relay.log_chain_next(previous, "input", envelope, payload.encode()), expected)
+        for unchained in ({}, dict(envelope, event_time="2026-13-16T09:30:00Z")):
+            self.assertIsNone(relay.log_chain_next(previous, "input", unchained, payload.encode()))
+        self.assertEqual(tidata._record_digest(previous, "input", envelope, payload), expected)
+        with self.assertRaises(TypeError):
+            relay._canonical_bytes({"x": 1.5})
+        with self.assertRaises(TypeError):
+            tidata._canonical_bytes({"x": True})
+
+    def test_an_engine_log_and_the_doubles_follow_the_chain(self):
+        engine = LoggedEngine(str(self.root / "run-a.log"), configuration=json.loads(
+            (tests_dir.parents[2] / "deploy" / "etc" / "engines" / "boost.config").read_text()))
+        commit(engine, "input-a")
+        self.assertEqual(self.breaks(engine.path), (None, None))
+        self.assertEqual(self.breaks(tests_dir.parents[1] / "marketdata" / "tests" / "testdata" / "boost-fixture.log"),
+                         (None, None))
+
+    def test_a_record_that_does_not_follow_the_chain_is_named_and_a_torn_tail_is_not(self):
+        engine = LoggedEngine(str(self.root / "run-a.log"), configuration=json.loads(
+            (tests_dir.parents[2] / "deploy" / "etc" / "engines" / "boost.config").read_text()))
+        commit(engine, "input-a")
+        commit(engine, "input-b")
+        good = Path(engine.path).read_text(encoding="utf-8")
+        for name, text, want in (
+                ("an edited id", good.replace('"id":"input-a"', '"id":"input-z"'), 2),
+                ("an edited record in the uncommitted tail", good + good.splitlines(keepends=True)[-2].replace(
+                    '"sequence":3', '"sequence":4', 1), None)):
+            with self.subTest(name):
+                Path(engine.path).write_text(text, encoding="utf-8")
+                self.assertEqual(self.breaks(engine.path), (want, want))
+        # A time no engine writes, which the adapter refuses outright (its
+        # envelope check) and the data job, reading less, finds unchained.
+        from marketdata import tidata
+        Path(engine.path).write_text(good.replace('"event_time":"2027-01-14T22:05:00Z"',
+                                                  '"event_time":"2027-13-14T22:05:00Z"', 1), encoding="utf-8")
+        self.assertEqual(tidata.read_engine_log(str(engine.path)).chain_break, 2)
+
+    def test_the_data_job_finds_no_chain_in_a_record_whose_payload_is_not_last(self):
+        from marketdata import tidata
+        engine = LoggedEngine(str(self.root / "run-a.log"), configuration=json.loads(
+            (tests_dir.parents[2] / "deploy" / "etc" / "engines" / "boost.config").read_text()))
+        lines = Path(engine.path).read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[1])
+        record["record"]["envelope"] = dict(reversed(list(record["record"]["envelope"].items())))
+        lines[1] = json.dumps(record, separators=(",", ":"))
+        Path(engine.path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertEqual(tidata.read_engine_log(str(engine.path)).chain_break, 1)
+
+
+class RealEngineResumeTests(unittest.TestCase):
+    """The record hash chain rule rests on what cmd/engine -resume writes: the real engine, built here, crashed and resumed."""
+
+    def test_a_real_resume_keeps_every_copied_record_hash_and_both_chains_verify(self):
+        import os
+        import signal
+        import subprocess
+        import time
+        from delivery import stream_run
+        from relay import _committed_groups
+        adapter_dir = str(tests_dir.parents[1])
+        if adapter_dir not in sys.path:
+            sys.path.insert(0, adapter_dir)
+        from marketdata import tidata
+        repo = tests_dir.parents[2]
+        config = str(repo / "deploy" / "etc" / "engines" / "boost.config")
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        root = Path(work.name)
+        sockets = tempfile.mkdtemp(dir="/tmp")
+        self.addCleanup(lambda: __import__("shutil").rmtree(sockets, True))
+        env = dict(os.environ, GOTOOLCHAIN="local")
+        engine_bin, demo_bin = str(root / "engine"), str(root / "boost-demo")
+        subprocess.run(["go", "build", "-ldflags",
+                        "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=resume-test",
+                        "-o", engine_bin, "./cmd/engine"], cwd=str(repo), env=env, check=True)
+        subprocess.run(["go", "build", "-o", demo_bin, "./cmd/boost-demo"], cwd=str(repo), env=env, check=True)
+        logs = root / "engines"
+        logs.mkdir()
+        streams = root / "streams" / "boost"
+        (streams / "run-a").mkdir(parents=True)
+        socket = os.path.join(sockets, "s.sock")
+
+        def start(name, *extra):
+            out = root / (name + ".out")
+            engine = subprocess.Popen([engine_bin, "-mode", "dry-run", "-config", config,
+                                       "-as-of", "2024-01-02T21:00:00Z", "-socket", socket,
+                                       "-log", str(logs / (name + ".log")), "-out", str(root / (name + ".journal")),
+                                       *extra], stdout=open(out, "w"), stderr=subprocess.STDOUT)
+            self.addCleanup(lambda: engine.poll() is None and engine.kill())
+            for _ in range(200):
+                if "listening on" in out.read_text():
+                    return engine
+                self.assertIsNone(engine.poll(), out.read_text())
+                time.sleep(0.05)
+            self.fail("the engine did not listen: " + out.read_text())
+
+        crashed = start("run-a")
+        subprocess.run([demo_bin, "-socket", socket, "-log", str(logs / "run-a.log"), "-config", config,
+                        "-sessions", "40"], check=True, capture_output=True)
+        crashed.send_signal(signal.SIGKILL)
+        crashed.wait()
+        resumed = start("run-c", "-resume", str(logs / "run-a.log"))
+        first, copy = str(logs / "run-a.log"), str(logs / "run-c.log")
+        a, c = _committed_groups(first), _committed_groups(copy)
+        self.assertGreater(len(a.groups), 2)
+        self.assertEqual(c.record_hashes[:len(a.record_hashes)], a.record_hashes)
+        self.assertEqual((a.chain_break, c.chain_break), (None, None))
+        self.assertEqual((tidata.read_engine_log(first).chain_break, tidata.read_engine_log(copy).chain_break),
+                         (None, None))
+        self.assertEqual(stream_run(str(streams), copy), "run-a")
+        self.assertEqual(tidata.stream_run(str(streams), copy, tidata.read_engine_log(copy)), "run-a")
+        resumed.send_signal(signal.SIGTERM)
+        resumed.wait(timeout=60)
 
 
 if __name__ == "__main__":

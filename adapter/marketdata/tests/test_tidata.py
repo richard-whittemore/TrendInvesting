@@ -75,9 +75,12 @@ def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/
     first the configuration input carrying ``config`` (default the shipped
     Boost configuration), the others inputs only, no decisions. With
     ``approval`` (an input ID), the second input is the run's Run approval
-    under that ID, which names a fresh run after an earlier one."""
-    lines = [json.dumps({"chain_algorithm": CHAIN, "configuration_hash": configuration_hash, "log_version": 1,
-                         "strategy_version": strategy_version}, sort_keys=True, separators=(",", ":"))]
+    under that ID, which names a fresh run after an earlier one. Each
+    record's hash is chained as LOG_CHAIN_ALGORITHM states."""
+    header = {"chain_algorithm": CHAIN, "configuration_hash": configuration_hash, "log_version": 1,
+              "strategy_version": strategy_version}
+    lines = [json.dumps(header, sort_keys=True, separators=(",", ":"))]
+    chain = tidata._chain_seed(header)
     for n in range(1, inputs + 1):
         if n == 1:
             ident, kind, payload = "configuration:" + configuration_hash, tidata.CONFIGURATION_TYPE, config or shipped_config()
@@ -91,7 +94,8 @@ def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/
                     "source": "engine", "strategy_version": strategy_version,
                     "configuration_hash": configuration_hash,
                     "payload_hash": hashlib.sha256(raw.encode()).hexdigest(), "payload": payload}
-        digest = _digest(str(n))
+        chain = tidata._record_digest(chain, "input", envelope, raw)
+        digest = "sha256:" + chain.hex()
         lines.append(json.dumps({"record": {"sequence": n, "kind": "input", "envelope": envelope,
                                             "record_hash": digest}}, separators=(",", ":")))
         lines.append(json.dumps({"commit": {"sequence": n, "record_hash": digest}}, separators=(",", ":")))
@@ -271,7 +275,7 @@ class EngineLogTest(unittest.TestCase):
                           if line.startswith('{"record"'))
             self.assertEqual(got, tidata.EngineLog("hash-boost", "boost/r1/test", RUN, boost,
                                                    "configuration:hash-boost@2026-03-13T21:00:00Z",
-                                                   ("configuration:hash-boost", "input-2"), chain))
+                                                   ("configuration:hash-boost", "input-2"), chain, None))
             self.assertEqual(len(chain), 2)
             write_log(p, inputs=3, approval="operator.run.approved:1")
             self.assertEqual(tidata.read_engine_log(str(p)).identity, "operator.run.approved:1")

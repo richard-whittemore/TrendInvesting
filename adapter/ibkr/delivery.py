@@ -378,12 +378,16 @@ def stream_run(streams, engine_log_path):
     Only the logs of folders are read, and each first by its head
     (relay.head_identity: its first two committed inputs, where a run's
     identity is): a log whose head names another run is read no further,
-    and one whose head cannot be read names no run, so it is skipped with a
-    warning naming its folder, never stopping this run (an older build's
-    log, or one damaged after its run ended). A log whose head names this
-    run is read whole and strictly. Fail closed (StreamRefused, AGENTS.md):
+    and one whose head cannot be read cannot be matched to any run, so,
+    when the run's folder is found, it is skipped with a warning naming its
+    folder (an older build's log, or one damaged after its run ended). A
+    log whose head names this run is read whole and strictly. Fail closed
+    (StreamRefused, AGENTS.md):
 
     - this run's log, or a log whose head names this run, cannot be read;
+    - no folder of the run is found and a log was skipped: it may be this
+      resumed run's own first log, its head damaged, and the run is never
+      sent to a warm-up under its new name;
     - two folders of the run, its own name's among them: one run's stream
       is never split across two folders;
     - one folder of another name whose log is not the head of this log's
@@ -395,8 +399,12 @@ def stream_run(streams, engine_log_path):
       run from the same run.env, with no approval, repeats its
       configuration record hash for hash, so the chain cannot tell them
       apart, and nothing of such a run is kept; ADR 0027: a run that is not
-      a crash's resume is a fresh run, with its approval). The log is read
-      once the engine listens, so a resume's copy is then whole.
+      a crash's resume is a fresh run, with its approval). The record
+      hashes compared are recomputed first (relay.log_chain_next,
+      LOG_CHAIN_ALGORITHM), in both logs: a stored hash vouches for its
+      record only when it is the one the chain gives over it, so a log
+      edited after the engine wrote it is refused. The log is read once the
+      engine listens, so a resume's copy is then whole.
 
     With no folder of the run, the run's own name is returned (check then
     refuses: its warm-up is not written).
@@ -413,7 +421,7 @@ def stream_run(streams, engine_log_path):
     except ResolveRefused as err:
         raise StreamRefused("the run's stream folder is found by the run's identity, from its durable log, and "
                             "that log cannot be read: {}".format(err)) from None
-    found, chains = [], {}
+    found, chains, skipped = [], {}, []
     for name in candidates:
         if name == own:
             found.append(name)
@@ -422,9 +430,10 @@ def stream_run(streams, engine_log_path):
         try:
             head = head_identity(path)
         except ResolveRefused as err:
-            log.warning("ibkr stream folder %s skipped: its log's first records cannot be read, so it is not this "
-                        "run's (%s). Once its run has ended, move the folder and its log out of %s "
-                        "(docs/manual/market-data.md, \"A crash resume\")", os.path.join(streams, name), err, streams)
+            skipped.append(name)
+            log.warning("ibkr stream folder %s skipped: its log's first records cannot be read, so it cannot be "
+                        "matched to any run (%s). Once its run has ended, %s", os.path.join(streams, name), err,
+                        move_aside(streams, logs))
             continue
         if head != identity:
             continue
@@ -444,9 +453,26 @@ def stream_run(streams, engine_log_path):
             "its warm-up; nothing is delivered until a person decides which is the run's "
             "(docs/manual/market-data.md, \"A crash resume\")".format(
                 engine_log_path, ", ".join(os.path.join(streams, n) for n in found)))
+    if not found and skipped:
+        raise StreamRefused(
+            "no stream folder of the run of {} is found, and the logs of {} cannot be matched to any run (their "
+            "first records cannot be read): one may be this run's own first log, damaged, so nothing is delivered "
+            "and no warm-up is to be run for this run's name. If this run is a crash resume, restore its first "
+            "run's log from the backup as the engine wrote it; if a log is an old run's, {}".format(
+                engine_log_path, ", ".join(os.path.join(streams, n) for n in skipped), move_aside(streams, logs)))
     if not found or found == [own]:
         return own
     earlier = chains[found[0]]
+    broken = [(path, chain.chain_break) for path, chain in ((os.path.join(logs, found[0] + ".log"), earlier),
+                                                            (engine_log_path, mine))
+              if chain.chain_break is not None and chain.chain_break <= len(earlier.record_hashes)]
+    if broken:
+        raise StreamRefused(
+            "the log {} does not follow its record hash chain at record {}: the hash it states is not the one its "
+            "records give (LOG_CHAIN_ALGORITHM), so it was changed after the engine wrote it, nothing shows the run "
+            "of {} is the crash resume of the run of the stream folder {}, and nothing is delivered. Restore it "
+            "from the backup as the engine wrote it; never edit it (docs/manual/market-data.md, \"A crash "
+            "resume\")".format(broken[0][0], broken[0][1], engine_log_path, os.path.join(streams, found[0])))
     if len(earlier.groups) < 2:
         why = "that run committed nothing but its configuration"
     elif mine.record_hashes[:len(earlier.record_hashes)] != earlier.record_hashes:
@@ -456,6 +482,13 @@ def stream_run(streams, engine_log_path):
         return found[0]
     raise StreamRefused(no_whole_copy(engine_log_path, os.path.join(logs, found[0] + ".log"),
                                       os.path.join(streams, found[0]), why))
+
+
+def move_aside(streams, logs):
+    """The remedy for a log that cannot be matched to any run: the data job's warning says the same (tidata.py)."""
+    return ("move the folder out of {} and its log out of the engine's log folder {}, "
+            "keeping both as evidence in a folder outside both (docs/manual/market-data.md, \"A crash "
+            "resume\")".format(streams, logs))
 
 
 def no_whole_copy(engine_log, earlier, folder, why):

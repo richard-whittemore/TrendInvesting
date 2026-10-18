@@ -244,6 +244,8 @@ ENVELOPE_FIELDS = frozenset(("id", "type", "envelope_version", "schema_version",
 ENVELOPE_OPTIONAL = frozenset(("correlation_id", "causation_id"))
 PAYLOAD_HASH = re.compile(r"[0-9a-f]{64}")
 TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})")
+TIME_PARTS = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?"
+                        r"(?:Z|([+-])([0-9]{2}):([0-9]{2}))")
 WHOLE_SECOND = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})")
 # A fill input, as the IBKR adapter journals it (reports.FILL_TYPE and
 # FILL_VERSION: internal/event TargetWeightFillPayload).
@@ -273,7 +275,10 @@ EngineLog = namedtuple("EngineLog", ("configuration_hash", "strategy_version", "
 # The durable log as _committed_groups reads it: the header, each committed
 # group, the record hash of the last commit (None when there is none), and
 # every committed record's hash in log order (its hash chain).
-CommittedLog = namedtuple("CommittedLog", ("header", "groups", "final_hash", "record_hashes"))
+# chain_break is the sequence of the first committed record whose stored
+# record_hash is not the one LOG_CHAIN_ALGORITHM gives over the records
+# before it (log_chain_next), or None when every committed record's is.
+CommittedLog = namedtuple("CommittedLog", ("header", "groups", "final_hash", "record_hashes", "chain_break"))
 
 
 class EngineUnavailable(Exception):
@@ -1276,7 +1281,7 @@ def head_identity(path):
                 line = _log_json(path, n, raw)
                 record = line.get("record") if isinstance(line, dict) and len(line) == 1 else None
                 envelope = record.get("envelope") if isinstance(record, dict) else None
-                if (isinstance(envelope, dict) and record.get("kind") in (LOG_INPUT, LOG_DECISION)
+                if (isinstance(envelope, dict) and record.get("kind") == (LOG_DECISION if group else LOG_INPUT)
                         and all(_is_text(envelope.get(k)) for k in ("id", "type", "recorded_at"))):
                     group.append((n, record["kind"], record["envelope"]))
                 elif isinstance(line, dict) and len(line) == 1 and "commit" in line and group:
@@ -1286,8 +1291,6 @@ def head_identity(path):
                     raise _unreadable(path, n, "it is not a record or commit as the engine writes one")
     except OSError as err:
         raise ResolveRefused("cannot read the engine's durable log {}: {}".format(path, err)) from None
-    if groups and groups[0][0][1] != LOG_INPUT:
-        raise _unreadable(path, groups[0][0][0], "a group is one input followed by its decisions")
     return _identity(path, groups)
 
 
@@ -1691,6 +1694,8 @@ def _committed_groups(path):
     sequence = 0
     last_hash = None
     final_hash = None
+    chain = log_chain_seed(header)
+    chain_break = pending_break = None
     for n, raw in enumerate(lines[1:], 2):
         line = _log_json(path, n, raw)
         if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
@@ -1705,7 +1710,11 @@ def _committed_groups(path):
                 raise _unreadable(path, n, "a group is one input followed by its decisions")
             if not isinstance(record["record_hash"], str) or not RECORD_HASH.fullmatch(record["record_hash"]):
                 raise _unreadable(path, n, "its record hash is not a SHA-256")
-            _check_envelope(path, n, raw, record)
+            payload = _check_envelope(path, n, raw, record)
+            if pending_break is None and chain_break is None:
+                chain = log_chain_next(chain, record["kind"], record["envelope"], payload)
+                if chain is None or "sha256:" + chain.hex() != record["record_hash"]:
+                    pending_break = record["sequence"]
             sequence, last_hash = record["sequence"], record["record_hash"]
             group.append((n, record["kind"], record["envelope"]))
             pending.append(last_hash)
@@ -1718,7 +1727,8 @@ def _committed_groups(path):
         hashes.extend(pending)
         group, pending = [], []
         final_hash = last_hash
-    return CommittedLog(header, groups, final_hash, tuple(hashes))
+        chain_break = chain_break if chain_break is not None else pending_break
+    return CommittedLog(header, groups, final_hash, tuple(hashes), chain_break)
 
 
 def _unreadable(path, n, why):
@@ -1736,7 +1746,7 @@ def _log_json(path, n, raw):
 
 
 def _check_envelope(path, n, raw, record):
-    """Refuse an envelope not as internal/event writes one, or whose payload's bytes do not match its hash."""
+    """The payload's bytes as stored; refuse an envelope not as internal/event writes one, or whose payload's bytes do not match its hash."""
     envelope = record["envelope"]
     if (not isinstance(envelope, dict) or not ENVELOPE_FIELDS <= set(envelope)
             or not set(envelope) <= ENVELOPE_FIELDS | ENVELOPE_OPTIONAL
@@ -1754,9 +1764,70 @@ def _check_envelope(path, n, raw, record):
     marker = '"payload_hash":"{}","payload":'.format(envelope["payload_hash"]).encode()
     suffix = '}},"record_hash":"{}"}}}}'.format(record["record_hash"]).encode()
     start = raw.find(marker)
-    if start < 0 or not raw.endswith(suffix) or hashlib.sha256(
-            raw[start + len(marker):len(raw) - len(suffix)]).hexdigest() != envelope["payload_hash"]:
+    payload = raw[start + len(marker):len(raw) - len(suffix)]
+    if start < 0 or not raw.endswith(suffix) or hashlib.sha256(payload).hexdigest() != envelope["payload_hash"]:
         raise _unreadable(path, n, "its payload does not match its payload hash")
+    return payload
+
+
+def log_chain_seed(header):
+    """The seed of a durable log's record hash chain: sha256 of its header's canonical bytes (LOG_CHAIN_ALGORITHM).
+
+    internal/journal newLogChain: the header's four fields through the
+    project's one canonical encoder (event.CanonicalBytes, ADR 0016).
+    """
+    return hashlib.sha256(_canonical_bytes({k: header[k] for k in LOG_HEADER_FIELDS})).digest()
+
+
+def log_chain_next(previous, kind, envelope, payload):
+    """The record hash, as raw SHA-256 bytes, of a record of kind after previous (LOG_CHAIN_ALGORITHM), else None.
+
+    internal/journal Chain.Next: sha256(previous || kind ||
+    event.CanonicalEnvelopeBytes(envelope)), where the canonical bytes cover
+    every envelope field, both times rendered in UTC as RFC 3339 with
+    nanoseconds, an absent correlation or causation ID as "", and the
+    payload as its bytes exactly as stored (payload, which its hash
+    attests). None when the envelope cannot be rendered so (a time the
+    engine would not write): such a record follows no chain.
+    """
+    try:
+        fields = {k: envelope[k] for k in ENVELOPE_FIELDS if k != "payload"}
+        fields.update((k, envelope.get(k, "")) for k in ENVELOPE_OPTIONAL)
+        fields["event_time"], fields["recorded_at"] = _utc(envelope["event_time"]), _utc(envelope["recorded_at"])
+        fields["payload"] = payload.decode("utf-8")
+        canonical = _canonical_bytes(fields)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return hashlib.sha256(previous + kind.encode("utf-8") + canonical).digest()
+
+
+def _canonical_bytes(fields):
+    """fields (text and whole-number values) as internal/event canonicalJSON renders them: keys sorted, compact."""
+    parts = []
+    for key in sorted(fields):
+        value = fields[key]
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise TypeError("a canonical field is text or a whole number")
+        parts.append(_go_string(key) + ":" + (str(value) if isinstance(value, int) else _go_string(value)))
+    return ("{" + ",".join(parts) + "}").encode("utf-8")
+
+
+def _go_string(text):
+    """text as Go's encoding/json writes a string: UTF-8 kept, and <, >, &, U+2028 and U+2029 escaped."""
+    return (json.dumps(text, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
+def _utc(text):
+    """An RFC 3339 time as Go's Time.UTC().Format(time.RFC3339Nano) renders it: UTC, "Z", no trailing zeros."""
+    year, month, day, hour, minute, second, fraction, sign, hours, minutes = TIME_PARTS.fullmatch(text).groups()
+    at = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
+    if sign:
+        offset = timedelta(hours=int(hours), minutes=int(minutes))
+        at = at - offset if sign == "+" else at + offset
+    fraction = (fraction or "").rstrip("0")
+    return "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}{}Z".format(at.year, at.month, at.day, at.hour, at.minute,
+                                                              at.second, "." + fraction if fraction else "")
 
 
 def _fill_id(path, n, kind, envelope):

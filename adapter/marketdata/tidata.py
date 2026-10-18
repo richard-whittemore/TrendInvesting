@@ -73,6 +73,7 @@ nothing, re-verifies every stream as in step 4, and returns that stream.
 import argparse
 import datetime as dt
 import glob
+import hashlib
 import json
 import os
 import re
@@ -100,6 +101,14 @@ LOG_HEADER_FIELDS = ("chain_algorithm", "configuration_hash", "log_version", "st
 LOG_RECORD_FIELDS = ("envelope", "kind", "record_hash", "sequence")
 LOG_COMMIT_FIELDS = ("record_hash", "sequence")
 RECORD_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+# The envelope fields the chain's canonical bytes cover (internal/event
+# CanonicalEnvelopeBytes), the two left out of the envelope when empty, and
+# an RFC 3339 time's parts.
+ENVELOPE_FIELDS = ("configuration_hash", "envelope_version", "event_time", "id", "payload_hash", "recorded_at",
+                   "schema_version", "sequence", "source", "strategy_version", "type")
+ENVELOPE_OPTIONAL = ("causation_id", "correlation_id")
+TIME_PARTS = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?"
+                        r"(?:Z|([+-])([0-9]{2}):([0-9]{2}))")
 # Stands in for the key in every message main prints.
 KEY_MASK = "[" + KEY_NAME + "]"
 
@@ -108,12 +117,16 @@ try:   # written by deploy/build-data.sh into the packed file
 except ImportError:
     STAMP = "dev"
 
-EngineLog = namedtuple("EngineLog", "configuration_hash strategy_version run_id boost identity inputs record_hashes")
+EngineLog = namedtuple("EngineLog",
+                       "configuration_hash strategy_version run_id boost identity inputs record_hashes chain_break")
 """The engine's durable log as the job reads it: the header's identity, the
 log's own run name (its file name without ``.log``), the Boost
 configuration, the run's identity (see read_engine_log), the IDs of its
-committed inputs in order, and every committed record's hash in order, its
-hash chain (a crash resume's begin with the crashed run's)."""
+committed inputs in order, every committed record's hash in order, its
+hash chain (a crash resume's begin with the crashed run's), and the
+sequence of the first committed record whose stored hash is not the one
+LOG_CHAIN_ALGORITHM gives over the records before it (_chain_next), or None
+when every one's is."""
 
 
 class Boost(namedtuple("Boost", "instrument warm_up_start trend_days exit_sma rsi_period")):
@@ -198,6 +211,7 @@ def read_engine_log(path):
         raise _log_error(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
     sequence, last_hash, group, configuration, first, approved, inputs = 0, None, [], None, None, None, []
     hashes = []
+    chain, chain_break, pending_break = _chain_seed(header), None, None
     for n, line in enumerate(parsed[1:], 2):
         if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
             raise _log_error(path, n, "a line is exactly one of a record and a commit")
@@ -211,6 +225,10 @@ def read_engine_log(path):
                 raise _log_error(path, n, "its sequence does not follow {}".format(sequence))
             if rec["kind"] != ("decision" if group else "input"):
                 raise _log_error(path, n, "a group is one input followed by its decisions")
+            if pending_break is None and chain_break is None:
+                chain = _chain_next(chain, rec, lines[n - 1])
+                if chain is None or "sha256:" + chain.hex() != rec["record_hash"]:
+                    pending_break = rec["sequence"]
             sequence, last_hash = rec["sequence"], rec["record_hash"]
             group.append((n, rec["envelope"], last_hash))
             continue
@@ -226,12 +244,75 @@ def read_engine_log(path):
         inputs.append(group[0][1].get("id"))
         hashes.extend(h for _, _, h in group)
         group = []
+        chain_break = chain_break if chain_break is not None else pending_break
     if configuration is None:
         raise Refused("the engine's durable log {} holds no committed configuration input: start the engine "
                       "first".format(path))
     identity = approved if approved else "{}@{}".format(first.get("id"), first.get("recorded_at"))
     return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration, identity,
-                     tuple(inputs), tuple(hashes))
+                     tuple(inputs), tuple(hashes), chain_break)
+
+
+def _chain_seed(header):
+    """The seed of the log's record hash chain (LOG_CHAIN_ALGORITHM), as adapter/ibkr/relay.py's log_chain_seed."""
+    return hashlib.sha256(_canonical_bytes({k: header[k] for k in LOG_HEADER_FIELDS})).digest()
+
+
+def _chain_next(previous, rec, raw):
+    """The record hash, raw SHA-256 bytes, of rec (its log line raw) after previous, else None; as relay's
+    log_chain_next: sha256(previous || kind || internal/event CanonicalEnvelopeBytes), every envelope field
+    covered, both times in UTC as RFC 3339 with nanoseconds, an absent correlation or causation ID as "", and
+    the payload as its bytes exactly as stored (the writer puts it last in the envelope, the record hash last in
+    the record). None when the record cannot be rendered so: it follows no chain."""
+    envelope = rec["envelope"]
+    try:
+        marker = '"payload_hash":"{}","payload":'.format(envelope["payload_hash"]).encode()
+        suffix = '}},"record_hash":"{}"}}}}'.format(rec["record_hash"]).encode()
+        start = raw.find(marker)
+        if start < 0 or not raw.endswith(suffix) or not isinstance(rec["kind"], str):
+            return None
+        return _record_digest(previous, rec["kind"], envelope,
+                              raw[start + len(marker):len(raw) - len(suffix)].decode("utf-8"))
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        return None
+
+
+def _record_digest(previous, kind, envelope, payload):
+    """sha256(previous || kind || the canonical bytes of envelope with payload, its stored text): _chain_next's."""
+    fields = {k: envelope[k] for k in ENVELOPE_FIELDS}
+    fields.update((k, envelope.get(k, "")) for k in ENVELOPE_OPTIONAL)
+    fields["event_time"], fields["recorded_at"] = _utc(envelope["event_time"]), _utc(envelope["recorded_at"])
+    fields["payload"] = payload
+    return hashlib.sha256(previous + kind.encode("utf-8") + _canonical_bytes(fields)).digest()
+
+
+def _canonical_bytes(fields):
+    """fields (text and whole-number values) as internal/event canonicalJSON renders them: keys sorted, compact,
+    strings as Go's encoding/json writes them (UTF-8 kept; <, >, &, U+2028 and U+2029 escaped)."""
+    parts = []
+    for key in sorted(fields):
+        value = fields[key]
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise TypeError("a canonical field is text or a whole number")
+        parts.append(_go_string(key) + ":" + (str(value) if isinstance(value, int) else _go_string(value)))
+    return ("{" + ",".join(parts) + "}").encode("utf-8")
+
+
+def _go_string(text):
+    return (json.dumps(text, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
+def _utc(text):
+    """An RFC 3339 time as Go's Time.UTC().Format(time.RFC3339Nano) renders it: UTC, "Z", no trailing zeros."""
+    year, month, day, hour, minute, second, fraction, sign, hours, minutes = TIME_PARTS.fullmatch(text).groups()
+    at = dt.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=dt.timezone.utc)
+    if sign:
+        offset = dt.timedelta(hours=int(hours), minutes=int(minutes))
+        at = at - offset if sign == "+" else at + offset
+    fraction = (fraction or "").rstrip("0")
+    return "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}{}Z".format(at.year, at.month, at.day, at.hour, at.minute,
+                                                              at.second, "." + fraction if fraction else "")
 
 
 def head_identity(path):
@@ -304,11 +385,17 @@ def stream_run(engine_streams, engine_log, log, warn=None):
 
     Only the logs of folders are read, each first by its head
     (head_identity): one whose head names another run is read no further,
-    and one whose head cannot be read names no run, so it is skipped and
-    warn (by default a line on stderr) names its folder, never stopping the
-    job (an older build's log, or one damaged after its run ended). A log
-    whose head names the run is read whole and strictly, and refused if it
-    cannot be. The job is also refused (fail closed, AGENTS.md) with two
+    and one whose head cannot be read cannot be matched to any run, so,
+    when the run's folder is found, it is skipped and warn (by default a
+    line on stderr) names its folder (an older build's log, or one damaged
+    after its run ended). With no folder of the run found and a log
+    skipped, the job is refused: that log may be the resumed run's own
+    first log, its head damaged, and the run is never sent to a warm-up
+    under its new name. A log whose head names the run is read whole and
+    strictly, and refused if it cannot be. The record hashes compared are
+    recomputed first (_chain_next), in both logs, and a log whose stored
+    hashes are not its chain's is refused: it was changed after the engine
+    wrote it. The job is also refused (fail closed, AGENTS.md) with two
     folders of the run, its own name's among them (one run's stream is
     never split across two folders), and with one folder of another name
     whose log is not the head of engine_log's record hash chain (engine
@@ -325,7 +412,7 @@ def stream_run(engine_streams, engine_log, log, warn=None):
             print("ti-data warning: " + text, file=sys.stderr)
     logs = os.path.dirname(os.path.abspath(engine_log))
     names = sorted(os.listdir(engine_streams)) if os.path.isdir(engine_streams) else []
-    found, chains = [], {}
+    found, chains, skipped = [], {}, []
     for name in names:
         path = os.path.join(logs, name + ".log")
         if not os.path.isdir(os.path.join(engine_streams, name)) or not os.path.isfile(path):
@@ -336,9 +423,10 @@ def stream_run(engine_streams, engine_log, log, warn=None):
         try:
             head = head_identity(path)
         except Refused as e:
-            warn("stream folder {} skipped: its log's first records cannot be read, so it is not this run's ({}). "
-                 "Once its run has ended, move the folder and its log out of {} (docs/manual/market-data.md, \"A "
-                 "crash resume\")".format(os.path.join(engine_streams, name), e, engine_streams))
+            skipped.append(name)
+            warn("stream folder {} skipped: its log's first records cannot be read, so it cannot be matched to any "
+                 "run ({}). Once its run has ended, {}".format(os.path.join(engine_streams, name), e,
+                                                              _move_aside(engine_streams, logs)))
             continue
         if head != log.identity:
             continue
@@ -355,9 +443,27 @@ def stream_run(engine_streams, engine_log, log, warn=None):
         raise Refused("the run of {} has more than one stream folder: {}. One run's stream is in one folder, made "
                       "by its warm-up; this stops the job for a person (docs/manual/market-data.md, \"A crash "
                       "resume\")".format(engine_log, ", ".join(os.path.join(engine_streams, n) for n in found)))
+    if not found and skipped:
+        raise Refused(
+            "no stream folder of the run of {} is found, and the logs of {} cannot be matched to any run (their "
+            "first records cannot be read): one may be this run's own first log, damaged, so nothing is written "
+            "and no warm-up is to be run for this run's name. If this run is a crash resume, restore its first "
+            "run's log from the backup as the engine wrote it; if a log is an old run's, {}".format(
+                engine_log, ", ".join(os.path.join(engine_streams, n) for n in skipped),
+                _move_aside(engine_streams, logs)))
     if not found or found == [log.run_id]:
         return log.run_id
     earlier = chains[found[0]]
+    broken = [(path, chain.chain_break) for path, chain in ((os.path.join(logs, found[0] + ".log"), earlier),
+                                                            (engine_log, log))
+              if chain.chain_break is not None and chain.chain_break <= len(earlier.record_hashes)]
+    if broken:
+        raise Refused(
+            "the log {} does not follow its record hash chain at record {}: the hash it states is not the one its "
+            "records give (LOG_CHAIN_ALGORITHM), so it was changed after the engine wrote it, nothing shows the run "
+            "of {} is the crash resume of the run of the stream folder {}, and nothing is written. Restore it from "
+            "the backup as the engine wrote it; never edit it (docs/manual/market-data.md, \"A crash "
+            "resume\")".format(broken[0][0], broken[0][1], engine_log, os.path.join(engine_streams, found[0])))
     if len(earlier.inputs) < 2:
         why = "that run committed nothing but its configuration"
     elif log.record_hashes[:len(earlier.record_hashes)] != earlier.record_hashes:
@@ -375,6 +481,12 @@ def stream_run(engine_streams, engine_log, log, warn=None):
         "while the engine is still copying, run this again once it listens) (docs/manual/market-data.md, \"A "
         "crash resume\")".format(engine_log, os.path.join(logs, found[0] + ".log"), why,
                                  os.path.join(engine_streams, found[0])))
+
+
+def _move_aside(engine_streams, logs):
+    """The remedy for a log that cannot be matched to any run, as the adapter's (delivery.move_aside)."""
+    return ("move the folder out of {} and its log out of the engine's log folder {}, keeping both as evidence in "
+            "a folder outside both (docs/manual/market-data.md, \"A crash resume\")".format(engine_streams, logs))
 
 
 def _logged_configuration(path, header, n, envelope):

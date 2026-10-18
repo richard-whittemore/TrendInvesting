@@ -448,21 +448,36 @@ Only the logs of folders in `streams/boost/` are read, and each one first
 by its first records alone (its configuration and, for a fresh run, its
 approval: the run's identity). A log whose first records name another run
 is read no further. A log whose first records cannot be read (one an older
-build wrote, or one damaged after its run ended) names no run: it is
-skipped, and the data job prints a `ti-data warning:` line (the adapter
-logs a warning) naming its folder, so an old folder never stops a later
-run. Once that run has ended, move its folder and its log out of
-`streams/boost/` together, and keep them. A log whose first records name
-this run is read whole: if it cannot be read, both stop, naming it ("names
-this run in its first records but cannot be read"); restore it from the
-backup as the engine wrote it.
+build wrote, or one damaged after its run ended) cannot be matched to any
+run. When the running run's own folder is found, that log is skipped, and
+the data job prints a `ti-data warning:` line (the adapter logs a warning)
+naming its folder, so an old folder never stops a later run. Once that run
+has ended, move its folder out of `streams/boost/` and its log out of the
+engine's log folder (`/var/lib/trend-investing/engines/<account>/`, beside
+the running log), and keep both as evidence in a folder outside both: a
+durable log is never edited or deleted. When no folder of the running run
+is found and such a log was skipped, both stop instead, naming the skipped
+folders ("cannot be matched to any run"): the skipped log may be this
+resumed run's own first log with a damaged head, and a warm-up for the new
+name would deliver the whole warm-up again to a run whose log already holds
+it. If this run is a crash resume, restore its first run's log from the
+backup as the engine wrote it; if the log is an old run's, move it and its
+folder aside as above. A log whose first records name this run is read
+whole: if it cannot be read, both stop, naming it ("names this run in its
+first records but cannot be read"); restore it from the backup as the
+engine wrote it.
 
 A run is taken for a resume of the run whose folder it finds only when its
 log begins with that run's records, copied exactly: `-resume` writes the
 crashed run's records into the new log one for one under the same header,
 so each keeps its `record_hash`, and the earlier log's committed records
 are the first records of the new one, hash for hash, in the same order (the
-resumed run's own records follow). That run must also have committed more
+resumed run's own records follow). The hashes are not taken on trust: each
+one compared is computed again from its record and the one before it, the
+way the engine chains them, in both logs, and a log whose stated hashes are
+not the ones its records give was changed after the engine wrote it. Both
+stop, naming it ("does not follow its record hash chain"); restore it from
+the backup as the engine wrote it, never edit it. That run must also have committed more
 than its configuration: the hash chain cannot tell a resume of a run that
 committed only its configuration from a second start of the same run,
 whose configuration record is the same, byte for byte. Otherwise both stop,
@@ -780,11 +795,18 @@ which writes the sessions again from its recordings, and start the adapter
   its approval and its own warm-up; for the third, resume the crashed run's
   own log with `engine -resume`.
 - **A log beside a stream folder that cannot be read**: one whose first
-  records cannot be read is skipped with a warning naming its folder (move
-  the folder and its log out of `streams/boost/` once its run has ended);
-  one whose first records name this run but whose later records cannot be
-  read stops the adapter ("names this run in its first records but cannot
-  be read"): restore that log from the backup as the engine wrote it.
+  records cannot be read cannot be matched to any run. Beside the running
+  run's own folder it is skipped with a warning naming its folder (once its
+  run has ended, move the folder out of `streams/boost/` and its log out of
+  the engine's log folder, beside the running log, keeping both as
+  evidence); with no folder of the running run found, the adapter refuses to
+  start ("cannot be matched to any run"): after a crash resume, restore the
+  first run's log from the backup; for an old run's log, move it and its
+  folder aside. One whose first records name this run but whose later
+  records cannot be read stops the adapter ("names this run in its first
+  records but cannot be read"), and one whose stated record hashes are not
+  the ones its records give stops it too ("does not follow its record hash
+  chain"): restore that log from the backup as the engine wrote it.
 
 ## What can go wrong, and what the step does
 

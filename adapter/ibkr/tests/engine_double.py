@@ -6,8 +6,10 @@ recorded at the run's as-of time, started_at); a log that exists already is
 a resumed run's copy, and the stand-in takes its next sequence from it.
 It commits each new input before it replies (ADR 0027 section 4): the input
 and the decisions scripted for its ID go to the log file as one group closed
-by a commit, in the layout relay.read_engine_log reads (the record hashes are
-stand-ins; the chain is the real engine's to verify). An input it has
+by a commit, in the layout relay.read_engine_log reads, each record's hash
+chained as LOG_CHAIN_ALGORITHM states (relay.log_chain_next; a real
+engine's resume is checked against it in test_delivery's
+RealEngineResumeTests). An input it has
 committed is answered from its log, byte for byte, and one with the same ID
 but other content is refused, as the engine refuses it. An input out of
 sequence, or of another run, is refused too: the real engine stops on one.
@@ -18,6 +20,8 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+
+from relay import log_chain_next, log_chain_seed
 
 LOG_CHAIN = ("seed=sha256(canonical_log_header_bytes); "
              "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
@@ -33,9 +37,11 @@ class EngineRefused(Exception):
     """The stand-in refused an input as the engine would, stopping its run."""
 
 
-def _record_line(sequence, kind, envelope, raw_payload):
+def _record_line(previous, sequence, kind, envelope, raw_payload):
+    """(record hash, line) of a record after the chain's previous hash (raw bytes), as internal/journal writes one."""
     head = json.dumps(envelope, separators=COMPACT)
-    record_hash = "sha256:" + hashlib.sha256("{}:{}".format(sequence, head).encode()).hexdigest()
+    digest = log_chain_next(previous, kind, envelope, raw_payload.encode("utf-8"))
+    record_hash = "sha256:" + digest.hex()
     return record_hash, '{{"record":{{"sequence":{},"kind":"{}","envelope":{},"payload":{}}},"record_hash":"{}"}}}}\n'.format(
         sequence, kind, head[:-1], raw_payload, record_hash)
 
@@ -79,17 +85,20 @@ class LoggedEngine:
             lines = self.path.read_text(encoding="utf-8").splitlines()[1:]
             self.records = sum(1 for line in lines if line.startswith('{"record"'))
             self.next_sequence = sum(1 for line in lines if line.startswith('{"commit"')) + 1
+            records = [json.loads(line)["record"] for line in lines if line.startswith('{"record"')]
+            self._chain = bytes.fromhex(records[-1]["record_hash"][len("sha256:"):]) if records else None
             return
-        self.path.write_text(json.dumps({"log_version": 1, "chain_algorithm": LOG_CHAIN,
-                                         "configuration_hash": configuration_hash,
-                                         "strategy_version": strategy_version}, separators=COMPACT) + "\n")
+        header = {"log_version": 1, "chain_algorithm": LOG_CHAIN, "configuration_hash": configuration_hash,
+                  "strategy_version": strategy_version}
+        self._chain = log_chain_seed(header)
+        self.path.write_text(json.dumps(header, separators=COMPACT) + "\n")
         raw = json.dumps(configuration or {"strategy_id": "boost"}, separators=COMPACT)
         head = {"id": "configuration:" + configuration_hash, "type": CONFIGURATION_TYPE, "envelope_version": 1,
                 "schema_version": 7, "event_time": started_at, "recorded_at": started_at, "sequence": 1,
                 "source": "engine", "strategy_version": strategy_version, "configuration_hash": configuration_hash,
                 "payload_hash": hashlib.sha256(raw.encode()).hexdigest()}
         self.records = 1
-        last, line = _record_line(1, "input", head, raw)
+        last, line = self._record(1, "input", head, raw)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(line + json.dumps({"commit": {"sequence": 1, "record_hash": last}}, separators=COMPACT) + "\n")
         self.next_sequence = 2
@@ -159,7 +168,7 @@ class LoggedEngine:
         head.pop("payload_hash")
         head["payload_hash"] = envelope["payload_hash"]
         self.records += 1
-        last, line = _record_line(self.records, "input", head, raw)
+        last, line = self._record(self.records, "input", head, raw)
         lines.append(line)
         for n, decision in enumerate(decisions, 1):
             draw = json.dumps(decision["payload"], separators=COMPACT, allow_nan=False)
@@ -169,7 +178,7 @@ class LoggedEngine:
                      "configuration_hash": self.configuration_hash, "causation_id": envelope["id"],
                      "payload_hash": hashlib.sha256(draw.encode()).hexdigest()}
             self.records += 1
-            last, line = _record_line(self.records, "decision", dhead, draw)
+            last, line = self._record(self.records, "decision", dhead, draw)
             lines.append(line)
         lines.append(json.dumps({"commit": {"sequence": self.records, "record_hash": last}}, separators=COMPACT) + "\n")
         with open(self.path, "a", encoding="utf-8") as f:
@@ -181,6 +190,11 @@ class LoggedEngine:
                  "strategy_version": self.strategy_version, "payload": {"decisions": decisions}}
         self.committed[envelope["id"]] = (copy.deepcopy(envelope), reply)
         return copy.deepcopy(reply)
+
+    def _record(self, sequence, kind, head, raw):
+        record_hash, line = _record_line(self._chain, sequence, kind, head, raw)
+        self._chain = bytes.fromhex(record_hash[len("sha256:"):])
+        return record_hash, line
 
     def _stale(self, envelope):
         """Why the latest broker snapshot is stale at envelope's recorded time, or "" when it is fresh."""
