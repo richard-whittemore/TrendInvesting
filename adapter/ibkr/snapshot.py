@@ -16,13 +16,24 @@ IBKR does not timestamp positions or balances, so as_of is IBKR's server time
 asked for after every component was read; if the link failed before IBKR
 could answer, it is the adapter's own receipt time, and every component is
 then unreadable.
+
+A holding's mark is IBKR's last price for its contract, from a one-off
+market-data snapshot (read_marks): only IBKR's LAST tick counts, so a
+quote, a previous close or a delayed price is never stated as the mark.
+A holding IBKR gives no last price for, or whose contract number the
+configuration does not hold, is stated with mark_set false, which the
+engine reads as no mark (ADR 0019: the sale back to 98% is then withheld
+and the owner acts by hand).
 """
+import math
 from collections import namedtuple
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from account import EXCESS_LIQUIDITY, NET_LIQUIDATION, SUMMARY_GROUP, SUMMARY_TAGS, TOTAL_CASH
 from account import SnapshotIncomplete, SnapshotInvalid, _add_balance, _add_position, _server_time
 from orders import UnrecognisedOrderReport, open_order_record, order_key
+from sender import CURRENCY, EXCHANGE, SEC_TYPE
 from values import to_decimal
 
 BROKER_SNAPSHOT_TYPE = "account.broker.snapshot"
@@ -37,6 +48,10 @@ NET = "net-liquidation"
 OPEN_ORDERS = "open-orders"
 POSITIONS = "positions"
 CASH = "total-cash"
+
+# IBKR's tick type for the last traded price (TWS API "Tick Types": 4, LAST),
+# the only tick read_marks takes as a mark.
+LAST_PRICE_TICK = 4
 
 # The currency the engine's balances are in; a balance in another is unreadable.
 BASE_CURRENCY = "USD"
@@ -197,6 +212,51 @@ def _take_order(orders, account, unread, order_id, contract, order, order_state)
         # can only be smaller, never sell a share not held.
         "remaining_quantity": int(record.quantity),
     }
+
+
+def read_marks(conn, con_ids):
+    """IBKR's mark for each symbol of con_ids (symbol to IBKR's contract ID): {symbol: Decimal}.
+
+    One market-data snapshot per contract, asked together and waited for up
+    to the configuration's request_timeout. A symbol whose snapshot ended
+    with no LAST price, was refused (IBKR's error under its request, such
+    as no market-data permission), carried a price that is not finite and
+    positive, or was not answered in time has no mark; a request not ended
+    is cancelled. Nothing here raises: with the link down there are no
+    marks.
+    """
+    if not conn.connected or not con_ids:
+        return {}
+    asked = {}
+    for symbol in sorted(con_ids):
+        req_id = conn.new_req_id()
+        asked[req_id] = symbol
+        conn.api.req_mkt_data(req_id, SimpleNamespace(conId=con_ids[symbol], symbol=symbol, secType=SEC_TYPE,
+                                                      currency=CURRENCY, exchange=EXCHANGE))
+    marks, ended = {}, set()
+    try:
+        for event in conn.events(conn.config.request_timeout):
+            if not conn.connected:
+                break
+            req_id = event.args[0] if event.args else None
+            if req_id not in asked:
+                continue
+            if event.name == "tick_price" and event.args[1] == LAST_PRICE_TICK:
+                price = event.args[2]
+                if isinstance(price, (int, float)) and not isinstance(price, bool) and math.isfinite(price) \
+                        and price > 0:
+                    marks[asked[req_id]] = to_decimal(price, "mark")
+            elif event.name in ("tick_snapshot_end", "error"):
+                if event.name == "error":
+                    marks.pop(asked[req_id], None)
+                ended.add(req_id)
+            if len(ended) == len(asked):
+                break
+    finally:
+        if conn.connected:
+            for req_id in sorted(set(asked) - ended):
+                conn.api.cancel_mkt_data(req_id)
+    return marks if conn.connected else {}
 
 
 def _stamp(at):

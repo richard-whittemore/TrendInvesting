@@ -294,6 +294,12 @@ def _forwarder_class():
         def commissionAndFeesReport(self, commissionAndFeesReport):
             self._send("commission_report", commissionAndFeesReport)
 
+        def tickPrice(self, reqId, tickType, price, attrib):
+            self._send("tick_price", reqId, tickType, price, attrib)
+
+        def tickSnapshotEnd(self, reqId):
+            self._send("tick_snapshot_end", reqId)
+
     return Forwarder
 
 
@@ -467,6 +473,19 @@ class IbapiClient(TWSApi):
         flt = ExecutionFilter()
         flt.acctCode = account_id
         self._client.reqExecutions(req_id, flt)
+
+    def req_mkt_data(self, req_id, contract):
+        """One market-data snapshot of the contract, by IBKR's conId (snapshot.read_marks).
+
+        A snapshot (IBKR ends it with tickSnapshotEnd) with no generic ticks,
+        which IBKR refuses on a snapshot, and not a regulatory snapshot,
+        which IBKR charges for. The contract must be in place_order's
+        contract shape (OrderShapeRefused otherwise).
+        """
+        self._client.reqMktData(req_id, ibapi_contract(contract, Contract), "", True, False, [])
+
+    def cancel_mkt_data(self, req_id):
+        self._client.cancelMktData(req_id)
 
     def can_place_orders(self):
         """Whether this client may place orders: the sending switch, the paper gate's last check (AGENTS.md rule 5).

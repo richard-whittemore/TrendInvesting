@@ -33,7 +33,9 @@ Run one engine's IBKR adapter: connect to IB Gateway with the configured
 client ID, read and match IBKR's account, open orders and executions, then
 pass IBKR's reports to the engine and hand each released order marked send
 to IB Gateway once. Start the engine first: its durable log (--engine-log)
-must exist.
+must exist. With --streams, it also delivers the run's market-data stream
+(the data job's files in <streams>/<run>/) to the engine, each batch behind
+a broker snapshot; the run's folder must exist (the data job's warm-up).
 
 An order is sent only when the configuration is mode "paper", names a paper
 account (DU...) that the IBKR login manages, and sets
@@ -79,6 +81,10 @@ def _parser():
     run.add_argument("--engine-log", required=True, metavar="FILE",
                      help="the engine's durable log, the file given to the engine as -log")
     run.add_argument("--socket", required=True, metavar="PATH", help="the engine's socket, as given to it as -socket")
+    run.add_argument("--streams", metavar="DIR",
+                     help="the folder holding the engine's stream folders, one per run, as the data job writes "
+                          "them: the run's own is DIR/<run>, <run> being --engine-log's name without .log. On the "
+                          "server: /var/lib/trend-investing/data/streams/boost. Left out, no stream is delivered")
     run.add_argument("--secrets", metavar="FILE",
                      help="a KEY=VALUE file holding the account number (with --account-key), when the "
                           "configuration does not name account_id. On the server: the adapter's own account file, "
@@ -166,13 +172,14 @@ def _engine_connect(path, timeout):
 
 
 def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL,
-         ibapi_version=None):
+         ibapi_version=None, today=None):
     """Run the command; returns the process exit status.
 
     api_factory, engine_connect, should_stop and ibapi_version replace the
     real IBKR client, the engine's socket, the signal handlers and the
     imported ibapi's version (for the tests and the rehearsal, which run
-    without ibapi); poll is how long one step waits for a callback.
+    without ibapi); today replaces the session's date (the rehearsal's
+    synthetic session); poll is how long one step waits for a callback.
     """
     err = err or sys.stderr
     args = _parser().parse_args(argv)
@@ -200,7 +207,8 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
                     "on" if cfg.paper_sending_enabled else "off", version)
         loop = AdapterLoop(cfg, (api_factory or _real_api)(cfg),
                            (engine_connect or _engine_connect)(args.socket, ENGINE_TIMEOUT), args.pending,
-                           args.engine_log, poll=poll)
+                           args.engine_log, poll=poll, streams=args.streams,
+                           **({"today": today} if today is not None else {}))
         loop.run(should_stop)
         logger.info("ibkr adapter stopped on request")
     except Exception as stopped:  # every stop is reported, never swallowed

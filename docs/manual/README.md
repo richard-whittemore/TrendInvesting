@@ -40,7 +40,7 @@ rather than keep their own. As of `main` on 2026-10-18:
 | Durable log, crash resume, approved fresh run | Yes | — |
 | Engine on the server | Boost in dry-run, started by hand | Paper (waits for the adapter) |
 | Daily data job | Boost's stream, installed with its timer | A job for the IRAs |
-| IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, all against a stand-in gateway | The paper-account test against IBKR, run by hand; delivering the data files; a real server run with `ibapi` installed |
+| IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind a broker snapshot with SPY's mark, all against a stand-in gateway | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed; the account snapshot as of the close and the recorded mark the Boost engine decides from ([paper trading](paper-trading.md), "A paper day") |
 | Morning reconciliation | The engine's comparison, states and alert | The adapter's read delivered to the engine; the checks at startup, after fills and before orders; open orders; the joint account's cash; any command to record a missed event |
 | Reporter and dashboard | Both programs | Installed on the server with working settings; alerts for the margin alarm and the sale back to 98%; Boost fills and lapsed sales in the daily summary; the outside heartbeat |
 | Operator tool and journal-query | Both programs | Installed on the server; the engine's operator inbox in its service file |

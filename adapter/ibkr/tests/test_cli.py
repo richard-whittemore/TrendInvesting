@@ -93,7 +93,7 @@ class CommandTests(unittest.TestCase):
         out = subprocess.run([sys.executable, "-m", "adapter.ibkr", "run", "--help"], cwd=str(repo),
                              capture_output=True, text=True, check=True).stdout
         for word in ("--config", "--pending", "--engine-log", "--socket", "--secrets", "--account-key",
-                     "--ibapi-record", "--versions", "paper_sending_enabled"):
+                     "--ibapi-record", "--versions", "--streams", "paper_sending_enabled"):
             self.assertIn(word, out)
 
     def test_an_ibapi_other_than_the_pinned_build_refuses_to_start_before_connecting(self):
@@ -169,6 +169,24 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn(ACCOUNT, self.err.getvalue())
         self.assertNotIn("DU0000002", self.err.getvalue(), "nor the login's other accounts")
 
+    def test_the_runs_stream_folder_is_delivered_from(self):
+        from test_delivery import session_envelopes, write_stream
+        from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION
+        streams = self.dir / "streams"
+        envelopes = session_envelopes([__import__("datetime").date(2027, 1, 14)], run="run-1",
+                                      configuration_hash=CONFIGURATION_HASH, strategy_version=STRATEGY_VERSION)
+        write_stream(streams / "run-1", __import__("datetime").date(2027, 1, 14), envelopes)
+        self.assertEqual(self.run_main(self.argv("--streams", str(streams)), steps=10), 0, self.err.getvalue())
+        self.assertEqual([e["type"] for e in self.engine.inputs()],
+                         ["account.broker.snapshot", "market.bar.completed", "market.session.closed"])
+
+    def test_a_run_with_no_stream_folder_stops_and_names_the_warm_up(self):
+        streams = self.dir / "streams"
+        streams.mkdir()
+        self.assertEqual(self.run_main(self.argv("--streams", str(streams))), 1)
+        self.assertIn(str(streams / "run-1"), self.err.getvalue())
+        self.assertIn("StreamRefused", self.err.getvalue())
+
     def test_an_engine_log_that_cannot_be_read_stops_before_connecting(self):
         self.engine_log.unlink()
         self.assertEqual(self.run_main(self.argv()), 1)
@@ -192,10 +210,33 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(args.engine_log, "/var/lib/trend-investing/engines/boost/run-1.log")
         self.assertEqual(args.socket, "/run/ti-engine-boost/engine.sock")
         self.assertEqual(args.pending, "/var/lib/trend-investing/adapters/boost/pending.json")
+        self.assertEqual(args.streams, "/var/lib/trend-investing/data/streams/boost")
         self.assertIn("LoadCredential=account:/etc/trend-investing/accounts/boost.env", unit)
         self.assertEqual(args.secrets, "/run/credentials/ti-adapter-boost.service/account")
         self.assertIn("Restart=no", unit)
         self.assertNotRegex(unit, r"\bD?U[0-9]{5,}", "no account number in the unit")
+
+    def test_the_data_job_writes_the_stream_folder_the_adapter_reads(self):
+        # The data job writes STREAMS/boost/<TI_RUN>/ (adapter/marketdata/
+        # tidata.py); the adapter reads <--streams>/<run>, the run named by
+        # its --engine-log, from the same run.env.
+        data = (repo / "deploy" / "systemd" / "ti-data.service").read_text()
+        adapter = (repo / "deploy" / "systemd" / "ti-adapter-boost.service").read_text()
+        data_dir = re.search(r"^Environment=TI_DATA_DIR=(\S+)$", data, re.M).group(1)
+        written = re.search(r"--streams (\S+)", data).group(1).replace("${TI_DATA_DIR}", data_dir)
+        read = re.search(r"--streams (\S+)", adapter).group(1)
+        self.assertEqual(read, written + "/boost")
+        for unit in (data, adapter):
+            self.assertIn("EnvironmentFile=", unit)
+            self.assertIn("/var/lib/trend-investing/engines/boost/run.env", unit)
+            self.assertIn("--engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log", unit)
+        self.assertIn("ReadOnlyPaths=/var/lib/trend-investing/engines/boost -" + read, adapter)
+
+    def test_the_adapter_is_installed_with_the_calendar_it_reads(self):
+        provision = (repo / "deploy" / "provision.sh").read_text()
+        body = provision[provision.index("step_adapter() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn('"$here/../adapter/marketdata/nyse_calendar.py" "$adapter_root.new/adapter/marketdata/"', body)
 
     def test_the_adapter_is_handed_its_own_account_file_and_nothing_else(self):
         # One engine per account (ADR 0026 point 8): the Boost adapter never

@@ -206,6 +206,10 @@ RUN_ENDED_FIELDS = ("at", "input", "outbox", "reason", "refused", "run", "sessio
 # one of its entries.
 OUTBOX_SUFFIX = ".outbox"
 OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
+# An entry from a market-data stream (delivery.py) also carries the
+# envelope as the data job wrote it, which is sent as written but for its
+# sequence.
+OUTBOX_STREAM_FIELDS = tuple(sorted(OUTBOX_FIELDS + ("envelope",)))
 # An input that awaits its reply from an earlier run (earlier_run): its ID,
 # the earlier run's log file name (None when no log of the chain holds it
 # and the adapter recorded none), whether that run committed it, the orders
@@ -416,8 +420,12 @@ class Outbox:
         return entries
 
     def append(self, entry):
+        self.extend([entry])
+
+    def extend(self, entries):
+        """Add entries behind every entry already recorded, in order, in one write: all of them or none."""
         with self._locked():
-            self._write(self.load() + [entry])
+            self._write(self.load() + list(entries))
 
     def strike(self, input_id):
         """Remove the entry for input_id; one not there is already struck off."""
@@ -1702,9 +1710,22 @@ def _is_text(value):
 
 
 def _is_outbox_entry(entry):
-    """Whether entry is one outbox entry as Outbox writes it."""
-    return (isinstance(entry, dict) and tuple(sorted(entry)) == OUTBOX_FIELDS and _is_text(entry["id"])
-            and isinstance(entry["payload"], dict))
+    """Whether entry is one outbox entry as Outbox writes it.
+
+    A stream entry's envelope must name the same input as the entry itself:
+    its ID, type, schema version, event time and payload.
+    """
+    if not isinstance(entry, dict) or tuple(sorted(entry)) not in (OUTBOX_FIELDS, OUTBOX_STREAM_FIELDS):
+        return False
+    if not _is_text(entry["id"]) or not isinstance(entry["payload"], dict):
+        return False
+    if "envelope" not in entry:
+        return True
+    envelope = entry["envelope"]
+    return isinstance(envelope, dict) and all(
+        envelope.get(k) == entry[f] for k, f in (("id", "id"), ("type", "event_type"),
+                                                  ("schema_version", "schema_version"),
+                                                  ("event_time", "event_time"), ("payload", "payload")))
 
 
 def _is_count(value):

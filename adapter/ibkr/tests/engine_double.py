@@ -42,12 +42,14 @@ class LoggedEngine:
     """Answers decide(envelope) for one run, logging each committed input and its decisions to log_path.
 
     decisions maps an input ID to the decision dicts ({"type", "payload"})
-    its reply carries. Calling the engine is the relay's connect: it returns
-    itself, and connects counts each call.
+    its reply carries. configuration is the configuration input's payload (a
+    bare Boost strategy ID when not given; the data job reads a whole Boost
+    configuration from it). Calling the engine is the relay's connect: it
+    returns itself, and connects counts each call.
     """
 
     def __init__(self, log_path, decisions=None, configuration_hash=CONFIGURATION_HASH,
-                 strategy_version=STRATEGY_VERSION, started_at=STARTED_AT):
+                 strategy_version=STRATEGY_VERSION, started_at=STARTED_AT, configuration=None):
         self.path = Path(log_path)
         self.decisions = decisions or {}
         self.configuration_hash = configuration_hash
@@ -65,7 +67,7 @@ class LoggedEngine:
         self.path.write_text(json.dumps({"log_version": 1, "chain_algorithm": LOG_CHAIN,
                                          "configuration_hash": configuration_hash,
                                          "strategy_version": strategy_version}, separators=COMPACT) + "\n")
-        raw = json.dumps({"strategy_id": "boost"}, separators=COMPACT)
+        raw = json.dumps(configuration or {"strategy_id": "boost"}, separators=COMPACT)
         head = {"id": "configuration:" + configuration_hash, "type": CONFIGURATION_TYPE, "envelope_version": 1,
                 "schema_version": 7, "event_time": started_at, "recorded_at": started_at, "sequence": 1,
                 "source": "engine", "strategy_version": strategy_version, "configuration_hash": configuration_hash,

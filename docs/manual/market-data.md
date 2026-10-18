@@ -355,9 +355,8 @@ session it missed in one file. A run that hangs is stopped after an hour
    session close, for each session, to
    `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<YYYY-MM-DD>.jsonl`,
    named by the last session it holds. Each file follows on from the one
-   before it, to be read in date order. **Not built yet:** nothing reads
-   these files and delivers them to the engine; that is the adapter's work
-   ([IBKR adapter](ibkr-adapter.md)).
+   before it, to be read in date order. The adapter delivers each file to
+   the engine ("What happens to the file", below).
 
 **The file format.** One event per line, in the order they are to be
 delivered. The `sequence` on each line is its position in that file (1, 2,
@@ -366,8 +365,8 @@ of a run in one series, whatever it came from (the configuration, the Run
 approval, fills, account snapshots, these files), so only the program that
 delivers the files, which sends one input at a time and reads the engine's
 answer, knows the next number: it is to replace each line's `sequence` with
-it as it sends the line, and send everything else as written. (That program
-is not built yet.) A file therefore
+it as it sends the line, and send everything else as written. The adapter
+is that program ("What happens to the file", below). A file therefore
 never claims a number another input could already have taken.
 
 **The one-time warm-up.** The engine's 200-day average and its RSI need
@@ -492,6 +491,110 @@ carries on from them.
      Massive publishes, and the paper run waits while you decide.
   5. If the corrected figure falls inside a file already written, the run
      then stops at "A file already written differs" (above): start a new run.
+
+### What happens to the file
+
+The file is the engine's input for those sessions, and the Boost adapter
+(`ti-adapter-boost`) carries it there. Nothing else reads it.
+
+**When.** The adapter looks in the run's folder,
+`/var/lib/trend-investing/data/streams/boost/<TI_RUN>/`, on every turn of
+its loop (about once a second) while its link to IB Gateway is up and
+matched. A new file is picked up within a second or two of the data job
+writing it, which on a normal day is a few minutes after 17:05 New York.
+If the adapter is not running then, it picks the file up when you next
+start it. If several files are waiting (the adapter was stopped for some
+days), it takes them all, oldest first.
+
+**What it sends, in order.**
+
+1. **The broker snapshot.** Just before the file goes, the adapter reads
+   the account at IBKR (positions, cash, net liquidation, Excess Liquidity
+   and every open order) and asks IBKR for SPY's last traded price, which
+   is the "mark" the snapshot gives each holding. It also says whether the
+   market was open at that moment (by the NYSE calendar the data job uses:
+   9:30 to 4 p.m. New York, 1 p.m. on an early close). After 17:05 that is
+   always "closed". If IBKR gives no last price (the paper login has no
+   market data for SPY, say), the holding is listed with no mark ("mark set
+   false"): the engine then cannot size the joint account's emergency sale
+   back to 98% from that snapshot, holds that sale back and asks you to act
+   by hand; nothing else it decides needs the mark.
+2. **The file, line by line, as written**: each session's SPY bar, then that
+   session's close. The engine therefore records the snapshot before the
+   bars, and each session closes only after its bar, before anything for
+   that day is decided (ADR 0019, ADR 0021). Each line goes with the
+   engine's next input number in place of the file's own (the file format,
+   above); nothing else in it changes.
+
+Several waiting files go behind one snapshot, oldest first. The next day's
+file gets its own snapshot.
+
+**Exactly once.** Before anything is sent, the adapter writes down which
+files it is about to hand over, beside its pending file
+(`/var/lib/trend-investing/adapters/boost/pending.json.delivered`). It then
+puts the snapshot and every line of the files in its outbox in one write,
+and marks the files handed over. From the outbox each input goes once, as
+every other input does ([re-delivery](redelivery.md)). So:
+
+- a file it has handed over is never sent again, after a restart, a
+  reconnect, or a later file;
+- if it stops partway through a file, the next start carries on from the
+  next line; the lines already sent are not sent again;
+- if it stops between writing down the files and the outbox write, the next
+  start finds nothing of them in the outbox or in the engine's log, takes a
+  fresh snapshot and hands them over then; if it stops just after the
+  outbox write, the next start finds the snapshot there and does not hand
+  them over a second time;
+- if the engine stopped after recording an input but before answering, the
+  adapter asks for that input's answer again under the same name, and the
+  engine answers from its log without applying it twice.
+
+**What you see.** In the adapter's log (`journalctl -u ti-adapter-boost`):
+`ibkr stream queued run=<TI_RUN> files=boost-<date>.jsonl inputs=<n>` when a
+file is handed over, then one `ibkr input=... answered with ...` line per
+input as the engine answers. In the engine's journal (`journal-query`), the
+broker snapshot, the bar and the session close, and whatever the engine
+decided at that close. Never edit the `.delivered` file; the adapter reads
+it strictly and stops on anything it did not write.
+
+**What can go wrong, and what the adapter does.** In every case below it
+sends nothing from the file (or from any file after it), and stops for you
+with a message naming the file. To settle a refused file: with the adapter
+stopped, move the file out of the run's folder (keep it, it is evidence;
+never edit it), run the data job again (`sudo systemctl start ti-data`),
+which writes the sessions again from its recordings, and start the adapter
+(`sudo systemctl start ti-adapter-boost`).
+
+- **The file is not as the data job writes it**: a line that is not JSON or
+  not complete, a field missing or extra, a line whose contents do not match
+  its own checksum (`payload_hash`), one input named twice, or line numbers
+  that are not 1, 2, 3, ... in order. Something other than the data job
+  wrote or changed it.
+- **The file is not this run's** ("it is not this run's"): it carries
+  another run's name, configuration hash or build than the engine now
+  running. A file copied from another run's folder, or a run restarted under
+  another configuration or build without a fresh `TI_RUN`.
+- **A file older than one already delivered** appears: the sessions would go
+  to the engine out of order. A file put back by hand, or a clock problem.
+- **The run's folder does not exist** when the adapter starts: the warm-up
+  has not been written for this `TI_RUN`. The adapter refuses to start and
+  names the warm-up command. Run the warm-up ("The one-time warm-up",
+  above), then start the adapter.
+- **The `.delivered` file cannot be read**: something other than the adapter
+  changed it. The adapter stops before delivering anything. Restore it from
+  the backup as it was ([server](server.md), "Backups"); never edit it.
+- **The link to IB Gateway drops while the snapshot is read**: nothing is
+  written down or sent. Once the link is back and matched, the adapter takes
+  a fresh snapshot and hands the file over then.
+- **The adapter was not running at 17:05** and starts the next morning: it
+  delivers the file then, and an order the engine releases at that close is
+  for a session already past, so it is never sent (the adapter stops on it:
+  [paper trading](paper-trading.md), "What can go wrong"). Keep the adapter
+  running through the evening of a paper day.
+- **A fresh run with lines of the old run's file still in the outbox** (you
+  started a new `TI_RUN` before the old file was all sent): those lines are
+  dropped unsent, each with a log line; the new run's own warm-up carries
+  the whole history again.
 
 ## What can go wrong, and what the step does
 

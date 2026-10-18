@@ -276,12 +276,25 @@ Order of starting, each on the server, each an explicit step of yours:
    start, `sudo systemctl start ti-adapter-boost`. The adapter refuses to
    start until the engine's socket is open and its durable log exists; for a
    fresh run the engine records the Run approval before it opens its socket.
-   For a run's first paper day, run the data job's one-time warm-up once the
-   engine has started, before the adapter delivers anything
-   (`docs/manual/market-data.md`, "The daily data job"); from then on the
-   timer writes each day's file at 17:05.
+   For a run's first paper day the order is: the engine; then the data
+   job's one-time warm-up (`docs/manual/market-data.md`, "The one-time
+   warm-up"), which writes the run's first file,
+   `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<date>.jsonl`;
+   check it exists (`ls` that folder); **only then** start the adapter. The
+   adapter refuses to start until the run's stream folder exists ("the
+   run's stream folder ... does not exist"), and once started it delivers
+   the warm-up to the engine behind one broker snapshot. From then on the
+   timer writes each day's file at 17:05 and the adapter, left running,
+   delivers it within seconds (`docs/manual/paper-trading.md`, "A paper
+   day"). Keep the adapter running through the evening: a file delivered
+   the next morning releases an order for a session already past, which is
+   never sent.
    Neither is started or restarted by systemd on its own; every start is
    yours.
+   **Before the first real order:** the Boost engine also needs an account
+   snapshot as of each close and a recorded mark, which nothing produces
+   yet; until they are built it withholds every session and releases no
+   order (`docs/manual/paper-trading.md`, "A paper day", "Not built yet").
 5. Confirm the engine's log begins with the paper configuration, and that the
    adapter says it connected on 4002, read the account's balances in full
    and matched IBKR's open orders and today's trades to the orders the

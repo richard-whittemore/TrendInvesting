@@ -238,6 +238,10 @@ step_adapter() {
   rm -rf "$adapter_root.new"
   install -d -m 0755 "$adapter_root.new/adapter/ibkr"
   install -m 0644 "$src"/*.py "$adapter_root.new/adapter/ibkr/"
+  # The NYSE calendar the data job uses, in the same layout, so the adapter
+  # states the market's hours from the same committed calendar (delivery.py).
+  install -d -m 0755 "$adapter_root.new/adapter/marketdata"
+  install -m 0644 "$here/../adapter/marketdata/nyse_calendar.py" "$adapter_root.new/adapter/marketdata/"
   install -m 0644 "$here/versions.env" "$adapter_root.new/versions.env"
   rm -rf "$adapter_root"
   mv "$adapter_root.new" "$adapter_root"

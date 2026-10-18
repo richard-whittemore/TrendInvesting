@@ -94,6 +94,15 @@ class FakeTWS(TWSApi):
         self.place_error = None
         self.can_place = True
         self.managed_accounts = (ACCOUNT,)
+        # IBKR's market-data snapshots: the price for each conId, sent as
+        # mark_tick (LAST) and ended; an (code, message) error for a conId in
+        # mark_errors instead; nothing at all with answer_marks false; the
+        # link dropped as the snapshot is asked for with drop_on_mark.
+        self.marks = {}
+        self.mark_tick = 4
+        self.mark_errors = {}
+        self.answer_marks = True
+        self.drop_on_mark = False
 
     # -- connection ------------------------------------------------------
     def connect(self, host, port, client_id, callbacks, timeout):
@@ -188,6 +197,24 @@ class FakeTWS(TWSApi):
             if ex.execId in self.commissions:
                 self.callbacks.commission_report(self.commissions[ex.execId])
         self.callbacks.exec_details_end(req_id)
+
+    # -- market data -----------------------------------------------------
+    def req_mkt_data(self, req_id, contract_):
+        self.calls.append(("req_mkt_data", req_id, contract_))
+        if self.drop_on_mark:
+            self.drop()
+            return
+        if not self.answer_marks:
+            return
+        if contract_.conId in self.mark_errors:
+            self.callbacks.error(req_id, *self.mark_errors[contract_.conId])
+            return
+        if contract_.conId in self.marks:
+            self.callbacks.tick_price(req_id, self.mark_tick, self.marks[contract_.conId], SimpleNamespace())
+        self.callbacks.tick_snapshot_end(req_id)
+
+    def cancel_mkt_data(self, req_id):
+        self.calls.append(("cancel_mkt_data", req_id))
 
     def can_place_orders(self):
         return self.can_place
