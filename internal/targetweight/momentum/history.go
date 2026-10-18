@@ -22,9 +22,6 @@ const (
 	StatusSectorCapped Status = "sector-capped"
 	// StatusBeyondTopN: ranked after the book was full.
 	StatusBeyondTopN Status = "beyond-top-n"
-	// StatusNoSector: no sector label from any source; left out of the
-	// ranking, never uncapped (plan.md section 4, "Sectors", "Chosen").
-	StatusNoSector Status = "no-sector"
 	// StatusZeroVolatility: every return in the volatility window was the
 	// same, so it has no inverse-volatility weight; left out.
 	StatusZeroVolatility Status = "zero-volatility"

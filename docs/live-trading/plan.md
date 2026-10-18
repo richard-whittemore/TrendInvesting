@@ -66,7 +66,7 @@ drawdown on daily equity:
   `defensive_v2.py:289`). A stock with fewer than 253 closes is left out, so
   a listing under a year old cannot be picked (287-288).
 - Take the top 25, at most 3 per Morningstar sector (a stock with no sector
-  is not capped, `defensive_book`, 69-73), weighted by inverse volatility:
+  is not capped, `defensive_book`, 69-74), weighted by inverse volatility:
   the population standard deviation of the last 252 daily returns (291);
   98% invested in total.
 - Risk-off: SPY's last close below the mean of its last 200 closes, that
@@ -362,10 +362,20 @@ Lightsail VM (Ubuntu, $12/month, US East)
   Nasdaq's screener sectors on 15 of 19.
   **Chosen:** GICS from IWV where it covers a stock, Nasdaq's screener
   sector otherwise, with each label's source recorded and the effect
-  measured monthly through dry-run and paper trading. A stock with no label
-  from either source (six at the snapshot: APGE, ATAI, CRNX, EA, WBD, WBS)
+  measured monthly through dry-run and paper trading. *(Superseded on
+  2026-10-18 by the change below:)* A stock with no label from either source (six at the snapshot: APGE, ATAI, CRNX, EA, WBD, WBS)
   is left out of that month's ranking, recorded, and alerted if it would
   otherwise have been among the top 25; it is never left uncapped.
+  **Changed 2026-10-18 (owner decision, #461; ADR 0026 point 8):** a stock
+  with no label from either source is ranked and can be picked, counted
+  toward the 25 but toward no sector's cap, as `defensive_book` treated a
+  stock with no Morningstar sector (69-74). The parity run found the
+  exclusion changed the book in most months compared
+  (`docs/research/parity-2026-10.md`); the owner chose parity. A month in
+  which more than 20% of the ranked stocks have no label (the configured
+  `max_unlabelled_share`; 3.5–5.3% in the backtest) is a label outage and
+  is withheld as `labels-missing`, the book kept; the market-data step
+  refuses a session whose labels have all failed to map.
 - **Universe parity study first** (research, before any build): for each
   month of 2016–2026, compare the 25 names this approach would pick with
   the backtest's own picks, and the return difference.

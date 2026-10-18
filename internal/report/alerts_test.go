@@ -117,6 +117,25 @@ func TestAnAllUnaffordableWithholdIsUrgent(t *testing.T) {
 	}
 }
 
+// TestALabelsMissingWithholdIsUrgent: a month withheld because too many
+// ranked members have no sector label points at a broken label source or
+// mapping, which a person fixes before the next decision, so the owner is
+// paged now, as for all-unaffordable.
+func TestALabelsMissingWithholdIsUrgent(t *testing.T) {
+	s := newStream(t)
+	s.withheld(0, event.WithheldLabelsMissing)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Kind != report.KindWithheld || got[0].Severity != report.Urgent {
+		t.Fatalf("alerts = %+v", got)
+	}
+	if !contains(got[0].Body, "detail for labels-missing") {
+		t.Errorf("body lacks the detail: %q", got[0].Body)
+	}
+}
+
 // TestMissingHistoriesAreMissingData: a decision withheld because the
 // compact stream sent no close history for the ranked members names absent
 // inputs, as missing bars do.

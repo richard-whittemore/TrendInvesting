@@ -74,7 +74,15 @@ import (
 //     applied (risklimit.Gate.SetKillSwitch; ADR 0019, amendment of
 //     2026-10-17), so a journal written under an earlier version does not
 //     replay.
-//   - 1.13.0 is reserved for a rules change landing in parallel.
+//   - 1.13.0 ranks and picks a momentum name with no sector label, uncapped
+//     and counted toward no sector's cap, as the backtest did
+//     (defensive_v2.py:69-74), where 1.12.0 left it out as no-sector: the
+//     owner's decision of 2026-10-18 (ADR 0026 point 8). A journal holding
+//     such a name within the book's reach decides differently, so one
+//     written under 1.12.0 does not replay. It withholds a month as
+//     labels-missing when more than the configuration's MaxUnlabelledShare
+//     of the ranked members has no label (configuration version 7, so a
+//     version 6 configuration is refused).
 //   - 1.14.0 has Boost re-plan, at the next decided session, the difference
 //     between the account's position and the target in force after a
 //     refusal that leaves the engine Normal (the kill switch, a stale broker
@@ -82,7 +90,7 @@ import (
 //     (owner's decision of 2026-10-18; ADR 0026, point 2, "Boost", amended
 //     2026-10-18, after ADR 0019 reading 10). A refusal under Degraded or
 //     Halted follows that state's own rules, as before. A journal holding
-//     such a refusal decides differently under 1.12.0.
+//     such a refusal decides differently under 1.13.0.
 const RulesVersion = "1.14.0"
 
 // source names this handler on every envelope it emits.

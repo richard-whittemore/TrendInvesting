@@ -434,14 +434,16 @@ type books struct {
 // books computes them from QuantConnect's candidates, in its order, and
 // the names the live rule leaves out for a gap (gaps: whether the closes
 // show it). The stages apply, in turn: the live tie order (ascending ID),
-// leaving out each name whose closes show a gap, each zero volatility and
-// each name with no sector. The live book is SelectBook given every
-// candidate but the gaps the closes show. A gap they do not show is kept
-// in every book, so it is never explained away. Every book takes QuantConnect's
-// risk-off flag.
+// leaving out each name whose closes show a gap and each zero volatility.
+// A name with no sector is no stage: the live rule picks it uncapped, as
+// the backtest did (ADR 0026 point 8, the owner's decision of 2026-10-18),
+// so a live book that leaves one out is unexplained. The live book is
+// SelectBook given every candidate but the gaps the closes show. A gap
+// they do not show is kept in every book, so it is never explained away.
+// Every book takes QuantConnect's risk-off flag.
 func (r *momentumRun) books(m *MomentumMonth, cands []momentum.Candidate, gaps map[string]bool) (books, error) {
 	var b books
-	var errs [6]error
+	var errs [5]error
 	b.backtest, errs[0] = momentum.BacktestBook(r.cfg, cands, m.RiskOff)
 	live := append([]momentum.Candidate(nil), cands...)
 	sort.SliceStable(live, func(i, j int) bool {
@@ -458,7 +460,6 @@ func (r *momentumRun) books(m *MomentumMonth, cands []momentum.Candidate, gaps m
 		{KindTie, func(momentum.Candidate) bool { return false }},
 		{KindGap, func(c momentum.Candidate) bool { return gaps[c.InstrumentID] }},
 		{KindZeroVolatility, func(c momentum.Candidate) bool { return c.Volatility == 0 }},
-		{KindNoSector, func(c momentum.Candidate) bool { return c.Sector == "" }},
 	} {
 		var next []momentum.Candidate
 		for _, c := range keep {
@@ -477,7 +478,7 @@ func (r *momentumRun) books(m *MomentumMonth, cands []momentum.Candidate, gaps m
 			liveCands = append(liveCands, c)
 		}
 	}
-	b.live, errs[5] = momentum.SelectBook(r.cfg, liveCands, m.RiskOff)
+	b.live, errs[4] = momentum.SelectBook(r.cfg, liveCands, m.RiskOff)
 	return b, errors.Join(errs[:]...)
 }
 
@@ -597,16 +598,14 @@ func (r *momentumRun) stageDepartures(m *MomentumMonth, prev, next momentum.Book
 }
 
 // unexplained lists every way the live book differs from the last stage:
-// a name the live rule leaves out for no sector or a zero volatility its
-// data does not show, a name ranked, given a status or weighted
-// otherwise, a target, or a BacktestWouldPick that is not whether the
-// backtest's handling of the live candidates in live order (withGaps)
-// picks it.
+// a name the live rule leaves out for a zero volatility its data does not
+// show, a name ranked, given a status or weighted otherwise, a target, or
+// a BacktestWouldPick that is not whether the backtest's handling of the
+// live candidates in live order (withGaps) picks it.
 func (r *momentumRun) unexplained(m *MomentumMonth, last, withGaps, live momentum.Book) {
 	var rest []momentum.RankedName
 	for _, n := range live.Ranked {
-		ownRule := (n.Status == momentum.StatusNoSector && n.Sector == "") ||
-			(n.Status == momentum.StatusZeroVolatility && n.Volatility == 0 && n.Sector != "")
+		ownRule := n.Status == momentum.StatusZeroVolatility && n.Volatility == 0
 		if !ownRule {
 			rest = append(rest, n)
 		}

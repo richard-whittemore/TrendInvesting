@@ -4,7 +4,11 @@ Source (docs/live-trading/plan.md section 4, "Sectors", chosen 2026-10-15
 on docs/research/sector-labels-2026-10.md): the GICS sector in iShares'
 daily IWV (Russell 3000) holdings file where it lists a stock, else the
 sector in Nasdaq's stock screener; a stock neither labels has no label, and
-the momentum rule leaves it out of the ranking.
+the momentum rule ranks it uncapped, as the backtest ranked a stock with no
+Morningstar sector (ADR 0026 point 8, the owner's decision of 2026-10-18).
+A file whose sector column is missing, or a session in which no label maps,
+is refused rather than written as empty labels; the momentum rule withholds
+a month with too many unlabelled names as labels-missing.
 
 Both sources' sectors are mapped by name onto Morningstar's eleven sectors,
 the scheme the backtest's cap counted (QuantConnect's MorningstarSectorCode),
@@ -133,8 +137,13 @@ def parse_iwv(text):
         raise Unusable("no 'Ticker,' header: not an iShares holdings file")
     as_of = next((line.split(",", 1)[1].strip().strip('"') for line in lines[:start]
                   if line.startswith("Fund Holdings as of,")), None)
+    reader = csv.DictReader(io.StringIO("\n".join(lines[start:])))
+    if "Sector" not in (reader.fieldnames or ()):
+        # A renamed column would read as no label for every row, which the
+        # momentum rule ranks with no sector cap: refused, not emitted empty.
+        raise Unusable("the iShares file has no 'Sector' column")
     rows = {}
-    for row in csv.DictReader(io.StringIO("\n".join(lines[start:]))):
+    for row in reader:
         if row.get("Asset Class") == "Equity" and row.get("Ticker"):
             _put(rows, norm(row["Ticker"]), (row.get("Sector") or "").strip())
     if not rows:
@@ -147,6 +156,10 @@ def parse_nasdaq(body):
     rows = (body.get("data") or {}).get("rows") if isinstance(body, dict) else None
     if not rows or not all(isinstance(r, dict) and r.get("symbol") for r in rows):
         raise Unusable("the screener response has no rows of symbols")
+    if not any("sector" in r for r in rows):
+        # As for the iShares column: a renamed field is refused, not read as
+        # no label for every row.
+        raise Unusable("the screener response has no 'sector' field")
     out = {}
     for r in rows:
         _put(out, norm(r["symbol"]), (r.get("sector") or "").strip())
@@ -171,14 +184,29 @@ def _unambiguous(rows):
 
 def labels(iwv, nasdaq):
     """{normalised ticker: (Morningstar sector, source)} from the two
-    recordings: IWV's GICS label where it maps, else Nasdaq's, else none."""
+    recordings: IWV's GICS label where it maps, else Nasdaq's, else none.
+    Raises Unusable when a source that parsed unambiguous rows maps none of
+    them: each normally maps thousands, so none is a renamed vocabulary or a
+    broken file, which the other source would otherwise cover unseen (ADR 0026
+    point 5). A source whose every row was ambiguous has no vocabulary to
+    judge and is skipped."""
     out = {}
-    for ticker, sector in parse_nasdaq({"data": {"rows": nasdaq["rows"]}}).items():
+    nasdaq_rows = parse_nasdaq({"data": {"rows": nasdaq["rows"]}})
+    iwv_rows = parse_iwv(iwv["body"])[1]
+    for name, rows, table in (("screener", nasdaq_rows, NASDAQ_SECTORS), ("iShares", iwv_rows, GICS_SECTORS)):
+        mapped = {t: s for t, s in rows.items() if s in table}
+        if rows and not mapped:
+            raise Unusable("none of the {} source's sectors map onto a Morningstar sector".format(name))
+    for ticker, sector in nasdaq_rows.items():
         if sector in NASDAQ_SECTORS:
             out[ticker] = (NASDAQ_SECTORS[sector], NASDAQ_SOURCE)
-    for ticker, sector in parse_iwv(iwv["body"])[1].items():
+    for ticker, sector in iwv_rows.items():
         if sector in GICS_SECTORS:
             out[ticker] = (GICS_SECTORS[sector], IWV_SOURCE)
+    if not out:
+        # Every row of both sources was ambiguous: no label to write, refused
+        # rather than written as a snapshot with none (ADR 0026 point 5).
+        raise Unusable("neither source labels any stock unambiguously")
     return out
 
 

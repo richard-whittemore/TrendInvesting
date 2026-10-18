@@ -56,6 +56,14 @@ type Config struct {
 	// RiskOffFraction is the share of the book moved to RiskOffInstrument
 	// when risk-off (F_COMBO RISK_OFF_FRACTION 0.5).
 	RiskOffFraction float64
+	// MaxUnlabelledShare is the largest share of the ranked members that may
+	// have no sector label in a month that is decided. A name with no label
+	// is ranked uncapped, as defensive_book ranked a stock with no
+	// Morningstar sector (defensive_v2.py:69-74); a snapshot above the share
+	// is a label outage, not a few names the sources do not cover, and is
+	// withheld as labels-missing (ADR 0026 points 5 and 8). The backtest's
+	// months had 3.5% to 5.3% unlabelled (docs/research/parity-2026-10.md).
+	MaxUnlabelledShare float64
 }
 
 // FCombo returns the F_COMBO configuration: mom_trend, TOP_N 25,
@@ -76,6 +84,8 @@ func FCombo() Config {
 		TrendCloses:       200,
 		RiskOffInstrument: "IEF",
 		RiskOffFraction:   0.5,
+
+		MaxUnlabelledShare: 0.20,
 	}
 }
 
@@ -108,6 +118,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("momentum: trend closes %d < 1", c.TrendCloses)
 	case !finite(c.RiskOffFraction) || c.RiskOffFraction < 0 || c.RiskOffFraction > 1:
 		return fmt.Errorf("momentum: risk-off fraction %v outside [0, 1]", c.RiskOffFraction)
+	case !finite(c.MaxUnlabelledShare) || c.MaxUnlabelledShare <= 0 || c.MaxUnlabelledShare >= 1:
+		return fmt.Errorf("momentum: unlabelled share ceiling %v outside (0, 1)", c.MaxUnlabelledShare)
 	}
 	return nil
 }
