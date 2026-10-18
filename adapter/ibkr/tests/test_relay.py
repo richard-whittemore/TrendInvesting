@@ -23,7 +23,7 @@ if tests_dir not in sys.path:
 from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
-                   acknowledge_correction, main, resolve)
+                   acknowledge_correction, journalled_fills, main, resolve)
 from sender import OrderRequest
 
 
@@ -125,6 +125,21 @@ def to_request(order, session=None):
     return OrderRequest(client_order_id=order["client_order_id"], account_id=order["account_id"], con_id=756733,
                         symbol=order["instrument_id"], action=order["side"].upper(), quantity=Decimal(order["quantity"]),
                         order_type="LMT", limit_price=order["limit_price"], tif="DAY", session=session)
+
+
+# The fills the engine's journal holds, for the acknowledgement tests.
+FILLS = frozenset({"e.1.01"})
+
+
+def write_engine_journal(path, fill_ids):
+    """An engine journal (one JSON object per line) holding an input fill for each of fill_ids, among other lines."""
+    lines = [{"sequence": 1, "kind": "input", "envelope": {"type": "market.session.closed", "payload": {}}}]
+    for n, fill_id in enumerate(fill_ids, 2):
+        lines.append({"sequence": n, "kind": "input", "envelope": {
+            "type": "execution.fill", "schema_version": 5, "payload": {"account_id": "DU1234567", "fill_id": fill_id}}})
+    lines.append({"sequence": len(lines) + 1, "kind": "decision", "envelope": {"type": "risk.order.released"}})
+    Path(path).write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    return str(path)
 
 
 def envelope(i):
@@ -306,6 +321,12 @@ class RelayTests(unittest.TestCase):
             with self.assertRaises(HandoverRecordInvalid):
                 restarted.exchange(envelope(1))
             restarted.close()
+        with open(self.pending.handover_path, "w", encoding="utf-8") as f:
+            json.dump({"tw-1": "Sent"}, f)
+        with self.assertRaises(HandoverRecordInvalid) as unknown:
+            self.pending.handovers()
+        for mark in ("handing-over", "sent", "never-sent", "resend:YYYY-MM-DD"):
+            self.assertIn(repr(mark), str(unknown.exception), "the message names every mark the record may hold")
         with open(self.pending.handover_path, "w", encoding="utf-8") as f:
             f.write('{"tw-1": sent')
         with self.assertRaises(HandoverRecordInvalid):
@@ -732,6 +753,97 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.sent, [], "an order settled as never sent is never handed over")
         self.assertIsNone(self.pending.load(), "the relay went on to the next input")
 
+    def settled_never_sent(self, log, decisions):
+        """The sender refuses tw-1 for good, and the owner settles it as never sent."""
+        def refused(order, session):
+            raise ValueError("order {} was released for an earlier session".format(order["client_order_id"]))
+
+        stuck = self.relay(Restarts(log, decisions), mapper=refused)
+        with self.assertRaises(ValueError):
+            stuck.exchange(envelope(0))
+        stuck.close()
+        resolve(self.pending, "tw-1", "never-sent", "IBKR shows no order tagged tw-1", today=date(2026, 10, 16))
+        return refused
+
+    def test_a_never_sent_order_ibkr_shows_open_or_executed_stops_for_a_person(self):
+        # A never-sent mark is the owner's judgement that the order never
+        # left the process; IBKR showing its tag contradicts it, so the relay
+        # stops rather than pass over an order the broker holds.
+        for where in ("open_orders", "executions"):
+            with self.subTest(where=where):
+                self.pending.clear()
+                for path in (self.pending.handover_path, self.pending.refused_path):
+                    Path(path).unlink(missing_ok=True)
+                log, decisions = {}, {"session:0": [released("tw-1")]}
+                refused = self.settled_never_sent(log, decisions)
+                broker = holding(**{where: ["tw-1"]})
+                contradicted = self.relay(Restarts(log, decisions), broker=broker, mapper=refused)
+                with self.assertRaises(HandoverUnconfirmed) as raised:
+                    contradicted.exchange(envelope(1))
+                contradicted.close()
+                self.assertIn("never sent", str(raised.exception))
+                self.assertEqual(self.sent, [])
+                self.assertEqual(self.pending.load(), envelope(0), "the input still awaits its reply")
+                # The owner, having found it at IBKR, marks it sent; then the
+                # relay goes on without sending it.
+                with self.assertRaises(ResolveRefused):
+                    resolve(self.pending, "tw-1", "resend", "IBKR has it", today=date(2026, 10, 16))
+                resolve(self.pending, "tw-1", "sent", "IBKR shows it cancelled", today=date(2026, 10, 16))
+                self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+                goes_on = self.relay(Restarts(log, decisions), broker=broker, mapper=refused)
+                goes_on.exchange(envelope(1))
+                goes_on.close()
+                self.assertEqual(self.sent, [])
+
+    def test_never_sent_is_refused_for_any_order_but_the_one_the_relay_is_refusing(self):
+        log = {}
+        decisions = {"session:0": [released("tw-1"), released("tw-2")]}
+
+        def refused(order, session):
+            if order["client_order_id"] == "tw-2":
+                raise ValueError("no IBKR contract for {}".format(order["instrument_id"]))
+            return to_request(order, session)
+
+        stuck = self.relay(Restarts(log, decisions), mapper=refused)
+        with self.assertRaises(ValueError):
+            stuck.exchange(envelope(0))
+        stuck.close()
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"])
+        # tw-1 went out and is marked; tw-3 is a typo the relay never refused.
+        for cid, named in (("tw-1", "sent"), ("tw-3", "tw-2")):
+            with self.subTest(cid=cid), self.assertRaises(ResolveRefused) as raised:
+                resolve(self.pending, cid, "never-sent", "a typo", today=date(2026, 10, 16))
+            self.assertIn(named, str(raised.exception))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+        self.assertEqual(self.pending.decisions(), [])
+        resolve(self.pending, "tw-2", "never-sent", "no contract configured", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent", "tw-2": "never-sent"})
+
+    def test_never_sent_is_refused_when_the_relay_recorded_no_refusal_for_the_waiting_input(self):
+        # An input awaits its reply because the engine did not answer, not
+        # because the sender refused an order: nothing is refused, so nothing
+        # can be settled as never sent.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        down = self.relay(Restarts(log, decisions, crash_before_reply=["session:0"]), reconnects=0)
+        with self.assertRaises(EngineUnavailable):
+            down.exchange(envelope(0))
+        down.close()
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", "guessing", today=date(2026, 10, 16))
+        # A refusal recorded for another input does not carry over.
+        with open(self.pending.refused_path, "w", encoding="utf-8") as f:
+            json.dump({"input_id": "session:9", "client_order_id": "tw-1", "reason": "stale"}, f)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", "guessing", today=date(2026, 10, 16))
+        for bad in ("{not json", "[]", json.dumps({"input_id": "session:0", "client_order_id": "tw-1"})):
+            with self.subTest(bad=bad):
+                with open(self.pending.refused_path, "w", encoding="utf-8") as f:
+                    f.write(bad)
+                with self.assertRaises(HandoverRecordInvalid):
+                    resolve(self.pending, "tw-1", "never-sent", "guessing", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {})
+
     def test_never_sent_is_refused_for_an_order_with_a_mark_or_with_no_input_awaiting_its_reply(self):
         today = date(2026, 10, 16)
         with self.assertRaises(ResolveRefused):
@@ -791,20 +903,32 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.pending.handovers(), {}, "a request the sender refuses is never marked")
         self.assertEqual(self.sent, [])
 
+    def test_a_correction_of_an_execution_never_journalled_as_a_fill_is_not_acknowledged(self):
+        # The engine keeps the original fill only if it was recorded; a
+        # correction of one never recorded (its commission had not arrived)
+        # leaves the shares in no fill, so it is reconciled by hand instead.
+        with self.assertRaises(ResolveRefused) as raised:
+            acknowledge_correction(self.pending, "e.1.02", "e.1.01", "IBKR corrected the price", fills={"e.2.01"})
+        message = str(raised.exception)
+        self.assertIn("e.1.01", message)
+        self.assertIn("never recorded", message)
+        self.assertIn("reconcil", message)
+        self.assertEqual(self.pending.acknowledged_corrections(), {})
+
     def test_an_acknowledged_correction_is_kept_and_read_back_exactly(self):
         self.assertEqual(self.pending.acknowledged_corrections(), {})
-        acknowledge_correction(self.pending, "e.1.02", "e.1.01", "IBKR corrected the price")
-        acknowledge_correction(self.pending, "e.1.02", "e.1.01", "the same, again")
+        acknowledge_correction(self.pending, "e.1.02", "e.1.01", "IBKR corrected the price", fills=FILLS)
+        acknowledge_correction(self.pending, "e.1.02", "e.1.01", "the same, again", fills=FILLS)
         self.assertEqual(self.pending.acknowledged_corrections(), {"e.1.02": "e.1.01"})
         for exec_id, corrects, reason in (("e.1.02", "e.1.01", " "), ("e.1.01", "e.1.01", "itself"),
                                           ("e.2.02", "e.1.01", "another base"), ("nodots", "e.1.01", "no base"),
                                           ("e.1.02", "e.1.00", "another original")):
             with self.subTest(exec_id=exec_id, corrects=corrects), self.assertRaises(ResolveRefused):
-                acknowledge_correction(self.pending, exec_id, corrects, reason)
+                acknowledge_correction(self.pending, exec_id, corrects, reason, fills=FILLS | {corrects})
         self.assertEqual(self.pending.acknowledged_corrections(), {"e.1.02": "e.1.01"})
         running = self.relay(Restarts({}, {}))
         with self.assertRaises(ResolveRefused):
-            acknowledge_correction(self.pending, "e.1.03", "e.1.01", "while the adapter runs")
+            acknowledge_correction(self.pending, "e.1.03", "e.1.01", "while the adapter runs", fills=FILLS)
         running.close()
 
     def test_a_corrections_file_not_as_acknowledge_correction_writes_it_is_refused(self):
@@ -820,11 +944,31 @@ class RelayTests(unittest.TestCase):
 
     def test_the_acknowledge_correction_command_refuses_with_a_nonzero_exit(self):
         path = self.pending.path
-        self.assertEqual(main(["acknowledge-correction", path, "e.2.02", "--corrects", "e.1.01", "--reason", "x"]), 1)
-        self.assertEqual(main(["acknowledge-correction", path, "e.1.02", "--corrects", "e.1.01", "--reason", "x"]), 0)
+        journal = write_engine_journal(Path(self.dir.name) / "journal.jsonl", ["e.1.01"])
+        ack = ["acknowledge-correction", path, "--journal", journal]
+        self.assertEqual(main(ack + ["e.2.02", "--corrects", "e.1.01", "--reason", "x"]), 1)
+        self.assertEqual(main(ack + ["e.3.02", "--corrects", "e.3.01", "--reason", "never journalled"]), 1)
+        self.assertEqual(main(["acknowledge-correction", path, "--journal", str(Path(self.dir.name) / "missing.jsonl"),
+                               "e.1.02", "--corrects", "e.1.01", "--reason", "x"]), 1)
+        self.assertEqual(self.pending.acknowledged_corrections(), {})
+        self.assertEqual(main(ack + ["e.1.02", "--corrects", "e.1.01", "--reason", "x"]), 0)
+        self.assertEqual(self.pending.acknowledged_corrections(), {"e.1.02": "e.1.01"})
         with open(self.pending.corrections_path, "w", encoding="utf-8") as f:
             f.write("[]\n")
-        self.assertEqual(main(["acknowledge-correction", path, "e.1.03", "--corrects", "e.1.01", "--reason", "x"]), 1)
+        self.assertEqual(main(ack + ["e.1.03", "--corrects", "e.1.01", "--reason", "x"]), 1)
+
+    def test_the_engine_journal_is_read_strictly_for_its_fills(self):
+        journal = Path(write_engine_journal(Path(self.dir.name) / "journal.jsonl", ["e.1.01", "e.2.01"]))
+        self.assertEqual(journalled_fills(str(journal)), {"e.1.01", "e.2.01"})
+        good = journal.read_text(encoding="utf-8")
+        fill = {"sequence": 9, "kind": "input", "envelope": {"type": "execution.fill", "payload": {}}}
+        for bad in ("{not json\n", "[]\n", json.dumps(fill) + "\n"):
+            with self.subTest(bad=bad):
+                journal.write_text(good + bad, encoding="utf-8")
+                with self.assertRaises(ResolveRefused):
+                    journalled_fills(str(journal))
+        with self.assertRaises(ResolveRefused):
+            journalled_fills(str(journal) + ".missing")
 
     def test_the_resolve_command_writes_the_decision_and_refuses_with_a_nonzero_exit(self):
         decisions = {"session:0": [released("tw-1")]}

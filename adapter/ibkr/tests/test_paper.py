@@ -15,6 +15,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 tests_dir = Path(__file__).resolve().parent
 if str(tests_dir) not in sys.path:
@@ -74,9 +75,12 @@ class PaperAdapter:
         self.received = RECEIVED
         self.today = SESSION
         self.pending = PendingInput(str(Path(directory) / "pending.json"))
+        # The engine's journal, as the owner's commands read it.
+        self.engine_journal = str(Path(directory) / "journal.jsonl")
         self.reports = OrderReportJournal(self.conn.config.account_id, self.conn.config.client_id,
-                                          self.inputs.append, now=lambda: self.received,
+                                          self._journal_input, now=lambda: self.received,
                                           commission_wait=self.conn.config.commission_wait,
+                                          held_path=str(Path(directory) / "journal.held"),
                                           journalled=list(self.inputs),
                                           acknowledged=self.pending.acknowledged_corrections())
         self.tracker = OrderTracker(self.conn.config.account_id, self.conn.config.client_id,
@@ -89,6 +93,12 @@ class PaperAdapter:
         # be sent, so an order the sender would refuse leaves no mark.
         self.relay = Relay(self.engine, self.sender, self.pending, lambda: collect_broker_orders(self.conn),
                            lambda o, session: release_to_request(o, "paper", self.conn.config.con_ids, session))
+
+    def _journal_input(self, record):
+        self.inputs.append(record)
+        with open(self.engine_journal, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"sequence": len(self.inputs), "kind": "input", "envelope": {
+                "type": record.event_type, "schema_version": record.schema_version, "payload": record.payload}}) + "\n")
 
     def _journal_sent(self, record):
         if self.die_after_place:
@@ -258,11 +268,11 @@ class PaperSendingTests(unittest.TestCase):
         b = self.restart(a)
         with self.assertRaises(UnreportableOrder):
             b.start()
-        self.assertEqual(relay_main(["acknowledge-correction", b.pending.path, "0001f4e8.paper.01.02", "--corrects",
+        self.assertEqual(relay_main(["acknowledge-correction", b.pending.path, "--journal", b.engine_journal, "0001f4e8.paper.01.02", "--corrects",
                                      "0001f4e8.paper.01.01", "--reason", "IBKR corrected the price to 401.20"]), 1,
                          "refused while an adapter holds the pending file")
         b.relay.close()
-        self.assertEqual(relay_main(["acknowledge-correction", b.pending.path, "0001f4e8.paper.01.02", "--corrects",
+        self.assertEqual(relay_main(["acknowledge-correction", b.pending.path, "--journal", b.engine_journal, "0001f4e8.paper.01.02", "--corrects",
                                      "0001f4e8.paper.01.01", "--reason", "IBKR corrected the price to 401.20"]), 0)
         c = self.restart(b)
         c.start()
@@ -276,6 +286,55 @@ class PaperSendingTests(unittest.TestCase):
                       time="20261017 09:30:01 US/Eastern")
         with self.assertRaises(UnreportableOrder):
             c.drain()
+
+    def test_a_correction_of_an_execution_never_recorded_as_a_fill_is_not_acknowledged(self):
+        # IBKR's correction arrives while the original still waits for its
+        # commission: the original was never journalled, so the engine has no
+        # fill to keep, and acknowledging the correction would leave the
+        # shares in no fill record. The owner is sent to reconcile instead.
+        a = self.sent_and_working()
+        a.h.fake.fill(7, shares="4", price=401.25, exec_id="0001f4e8.paper.01.01", cum_qty="4", commission=None,
+                      time="20261017 09:30:01 US/Eastern")
+        a.h.fake.fill(7, shares="4", price=401.2, exec_id="0001f4e8.paper.01.02", cum_qty="4", commission=None,
+                      time="20261017 09:30:01 US/Eastern")
+        with self.assertRaises(UnreportableOrder):
+            a.drain()
+        a.relay.close()
+        self.assertEqual(relay_main(["acknowledge-correction", a.pending.path, "--journal", a.engine_journal,
+                                     "0001f4e8.paper.01.02", "--corrects", "0001f4e8.paper.01.01", "--reason",
+                                     "IBKR corrected the price to 401.20"]), 1)
+        self.assertEqual(a.pending.acknowledged_corrections(), {})
+
+    def test_a_cancellation_held_for_a_fill_survives_a_stop_before_the_fills_commission(self):
+        # IBKR cancels the order while a partial fill waits for its
+        # commission, and the adapter stops before the commission arrives. On
+        # restart IBKR replays the execution and its commission but not the
+        # status of an order no longer open, so the held cancellation must
+        # have been kept on disk: the fill, then the cancellation, once.
+        a = self.sent_and_working()
+        exec_id = "0001f4e8.paper.01.01"
+        a.h.fake.fill(7, shares="4", price=401.25, exec_id=exec_id, cum_qty="4", commission=None,
+                      time="20261017 09:30:01 US/Eastern")
+        a.h.fake.open_orders = [o for o in a.h.fake.open_orders if o[0] != 7]
+        a.h.fake.status(7, "Cancelled", filled="4", remaining="5")
+        a.drain()
+        self.assertEqual([r.payload.get("status") for r in a.inputs], ["submitted"], "the cancellation is held")
+        a.relay.close()
+        # IBKR's commission arrives after the stop, so only its replay brings it.
+        a.h.fake.commissions[exec_id] = SimpleNamespace(execId=exec_id, commission="1.00", currency="USD")
+        b = self.restart(a)
+        b.start()
+        b.exchange()
+        b.drain()
+        self.assertEqual([(r.event_type, r.payload.get("status")) for r in b.inputs],
+                         [(LIFECYCLE_TYPE, "submitted"), (FILL_TYPE, None), (LIFECYCLE_TYPE, "canceled")])
+        b.relay.close()
+        c = self.restart(b)
+        c.start()
+        c.exchange()
+        c.drain()
+        self.assertEqual(len(c.inputs), 3, "the cancellation is journalled once, across every restart")
+        self.assertEqual(c.placed(), 1)
 
     def test_a_client_that_cannot_place_orders_leaves_no_mark(self):
         a = self.adapter()
@@ -415,11 +474,108 @@ class PaperSendingTests(unittest.TestCase):
 
 
 class OrderReportJournalTests(unittest.TestCase):
-    def journal(self, now=lambda: RECEIVED, journalled=()):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.held_path = str(Path(self.dir.name) / "journal.held")
+
+    def journal(self, now=lambda: RECEIVED, journalled=(), sink=None):
         inputs = []
-        j = OrderReportJournal(ACCOUNT, 11, inputs.append, now=now, commission_wait=COMMISSION_WAIT,
-                               journalled=journalled)
+        j = OrderReportJournal(ACCOUNT, 11, sink or inputs.append, now=now, commission_wait=COMMISSION_WAIT,
+                               held_path=self.held_path, journalled=journalled)
         return j, inputs
+
+    def held_cancellation(self, sink=None):
+        """A journal holding order 7's cancellation for a partial fill still waiting for its commission."""
+        j, inputs = self.journal(sink=sink)
+        self.sent(j)
+        j.on_record(self.status("submitted"))
+        ex = execution_report(contract(), execution(order_ref="tw-1", side="SLD", shares="1", cum_qty="1", price=401.5))
+        j.on_record(ex)
+        j.on_record(self.status("canceled"))
+        return j, inputs, ex
+
+    def test_a_failed_write_of_a_held_cancellation_stops_and_keeps_it_for_the_restart(self):
+        # The cancellation's journal write fails after the fill's: the run
+        # stops with the cause, the held cancellation stays on disk, and a
+        # repeated commission or a restart writes it once.
+        written = []
+        fail = {"canceled": True}
+
+        def sink(record):
+            if record.payload.get("status") == "canceled" and fail["canceled"]:
+                raise OSError("journal disk full")
+            written.append(record)
+
+        j, _, ex = self.held_cancellation(sink=sink)
+        with self.assertRaises(OSError):
+            j.on_record(CommissionReport(ex.exec_id, Decimal("1"), "USD"))
+        self.assertEqual([r.event_type for r in written], [LIFECYCLE_TYPE, FILL_TYPE])
+        with self.assertRaises(OSError):
+            j.on_record(CommissionReport(ex.exec_id, Decimal("1"), "USD"))
+        fail["canceled"] = False
+        j.on_record(CommissionReport(ex.exec_id, Decimal("1"), "USD"))
+        self.assertEqual([r.payload.get("status") for r in written], ["submitted", None, "canceled"],
+                         "a repeated commission retries the held write")
+        # A restart after the write finds nothing held to write again.
+        after, inputs = self.journal(journalled=list(written))
+        after.on_record(ex)
+        after.on_record(CommissionReport(ex.exec_id, Decimal("1"), "USD"))
+        self.assertEqual(inputs, [])
+
+    def test_a_held_cancellation_whose_fill_was_written_before_a_stop_is_written_at_restart(self):
+        written = []
+
+        def sink(record):
+            if record.payload.get("status") == "canceled":
+                raise OSError("adapter stopped")
+            written.append(record)
+
+        j, _, ex = self.held_cancellation(sink=sink)
+        with self.assertRaises(OSError):
+            j.on_record(CommissionReport(ex.exec_id, Decimal("1"), "USD"))
+        after, inputs = self.journal(journalled=list(written))
+        self.assertEqual([r.payload.get("status") for r in inputs], ["canceled"], "written as the journal starts")
+        again, more = self.journal(journalled=list(written) + inputs)
+        again.on_record(ex)
+        again.on_record(CommissionReport(ex.exec_id, Decimal("1"), "USD"))
+        self.assertEqual(more, [])
+
+    def test_a_held_cancellation_that_cannot_be_kept_on_disk_stops_for_a_person(self):
+        self.held_path = str(Path(self.dir.name) / "missing" / "journal.held")
+        j, inputs = self.journal()
+        self.sent(j)
+        j.on_record(self.status("submitted"))
+        j.on_record(execution_report(contract(), execution(order_ref="tw-1", side="SLD", shares="1", cum_qty="1",
+                                                           price=401.5)))
+        with self.assertRaises(UnreportableOrder) as raised:
+            j.on_record(self.status("canceled"))
+        self.assertIn("tw-1", str(raised.exception))
+        self.assertEqual([r.payload.get("status") for r in inputs], ["submitted"])
+
+    def test_the_held_reports_file_is_read_strictly(self):
+        self.held_cancellation()
+        good = json.loads(Path(self.held_path).read_text(encoding="utf-8"))
+        entry = good[0]
+        for bad in ("{not json", json.dumps({}), json.dumps([dict(entry, extra=1)]),
+                    json.dumps([dict(entry, status="submitted")]), json.dumps([dict(entry, awaits="x")]),
+                    json.dumps([dict(entry, record=dict(entry["record"], event_type=FILL_TYPE))]),
+                    json.dumps([dict(entry, order_id=8)])):
+            with self.subTest(bad=bad):
+                Path(self.held_path).write_text(bad, encoding="utf-8")
+                with self.assertRaises(UnreportableOrder):
+                    self.journal()
+
+    def test_a_held_cancellation_whose_fill_is_never_replayed_stops_for_a_person(self):
+        clock = {"now": RECEIVED}
+        self.held_cancellation()
+        j, inputs = self.journal(now=lambda: clock["now"])
+        j.check_overdue()
+        clock["now"] = RECEIVED + timedelta(seconds=COMMISSION_WAIT)
+        with self.assertRaises(UnreportableOrder) as raised:
+            j.check_overdue()
+        self.assertIn("0001f4e8", str(raised.exception))
+        self.assertEqual(inputs, [])
 
     def sent(self, j, order_id=7, client_order_id="tw-1"):
         request = release_to_request({"account_id": ACCOUNT, "client_order_id": client_order_id,
@@ -535,7 +691,8 @@ class OrderReportJournalTests(unittest.TestCase):
     def test_the_commission_wait_and_execution_ids_are_read_strictly(self):
         for wait in (0, -1, float("nan"), float("inf"), True, "30"):
             with self.subTest(wait=wait), self.assertRaises(ValueError):
-                OrderReportJournal(ACCOUNT, 11, lambda r: None, now=lambda: RECEIVED, commission_wait=wait)
+                OrderReportJournal(ACCOUNT, 11, lambda r: None, now=lambda: RECEIVED, commission_wait=wait,
+                                   held_path=self.held_path)
         j, inputs = self.journal()
         with self.assertRaises(UnreportableOrder):
             j.on_record(execution_report(contract(), execution(exec_id="0001f4e8")))
@@ -643,6 +800,11 @@ class OrderReportJournalTests(unittest.TestCase):
         j.on_record(first)
         with self.assertRaises(UnreportableOrder):
             j.on_record(execution_report(contract(), execution(exec_id="0001f4e8.6512a1b2.01.03")))
+        # Acknowledged, but IBKR never reported the original to this journal.
+        j, inputs = self.journal_acknowledging({"0001f4e8.6512a1b2.01.02": "0001f4e8.6512a1b2.01.01"})
+        with self.assertRaises(UnreportableOrder) as raised:
+            j.on_record(execution_report(contract(), execution(exec_id="0001f4e8.6512a1b2.01.02")))
+        self.assertIn("never recorded as a fill", str(raised.exception))
         j, inputs = self.journal_acknowledging({"0001f4e8.6512a1b2.01.02": "0001f4e8.6512a1b2.01.01"})
         j.on_record(first)
         j.on_record(execution_report(contract(), execution(exec_id="0001f4e8.6512a1b2.01.02", price=101.2)))
@@ -653,7 +815,7 @@ class OrderReportJournalTests(unittest.TestCase):
     def journal_acknowledging(self, acknowledged):
         inputs = []
         j = OrderReportJournal(ACCOUNT, 11, inputs.append, now=lambda: RECEIVED, commission_wait=COMMISSION_WAIT,
-                               acknowledged=acknowledged)
+                               held_path=self.held_path, acknowledged=acknowledged)
         return j, inputs
 
     def test_a_receipt_time_without_a_zone_is_refused(self):

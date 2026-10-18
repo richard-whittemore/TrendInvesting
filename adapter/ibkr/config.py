@@ -40,7 +40,8 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     person (reports.OrderReportJournal). con_ids is the contract map: the
     engine's instrument ID to IBKR's contract ID (conId), the only way the
     adapter names a contract (sender.release_to_request), never a lookup by
-    name; it is kept as a read-only copy.
+    name; no two instruments may share a contract ID; it is kept as a
+    read-only copy.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -105,7 +106,7 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
 
 
 def _contract_map(value):
-    """value as a read-only map from instrument ID to IBKR's positive contract ID, else ConfigError."""
+    """value as a read-only map from instrument ID to IBKR's positive contract ID, one each, else ConfigError."""
     if not isinstance(value, Mapping):
         raise ConfigError("con_ids must be an object from instrument ID to IBKR contract ID")
     for instrument, con_id in value.items():
@@ -115,6 +116,14 @@ def _contract_map(value):
         if not _is_int(con_id) or con_id < 1:
             raise ConfigError("con_ids gives {!r} contract ID {!r}; IBKR's contract ID is a positive "
                               "integer".format(instrument, con_id))
+    # One contract per instrument: a contract ID shared by two instruments
+    # would send one instrument's order on the other's contract.
+    named = {}
+    for instrument, con_id in value.items():
+        if con_id in named:
+            raise ConfigError("con_ids gives {!r} and {!r} the same contract ID {}; each instrument names its own "
+                              "IBKR contract".format(named[con_id], instrument, con_id))
+        named[con_id] = instrument
     return MappingProxyType(dict(value))
 
 

@@ -61,6 +61,16 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             c.con_ids["QQQ"] = 320227571
 
+    def test_a_contract_map_giving_two_instruments_one_contract_id_is_refused_naming_both(self):
+        # One contract ID for two instruments would send one instrument's
+        # order on the other's contract.
+        with self.assertRaises(ConfigError) as caught:
+            config(con_ids={"SPY": 756733, "VOO": 756733, "QQQ": 320227571})
+        message = str(caught.exception)
+        self.assertIn("SPY", message)
+        self.assertIn("VOO", message)
+        self.assertIn("756733", message)
+
     def test_client_id_zero_is_refused(self):
         with self.assertRaises(ConfigError):
             config(client_id=0)

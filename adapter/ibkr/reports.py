@@ -39,11 +39,26 @@ difference is the owner's to reconcile.
 A report that would end the order (canceled, invalid) is held while an
 execution of that order still waits for its commission, and journalled
 straight after that execution's fill: the engine reads no fill on an order
-already ended. An order IBKR shows with another side, quantity or limit than
+already ended. The hold is kept on disk (held_path, beside the journal)
+before the report is accepted, since IBKR replays an execution and its
+commission on every start but never the status of an order no longer open:
+a stop before the commission would otherwise lose the cancellation and
+leave the order working in the engine. A restarted journal reads the file
+strictly and journals each held report once the executions it waited for
+are journalled (at start, if they already are); one whose executions IBKR
+does not replay within commission_wait of the start raises
+UnreportableOrder from check_overdue. A held report leaves the file only
+after its own journal write: a failed write stops the run with its cause
+and keeps the hold, and a repeated record or a restart writes it once. A
+correction of an execution never journalled as a fill is never
+acknowledged (relay.py acknowledge-correction): the engine has no
+original to keep, and the shares are reconciled by hand. An order IBKR shows with another side, quantity or limit than
 the one already reported raises UnreportableOrder: IBKR changed a working
 order, and the engine judges each report against the order it released.
 """
+import json
 import math
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -63,6 +78,9 @@ EXECUTION_SIDES = {"BOT": "buy", "SLD": "sell"}
 UNSET_FIGURE = Decimal("1.7E308")
 # The ADR 0022 statuses that end an order.
 TERMINAL = ("canceled", "invalid")
+# The fields of one held report in the held reports file.
+HELD_FIELDS = ("awaits", "client_id", "order_id", "record", "status")
+RECORD_FIELDS = ("event_type", "payload", "schema_version")
 
 
 class UnreportableOrder(Exception):
@@ -141,10 +159,15 @@ class OrderReportJournal:
     working order's status and each execution with its commission, which it
     sends on every read after a reconnect, writes nothing twice.
     acknowledged maps each correction the owner acknowledged to the execId
-    it corrects (check_acknowledged; ValueError otherwise).
+    it corrects (check_acknowledged; ValueError otherwise). held_path is the
+    file, beside the journal, that keeps each report held for a waiting
+    execution across a stop; it is read strictly at construction
+    (UnreportableOrder for anything but what this journal writes), and a
+    held report whose executions are already journalled is journalled then.
     """
 
-    def __init__(self, account_id, client_id, sink, now, commission_wait, journalled=(), acknowledged=None):
+    def __init__(self, account_id, client_id, sink, now, commission_wait, held_path, journalled=(),
+                 acknowledged=None):
         if (isinstance(commission_wait, bool) or not isinstance(commission_wait, (int, float))
                 or not math.isfinite(commission_wait) or commission_wait <= 0):
             raise ValueError("commission_wait must be a positive number of seconds, not {!r}".format(
@@ -168,10 +191,19 @@ class OrderReportJournal:
         # instrument, side, quantity, limit).
         self._described = {}
         # A report ending an order, held until the order's waiting
-        # executions are journalled: order key to (record, status).
+        # executions are journalled: order key to (record, status, the
+        # execIds it waits for), kept in held_path.
         self._held = {}
+        # Every fill ID journalled.
+        self._fills = set()
+        self._held_path = held_path
+        # When this journal started: a held report read back waits for
+        # IBKR's replay of its executions no longer than commission_wait.
+        self._started = None
         for record in journalled:
             self._seed(record)
+        self._load_held()
+        self._release_held()
 
     def _seed(self, record):
         payload = record.payload
@@ -185,10 +217,91 @@ class OrderReportJournal:
                                         payload.get("side"), payload.get("quantity"), payload.get("limit_price"))
         elif record.event_type == FILL_TYPE:
             self._seen[_exec_base(payload["fill_id"])] = payload["fill_id"]
+            self._fills.add(payload["fill_id"])
+
+    def _load_held(self):
+        """Read the held reports file strictly; a report already journalled (its status seeded) is dropped."""
+        try:
+            with open(self._held_path, encoding="utf-8") as f:
+                entries = json.load(f)
+        except FileNotFoundError:
+            return
+        except ValueError as err:
+            raise UnreportableOrder("{} is not JSON: {}; check it against IBKR before starting "
+                                    "(docs/manual/paper-trading.md)".format(self._held_path, err)) from None
+        if not isinstance(entries, list):
+            raise UnreportableOrder("{} is not a list of held reports".format(self._held_path))
+        for n, entry in enumerate(entries, 1):
+            key = self._held_entry(entry)
+            if key is None:
+                raise UnreportableOrder("{} entry {} is not a held report as this journal writes one; check it "
+                                        "against IBKR before starting (docs/manual/paper-trading.md)".format(
+                                            self._held_path, n))
+            record = Record(LIFECYCLE_TYPE, LIFECYCLE_VERSION, entry["record"]["payload"])
+            if self._status.get(key) != entry["status"]:
+                self._held[key] = (record, entry["status"], frozenset(entry["awaits"]))
+        if self._held:
+            self._started = _utc(self._now(), "receipt time")
+
+    def _held_entry(self, entry):
+        """The order key of one well-formed held report of this account, else None."""
+        if not isinstance(entry, dict) or tuple(sorted(entry)) != HELD_FIELDS:
+            return None
+        record, awaits = entry["record"], entry["awaits"]
+        if (not _is_id(entry["client_id"]) or not _is_id(entry["order_id"]) or entry["status"] not in TERMINAL
+                or not isinstance(awaits, list) or not awaits
+                or not all(isinstance(a, str) and a for a in awaits)
+                or not isinstance(record, dict) or tuple(sorted(record)) != RECORD_FIELDS
+                or record["event_type"] != LIFECYCLE_TYPE or record["schema_version"] != LIFECYCLE_VERSION
+                or not isinstance(record["payload"], dict)):
+            return None
+        key = (entry["client_id"], entry["order_id"])
+        payload = record["payload"]
+        if (payload.get("account_id") != self.account_id or payload.get("status") != entry["status"]
+                or _order_key(payload.get("order_id")) != key):
+            return None
+        return key
+
+    def _save_held(self):
+        """Write the held reports durably (fsync, atomic replace) before the caller goes on."""
+        entries = [{"client_id": key[0], "order_id": key[1], "status": status, "awaits": sorted(awaits),
+                    "record": {"event_type": record.event_type, "schema_version": record.schema_version,
+                               "payload": record.payload}}
+                   for key, (record, status, awaits) in sorted(self._held.items())]
+        tmp = self._held_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(entries, f, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self._held_path)
+        fd = os.open(os.path.dirname(os.path.abspath(self._held_path)), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _release_held(self):
+        """Journal each held report whose executions are all journalled, then drop it from the file.
+
+        The journal write comes first: if it fails, the report stays held,
+        on disk and here, and the failure stops the run.
+        """
+        for key in sorted(self._held):
+            record, status, awaits = self._held[key]
+            if self._waiting(key) or not awaits <= self._fills:
+                continue
+            self._sink(record)
+            self._status[key] = status
+            del self._held[key]
+            self._save_held()
 
     def check_overdue(self):
-        """Raise UnreportableOrder for an execution whose commission is commission_wait seconds late or more."""
-        if not self._executions:
+        """Raise UnreportableOrder for an execution whose commission is commission_wait seconds late or more.
+
+        Also for a held report read back at start whose executions IBKR has
+        not replayed with their commissions within commission_wait.
+        """
+        if not self._executions and self._started is None:
             return
         now = _utc(self._now(), "receipt time")
         for exec_id, (_, arrived) in self._executions.items():
@@ -197,6 +310,16 @@ class OrderReportJournal:
                     "execution {} has waited {} s or more for IBKR's commission report, without which its fill "
                     "cannot be recorded; check the trade in IBKR (docs/manual/paper-trading.md)".format(
                         exec_id, self._commission_wait))
+        if self._started is not None and (now - self._started).total_seconds() >= self._commission_wait:
+            for key, (record, status, awaits) in sorted(self._held.items()):
+                missing = sorted((awaits - self._fills) - set(self._executions))
+                if missing:
+                    raise UnreportableOrder(
+                        "order {} was reported {} while execution {} waited for its commission, and IBKR has not "
+                        "replayed that execution within {} s of the start: neither can be recorded; check the "
+                        "order and its trades in IBKR (docs/manual/paper-trading.md)".format(
+                            record.payload.get("client_order_id"), status, ", ".join(missing),
+                            self._commission_wait))
 
     def sent(self, record):
         """Remember the request an order was sent as, for a refusal IBKR reports before any openOrder."""
@@ -205,8 +328,10 @@ class OrderReportJournal:
     def on_record(self, record):
         if isinstance(record, CommissionReport):
             self._on_commission(record)
+            self._release_held()
             self.check_overdue()
             return
+        self._release_held()
         self.check_overdue()
         if isinstance(record, OpenOrderRecord):
             self._on_open_order(record)
@@ -266,7 +391,18 @@ class OrderReportJournal:
         self._described[key] = (client_order_id, symbol, SIDES[action], _whole(quantity, "order quantity"),
                                 float(limit))
         if report.lifecycle in TERMINAL and self._waiting(key):
-            self._held[key] = (record, report.lifecycle)
+            awaits = frozenset(r.exec_id for r, _ in self._executions.values()
+                               if (r.client_id, r.broker_order_id) == key)
+            self._held[key] = (record, report.lifecycle, awaits)
+            try:
+                self._save_held()
+            except OSError as err:
+                del self._held[key]
+                raise UnreportableOrder(
+                    "IBKR reported order {} {} while its execution waited for a commission, and the report could "
+                    "not be kept in {} ({}): it would be lost on a stop; check the order in IBKR "
+                    "(docs/manual/paper-trading.md)".format(client_order_id, report.lifecycle, self._held_path,
+                                                            err)) from None
             return
         self._sink(record)
         self._status[key] = report.lifecycle
@@ -290,9 +426,11 @@ class OrderReportJournal:
         if acknowledged is not None:
             if first != acknowledged:
                 raise UnreportableOrder(
-                    "IBKR reported execution {}, acknowledged as a correction of execution {}, but the execution "
-                    "first reported under its base is {}: check the order's trades in IBKR "
-                    "(docs/manual/paper-trading.md)".format(report.exec_id, acknowledged, first))
+                    "IBKR reported execution {}, acknowledged as a correction of execution {}, but {}: check the "
+                    "order's trades in IBKR and reconcile them (docs/manual/paper-trading.md)".format(
+                        report.exec_id, acknowledged,
+                        "execution {} was never recorded as a fill".format(acknowledged) if first is None
+                        else "the execution first reported under its base is {}".format(first)))
             # The owner acknowledged this correction; the engine keeps the
             # original fill.
             return
@@ -338,12 +476,12 @@ class OrderReportJournal:
             "commission": float(commission.commission),
             "filled_at": _stamp(report.occurred_at, "execution time"),
         }))
+        self._fills.add(report.exec_id)
         del self._executions[commission.exec_id]
-        key = (report.client_id, report.broker_order_id)
-        if key in self._held and not self._waiting(key):
-            record, lifecycle = self._held.pop(key)
-            self._sink(record)
-            self._status[key] = lifecycle
+
+
+def _is_id(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _figures(record):
