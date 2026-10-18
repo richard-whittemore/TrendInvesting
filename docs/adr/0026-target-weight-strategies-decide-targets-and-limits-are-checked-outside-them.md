@@ -947,8 +947,13 @@ target next changed; point 2 said nothing of a partial fill.
   rejected, not decisions: when the gate refuses the one re-plan (the kill
   switch, a stale broker snapshot) and a later decided session releases it,
   that order is still the rejection's one re-plan, and a restart from the
-  decision that recorded the refusal recovers it as such. A second rejection
-  read while a refusal's re-plan is pending is recorded all the same. One
+  decision that recorded the refusal recovers it as such. The bound holds
+  only while the target in force is unchanged: an order planned to a new
+  target is a new order, with its own one re-plan, so a rejection's re-plan
+  pending when the target changes does not mark the order to the new
+  target, and a restart from a decision recording it reads it the same
+  way. A second rejection read while a refusal's re-plan is pending is
+  recorded all the same. One
   read during a restarted run's warm-up, whose sessions only feed the
   indicators, is recorded by the first decision after it. (The
   orchestrator's reading of a review finding, put to the owner for
@@ -993,7 +998,10 @@ target next changed; point 2 said nothing of a partial fill.
   every exit and sale back to 98% is sized net of every working sell),
   released before every snapshot of the restarted run, filled by its
   recorded executions as stamped and ended at its recorded end, so a later
-  exit cannot sell its shares again. A run restarted from a withheld
+  exit cannot sell its shares again. A broker snapshot read before the
+  recovery that listed it, as a sell the gate did not then know, is read as
+  its listing, matched by its client order ID and instrument, so it is
+  counted once. A run restarted from a withheld
   decision recovers the pending re-plan's cause; one restarted from a
   decided decision whose own order was refused recovers `refused`, or
   `rejected` when that order was a rejection's one re-plan.
@@ -1002,13 +1010,17 @@ target next changed; point 2 said nothing of a partial fill.
   crash (ADR 0027) re-applies every input of the crashed log, so the order,
   its executions and its reports are read again in order and the watch is
   rebuilt exactly; an execution the venue sends again after the resume is a
-  redelivery. A **fresh run** after the owner's approval starts after a
-  session's end and a reconciliation, when a DAY order has expired; it
-  watches no order of the earlier run, refuses the venue's reports on one as
-  on any order it did not release (reconciliation's to explain, ADR 0019),
+  redelivery. A **fresh run** (CONTEXT.md, "Fresh run": any start that is
+  not a resume, started from the owner's approval) watches no order of the
+  earlier run, refuses the venue's reports on one as on any order it did
+  not release (reconciliation's to explain, ADR 0019),
   and its first decided session plans to the target from the account as it
-  stands. The recovery from a decided record is the handler's input
-  contract for a restart from a decision (point 5), tested as such.
+  stands. Nothing in the engine makes a fresh run wait for the earlier
+  run's DAY order to expire: the runbook asks the owner to start one after a
+  session's end and a reconciliation (docs/runbooks/durable-log.md, "Start
+  a fresh run after an earlier one"). The recovery from a decided record
+  is the handler's input contract for a restart from a decision (point 5),
+  tested as such.
 
 ### Rules and schema
 

@@ -599,6 +599,17 @@ func TestBoostWatchedOrderValidate(t *testing.T) {
 	expectInvalid(t, "filled in full", v, func(p *P) { p.Boost.Watched.Filled, p.Boost.Watched.Fills = 39, nil }, "fewer filled")
 	expectInvalid(t, "negative fill", v, func(p *P) { p.Boost.Watched.Filled, p.Boost.Watched.Fills = -1, nil }, "fewer filled")
 	expectInvalid(t, "working status", v, func(p *P) { p.Boost.Watched.Status = event.OrderLifecycleStatusSubmitted }, "status")
+	// Fills whose sum wraps past the largest int64 to the recorded figure
+	// are refused before the sum can wrap: 1 filled of 39, from fills of
+	// MaxInt64, MaxInt64 and 3.
+	expectInvalid(t, "fills that overflow their sum", v, func(p *P) {
+		p.Boost.Watched.Filled = 1
+		p.Boost.Watched.Fills = []event.BoostWatchedFill{
+			{FillID: "f1", Quantity: math.MaxInt64, Price: 104, FilledAt: filledAt},
+			{FillID: "f2", Quantity: math.MaxInt64, Price: 104, FilledAt: filledAt},
+			{FillID: "f3", Quantity: 3, Price: 104, FilledAt: filledAt},
+		}
+	}, "more shares than released")
 	if v.Boost.IsZero() {
 		t.Error("figures with a watched order are not empty")
 	}

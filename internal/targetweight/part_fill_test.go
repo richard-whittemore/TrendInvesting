@@ -391,6 +391,44 @@ func TestARunRecoveredReadsAFillRecordedAfterItsDecisionOnce(t *testing.T) {
 	}
 }
 
+// TestARunRecoveredWatchingASellSizesLaterSellsNetOfIt: the earlier run's
+// session-20 decision released Boost's exit, a sell of 17, which is still
+// working, unfilled, when the run restarts from that decision. The
+// restarted run restores it as a working sell (ADR 0026, point 5; ADR 0019,
+// amended 2026-10-15, every sale sized "net of every working sell"), so when
+// the margin alarm turns urgent at session 21, the sale back to 98% nets the
+// exit's 17 shares and sells what the full run sells, not those shares
+// again.
+func TestARunRecoveredWatchingASellSizesLaterSellsNetOfIt(t *testing.T) {
+	hold := map[int]bool{21: true}
+	urgent := map[int]func(*event.BrokerSnapshotPayload){21: func(b *event.BrokerSnapshotPayload) {
+		b.NetLiquidation *= 0.8
+		b.ExcessLiquidity = 0.1 * b.NetLiquidation
+	}}
+	full := simulate(t, options{brokers: true, hold: hold, brokerMutate: urgent})
+	exit := releasedBy(t, full.decisions, 20)
+	if len(exit) != 1 || exit[0].Side != event.OrderSideSell {
+		t.Fatalf("session 20 releases %+v, want the exit", exit)
+	}
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[20]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	if w := p.Boost.Watched; w.Side != event.OrderSideSell || w.ClientOrderID != exit[0].ClientOrderID || w.Status != "" {
+		t.Fatalf("session 20 records the watched order %+v, want the exit still working", w)
+	}
+	// The earlier run's broker snapshots, the urgent one included, are fed
+	// as recorded.
+	r := simulate(t, options{brokers: true, recovery: &recovery, snapshots: full.inputs, hold: hold,
+		working: map[int][]event.OrderReleasedPayload{21: exit}})
+	got, want := sales(t, r.decisions), sales(t, full.decisions)
+	if len(want) != 1 || want[0].Sale.WorkingSells != exit[0].Quantity {
+		t.Fatalf("the full run's sale back to 98%%: %+v, want one netting the exit's %d shares", want, exit[0].Quantity)
+	}
+	if len(got) != 1 || got[0].Quantity != want[0].Quantity || got[0].Sale != want[0].Sale {
+		t.Errorf("the recovered run's sale back to 98%%: %+v, want the full run's %+v", got, want)
+	}
+}
+
 // TestARecoveryKeepsAnOrderReleasedBeforeIt: a broker snapshot read before
 // the recovered decision turns the margin alarm urgent, and the sale back to
 // 98% is released. The recovered decision adds its watched order to the
@@ -437,6 +475,34 @@ func TestARunRecoveredFromARefusedRejectionReplanStillBoundsIt(t *testing.T) {
 	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[1]
 	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reject: opts.reject})
 	assertRejectedTwiceIsWithheld(t, r)
+}
+
+// TestARejectionsBoundEndsWhenTheTargetChanges: the first purchase fills 30
+// of 39 shares, the venue rejects its re-plan, and the kill switch refuses
+// the rejection's one re-plan at every session until Boost's entry at
+// session 16 changes the target to 147%. The order
+// to the new target is a new order with its own one re-plan, not the
+// rejection's (ADR 0026, point 2, "Boost", amended 2026-10-18: the account
+// waits off its target "until the target changes"), so when the venue
+// rejects it, session 17 re-plans it once, cause rejected, and nothing is
+// withheld.
+func TestARejectionsBoundEndsWhenTheTargetChanges(t *testing.T) {
+	r := simulate(t, options{partFill: map[int]int64{1: 30}, reject: map[int]bool{2: true, 17: true}, kill: map[int]bool{2: true, 16: false}})
+	if d := targets(t, r.decisions)[15]; !d.Boost.ReplanPending || d.Boost.Replan.Cause != event.ReplanCauseRejected {
+		t.Fatalf("session 15: pending %v re-plan %+v, want the rejection's one re-plan still refused", d.Boost.ReplanPending, d.Boost.Replan)
+	}
+	entry := releasedBy(t, r.decisions, 16)
+	if len(entry) != 1 || entry[0].Side != event.OrderSideBuy {
+		t.Fatalf("session 16 releases %+v, want the entry once the switch is off", entry)
+	}
+	d := targets(t, r.decisions)[17]
+	want := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: entry[0].ClientOrderID, Released: entry[0].Quantity}
+	if d.Boost.Replan != want || d.Boost.ReplanWithheld != (event.BoostReplan{}) {
+		t.Errorf("session 17: re-plan %+v withheld %+v, want %+v re-planned and nothing withheld", d.Boost.Replan, d.Boost.ReplanWithheld, want)
+	}
+	if got := releasedBy(t, r.decisions, 17); len(got) != 1 || got[0].Side != event.OrderSideBuy {
+		t.Errorf("session 17 releases %+v, want the entry's one re-plan", got)
+	}
 }
 
 // assertRejectedTwiceIsWithheld checks that the order released at session 2

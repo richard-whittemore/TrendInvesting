@@ -672,6 +672,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	}
 	decisionID, decided := b.targets(figures, "", "")
 	at := len(b.out) - 1
+	sameTarget := h.inForceSet && h.inForce == decided.Targets[0].Weight
 	h.inForce, h.inForceSet = decided.Targets[0].Weight, true
 	h.gate.RecordDecision(decisionID)
 
@@ -686,8 +687,12 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	})
 	b.fail(err)
 	// A rejection's one re-plan is marked on the order it releases, so a
-	// second rejection withholds it (settleWatch).
-	afterRejection := h.replan && h.replanCause.Cause == event.ReplanCauseRejected
+	// second rejection withholds it (settleWatch). The bound holds only
+	// while the target is unchanged: an order to a new target is a new
+	// order, with its own one re-plan, as the account waits off its target
+	// only "until the target changes" (ADR 0026, point 2, "Boost", amended
+	// 2026-10-18).
+	afterRejection := h.replan && h.replanCause.Cause == event.ReplanCauseRejected && sameTarget
 	rejection := h.replanCause
 	h.replan, h.replanCause = false, event.BoostReplan{}
 	// A watched order that has ended is settled by this decision, which

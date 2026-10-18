@@ -1,6 +1,7 @@
 package risklimit_test
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 	"time"
@@ -1033,6 +1034,8 @@ func TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart(t *testing.T)
 		}()},
 		"an invalid one":    {restoredFill("", 1, -1)},
 		"one fill id twice": {restoredFill("f0", 1, -1), restoredFill("f0", 2, -1)},
+		// MaxInt64 + MaxInt64 + 3 wraps to 1, fewer than 39.
+		"fills overflowing their sum": {restoredFill("f0", math.MaxInt64, -1), restoredFill("f1", math.MaxInt64, -1), restoredFill("f2", 3, -1)},
 	} {
 		g := gate(t, limits(), event.TradingModeDryRun)
 		if err := g.RestoreReleased(o, fills, time.Time{}); err == nil {
@@ -1111,4 +1114,30 @@ func TestARestoredSellIsNettedAsAWorkingSell(t *testing.T) {
 	pendingIs(t, ended, 34, "an account snapshot before the restored sell ended")
 	ended.ObserveAccount(account(127, -1))
 	pendingIs(t, ended, 0, "an account snapshot after it ended")
+}
+
+// TestARestoredSellListedBeforeItsRestoreIsCountedOnce: a broker snapshot
+// read before the restore lists the earlier run's working sell, which the
+// gate does not yet know, so it is filed as an unknown sell. The restore
+// takes that listing onto the restored sell, matched by its client order ID
+// and instrument as a listing of a sell this run released is, so the sell
+// is counted once (the pending rule's invariant "Unknown sells are counted
+// once"; ADR 0019, amended 2026-10-15): 54 released, 20 executed, so 34
+// still to sell, not 68. A hand sell listed beside it stays unknown.
+func TestARestoredSellListedBeforeItsRestoreIsCountedOnce(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", later(broker(127, listed("tw-old", event.BrokerOrderWorking, 34)), -5))
+	if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	g.ObserveAccount(account(127, -1))
+	pendingIs(t, g, 34, "the restored sell, listed before its restore")
+
+	withHand := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, withHand, "broker:1", later(broker(127, hand(5), listed("tw-old", event.BrokerOrderWorking, 34)), -5))
+	if err := withHand.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	withHand.ObserveAccount(account(127, -1))
+	pendingIs(t, withHand, 39, "the restored sell's 34 and the hand sell's 5")
 }

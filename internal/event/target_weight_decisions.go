@@ -836,6 +836,7 @@ func (w BoostWatchedOrder) validate() []error {
 		errs = append(errs, errors.New("a watched boost order's ended_at cannot be written as RFC 3339"))
 	}
 	var sum int64
+	overflow := false
 	seen := map[string]bool{}
 	for _, f := range w.Fills {
 		switch {
@@ -855,9 +856,19 @@ func (w BoostWatchedOrder) validate() []error {
 			errs = append(errs, fmt.Errorf("a watched boost order's fill %s has a finite commission, not negative", f.FillID))
 		}
 		errs = append(errs, wholeSecondTime("a watched boost order's fill "+f.FillID+" filled at", f.FilledAt)...)
-		sum += f.Quantity
+		// Each fill is checked against the shares released before it is
+		// added, so the sum stays within them and can never wrap (fail
+		// closed, AGENTS.md).
+		switch {
+		case f.Quantity <= 0:
+		case f.Quantity > max(w.Released, 0)-sum:
+			errs = append(errs, fmt.Errorf("a watched boost order's fills come to more shares than released, %d", w.Released))
+			overflow = true
+		default:
+			sum += f.Quantity
+		}
 	}
-	if sum != w.Filled {
+	if !overflow && sum != w.Filled {
 		errs = append(errs, fmt.Errorf("a watched boost order's fills sum to %d shares; it records %d filled", sum, w.Filled))
 	}
 	return errs

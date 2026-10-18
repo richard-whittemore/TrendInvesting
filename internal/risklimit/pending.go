@@ -160,13 +160,20 @@ type sellLedger struct {
 	openOrders []view
 	// unknown holds each unknown sell's listings, by instrument and broker
 	// order ID, in time order.
-	unknown map[string]map[string][]stamped
+	unknown map[string]map[string]*unknownSell
+}
+
+// unknownSell is a sell the broker lists that the gate did not release: the
+// client order ID it was listed with, and its listings.
+type unknownSell struct {
+	client   string
+	listings []stamped
 }
 
 func newSellLedger() sellLedger {
 	return sellLedger{
 		sells: map[string]*ledgerSell{}, byInstrument: map[string][]*ledgerSell{},
-		held: map[int]map[string]int64{}, unknown: map[string]map[string][]stamped{},
+		held: map[int]map[string]int64{}, unknown: map[string]map[string]*unknownSell{},
 	}
 }
 
@@ -179,9 +186,19 @@ func (l *sellLedger) release(client, instrumentID string, quantity int64) {
 
 // restore records a sell an earlier run released, before every snapshot
 // this run records, so no reference of this run is taken before it: first in
-// release order.
+// release order. A broker snapshot recorded before the restore may already
+// list it, as an unknown sell: each such listing, matched by its client
+// order ID and instrument as listOpenOrders matches a released sell's, is
+// taken onto the restored sell, so it is counted once (the invariant
+// "Unknown sells are counted once" above).
 func (l *sellLedger) restore(client, instrumentID string, quantity int64) *ledgerSell {
 	s := &ledgerSell{instrumentID: instrumentID, released: quantity}
+	for id, u := range l.unknown[instrumentID] {
+		if u.client == client {
+			s.listings = append(s.listings, u.listings...)
+			delete(l.unknown[instrumentID], id)
+		}
+	}
 	l.sells[client] = s
 	l.byInstrument[instrumentID] = append([]*ledgerSell{s}, l.byInstrument[instrumentID]...)
 	return s
@@ -222,10 +239,16 @@ func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 		}
 		byID := l.unknown[o.InstrumentID]
 		if byID == nil {
-			byID = map[string][]stamped{}
+			byID = map[string]*unknownSell{}
 			l.unknown[o.InstrumentID] = byID
 		}
-		byID[o.BrokerOrderID] = append(byID[o.BrokerOrderID], listing)
+		u := byID[o.BrokerOrderID]
+		if u == nil {
+			u = &unknownSell{}
+			byID[o.BrokerOrderID] = u
+		}
+		u.client = o.ClientOrderID
+		u.listings = append(u.listings, listing)
 	}
 }
 
@@ -281,7 +304,8 @@ func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bo
 			break
 		}
 	}
-	for _, listings := range l.unknown[instrumentID] {
+	for _, u := range l.unknown[instrumentID] {
+		listings := u.listings
 		// Broker snapshots follow one another, so the listings credited to v
 		// come first.
 		credited := len(listings)
@@ -502,11 +526,13 @@ func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.Targe
 		if _, applied := g.fills[f.FillID]; applied {
 			return fmt.Errorf("risklimit: restored fill id %s is already applied to another order", f.FillID)
 		}
+		// Checked against the shares released before it is added, so the
+		// sum stays below them and can never wrap (fail closed, AGENTS.md).
+		if f.Quantity >= o.Quantity-filled {
+			return fmt.Errorf("risklimit: restored order %s has %d shares filled before fill %s of %d; a watched order has fewer filled than its %d released", o.ClientOrderID, filled, f.FillID, f.Quantity, o.Quantity)
+		}
 		seen[f.FillID] = true
 		filled += f.Quantity
-	}
-	if filled >= o.Quantity {
-		return fmt.Errorf("risklimit: restored order %s has %d of %d shares filled; a watched order has fewer filled than released", o.ClientOrderID, filled, o.Quantity)
 	}
 	g.released[o.ClientOrderID] = true
 	g.orders[o.ClientOrderID] = &releasedOrder{
