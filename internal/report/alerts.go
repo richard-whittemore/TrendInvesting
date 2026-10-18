@@ -51,6 +51,19 @@ const (
 	// engine did not read: it does not validate, or does not describe the
 	// order it names as released. It acknowledges nothing.
 	KindVenueReportUnread Kind = "venue-report-unread"
+	// KindMarginAlarm is a change of the joint account's margin-cushion
+	// alarm level (plan.md section 5, "A margin-cushion alarm").
+	KindMarginAlarm Kind = "margin-alarm"
+	// KindSaleSent, KindSaleFilled and KindSaleFailed are the steps of a sale
+	// back to 98% the owner is told of (plan.md, decision D6): released to be
+	// sent, each execution, and the venue ending it unfilled.
+	KindSaleSent   Kind = "sale-sent"
+	KindSaleFilled Kind = "sale-filled"
+	KindSaleFailed Kind = "sale-failed"
+	// KindSaleByHand is a sale back to 98% withheld for a reason that counts
+	// as the attempt, which the owner makes by hand (ADR 0019, amended
+	// 2026-10-15, "No order when it cannot be checked").
+	KindSaleByHand Kind = "sale-by-hand"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
@@ -141,6 +154,7 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	// flagged holds each refusal reason the gate is proven to flag: a record
 	// of that reason earlier in the journal carried the flag.
 	flagged := map[string]bool{}
+	pending := sales{}
 	for _, e := range envelopes {
 		switch e.Type {
 		case event.OperatorRunApprovedEventType:
@@ -193,6 +207,53 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			if p.Alert {
 				flagged[event.RefusedStaleBrokerSnapshot] = true
 				out = append(out, staleSaleAlert(account, e, p))
+			}
+			if a, ok := byHandAlert(account, e, p); ok {
+				out = append(out, a)
+			}
+		case event.MarginAlarmEventType:
+			var p event.MarginAlarmPayload
+			if err := read(e, marginAlarmVersions, &p); err != nil {
+				return nil, err
+			}
+			out = append(out, marginAlarmAlert(account, e, p))
+		case event.OrderPlannedEventType:
+			// A plan is a decision, and the one that names a sale back to
+			// 98%: one that does not read would silence that sale's sent,
+			// filled and failed alerts, so it is an error, never skipped,
+			// and the reporter pages that it cannot read the journal (ADR
+			// 0019, "Alerting").
+			var p event.OrderPlannedPayload
+			if err := read(e, plannedVersions, &p); err != nil {
+				return nil, err
+			}
+			pending.plan(p)
+		case event.OrderReleasedEventType:
+			var p event.OrderReleasedPayload
+			if err := read(e, releasedVersions, &p); err != nil {
+				return nil, err
+			}
+			if a, ok := pending.release(account, e, p); ok {
+				out = append(out, a)
+			}
+		case event.FillEventType:
+			// A venue's report is an input the log keeps even when the
+			// engine refused it, so one that does not read raises no sale
+			// alert; the order's other alerts are unaffected.
+			var p event.TargetWeightFillPayload
+			if e.SchemaVersion != event.FillTargetWeightVersion || read(e, targetWeightFillVersions, &p) != nil {
+				continue
+			}
+			if a, ok := pending.fill(account, e, p); ok {
+				out = append(out, a)
+			}
+		case event.OrderLifecycleEventType:
+			var p event.LimitOrderLifecyclePayload
+			if e.SchemaVersion != event.OrderLifecycleLimitVersion || read(e, lifecycleVersions, &p) != nil {
+				continue
+			}
+			if a, ok := pending.lifecycle(account, e, p); ok {
+				out = append(out, a)
 			}
 		case event.EngineStateEventType:
 			var p event.EngineStatePayload

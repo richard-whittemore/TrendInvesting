@@ -42,9 +42,9 @@ rather than keep their own. As of `main` on 2026-10-18:
 | Daily data job | Boost's stream, installed with its timer | A job for the IRAs |
 | IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, all against a stand-in gateway | The paper-account test against IBKR, run by hand; delivering the data files; a real server run with `ibapi` installed |
 | Morning reconciliation | The engine's comparison, states and alert | The adapter's read delivered to the engine; the checks at startup, after fills and before orders; open orders; the joint account's cash; any command to record a missed event |
-| Reporter and dashboard | Both programs | Installed on the server with working settings; alerts for the margin alarm and the sale back to 98%; Boost fills and lapsed sales in the daily summary; the outside heartbeat |
-| Operator tool and journal-query | Both programs | Installed on the server; the engine's operator inbox in its service file |
-| Server | Provisioning, the Gateway unit, the firewall, pinned downloads | Backups; a real server run; the reporter's secrets where its unit reads them |
+| Reporter and dashboard | Both programs, installed on the server; the reporter checks every 5 minutes, around the clock | The outside heartbeat |
+| Operator tool and journal-query | Both programs, installed on the server | The engine's operator inbox in its service file |
+| Server | Provisioning, the Gateway unit, the firewall, pinned downloads | Backups; a real server run |
 | Day-trade counter for the joint account | — | Counted by hand ([margin warning](../runbooks/margin-warning.md)) |
 
 **Current versions** (each chapter's "since version x" is history; these
@@ -103,7 +103,7 @@ are what this build runs):
      positions and cash against the engine's book.
 6. **Telling you, and your controls.**
    - [alerts-and-dashboard](alerts-and-dashboard.md): the reporter's alerts
-     and daily summary, the dashboard, and the alerts not yet sent.
+     and daily summary, and the dashboard.
    - [operator](operator.md): your kill switch, approval, clearance and
      acknowledgement.
    - [journal-query](journal-query.md): asking a run's log what happened.

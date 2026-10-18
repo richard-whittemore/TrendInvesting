@@ -277,6 +277,26 @@ CONF
   else
     log "no $data_job: the data step is not installed (deploy/build-data.sh builds it)"
   fi
+  # The reporter, the dashboard and the owner's two tools, built for the
+  # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
+  # and copied to dist/ beside deploy/. A missing one is named here, and its
+  # unit fails when it runs, so the gap is seen. The owner runs the tools as
+  # `sudo -u ti-trader operator ...` and `sudo -u ti-trader journal-query ...`:
+  # sudo's PATH includes /usr/local/bin, where each is linked.
+  local dist=${TI_DIST:-$here/../dist} b
+  for b in ti-reporter ti-dashboard operator journal-query; do
+    if test -f "$dist/$b"; then
+      install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
+      log "installed $b from $dist"
+    else
+      log "no $dist/$b: $b is not installed (deploy/build-engine.sh builds it)"
+    fi
+  done
+  for b in operator journal-query; do
+    if test -x "/opt/trend-investing/bin/$b"; then
+      ln -sfn "/opt/trend-investing/bin/$b" "/usr/local/bin/$b"
+    fi
+  done
   write_stub "$etc/ibkr-login.env" "$here/etc/ibkr-login.env.example"
   write_stub "$etc/secrets.env" "$here/etc/secrets.env.example"
   # Each adapter's account number in a file of its own, handed only to that
@@ -300,10 +320,43 @@ CONF
   fi
 
   log "systemd units"
+  # The reporter is one instance per account (ti-reporter@<account>); an
+  # earlier provisioner's single unit and its timer link are removed. It is
+  # stopped and disabled first: systemd keeps a running unit loaded after its
+  # file is gone, firing a service that no longer exists.
+  if test "$rehearsal" != 1; then
+    # Stopped when active even if its file is already gone (the unit stays
+    # loaded); disabled only while its file exists. The test sits in an if,
+    # so its failure does not trip set -e.
+    if systemctl is-active --quiet ti-reporter.timer; then systemctl stop ti-reporter.timer; fi
+    # A oneshot still starting is "activating", which is-active does not
+    # report as active, so the service is stopped unconditionally; stopping a
+    # unit that is not loaded fails, which must not trip set -e.
+    systemctl stop ti-reporter.service || true
+    if test -e /etc/systemd/system/ti-reporter.timer; then
+      systemctl disable ti-reporter.timer
+    fi
+  fi
+  rm -f /etc/systemd/system/ti-reporter.service /etc/systemd/system/ti-reporter.timer \
+    /etc/systemd/system/timers.target.wants/ti-reporter.timer
   install -m 0644 "$here"/systemd/*.service "$here"/systemd/*.timer /etc/systemd/system/
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
-    systemctl enable ti-gateway.service ti-data.timer ti-reporter.timer ti-dashboard.service
+    # The Boost account's reporter only: the IRA engines have no
+    # configuration yet, and an enabled IRA reporter would fail every firing.
+    # `enable` only links them for the next boot, so the timers and the
+    # dashboard are started now too: on a server that is not rebooted the
+    # reporter, the owner's one eye on the engine, would otherwise never fire
+    # (ADR 0019, "Alerting"). The dashboard is restarted, so it runs the
+    # build just installed; the reporter picks a new build up at its next
+    # firing. Until the Boost engine's run.env exists the dashboard fails,
+    # naming it, and restarts by itself; that is logged here, not fatal.
+    systemctl enable ti-gateway.service
+    systemctl enable --now ti-data.timer ti-reporter@boost.timer
+    systemctl enable ti-dashboard.service
+    if ! systemctl restart ti-dashboard.service; then
+      log "ti-dashboard did not start (see journalctl -u ti-dashboard); it fails until the Boost engine has run once"
+    fi
     # Engines are not enabled: every engine start is the owner's explicit step
     # (docs/runbooks/durable-log.md, "Restarting an engine"), so a reboot
     # leaves them stopped. An earlier provisioner enabled them, and those
@@ -313,11 +366,11 @@ CONF
     # The adapter is started by the owner too, after its engine; never enabled.
     systemctl disable ti-adapter-boost.service
     # The gateway starts only once the owner has filled
-    # the login file; the unit's own check refuses an empty one. The
-    # reporter and dashboard are skipped (a unit condition) until their
-    # binaries are installed. The data step fails, with a message, until its
-    # file is installed and the Boost engine's run.env exists.
-    log "enabled; start with: systemctl start ti-gateway (after the owner enters the IBKR login)"
+    # the login file; the unit's own check refuses an empty one. The data
+    # step, the reporter and the dashboard fail, each with a message, until
+    # their files are installed and the Boost engine's run.env exists; the
+    # reporter also until secrets.env holds its channel secrets.
+    log "enabled; started ti-data.timer, ti-reporter@boost.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
   fi
 }
 

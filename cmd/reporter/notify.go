@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -50,6 +51,38 @@ func publicNtfy(server string) (bool, error) {
 }
 
 const defaultPagerDutyURL = "https://events.pagerduty.com/v2/enqueue"
+
+// withSecretsFile returns a lookup that answers from getenv, and, for a name
+// the environment leaves empty, from the KEY=VALUE lines of the secrets file
+// at path: under systemd the secrets arrive as a credential file
+// (LoadCredential), never in the environment (deploy/etc/secrets.env.example).
+// Blank lines and # comments are skipped and values are trimmed. A file that
+// cannot be read, or a line that is not KEY=VALUE, is an error that names
+// the line's number and never its text, which may be a secret.
+func withSecretsFile(getenv func(string) string, path string) (func(string) string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.New("reporter: the secrets file cannot be read; check -secrets-file names the credential file")
+	}
+	values := map[string]string{}
+	for n, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("reporter: the secrets file's line %d is not KEY=VALUE", n+1)
+		}
+		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return func(key string) string {
+		if v := getenv(key); v != "" {
+			return v
+		}
+		return values[key]
+	}, nil
+}
 
 func buildSenders(channels string, getenv func(string) string, client *http.Client, out io.Writer) ([]sender, error) {
 	var senders []sender
@@ -106,9 +139,10 @@ func channelKey(channel, alertKey string) string { return channel + "|" + alertK
 // while any channel still lacks it and never counts. The daily summary skips
 // a channel on a public relay, and is an error when no other delivery channel
 // was named. Each repeat a channel takes is counted in repeats, so the
-// channel can tell a repeat from the first delivery. The error joins every
-// channel failure.
-func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration) error {
+// channel can tell a repeat from the first delivery. After each success,
+// record saves the state, so a run stopped midway has saved every delivery
+// it made. The error joins every channel failure and every failed save.
+func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration, record func() error) error {
 	var pending []sender
 	private := false
 	for _, s := range senders {
@@ -155,6 +189,9 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 		}
 		if repeat > 0 {
 			repeats[key] = repeat
+		}
+		if err := record(); err != nil {
+			failures = append(failures, err)
 		}
 	}
 	return errors.Join(failures...)

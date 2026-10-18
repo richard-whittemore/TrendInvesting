@@ -15,17 +15,15 @@ go wrong. The rules come from ADR 0019 (amended 2026-09-24, 2026-10-15,
 
 What is built today: the gate, the states, the kill switch input, the
 margin-cushion alarm and the sale, all recorded in the journal and replayed
-byte for byte, and the way you switch the kill switch on and off,
-`operator kill-switch` ([operator](operator.md)), which is not yet installed
-on the server ([server](server.md), "Reading the logs without the tools on the
-server"). The reporter alerts
-you when a state changes, and repeats the alert until you acknowledge it
-([alerts-and-dashboard](alerts-and-dashboard.md)). **Not built yet:** the
-reporter is not yet installed or set up on the server, and it sends no alert
-for the margin-cushion alarm or for the sale back to 98% being sent, filled,
-failed or withheld for you to act by hand
-([alerts-and-dashboard](alerts-and-dashboard.md), "Alerts the reporter does
-not send"). Until it does, check those with `journal-query`.
+byte for byte, and the way you switch the kill switch on and off from the
+server: `operator kill-switch` ([operator](operator.md)). The reporter alerts
+you when a state changes, and repeats the alert until you acknowledge it. It
+also alerts each change of the margin alarm's level, each step of the sale
+back to 98% (sent, each fill, and IBKR ending it unfilled), and a withheld
+sale you must make by hand. On the server it checks every 5 minutes, around
+the clock, seven days a week, so these reach you within 5 minutes, overnight
+and at weekends too ([alerts-and-dashboard](alerts-and-dashboard.md), "When
+the reporter runs").
 
 ## The three states
 
@@ -243,8 +241,9 @@ What follows from the rule:
   listing that shows more remaining than the one before, and if fills
   between two listings outweigh the raise, so IBKR never lists more
   remaining than before, they are never counted. Do not sell by hand, or change a hand sale, while a sale
-  of the program's is working; if you must, engage the kill switch
-  first, which stops every new order but the sale back to 98%.
+  of the program's is working; if you must, first stop new orders as the
+  failed-sale bullet below says (the kill switch where it exists, otherwise
+  the engine), and cancel the working sale in IBKR's app.
 
 The exit and the broker-holding check use this same rule, so a sell still
 working is never sold again, and a sell that was cancelled stops holding the
@@ -271,9 +270,9 @@ alarm.
   (`nothing-to-sell`).
 
 In the first two cases the sale counts as attempted and is never tried again
-automatically: you act by hand, and a later automatic sale could duplicate
-yours. **Not built yet:** no alert tells you so; the withhold is in the log
-(`journal-query refusals`, event `sale-withheld`). No IBKR snapshot recorded yet counts as
+automatically. The reporter's urgent "sale withheld, sell by hand" alert asks
+you to act by hand, and a later automatic
+sale could duplicate yours. No IBKR snapshot recorded yet counts as
 unreadable. In the other three nothing was attempted: the engine state does
 not change, and the sale is decided again at the next IBKR snapshot that is
 readable and positive, while what fired it is still in force:
@@ -288,8 +287,8 @@ readable and positive, while what fired it is still in force:
 Otherwise the withheld sale lapses, its attempt unspent, and the program
 records one more `risk.sale.withheld`, with reason `lapsed`, so the journal
 shows it will not be decided again. A lapse is meant for the daily summary,
-not an urgent alert, since what needed the sale has ended. **Not built
-yet:** the summary does not show lapses; `journal-query refusals` does. Boost's exit and the alarm
+not an urgent alert, since what needed the sale has ended. The daily summary
+lists lapses; `journal-query refusals` does too. Boost's exit and the alarm
 can fire the same sale, under the same incident or engagement. Once either
 of them plans it, it is not tried again for the other and never recorded as
 lapsed; withheld for both, it lapses once, when neither is still in force. The incident or the
@@ -383,7 +382,8 @@ the dashboard read every version. See [journal-query](journal-query.md).
 - **The broker snapshot is missing or unreadable.** Degraded sells are refused
   and the sale back to 98% is withheld. Nothing is guessed. If the withhold is
   `broker-values-unreadable`, the program will not try again: sell back to
-  98% by hand at IBKR if the sale is still needed (no alert tells you yet).
+  98% by hand at IBKR if the sale is still needed; the reporter sends an
+  urgent "sell by hand" alert for it.
 - **The broker snapshot is old.** The sale is withheld and other sells are
   refused, with no state change and one urgent alert per stale episode; the
   next fresh snapshot ends the episode and decides again.
@@ -396,11 +396,18 @@ the dashboard read every version. See [journal-query](journal-query.md).
 - **You sold by hand after a withheld sale.** The program never repeats the
   attempt in that incident, so it cannot sell a second time.
 - **The sale fills only partly, or IBKR rejects it.** It is not retried. The
-  account stays in its state until you recover. Check the account at IBKR;
-  if it is still above 98%, engage the kill switch (it does not cancel orders
-  already at IBKR), cancel any remaining sale in IBKR, and confirm that no
-  `working`, `pending` or `cancel-pending` sell remains before selling the rest
-  by hand (`docs/runbooks/margin-warning.md`).
+  account stays in its state until you recover. The reporter sends an urgent
+  "sale back to 98% failed" alert saying how many shares filled. Check the
+  account at IBKR; if it is still above 98%, stop the program from sending
+  anything new. Where the operator tool and its inbox exist and the engine was
+  started with `-operator`, engage the kill switch (`operator kill-switch
+  -state engaged`, [operator](operator.md)). Until then there is no recorded
+  kill switch on the server, so stop the engine instead:
+  `sudo systemctl stop ti-engine@<account>` ([server](server.md), "Reading the
+  logs and the kill switch on the server"). Neither stops orders already at
+  IBKR. Then cancel any remaining sale in IBKR's app, confirm that no
+  `working`, `pending` or `cancel-pending` sell remains, and only then sell
+  the rest by hand (`docs/runbooks/margin-warning.md`).
 - **The kill switch is on and the margin alarm turns urgent.** The sale still
   goes. That is intended: the switch never keeps you borrowed.
 - **You release the kill switch after it refused a Boost order.** Nothing

@@ -240,6 +240,9 @@ func TestEverySystemctlArgumentIsAUnit(t *testing.T) {
 			continue
 		}
 		for _, f := range fields[2:] {
+			if f == "||" || f == "&&" || f == ";" {
+				break // the shell's own operator ends the command's arguments
+			}
 			if strings.HasPrefix(f, "-") || strings.HasSuffix(f, ".service") || strings.HasSuffix(f, ".timer") || systemDaemons[f] {
 				continue
 			}

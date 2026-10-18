@@ -3,7 +3,7 @@ export GOTOOLCHAIN := local
 COVERAGE_MIN ?= 80.0
 COVERAGE_PROFILE ?= coverage.out
 
-.PHONY: adapter-test build check coverage demo-boost-dry-run deps engine fmt fmt-check golangci lint research-test staticcheck test vet vuln
+.PHONY: adapter-test build check coverage deploy-test demo-boost-dry-run deps engine fmt fmt-check golangci lint research-test staticcheck test vet vuln
 
 # The build stamp: every envelope's strategy version carries it (ADR 0016),
 # and cmd/engine refuses -mode dry-run, paper or live on an unstamped build
@@ -117,4 +117,8 @@ research-test:
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py
 	cd research/futures-local && python3 -m unittest discover -s . -p "test_*.py"
 
-check: deps lint coverage vuln build adapter-test research-test
+# Shell tests for the deploy rehearsal (no Docker needed).
+deploy-test:
+	./deploy/rehearsal/test-platform.sh
+
+check: deps lint coverage vuln build adapter-test research-test deploy-test

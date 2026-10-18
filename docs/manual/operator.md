@@ -211,8 +211,10 @@ also raises the urgent "venue report not read" alert.
 ## Acknowledging an alert
 
 A Degraded, Halted or reconciliation alert is sent again every
-`-repeat-interval` until you acknowledge it ([alerts](alerts-and-dashboard.md),
-"Repeated until you acknowledge it"). Its text ends with `acknowledge with
+`-repeat-interval` (30 minutes on the server), around the clock, overnight
+and at weekends included, until you acknowledge it
+([alerts](alerts-and-dashboard.md), "Repeated until you acknowledge it" and
+"When the reporter runs"). Its text ends with `acknowledge with
 alert key: <key>`. Copy that key, exactly, into:
 
 ```
@@ -409,8 +411,7 @@ on either channel); `TestAnAlertAcknowledgementIsDeliveredAndJournalled`
 ## Not built yet
 
 The IBKR adapter, which will carry the engine's inputs and follow its
-numbering; the inbox in the server's service file and provisioner, and the
-tool installed on the server beside the engine; the momentum engines in the
+numbering; the inbox in the server's service file and provisioner; the momentum engines in the
 running program; a day-trade
 counter for the margin account (counted by hand for now: see the
 [margin-warning runbook](../runbooks/margin-warning.md)).

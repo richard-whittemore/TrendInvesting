@@ -59,10 +59,23 @@ func (o OrderLine) StatusText() string {
 
 // FillLine is one execution.fill record.
 type FillLine struct {
-	At           time.Time
-	InstrumentID string
-	Quantity     int64
-	Price        float64
+	At            time.Time
+	InstrumentID  string
+	Side          string
+	ClientOrderID string
+	Quantity      int64
+	Price         float64
+}
+
+// SaleWithheldLine is one risk.sale.withheld record: a sale back to 98% of
+// net liquidation that fired and was not planned, and why.
+type SaleWithheldLine struct {
+	At            time.Time
+	ClientOrderID string
+	InstrumentID  string
+	Trigger       string
+	Reason        string
+	Detail        string
 }
 
 // Equity compares the account's net liquidation with the benchmark's close
@@ -102,6 +115,7 @@ type Summary struct {
 	Orders         []OrderLine
 	Refusals       int
 	Fills          []FillLine
+	SalesWithheld  []SaleWithheldLine
 	EngineState    string
 	Equity         Equity
 	// RejectedInputs counts the inputs the summary would have read (bars,
@@ -112,14 +126,16 @@ type Summary struct {
 
 // Summarize builds the account's summary for the UTC date from the journal's
 // envelopes, in recording order. Holdings, engine state and equity are as of
-// the end of that date; decisions, orders and fills are those of the date.
+// the end of that date; decisions, orders, fills and withheld sales back to
+// 98% (a lapse among them, which goes here rather than in an urgent alert:
+// ADR 0019, amendment of 2026-10-17, reading 1) are those of the date.
 // Events after the date are ignored, so a past day's summary does not change
 // when the journal grows.
 //
 // A journal keeps the inputs the engine refused, so an input that does not
 // read or validate is skipped and counted in RejectedInputs: refusing the
 // whole report for it would silence every later alert. A decision the
-// engine recorded (targets, orders, engine state) that does not read or
+// engine recorded (targets, orders, engine state, withheld sales) that does not read or
 // validate refuses the summary, as journalquery does.
 func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, error) {
 	end, err := time.Parse(time.DateOnly, date)
@@ -213,12 +229,22 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 			if !today {
 				continue
 			}
-			var p event.FillPayload
-			if read(e, fillVersions, &p) != nil {
+			line, err := readFill(e)
+			if err != nil {
 				s.RejectedInputs++
 				continue
 			}
-			s.Fills = append(s.Fills, FillLine{At: p.FilledAt, InstrumentID: p.InstrumentID, Quantity: p.Quantity, Price: p.Price})
+			s.Fills = append(s.Fills, line)
+		case event.SaleWithheldEventType:
+			if !today {
+				continue
+			}
+			var p event.SaleWithheldPayload
+			if err := read(e, saleWithheldVersions, &p); err != nil {
+				return Summary{}, err
+			}
+			s.SalesWithheld = append(s.SalesWithheld, SaleWithheldLine{At: e.EventTime, ClientOrderID: p.ClientOrderID,
+				InstrumentID: p.InstrumentID, Trigger: p.Trigger, Reason: p.Reason, Detail: p.Detail})
 		}
 	}
 	for d, net := range netBy {
@@ -229,6 +255,24 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
 	s.Equity = equityOf(points, date)
 	return s, nil
+}
+
+// readFill decodes a fill at either version this build reads: the Turtle
+// engine's (version 4) and the target-weight engines' (version 5, ADR 0026,
+// Consequences), each validated at its own version.
+func readFill(e event.Envelope) (FillLine, error) {
+	if e.SchemaVersion == event.FillTargetWeightVersion {
+		var p event.TargetWeightFillPayload
+		if err := read(e, targetWeightFillVersions, &p); err != nil {
+			return FillLine{}, err
+		}
+		return FillLine{At: p.FilledAt, InstrumentID: p.InstrumentID, Side: p.Side, ClientOrderID: p.ClientOrderID, Quantity: p.Quantity, Price: p.Price}, nil
+	}
+	var p event.FillPayload
+	if err := read(e, fillVersions, &p); err != nil {
+		return FillLine{}, err
+	}
+	return FillLine{At: p.FilledAt, InstrumentID: p.InstrumentID, Quantity: p.Quantity, Price: p.Price}, nil
 }
 
 // readBar decodes a bar at either version this build reads and validates it

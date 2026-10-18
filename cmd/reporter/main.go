@@ -33,6 +33,13 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
+// The defaults of -repeat-interval and -ack-within, which the reporter's
+// timer is set against (deploy/systemd/ti-reporter@.timer).
+const (
+	defaultRepeatInterval = 30 * time.Minute
+	defaultAckWithin      = 10 * time.Minute
+)
+
 func main() {
 	if err := run(os.Args[1:], os.Getenv, time.Now, os.Stdout, http.DefaultClient); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -61,9 +68,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	sessions := flags.Int("heartbeat-sessions", 2, "NYSE sessions that may close with nothing written to the journal before a heartbeat alert fires (at least 2); weekends and holidays close none")
 	accountName := flags.String("account", "", "account name for alerts when the journal cannot name its own (default: the journal file's name)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
-	repeat := flags.Duration("repeat-interval", 30*time.Minute, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
-	ackWithin := flags.Duration("ack-within", 10*time.Minute, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
-	if err := flags.Parse(args); err != nil {
+	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
+	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets, read for any not set in the environment (under systemd: %d/secrets, the credential file)")
+	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
+	err := flags.Parse(args)
+	if err != nil {
 		return err
 	}
 	if *journalPath == "" || *statePath == "" {
@@ -86,6 +95,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// the state file.
 	bounded := *client
 	bounded.Timeout = *sendTimeout
+	if *secretsFile != "" {
+		if getenv, err = withSecretsFile(getenv, *secretsFile); err != nil {
+			return err
+		}
+	}
 	senders, err := buildSenders(*channels, getenv, &bounded, out)
 	if err != nil {
 		return err
@@ -143,9 +157,17 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 	}
 
+	// Each delivery is saved as soon as a channel takes it, so a run stopped
+	// before it ends (systemd stops one at its TimeoutStartSec) makes the
+	// next run send again at most the one alert on the one channel that had
+	// taken it but was not yet saved: delivery is at-least-once, PagerDuty
+	// folds the repeat by its key and ntfy posts it twice (ADR 0019,
+	// "Alerting"). The state is saved once more at the end, so the
+	// file exists after a run that delivered nothing.
 	at := now()
+	record := func() error { return saveState(*statePath, seen, sent, repeats) }
 	for _, a := range report.Fresh(alerts, nil) {
-		if err := deliver(senders, a, seen, sent, repeats, at, *repeat); err != nil {
+		if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
 		}
 	}

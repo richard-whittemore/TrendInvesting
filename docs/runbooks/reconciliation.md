@@ -127,10 +127,10 @@ that is why the approval is your attestation and must follow a real check.
    its journal. Keep the log and the journal: they are evidence, never
    edited or deleted (ADR 0018).
 4. **To leave the incident behind** (every difference explained), write the
-   approval clearing it by its ID. `operator` is not installed on the server
-   yet ([server](../manual/server.md), "Reading the logs without the tools
-   on the server"), so until it is, run it on the Mac against a copy of the
-   log (`scp` the stopped engine's log into a folder outside the repository
+   approval clearing it by its ID. `operator` is installed on the server
+   ([server](../manual/server.md), "Reading the logs and the kill switch on
+   the server"), and the steps below, which run it on the
+   Mac against a copy of the log, still work (`scp` the stopped engine's log into a folder outside the repository
    and iCloud, keeping the log's original file name, because the approval
    records that name and the engine checks it; run
    `go run ./cmd/operator approve -log <copy> ...` from the commit the server

@@ -1,0 +1,22 @@
+[Unit]
+Description=Run the reporter for account %i every 5 minutes, around the clock
+
+[Timer]
+# Every 5 minutes, around the clock, seven days a week (New York time). The
+# reporter checks only when it runs, so an alert that arises overnight or at
+# a weekend (a reconciliation at the nightly Gateway restart's reconnect, a
+# lost heartbeat) is sent within 5 minutes, a Degraded, Halted or
+# reconciliation alert repeats every -repeat-interval (30 minutes, a multiple
+# of 5) until acknowledged, overnight included, and an order IBKR has not
+# acknowledged within -ack-within (10 minutes) is reported at most 5 minutes
+# after that (ADR 0019, "Alerting"; docs/manual/alerts-and-dashboard.md,
+# "When the reporter runs"). Quiet hours, if the owner wants them, are the
+# owner's decision, recorded in that manual. cmd/reporter's unit test checks
+# these bounds against the reporter's defaults. Persistent: a firing missed
+# while the server was down runs at boot.
+OnCalendar=*:0/5 America/New_York
+Persistent=true
+Unit=ti-reporter@%i.service
+
+[Install]
+WantedBy=timers.target

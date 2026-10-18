@@ -31,6 +31,11 @@ func main() {
 	}
 }
 
+// defaultAddr is the dashboard's listen address: loopback, on the port the
+// server's unit passes and the Lightsail runbook publishes to the tailnet
+// with `tailscale serve` (deploy/systemd/ti-dashboard.service).
+const defaultAddr = "127.0.0.1:8088"
+
 type stringList []string
 
 func (l *stringList) String() string     { return strings.Join(*l, ",") }
@@ -41,7 +46,7 @@ func run(args []string, log io.Writer) error {
 	flags.SetOutput(log)
 	var journals stringList
 	flags.Var(&journals, "journal", "path to an account's journal; repeat for each account")
-	addr := flags.String("addr", "127.0.0.1:8088", "listen address: loopback or a Tailscale address")
+	addr := flags.String("addr", defaultAddr, "listen address: loopback or a Tailscale address")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -256,7 +261,8 @@ table{border-collapse:collapse}td,th{padding:.2rem .7rem;text-align:left;border-
 <h3>Targets</h3>{{if .Decisions}}<table>{{range .Decisions}}<tr><td>{{.Outcome}}</td><td>{{.WithheldReason}}</td><td>{{range .Targets}}{{.InstrumentID}} {{weight .Weight}} {{end}}</td></tr>{{end}}</table>{{else}}<p>No decision today.</p>{{end}}
 <h3>Orders</h3>{{if .Orders}}<table>{{range .Orders}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}} {{.Quantity}} {{.InstrumentID}} @ {{printf "%.2f" .LimitPrice}}</td><td>{{.StatusText}}</td><td>{{.Reason}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 <p>Refusals today: {{.Refusals}}</p>
-<h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.InstrumentID}}</td><td>{{.Quantity}} @ {{printf "%.2f" .Price}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
+<h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{.Quantity}} @ {{printf "%.2f" .Price}}</td><td>{{.ClientOrderID}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
+{{if .SalesWithheld}}<h3>Sales back to 98% withheld</h3><table>{{range .SalesWithheld}}<tr><td>{{.ClientOrderID}}</td><td>{{.InstrumentID}}</td><td>{{.Reason}}</td><td>{{.Trigger}}</td><td>{{.Detail}}</td></tr>{{end}}</table>{{end}}
 <h3>Equity against {{.Benchmark}}</h3>{{if .Equity.Available}}<p>{{.Equity.StartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>{{if .Equity.DayAvailable}}Day, {{.Equity.DayStartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.{{else}}Day: not available (no paired snapshot and {{.Benchmark}} close on {{.Date}}).{{end}}</p>{{else}}<p>Not enough paired snapshots and bars yet.</p>{{end}}
 {{if .RejectedInputs}}<p class="urgent">Inputs not read: {{.RejectedInputs}} (an unknown schema version or values that fail validation; they move no figure).</p>{{end}}{{end}}
 <h3>Alerts</h3>{{if .Alerts}}<table>{{range .Alerts}}<tr class="{{.Severity}}"><td>{{.At.UTC.Format "2006-01-02 15:04Z"}}</td><td>{{.Severity}}</td><td>{{.Title}}<p>{{.Body}}</p></td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}

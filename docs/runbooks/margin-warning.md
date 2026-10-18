@@ -8,29 +8,17 @@ liquidation from every broker snapshot (plan.md section 5; ADR 0026,
 point 6). Its thresholds are in the account's hashed configuration
 (`excess_liquidity_warning`, `excess_liquidity_urgent`,
 `excess_liquidity_stale_minutes`). Each change of level is recorded as a
-`risk.margin.alarm` decision.
-
-> **Not built yet: the reporter sends no alert for the margin alarm**,
-> warning or urgent, nor for the sale back to 98% being sent, filling or
-> failing ([alerts-and-dashboard](../manual/alerts-and-dashboard.md),
-> "Alerts the reporter does not send"; tracked with the reporter follow-up
-> on missing alerts). Until it does, nothing tells you the alarm moved, and
-> it can move while SPY is flat (a higher house-margin requirement, a net
-> liquidation of zero or less, or readings that are stale or missing). So
-> while the joint account holds a position, check at least twice each market
-> day (after the open and before the close): Excess Liquidity and net
-> liquidation in IBKR's app, and that the program's last reading is recent
-> (the time of the newest `account.broker.snapshot` record in the log; the
-> `risk.margin.alarm` record is written only when the level changes, so an
-> old one is expected while the level has not moved). Read the alarm's
-> records with `grep '"risk.margin.alarm"' <log>`. If you cannot
-> keep this check, do not run the joint account live until the alert exists.
+`risk.margin.alarm` decision and alerted: "margin cushion warning" and
+"margin cushion clear" as routine messages, "margin cushion urgent" as an
+urgent one, each with the reading and the thresholds
+([alerts-and-dashboard](../manual/alerts-and-dashboard.md); on the server the
+reporter checks every 5 minutes, around the clock, seven days a week).
 
 | Level | When | What the program does | What you do |
 | --- | --- | --- | --- |
-| **warning** | below the warning threshold (40%) | records it (no alert yet); orders as usual | check the position the same day (below) |
-| **urgent** | below the urgent threshold (20%), a net liquidation of zero or less, or no reading for the stale period while the market is open | records it (no alert yet), and sells back to 98% once per urgent alarm (ADR 0019, amended 2026-10-15; ADR 0026, point 4) | below |
-| **clear** | back above the warning threshold | records the clear | nothing |
+| **warning** | below the warning threshold (40%) | records and alerts; orders as usual | check the position the same day (below) |
+| **urgent** | below the urgent threshold (20%), a net liquidation of zero or less, or no reading for the stale period while the market is open | records, alerts, and sells back to 98% once per urgent alarm (ADR 0019, amended 2026-10-15; ADR 0026, point 4) | below |
+| **clear** | back above the warning threshold | records and alerts the clear | nothing |
 
 ## A warning
 
@@ -43,24 +31,32 @@ point 6). Its thresholds are in the account's hashed configuration
 3. **Decide.** At 147% under the standard 25% maintenance requirement the
    ratio is about 63%, so a warning means either a deep fall in SPY or a
    higher house requirement. If the requirement rose, the boost is riskier
-   than the backtest assumed: you may engage the kill switch to stop the
-   next boost buy (`sudo -u ti-trader operator kill-switch ... -state engaged`), which still
-   lets the sale back to 98% go. Selling by hand is your call; if you do,
-   engage the kill switch first, so the program sends nothing new while your
-   order works.
+   than the backtest assumed: where the operator inbox exists and the engine
+   was started with `-operator`, you may engage the kill switch to stop the
+   next boost buy (`sudo -u ti-trader operator kill-switch ... -state engaged`),
+   which still lets the sale back to 98% go. Until the inbox exists, stop the
+   engine instead (`sudo systemctl stop ti-engine@<account>`). Selling by hand
+   is your call; if you do, stop new orders first in the same way, so the
+   program sends nothing new while your order works.
 
 ## An urgent alarm
 
 1. **The program sells back to 98%** from the latest IBKR snapshot, once for
-   this alarm. No alert says it was sent, filled or failed yet: check it
-   with `journal-query orders` and in IBKR's app.
+   this alarm. Watch for the alert that it was sent ("sale back to 98%
+   sent"), one for each fill ("filled N of M", which says how many are left),
+   or the urgent one that IBKR canceled or refused it ("sale back to 98%
+   failed": sell the rest by hand). `journal-query orders` and
+   `journal-query fills` show the same.
 2. **If the sale was withheld** (`sale-withheld` in `journal-query
    refusals`):
    - `broker-values-unreadable` or `unknown-working-sell`: the program will
-     not try again. **Act by hand at IBKR now**: sell back to 98% of net
-     liquidation, after checking no other sell is working.
+     not try again, and the urgent "sale withheld, sell by hand" alert says
+     so. **Act by hand at IBKR now**: sell back to 98% of net liquidation,
+     after checking no other sell is working.
    - `stale-broker-snapshot` or `non-positive-broker-values`: the program
      decides it again from the next good snapshot while the alarm is urgent.
+     The first stale one of an outage alerts (once per stale episode); a
+     non-positive one sends no alert, so look for it here.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
      by hand.
 3. **No reading** (the cause says `no-reading`): the adapter has had no
@@ -68,7 +64,8 @@ point 6). Its thresholds are in the account's hashed configuration
    (`gateway-login.md`).
 4. **After the sale**, the account stays Normal unless something else
    moved it; the boost may buy again when Boost's rule says so. If you want
-   it not to, engage the kill switch.
+   it not to, engage the kill switch (where the inbox exists) or stop the
+   engine.
 
 ## Day trades (legacy pattern-day-trader rule)
 
