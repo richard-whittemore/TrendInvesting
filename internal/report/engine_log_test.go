@@ -25,7 +25,8 @@ func engineLog(t *testing.T, closes []float64) []byte {
 		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
 		Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 30,
 			TrendDays: 10, ExitSMA: 3, WarmUpStart: "2024-01-02"},
-		Limits: event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05},
+		Limits:    event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05, ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30},
+		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30},
 	}
 	handler, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: day(0)})
 	if err != nil {

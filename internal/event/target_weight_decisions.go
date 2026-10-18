@@ -470,8 +470,16 @@ func (b BoostFigures) validate() []error {
 // derived from a target decision (ADR 0026, point 2).
 const OrderPlannedEventType = "strategy.order.planned"
 
-// OrderPlannedSchemaVersion is the current schema version of OrderPlannedPayload.
-const OrderPlannedSchemaVersion uint32 = 1
+// The schema versions of OrderPlannedPayload (ADR 0015). A writer journals
+// each payload at SchemaVersion, the lowest version that holds it.
+//
+//   - Version 1 is an ordinary planned order, with no Sale.
+//   - Version 2 adds Sale, the figures of ADR 0019's sale back to 98%
+//     (amendments of 2026-10-15 and 2026-10-17). It reads every version-1 field.
+const (
+	OrderPlannedSchemaVersion uint32 = 1
+	OrderPlannedSafetyVersion uint32 = 2
+)
 
 // Order sides, which are also the planner's phases (ADR 0026, point 2,
 // "Order identity").
@@ -505,11 +513,44 @@ type OrderPlannedPayload struct {
 	HeldQuantity   int64   `json:"held_quantity"`
 	ReferencePrice float64 `json:"reference_price"`
 	PriceBand      float64 `json:"price_band"`
+	// Sale is set only on a sale back to 98% of net liquidation (ADR 0019,
+	// amended 2026-10-15 and 2026-10-16; ADR 0026, point 4). It is omitted
+	// otherwise, so an ordinary order's bytes do not change.
+	Sale SaleFigures `json:"sale,omitzero"`
+}
+
+// SchemaVersion returns the lowest schema version that holds p.
+func (p OrderPlannedPayload) SchemaVersion() uint32 {
+	if p.Sale.set() {
+		return OrderPlannedSafetyVersion
+	}
+	return OrderPlannedSchemaVersion
+}
+
+// ValidateSchema checks that p is one schemaVersion holds, then validates it.
+func (p OrderPlannedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := checkSafetyVersion(OrderPlannedEventType, schemaVersion, p.SchemaVersion(), OrderPlannedSafetyVersion); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
+// checkSafetyVersion refuses a schema version outside 1 to latest, and one
+// below need, the earliest version that holds the payload.
+func checkSafetyVersion(eventType string, schemaVersion, need, latest uint32) error {
+	switch {
+	case schemaVersion < 1 || schemaVersion > latest:
+		return fmt.Errorf("%s: schema version %d is not recognised", eventType, schemaVersion)
+	case schemaVersion < need:
+		return fmt.Errorf("%s: schema version %d cannot hold the payload's sale figures, cash or broker figures or refusal reason; it needs version %d", eventType, schemaVersion, need)
+	}
+	return nil
 }
 
 // Validate checks identity, side, type, quantity and prices, and that the
 // limit lies on the side of the reference price its order type requires: a
-// buy's limit at or above it, a sell's at or below.
+// buy's limit at or above it, a sell's at or below. A sale back to 98% also
+// checks its sizing figures.
 func (p OrderPlannedPayload) Validate() error {
 	var errs []error
 	errs = append(errs, orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)...)
@@ -545,6 +586,9 @@ func (p OrderPlannedPayload) Validate() error {
 		if p.Side == OrderSideSell && p.LimitPrice > p.ReferencePrice {
 			errs = append(errs, errors.New("a sell's limit must not be above its reference price"))
 		}
+	}
+	if p.Sale.set() {
+		errs = append(errs, p.Sale.validate(p)...)
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid order planned payload: %w", err)
@@ -582,16 +626,29 @@ const (
 	OrderRefusedEventType  = "risk.order.refused"
 )
 
-// OrderReleasedSchemaVersion and OrderRefusedSchemaVersion are the current
-// schema versions of OrderReleasedPayload and OrderRefusedPayload.
+// The schema versions of OrderReleasedPayload and OrderRefusedPayload (ADR
+// 0015). A writer journals each payload at SchemaVersion: the lowest version
+// that holds it, and never below version 2, since every figure this build
+// writes is account-wide.
 //
 //   - Version 1 checked the order's own instrument's exposure.
 //   - Version 2 checks account-wide exposure, and adds the IRA's cash check
 //     to RiskFigures (CashChecked, BuyCost, CashAvailable) and its refusal
-//     reasons to the closed set.
+//     reasons (ira-exposure, insufficient-cash, sell-exceeds-holding,
+//     unvalued-holding) to the closed set.
+//   - Version 3 adds the figures' broker fields (BrokerSet, BrokerHolding,
+//     WorkingSells, RiskReducing) and the refusal reasons kill-switch,
+//     broker-holding, sale-attempted and stale-broker-snapshot, and the
+//     refusal's alert (ADR 0019, amended 2026-10-15 and
+//     2026-10-17; ADR 0026, points 3 and 4).
+//
+// Each version reads every earlier version's fields, and refuses a later
+// version's.
 const (
 	OrderReleasedSchemaVersion uint32 = 2
+	OrderReleasedSafetyVersion uint32 = 3
 	OrderRefusedSchemaVersion  uint32 = 2
+	OrderRefusedSafetyVersion  uint32 = 3
 )
 
 // The closed set of reasons the risk gate refuses an order (ADR 0026, point 3).
@@ -627,6 +684,25 @@ const (
 	// RefusedUnvaluedHolding: an exposure-increasing order while a holding
 	// has no reference price, so account-wide exposure cannot be valued.
 	RefusedUnvaluedHolding = "unvalued-holding"
+	// RefusedKillSwitch: the kill switch is engaged, which refuses every
+	// order except ADR 0019's one sale back to 98% in a margin account
+	// (ADR 0026, point 3). It changes no engine state.
+	RefusedKillSwitch = "kill-switch"
+	// RefusedBrokerHolding: a sell exceeds the broker-reported holding net of
+	// every working or pending sell (ADR 0026, point 2.5), or, while Degraded,
+	// there is no broker snapshot to size it from (ADR 0019, amended
+	// 2026-09-24).
+	RefusedBrokerHolding = "broker-holding"
+	// RefusedSaleAttempted: the incident's one sale back to 98% was already
+	// attempted for the instrument, and is never retried automatically
+	// (ADR 0019, amended 2026-10-15).
+	RefusedSaleAttempted = "sale-attempted"
+	// RefusedStaleBrokerSnapshot: a sell would be checked against a latest
+	// broker snapshot older at its planned time than the configured execution
+	// MaxSnapshotAge, or taken after it (ADR 0019: "a stale matching
+	// snapshot is not success"). It changes no engine state; the sell is
+	// planned again at the next decision.
+	RefusedStaleBrokerSnapshot = "stale-broker-snapshot"
 )
 
 // RiskFigures are the values the gate checked an order against, so the
@@ -647,9 +723,24 @@ type RiskFigures struct {
 	CashChecked      bool    `json:"cash_checked,omitzero"`
 	BuyCost          float64 `json:"buy_cost,omitzero"`
 	CashAvailable    float64 `json:"cash_available,omitzero"`
+	// RiskReducing marks an order ADR 0026 point 4 calls risk-reducing: a
+	// sell within the broker-reported holding net of every working or
+	// pending sell (BrokerSet), or, with no readable broker snapshot, within
+	// the account snapshot's holding it was sized from. It is exempt from
+	// the order count, size and price band.
+	RiskReducing bool `json:"risk_reducing,omitempty"`
+	// The latest broker snapshot's holding and working sells for the
+	// instrument, when the gate had one (BrokerSet). WorkingSells also counts
+	// the sells the gate released after that snapshot, which it cannot yet
+	// show (ADR 0019, amended 2026-10-15: "never below it"). All four fields are
+	// omitted when unset, so figures without a broker snapshot keep their
+	// bytes.
+	BrokerSet     bool  `json:"broker_set,omitempty"`
+	BrokerHolding int64 `json:"broker_holding,omitempty"`
+	WorkingSells  int64 `json:"working_sells,omitempty"`
 }
 
-func (f RiskFigures) validate() []error {
+func (f RiskFigures) validate(side string) []error {
 	var errs []error
 	if !isFinite(f.NetLiquidation) || f.NetLiquidation <= 0 {
 		errs = append(errs, errors.New("figures net liquidation must be finite and positive"))
@@ -676,6 +767,15 @@ func (f RiskFigures) validate() []error {
 	if f.OrdersInDecision < 0 {
 		errs = append(errs, errors.New("figures orders in decision must not be negative"))
 	}
+	if f.WorkingSells < 0 {
+		errs = append(errs, errors.New("figures working sells must not be negative"))
+	}
+	if f.RiskReducing && side != OrderSideSell {
+		errs = append(errs, errors.New("figures risk-reducing marks a sell only: no buy is risk-reducing"))
+	}
+	if !f.BrokerSet && (f.BrokerHolding != 0 || f.WorkingSells != 0) {
+		errs = append(errs, errors.New("figures broker holding and working sells carry values but no broker snapshot is set"))
+	}
 	switch {
 	case !isFinite(f.BuyCost) || f.BuyCost < 0 || !isFinite(f.CashAvailable):
 		errs = append(errs, errors.New("figures buy cost must be finite and not negative, and cash available finite"))
@@ -701,6 +801,32 @@ type OrderReleasedPayload struct {
 	Figures       RiskFigures `json:"figures"`
 }
 
+// need returns the earliest version of risk.order.released and
+// risk.order.refused that holds f: 3 for the broker fields, 2 for the cash
+// figures, otherwise 1.
+func (f RiskFigures) need() uint32 {
+	switch {
+	case f.BrokerSet || f.RiskReducing || f.BrokerHolding != 0 || f.WorkingSells != 0:
+		return OrderReleasedSafetyVersion
+	case f.CashChecked || f.BuyCost != 0 || f.CashAvailable != 0:
+		return 2
+	}
+	return 1
+}
+
+// SchemaVersion returns the version a writer journals p at.
+func (p OrderReleasedPayload) SchemaVersion() uint32 {
+	return max(p.Figures.need(), OrderReleasedSchemaVersion)
+}
+
+// ValidateSchema checks that p is one schemaVersion holds, then validates it.
+func (p OrderReleasedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := checkSafetyVersion(OrderReleasedEventType, schemaVersion, p.Figures.need(), OrderReleasedSafetyVersion); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
 // Validate checks identity, mode, the dry-run rule and the figures.
 func (p OrderReleasedPayload) Validate() error {
 	var errs []error
@@ -717,7 +843,7 @@ func (p OrderReleasedPayload) Validate() error {
 	if p.Mode == TradingModeDryRun && p.Send {
 		errs = append(errs, errors.New("a dry-run release is never sent"))
 	}
-	errs = append(errs, p.Figures.validate()...)
+	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid order released payload: %w", err)
 	}
@@ -739,6 +865,35 @@ type OrderRefusedPayload struct {
 	Reason        string      `json:"reason"`
 	Detail        string      `json:"detail"`
 	Figures       RiskFigures `json:"figures"`
+	// Alert marks the first stale-broker-snapshot refusal against one latest
+	// broker snapshot: it raises the urgent alert, once per snapshot, until a
+	// later snapshot is recorded (ADR 0019, amendment of 2026-10-17).
+	Alert bool `json:"alert,omitempty"`
+}
+
+// need returns the earliest version that holds p: its figures', or the
+// version its reason joined at.
+func (p OrderRefusedPayload) need() uint32 {
+	switch p.Reason {
+	case RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot:
+		return OrderRefusedSafetyVersion
+	case RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding:
+		return max(p.Figures.need(), 2)
+	}
+	return p.Figures.need()
+}
+
+// SchemaVersion returns the version a writer journals p at.
+func (p OrderRefusedPayload) SchemaVersion() uint32 {
+	return max(p.need(), OrderRefusedSchemaVersion)
+}
+
+// ValidateSchema checks that p is one schemaVersion holds, then validates it.
+func (p OrderRefusedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := checkSafetyVersion(OrderRefusedEventType, schemaVersion, p.need(), OrderRefusedSafetyVersion); err != nil {
+		return err
+	}
+	return p.Validate()
 }
 
 // Validate checks identity, the reason, the detail and the figures.
@@ -751,14 +906,18 @@ func (p OrderRefusedPayload) Validate() error {
 	switch p.Reason {
 	case RefusedUndecidedOrder, RefusedMarginExposure, RefusedOrderCount, RefusedOrderSize,
 		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted,
-		RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding:
+		RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding,
+		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot:
 	default:
 		errs = append(errs, fmt.Errorf("refusal reason %q is not recognised", p.Reason))
 	}
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a refusal without its figures cannot be checked"))
 	}
-	errs = append(errs, p.Figures.validate()...)
+	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot {
+		errs = append(errs, errors.New("only a stale-broker-snapshot refusal raises the alert"))
+	}
+	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid order refused payload: %w", err)
 	}

@@ -62,7 +62,8 @@
   "execution": {
     "cash_rule": "settled-cash",
     "share_quantity": "minimum-lot",
-    "max_fees_per_order": 1
+    "max_fees_per_order": 1,
+    "max_snapshot_age_minutes": 30
   },
   "limits": {
     "max_exposure": 1,

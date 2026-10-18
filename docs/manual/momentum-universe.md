@@ -26,7 +26,7 @@ The engine never reads a bar for every listed stock in a session.
 
 ## The configuration says which shape the run reads
 
-The IRA's configuration (version 5) must say which of the two shapes its
+The IRA's configuration (version 6) must say which of the two shapes its
 stream is, in the momentum section's `universe_input`:
 
 - `"compact"`: the shape above, written by `encode --ranker`;
@@ -187,9 +187,9 @@ bars (ADR 0026, point 5).
 
 - ADR 0026, points 1 (inputs, ranking in Go, decision times) and 5 (missing
   bars fail closed); ADR 0015 (the two new record types start at version 1;
-  the configuration's `universe_input` is its version 5, and version 4 is
+  the configuration's `universe_input` is its version 6, and version 5 is
   refused); ADR 0016 (the value is part of the configuration hash; rules
-  version 1.5.0);
+  version 1.6.0);
   ADR 0004 and the adjusted-bar rule in `internal/event/bar_adjusted.go` (how
   closes are adjusted).
 - `internal/event/universe_inputs.go`: `market.close.history` and

@@ -651,6 +651,60 @@ func TestPositionsThatWouldOverflowAreRefusedNotWrapped(t *testing.T) {
 	}
 }
 
+// TestTheSafetyVersionsOfOrderRecordsAreRead: a sale back to 98% is
+// strategy.order.planned version 2, and figures with a broker snapshot or a
+// safety refusal reason are risk.order.released and risk.order.refused
+// version 3; every report reads them. A record at an earlier version carrying
+// a later version's field, and a version this build does not know, are
+// refused, never guessed at (ADR 0015).
+func TestTheSafetyVersionsOfOrderRecordsAreRead(t *testing.T) {
+	d := at(time.March, 2)
+	sale := plannedPayload("AAA", "sell")
+	sale.TargetWeight, sale.NetLiquidation, sale.HeldQuantity, sale.ReferencePrice, sale.LimitPrice = 0.98, 8530, 147, 90, 85.5
+	sale.Quantity = 54
+	sale.Sale = event.SaleFigures{
+		Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit, SnapshotID: "broker-snapshot:1",
+		KeepShares: 93, ToTarget: 54, WithinHolding: 147, NeverBelow: 54,
+	}
+	broker := figures
+	broker.BrokerSet, broker.BrokerHolding, broker.RiskReducing = true, 147, true
+	released := event.OrderReleasedPayload{AccountID: "A", ClientOrderID: "c", PlanID: "p", Tag: "t", InstrumentID: "AAA", Side: "sell", Quantity: 54, LimitPrice: 85.5, Mode: "paper", Figures: broker}
+	refused := event.OrderRefusedPayload{AccountID: "A", ClientOrderID: "k", PlanID: "p", Tag: "t", InstrumentID: "AAA", Side: "sell", Quantity: 1, LimitPrice: 3, Reason: event.RefusedKillSwitch, Detail: "d", Figures: figures}
+	cashReleased := released
+	cashReleased.Side, cashReleased.Figures = "buy", cashFigures
+	iraRefused := refused
+	iraRefused.Reason = event.RefusedInsufficientCash
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input,
+		dec(event.OrderPlannedEventType, event.OrderPlannedSafetyVersion, d, sale),
+		dec(event.OrderReleasedEventType, event.OrderReleasedSafetyVersion, d, released),
+		dec(event.OrderRefusedEventType, event.OrderRefusedSafetyVersion, d, refused),
+	))}
+	if orders, err := journalquery.Orders(js, journalquery.Filter{}); err != nil || len(orders.Rows) == 0 {
+		t.Fatalf("orders: %v %+v", err, orders)
+	}
+	r, err := journalquery.Refusals(js, journalquery.Filter{})
+	if err != nil || len(r.Rows) != 1 || cell(r, 0, "reason") != event.RefusedKillSwitch {
+		t.Fatalf("refusals: %v %+v", err, r)
+	}
+
+	for name, bad := range map[string]rec{
+		"a sale at version 1":            dec(event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, d, sale),
+		"broker figures at version 2":    dec(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, d, released),
+		"a safety reason at version 2":   dec(event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, d, refused),
+		"cash figures at version 1":      dec(event.OrderReleasedEventType, 1, d, cashReleased),
+		"an IRA reason at version 1":     dec(event.OrderRefusedEventType, 1, d, iraRefused),
+		"planned at an unknown version":  dec(event.OrderPlannedEventType, event.OrderPlannedSafetyVersion+1, d, sale),
+		"released at an unknown version": dec(event.OrderReleasedEventType, event.OrderReleasedSafetyVersion+1, d, released),
+		"refused at an unknown version":  dec(event.OrderRefusedEventType, event.OrderRefusedSafetyVersion+1, d, refused),
+	} {
+		js := []journalquery.Journal{load(t, "j", build(t, input, bad))}
+		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 2") {
+			t.Errorf("%s: accepted or unnamed: %v", name, err)
+		}
+	}
+}
+
 // The target-weight account's record versions (ADR 0026): account.snapshot
 // version 4 (positions and cash), execution.fill version 5 (a limit order's
 // execution, by side), execution.order.lifecycle version 2 (a limit order's
@@ -747,8 +801,9 @@ func TestTheNextVersionOfEveryReadRecordIsRefused(t *testing.T) {
 	for _, r := range []rec{
 		{journal.KindInput, event.FillEventType, event.FillTargetWeightVersion + 1, d, map[string]any{}},
 		{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion + 1, d, map[string]any{}},
-		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion + 1, d, map[string]any{}},
-		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderPlannedEventType, event.OrderPlannedSafetyVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSafetyVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedSafetyVersion + 1, d, map[string]any{}},
 		{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion + 1, d, map[string]any{}},
 	} {
 		js := []journalquery.Journal{load(t, "j", build(t, rec{journal.KindInput, "other.thing", 1, d, 1}, r))}
@@ -795,6 +850,50 @@ func TestTurtleFillIsRefusedWhenAnotherAccountOnlyAppearsOnAFill(t *testing.T) {
 	}
 }
 
+// A sale back to 98% the gate withheld (risk.sale.withheld) is listed with
+// the refusals, by its reason, the lapse of a withheld sale included, and is
+// read by every report; a version this build does not know, or an invalid
+// record, is refused.
+func TestWithheldSalesAreListedWithTheRefusals(t *testing.T) {
+	d := at(time.March, 2)
+	withheld := event.SaleWithheldPayload{
+		AccountID: "A", Tag: "engine-state:A:x", ClientOrderID: "s", InstrumentID: "AAA", Kind: event.SaleKindIncident,
+		Trigger: event.SaleTriggerExit, Reason: event.SaleWithheldStaleBrokerSnapshot, Detail: "stale", SnapshotID: "broker:1", Alert: true,
+	}
+	lapsed := withheld
+	lapsed.Reason, lapsed.Detail, lapsed.Alert = event.SaleWithheldLapsed, "the exit is no longer refused", false
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input,
+		dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, d, withheld),
+		dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, d, lapsed),
+	))}
+	r, err := journalquery.Refusals(js, journalquery.Filter{})
+	if err != nil || len(r.Rows) != 2 {
+		t.Fatalf("refusals: %v %+v", err, r)
+	}
+	if cell(r, 0, "event") != "sale-withheld" || cell(r, 0, "reason") != event.SaleWithheldStaleBrokerSnapshot || cell(r, 0, "instrument") != "AAA" || cell(r, 0, "account") != "A" {
+		t.Errorf("withheld row: %v", r.Rows[0])
+	}
+	if cell(r, 1, "reason") != event.SaleWithheldLapsed || cell(r, 1, "detail") != "the exit is no longer refused" {
+		t.Errorf("lapsed row: %v", r.Rows[1])
+	}
+	if r, _ := journalquery.Refusals(js, journalquery.Filter{Instrument: "BBB"}); len(r.Rows) != 0 {
+		t.Errorf("an instrument filter: %v", r.Rows)
+	}
+	if o, err := journalquery.Orders(js, journalquery.Filter{}); err != nil || len(o.Rows) != 0 {
+		t.Errorf("a withheld sale is no order: %v %v", o.Rows, err)
+	}
+	for name, bad := range map[string]rec{
+		"unknown version": dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion+1, d, withheld),
+		"invalid":         dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, d, event.SaleWithheldPayload{AccountID: "A"}),
+	} {
+		js := []journalquery.Journal{load(t, "j", build(t, input, bad))}
+		if _, err := journalquery.Refusals(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 2") {
+			t.Errorf("%s: accepted or unnamed: %v", name, err)
+		}
+	}
+}
+
 // TestTheGlidePathRecordVersionsAreRead covers the glide path's record
 // versions (ADR 0026 point 5): strategy.target-weight.configuration version
 // 3 (the glide section) and strategy.targets.decided version 3 (the glide
@@ -829,7 +928,7 @@ func TestTheGlidePathRecordVersionsAreRead(t *testing.T) {
 }
 
 // TestTheCompactUniverseInputsAreRead: a momentum journal records its
-// configuration, version 5, declaring the compact universe input, then that
+// configuration, version 6, declaring the compact universe input, then that
 // input: the universe snapshot, the ranked members' close histories and any
 // session retraction. No report draws a figure from them, so a journal
 // holding them reads in every report, its fills unchanged.

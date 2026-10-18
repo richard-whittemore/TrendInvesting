@@ -167,7 +167,7 @@ func TestGlideDecisionValidate(t *testing.T) {
 // glide section included (ADR 0016).
 func TestMomentumConfigurationHashStability(t *testing.T) {
 	got := event.TargetWeightConfigurationHash(validMomentumConfiguration())
-	const want = "sha256:f4ba94bec6ad0d4c70189d493e78c4a0209274d74c268bb494d72e6ae768a0a9"
+	const want = "sha256:6380b5d482aeb2744a2f0bc9cf1afd8cf48724bd26a462c764eb25c158767575"
 	if got != want {
 		t.Fatalf("TargetWeightConfigurationHash = %s, want %s", got, want)
 	}

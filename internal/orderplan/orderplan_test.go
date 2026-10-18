@@ -174,3 +174,37 @@ func TestPlanBoostRefusesWhatItCannotPlan(t *testing.T) {
 		}
 	}
 }
+
+// TestAnExitIsNetOfSellsAlreadyWorking: Boost's exit and the sells already
+// working never together sell below the target (ADR 0019, amended
+// 2026-10-15, "never below it"), and a working sell never turns the exit
+// into a buy. ADR 0019's worked example: 147 shares, net liquidation $8,530,
+// a $90 close; the exit to 98% sells 54.
+func TestAnExitIsNetOfSellsAlreadyWorking(t *testing.T) {
+	in := input(decision(0.98, 1.47, true), 8530, 147, 90)
+	order, ok := plan(t, in)
+	if !ok || order.Side != event.OrderSideSell || order.Quantity != 54 {
+		t.Fatalf("exit without working sells: %+v", order)
+	}
+	in.WorkingSells = 20
+	if order, ok = plan(t, in); !ok || order.Quantity != 34 || order.HeldQuantity != 147 {
+		t.Fatalf("exit net of 20 working: %+v", order)
+	}
+	in.WorkingSells = 54
+	if order, ok = plan(t, in); ok {
+		t.Fatalf("an urgent sale of 54 already working leaves nothing to sell: %+v", order)
+	}
+	in.WorkingSells = 90
+	if order, ok = plan(t, in); ok {
+		t.Fatalf("a working sell never turns the exit into a buy: %+v", order)
+	}
+	entry := input(decision(1.47, 0.98, true), 8530, 93, 90)
+	entry.WorkingSells = 10
+	if order, ok = plan(t, entry); !ok || order.Side != event.OrderSideBuy {
+		t.Fatalf("a buy is planned as before: %+v", order)
+	}
+	in.WorkingSells = -1
+	if _, _, err := orderplan.PlanBoost(in); err == nil {
+		t.Error("negative working sells are a defect")
+	}
+}

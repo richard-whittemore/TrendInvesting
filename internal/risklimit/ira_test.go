@@ -3,6 +3,7 @@ package risklimit_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
@@ -14,7 +15,7 @@ func iraLimits() event.MarginLimits {
 
 func iraGate(t *testing.T, maxFees float64) *risklimit.Gate {
 	t.Helper()
-	g, err := risklimit.NewIRAGate("joint", iraLimits(), event.TradingModeDryRun, maxFees)
+	g, err := risklimit.NewIRAGate("joint", iraLimits(), event.TradingModeDryRun, maxFees, 30*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +34,9 @@ func iraOrder(id, side string, quantity int64) risklimit.Order {
 
 func checkBook(t *testing.T, g *risklimit.Gate, book risklimit.Book, plan ...risklimit.Order) []risklimit.Outcome {
 	t.Helper()
+	if book.At.IsZero() {
+		book.At = now(g)
+	}
 	outcomes, err := g.Check(book, plan)
 	if err != nil {
 		t.Fatal(err)
@@ -205,13 +209,29 @@ func TestPriorOrdersCountTowardTheDecisionTime(t *testing.T) {
 func TestIRAGateRefusesBadConstruction(t *testing.T) {
 	margin := iraLimits()
 	margin.MaxExposure = 1.5
-	if _, err := risklimit.NewIRAGate("ira", margin, event.TradingModeDryRun, 0); err == nil {
+	if _, err := risklimit.NewIRAGate("ira", margin, event.TradingModeDryRun, 0, 30*time.Minute); err == nil {
 		t.Error("an IRA gate above 100% accepted")
 	}
-	if _, err := risklimit.NewIRAGate("ira", iraLimits(), event.TradingModeDryRun, -1); err == nil {
+	if _, err := risklimit.NewIRAGate("ira", iraLimits(), event.TradingModeDryRun, -1, 30*time.Minute); err == nil {
 		t.Error("a negative fee allowance accepted")
 	}
-	if _, err := risklimit.NewIRAGate("", iraLimits(), event.TradingModeDryRun, 0); err == nil {
+	if _, err := risklimit.NewIRAGate("", iraLimits(), event.TradingModeDryRun, 0, 30*time.Minute); err == nil {
 		t.Error("a missing account accepted")
 	}
+}
+
+// TestAnIRASellIsNeverCheckedAgainstAStaleSnapshot: MaxSnapshotAge is
+// required for every account, since an IRA's broker-holding check reads the
+// broker snapshot too.
+func TestAnIRASellIsNeverCheckedAgainstAStaleSnapshot(t *testing.T) {
+	if _, err := risklimit.NewIRAGate("ira", iraLimits(), event.TradingModeDryRun, 0, 0); err == nil {
+		t.Error("an IRA gate without a maximum broker snapshot age")
+	}
+	g := iraGate(t, 0)
+	b := broker(100)
+	b.Positions[0].InstrumentID = "AAA"
+	observe(t, g, "broker:1", b)
+	sell := iraOrder("AAA", event.OrderSideSell, 10)
+	book := risklimit.Book{Holdings: map[string]int64{"AAA": 100}, Prices: map[string]float64{"AAA": 1}, At: at.Add(31 * time.Minute)}
+	refusedFor(t, checkBook(t, g, book, sell)[0], event.RefusedStaleBrokerSnapshot)
 }
