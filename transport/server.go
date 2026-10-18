@@ -59,9 +59,12 @@ type ServerConfig struct {
 	MaxConnections int
 	// AfterReply, when set, is called on a connection's goroutine each
 	// time a reply to a request has been written to it, before the next
-	// request is read. A caller that must stop serving because of an
-	// answer stops it here, so the answer reaches the client first. It
-	// must not block on the server (Close waits for this goroutine).
+	// request is read, and once more when the connection's goroutine ends
+	// for any reason, including a reply that could not be written. A
+	// caller that must stop serving because of an answer stops it here, so
+	// the answer reaches the client first, and an answer that cannot reach
+	// it still stops serving. It must not block on the server (Close waits
+	// for this goroutine).
 	AfterReply func()
 }
 
@@ -340,6 +343,11 @@ func (s *Server) untrack(conn net.Conn) {
 }
 
 func (s *Server) handle(conn net.Conn) {
+	if s.cfg.AfterReply != nil {
+		// A reply that could not be written, or a connection that ended,
+		// leaves nothing to wait for, so the hook runs on every exit too.
+		defer s.cfg.AfterReply()
+	}
 	maxFrame := s.cfg.maxFrameBytes()
 	reader := newFrameReader(conn, maxFrame)
 	for {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -115,12 +116,16 @@ type wireGuard struct {
 	// under stopMu. An operator record that could not be delivered stops
 	// the run, since its log has failed (operatorInbox), as does an input
 	// whose sequence was spent but not recorded (answer). The cause is
-	// recorded when it happens and the run is stopped only once the reply
+	// recorded when it happens and the run is stopped once the reply
 	// stating it has been written (afterReply), so the adapter receives the
-	// refusal, and the sequence it states, before the socket closes.
+	// refusal, and the sequence it states, before the socket closes; when
+	// that reply is never written, it stops anyway after stopGrace.
 	stop    context.CancelCauseFunc
 	stopMu  sync.Mutex
 	stopped error
+	// stopGrace bounds how long a recorded cause waits for its reply; zero
+	// is defaultStopGrace.
+	stopGrace time.Duration
 }
 
 // answer returns the committed group for input, applying input through
@@ -142,8 +147,9 @@ type wireGuard struct {
 //
 // The durable log must never miss a sequence, or Resume refuses it. So when
 // input was not recorded and its sequence was spent (the engine's cursor
-// moved past it: the recorder refused input of its own, its record bound or
-// its emission ceiling), or records were delivered first and so moved it,
+// moved during this call: the recorder refused input of its own, its record
+// bound or its emission ceiling), or records were delivered first and so
+// moved it,
 // or a record could not be delivered, g is poisoned and the run stops with
 // the cause (stopWith), whether or not any record was delivered. When
 // records were delivered first, the error states the last sequence
@@ -158,6 +164,7 @@ func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder 
 	if committed, ok = recorder.Committed(input.ID); ok {
 		return committed, sentWith(recorder, committed, input.Sequence), true, nil
 	}
+	before, _ := engine.Next()
 	at, err := g.applyLocked(ctx, engine, input, inbox)
 	if g.poisoned != nil {
 		return journal.Committed{}, false, false, err
@@ -170,7 +177,10 @@ func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder 
 	if err == nil {
 		err = fmt.Errorf("engine: input %s was applied but not committed, so it has no reply", input.ID)
 	}
-	if next, _ := engine.Next(); next > at || at != input.Sequence {
+	// Spent means this exchange moved the cursor. A sequence the engine
+	// refused as non-contiguous (a duplicated or stale one) leaves it where
+	// it was and spends nothing, so that refusal alone never stops the run.
+	if next, _ := engine.Next(); next > before || at != input.Sequence {
 		err = g.stopWith(fmt.Errorf("%w (%s was given sequence %d and not recorded; the run stops, so its log ends at sequence %d)", err, input.ID, at, at-1))
 		if at != input.Sequence {
 			err = deliveredThrough(err, at, input.ID)
@@ -179,13 +189,28 @@ func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder 
 	return journal.Committed{}, false, false, err
 }
 
+// defaultStopGrace is how long a recorded cause waits for the reply
+// stating it before the run stops anyway. A reply over the local socket is
+// written in well under it.
+const defaultStopGrace = 2 * time.Second
+
 // stopWith poisons g with cause and records it as the cause the run stops
-// with once the reply has been written (afterReply); it returns cause.
+// with once the reply has been written (afterReply); it returns cause. The
+// stop does not depend on a reply: a decision transport already abandoned
+// has none left to follow, and an idle adapter sends no request to bring
+// one, so the run also stops on its own once g's grace has passed.
 func (g *wireGuard) stopWith(cause error) error {
 	g.poisoned = cause
 	g.stopMu.Lock()
 	defer g.stopMu.Unlock()
 	g.stopped = cause
+	if g.stop != nil {
+		grace := g.stopGrace
+		if grace <= 0 {
+			grace = defaultStopGrace
+		}
+		time.AfterFunc(grace, func() { g.stop(cause) })
+	}
 	return cause
 }
 

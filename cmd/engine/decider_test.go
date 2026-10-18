@@ -205,6 +205,19 @@ func TestNewDeciderRejectsADuplicatedInput(t *testing.T) {
 	if len(recorder.Entries()) != 1 {
 		t.Fatalf("recorder holds %d entries, want exactly the first bar's own input", len(recorder.Entries()))
 	}
+
+	// The refused input spent no sequence (the engine's cursor did not
+	// move), so the run does not stop: the guard records no failure and the
+	// correctly numbered next bar is still accepted.
+	if strings.Contains(err.Error(), "the run stops") {
+		t.Errorf("duplicated sequence: decide error = %v, want no claim that the run stops", err)
+	}
+	if failure := guard.failure(); failure != nil {
+		t.Fatalf("the guard recorded %v, want no failure for a sequence the engine refused unmoved", failure)
+	}
+	if _, err := decide(context.Background(), stubInputAt(t, "bar-2", 2)); err != nil {
+		t.Fatalf("the correctly-numbered next bar was refused: %v", err)
+	}
 }
 
 func TestNewDeciderRejectsAGappedInput(t *testing.T) {

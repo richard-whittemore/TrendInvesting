@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -924,6 +925,113 @@ func TestARefusalThatStopsTheRunReachesTheAdapterFirst(t *testing.T) {
 	}
 	if _, err := decide(context.Background(), adapterInput(t, "adapter:3", 3, hash)); !errors.As(err, &limit) {
 		t.Errorf("the next input: err = %v, want it refused with the cause the run stopped on", err)
+	}
+}
+
+// TestARefusalThatStopsTheRunStopsItWhenItsReplyCannotBeWritten: an
+// adapter gone before the refusal that stops the run is written still has
+// the run stop, with the cause, instead of leaving it poisoned and serving.
+func TestARefusalThatStopsTheRunStopsItWhenItsReplyCannotBeWritten(t *testing.T) {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	engine, recorder, err := durableWiring(t, filepath.Join(t.TempDir(), "run-1.log"), hash, burstHandler("adapter:1"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, stopServing := context.WithCancelCause(t.Context())
+	defer stopServing(nil)
+	guard := &wireGuard{stop: stopServing, stopGrace: time.Hour}
+	decide := newDecider(guard, engine, recorder, "test", hash, nil)
+	reached, closed := make(chan struct{}), make(chan struct{})
+	gated := func(ctx context.Context, in event.Envelope) (event.Envelope, error) {
+		close(reached)
+		<-closed
+		return decide(ctx, in)
+	}
+	path := filepath.Join(shortSocketDir(t), "engine.sock")
+	server, err := transport.Listen(path, gated, transport.ServerConfig{MaxConnections: 1, AfterReply: guard.afterReply})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeContext(serveCtx) }()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := json.Marshal(adapterInput(t, "adapter:1", 1, hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(append(frame, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	<-reached
+	_ = conn.Close()
+	close(closed)
+
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		t.Fatal("serving did not end after a refusal that stops the run could not be written")
+	}
+	var limit *journal.EmissionLimitError
+	if !errors.As(context.Cause(serveCtx), &limit) {
+		t.Errorf("serving ended with %v, want the emission ceiling's refusal", context.Cause(serveCtx))
+	}
+}
+
+// TestACauseRecordedAfterItsReplyStillStopsTheRun: a decision transport
+// abandoned at its deadline that then records a cause the run stops on has
+// no reply left to follow, and an adapter that stays connected and idle
+// sends none; the run still stops, with the cause, within the guard's
+// grace.
+func TestACauseRecordedAfterItsReplyStillStopsTheRun(t *testing.T) {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	engine, recorder, err := durableWiring(t, filepath.Join(t.TempDir(), "run-1.log"), hash, burstHandler("adapter:1"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, stopServing := context.WithCancelCause(t.Context())
+	defer stopServing(nil)
+	guard := &wireGuard{stop: stopServing, stopGrace: 50 * time.Millisecond}
+	decide := newDecider(guard, engine, recorder, "test", hash, nil)
+	finished := make(chan struct{})
+	late := func(ctx context.Context, in event.Envelope) (event.Envelope, error) {
+		<-ctx.Done()
+		// Stands in for a decision that finishes after transport gave up on
+		// it, once its timeout reply has been written.
+		time.Sleep(50 * time.Millisecond)
+		defer close(finished)
+		return decide(context.Background(), in)
+	}
+	path := filepath.Join(shortSocketDir(t), "engine.sock")
+	server, err := transport.Listen(path, late, transport.ServerConfig{MaxConnections: 1, DecisionTimeout: 50 * time.Millisecond, AfterReply: guard.afterReply})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeContext(serveCtx) }()
+	client, err := transport.Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	exchange, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	var protocolErr *transport.ProtocolError
+	if _, err := client.Decide(exchange, adapterInput(t, "adapter:1", 1, hash)); !errors.As(err, &protocolErr) || protocolErr.Code != transport.CodeTimeout {
+		t.Fatalf("err = %#v, want the decision's timeout", err)
+	}
+	<-finished
+	select {
+	case <-served:
+	case <-exchange.Done():
+		t.Fatal("serving did not end after a cause recorded once its reply was written")
+	}
+	var limit *journal.EmissionLimitError
+	if !errors.As(context.Cause(serveCtx), &limit) {
+		t.Errorf("serving ended with %v, want the emission ceiling's refusal", context.Cause(serveCtx))
 	}
 }
 

@@ -549,6 +549,47 @@ func TestAfterReplyRunsOnceTheReplyIsWritten(t *testing.T) {
 	}
 }
 
+// TestAfterReplyRunsWhenTheReplyCannotBeWritten: a client gone before its
+// reply is written still has the hook run, so a server stopped from it
+// stops serving.
+func TestAfterReplyRunsWhenTheReplyCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	reached, closed := make(chan struct{}), make(chan struct{})
+	gated := func(context.Context, event.Envelope) (event.Envelope, error) {
+		close(reached)
+		<-closed
+		return event.Envelope{}, errors.New("refused; the engine stops")
+	}
+	ctx, stop := context.WithCancel(t.Context())
+	defer stop()
+	path := socketPath(t)
+	server, err := transport.Listen(path, gated, transport.ServerConfig{AfterReply: stop})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeContext(ctx) }()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	frame, err := json.Marshal(newBar(t, "bar-1", 1))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := conn.Write(append(frame, '\n')); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	<-reached
+	_ = conn.Close()
+	close(closed)
+	select {
+	case <-served:
+	case <-time.After(testTimeout):
+		t.Fatal("serving did not end after a reply that could not be written")
+	}
+}
+
 func readResponse(t *testing.T, conn net.Conn) transport.Response {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(testTimeout)); err != nil {

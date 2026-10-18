@@ -115,7 +115,11 @@ its number is used up, so the refusal says so and the run stops; resumed, the
 adapter's next input carries the input's own number again. (Before this
 release a run carried on after that refusal and left a gap in its log that
 could not be resumed.) Either way the engine writes the refusal to the
-adapter first and only then stops, so the adapter always receives it.
+adapter first and only then stops, so a connected adapter always receives
+it; if the adapter has gone away, or the refusal cannot be delivered, the
+run still stops, within a couple of seconds, with the same error. An input
+carrying a number already used or out of date is different: it is simply
+refused, uses up no number, and the run carries on.
 
 When the engine records your instructions before the adapter's input, the
 input is recorded under a later number than the one it was sent with. If
