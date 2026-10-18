@@ -321,10 +321,13 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 		},
 	}
 	for name, record := range unreadable {
-		t.Run("unreadable is a read error: "+name, func(t *testing.T) {
+		t.Run("unreadable acknowledgement errors the read: "+name, func(t *testing.T) {
 			s := newStream(t)
 			s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-			alerts, _ := report.Alerts(s.out)
+			alerts, err := report.Alerts(s.out)
+			if err != nil || len(alerts) != 1 {
+				t.Fatalf("alerts = %v, %v", alerts, err)
+			}
 			record(alerts[0].Key, s)
 			if _, err := report.Alerts(s.out); err == nil {
 				t.Fatal("an acknowledgement the engine could not have journalled means a build mismatch: want a read error")
