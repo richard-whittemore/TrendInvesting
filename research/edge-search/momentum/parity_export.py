@@ -293,11 +293,25 @@ def _previous_close(algo, closes, sym):
     return None
 
 
+#: Sessions the buys may wait for every bought security to have a price
+#: (one added to the universe at the rebalance has none until its first
+#: bar); after that a buy whose security still has none is not placed and
+#: is recorded as unplaced.
+PRICE_WAIT = 5
+
+
+def _priced(algo, sym):
+    secs = algo.Securities
+    has = secs.ContainsKey(sym) if hasattr(secs, "ContainsKey") else sym in secs
+    return has and bool(secs[sym].HasData) and float(secs[sym].Price) > 0
+
+
 def ira_rebalance(algo, targets, closes):
     """Trade the month's book as the IRA planner does: plan from the account
     now (as of the previous close), send the sells, and plan the buys at
-    once when there is no sell. A target with no price waits in pending,
-    outside the plan, as fresh_universe.py's unpriced targets do."""
+    once when there is no sell; they are sent once every bought security
+    has a price. A target with no price at all waits in pending, outside
+    the plan, as fresh_universe.py's unpriced targets do."""
     month = _month(algo)
     held = {kvp.Key: int(kvp.Value.Quantity) for kvp in algo.Portfolio if kvp.Value.Invested and kvp.Value.IsLong}
     syms = list(targets) + [s for s in held if s not in targets]
@@ -330,15 +344,21 @@ def ira_rebalance(algo, targets, closes):
     algo.ira = {"month": month, "day": algo.Time.date(), "decision": algo.Time.strftime("%Y-%m-%d"), "nlv": nlv,
                 "targets": plan_targets, "held": plan_held, "prices": plan_prices, "working": working,
                 "unpriced": [name(s) for s in unpriced], "sells": sells, "buys": buys, "skipped": skipped,
-                "sym_of": sym_of, "wait": algo.EXEC_DELAY if sells else 0, "waited": 0, "done": False}
+                "sym_of": sym_of, "wait": algo.EXEC_DELAY if sells else 0, "waited": 0, "for_sells": 0,
+                "for_price": 0, "done": False}
     if not sells:
-        _ira_buys(algo)
+        if all(_priced(algo, sym_of[b[0]]) for b in buys):
+            _ira_buys(algo)
+        else:
+            algo.ira["for_price"] = 1             # the next session's buy phase sends them
 
 
 def ira_buy_phase(algo):
     """Each session at 8:00: once EXEC_DELAY sessions have passed since the
-    rebalance and none of its sells is still working, budget and send its
-    buys."""
+    rebalance (none when it had no sell), none of its sells is still working
+    and every bought security has a price (for at most PRICE_WAIT sessions),
+    budget and send its buys. The sessions waited for each reason are
+    counted, so that waited = the delay + for_sells + for_price."""
     q = getattr(algo, "ira", None)
     if not q or q["done"] or algo.Time.date() == q["day"]:
         return
@@ -347,6 +367,10 @@ def ira_buy_phase(algo):
         return
     sell_tag = IRA_ORDER_PREFIX + q["month"] + " sell"
     if any(getattr(t, "Tag", "") == sell_tag for t in algo.Transactions.GetOpenOrderTickets()):
+        q["for_sells"] += 1
+        return
+    if q["for_price"] < PRICE_WAIT and not all(_priced(algo, q["sym_of"][b[0]]) for b in q["buys"]):
+        q["for_price"] += 1
         return
     _ira_buys(algo)
 
@@ -355,13 +379,17 @@ def _ira_buys(algo):
     q = algo.ira
     budget = float(algo.Portfolio.Cash)
     kept, scaled_skipped, scale = scale_buys(q["buys"], budget, algo.MAX_FEES)
+    unplaced = []
     for inst, n, _ in kept:
-        algo.MarketOrder(q["sym_of"][inst], n, tag=IRA_ORDER_PREFIX + q["month"] + " buy")
+        if _priced(algo, q["sym_of"][inst]):
+            algo.MarketOrder(q["sym_of"][inst], n, tag=IRA_ORDER_PREFIX + q["month"] + " buy")
+        else:
+            unplaced.append(inst)
     record = {k: q[k] for k in ("month", "decision", "nlv", "targets", "held", "prices", "working", "unpriced",
-                                "sells", "buys", "skipped", "waited")}
+                                "sells", "buys", "skipped", "waited", "for_sells", "for_price")}
     record.update({"buy_session": algo.Time.strftime("%Y-%m-%d"), "delay": algo.EXEC_DELAY,
                    "band": algo.REBALANCE_BAND, "price_band": algo.PRICE_BAND, "max_fees": algo.MAX_FEES,
                    "budget": budget, "scale": scale, "kept": [[i, n] for i, n, _ in kept],
-                   "scaled_skipped": scaled_skipped})
+                   "scaled_skipped": scaled_skipped, "unplaced": unplaced})
     q["done"] = True
     attach(algo, IRA_PREFIX + _dumps(record), dummy=True)

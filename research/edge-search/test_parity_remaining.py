@@ -281,6 +281,7 @@ class IRATemplateTest(unittest.TestCase):
         self.assertEqual(rec["buys"], [["AAA", 50, 52.5], ["BBB", 80, 31.5], ["IEF", 24, 105.0]])
         self.assertEqual((rec["scale"], rec["kept"]), (scale, [[b[0], b[1]] for b in algo.market[1:]]))
         self.assertEqual((rec["skipped"], rec["scaled_skipped"], rec["unpriced"], rec["working"]), ([], [], [], {}))
+        self.assertEqual((rec["for_sells"], rec["for_price"], rec["unplaced"]), (0, 0, []))
         algo.Time = _dt.datetime(2020, 4, 3, 8)
         self.module.ira_buy_phase(algo)                                   # done: nothing more
         self.assertEqual((len(algo.market), len(algo.limits)), (4, 1))
@@ -306,7 +307,32 @@ class IRATemplateTest(unittest.TestCase):
         algo.Portfolio.Cash = 800.0
         self.module.ira_buy_phase(algo)
         rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
-        self.assertEqual((rec["buy_session"], rec["waited"]), ("2020-04-03", 2))
+        self.assertEqual((rec["buy_session"], rec["waited"], rec["for_sells"], rec["for_price"]), ("2020-04-03", 2, 1, 0))
+
+    def test_buys_wait_for_a_security_with_no_price_yet(self):
+        # NEW joined the universe at the rebalance: the plan sizes it from
+        # the history's close, but it cannot be ordered until its first bar.
+        algo = self._algo({}, cash=1000.0)
+        closes = _Closes({"AAA": [49.0, 50.0], "NEW": [9.0, 10.0], "SPY": [1.0, 2.0]})
+        self.module.ira_rebalance(algo, {"AAA": 0.49, "NEW": 0.49}, closes)
+        self.assertEqual((algo.market, algo.limits), ([], []))
+        algo.Time = _dt.datetime(2020, 4, 2, 8)
+        algo.Securities["NEW"] = types.SimpleNamespace(Price=10.5, HasData=True)
+        self.module.ira_buy_phase(algo)
+        self.assertEqual(algo.market, [("AAA", 9, "IRAORD1 2020-04 buy"), ("NEW", 49, "IRAORD1 2020-04 buy")])
+        rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
+        self.assertEqual((rec["waited"], rec["for_sells"], rec["for_price"], rec["buy_session"]), (1, 0, 1, "2020-04-02"))
+
+    def test_a_security_that_never_gets_a_price_is_left_unplaced(self):
+        algo = self._algo({}, cash=1000.0)
+        closes = _Closes({"AAA": [49.0, 50.0], "NEW": [9.0, 10.0], "SPY": [1.0, 2.0]})
+        self.module.ira_rebalance(algo, {"AAA": 0.49, "NEW": 0.49}, closes)
+        for day in range(2, 9):
+            algo.Time = _dt.datetime(2020, 4, day, 8)
+            self.module.ira_buy_phase(algo)
+        self.assertEqual(algo.market, [("AAA", 9, "IRAORD1 2020-04 buy")])
+        rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
+        self.assertEqual((rec["waited"], rec["for_price"], rec["unplaced"]), (5, 5, ["NEW"]))
 
     def test_a_target_with_no_price_waits_in_pending_outside_the_plan(self):
         algo = self._algo({}, cash=1000.0)
