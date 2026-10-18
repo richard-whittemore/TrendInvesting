@@ -221,6 +221,25 @@ func TestKillSwitchRefusesEveryRoutineOrderAndLeavesTheState(t *testing.T) {
 	}
 }
 
+// TestAKillSwitchStatingAnEarlierTimeIsRefused: the owner's instructions
+// are ordered by the time they state, so a kill switch stating a time
+// earlier than the one the gate last applied for its account is refused,
+// naming that one, and the switch stays as the later instruction left it.
+// The refusal is the gate's, so its input is journalled and a replay refuses
+// it again. One stating the same time is applied: the later recorded wins.
+func TestAKillSwitchStatingAnEarlierTimeIsRefused(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(9800))
+	kill(t, g, "kill:engaged", true)
+	err := g.SetKillSwitch("kill:stale", event.KillSwitchPayload{AccountID: "joint", AsOf: at.Add(-time.Hour), Engaged: false, Operator: "owner", Detail: "backdated"})
+	if err == nil || !strings.Contains(err.Error(), "kill:engaged") {
+		t.Fatalf("SetKillSwitch(earlier) = %v, want a refusal naming kill:engaged", err)
+	}
+	refusedFor(t, check(t, g, order(event.OrderSideBuy, 1, 9800))[0], event.RefusedKillSwitch)
+	kill(t, g, "kill:same-time", false)
+	released(t, check(t, g, order(event.OrderSideBuy, 1, 9800))[0])
+}
+
 func TestKillSwitchRefusesARoutineIRASellAndPassesTheSaleBackTo98(t *testing.T) {
 	ira := iraGate(t, 0)
 	observe(t, ira, "broker:1", boosted())
@@ -710,7 +729,7 @@ func TestARestoredIncidentsEarlierAttemptIsNotRepeated(t *testing.T) {
 		if err := r.RestoreSaleAttempt(halted.StateID, attempted); err != nil {
 			t.Fatal(err)
 		}
-		if err := r.RestoreIncidentState(halted.StateID, event.EngineStateHalted, nil); err != nil {
+		if err := r.RestoreIncidentState(halted.StateID, event.EngineStateHalted, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		observe(t, r, "broker:1", boosted())

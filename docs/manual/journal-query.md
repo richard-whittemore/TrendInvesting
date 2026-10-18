@@ -123,7 +123,10 @@ name their own account.
 
 For a target-weight account's limit orders, an `orders` lifecycle row shows
 the order's side, its limit price and, in `note`, its client order id; a
-Turtle stop order's row shows its stop price and its tag.
+Turtle stop order's row shows its stop price and its tag. A dry-run engine's
+own synthetic report on an order it never sent (version 3, see `engine.md`)
+shows as `synthetic-lifecycle-canceled`; it is never an execution, so it
+adds nothing to `fills`, `totals` or `positions`.
 
 ## What can go wrong, and what the tool does
 
@@ -161,8 +164,9 @@ Turtle stop order's row shows its stop price and its tag.
 - **A record from a newer or older build** (a schema version this build does
   not read, including a newer account snapshot). Refused, naming the record; the
   tool never guesses at a figure. It reads fills of versions 4 (Turtle) and 5
-  (target-weight), order lifecycle changes of versions 1 (Turtle stop orders)
-  and 2 (target-weight limit orders), planned orders of versions 1 and 2 (2 is a
+  (target-weight), order lifecycle changes of versions 1 (Turtle stop orders),
+  2 (target-weight limit orders) and 3 (a dry-run's synthetic report; a
+  synthetic report at version 2, or a venue's at version 3, is refused), planned orders of versions 1 and 2 (2 is a
   sale back to 98%), risk-gate releases and refusals of versions 1, 2 and 3
   (3 adds the broker figures and the kill-switch, broker-holding,
   sale-attempted and stale-broker-snapshot reasons, and the refusal's

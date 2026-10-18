@@ -91,7 +91,7 @@ func TestMomentumInputRules(t *testing.T) {
 	mustApply(t, h, s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "u", at, universe("2025-01-02", "fixture-universe", "gics")))
 	mustRefuse(t, h, s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "u", at, universe("2025-01-02", "fixture-universe", "gics")), "does not follow")
 
-	acct := &ira{settled: 1000, held: map[string]int64{}}
+	acct := &ira{account: iraAccount, settled: 1000, held: map[string]int64{}}
 	snap := acct.snapshot(at, nil)
 	wrong := snap
 	wrong.AccountID = "joint"
@@ -145,6 +145,12 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l4", mutated(func(p *event.LimitOrderLifecyclePayload) { p.Quantity++ }), "reports")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l4b", mutated(func(p *event.LimitOrderLifecyclePayload) { p.LimitPrice = o.LimitPrice + 0.01 }), "reports")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleSchemaVersion, "l5", lifecycle, "schema version")
+	// A synthetic report is only ever the engine's own, never a venue's input.
+	synthetic := mutated(func(p *event.LimitOrderLifecyclePayload) {
+		p.Synthetic, p.OrderID, p.Status, p.Message = true, "", event.OrderLifecycleStatusCanceled, "dry-run"
+	})
+	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l-synthetic", synthetic, "version 3")
+	refuse(event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion, "l-synthetic-3", synthetic, "schema version")
 	// The venue's echo of the limit need not be bit-equal to the engine's
 	// (.greptile/rules.md, "Numbers and money").
 	echoed := mutated(func(p *event.LimitOrderLifecyclePayload) { p.LimitPrice = o.LimitPrice + 1e-9 })

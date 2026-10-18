@@ -69,6 +69,14 @@ const (
 	// order with no journalled decision halts, any other breach degrades.
 	// It is recorded at schema version 2 only.
 	EngineStateReasonRiskLimitBreached = "risk-limit-breached"
+	// EngineStateReasonReconciliationUnexplained means a reconciliation found
+	// a difference no journalled event explains, bounded to the scope it
+	// names (ADR 0019, amended 2026-09-24: Degraded). Schema version 2 only.
+	EngineStateReasonReconciliationUnexplained = "reconciliation-unexplained"
+	// EngineStateReasonReconciliationUnverifiable means a reconciliation's
+	// evidence could not be compared, so nothing it bears on can be bounded
+	// (ADR 0019, amended 2026-09-24: Halted). Schema version 2 only.
+	EngineStateReasonReconciliationUnverifiable = "reconciliation-unverifiable"
 )
 
 // EngineStatePayload records the engine halting because a capital-safety
@@ -141,7 +149,8 @@ func (p EngineStatePayload) Validate() error {
 	errs = append(errs, ascendingIDs("scope order id", p.ScopeOrderIDs)...)
 	errs = append(errs, ascendingIDs("scope cash component", p.ScopeCashComponents)...)
 	switch p.Reason {
-	case EngineStateReasonCampaignWithoutProtectiveStop, EngineStateReasonRiskLimitBreached:
+	case EngineStateReasonCampaignWithoutProtectiveStop, EngineStateReasonRiskLimitBreached,
+		EngineStateReasonReconciliationUnexplained, EngineStateReasonReconciliationUnverifiable:
 		// recognised
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised engine state reason", p.Reason))

@@ -122,7 +122,7 @@ func TestGlideSleevesAreSummedIntoOneTarget(t *testing.T) {
 	}
 	// The planner sized February's IEF from the summed target.
 	for _, o := range planned(t, r.decisions) {
-		if o.InstrumentID == "IEF" && o.Tag == "targets-decided:ira:2025-02-28T21:00:00Z" && o.TargetWeight != ief.Weight {
+		if o.InstrumentID == "IEF" && o.Tag == "targets-decided:DUIRA:2025-02-28T21:00:00Z" && o.TargetWeight != ief.Weight {
 			t.Errorf("IEF planned at target %v, want the sum %v", o.TargetWeight, ief.Weight)
 		}
 	}
@@ -162,7 +162,7 @@ func TestGlideBandAppliesToTheSummedTargets(t *testing.T) {
 		}
 	}
 	for _, o := range planned(t, both.decisions) {
-		if o.Tag == "targets-decided:ira:2025-02-28T21:00:00Z" && (o.InstrumentID == "IEF" || o.InstrumentID == "SHY") {
+		if o.Tag == "targets-decided:DUIRA:2025-02-28T21:00:00Z" && (o.InstrumentID == "IEF" || o.InstrumentID == "SHY") {
 			t.Errorf("%s %s resized inside the band: %+v", o.Side, o.InstrumentID, o)
 		}
 	}

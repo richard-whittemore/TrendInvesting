@@ -405,3 +405,20 @@ func TestAnUnknownReportOrMissingJournalIsRefused(t *testing.T) {
 		t.Error("no report was accepted")
 	}
 }
+
+// TestTheOperatorReportShowsTheKillSwitch: the operator's recorded inputs
+// are visible from the command line, what each did and who recorded it.
+func TestTheOperatorReportShowsTheKillSwitch(t *testing.T) {
+	when := day(2026, 10, 17)
+	path := writeJournal(t, "operator.jsonl", ev{journal.KindInput, event.KillSwitchEventType, event.KillSwitchSchemaVersion, when,
+		event.KillSwitchPayload{AccountID: "joint", AsOf: when, Engaged: true, Operator: "owner", Detail: "news before the open"}})
+	out, err := query(t, "operator", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"kill-switch", "engaged", "owner", "news before the open", "joint"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}

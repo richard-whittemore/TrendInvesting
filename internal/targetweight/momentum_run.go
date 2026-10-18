@@ -9,6 +9,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/glide"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
@@ -40,8 +41,10 @@ import (
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
 //   - execution.order.lifecycle version 2 and execution.fill version 5 for the
 //     orders this run released;
-//   - operator.kill-switch, which refuses every order while engaged, and
-//     account.broker.snapshot, whose holdings net of working sells size
+//   - operator.kill-switch, which refuses every order while engaged;
+//   - operator.rebalance.cleared, the owner's clearance of the rebalance in
+//     progress (applyCleared); and
+//   - account.broker.snapshot, whose holdings net of working sells size
 //     every sell the gate checks after it (ADR 0026, points 2.5, 3 and 4).
 //     An IRA gets no sale back to 98% and no margin alarm.
 //
@@ -86,6 +89,15 @@ import (
 // execution"). The buys are budgeted from cash under the D5 rule and scaled
 // to fit; the budget is carried through each release and fill, less any cash
 // a newer snapshot shows gone that the fills do not explain.
+//
+// # Dry-run
+//
+// A dry-run releases every order with send false, so no venue ever reports
+// on it. The run records a synthetic terminal report for each as it is
+// released (endUnsent), so the buy phase is planned at the same close and the
+// next rebalance is not withheld as rebalance-in-progress. Nothing executes:
+// no fill, proceeds or commission is counted, so the buys are budgeted from
+// the snapshot's cash alone. Paper and live runs never record one.
 type momentumRun struct {
 	h       *Handler
 	rule    momentum.Config
@@ -215,6 +227,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		// The kill switch refuses every order of an IRA, which gets no sale
 		// back to 98% (ADR 0026, points 3 and 4).
 		return nil, r.h.applyKillSwitch(in)
+	case event.RebalanceClearedEventType:
+		return nil, r.applyCleared(in)
 	case event.BrokerSnapshotEventType:
 		// The latest broker holdings and open orders size every sell (ADR
 		// 0026, point 2.5); an IRA has no margin alarm, so this emits nothing.
@@ -223,6 +237,12 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return r.applyLifecycle(in)
 	case event.FillEventType:
 		return r.applyFill(in)
+	case event.ReconciliationEventType:
+		return r.h.applyReconciliation(in)
+	case event.MarketCorporateActionEventType:
+		return nil, r.h.applyCorporateAction(in)
+	case event.AlertAcknowledgedEventType:
+		return nil, r.h.applyAcknowledgement(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -320,6 +340,7 @@ func (r *momentumRun) applySnapshot(in event.Envelope) error {
 		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, r.snapshot.AsOf)
 	}
 	r.snapshot = &p
+	r.h.gate.SetBook(reconcile.CashBook(in.ID, p))
 	return nil
 }
 
@@ -535,10 +556,55 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.Unive
 	for _, o := range r.check(b, reb, plan.Sells, 0) {
 		reb.sells = append(reb.sells, o.ClientOrderID)
 	}
-	if len(reb.sells) == 0 {
+	r.endUnsent(b, reb.sells)
+	if r.sellsTerminal(reb) {
 		r.planBuys(b)
 	}
 	return b.result()
+}
+
+// sellsTerminal reports whether every sell the rebalance released is
+// terminal, as when it released none.
+func (r *momentumRun) sellsTerminal(reb *rebalance) bool {
+	for _, id := range reb.sells {
+		if s, _ := r.orders.Order(id); !s.Terminal {
+			return false
+		}
+	}
+	return true
+}
+
+// endUnsent records, in a dry-run only, a synthetic terminal report for each
+// of the orders just released, which the run never sent (ADR 0026, point 3,
+// "Mode", amended 2026-10-17), and ends each as a venue's cancellation would:
+// the gate no longer counts the sell as pending and a buy commits nothing
+// more. The report is marked synthetic and names no venue order, so no reader
+// can take it for a venue's report or an execution
+// (LimitOrderLifecyclePayload.Synthetic).
+func (r *momentumRun) endUnsent(b *emissions, released []string) {
+	if r.h.cfg.Mode != event.TradingModeDryRun {
+		return
+	}
+	for _, id := range released {
+		o, _ := r.orders.Order(id)
+		q := o.Released
+		p := event.LimitOrderLifecyclePayload{
+			AccountID: q.AccountID, ClientOrderID: id, InstrumentID: q.InstrumentID, Side: q.Side,
+			Status: event.OrderLifecycleStatusCanceled, Quantity: q.Quantity, LimitPrice: q.LimitPrice,
+			OccurredAt: b.at, Synthetic: true,
+			Message: "dry-run: journalled with send false and never sent; synthetic terminal report, nothing executed",
+		}
+		b.add("synthetic-lifecycle:"+id, event.OrderLifecycleEventType, p.SchemaVersion(), p)
+		// The run released this order from these very figures, so neither
+		// the shared report rule nor the gate can refuse the report: an
+		// error is a defect.
+		_, err := r.orders.Lifecycle(p)
+		b.fail(err)
+		b.fail(r.h.gate.ObserveLifecycle(p))
+		if q.Side == event.OrderSideBuy {
+			r.rebalance.budget.Close(id)
+		}
+	}
 }
 
 // minimumLot returns what D7-L's substitution values the picks against at the
@@ -647,6 +713,38 @@ func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (re
 	return "", ""
 }
 
+// applyCleared applies the owner's clearance of the rebalance in progress:
+// a rebalance whose orders are not all terminal sends nothing more and
+// withholds every later decision until the owner clears it (ADR 0026, point
+// 5 and "A new rebalance is withheld while an earlier one's orders are
+// working"). The clearance must name that rebalance's decision and exactly
+// the orders of it not terminal, which the owner has dealt with at the
+// broker; each is then terminal and the rebalance plans nothing more, so its
+// buy phase, if still pending, is never planned and the next decision time
+// decides afresh. The orders are cleared by the rule the reporter reads the
+// log by (event.OrderReports' Clear), so a later venue report on a cleared
+// order is refused as on a terminal order by both. The gate's pending sells
+// are left to the broker snapshots, which show what each cleared sell sold
+// (ADR 0026, point 2.5).
+func (r *momentumRun) applyCleared(in event.Envelope) error {
+	p, err := decodeInput[event.RebalanceClearedPayload](in, event.RebalanceClearedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if p.AccountID != r.h.cfg.AccountID {
+		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, r.h.cfg.AccountID)
+	}
+	if err := r.orders.Clear(p); err != nil {
+		return fmt.Errorf("targetweight: clearance %s: %w", in.ID, err)
+	}
+	for _, id := range p.ClientOrderIDs {
+		if o, _ := r.orders.Order(id); o.Released.Side == event.OrderSideBuy {
+			r.rebalance.budget.Close(id)
+		}
+	}
+	return nil
+}
+
 // cash is the cash the D5 rule funds buys from (ADR 0026, point 2, "Budget").
 func (r *momentumRun) cash(s event.AccountCashSnapshotPayload) float64 {
 	if r.exec.CashRule == event.CashRuleTotal {
@@ -667,9 +765,12 @@ func (r *momentumRun) planBuys(b *emissions) {
 	}
 	buys, skipped, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
 	r.skipped(b, skipped)
+	var released []string
 	for _, o := range r.check(b, reb, buys, reb.sellsPlanned) {
 		reb.budget.Release(o.ClientOrderID, orderplan.BuyCost(o, r.exec.MaxFeesPerOrder))
+		released = append(released, o.ClientOrderID)
 	}
+	r.endUnsent(b, released)
 }
 
 // unexplainedCashDrop is how far the latest snapshot's cash under the D5 rule
@@ -824,10 +925,8 @@ func (r *momentumRun) terminal(in event.Envelope, o *event.ReportedOrder, at tim
 		reb.budget.Close(o.Released.ClientOrderID)
 		return nil, nil
 	}
-	for _, id := range reb.sells {
-		if s, _ := r.orders.Order(id); !s.Terminal {
-			return nil, nil
-		}
+	if !r.sellsTerminal(reb) {
+		return nil, nil
 	}
 	b := &emissions{h: r.h, in: in, at: at}
 	r.planBuys(b)

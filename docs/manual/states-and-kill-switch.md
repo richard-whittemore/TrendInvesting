@@ -15,22 +15,25 @@ go wrong. The rules come from ADR 0019 (amended 2026-09-24, 2026-10-15,
 
 What is built today: the gate, the states, the kill switch input, the
 margin-cushion alarm and the sale, all recorded in the journal and replayed
-byte for byte. The way you will switch the kill switch on and off from the
-server, and the alerts that tell you a state changed, come with the composed
-live engine. They are not in this build.
+byte for byte, and the way you switch the kill switch on and off from the
+server: `operator kill-switch` ([operator](operator.md)). The reporter alerts
+you when a state changes, and repeats the alert until you acknowledge it
+([alerts-and-dashboard](alerts-and-dashboard.md)).
 
 ## The three states
 
 | State | What causes it | What still goes | What stops |
 | --- | --- | --- | --- |
 | **Normal** | the starting state | every order that passes the limits | orders that break a limit |
-| **Degraded** | an order broke a limit (too large, outside the price band, no mark, too much exposure, a sell larger than the broker's holding) | sells on instruments the problem does not name, sized from the broker's latest holding | every buy; every order on a named instrument |
-| **Halted** | something the gate cannot contain, such as an order that names no recorded decision, which means a defect in the order path | only the one sale back to 98% (below) | every other order |
+| **Degraded** | an order broke a limit (too large, outside the price band, no mark, too much exposure, a sell larger than the broker's holding), or the morning reconciliation found a difference no journalled event explains ([reconciliation](reconciliation.md)) | sells on instruments the problem does not name, sized from the broker's latest holding | every buy; every order on a named instrument |
+| **Halted** | something the gate cannot contain, such as an order that names no recorded decision, which means a defect in the order path, or a reconciliation whose evidence could not be compared | only the one sale back to 98% (below) | every other order |
 
 Each move out of Normal is written to the journal as a
 `strategy.engine.state` record. It says which state, why, and for Degraded
-which instruments are frozen (the *scope*). A second breach on another
-instrument widens the scope; it never narrows. Degraded can become Halted.
+which instruments are frozen (the *scope*). A reconciliation's scope can also
+name the account's cash (`total-cash`) when only the cash differs: then no
+instrument is frozen, every buy is refused and sells carry on. A second breach
+on another instrument widens the scope; it never narrows. Degraded can become Halted.
 Halted never becomes Degraded again.
 
 **Leaving Degraded or Halted is never automatic.** A later clean check does
@@ -56,7 +59,9 @@ down, and the instrument is added to the scope.
 ## The kill switch
 
 The kill switch is your own input, recorded in the journal as
-`operator.kill-switch`. While it is on:
+`operator.kill-switch`. You record it with `operator kill-switch -state
+engaged` (or `released`); the engine records it before its next input from
+the adapter ([operator](operator.md)). While it is on:
 
 - every order is refused (`kill-switch`), routine sells and the IRAs'
   included;
@@ -64,6 +69,11 @@ The kill switch is your own input, recorded in the journal as
   borrowed because the switch is on;
 - the engine state does not change. Turning the switch off puts things back
   as they were. Turning it on twice is still one engagement.
+- Boost orders only when its target changes, so a Boost order refused while
+  the switch was on is not tried again when you turn it off; the next target
+  change orders as usual. The IRAs plan afresh at every decision time.
+- A fresh run starts with the switch off. `operator approve` warns you when
+  the previous run ended with it on, so you can record it again.
 
 Each input must say `engaged` true or false. An input that leaves it out, or
 sets it to null, is rejected rather than read as "off", so a malformed input
@@ -321,8 +331,9 @@ refused, because working sells could not be checked.
 
 The thresholds are in the configuration. They were introduced in version 5 of
 `strategy.target-weight.configuration`, carried unchanged in the current version 6,
-and read by rules version 1.6.0 and later (a journal written under an earlier rules version
-will not replay). Only the margin account has them: an
+and read from rules version 1.5.0 on. This build (rules version 1.12.0) reads
+only configuration version 6, so a journal written under an earlier rules
+version will not replay. Only the margin account has them: an
 IRA has no margin cushion, so its configuration leaves them out and it gets no
 alarm. A change of level is recorded as
 `risk.margin.alarm`. Turning urgent fires the sale back to 98%.

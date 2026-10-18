@@ -1,11 +1,11 @@
 # Runbook: the durable log, a refused restart and a build upgrade
 
-This is the durable-log runbook (ADR 0027). #338 adds the remaining entries
-(a diverging restart, a torn tail). The entries here follow the owner's
-decisions of 2026-10-16: no resume across builds, and the restart model;
-"An unrecoverable log" is the step for a log whose content the engine cannot
-recover; "A log that cannot be read" is the step for one it cannot open or
-read.
+This is the durable-log runbook (ADR 0027). The entries here follow the
+owner's decisions of 2026-10-16: no resume across builds, and the restart
+model; "An unrecoverable log" is the step for a log whose content the engine
+cannot recover; "A log that cannot be read" is the step for one it cannot
+open or read; "A resume that does not reproduce its log" and "A torn tail"
+are the other two refusals and reports a resume can give.
 
 ## Upgrading the build
 
@@ -92,7 +92,13 @@ The engine reads its settings from
 2. Find the latest log and its final record hash: the `record_hash` of the
    last commit line, `grep '"commit"' <latest>.log | tail -n 1`.
 3. Write the approval, for example `approval-<new TI_RUN>.json` in the
-   account's state directory:
+   account's state directory. `sudo -u ti-trader operator approve -log
+   <latest>.log -account <account> -by owner -out <file>` writes it from the log, with the final
+   hash, the latch and the incident in force read from the log itself, and
+   `-clear-incident <id>` clears the incident instead
+   ([operator](../manual/operator.md)); if the kill switch was engaged when
+   that log ended, it says so, and you record it again before the start (a
+   fresh run starts with it released). By hand, it looks like this:
 
    ```json
    {"account_id": "joint", "previous_log": "run-2026-10-20.log",
@@ -113,10 +119,14 @@ The engine reads its settings from
    of normal), and must be empty if that log ended normal. `incident_in_force` is `null`
    unless the new run continues an incident; then it is
    `{"incident_id": "<id>", "state": "degraded"|"halted",
-   "scope_instrument_ids": ["SPY"], "sale_attempted": true|false,
+   "scope_instrument_ids": ["SPY"], "scope_cash_components": ["total-cash"],
+   "sale_attempted": true|false,
    "sale_client_order_id": "<id, only if the sale was sent>"}`: the state
    and scope the incident holds the account in (degraded names its
-   instruments, in ascending order; halted names none: `[]`), from the last
+   instruments and its cash components, each in ascending order, at least
+   one of either: `["total-cash"]` when a reconciliation found unexplained
+   cash, which refuses every buy, else `[]`; halted names none: `[]` for
+   both), from the last
    `strategy.engine.state` records in the previous log, or, if it recorded
    none since its start, the `incident_in_force` its own approval carried
    (a continued incident records no new state); the new run starts
@@ -140,7 +150,8 @@ The engine reads its settings from
    names what does not match: a later log than the one approved, a final hash
    that is not the log's, a latch the log does not end with, an incident
    state looser than the one the log ended in, an incident ID that is not
-   the log's, a carried-in-force incident when the log ended normal, a
+   the log's, a carried-in-force incident when the log ended normal, an
+   incident's sale stated not attempted when the log records an attempt, a
    repeated start, or another account. Every log in the state directory is
    read to find the latest run, so a log the engine cannot recover (ADR
    0027 §5) stops every start until it is set aside: see "An unrecoverable
@@ -252,3 +263,39 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
    the crashed run itself, it cannot be resumed: start a fresh run from a
    reconciled baseline (ADR 0019's recovery procedure), with an approval
    naming the latest run left in the directory.
+
+## A resume that does not reproduce its log
+
+A resume re-applies every input of the crashed log, in order, and checks
+that this build makes exactly the decisions the log records for each. A
+refusal saying "did not reproduce what the log records" (a
+`journal.ResumeDivergenceError`) names the first input whose decisions
+differ. The engine stops; the new log it started holds a copy of the records
+before that input, an abandoned resume attempt the engine skips from then on
+(ADR 0027 §6).
+
+1. **Check the start settings first.** The same `-config`, `-as-of` and
+   build as the crashed run? A different configuration or build is refused
+   earlier with its own message; a divergence on the same ones means the
+   program decided differently from the same inputs, which it must never do.
+2. **Keep both logs**, unchanged. Do not retry the resume in a loop: it
+   diverges the same way every time.
+3. **Open an issue** with the input the refusal names and both logs. It is a
+   defect (a rule that depends on something outside the log), not an
+   operator error.
+4. **Restart from a reconciled baseline**: a fresh run, approved by
+   `operator approve` naming the crashed log (it is still the latest run),
+   after reconciling at IBKR (`reconciliation.md`, *Recover*). The fresh run
+   does not replay the crashed log, so it does not meet the divergence.
+
+## A torn tail
+
+A crash can interrupt the write of the last input, leaving a partial group
+after the last commit. A resume reports `left out a torn tail of N byte(s)`
+and recovers every committed group before it. Nothing from that input was
+released (journal-before-send, ADR 0027), so the adapter sends it again at
+the sequence the resume reports (`the adapter's next input carries sequence
+N`; a resume of a start cut short that records an approval states it once,
+on the approval's line, `the adapter's first input carries sequence 3`).
+There is nothing to do. A partial line anywhere but the end is not a
+torn tail: it is damage, refused as in "An unrecoverable log".

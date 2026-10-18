@@ -148,8 +148,8 @@ func TestDecodeOperatorRunApprovedRequiresEveryKey(t *testing.T) {
 	base := `"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2026-10-17T13:00:00Z"`
 	accept := []string{
 		`{` + base + `,"boost":{"latched":true},"incident_in_force":null}`,
-		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","state":"halted","scope_instrument_ids":[],"sale_attempted":false}}`,
-		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","state":"degraded","scope_instrument_ids":["SPY"],"sale_attempted":false}}`,
+		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","state":"halted","scope_instrument_ids":[],"scope_cash_components":[],"sale_attempted":false}}`,
+		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","state":"degraded","scope_instrument_ids":["SPY"],"scope_cash_components":[],"sale_attempted":false}}`,
 	}
 	for _, raw := range accept {
 		if _, err := event.DecodeOperatorRunApproved([]byte(raw)); err != nil {
@@ -173,5 +173,99 @@ func TestDecodeOperatorRunApprovedRequiresEveryKey(t *testing.T) {
 		if _, err := event.DecodeOperatorRunApproved([]byte(raw)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("DecodeOperatorRunApproved(%s) = %v, want a refusal mentioning %q", raw, err, want)
 		}
+	}
+}
+
+// TestAnApprovalCarriesTheIncidentsCashScope: a Degraded incident's scope can
+// cover cash (a reconciliation's unexplained cash difference, ADR 0019,
+// amended 2026-09-24), and a fresh run resumes in that same scope, so the
+// approval states the cash components beside the instruments, at schema
+// version 2: Degraded names instruments or cash components or both, strictly
+// ascending; Halted names neither.
+func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
+	if event.OperatorRunApprovedSchemaVersion != 2 {
+		t.Errorf("OperatorRunApprovedSchemaVersion = %d, want 2 once an incident in force states its cash scope", event.OperatorRunApprovedSchemaVersion)
+	}
+	type P = event.OperatorRunApprovedPayload
+	v := validOperatorRunApproved()
+	cash := []string{event.ReconciliationComponentCash}
+	for name, in := range map[string]event.IncidentInForce{
+		"cash alone":          {IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeCashComponents: cash, SaleAttempted: new(false)},
+		"instrument and cash": {IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: []string{"SPY"}, ScopeCashComponents: cash, SaleAttempted: new(false)},
+	} {
+		ok := v
+		ok.IncidentInForce = &in
+		if err := ok.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	in := func(mutate func(*event.IncidentInForce)) func(*P) {
+		return func(p *P) {
+			i := event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeCashComponents: cash, SaleAttempted: new(false)}
+			mutate(&i)
+			p.IncidentInForce = &i
+		}
+	}
+	expectInvalid(t, "halted with cash", v, in(func(i *event.IncidentInForce) { i.State = event.EngineStateHalted }), "scope")
+	expectInvalid(t, "cash out of order", v, in(func(i *event.IncidentInForce) { i.ScopeCashComponents = []string{"total-cash", "dividends"} }), "ascending")
+
+	base := `"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2026-10-17T13:00:00Z","boost":{"latched":false}`
+	cashOnly := `{` + base + `,"incident_in_force":{"incident_id":"engine-state:joint:1","state":"degraded","scope_instrument_ids":[],"scope_cash_components":["total-cash"],"sale_attempted":false}}`
+	p, err := event.DecodeOperatorRunApproved([]byte(cashOnly))
+	if err != nil || p.IncidentInForce == nil || len(p.IncidentInForce.ScopeCashComponents) != 1 {
+		t.Errorf("DecodeOperatorRunApproved(cash alone) = %+v, %v", p.IncidentInForce, err)
+	}
+	unstated := `{` + base + `,"incident_in_force":{"incident_id":"engine-state:joint:1","state":"degraded","scope_instrument_ids":["SPY"],"sale_attempted":false}}`
+	if _, err := event.DecodeOperatorRunApproved([]byte(unstated)); err == nil || !strings.Contains(err.Error(), "incident_in_force.scope_cash_components") {
+		t.Errorf("an incident in force that does not state its cash scope: %v", err)
+	}
+
+	// A version 1 approval recorded by an earlier build could not state a
+	// cash scope, so it is read with none; it may not name one.
+	if r, err := event.DecodeRecordedOperatorRunApproved([]byte(unstated), 1); err != nil || len(r.IncidentInForce.ScopeCashComponents) != 0 {
+		t.Errorf("a version 1 approval: %+v, %v", r.IncidentInForce, err)
+	}
+	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 1); err == nil {
+		t.Error("a version 1 approval naming a cash scope was read")
+	}
+	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 2); err != nil {
+		t.Errorf("a version 2 approval: %v", err)
+	}
+	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 3); err == nil || !strings.Contains(err.Error(), "schema version 3") {
+		t.Errorf("an approval at an unknown schema version: %v", err)
+	}
+}
+
+// TestOperatorRunApprovedValidateSchema: an approval is checked against the
+// schema version it was recorded at (ADR 0015): version 1 could not state an
+// incident's cash scope, so a payload naming one is refused under it; version
+// 2 holds it; any other version is refused.
+func TestOperatorRunApprovedValidateSchema(t *testing.T) {
+	plain := validOperatorRunApprovedInIncident()
+	withCash := validOperatorRunApproved()
+	withCash.IncidentInForce = &event.IncidentInForce{
+		IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded,
+		ScopeCashComponents: []string{event.ReconciliationComponentCash}, SaleAttempted: new(false),
+	}
+	for _, v := range []uint32{1, 2} {
+		if err := plain.ValidateSchema(v); err != nil {
+			t.Errorf("version %d, no cash scope: %v", v, err)
+		}
+	}
+	if err := withCash.ValidateSchema(2); err != nil {
+		t.Errorf("version 2 with a cash scope: %v", err)
+	}
+	if err := withCash.ValidateSchema(1); err == nil || !strings.Contains(err.Error(), "cash") {
+		t.Errorf("version 1 naming a cash scope: %v", err)
+	}
+	for _, v := range []uint32{0, 3} {
+		if err := plain.ValidateSchema(v); err == nil || !strings.Contains(err.Error(), "schema version") {
+			t.Errorf("version %d: %v", v, err)
+		}
+	}
+	bad := plain
+	bad.AccountID = ""
+	if err := bad.ValidateSchema(2); err == nil {
+		t.Error("an invalid payload passed ValidateSchema")
 	}
 }

@@ -71,6 +71,14 @@ func (g *Gate) checkSale(o Order, f event.RiskFigures) Outcome {
 // ID id. An engagement while already engaged is the same engagement, so the
 // sale it allows is still attempted once. It changes no engine state (ADR
 // 0026, point 3; owner decision 2026-10-16).
+//
+// The owner's instructions count in the order of the times they state, not
+// the order they arrive in, since the operator may backdate one: a kill
+// switch stating a time earlier than the one last applied is refused,
+// naming it, so a stale instruction never undoes a later one (ADR 0019,
+// amendment of 2026-10-17, "operator instructions count in the order of the
+// times they state"). One stating the same time is applied, the later
+// recorded winning.
 func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
@@ -81,6 +89,11 @@ func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 	if p.AccountID != g.accountID {
 		return fmt.Errorf("risklimit: kill switch for account %q; this gate is %q", p.AccountID, g.accountID)
 	}
+	if g.lastKillSet && p.AsOf.Before(g.lastKillAt) {
+		return fmt.Errorf("risklimit: kill switch %s states %s, earlier than %s, already applied for account %s at %s; the owner's instructions are ordered by the time they state, so this one would undo a later one: record it again with the current time if it is still meant",
+			id, p.AsOf.UTC().Format(time.RFC3339), g.lastKill, p.AccountID, g.lastKillAt.UTC().Format(time.RFC3339))
+	}
+	g.lastKill, g.lastKillAt, g.lastKillSet = id, p.AsOf, true
 	switch {
 	case p.Engaged && !g.killEngaged:
 		g.killEngaged, g.killID = true, id
@@ -294,11 +307,13 @@ func (g *Gate) StaleEpisodeOpen() bool { return g.staleOpen }
 // stale episode open, which ADR 0026 point 5 lists among the state a restart
 // recovers from the journal ("Whether a stale-snapshot episode is open for
 // the account, from its opening `stale-broker-snapshot` record" and what
-// closes it), so a restart within it does not alert again. It is an unwired
-// seam: a crash resume rebuilds the episode by replaying the durable log's
-// inputs (ADR 0027, section 6), and the owner's approval of a fresh run,
-// which restores the incident's sale attempt, is where a restore of the
-// episode would be wired.
+// closes it), so a restart within it does not alert again. A crash resume
+// rebuilds the episode by replaying the durable log's inputs (ADR 0027,
+// section 6), so it never calls this. A fresh run's approval does not
+// restore it either: the approval is the run's input before any other, and
+// a stale check needs a latest broker snapshot, whose ObserveBroker ends
+// the episode, so an episode restored open would be ended before any check
+// could read it. The fresh run's first stale check alerts.
 func (g *Gate) RestoreStaleEpisode(open bool) { g.staleOpen = open }
 
 // freshCheck applies a gate check of the latest broker snapshot at at, the

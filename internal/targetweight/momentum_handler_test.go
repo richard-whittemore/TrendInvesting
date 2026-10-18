@@ -294,7 +294,7 @@ func TestMomentumFailsClosed(t *testing.T) {
 func TestAWithheldRebalancePlansNothing(t *testing.T) {
 	r := simulateMomentum(t, momentumOptions{noBar: map[string]string{"2025-02-28": "IEF"}})
 	for _, o := range planned(t, r.decisions) {
-		if o.Tag != "targets-decided:ira:2025-01-31T21:00:00Z" {
+		if o.Tag != "targets-decided:DUIRA:2025-01-31T21:00:00Z" {
 			t.Errorf("an order for a withheld decision: %+v", o)
 		}
 	}

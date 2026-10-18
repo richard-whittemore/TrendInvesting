@@ -51,6 +51,41 @@ and records everything, and marks every order "do not send".
 7. **When stopped** (SIGTERM, which `systemctl stop` sends), it also writes a
    journal of the whole run (ADR 0017).
 
+### What dry-run simulates, and what it does not
+
+Dry-run rehearses the decisions, not the trading. Nothing reaches a venue, so
+no venue ever reports on an order. A momentum IRA plans its buys only once
+every sell of the rebalance has ended (ADR 0026, point 2, "IRA execution"),
+and would wait on an unsent sell for ever, withholding every later month as
+`rebalance-in-progress`. So in dry-run, and only in dry-run, the engine
+records its own **synthetic** terminal report for each order it releases:
+an `execution.order.lifecycle` record at version 3, marked
+`"synthetic": true`, status `canceled`, with no venue order id and a message
+saying it was never sent. The rebalance then plans its buys at the same
+close, and next month is decided normally.
+
+A synthetic report is never an execution. Nothing fills, so no proceeds,
+commission or position change is counted, and the buys are budgeted from
+the account's cash alone. The holdings never move, so each month's dry-run
+decides from the same positions. `journal-query orders` shows the record as
+`synthetic-lifecycle-canceled`. Paper and live never record one: there the
+venue's own reports end each order. A synthetic report arriving as an input
+is refused.
+
+Boost records none, and that has a consequence. It has no buy phase to wait
+for, but the gate still counts each released Boost sell as pending until a
+venue reports a fill or a cancellation on it, and every later Boost sell is
+sized net of the shares still pending (ADR 0026, point 2, step 5). In a
+dry-run against an adapter that sends nothing, no report ever comes, so after
+Boost's first exit sell (147% back to 98%) that sell's shares stay pending
+for the rest of the run: the next exit's sell is smaller than paper would
+make it, and none at all once the pending shares reach the holding. The
+broker-holding check and the sale back to 98% net the same phantom sell. So
+a dry-run rehearses one Boost exit faithfully; read any later exit in the
+same run as under-sized (a resumed run replays the same pending sell). (`make
+demo-boost-dry-run` does not show this: its simulated account reports a fill
+for every released order at the next close, which ends each sell.)
+
 ## Build identity
 
 Every decision carries the build that made it. A build is "stamped" with the
@@ -73,6 +108,13 @@ folder only the engine's user can open), `-log`, `-out` and `-as-of`. systemd
 never restarts it by itself; restarting is your step (`restart.md`). The
 engines are not started at boot, and the provisioner disables any engine an
 earlier version of it had set to start at boot.
+
+## Your instructions while it runs
+
+Started with `-operator <folder>`, the engine reads your kill switch and
+rebalance clearances from that folder, which `operator` writes, and records
+each in its durable log before its next input from the adapter
+([operator](operator.md)).
 
 ## What can go wrong, and what it does
 
@@ -97,6 +139,18 @@ from the first one's log and checks the two logs are identical byte for byte.
 - ADRs: 0014 (socket), 0016 (configuration hash and build), 0017 (journal),
   0019 (Degraded and Halted), 0025 (IBKR adapter), 0026 (target-weight
   strategies and the risk gate), 0027 (durable log, restart).
+- The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
+  target-weight rules version 1.11.0 (ADR 0016), so a dry-run journal written
+  under an earlier rules version does not replay.
+- Tests of the synthetic reports, in `internal/targetweight`:
+  `TestRulesVersionDeclaresTheDryRunSyntheticReports`,
+  `TestADryRunRebalanceThatSellsPlansItsBuysInTheSameRun`,
+  `TestOnlyADryRunRecordsSyntheticReports`,
+  `TestADryRunCountsNoProceedsOrCommissionFromASyntheticReport`,
+  `TestADryRunJournalReplays`; in `internal/journalquery`:
+  `TestASyntheticReportIsShownAndCountsNoFill`; in `internal/report`:
+  `TestASyntheticReportAcknowledgesNothing`; in `internal/event`:
+  `TestLimitOrderLifecycleIsReadAtBothItsVersions`.
 - Tests in `cmd/engine`: `TestADryRunEngineRunsBoostAndSendsNothing`,
   `TestTheDeclaredModeMustBeTheConfiguredMode`,
   `TestTheAccountMustMatchTheMode`,
@@ -108,5 +162,6 @@ from the first one's log and checks the two logs are identical byte for byte.
 ## Not built yet
 
 The IBKR adapter (so nothing can be sent at all yet), reconciliation against
-IBKR on every start (#394), re-delivery of released orders after a restart
-(#395), and the IRA accounts' momentum configuration.
+IBKR on every start (#394), and the IRA accounts' momentum configuration.
+Re-delivery of released orders after a restart is built: see
+[re-delivery](redelivery.md).

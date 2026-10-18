@@ -48,11 +48,12 @@ func marshalPayloads() []validatedPayload {
 		validTargetsDecided(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validKillSwitch(), validBrokerSnapshot(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
-		validOperatorRunApproved(), validOperatorRunApprovedInIncident(),
+		validOperatorRunApproved(), validOperatorRunApprovedInIncident(), validRebalanceCleared(),
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
 		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
 		validAdjustedBar(), validCloseHistory(), validSessionRetracted(),
+		validReconciliation(), validReconciliationResult(), validAlertAcknowledged(),
 	}
 }
 

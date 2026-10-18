@@ -71,3 +71,34 @@ func TestAnApprovedLatchIsTheOneTheApprovedLogEndsWith(t *testing.T) {
 		}
 	}
 }
+
+// TestAVersion1ApprovalInTheApprovedLogStaysReadable: the approved log is
+// evidence recorded earlier, so its approval is read at the schema version it
+// was recorded at (ADR 0015). A version 1 approval, which could not state an
+// incident's cash scope, still gives the latch a run that decided nothing
+// started from.
+func TestAVersion1ApprovalInTheApprovedLogStaysReadable(t *testing.T) {
+	recorded := approvalEntry(t, event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-0.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("0", 64),
+		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+		Boost:           event.BoostStateInForce{Latched: new(true)},
+		IncidentInForce: &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: []string{"SPY"}, SaleAttempted: new(false)},
+	})
+	var keys map[string]any
+	if err := json.Unmarshal(recorded.Envelope.Payload, &keys); err != nil {
+		t.Fatal(err)
+	}
+	delete(keys["incident_in_force"].(map[string]any), "scope_cash_components")
+	raw, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded.Envelope.Payload, recorded.Envelope.SchemaVersion = raw, 1
+	entries := []journal.Entry{recorded}
+	if err := restart.CheckApprovedLatch(entries, event.OperatorRunApprovedPayload{Boost: event.BoostStateInForce{Latched: new(true)}}, "run-1.log"); err != nil {
+		t.Fatalf("a version 1 approval in the approved log is read at its version: %v", err)
+	}
+	if err := restart.CheckApprovedLatch(entries, event.OperatorRunApprovedPayload{Boost: event.BoostStateInForce{Latched: new(false)}}, "run-1.log"); err == nil || !strings.Contains(err.Error(), "decided nothing") {
+		t.Fatalf("its latch is the one in force: %v", err)
+	}
+}

@@ -76,8 +76,20 @@ var (
 	refusedVersions  = event.OrderRefusedVersions()
 	// A target-weight account's orders are limit orders, reported at
 	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
-	lifecycleVersions        = []uint32{event.OrderLifecycleLimitVersion}
+	lifecycleVersions = []uint32{event.OrderLifecycleLimitVersion}
+	// syntheticVersions: a dry-run engine's own report, a decision, never
+	// the venue's input (event.LimitOrderLifecycleVersions).
+	syntheticVersions        = []uint32{event.OrderLifecycleSyntheticVersion}
 	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
+	// The owner's clearance of a momentum run's rebalance in progress (ADR
+	// 0026, point 5).
+	clearedVersions = []uint32{event.RebalanceClearedSchemaVersion}
+	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
+	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
+	acknowledgedVersions   = []uint32{event.AlertAcknowledgedSchemaVersion}
+	// A fresh run's approval, for the incident it carries in force: version
+	// 1, which could not state a cash scope, and the current version.
+	approvalVersions = []uint32{1, event.OperatorRunApprovedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }

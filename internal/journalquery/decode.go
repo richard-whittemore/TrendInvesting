@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -32,6 +33,9 @@ type item struct {
 	engine    *event.EngineStatePayload
 	snapshot  *event.AccountPositionsSnapshotPayload
 	renamed   *event.InstrumentSymbolChangedPayload
+	killed    *event.KillSwitchPayload
+	cleared   *event.RebalanceClearedPayload
+	approved  *event.OperatorRunApprovedPayload
 }
 
 // fill is one execution in either fill version the queries read: a Turtle
@@ -53,11 +57,13 @@ type fill struct {
 // lifecycle is one order state change in either lifecycle version: a Turtle
 // stop order's (version 1), priced at its stop and noted with its tag, or a
 // target-weight limit order's (version 2, ADR 0026), priced at its limit and
-// noted with its client order id.
+// noted with its client order id. Synthetic marks a dry-run engine's own
+// report on an order it never sent (version 3), which is never an execution.
 type lifecycle struct {
 	InstrumentID, Status, Side, Note string
 	Quantity                         int64
 	Price                            float64
+	Synthetic                        bool
 }
 
 type seenFill struct {
@@ -107,6 +113,24 @@ func decode(j Journal) ([]item, error) {
 		case event.EngineStateEventType:
 			it.engine = new(event.EngineStatePayload)
 			err = read(env, []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}, it.engine)
+		case event.KillSwitchEventType:
+			it.killed = new(event.KillSwitchPayload)
+			err = read(env, []uint32{event.KillSwitchSchemaVersion}, it.killed)
+			it.at, it.account = it.killed.AsOf, it.killed.AccountID
+		case event.RebalanceClearedEventType:
+			it.cleared = new(event.RebalanceClearedPayload)
+			err = read(env, []uint32{event.RebalanceClearedSchemaVersion}, it.cleared)
+			it.at, it.account = it.cleared.AsOf, it.cleared.AccountID
+		case event.OperatorRunApprovedEventType:
+			// An approval is read at the version it was recorded at, version
+			// 1 (no cash scope) included, by the rule every reader of a
+			// recorded approval applies (ADR 0015).
+			var p event.OperatorRunApprovedPayload
+			if p, err = event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion); err != nil {
+				err = fmt.Errorf("%s: %w", env.Type, err)
+			}
+			it.approved = &p
+			it.at, it.account = it.approved.ApprovedAt, it.approved.AccountID
 		case event.AccountSnapshotEventType:
 			// Version 2 (equity and cash) carries no positions and is not
 			// read here. Version 3 is the broker's positions and version 4
@@ -227,18 +251,21 @@ func readFill(env event.Envelope) (*fill, error) {
 	return &fill{InstrumentID: p.InstrumentID, Kind: p.Kind, Quantity: p.Quantity, Price: p.Price, Commission: p.Commission, turtle: p}, nil
 }
 
-// readLifecycle decodes an order state change of either version, with the
-// account a limit order's change names; any other version is refused.
+// readLifecycle decodes an order state change of any version, with the
+// account a limit order's change names; any other version is refused. A
+// limit order's version 2 is a venue's report and version 3 a synthetic one,
+// and each is refused at the other's version.
 func readLifecycle(env event.Envelope) (*lifecycle, string, error) {
-	if env.SchemaVersion == event.OrderLifecycleLimitVersion {
+	limit := event.LimitOrderLifecycleVersions()
+	if slices.Contains(limit, env.SchemaVersion) {
 		p := new(event.LimitOrderLifecyclePayload)
-		if err := read(env, []uint32{event.OrderLifecycleLimitVersion}, p); err != nil {
+		if err := read(env, limit, p); err != nil {
 			return nil, "", err
 		}
-		return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Side: p.Side, Note: p.ClientOrderID, Quantity: p.Quantity, Price: p.LimitPrice}, p.AccountID, nil
+		return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Side: p.Side, Note: p.ClientOrderID, Quantity: p.Quantity, Price: p.LimitPrice, Synthetic: p.Synthetic}, p.AccountID, nil
 	}
 	p := new(event.OrderLifecyclePayload)
-	if err := read(env, []uint32{event.OrderLifecycleSchemaVersion, event.OrderLifecycleLimitVersion}, p); err != nil {
+	if err := read(env, append([]uint32{event.OrderLifecycleSchemaVersion}, limit...), p); err != nil {
 		return nil, "", err
 	}
 	return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Note: p.Tag, Quantity: p.Quantity, Price: p.StopPrice}, "", nil
