@@ -115,13 +115,27 @@ the difference to the target in force, from the account as it then stands
 (rules version 1.18.0; ADR 0026, amendment of 2026-10-18). The part-filled
 case is the owner's decision of 2026-10-18; the nothing-filled case extends
 it and is put to the owner for confirmation. An order filled in full plans
-nothing more. The program checks at each close, so a fill IBKR reports a
-little after the cancellation still counts.
+nothing more, even if the rest of its fills arrive after the cancellation:
+the program checks at each close until the session that plans the rest, so
+a fill IBKR reports late still counts, and that decision records the shares
+filled as they then stand.
 
-One exception: if a later decision has already planned a new order (because
-the target changed), an expiry reported after it plans nothing. That new
-order was sized from the account as it stood, so planning again would trade
-drift, or buy twice while the new buy is still working.
+The program keeps watching the last order a decided session released until
+it has filled in full, or it has ended and a later session has decided. A
+session that decides but orders nothing does not stop the watch, so an
+expiry IBKR reports after the next close is still planned for. The one
+exception: if a later decision has already **released** a new order
+(because the target changed), an expiry reported after it plans nothing.
+That new order was sized from the account as it stood, so planning again
+would trade drift, or buy twice while the new buy is still working.
+
+If IBKR **rejects** the order outright (`invalid`, it never rested), the
+reason may last (a permission, a margin requirement), so the program plans
+it again **once** (`replan` cause `rejected`). If IBKR rejects that order
+too, the program does not try again: that session's decision records it
+(`replan_withheld`), you get one urgent page, and the account stays off its
+target until the target changes or a fresh run. This bound is the
+orchestrator's reading, put to you for confirmation.
 
 A refusal that moves the account to Degraded or Halted does **not** set up a
 re-plan: those states follow their own rules, and the way out is a fresh
@@ -130,8 +144,12 @@ run you approve, whose first decision plans to the target from scratch.
 Each decision records whether a re-plan is pending after it
 (`replan_pending`), so a run restarted from that decision picks it up. A
 decision that re-plans, or is withheld while one is pending, also records
-why (`replan`): `refused`, or `part-filled` or `unfilled` with the order's
-client order ID and its filled and released shares.
+why (`replan`): `refused`, or `part-filled`, `unfilled` or `rejected` with
+the order's client order ID and its filled and released shares. Each
+decision also records the order being watched (`watched`: its client order
+ID, side, shares, limit, shares filled so far and, once IBKR ended it, how),
+so a run restarted while an order is still working keeps watching it and
+reads IBKR's reports on it.
 
 ## A session with no SPY bar
 
@@ -142,8 +160,13 @@ session is **skipped**: at the next session with a bar, RSI(2) and both
 averages carry on over the closes the engine has, as if the missing session
 had not been in the series, and that decision lists the missing sessions
 (`gap_sessions`). From there the run decides as normal, so a gap never
-blocks Boost's exit (owner's decision of 2026-10-18; ADR 0026, point 5,
-amendment of that date; rules version 1.18.0).
+blocks Boost's exit (ADR 0026, point 5, amendment of 2026-10-18; rules
+version 1.18.0).
+
+Who decided what: you accepted the recommendation that a missing bar must
+not freeze the run (2026-10-18). Skipping the session, rather than filling
+its close forward as the backtest's engine does, is the orchestrator's
+reading, put to you and **awaiting your confirmation**.
 
 This is **not** what the QuantConnect backtest would do. Its engine fills a
 missing daily bar forward: it repeats the previous close, feeds that to the
@@ -215,8 +238,10 @@ In dry-run, step 5 never sends (every order says `send: false`); see the
 Each decided or withheld session writes one `strategy.targets.decided`
 record. For Boost it carries the close, RSI(2), both averages (and whether
 each was ready), the latch before and after, the target in force,
-whether a re-plan is pending and why (`replan`), and any sessions with no
-bar since the last close it read (`gap_sessions`). An order adds `strategy.order.planned`, then
+whether a re-plan is pending and why (`replan`), a re-plan withheld after
+a second rejection (`replan_withheld`), the order being watched
+(`watched`), and any sessions with no bar since the last close it read
+(`gap_sessions`). An order adds `strategy.order.planned`, then
 `risk.order.released` or `risk.order.refused`. `journal-query orders` and
 `journal-query refusals` list them ([journal-query](journal-query.md)).
 
@@ -230,9 +255,11 @@ bar since the last close it read (`gap_sessions`). An order adds `strategy.order
 | The kill switch is on | Every order is refused except the sale back to 98%; the account stays Normal; the order is re-planned at the first decided close after you release the switch. | Nothing more, once released. Check it with `journal-query orders`. |
 | IBKR's latest snapshot is too old when a sell is checked | The sell is refused (`stale-broker-snapshot`), no state change, one urgent alert per outage, re-planned at the next decision. | Check the Gateway. |
 | The exit is refused because the account is Halted, Degraded on SPY or under the kill switch | The one sale back to 98% goes instead ([states-and-kill-switch](states-and-kill-switch.md#the-one-sale-back-to-98)). | Follow the alert; do not sell by hand while that sale is working. |
-| The DAY order expires, or IBKR cancels it, with part or all unfilled | The cancellation is recorded and ends the order. The next session that decides plans the rest of the difference to the target (`replan` cause `part-filled` or `unfilled`), unless a newer order already replaced it. | Nothing, normally. Do not buy or sell the rest by hand as well: the program will. If you must, engage the kill switch first. |
-| An order is never sent (the adapter refused it for good and you settled it `--never-sent`) | The order stays released in the log. A never-sent **sell** keeps counting as being sold, so every later exit in the run is smaller, or nothing, as in dry-run. A never-sent **buy** is not re-planned (the target in force has not changed). | After settling it, reconcile and start a fresh run you approve: its first decision plans to the target from scratch ([IBKR adapter](ibkr-adapter.md)). |
+| The DAY order expires, or IBKR cancels it, with part or all unfilled | The cancellation is recorded and ends the order. The next session that decides after the program has read it plans the rest of the difference to the target (`replan` cause `part-filled` or `unfilled`), unless a newer released order already replaced it. A session that decides without ordering does not cancel the plan. | Nothing, normally. Do not buy or sell the rest by hand as well: the program will. If you must, engage the kill switch first. |
+| IBKR rejects the order (`invalid`) | The rejection is recorded. The next session that decides plans it once more (`replan` cause `rejected`). If IBKR rejects that one too, it is not planned again (`replan_withheld`) and you get one urgent page; the account stays off its target until the target changes. | Find the reason in IBKR's order log (`journal-query orders` lists the rejection). Once fixed, the next change of target orders as normal; or start a fresh run you approve, whose first decision plans to the target from scratch. |
+| An order is never sent (the adapter refused it for good and you settled it `--never-sent`) | The order stays released in the log. A never-sent **sell** keeps counting as being sold, so every later exit in the run is smaller, or nothing, as in dry-run. A never-sent **buy** is not re-planned: settling it records nothing the engine reads, so the engine never sees the order end (the target in force has not changed). | After settling it, reconcile and start a fresh run you approve: its first decision plans to the target from scratch ([IBKR adapter](ibkr-adapter.md)). |
 | The engine crashes while the boost is on | Resumed from its log, it carries on in the same latch, neither entering nor exiting by mistake (`TestARestartWhileBoostedNeitherEntersNorExits`). | Resume it (`docs/runbooks/durable-log.md`). |
+| The engine restarts while an order is still working | The last decision records the order being watched (`watched`), so the restarted run keeps watching it from the shares filled before the restart, reads IBKR's reports on it, and plans any remainder as above (`TestARunRecoveredWithAnOrderWorkingStillReplansItsRemainder`). | Nothing more. |
 | A fresh run after a stop | The approval states the latch in force; the engine refuses an approval whose latch is not the one the previous log ended with. | `operator approve` reads it for you ([operator](operator.md)). |
 
 ## What backs this
@@ -271,12 +298,20 @@ bar since the last close it read (`gap_sessions`). An order adds `strategy.order
   `TestAGapWhileBoostedNeverBlocksTheExit`,
   `TestAGapRunIsByteIdenticalReplaysAndRestarts`,
   `TestSyntheticGoldenBoostGap` (a hand-computed case, since QuantConnect's
-  logs hold no missing session),
+  logs hold no missing session, built so that skipping the session and
+  filling it forward give a different RSI(2) and different averages),
   `TestAPartFilledOrderIsReplannedAtTheNextDecision`,
   `TestAnExpiredUnfilledOrderIsReplannedInFull`,
   `TestAFullyFilledOrderIsNotReplanned`,
   `TestAWithheldSessionKeepsThePartFillReplan`,
   `TestALaterOrderSupersedesAPartFill`,
+  `TestACancelRecordedAfterItsExpirySessionIsStillReplanned`,
+  `TestAPartFillCompletedAfterAWithheldCloseIsNotReplanned`,
+  `TestAPendingPartFillReplanReadsTheLatestFills`,
+  `TestAVenueRejectionIsReplannedOnceThenWithheld`,
+  `TestACancelAfterARejectionIsReplannedAsAnyOther`,
+  `TestARunRecoveredWithAnOrderWorkingStillReplansItsRemainder`,
+  `TestARunRecoveredMidPartFillCountsTheFillsBeforeIt`,
   `TestARunRecoveredFromAPendingPartFillReplansIt`,
   `TestAPartFillRunIsByteIdenticalAndReplays`,
   `TestAStaleSnapshotWithholdsButTheLatchAdvances`,

@@ -48,11 +48,14 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     decision with no such name has the bytes it had before.
 //   - Version 6 records why a Boost decision re-plans (ADR 0026, point 2,
 //     "Boost", amended 2026-10-18): BoostFigures.Replan, the cause, refused,
-//     part-filled or unfilled, with such an order's client order ID and its
-//     filled and released shares, omitted when the decision entered with no
-//     re-plan pending; and BoostFigures.GapSessions, the sessions with no
-//     bar the decision's readings span (ADR 0026, point 5, amended
-//     2026-10-18), omitted when empty.
+//     part-filled, unfilled or rejected, with such an order's client order
+//     ID and its filled and released shares, omitted when the decision
+//     entered with no re-plan pending; BoostFigures.ReplanWithheld, a
+//     rejection's re-plan rejected again; BoostFigures.Watched, the order
+//     watched for an unfilled remainder, so a restart watches it still; and
+//     BoostFigures.GapSessions, the sessions with no bar the decision's
+//     readings span (ADR 0026, point 5, amended 2026-10-18). Each is omitted
+//     when unset.
 const TargetsDecidedSchemaVersion uint32 = 6
 
 // The two outcomes of a target decision (ADR 0026, point 1).
@@ -173,6 +176,32 @@ type BoostFigures struct {
 	// decision's: the gap this decision's readings span (ADR 0026, point 5,
 	// amended 2026-10-18). Omitted when empty.
 	GapSessions []string `json:"gap_sessions,omitempty"`
+	// ReplanWithheld is a re-planned order the venue rejected again, which
+	// no session plans again (ADR 0026, point 2, "Boost", amended
+	// 2026-10-18): cause rejected, with its client order ID and its filled
+	// and released shares. It is recorded once, on the decision of the
+	// session at whose close the second rejection was read, and omitted
+	// otherwise.
+	ReplanWithheld BoostReplan       `json:"replan_withheld,omitzero"`
+	Watched        BoostWatchedOrder `json:"watched,omitzero"`
+}
+
+// BoostWatchedOrder is the order the latest decided Boost session
+// released, while it is watched for an unfilled remainder (ADR 0026, point
+// 2, "Boost", amended 2026-10-18): its client order ID, side, released
+// shares and limit as released, the shares its fill reports executed so
+// far, its terminal status once the venue reported it (canceled or
+// invalid), and whether it is the one re-plan of an order the venue
+// rejected. A run restarted from the decision watches it still and reads
+// the venue's reports on it (ADR 0026, point 5).
+type BoostWatchedOrder struct {
+	ClientOrderID  string  `json:"client_order_id"`
+	Side           string  `json:"side"`
+	Released       int64   `json:"released"`
+	LimitPrice     float64 `json:"limit_price"`
+	Filled         int64   `json:"filled,omitempty"`
+	Status         string  `json:"status,omitempty"`
+	AfterRejection bool    `json:"after_rejection,omitempty"`
 }
 
 // IsZero reports whether b is empty, as a momentum decision's Boost figures
@@ -180,7 +209,8 @@ type BoostFigures struct {
 func (b BoostFigures) IsZero() bool {
 	return b.InstrumentID == "" && b.Close == 0 && b.RSI == 0 && !b.RSIReady && b.TrendMean == 0 && !b.TrendMeanReady &&
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
-		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0
+		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
+		b.ReplanWithheld == (BoostReplan{}) && b.Watched == (BoostWatchedOrder{})
 }
 
 // validateGaps checks the gap sessions against the decided session's date:
@@ -207,18 +237,24 @@ const (
 	// ReplanCauseRefused: the last planned order was refused and the refusal
 	// left the engine Normal.
 	ReplanCauseRefused = "refused"
-	// ReplanCausePartFilled: the last planned order reached a terminal state
-	// with fewer shares filled than released and more than none.
+	// ReplanCausePartFilled: the last released order was canceled (a DAY
+	// order's expiry included) with fewer shares filled than released and
+	// more than none.
 	ReplanCausePartFilled = "part-filled"
-	// ReplanCauseUnfilled: the last planned order reached a terminal state
-	// with nothing filled.
+	// ReplanCauseUnfilled: the last released order was canceled with
+	// nothing filled.
 	ReplanCauseUnfilled = "unfilled"
+	// ReplanCauseRejected: the venue refused the last planned order before
+	// it rested (invalid), a reason that may last, so it is re-planned once;
+	// a re-planned order rejected again is withheld
+	// (BoostFigures.ReplanWithheld).
+	ReplanCauseRejected = "rejected"
 )
 
 // BoostReplan is why a Boost decision plans the difference to the target in
 // force though the target has not changed: the cause and, for an order that
-// ended part-filled or unfilled, its client order ID and its filled and
-// released shares.
+// ended part-filled, unfilled or rejected, its client order ID and its
+// filled and released shares.
 type BoostReplan struct {
 	Cause         string `json:"cause"`
 	ClientOrderID string `json:"client_order_id,omitempty"`
@@ -245,6 +281,18 @@ func (r BoostReplan) validate() []error {
 			errs = append(errs, fmt.Errorf("a part-fill re-plan has filled shares between none and the %d released; got %d", r.Released, r.Filled))
 		}
 		return errs
+	case ReplanCauseRejected:
+		var errs []error
+		if r.ClientOrderID == "" {
+			errs = append(errs, errors.New("a rejected re-plan names its order"))
+		}
+		if r.Released <= 0 {
+			errs = append(errs, errors.New("a rejected re-plan names the shares released"))
+		}
+		if r.Filled < 0 || r.Filled >= r.Released {
+			errs = append(errs, fmt.Errorf("a rejected re-plan has fewer filled shares than the %d released; got %d", r.Released, r.Filled))
+		}
+		return errs
 	case ReplanCauseUnfilled:
 		var errs []error
 		if r.ClientOrderID == "" {
@@ -258,7 +306,7 @@ func (r BoostReplan) validate() []error {
 		}
 		return errs
 	default:
-		return []error{fmt.Errorf("boost re-plan cause %q is not refused, part-filled or unfilled", r.Cause)}
+		return []error{fmt.Errorf("boost re-plan cause %q is not refused, part-filled, unfilled or rejected", r.Cause)}
 	}
 	return nil
 }
@@ -705,7 +753,41 @@ func (b BoostFigures) validate() []error {
 	case !b.TargetInForceSet && b.TargetInForce != 0:
 		errs = append(errs, errors.New("boost target in force carries a value but none is set"))
 	}
-	return append(errs, b.Replan.validate()...)
+	errs = append(errs, b.Replan.validate()...)
+	errs = append(errs, b.Watched.validate()...)
+	if w := b.ReplanWithheld; w != (BoostReplan{}) {
+		if w.Cause != ReplanCauseRejected {
+			errs = append(errs, fmt.Errorf("a withheld boost re-plan is a rejection's; got cause %q", w.Cause))
+		} else {
+			errs = append(errs, w.validate()...)
+		}
+	}
+	return errs
+}
+
+func (w BoostWatchedOrder) validate() []error {
+	if w == (BoostWatchedOrder{}) {
+		return nil
+	}
+	var errs []error
+	if w.ClientOrderID == "" {
+		errs = append(errs, errors.New("a watched boost order names its client order ID"))
+	}
+	if w.Side != OrderSideBuy && w.Side != OrderSideSell {
+		errs = append(errs, fmt.Errorf("a watched boost order is a buy or a sell; got %q", w.Side))
+	}
+	if !isFinite(w.LimitPrice) || w.LimitPrice <= 0 {
+		errs = append(errs, errors.New("a watched boost order has a positive limit price"))
+	}
+	if w.Released <= 0 || w.Filled < 0 || w.Filled >= w.Released {
+		errs = append(errs, fmt.Errorf("a watched boost order has released shares and fewer filled; got %d of %d", w.Filled, w.Released))
+	}
+	switch w.Status {
+	case "", OrderLifecycleStatusCanceled, OrderLifecycleStatusInvalid:
+	default:
+		errs = append(errs, fmt.Errorf("a watched boost order's status is canceled, invalid or none; got %q", w.Status))
+	}
+	return errs
 }
 
 // OrderPlannedEventType identifies one order the strategy-independent planner

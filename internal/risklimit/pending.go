@@ -443,6 +443,33 @@ func (g *Gate) Filled(clientOrderID string) int64 {
 	return 0
 }
 
+// RestoreReleased restores an order an earlier run released and a run
+// restarted from its recorded decision still watches (ADR 0026, point 5),
+// with the shares its fill reports executed before the restart, so the
+// venue's later fill and lifecycle reports on it are read against it and
+// its working order is recognised. It restores no pending sell: a restarted
+// run sizes its exits as before. The order must be this gate's account's,
+// not already known, with fewer shares filled than released.
+func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, filled int64) error {
+	switch _, known := g.orders[o.ClientOrderID]; {
+	case o.AccountID != g.accountID:
+		return fmt.Errorf("risklimit: restored order %s is for account %q; this gate is %q", o.ClientOrderID, o.AccountID, g.accountID)
+	case known || o.ClientOrderID == "":
+		return fmt.Errorf("risklimit: order %q is already known, or unnamed, and cannot be restored", o.ClientOrderID)
+	case o.Quantity <= 0 || filled < 0 || filled >= o.Quantity:
+		return fmt.Errorf("risklimit: restored order %s has %d of %d shares filled; a watched order has fewer filled than released", o.ClientOrderID, filled, o.Quantity)
+	}
+	g.released[o.ClientOrderID] = true
+	g.orders[o.ClientOrderID] = &releasedOrder{
+		planned: event.OrderPlannedPayload{
+			AccountID: o.AccountID, Tag: o.Tag, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID,
+			Side: o.Side, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+		},
+		reported: filled,
+	}
+	return nil
+}
+
 // ObserveLifecycle applies a recorded lifecycle report on a released order:
 // canceled or invalid ends a sell's remainder, from the earliest such
 // report's second; submitted and cancel-pending leave it pending. The

@@ -119,22 +119,28 @@ import (
 //     amended 2026-10-18). A journal holding such a name decides
 //     differently under 1.16.0.
 //   - 1.18.0 has Boost re-plan, at the next decided session, the remaining
-//     difference to the target in force after its last order ends
-//     part-filled (canceled or expired with fewer shares filled than
-//     released and more than none), as after a refusal, where 1.17.0 left
-//     the account short until the target changed; an order that ends with
-//     nothing filled is re-planned in full the same way. Each decision records the
-//     cause of the re-plan it planned or carries (refused, part-filled or
-//     unfilled,
-//     with the order and its filled and released shares; targets.decided
-//     schema version 6). A later decision's order supersedes a part-fill
-//     reported after it. A session with no bar is withheld and skipped: the
-//     indicators continue at the next bar over the closes received, and that
-//     decision names the gap (gap_sessions), where 1.17.0 withheld every
-//     later session. Neither copies LEAN, which fills a missing bar forward.
-//     The owner's decisions of 2026-10-18 (ADR 0026, point 2, "Boost", and
-//     point 5, amended 2026-10-18). A journal holding such an order or gap
-//     decides differently under 1.17.0.
+//     difference to the target in force after the last order a decided
+//     session released ends with shares unfilled, as after a refusal, where
+//     1.17.0 left the account short until the target changed: canceled
+//     (a DAY order's expiry included) part-filled or with nothing filled, or
+//     rejected by the venue (invalid), which is re-planned once and, rejected
+//     again, withheld and paged. The order is watched until it fills in full
+//     or a decided session plans after its end; only a later decided
+//     session's released order replaces it, and each decision records it,
+//     so a restart watches it still. Each decision records the cause of the
+//     re-plan it planned or carries (refused, part-filled, unfilled or
+//     rejected, with the order and its filled and released shares;
+//     targets.decided schema version 6). The part-fill rule is the owner's
+//     decision of 2026-10-18; its extension to an order with nothing filled
+//     is put to the owner for confirmation. A session with no bar is
+//     withheld and skipped: the indicators continue at the next bar over the
+//     closes received, and that decision names the gap (gap_sessions), where
+//     1.17.0 withheld every later session. That a missing bar must not stop
+//     the run is the owner's decision of 2026-10-18; skipping the session,
+//     rather than filling the close forward as LEAN does, is the
+//     orchestrator's reading, put to the owner for confirmation (ADR 0026,
+//     point 2, "Boost", and point 5, amended 2026-10-18). A journal holding
+//     such an order or gap decides differently under 1.17.0.
 const RulesVersion = "1.18.0"
 
 // source names this handler on every envelope it emits.
@@ -160,8 +166,8 @@ type Options struct {
 //     configuration the handler was built with;
 //   - optionally, straight after it, one recorded strategy.targets.decided:
 //     the last decision of an earlier run. A restart recovers the latched
-//     boost, the target in force and any pending re-plan from it, never by
-//     recomputing (ADR 0026, point 5); sessions up to its session then only feed the indicators,
+//     boost, the target in force, any pending re-plan and the watched order
+//     from it, never by recomputing (ADR 0026, point 5); sessions up to its session then only feed the indicators,
 //     which are rebuilt from the journal's own bars from the warm-up start;
 //   - optionally, straight after the configuration and before any other
 //     input, the owner's operator.run.approved: a fresh run after an earlier
@@ -181,10 +187,11 @@ type Options struct {
 //   - after an order's release: the venue's execution.fill (version 5) and
 //     execution.order.lifecycle (version 2) reports on it, which resolve a
 //     released sell's pending shares (risklimit.Gate.PendingSells). A
-//     lifecycle report is recorded and otherwise decides nothing (ADR 0022);
-//     one about an order this run did not release, or that does not describe
-//     it as released, is refused: it is reconciliation's to explain (ADR
-//     0019);
+//     lifecycle report is recorded and decides nothing but the re-plan of
+//     the watched order (ADR 0022; ADR 0026, point 2, "Boost", amended
+//     2026-10-18); one about an order neither this run released nor the
+//     recovered decision watches, or that does not describe it as released,
+//     is refused: it is reconciliation's to explain (ADR 0019);
 //   - at any time after the configuration: market.corporate-action, which a
 //     reconciliation's book is bridged by; account.reconciliation, which
 //     classifies IBKR's positions and cash against the latest account
@@ -234,20 +241,22 @@ type Handler struct {
 	inForce    float64
 	inForceSet bool
 	// replan is set when the last planned order was refused and the engine
-	// stayed Normal, so the next decided session plans the difference to the
-	// target in force again (orderplan.BoostInput.Replan). Every decision
-	// records it as it stands after that decision (BoostFigures.ReplanPending),
-	// so a restart from the decision recovers it.
+	// stayed Normal, or when the last released order ended with shares
+	// unfilled (settleWatch), so the next decided session plans the
+	// difference to the target in force again (orderplan.BoostInput.Replan;
+	// ADR 0026, point 2, "Boost", amended 2026-10-18). Every decision records
+	// it as it stands after that decision (BoostFigures.ReplanPending), so a
+	// restart from the decision recovers it.
 	replan bool
-	// replanCause is why replan is set: a refusal, or the last planned
-	// order's part-fill (BoostFigures.Replan).
+	// replanCause is why replan is set: a refusal, or the watched order's
+	// end with shares unfilled (BoostFigures.Replan).
 	replanCause event.BoostReplan
-	// lastOrder is the client order ID of the order the latest decided
-	// session released, until it reaches a terminal state; lastEnded is set
-	// once the venue reports it canceled or invalid. A later decision's order
-	// supersedes it, since that order was sized from the account as it stood.
-	lastOrder string
-	lastEnded bool
+	// watch is the order the latest decided session released, watched until
+	// it has filled in full, or has ended and a decided session has planned
+	// after its end; nil when there is none. Only a later decided session's
+	// released order replaces it, since that order was sized from the
+	// account as it stood (settleWatch).
+	watch *watched
 	// gap lists the sessions, YYYY-MM-DD, that closed with no bar since the
 	// last bar the indicators read; the next decision that reads one
 	// records it (BoostFigures.GapSessions).
@@ -441,6 +450,21 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	default:
 		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
 	}
+	// The order the earlier run watched is watched still, from the shares
+	// filled before the restart, and the venue's reports on it are read as
+	// on an order this run released (ADR 0026, points 2 and 5, amended
+	// 2026-10-18).
+	if w := p.Boost.Watched; w != (event.BoostWatchedOrder{}) {
+		o := event.OrderReleasedPayload{
+			AccountID: h.cfg.AccountID, ClientOrderID: w.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
+			Side: w.Side, Quantity: w.Released, LimitPrice: w.LimitPrice,
+		}
+		if err := h.gate.RestoreReleased(o, w.Filled); err != nil {
+			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+		}
+		h.released = map[string]event.OrderReleasedPayload{o.ClientOrderID: o}
+		h.watch = &watched{order: o, status: w.Status, afterRejection: w.AfterRejection}
+	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
 }
@@ -581,7 +605,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	h.started = true
 	h.lastPeriod = p.PeriodEnd
 	h.bar = nil
-	h.settlePartFill()
+	rejected := h.settleWatch()
 
 	quiet := p.PeriodEnd.Before(h.decideFrom) || !p.PeriodEnd.After(h.quietUntil)
 	b := &emissions{h: h, in: in, at: p.PeriodEnd}
@@ -595,6 +619,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 			return nil, nil
 		}
 		figures := h.figures(boost.Readings{}, h.latched)
+		figures.ReplanWithheld = rejected
 		b.targets(figures, event.WithheldMissingBars,
 			fmt.Sprintf("no %s bar in the session closing %s; Boost skips the session and trades nothing, and decides again at the next session with a bar, its indicators continuing over the closes received", h.cfg.Boost.InstrumentID, p.PeriodEnd.Format(idTime)))
 		return b.result()
@@ -612,6 +637,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	h.latched = h.params.Next(before, readings)
 	figures := h.figures(readings, before)
 	figures.GapSessions = gap
+	figures.ReplanWithheld = rejected
 	snapshot := h.snapshot
 	switch {
 	case snapshot == nil || snapshot.AsOf.Before(p.PeriodEnd):
@@ -639,10 +665,17 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		Replan:       h.replan,
 	})
 	b.fail(err)
+	// A rejection's one re-plan is marked on the order it releases, so a
+	// second rejection withholds it (settleWatch).
+	afterRejection := h.replan && h.replanCause.Cause == event.ReplanCauseRejected
 	h.replan, h.replanCause = false, event.BoostReplan{}
-	// This session's order, or its absence, supersedes the last one: it was
-	// sized from the account as it now stands.
-	h.lastOrder, h.lastEnded = "", false
+	// A watched order that has ended is settled by this decision, which
+	// planned from the account as it now stands, its re-plan included; one
+	// still working stays watched until this session's own order, if any,
+	// replaces it.
+	if h.watch != nil && h.watch.status != "" {
+		h.watch = nil
+	}
 	if !ok || order.Side != event.OrderSideSell {
 		// The decision no longer plans the sell that fired a withheld sale.
 		if l := h.gate.LapseExitSale(); l != nil {
@@ -667,7 +700,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
 	}
 	if outcome.Released != nil {
-		h.lastOrder = outcome.Released.ClientOrderID
+		h.watch = &watched{order: *outcome.Released, afterRejection: afterRejection}
 	}
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
@@ -800,33 +833,68 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
-	if p.ClientOrderID == h.lastOrder && p.Terminal() {
-		h.lastEnded = true
+	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && p.Terminal() && w.status == "" {
+		w.status = p.Status
 	}
 	return nil
 }
 
-// settlePartFill decides, as a session closes, whether the last order a
-// decided session released ended with an unfilled remainder: terminal, with
-// fewer shares filled than released, part-filled or unfilled. Such an order
-// is re-planned at the next decided session like a refusal (ADR 0026, point
-// 2, "Boost", amended 2026-10-18); one filled in full is not. It is read
-// at the session, not at the terminal report, so a fill the venue reports
-// after the cancel but before the session still counts.
-func (h *Handler) settlePartFill() {
-	if h.lastOrder == "" || !h.lastEnded {
-		return
+// watched is the order the latest decided session released, and its
+// status once the venue ended it: canceled (a DAY order's expiry included)
+// or invalid; empty while it may still execute. afterRejection marks the
+// one re-plan of an order the venue rejected.
+type watched struct {
+	order          event.OrderReleasedPayload
+	status         string
+	afterRejection bool
+}
+
+// settleWatch reads the watched order as a session closes (ADR 0026, point
+// 2, "Boost", amended 2026-10-18). Filled in full, it is no longer watched
+// and a re-plan it set is cleared: re-planning would trade drift toward an
+// unchanged target. Ended with fewer shares filled than released, it sets
+// the re-plan the next decided session plans, part-filled or unfilled, with
+// its shares filled as they now stand, so a fill the venue reports after
+// the cancellation still counts at every close until that session; a
+// refusal's re-plan already pending plans the whole difference, this
+// order's remainder included, and keeps its cause.
+//
+// An order the venue rejected (invalid) may have been refused for a reason
+// that lasts, so it is re-planned once, cause rejected, as a refusal is;
+// when that re-planned order is rejected too, nothing is planned again: it
+// returns the withheld re-plan, which the session's decision records and
+// the reporter pages, and the account waits for its target to change, as
+// after a refusal under Degraded or Halted.
+func (h *Handler) settleWatch() (withheld event.BoostReplan) {
+	w := h.watch
+	if w == nil {
+		return withheld
 	}
-	released, filled := h.released[h.lastOrder].Quantity, h.gate.Filled(h.lastOrder)
-	if filled < released {
+	id, released := w.order.ClientOrderID, w.order.Quantity
+	filled := h.gate.Filled(id)
+	own := h.replanCause.ClientOrderID == id
+	switch {
+	case filled >= released:
+		if own {
+			h.replan, h.replanCause = false, event.BoostReplan{}
+		}
+		h.watch = nil
+	case w.status == "", h.replan && !own:
+	case w.status == event.OrderLifecycleStatusInvalid && w.afterRejection:
+		h.watch = nil
+		return event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: id, Filled: filled, Released: released}
+	default:
 		cause := event.ReplanCausePartFilled
-		if filled == 0 {
+		switch {
+		case w.status == event.OrderLifecycleStatusInvalid:
+			cause = event.ReplanCauseRejected
+		case filled == 0:
 			cause = event.ReplanCauseUnfilled
 		}
 		h.replan = true
-		h.replanCause = event.BoostReplan{Cause: cause, ClientOrderID: h.lastOrder, Filled: filled, Released: released}
+		h.replanCause = event.BoostReplan{Cause: cause, ClientOrderID: id, Filled: filled, Released: released}
 	}
-	h.lastOrder, h.lastEnded = "", false
+	return withheld
 }
 
 // holdings maps each position to its quantity.
@@ -847,7 +915,21 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		ExitMean: r.ExitMean, ExitMeanReady: r.ExitMeanReady,
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
-		ReplanPending: h.replan, Replan: h.replanCause,
+		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(),
+	}
+}
+
+// watchedFigures is the watched order as a decision records it, so a run
+// restarted from the decision watches it still (ADR 0026, point 5): its
+// identity as released, its shares filled so far, and its end once reported.
+func (h *Handler) watchedFigures() event.BoostWatchedOrder {
+	w := h.watch
+	if w == nil {
+		return event.BoostWatchedOrder{}
+	}
+	return event.BoostWatchedOrder{
+		ClientOrderID: w.order.ClientOrderID, Side: w.order.Side, Released: w.order.Quantity, LimitPrice: w.order.LimitPrice,
+		Filled: h.gate.Filled(w.order.ClientOrderID), Status: w.status, AfterRejection: w.afterRejection,
 	}
 }
 
@@ -861,14 +943,17 @@ type emissions struct {
 }
 
 // settleReplan rewrites the decided session's decision, emitted at index i,
-// with the re-plan as the session's order left it: a withheld session leaves
-// it as it was, which figures already records, but a decided one plans,
-// clearing it or, on a refusal that leaves the engine Normal, setting it.
+// with the re-plan and the watched order as the session's order left them:
+// a withheld session leaves them as they were, which figures already
+// records, but a decided one plans, clearing the re-plan or, on a refusal
+// that leaves the engine Normal, setting it, and watches the order it
+// released.
 func (b *emissions) settleReplan(i int, decided event.TargetsDecidedPayload) {
-	if decided.Boost.ReplanPending == b.h.replan {
+	watched := b.h.watchedFigures()
+	if decided.Boost.ReplanPending == b.h.replan && decided.Boost.Watched == watched {
 		return
 	}
-	decided.Boost.ReplanPending = b.h.replan
+	decided.Boost.ReplanPending, decided.Boost.Watched = b.h.replan, watched
 	e, err := b.h.stamp(b.out[i].ID, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, b.at, b.in, decided)
 	b.fail(err)
 	b.out[i] = e

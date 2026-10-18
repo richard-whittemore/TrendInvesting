@@ -208,9 +208,10 @@ so an order is never lost or doubled. See [re-delivery](redelivery.md).
 
 **Re-plan.** Boost planning again, at its next decided session, the
 difference to its target after its last order did not get there: the gate
-refused it while the account stayed Normal (`refused`), or it ended with
-shares unfilled (`part-filled`, or `unfilled` when none filled). The
-decision records the cause (`replan`). See
+refused it while the account stayed Normal (`refused`), it ended with
+shares unfilled (`part-filled`, or `unfilled` when none filled), or IBKR
+rejected it (`rejected`, planned once more only). The decision records the
+cause (`replan`). See
 [boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Reconciled, reconciliation.** Three different things carry this word:

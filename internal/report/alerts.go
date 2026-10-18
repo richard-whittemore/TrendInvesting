@@ -113,6 +113,9 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     same incident, and Degraded to Halted is a new one (ADR 0019). The
 //     incident is keyed by its start, so a state that returns after another
 //     is a new incident too.
+//   - A Boost decision recording a re-plan withheld after the venue rejected
+//     the re-planned order again is one urgent refusal incident, keyed by
+//     the order (ADR 0026, point 2, "Boost", amended 2026-10-18).
 //   - A run of consecutive withheld decisions with one reason is one
 //     incident; a decided outcome ends it. Reasons that name absent inputs
 //     (missing bars, stale snapshot, missing universe, missing close
@@ -274,6 +277,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			var p event.TargetsDecidedPayload
 			if err := read(e, decidedVersions, &p); err != nil {
 				return nil, err
+			}
+			if w := p.Boost.ReplanWithheld; w.Cause != "" {
+				out = append(out, rejectionAlert(account, e, w))
 			}
 			if p.Outcome != event.TargetsOutcomeWithheld {
 				runReason = ""
@@ -439,6 +445,19 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 	key := engineStateKey(p) + ":" + e.EventTime.UTC().Format(time.RFC3339Nano) + "@" + account
 	return Alert{Key: key, Kind: kind, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
+}
+
+// rejectionAlert states a Boost re-plan withheld because the venue rejected
+// the re-planned order too (ADR 0026, point 2, "Boost", amended
+// 2026-10-18): the program does not plan it again, so the account stays off
+// its target until the target changes, and the owner finds the reason.
+func rejectionAlert(account string, e event.Envelope, w event.BoostReplan) Alert {
+	return Alert{
+		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
+		Title: fmt.Sprintf("%s: order %s rejected again, not re-planned", account, w.ClientOrderID),
+		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), which re-planned an order IBKR had rejected before. The program will not plan it again: the account stays off its target until the target changes. Find why IBKR rejects the order in IBKR's order log (journal-query orders lists the rejection) before the next change of target.",
+			w.ClientOrderID, w.Filled, w.Released),
+	}
 }
 
 func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload, start time.Time) Alert {

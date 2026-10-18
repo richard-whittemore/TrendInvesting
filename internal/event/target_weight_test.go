@@ -512,3 +512,49 @@ func TestBoostGapSessionsValidate(t *testing.T) {
 		t.Error("IsZero reports only empty Boost figures")
 	}
 }
+
+// TestBoostRejectedReplanValidate: a venue rejection's re-plan, and the
+// re-plan withheld after a second rejection, name the order and its released
+// shares, with fewer filled; the withheld one is a rejection only (ADR 0026,
+// point 2, "Boost", amended 2026-10-18).
+func TestBoostRejectedReplanValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Replan = event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-1", Released: 39}
+	v.Boost.ReplanWithheld = event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-0", Released: 39}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a rejection's re-plan and a withheld one are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "rejected without order", v, func(p *P) { p.Boost.Replan.ClientOrderID = "" }, "order")
+	expectInvalid(t, "rejected released nothing", v, func(p *P) { p.Boost.Replan.Released = 0 }, "released")
+	expectInvalid(t, "rejected filled in full", v, func(p *P) { p.Boost.Replan.Filled = 39 }, "filled")
+	expectInvalid(t, "withheld for a part-fill", v, func(p *P) {
+		p.Boost.ReplanWithheld = event.BoostReplan{Cause: event.ReplanCausePartFilled, ClientOrderID: "tw-0", Filled: 1, Released: 39}
+	}, "withheld")
+	expectInvalid(t, "withheld without order", v, func(p *P) { p.Boost.ReplanWithheld.ClientOrderID = "" }, "order")
+	if v.Boost.IsZero() {
+		t.Error("figures with a withheld re-plan are not empty")
+	}
+}
+
+// TestBoostWatchedOrderValidate: a watched order names its client order ID,
+// side and positive limit, with fewer shares filled than released, and its
+// status, when set, is canceled or invalid (ADR 0026, points 2 and 5,
+// amended 2026-10-18).
+func TestBoostWatchedOrderValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, Filled: 20, Status: event.OrderLifecycleStatusCanceled}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a watched order is valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "no order", v, func(p *P) { p.Boost.Watched.ClientOrderID = "" }, "client order ID")
+	expectInvalid(t, "no side", v, func(p *P) { p.Boost.Watched.Side = "short" }, "buy or a sell")
+	expectInvalid(t, "no limit", v, func(p *P) { p.Boost.Watched.LimitPrice = 0 }, "limit")
+	expectInvalid(t, "filled in full", v, func(p *P) { p.Boost.Watched.Filled = 39 }, "fewer filled")
+	expectInvalid(t, "negative fill", v, func(p *P) { p.Boost.Watched.Filled = -1 }, "fewer filled")
+	expectInvalid(t, "working status", v, func(p *P) { p.Boost.Watched.Status = event.OrderLifecycleStatusSubmitted }, "status")
+	if v.Boost.IsZero() {
+		t.Error("figures with a watched order are not empty")
+	}
+}

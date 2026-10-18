@@ -206,6 +206,40 @@ type options struct {
 	// instead, after that session's other reports.
 	partFill map[int]int64
 	cancelAt map[int]int
+	// lateFill reports, for an order part-filled at session i, a further
+	// execution of shares at session lateFill[i].at, after its cancel, at
+	// that session's close: a fill the venue reports after the cancellation.
+	lateFill map[int]lateFill
+	// reject has the venue refuse every order queued at session i before it
+	// rests (invalid): no execution, and no cancel.
+	reject map[int]bool
+	// working queues orders an earlier run released at the start of
+	// session i, so a restarted run receives the venue's reports on them.
+	working map[int][]event.OrderReleasedPayload
+	// fills are the venue's reports of executions fed at session i, after
+	// its cancels: an earlier run's order executing after a restart.
+	fills map[int][]event.TargetWeightFillPayload
+}
+
+// lateFill is a further execution of a part-filled order, reported at
+// session at.
+type lateFill struct {
+	at     int
+	shares int64
+}
+
+// fill executes shares of o at price, at at, and returns the venue's report.
+func (a *account) fill(o event.OrderReleasedPayload, id string, shares int64, price float64, at time.Time) event.TargetWeightFillPayload {
+	quantity := shares
+	if o.Side == event.OrderSideSell {
+		quantity = -quantity
+	}
+	a.held += quantity
+	a.cash -= float64(float64(quantity) * price)
+	return event.TargetWeightFillPayload{
+		AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: id, InstrumentID: o.InstrumentID,
+		Side: o.Side, Quantity: shares, Price: price, FilledAt: at,
+	}
 }
 
 // cancelAtOr is the session the cancel of an order part-filled at session i
@@ -255,6 +289,11 @@ func simulate(t *testing.T, opts options) run {
 		return out
 	}
 	late := map[int][]event.OrderReleasedPayload{} // cancels due at each session
+	type rest struct {
+		order  event.OrderReleasedPayload
+		shares int64
+	}
+	rests := map[int][]rest{} // late executions due at each session
 	start := sessionEnd(0).Add(-time.Hour)
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
 	for _, e := range opts.recorded {
@@ -280,6 +319,7 @@ func simulate(t *testing.T, opts options) run {
 	for i := opts.from; i < len(opts.closes); i++ {
 		at := sessionEnd(i)
 		price := opts.closes[i]
+		acct.pending = append(acct.pending, opts.working[i]...)
 		for _, o := range acct.pending {
 			ack := event.LimitOrderLifecyclePayload{
 				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
@@ -287,8 +327,24 @@ func simulate(t *testing.T, opts options) run {
 			}
 			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+o.ClientOrderID, ack.OccurredAt, ack))
 		}
+		if opts.reject[i] {
+			for _, o := range acct.pending {
+				invalid := event.LimitOrderLifecyclePayload{
+					AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					Side: o.Side, Status: event.OrderLifecycleStatusInvalid, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+					OccurredAt: at.Add(-150 * time.Minute), Message: "rejected by the venue",
+				}
+				apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "reject:"+o.ClientOrderID, invalid.OccurredAt, invalid))
+			}
+			acct.pending = nil
+		}
 		expiring := acct.pending
 		limit, part := opts.partFill[i]
+		if lf, ok := opts.lateFill[i]; ok && part {
+			for _, o := range expiring {
+				rests[lf.at] = append(rests[lf.at], rest{order: o, shares: lf.shares})
+			}
+		}
 		for _, f := range acct.fillAtMost(price, at.Add(-2*time.Hour), limit, part) {
 			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
 		}
@@ -304,6 +360,14 @@ func simulate(t *testing.T, opts options) run {
 			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "cancel:"+o.ClientOrderID, cancel.OccurredAt, cancel))
 		}
 		delete(late, i)
+		for _, x := range rests[i] {
+			f := acct.fill(x.order, "fill-late:"+x.order.ClientOrderID, x.shares, price, at.Add(-80*time.Minute))
+			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+		}
+		delete(rests, i)
+		for _, f := range opts.fills[i] {
+			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+		}
 		if engaged, ok := opts.kill[i]; ok {
 			apply(s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion, fmt.Sprintf("kill:%d", i), at.Add(-time.Hour),
 				event.KillSwitchPayload{AccountID: "joint", AsOf: at.Add(-time.Hour), Engaged: engaged, Operator: "owner", Detail: "fixture"}))

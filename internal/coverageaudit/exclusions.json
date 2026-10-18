@@ -907,6 +907,13 @@
     },
     {
       "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRecovery",
+      "statement": "return fmt.Errorf(\"targetweight: recovered decision %s: %w\", in.ID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.RestoreReleased refuses an order for another account, an unnamed or already known order, and one with no shares released or every share filled (TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart). The order it is given carries the configuration's own account; TargetsDecidedPayload.Validate, run by decodeInput above, refuses a watched order with no client order ID, no released shares, or as many filled as released (TestBoostWatchedOrderValidate); and applyRecovery runs once, before any approval, bar or session (its own guard above), so no decided session of this run has released an order. The only order the gate can know by then is a sale back to 98% that a broker snapshot read before the recovery released, whose client order ID derives from the sale's own tag, never from a decided session's, so it is never the watched order's."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
       "function": "New",
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
       "occurrence": 2,

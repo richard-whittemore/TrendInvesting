@@ -101,24 +101,50 @@ func TestAGapWhileBoostedNeverBlocksTheExit(t *testing.T) {
 }
 
 // TestSyntheticGoldenBoostGap is a synthetic golden case, hand-computed,
-// since QuantConnect's logged runs hold no missing session: SPY's closes rise
-// 4 a session from 100, and session 12 (148) is missing. At session 13 (152)
-// the exit mean of the last three closes received is (140 + 144 + 152) / 3
-// and the trend mean of the last ten is (112 + 116 + ... + 144 + 152) / 10 =
-// 130.4. A fill-forward of 144 into session 12, which LEAN would do, would
-// give 146.67 and 133.6 instead.
+// since QuantConnect's logged runs hold no missing session. It is built so
+// that skipping the missing session and LEAN's fill-forward of it give a
+// different RSI(2) and different means. SPY's closes rise 4 a session from
+// 100 to 140 (sessions 0 to 10), fall to 136 (session 11), session 12 is
+// missing, then 139 (13) and 143 (14). The test configuration's RSI period
+// is 2, its trend mean 10 sessions and its exit mean 3.
+//
+// RSI(2), Wilder's averages with k = 1/2: every rise of 4 holds the gain
+// average at 4 and the loss average at 0. Session 11's fall of 4 gives gain
+// 0/2 + 4/2 = 2 and loss 4/2 + 0/2 = 2.
+//
+//   - Skipped, session 13's change is 139 - 136 = +3: gain 3/2 + 2/2 = 2.5,
+//     loss 0/2 + 2/2 = 1, RSI = 100 - 100 / (1 + 2.5) = 500/7 = 71.428571...
+//     Exit mean (140 + 136 + 139) / 3 = 415/3 = 138.333...; trend mean of the
+//     last ten closes received, 112, 116, ..., 140, 136, 139, is 1283 / 10 =
+//     128.3.
+//   - Filled forward (136 again at session 12): session 12's change of 0
+//     gives gain 1 and loss 1, then +3 gives gain 3/2 + 1/2 = 2 and loss 1/2,
+//     RSI = 100 - 100 / (1 + 4) = 80. Exit mean (136 + 136 + 139) / 3 = 137;
+//     trend mean (116 + ... + 140 + 136 + 136 + 139) / 10 = 1307 / 10 = 130.7.
 func TestSyntheticGoldenBoostGap(t *testing.T) {
-	closes := make([]float64, 15)
-	for i := range closes {
-		closes[i] = float64(100 + 4*i)
+	closes := make([]float64, 0, 15)
+	for i := range 11 {
+		closes = append(closes, float64(100+4*i))
 	}
+	closes = append(closes, 136, 136, 139, 143) // session 12's 136 is never fed
 	r := simulate(t, options{closes: closes, skip: map[int]bool{12: true}})
 	d := targets(t, r.decisions)[13]
-	if math.Abs(d.Boost.ExitMean-436.0/3) > 1e-9 || math.Abs(d.Boost.TrendMean-130.4) > 1e-9 || d.Boost.RSI != 100 {
-		t.Errorf("session 13: exit mean %v, trend mean %v, RSI %v; want 145.33, 130.4 and 100", d.Boost.ExitMean, d.Boost.TrendMean, d.Boost.RSI)
+	const skipRSI, skipExit, skipTrend = 500.0 / 7, 415.0 / 3, 128.3
+	if math.Abs(d.Boost.RSI-skipRSI) > 1e-9 || math.Abs(d.Boost.ExitMean-skipExit) > 1e-9 || math.Abs(d.Boost.TrendMean-skipTrend) > 1e-9 {
+		t.Errorf("session 13: RSI %v, exit mean %v, trend mean %v; want %v, %v and %v", d.Boost.RSI, d.Boost.ExitMean, d.Boost.TrendMean, skipRSI, skipExit, skipTrend)
 	}
 	if !slices.Equal(d.Boost.GapSessions, []string{sessionDate(12)}) {
 		t.Errorf("gap sessions %v", d.Boost.GapSessions)
+	}
+	// The fill-forward reading, computed by hand above, is what the same
+	// indicators give with 136 fed at session 12, and differs in all three.
+	filled := expectedReadings(t, closes, nil)[13]
+	const fillRSI, fillExit, fillTrend = 80.0, 137.0, 130.7
+	if math.Abs(filled.RSI-fillRSI) > 1e-9 || math.Abs(filled.ExitMean-fillExit) > 1e-9 || math.Abs(filled.TrendMean-fillTrend) > 1e-9 {
+		t.Fatalf("fill-forward readings %+v, want RSI %v, exit mean %v, trend mean %v", filled, fillRSI, fillExit, fillTrend)
+	}
+	if math.Abs(skipRSI-fillRSI) < 1 || math.Abs(skipExit-fillExit) < 1 || math.Abs(skipTrend-fillTrend) < 1 {
+		t.Fatal("the case does not tell skipping from filling forward")
 	}
 }
 

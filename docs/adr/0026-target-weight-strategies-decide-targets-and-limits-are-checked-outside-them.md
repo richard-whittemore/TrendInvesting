@@ -133,7 +133,8 @@ first target, normally 98% from cash, whether or not a boost is on.
 Amended 2026-10-18 (owner): after a refusal that leaves the engine Normal,
 the next decision also plans the difference to the target in force (see the
 amendment of that date); and after its last order ends with shares
-unfilled (see "Amendment (2026-10-18, owner decision, #487 and #488)").
+unfilled, or is rejected by the venue, once (see "Amendment (2026-10-18,
+owner decision, #487 and #488)").
 
 **D7, whole shares, open: both options specified.** The choice is
 configuration (point 6):
@@ -865,8 +866,8 @@ kept exports and its three reports are byte-identical to the
 ## Amendment (2026-10-18, owner decision, #487 and #488): a session with no SPY bar, and an order that ends unfilled
 
 Accepted on 2026-10-18: the owner's decisions on #487 and #488 ("use the
-recommendation"), with two readings settled by the orchestrator and flagged
-to the owner, who can veto them before merge. Each is marked below. It amends
+recommendation"), with three readings settled by the orchestrator and
+flagged to the owner, who can veto them before merge. Each is marked below. It amends
 point 2, "Boost", and point 5, "Missing bars fail closed", for Boost.
 
 ### A session with no SPY bar is skipped
@@ -892,7 +893,10 @@ missing bar stopped Boost until a fresh run the owner approved.
 - The reporter pages once per gap, however many sessions in a row are
   missing, naming the first and saying that decisions continue.
 
-**This is the owner's choice for a data failure, not a copy of the
+**Who decided what.** The owner accepted the recommendation that a missing
+bar must not freeze the run (2026-10-18). Skipping the session, rather than
+filling its close forward as LEAN does, is the orchestrator's reading, put
+to the owner and awaiting his confirmation. **It is not a copy of the
 backtest.** The owner's recommendation said "as the backtest does"; it does
 not. The Boost template subscribes to SPY with LEAN's default fill-forward
 (`template.py:48`). LEAN puts a filled-forward bar into `data.Bars` and into
@@ -917,46 +921,78 @@ target next changed; point 2 said nothing of a partial fill.
 
 **The rule now.**
 
-- When the last order a decided session released reaches a terminal state
-  (canceled, which includes a DAY order's expiry, or invalid) with fewer
-  shares filled than released, the next decided session plans the
-  remaining difference to the target in force through the same re-plan as a
-  refusal (the amendment of 2026-10-18 above): want·V / p − q whole shares,
-  rounded toward zero, from the account snapshot as of that close.
+- When the last order a decided session released is canceled (which
+  includes a DAY order's expiry) with fewer shares filled than released,
+  the next decided session plans the remaining difference to the target in
+  force through the same re-plan as a refusal (the amendment of 2026-10-18
+  above): want·V / p − q whole shares, rounded toward zero, from the
+  account snapshot as of that close.
 - `part-filled`: more than none filled. This is the owner's decision on
   #488.
 - `unfilled`: none filled; the whole difference is planned. **This extends
   the owner's part-fill decision and is put to the owner for confirmation**
   (the orchestrator's reading): without it, one share filled of 39 would be
   re-planned and none of 39 would not.
-- An order filled in full plans nothing more.
-- **A later order supersedes.** Only the last order a decided session
-  released is watched. If a later decided session plans an order, or plans
-  none, before the earlier order's end is known, a terminal report on the
-  earlier one plans nothing: the later decision was sized from the account
-  as it stood, and re-planning then would trade drift, or buy twice while
-  the later buy still works. The sale back to 98% is never watched: its one
-  attempt is ADR 0019's.
-- The engine reads the order's state at each session's close, not at the
-  terminal report, so a fill the venue reports after the cancellation but
-  before the next close still counts.
+- `rejected`: the venue refused the order before it rested (`invalid`).
+  Its reason may last (a permission, a margin requirement, a contract
+  IBKR will not trade), so the re-plan is bounded: the next decided session
+  re-plans it **once**, through the same re-plan as a refusal, recording the
+  cause `rejected`. If the venue rejects that re-planned order too, nothing
+  plans it again: the decision of the session at whose close the second
+  rejection is read records it (`boost.replan_withheld`, the order and its
+  shares), the reporter pages it once (urgent), and the account waits off
+  its target until the target changes or a fresh run, as after a refusal
+  under Degraded or Halted. A re-planned order that is instead canceled
+  part-filled is re-planned as any other. (The orchestrator's reading of a
+  review finding, put to the owner for confirmation with the `unfilled`
+  extension.)
+- An order filled in full plans nothing more, and a re-plan it set is
+  cleared if the rest of its fills arrive before the session that would
+  plan it: re-planning then would trade drift toward an unchanged target.
+- **What the watch is.** The last order a decided session released is
+  watched until it has filled in full, or the venue has ended it and a
+  decided session has planned after that end. A decided session that plans
+  no order, or whose order is refused, does not end the watch: the venue's
+  cancel of a DAY order can be recorded after the close of its own expiry
+  session (two producers race), and a decision that ordered nothing sized
+  nothing. Only a later decided session's **released** order replaces the
+  watch: that order was sized from the account as it stood, and re-planning
+  the earlier one after it would trade drift, or buy twice while the later
+  buy still works. The sale back to 98% is never watched: its one attempt
+  is ADR 0019's.
+- The engine reads the watched order at each session's close, not at the
+  terminal report, so a fill the venue reports after the cancellation still
+  counts, at every close until the session that plans the re-plan, whose
+  decision records the shares filled as they then stand.
 - `boost.replan_pending` is set from that close until the session that
   plans it; a withheld session carries it. Every decision that enters with
   a re-plan pending records its cause (`boost.replan`): `refused`, or
-  `part-filled` or `unfilled` with the order's client order ID and its
-  filled and released shares. A run restarted from a withheld decision
-  recovers the cause; one restarted from a decided decision whose own order
-  was refused recovers `refused`.
+  `part-filled`, `unfilled` or `rejected` with the order's client order ID
+  and its filled and released shares.
+- **Restarts.** Every decision records the watched order as it stands after
+  it (`boost.watched`: client order ID, side, released shares, limit, shares
+  filled so far, its terminal status once reported, and whether it is a
+  rejection's one re-plan). A run restarted from that decision watches the
+  order still, from the shares filled before the restart, and reads the
+  venue's fill and lifecycle reports on it as on an order it released; it
+  restores no pending sell, so its exits are sized as before. A run
+  restarted from a withheld decision recovers the pending re-plan's cause;
+  one restarted from a decided decision whose own order was refused
+  recovers `refused`.
 
 ### Rules and schema
 
 A journal holding a gap or such an order decides differently under an
 earlier build: target-weight rules version **1.18.0** (ADR 0016).
 `strategy.targets.decided` moves to schema version **6** for the two new
-Boost fields, `replan` and `gap_sessions`, both omitted when unset; the
-refused re-plan now records its cause too. The synthetic cases are the
+Boost fields, `replan`, `replan_withheld`, `watched` and `gap_sessions`,
+each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
 golden cases for both rules (`TestSyntheticGoldenBoostGap`;
 `TestAPartFilledOrderIsReplannedAtTheNextDecision` and
-`TestAnExpiredUnfilledOrderIsReplannedInFull`, whose quantities are
-computed by hand in their comments). The parity tool's Boost comparison is
+`TestAnExpiredUnfilledOrderIsReplannedInFull`,
+`TestACancelRecordedAfterItsExpirySessionIsStillReplanned`,
+`TestAPendingPartFillReplanReadsTheLatestFills` and
+`TestAVenueRejectionIsReplannedOnceThenWithheld`, whose quantities are
+computed by hand in their comments; the gap case is built so that skipping
+and LEAN's fill-forward give a different RSI(2) and different means). The parity tool's Boost comparison is
 unchanged: QuantConnect's exports have neither a gap nor a partial fill.

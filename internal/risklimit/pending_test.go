@@ -973,3 +973,42 @@ func TestFilledCountsEachExecutionOnce(t *testing.T) {
 		t.Errorf("Filled of an order never released = %d, want 0", got)
 	}
 }
+
+// TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart: an order
+// an earlier run released and a restarted run watches (ADR 0026, point 5)
+// is restored with the shares filled before the restart, so the venue's
+// later reports on it are read, the fills counting on from those shares and
+// never past the order's own; a second restore, or one for another account
+// or with every share filled, is refused.
+func TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	o := event.OrderReleasedPayload{AccountID: "joint", ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 39, LimitPrice: 1}
+	if err := g.RestoreReleased(o, 20); err != nil {
+		t.Fatal(err)
+	}
+	sellFill(t, g, "tw-old", "f1", 10, 1)
+	if got := g.Filled("tw-old"); got != 30 {
+		t.Errorf("Filled = %d, want the 20 before the restart and 10 after", got)
+	}
+	if err := g.ObserveFill(event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-old", FillID: "f2", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: 10, Price: 1, FilledAt: at}); err == nil {
+		t.Error("a fill past the order's 39 shares must be refused")
+	}
+	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: "tw-old", OrderID: "ib-1", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled, Quantity: 39, LimitPrice: 1, OccurredAt: at}); err != nil {
+		t.Errorf("the restored order's cancel: %v", err)
+	}
+	if err := g.RestoreReleased(o, 0); err == nil {
+		t.Error("a second restore of the same order must be refused")
+	}
+	other := o
+	other.ClientOrderID, other.AccountID = "tw-other", "ira"
+	if err := g.RestoreReleased(other, 0); err == nil {
+		t.Error("a restore for another account must be refused")
+	}
+	full := o
+	full.ClientOrderID = "tw-full"
+	if err := g.RestoreReleased(full, 39); err == nil {
+		t.Error("a restore with every share filled must be refused")
+	}
+}
