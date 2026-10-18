@@ -21,6 +21,11 @@ LOT_PREFIX = "LOTPARITY1 "
 IRA_PREFIX = "IRAPARITY1 "
 #: The tag of every order the IRA path places: IRAORD1 <month> <phase>.
 IRA_ORDER_PREFIX = "IRAORD1 "
+#: The IRAPARITY1 export's version (internal/parity.IRAVersion). Version 1
+#: put a refused order among the placed ones under QuantConnect's
+#: placeholder ID and recorded no unfinished month.
+IRA_VERSION = 2
+_EXPORT_PREFIXES = (PARITY_PREFIX, GLIDE_PREFIX, LOT_PREFIX, IRA_PREFIX)
 
 
 def _dumps(record):
@@ -41,27 +46,35 @@ def namer(symbols):
 
 
 def attach(algo, tag, dummy=False):
-    """Put ``tag`` on the newest open order (UpdateTag changes no fill); with
-    none open, or when ``dummy``, on a 1-share SPY limit order at 1% of its
-    price, cancelled at once."""
+    """Put ``tag`` on the newest open order (UpdateTag changes no fill),
+    unless it already carries an export, which would be lost (AGENTS.md rule
+    6); with none to use, or when ``dummy``, on a 1-share SPY limit order at
+    1% of its price, cancelled at once. A carrier QuantConnect refuses (no
+    order ID of its own) is not in the orders listing: it is counted lost,
+    not logged."""
     done = False
     if not dummy:
         tickets = sorted(algo.Transactions.GetOpenOrderTickets(), key=lambda t: t.OrderId)
-        done = bool(tickets) and bool(tickets[-1].UpdateTag(tag).IsSuccess)
+        free = bool(tickets) and not str(getattr(tickets[-1], "Tag", "") or "").startswith(_EXPORT_PREFIXES)
+        done = free and bool(tickets[-1].UpdateTag(tag).IsSuccess)
     if not done:
         price = float(algo.Securities[algo.spy].Price)
         ticket = algo.LimitOrder(algo.spy, 1, round(max(price, 1.0) * 0.01, 2), tag=tag)
         ticket.Cancel()
         algo.export_dummies = getattr(algo, "export_dummies", 0) + 1
+        if int(getattr(ticket, "OrderId", 0)) <= 0:
+            algo.export_lost = getattr(algo, "export_lost", 0) + 1
+            return
     algo.export_logged = getattr(algo, "export_logged", 0) + 1
     algo.export_bytes = getattr(algo, "export_bytes", 0) + len(tag)
 
 
 def stat(algo):
     """The exports' end statistic."""
-    return "logged={} bytes={} dummies={}".format(getattr(algo, "export_logged", 0),
-                                                   getattr(algo, "export_bytes", 0),
-                                                   getattr(algo, "export_dummies", 0))
+    return "logged={} bytes={} dummies={} lost={}".format(getattr(algo, "export_logged", 0),
+                                                          getattr(algo, "export_bytes", 0),
+                                                          getattr(algo, "export_dummies", 0),
+                                                          getattr(algo, "export_lost", 0))
 
 
 def _month(algo):
@@ -316,12 +329,23 @@ def _priced(algo, sym):
     return has and bool(secs[sym].HasData) and float(secs[sym].Price) > 0
 
 
+def _open_sells(algo):
+    """Every sell still working, whatever its tag or month: the buys wait for
+    each to be terminal (ADR 0026 point 2, "IRA execution")."""
+    return [t for t in algo.Transactions.GetOpenOrderTickets()
+            if float(t.Quantity) < 0 and float(t.Quantity) - float(t.QuantityFilled) < 0]
+
+
 def ira_rebalance(algo, targets, closes):
     """Trade the month's book as the IRA planner does: plan from the account
     now (as of the previous close), send the sells, and plan the buys at
-    once when there is no sell; they are sent once every bought security
-    has a price. A target with no price at all waits in pending, outside
-    the plan, as fresh_universe.py's unpriced targets do."""
+    once when no sell is placed or still working; they are sent once every
+    bought security has a price. A target with no price at all waits in
+    pending, outside the plan, as fresh_universe.py's unpriced targets do;
+    a holding with none is sold by an order tagged as the month's unpriced
+    sale. A month whose buys were never sent is recorded as unfinished
+    first, its sells left working, which this month's plan nets."""
+    ira_unfinished(algo)
     month = _month(algo)
     held = _canonical({kvp.Key: int(kvp.Value.Quantity) for kvp in algo.Portfolio
                        if kvp.Value.Invested and kvp.Value.IsLong}, targets)
@@ -335,10 +359,9 @@ def ira_rebalance(algo, targets, closes):
         else:
             prices[s] = p
     working = {}
-    for t in algo.Transactions.GetOpenOrderTickets():
+    for t in _open_sells(algo):
         left = -(float(t.Quantity) - float(t.QuantityFilled))
-        if float(t.Quantity) < 0 and left > 0:
-            working[name(t.Symbol)] = working.get(name(t.Symbol), 0) + int(left)
+        working[name(t.Symbol)] = working.get(name(t.Symbol), 0) + int(left)
     nlv = float(algo.Portfolio.TotalPortfolioValue)
     plan_targets = {name(s): w for s, w in targets.items() if s in prices}
     plan_held = {name(s): q for s, q in held.items() if s in prices}
@@ -346,54 +369,86 @@ def ira_rebalance(algo, targets, closes):
     sells, buys, skipped = ira_plan(plan_targets, plan_held, plan_prices, nlv, algo.REBALANCE_BAND,
                                     algo.PRICE_BAND, working)
     algo.pending, algo.pending_tickets = {s: targets[s] for s in unpriced if s in targets}, {}
+    placed, refused = [], []
     for s in unpriced:
         if s not in targets:
-            algo.Liquidate(s)
+            algo.Transactions.CancelOpenOrders(s)
+            _place(placed, refused, algo.MarketOrder(s, -held[s], tag=IRA_ORDER_PREFIX + month + " unpriced"),
+                   name(s), "unpriced")
     sym_of = {name(s): s for s in syms}
-    placed = []
     for inst, q, _ in sells:
-        _place(placed, algo.MarketOrder(sym_of[inst], -q, tag=IRA_ORDER_PREFIX + month + " sell"), inst, "sell")
+        _place(placed, refused, algo.MarketOrder(sym_of[inst], -q, tag=IRA_ORDER_PREFIX + month + " sell"), inst,
+               "sell")
+    waiting = bool(sells) or any(p[1] == "unpriced" for p in placed) or bool(_open_sells(algo))
     algo.ira = {"month": month, "day": algo.Time.date(), "decision": algo.Time.strftime("%Y-%m-%d"), "nlv": nlv,
                 "targets": plan_targets, "held": plan_held, "prices": plan_prices, "working": working,
                 "unpriced": [name(s) for s in unpriced], "sells": sells, "buys": buys, "skipped": skipped,
-                "sym_of": sym_of, "wait": algo.EXEC_DELAY if sells else 0, "waited": 0, "for_sells": 0,
-                "for_price": 0, "placed": placed, "done": False}
-    if not sells:
+                "sym_of": sym_of, "wait": algo.EXEC_DELAY if waiting else 0, "waited": 0, "for_sells": 0,
+                "for_price": 0, "placed": placed, "refused": refused, "done": False}
+    if not waiting:
         if all(_priced(algo, sym_of[b[0]]) for b in buys):
             _ira_buys(algo)
         else:
             algo.ira["for_price"] = 1             # the next session's buy phase sends them
 
 
-def _place(placed, ticket, inst, phase):
-    """Record an order's ID by the name the export uses: the orders listing
+def _place(placed, refused, ticket, inst, phase):
+    """Record an order's ID by the name the export uses (the orders listing
     names a stock by its latest ticker, which a renamed stock no longer
-    shares with the backtest's."""
+    shares with the backtest's); an order QuantConnect refused has no ID of
+    its own, so it is recorded apart, with the reason it gave."""
     order_id = getattr(ticket, "OrderId", None)
-    if order_id is not None:
+    if order_id is None:
+        return
+    if int(order_id) > 0:
         placed.append([inst, phase, int(order_id)])
+        return
+    response = getattr(getattr(ticket, "SubmitRequest", None), "Response", None)
+    refused.append([inst, phase, str(getattr(response, "ErrorMessage", "") or "")])
 
 
 def ira_buy_phase(algo):
     """Each session at 8:00: once EXEC_DELAY sessions have passed since the
-    rebalance (none when it had no sell), none of its sells is still working
-    and every bought security has a price (for at most PRICE_WAIT sessions),
-    budget and send its buys. The sessions waited for each reason are
-    counted, so that waited = the delay + for_sells + for_price."""
+    rebalance (none when it had no sell), no sell of any month is still
+    working and every bought security has a price (for at most PRICE_WAIT
+    sessions), budget and send its buys. The sessions waited for each
+    reason are counted, so that waited = the delay + for_sells + for_price."""
     q = getattr(algo, "ira", None)
     if not q or q["done"] or algo.Time.date() == q["day"]:
         return
     q["waited"] += 1
     if q["waited"] < q["wait"]:
         return
-    sell_tag = IRA_ORDER_PREFIX + q["month"] + " sell"
-    if any(getattr(t, "Tag", "") == sell_tag for t in algo.Transactions.GetOpenOrderTickets()):
+    if _open_sells(algo):
         q["for_sells"] += 1
         return
     if q["for_price"] < PRICE_WAIT and not all(_priced(algo, q["sym_of"][b[0]]) for b in q["buys"]):
         q["for_price"] += 1
         return
     _ira_buys(algo)
+
+
+def _record(algo, q):
+    record = {k: q[k] for k in ("month", "decision", "nlv", "targets", "held", "prices", "working", "unpriced",
+                                "sells", "buys", "skipped", "waited", "for_sells", "for_price", "placed",
+                                "refused")}
+    record.update({"v": IRA_VERSION, "buy_session": algo.Time.strftime("%Y-%m-%d"), "delay": algo.EXEC_DELAY,
+                   "band": algo.REBALANCE_BAND, "price_band": algo.PRICE_BAND, "max_fees": algo.MAX_FEES})
+    return record
+
+
+def ira_unfinished(algo):
+    """Record a month whose buys were never sent, as unfinished, on the
+    session it was given up (the next rebalance's, or the run's end), so
+    that its plan and orders are not lost; once."""
+    q = getattr(algo, "ira", None)
+    if not q or q["done"]:
+        return
+    record = _record(algo, q)
+    record.update({"budget": 0.0, "scale": 0.0, "kept": [], "scaled_skipped": [], "unplaced": [],
+                   "unfinished": True})
+    q["done"] = True
+    attach(algo, IRA_PREFIX + _dumps(record), dummy=True)
 
 
 def _ira_buys(algo):
@@ -403,15 +458,12 @@ def _ira_buys(algo):
     unplaced = []
     for inst, n, _ in kept:
         if _priced(algo, q["sym_of"][inst]):
-            _place(q["placed"], algo.MarketOrder(q["sym_of"][inst], n, tag=IRA_ORDER_PREFIX + q["month"] + " buy"),
-                   inst, "buy")
+            _place(q["placed"], q["refused"],
+                   algo.MarketOrder(q["sym_of"][inst], n, tag=IRA_ORDER_PREFIX + q["month"] + " buy"), inst, "buy")
         else:
             unplaced.append(inst)
-    record = {k: q[k] for k in ("month", "decision", "nlv", "targets", "held", "prices", "working", "unpriced",
-                                "sells", "buys", "skipped", "waited", "for_sells", "for_price", "placed")}
-    record.update({"buy_session": algo.Time.strftime("%Y-%m-%d"), "delay": algo.EXEC_DELAY,
-                   "band": algo.REBALANCE_BAND, "price_band": algo.PRICE_BAND, "max_fees": algo.MAX_FEES,
-                   "budget": budget, "scale": scale, "kept": [[i, n] for i, n, _ in kept],
-                   "scaled_skipped": scaled_skipped, "unplaced": unplaced})
+    record = _record(algo, q)
+    record.update({"budget": budget, "scale": scale, "kept": [[i, n] for i, n, _ in kept],
+                   "scaled_skipped": scaled_skipped, "unplaced": unplaced, "unfinished": False})
     q["done"] = True
     attach(algo, IRA_PREFIX + _dumps(record), dummy=True)

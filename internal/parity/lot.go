@@ -65,8 +65,10 @@ type LotMonth struct {
 // net liquidation at full momentum scale, and in "held" mode its holdings):
 // the picked names, a kept name among them, and whether the month is
 // withheld, exactly; the names skipped and kept, exactly; the targets
-// within WeightTolerance (#324, "Ranked order and cap marks: exact (picks
-// ...)" and "Weights").
+// within WeightTolerance (docs/research/parity-2026-10.md, "What Go
+// recomputes, and the thresholds"; ADR 0026 point 7, item 2). The skipped
+// and kept checks compare every month, most of them of no name on either
+// side, so the report also counts the months in which the rule fired.
 //
 // The live book ranks equal scores by ticker and leaves out a zero
 // volatility, which the backtest did not (ADR 0026 point 8); each month
@@ -160,8 +162,13 @@ func lotMonth(cfg momentum.Config, run string, checks map[string]*Check, m *LotM
 	return lotDifferences(run, m)
 }
 
-// sameSet compares two lists of names as sets, once.
+// sameSet compares two lists of names as sets, once, and counts the month
+// as one in which the rule fired when either side names a name.
 func sameSet(c *Check, month string, goNames, qcNames []string) {
+	c.CountsFired = true
+	if len(goNames)+len(qcNames) > 0 {
+		c.Fired++
+	}
 	g, q := append([]string(nil), goNames...), append([]string(nil), qcNames...)
 	sort.Strings(g)
 	sort.Strings(q)

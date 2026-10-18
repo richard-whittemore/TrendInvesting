@@ -4,12 +4,16 @@
 # 0026 point 2's "IRA execution" plans it, by ports of the Go planner and
 # buy scaling in parity_export.py (uploaded beside this file): whole shares
 # from the previous close, the 25% band, sells at the rebalance, and the buys
-# EXEC_DELAY sessions later, once no sell is working (at once when there is
-# no sell), scaled to the cash on hand with MAX_FEES allowed per buy. Orders
-# are market orders tagged IRAORD1 <month> <phase>; the limit prices at
-# PRICE_BAND are recorded, not sent. Each rebalance's plan inputs and
-# results go in an order tag (IRAPARITY1, on a cancelled 1-share SPY limit
-# order). A target with no price at all waits in PENDING outside the plan.
+# EXEC_DELAY sessions later, once no sell is working (at once when no sell
+# is placed or working), scaled to the cash on hand with MAX_FEES allowed
+# per buy. Orders are market orders tagged IRAORD1 <month> <phase>; the
+# limit prices at PRICE_BAND are recorded, not sent. Each rebalance's plan
+# inputs and results go in an order tag (IRAPARITY1, on a cancelled 1-share
+# SPY limit order), and a month whose buys never went (a sell still working
+# at the next rebalance or the end) is recorded as unfinished. The buys
+# wait for every sell still working, of any month. A target with no price
+# at all waits in PENDING outside the plan; a holding with none is sold by
+# an order tagged IRAORD1 <month> unpriced.
 #
 # This is momentum/fresh_universe.py with additions only (a test checks
 # that every code line of it is kept); with IRA_EXEC False it trades as
@@ -55,7 +59,7 @@
 from AlgorithmImports import *
 from datetime import date
 import numpy as np
-from parity_export import ira_buy_phase, ira_rebalance, stat
+from parity_export import ira_buy_phase, ira_rebalance, ira_unfinished, stat
 
 
 #: A volatility scale this far (relative) from the last one applied to the
@@ -481,6 +485,8 @@ class MomentumResearch(QCAlgorithm):
             cagr, mdd, "{:.4f}".format(cagr / mdd) if mdd else "n/a")
 
     def OnEndOfAlgorithm(self):
+        if self.IRA_EXEC:
+            ira_unfinished(self)          # a month whose buys never went is recorded too
         # Each open position's last price, so a tax study can value every open
         # lot at the end ("End1", "End2", ...: "<security id>=<price>;" pairs).
         pairs = ["{}={:.6f}".format(kvp.Key.ID, float(self.Securities[kvp.Key].Price))

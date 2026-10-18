@@ -24,6 +24,12 @@
 //	       -lot D7L_PARITY=orders.json -lot-months D7L_PARITY=1999-03,1999-11 \
 //	       -ira IRA_PARITY=orders.json -ira-months IRA_PARITY=1999-03,1999-11
 //
+// The IRA sequence counts the sessions the buys waited by a calendar: the
+// list of -ira-calendar FILE, a JSON list of YYYY-MM-DD sessions (those of
+// a run's own history), where it covers the span, else internal/
+// nysecalendar in the years it covers. The list must agree with
+// internal/nysecalendar on every day both cover.
+//
 // A months list is comma separated; an item YYYY-MM..YYYY-MM is every month
 // from the first to the last, both included. Every planned month must be
 // exported; a glide, D7-L or IRA run may also export months beyond them,
@@ -93,10 +99,15 @@ func (n *named) set(s string) error {
 
 func run(args []string, stdout, stderr io.Writer) (bool, error) {
 	var mom, months, bst, sess named
+	var calendarFile string
+	sessions := parity.Sessions(parity.NYSESessions)
 	kinds := []*kind{
 		{flag: "glide", what: "a glide-path run", prefix: glidePrefix, compare: compareGlide},
 		{flag: "lot", what: "a D7-L run", prefix: lotPrefix, compare: compareLot},
-		{flag: "ira", what: "an IRA run", prefix: iraPrefix, compare: compareIRA},
+		{flag: "ira", what: "an IRA run", prefix: iraPrefix,
+			compare: func(name string, raw []byte, plan []string, tags []tag) (parity.Report, int, error) {
+				return compareIRA(name, raw, plan, tags, sessions)
+			}},
 	}
 	flags := flag.NewFlagSet("parity", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -108,8 +119,16 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 		flags.Func(k.flag, "NAME=FILE: "+k.what+"'s orders (repeatable)", k.runs.set)
 		flags.Func(k.flag+"-months", "NAME=YYYY-MM,...: that run's planned months (repeatable)", k.months.set)
 	}
+	flags.StringVar(&calendarFile, "ira-calendar", "", "FILE: a JSON list of sessions, YYYY-MM-DD, by which the IRA sequence counts the sessions waited; internal/nysecalendar beyond it")
 	if err := flags.Parse(args); err != nil {
 		return false, err
+	}
+	if calendarFile != "" {
+		list, err := readCalendar(calendarFile)
+		if err != nil {
+			return false, fmt.Errorf("ira calendar %s: %w", calendarFile, err)
+		}
+		sessions = parity.Either(list, parity.NYSESessions)
 	}
 	count := len(mom.names) + len(bst.names)
 	for _, k := range kinds {
@@ -198,6 +217,19 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 		return false, err
 	}
 	return r.Pass(), nil
+}
+
+// readCalendar reads a session list file.
+func readCalendar(path string) (parity.Sessions, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var dates []string
+	if err := json.Unmarshal(raw, &dates); err != nil {
+		return nil, err
+	}
+	return parity.SessionList(dates)
 }
 
 // readPlan reads and validates a Boost run's plan file.
@@ -311,7 +343,7 @@ func compareLot(name string, _ []byte, plan []string, tags []tag) (parity.Report
 	return parity.CompareMinimumLot(momentum.FCombo(), name, plan, ms), len(ms), nil
 }
 
-func compareIRA(name string, raw []byte, plan []string, tags []tag) (parity.Report, int, error) {
+func compareIRA(name string, raw []byte, plan []string, tags []tag, sessions parity.Sessions) (parity.Report, int, error) {
 	ms, err := decodeAll(tags, parity.DecodeIRA)
 	if err != nil {
 		return parity.Report{}, 0, err
@@ -320,7 +352,7 @@ func compareIRA(name string, raw []byte, plan []string, tags []tag) (parity.Repo
 	if err != nil {
 		return parity.Report{}, 0, fmt.Errorf("orders: %w", err)
 	}
-	return parity.CompareIRA(name, plan, ms, orders), len(ms), nil
+	return parity.CompareIRA(name, plan, ms, orders, sessions), len(ms), nil
 }
 
 // expandMonths reads a months list: YYYY-MM items, comma separated, and

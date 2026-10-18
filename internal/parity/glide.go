@@ -52,7 +52,9 @@ type GlideMonth struct {
 // (the runs used glide.DefaultAnchors) against the
 // share the run used, both within WeightTolerance; and glide.Combine of the
 // run's momentum book at the run's share against the run's combined
-// targets, every instrument, within WeightTolerance (#324, "Weights"). An
+// targets, every instrument, within WeightTolerance (docs/research/
+// parity-2026-10.md, "What Go recomputes, and the thresholds"; ADR 0026
+// point 7, item 2). An
 // instrument both sleeves hold is counted again under glide-sleeves, Go's
 // two shares summed, so the report shows that the summing was exercised. A
 // fixed-mix month has no schedule to check and is compared on its weights.

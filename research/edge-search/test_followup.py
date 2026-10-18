@@ -1985,11 +1985,13 @@ def _additions_only(test, original, derived):
 
 
 class _Ticket:
-    def __init__(self, order_id, ok=True):
-        self.OrderId, self.ok, self.tags = order_id, ok, []
+    def __init__(self, order_id, ok=True, tag=""):
+        self.OrderId, self.ok, self.tags, self.Tag = order_id, ok, [], tag
 
     def UpdateTag(self, tag):
         self.tags.append(tag)
+        if self.ok:
+            self.Tag = tag
         return types.SimpleNamespace(IsSuccess=self.ok)
 
 
@@ -2001,14 +2003,16 @@ class _Transactions:
         return list(self.tickets)
 
 
-def _limit_orders(algo):
-    """Record LimitOrder calls on ``algo`` and the cancel of each."""
+def _limit_orders(algo, refused=False):
+    """Record LimitOrder calls on ``algo`` and the cancel of each; with
+    ``refused`` QuantConnect refuses each, giving it its placeholder ID."""
     algo.limits = []
 
     def limit(sym, qty, price, tag=""):
         rec = {"sym": sym, "qty": qty, "price": price, "tag": tag, "cancelled": False}
         algo.limits.append(rec)
-        return types.SimpleNamespace(Cancel=lambda: rec.__setitem__("cancelled", True))
+        return types.SimpleNamespace(Cancel=lambda: rec.__setitem__("cancelled", True),
+                                     OrderId=-10 if refused else 1000 + len(algo.limits))
 
     algo.LimitOrder = limit
 

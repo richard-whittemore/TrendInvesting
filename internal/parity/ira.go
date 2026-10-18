@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 )
 
@@ -84,6 +85,19 @@ type IRAMonth struct {
 	// listing names a stock by its latest ticker, which a renamed stock
 	// no longer shares with the backtest.
 	Placed map[int]string
+	// Refused lists each order QuantConnect refused to place.
+	Refused []IRARefusal
+	// Unfinished marks a month whose buys were never placed: a sell was
+	// still working when the next rebalance came.
+	Unfinished bool
+}
+
+// IRARefusal is an order QuantConnect refused, so it has no order ID of
+// its own, and the reason it gave ("" when the export did not record one).
+type IRARefusal struct {
+	Ticker, Phase string
+	ID            int
+	Reason        string
 }
 
 // Order is one QuantConnect order of a run, as its orders listing gives it.
@@ -95,12 +109,45 @@ type Order struct {
 	Status       int
 	Time         string
 	LastFillTime string
-	Tag          string
+	// Terminal is when the order was filled, cancelled or refused; "" while
+	// it was still working when the listing was taken.
+	Terminal string
+	Tag      string
 }
 
+// The phases of an IRAORD1 tag: the rebalance's sells, its buys, and the
+// sale of a holding with no reference price, which the planner never sees.
+const (
+	PhaseSell     = "sell"
+	PhaseBuy      = "buy"
+	PhaseUnpriced = "unpriced"
+)
+
+// QuantConnect's terminal order statuses besides OrderFilled.
+const (
+	OrderCanceled = 5
+	OrderInvalid  = 7
+)
+
+// maxShares bounds an order's quantity: beyond it a float64 no longer
+// holds every whole number, so no share count can be read from it.
+const maxShares = 1 << 53
+
 type iraRun struct {
-	checks map[string]*Check
-	orders map[string]map[string][]Order // month -> phase -> orders
+	checks   map[string]*Check
+	orders   map[string]map[string][]Order // month -> phase -> orders
+	sells    []sellOrder                   // every sell of the run, whatever its tag
+	sessions Sessions
+	diffs    []Difference
+	run      string
+}
+
+// sellOrder is a sell of the run with its times read: placed at at, and
+// terminal at end unless it was still working when the listing was taken.
+type sellOrder struct {
+	Order
+	at, end time.Time
+	ended   bool
 }
 
 // CompareIRA checks each logged rebalance of an IRA run against the Go
@@ -108,18 +155,25 @@ type iraRun struct {
 // skips (instrument, side, shares, limit price, reason) exactly; then
 // orderplan.ScaleBuys of Go's buys at the run's budget and fee allowance:
 // the scale within WeightTolerance, the kept shares and the scaled-away
-// buys exactly; the orders the run placed (tagged IRAOrderPrefix) against
-// Go's sells and scaled buys exactly; and the sequence (ADR 0026 point 2,
-// "IRA execution"): every sell placed at the rebalance and filled before
-// any buy is placed, the buys on the session the export names, which is
-// Delay sessions after the rebalance (none when there is no sell) plus the
-// sessions it records waiting for a working sell or a price. Those extra
-// sessions are the sequence's measured difference.
+// buys exactly; the orders the run placed (tagged IRAOrderPrefix, each
+// filled, in its phase's direction, in whole shares) against Go's sells and
+// scaled buys exactly; and the sequence (ADR 0026 point 2, "IRA
+// execution"): every sell placed at the rebalance and filled before any
+// buy, no sell of the run, whatever its tag, still working when a buy was
+// placed, and the buys on the session the export names. The sessions
+// between the rebalance and the buys are counted by sessions, never taken
+// from the export: they must be the delay (none when no sell is placed or
+// working), then each session a sell was working at 8:00, as the orders
+// listing shows, then each session waited for a price. Those extra
+// sessions are the sequence's measured difference. A wait for a price and
+// a name with no reference price are listed as differences; ADR 0026 point
+// 8 lists neither, so the differences check fails on them.
 //
 // Every planned month must be exported once; every month the run logged
-// is compared.
-func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order) Report {
-	r := iraRun{checks: map[string]*Check{}, orders: map[string]map[string][]Order{}}
+// is compared. A failed result is recorded, never rewritten (AGENTS.md
+// rule 6).
+func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order, sessions Sessions) Report {
+	r := iraRun{checks: map[string]*Check{}, orders: map[string]map[string][]Order{}, sessions: sessions, run: run}
 	var order []*Check
 	for _, c := range []struct{ name, threshold string }{
 		{CheckIRAMonths, "every planned month exported once"},
@@ -127,16 +181,23 @@ func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order)
 		{CheckIRAPlan, "exact"},
 		{CheckIRAScale, fmt.Sprintf("shares exact; scale abs <= %g", WeightTolerance)},
 		{CheckIRAOrders, "exact"},
-		{CheckIRASequence, "sells filled before the buys; buys on the logged session, the delay plus the recorded waits after"},
+		{CheckIRASequence, "sells filled before the buys, none working at a buy; the sessions waited counted by the calendar: the delay, then the sessions a sell worked, then any for a price"},
 	} {
 		r.checks[c.name] = &Check{Run: run, Name: c.name, Threshold: c.threshold}
 		order = append(order, r.checks[c.name])
 	}
 	plannedMonths(r.checks[CheckIRAMonths], planned, monthsOf(months, func(m IRAMonth) string { return m.Month }))
 	for _, o := range orders {
+		if o.Quantity < 0 {
+			r.sells = append(r.sells, readSell(o))
+		}
 		rest, ok := strings.CutPrefix(o.Tag, IRAOrderPrefix)
-		month, phase, _ := strings.Cut(rest, " ")
 		if !ok {
+			continue
+		}
+		month, phase, _ := strings.Cut(rest, " ")
+		if phase != PhaseSell && phase != PhaseBuy && phase != PhaseUnpriced {
+			r.checks[CheckIRAOrders].compare(false, 0, fmt.Sprintf("order %d tagged %q: no phase sell, buy or unpriced", o.ID, o.Tag))
 			continue
 		}
 		if r.orders[month] == nil {
@@ -154,11 +215,52 @@ func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order)
 			r.checks[CheckIRAOrders].compare(false, 0, fmt.Sprintf("%s: orders placed, no export", month))
 		}
 	}
-	var out Report
+	out := Report{Differences: r.diffs}
 	for _, c := range order {
 		out.Checks = append(out.Checks, *c)
 	}
+	out.Checks = append(out.Checks, differencesCheck(run, r.diffs))
 	return out
+}
+
+func readSell(o Order) sellOrder {
+	// A sell of no known time is taken as placed at the start, so that it
+	// holds every buy until it is known to have ended.
+	s := sellOrder{Order: o}
+	if at, err := time.Parse(time.RFC3339, o.Time); err == nil {
+		s.at = at
+	}
+	end := o.Terminal
+	if end == "" && o.Status == OrderFilled {
+		end = o.LastFillTime
+	}
+	if t, err := time.Parse(time.RFC3339, end); err == nil {
+		s.end, s.ended = t, true
+	}
+	return s
+}
+
+// working reports whether the sell was working at t: placed by then and
+// not yet terminal.
+func (s sellOrder) working(t time.Time) bool {
+	return !s.at.After(t) && (!s.ended || s.end.After(t))
+}
+
+// at8 is 8:00 New York time on day, when the template's rebalance and buy
+// phase run.
+func at8(day string) time.Time {
+	d, _ := time.Parse(time.DateOnly, day)
+	return time.Date(d.Year(), d.Month(), d.Day(), 8, 0, 0, 0, nysecalendar.NewYork)
+}
+
+// sellWorking reports whether any sell of the run was working at t.
+func (r *iraRun) sellWorking(t time.Time) bool {
+	for _, s := range r.sells {
+		if s.working(t) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedMonths(m map[string]map[string][]Order) []string {
@@ -198,6 +300,82 @@ func (r *iraRun) month(m *IRAMonth) {
 		c.compare(inGo && inQC && g == q, 0, fmt.Sprintf("%s skip %s: Go %+v (set %v), QuantConnect %+v (set %v)", m.Month, k, g, inGo, q, inQC))
 	}
 
+	goBuys := map[string]int64{}
+	if m.Unfinished {
+		// Never scaled: the buys Go planned are what was never placed.
+		for _, b := range plan.Buys {
+			goBuys[b.InstrumentID] = b.Quantity
+		}
+	} else {
+		goBuys = r.scale(m, plan)
+	}
+
+	names := map[string]bool{}
+	for n := range m.Prices {
+		names[n] = true
+	}
+	for _, n := range m.Unpriced {
+		names[n] = true
+	}
+	placed := r.orders[m.Month]
+	goSells := map[string]int64{}
+	for _, o := range plan.Sells {
+		goSells[o.InstrumentID] = -o.Quantity
+	}
+	why, listed := map[string]string{}, map[string]string{}
+	for _, f := range m.Refused {
+		switch {
+		case f.ID < 0:
+			listed[f.Ticker+" "+f.Phase] = fmt.Sprintf("refused by QuantConnect with its placeholder order ID %d", f.ID)
+		case strings.Contains(f.Reason, "non-tradable"):
+			listed[f.Ticker+" "+f.Phase] = "refused by QuantConnect: " + f.Reason
+		default:
+			reason := f.Reason
+			if reason == "" {
+				reason = "no reason recorded"
+			}
+			why[f.Ticker+" "+f.Phase] = "refused by QuantConnect: " + reason
+		}
+	}
+	for _, n := range m.Unplaced {
+		listed[n+" "+PhaseBuy] = "no price within five sessions (unplaced)"
+	}
+	for n := range goBuys {
+		if m.Unfinished {
+			why[n+" "+PhaseBuy] = "never placed: a sell was still working at the next rebalance"
+		}
+	}
+	o := r.checks[CheckIRAOrders]
+	for _, phase := range []string{PhaseSell, PhaseBuy} {
+		goShares := goSells
+		if phase == PhaseBuy {
+			goShares = goBuys
+		}
+		qc := r.orderShares(o, m.Month, phase, placed[phase], names, m.Placed)
+		for _, n := range compareShares(o, m.Month+" "+phase+" orders", goShares, qc, why, listed, phase) {
+			r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month + " " + phase + " " + n, Kind: KindDelisted,
+				Size: listed[n+" "+phase]})
+		}
+	}
+	unpriced := map[string]bool{}
+	for _, n := range m.Unpriced {
+		unpriced[n] = true
+		r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month + " " + n, Kind: KindUnpriced,
+			Size: "no reference price: traded outside the planner"})
+	}
+	for n := range r.orderShares(o, m.Month, PhaseUnpriced, placed[PhaseUnpriced], names, m.Placed) {
+		_, target := m.Targets[n]
+		o.compare(unpriced[n] && !target, 0, fmt.Sprintf("%s unpriced sale of %s: not a holding without a reference price", m.Month, n))
+	}
+	if m.ForPrice > 0 {
+		r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month, Kind: KindPriceWait, Size: fmt.Sprintf("%d sessions", m.ForPrice)})
+	}
+	r.sequence(m, len(plan.Sells) > 0, placed)
+}
+
+// scale checks ScaleBuys against the month's scaling and returns Go's kept
+// buys.
+func (r *iraRun) scale(m *IRAMonth, plan orderplan.IRAPlan) map[string]int64 {
 	kept, scaledAway, scale := orderplan.ScaleBuys(plan.Buys, m.Budget, m.MaxFees)
 	s := r.checks[CheckIRAScale]
 	d := math.Abs(scale - m.Scale)
@@ -210,7 +388,7 @@ func (r *iraRun) month(m *IRAMonth) {
 	for _, k := range m.Kept {
 		qcKept[k.Ticker] = k.Shares
 	}
-	compareShares(s, m.Month+" kept", goKept, qcKept)
+	compareShares(s, m.Month+" kept", goKept, qcKept, nil, nil, "")
 	goAway, qcAway := map[string]float64{}, map[string]float64{}
 	for _, a := range scaledAway {
 		goAway[a.InstrumentID] = a.Shares
@@ -223,31 +401,25 @@ func (r *iraRun) month(m *IRAMonth) {
 		q, inQC := qcAway[n]
 		s.compare(inGo && inQC && g == q, math.Abs(g-q), fmt.Sprintf("%s scaled away %s: Go %v (set %v), QuantConnect %v (set %v)", m.Month, n, g, inGo, q, inQC))
 	}
-
-	names := map[string]bool{}
-	for n := range m.Prices {
-		names[n] = true
-	}
-	placed := r.orders[m.Month]
-	goSells := map[string]int64{}
-	for _, o := range plan.Sells {
-		goSells[o.InstrumentID] = -o.Quantity
-	}
-	o := r.checks[CheckIRAOrders]
-	compareShares(o, m.Month+" sell orders", goSells, orderShares(placed["sell"], names, m.Placed))
-	compareShares(o, m.Month+" buy orders", goKept, orderShares(placed["buy"], names, m.Placed))
-	r.sequence(m, len(plan.Sells) > 0, placed)
+	return goKept
 }
 
 // sequence checks the order of the month's phases (ADR 0026, point 2, "IRA
-// execution").
-func (r *iraRun) sequence(m *IRAMonth, sells bool, placed map[string][]Order) {
+// execution"), for a month that placed an order or never finished.
+func (r *iraRun) sequence(m *IRAMonth, plannedSells bool, placed map[string][]Order) {
 	c := r.checks[CheckIRASequence]
+	if len(placed[PhaseSell])+len(placed[PhaseBuy])+len(placed[PhaseUnpriced]) == 0 && !m.Unfinished {
+		return
+	}
 	fail := func(format string, args ...any) {
 		c.compare(false, 0, m.Month+": "+fmt.Sprintf(format, args...))
 	}
+	if m.Unfinished {
+		fail("the buys were never placed: a sell was still working at the next rebalance")
+		return
+	}
 	var lastFill time.Time
-	for _, o := range placed["sell"] {
+	for _, o := range placed[PhaseSell] {
 		at, err := time.Parse(time.RFC3339, o.Time)
 		fill, ferr := time.Parse(time.RFC3339, o.LastFillTime)
 		switch {
@@ -261,7 +433,7 @@ func (r *iraRun) sequence(m *IRAMonth, sells bool, placed map[string][]Order) {
 			lastFill = fill
 		}
 	}
-	for _, o := range placed["buy"] {
+	for _, o := range placed[PhaseBuy] {
 		at, err := time.Parse(time.RFC3339, o.Time)
 		switch {
 		case err != nil || at.Format(time.DateOnly) != m.BuySession:
@@ -271,9 +443,25 @@ func (r *iraRun) sequence(m *IRAMonth, sells bool, placed map[string][]Order) {
 			fail("buy %d placed %s, before the last sell filled at %s", o.ID, o.Time, lastFill.Format(time.RFC3339))
 			return
 		}
+		for _, s := range r.sells {
+			if s.ID < o.ID && s.working(at) {
+				fail("buy %d placed %s while sell %d (%s) was still working", o.ID, o.Time, s.ID, s.Ticker)
+				return
+			}
+		}
+	}
+	sessions, err := r.between(m.Decision, m.BuySession)
+	if err != nil {
+		fail("%v", err)
+		return
+	}
+	if len(sessions) != m.Waited {
+		fail("the export records %d sessions waited; the calendar has %d after %s through %s", m.Waited, len(sessions),
+			m.Decision, m.BuySession)
+		return
 	}
 	required := 0
-	if sells {
+	if plannedSells || r.sellWorking(at8(m.Decision)) {
 		required = m.Delay
 	}
 	if m.Waited != required+m.ForSells+m.ForPrice {
@@ -281,7 +469,31 @@ func (r *iraRun) sequence(m *IRAMonth, sells bool, placed map[string][]Order) {
 			m.ForSells, m.ForPrice)
 		return
 	}
+	// The sessions waited after the delay, the rebalance's own first when
+	// there is none: a sell working at 8:00 makes it a session waited for
+	// sells, and any other is one waited for a price.
+	days := append([]string{m.Decision}, sessions...)
+	forSells := 0
+	for _, d := range days[required:m.Waited] {
+		if r.sellWorking(at8(d)) {
+			forSells++
+		}
+	}
+	if forSells != m.ForSells {
+		fail("the export records %d sessions waiting for a sell; the orders show a sell working at 8:00 on %d", m.ForSells, forSells)
+		return
+	}
 	c.compare(true, float64(m.Waited-required), "")
+}
+
+func (r *iraRun) between(after, through string) ([]string, error) {
+	if after == through {
+		return nil, nil
+	}
+	if r.sessions == nil {
+		return nil, fmt.Errorf("%w: (%s, %s]", ErrNoSessions, after, through)
+	}
+	return r.sessions(after, through)
 }
 
 func planned(orders []event.OrderPlannedPayload) map[string]IRAOrder {
@@ -304,19 +516,37 @@ func compareOrders(c *Check, where string, goOrders map[string]IRAOrder, qc []IR
 	}
 }
 
-func compareShares(c *Check, where string, goShares, qcShares map[string]int64) {
+// compareShares compares share counts by name; why says, by "name phase",
+// why QuantConnect has none of a name. A name Go has and QuantConnect has
+// none of is no failure when listed gives the detection the export
+// records for it (ADR 0026 point 8, a stock delisted or acquired at the
+// rebalance); those names are returned, to be listed as differences.
+func compareShares(c *Check, where string, goShares, qcShares map[string]int64, why, listed map[string]string, phase string) []string {
+	var departures []string
 	for _, k := range unionKeys(goShares, qcShares) {
 		g, inGo := goShares[k]
 		q, inQC := qcShares[k]
-		c.compare(inGo && inQC && g == q, 0, fmt.Sprintf("%s %s: Go %d (set %v), QuantConnect %d (set %v)", where, k, g, inGo, q, inQC))
+		if _, ok := listed[k+" "+phase]; ok && inGo && !inQC {
+			c.compare(true, 0, "")
+			departures = append(departures, k)
+			continue
+		}
+		what := fmt.Sprintf("%s %s: Go %d (set %v), QuantConnect %d (set %v)", where, k, g, inGo, q, inQC)
+		if reason, ok := why[k+" "+phase]; ok && !inQC {
+			what += ": " + reason
+		}
+		c.compare(inGo && inQC && g == q, 0, what)
 	}
+	return departures
 }
 
-// orderShares sums the placed orders' shares by the name the export uses:
-// the one it records for the order's ID, else the security ID when the
-// export names one, else the ticker. An order of a fraction of a share is
-// reported as a shares count no plan can match.
-func orderShares(orders []Order, names map[string]bool, byID map[int]string) map[string]int64 {
+// orderShares sums the placed orders of a phase by the name the export
+// uses: the one it records for the order's ID, else the security ID when
+// the export names one, else the ticker. Only a filled order in its
+// phase's direction (a buy positive, a sell or unpriced sale negative) of
+// whole shares is summed; any other fails c and is left out, so that no
+// order of the wrong kind can make up a total.
+func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, names map[string]bool, byID map[int]string) map[string]int64 {
 	out := map[string]int64{}
 	for _, o := range orders {
 		name, ok := byID[o.ID]
@@ -327,11 +557,20 @@ func orderShares(orders []Order, names map[string]bool, byID map[int]string) map
 		default:
 			name = o.Ticker
 		}
-		q := int64(o.Quantity)
-		if float64(q) != o.Quantity {
-			q = math.MinInt64
+		bad := ""
+		switch {
+		case o.Status != OrderFilled:
+			bad = fmt.Sprintf("status %d, not filled", o.Status)
+		case phase == PhaseBuy && !(o.Quantity > 0), phase != PhaseBuy && !(o.Quantity < 0):
+			bad = fmt.Sprintf("quantity %v against the %s's direction", o.Quantity, phase)
+		case math.Abs(o.Quantity) > maxShares || o.Quantity != math.Trunc(o.Quantity):
+			bad = fmt.Sprintf("quantity %v is not a whole number of shares", o.Quantity)
 		}
-		out[name] += q
+		if bad != "" {
+			c.compare(false, 0, fmt.Sprintf("%s %s order %d (%s): %s", month, phase, o.ID, name, bad))
+			continue
+		}
+		out[name] += int64(o.Quantity)
 	}
 	return out
 }
@@ -398,6 +637,7 @@ func iraInput(m *IRAMonth) (orderplan.IRAInput, error) {
 }
 
 type iraPayload struct {
+	V             *int                `json:"v"`
 	Month         *string             `json:"month"`
 	Decision      *string             `json:"decision"`
 	NLV           *float64            `json:"nlv"`
@@ -423,11 +663,20 @@ type iraPayload struct {
 	ForPrice      *int                `json:"for_price"`
 	Unplaced      []string            `json:"unplaced"`
 	Placed        [][]json.RawMessage `json:"placed"`
+	Refused       [][]json.RawMessage `json:"refused"`
+	Unfinished    *bool               `json:"unfinished"`
 }
 
-// DecodeIRA decodes one IRAPARITY1 payload, refusing an unknown field, a
-// required field missing or null, a null map value, and an order, skip or
-// kept row of the wrong shape.
+// IRAVersion is the export version the IRA template writes. Version 1, the
+// first runs', had no version field, recorded a refused order among the
+// placed ones under QuantConnect's placeholder ID, and had neither refused
+// nor unfinished.
+const IRAVersion = 2
+
+// DecodeIRA decodes one IRAPARITY1 payload of either version, refusing an
+// unknown field or version, a required field missing or null, a null map
+// value, a row of the wrong shape, a placed order of an unknown phase, and
+// a row repeated: a name twice in a list, an order ID placed twice.
 func DecodeIRA(raw []byte) (IRAMonth, error) {
 	var p iraPayload
 	if err := strictDecode(raw, &p); err != nil {
@@ -435,6 +684,20 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 	}
 	if p.Month == nil || *p.Month == "" {
 		return IRAMonth{}, errors.New("parity: IRA payload has no month")
+	}
+	version := 1
+	if p.V != nil {
+		version = *p.V
+	}
+	switch {
+	case version != 1 && version != IRAVersion:
+		return IRAMonth{}, fmt.Errorf("parity: %s: unknown IRA export version %d", *p.Month, version)
+	case version == 1 && (p.Refused != nil || p.Unfinished != nil):
+		return IRAMonth{}, fmt.Errorf("parity: %s: refused or unfinished in a version 1 export", *p.Month)
+	case version == IRAVersion && p.Refused == nil:
+		return IRAMonth{}, fmt.Errorf("parity: %s: refused missing or null", *p.Month)
+	case version == IRAVersion && p.Unfinished == nil:
+		return IRAMonth{}, fmt.Errorf("parity: %s: unfinished missing or null", *p.Month)
 	}
 	for _, f := range []struct {
 		name    string
@@ -456,7 +719,7 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 	m := IRAMonth{Month: *p.Month, Decision: *p.Decision, BuySession: *p.BuySession, Delay: *p.Delay, Waited: *p.Waited,
 		NLV: *p.NLV, Band: *p.Band, PriceBand: *p.PriceBand, MaxFees: *p.MaxFees, Budget: *p.Budget, Scale: *p.Scale,
 		Unpriced: p.Unpriced, ForSells: *p.ForSells, ForPrice: *p.ForPrice, Unplaced: p.Unplaced,
-		Placed: map[int]string{}}
+		Placed: map[int]string{}, Unfinished: p.Unfinished != nil && *p.Unfinished}
 	var err error
 	if m.Targets, err = required(m.Month, "targets", p.Targets); err != nil {
 		return IRAMonth{}, err
@@ -470,66 +733,106 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 	if m.Working, err = required(m.Month, "working", p.Working); err != nil {
 		return IRAMonth{}, err
 	}
+	for _, list := range []struct {
+		name  string
+		names []string
+	}{{"unpriced", m.Unpriced}, {"unplaced", m.Unplaced}} {
+		seen := map[string]bool{}
+		for _, n := range list.names {
+			if seen[n] {
+				return IRAMonth{}, fmt.Errorf("parity: %s %s: %s twice", m.Month, list.name, n)
+			}
+			seen[n] = true
+		}
+	}
 	for _, rows := range []struct {
 		name string
 		rows [][]json.RawMessage
-		add  func([]json.RawMessage) error
+		add  func([]json.RawMessage) (key string, err error)
 	}{
-		{"sells", p.Sells, func(r []json.RawMessage) error { return appendOrder(&m.Sells, r) }},
-		{"buys", p.Buys, func(r []json.RawMessage) error { return appendOrder(&m.Buys, r) }},
-		{"skipped", p.Skipped, func(r []json.RawMessage) error {
+		{"sells", p.Sells, func(r []json.RawMessage) (string, error) { return appendOrder(&m.Sells, r) }},
+		{"buys", p.Buys, func(r []json.RawMessage) (string, error) { return appendOrder(&m.Buys, r) }},
+		{"skipped", p.Skipped, func(r []json.RawMessage) (string, error) {
 			var s IRASkip
 			if err := fields(r, &s.Ticker, &s.Side, &s.Reason, &s.Shares); err != nil {
-				return err
+				return "", err
 			}
 			m.Skipped = append(m.Skipped, s)
-			return nil
+			return s.Ticker + " " + s.Side, nil
 		}},
-		{"kept", p.Kept, func(r []json.RawMessage) error {
+		{"kept", p.Kept, func(r []json.RawMessage) (string, error) {
 			var k IRAKept
 			if err := fields(r, &k.Ticker, &k.Shares); err != nil {
-				return err
+				return "", err
 			}
 			m.Kept = append(m.Kept, k)
-			return nil
+			return k.Ticker, nil
 		}},
-		{"placed", p.Placed, func(r []json.RawMessage) error {
+		{"placed", p.Placed, func(r []json.RawMessage) (string, error) {
 			var name, phase string
 			var id int
 			if err := fields(r, &name, &phase, &id); err != nil {
-				return err
+				return "", err
+			}
+			if phase != PhaseSell && phase != PhaseBuy && phase != PhaseUnpriced {
+				return "", fmt.Errorf("order %d of unknown phase %q", id, phase)
+			}
+			if id <= 0 {
+				// Version 1 recorded a refusal here, under QuantConnect's
+				// placeholder ID, which two refusals share.
+				if version != 1 {
+					return "", fmt.Errorf("placed order ID %d", id)
+				}
+				m.Refused = append(m.Refused, IRARefusal{Ticker: name, Phase: phase, ID: id})
+				return "", nil
 			}
 			if _, dup := m.Placed[id]; dup {
-				return fmt.Errorf("order %d placed twice", id)
+				return "", fmt.Errorf("order %d placed twice", id)
 			}
 			m.Placed[id] = name
-			return nil
+			return "", nil
 		}},
-		{"scaled_skipped", p.ScaledSkipped, func(r []json.RawMessage) error {
+		{"refused", p.Refused, func(r []json.RawMessage) (string, error) {
+			var f IRARefusal
+			if err := fields(r, &f.Ticker, &f.Phase, &f.Reason); err != nil {
+				return "", err
+			}
+			m.Refused = append(m.Refused, f)
+			return "", nil
+		}},
+		{"scaled_skipped", p.ScaledSkipped, func(r []json.RawMessage) (string, error) {
 			var s IRAScaledSkip
 			if err := fields(r, &s.Ticker, &s.Shares); err != nil {
-				return err
+				return "", err
 			}
 			m.ScaledSkipped = append(m.ScaledSkipped, s)
-			return nil
+			return s.Ticker, nil
 		}},
 	} {
+		seen := map[string]bool{}
 		for i, row := range rows.rows {
-			if err := rows.add(row); err != nil {
+			key, err := rows.add(row)
+			if err == nil && key != "" && seen[key] {
+				err = fmt.Errorf("%s twice", key)
+			}
+			if err != nil {
 				return IRAMonth{}, fmt.Errorf("parity: %s %s row %d: %w", m.Month, rows.name, i+1, err)
 			}
+			seen[key] = true
 		}
 	}
 	return m, nil
 }
 
-func appendOrder(dst *[]IRAOrder, row []json.RawMessage) error {
+// appendOrder decodes a planned order and returns its ticker, which a list
+// of orders names once.
+func appendOrder(dst *[]IRAOrder, row []json.RawMessage) (string, error) {
 	var o IRAOrder
 	if err := fields(row, &o.Ticker, &o.Shares, &o.Limit); err != nil {
-		return err
+		return "", err
 	}
 	*dst = append(*dst, o)
-	return nil
+	return o.Ticker, nil
 }
 
 // fields decodes a row of exactly len(dst) values, none null, the first a
@@ -563,10 +866,16 @@ type orderPayload struct {
 	Time         string  `json:"time"`
 	LastFillTime *string `json:"lastFillTime"`
 	Tag          string  `json:"tag"`
+	Events       []struct {
+		Time   float64 `json:"time"`
+		Status string  `json:"status"`
+	} `json:"events"`
 }
 
 // DecodeOrders decodes a run's orders listing, QuantConnect's order objects,
-// keeping what the IRA comparison reads.
+// keeping what the IRA comparison reads. An order's Terminal time is its
+// last filled, canceled or invalid event, else, for a filled order, its
+// last fill.
 func DecodeOrders(raw []byte) ([]Order, error) {
 	var ps []orderPayload
 	if err := json.Unmarshal(raw, &ps); err != nil {
@@ -578,6 +887,15 @@ func DecodeOrders(raw []byte) ([]Order, error) {
 			Time: p.Time, Tag: p.Tag}
 		if p.LastFillTime != nil {
 			out[i].LastFillTime = *p.LastFillTime
+		}
+		for _, e := range p.Events {
+			if e.Status == "filled" || e.Status == "canceled" || e.Status == "invalid" {
+				sec, frac := math.Modf(e.Time)
+				out[i].Terminal = time.Unix(int64(sec), int64(frac*1e9)).UTC().Truncate(time.Second).Format(time.RFC3339)
+			}
+		}
+		if out[i].Terminal == "" && p.Status == OrderFilled {
+			out[i].Terminal = out[i].LastFillTime
 		}
 	}
 	return out, nil

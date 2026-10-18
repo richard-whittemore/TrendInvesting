@@ -232,3 +232,25 @@ func TestAMalformedLotPayloadIsRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestTheMonthsInWhichTheExceptionFiredAreReportedApart(t *testing.T) {
+	// Three months compared; C skipped in one, kept in another.
+	r := compareLot(lotMonths())
+	for _, name := range []string{parity.CheckLotSkipped, parity.CheckLotKept} {
+		if c := checkNamed(r, name); c.Compared != 3 || c.Fired != 1 || !c.CountsFired {
+			t.Errorf("%s: %+v", name, c)
+		}
+	}
+	for _, want := range []string{"- L d7l-skipped: fired in 1 of the 3 months compared",
+		"- L d7l-kept: fired in 1 of the 3 months compared"} {
+		if !strings.Contains(r.Markdown(), want) {
+			t.Errorf("report lacks %q:\n%s", want, r.Markdown())
+		}
+	}
+	// A month in which only one side names a name fired too.
+	ms := lotMonths()
+	ms[0].Skipped = []string{"F"}
+	if c := checkNamed(compareLot(ms), parity.CheckLotSkipped); c.Fired != 2 || c.Pass() {
+		t.Errorf("one-sided: %+v", c)
+	}
+}

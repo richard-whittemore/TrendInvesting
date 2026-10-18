@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L")
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8)
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -858,3 +858,51 @@ which applies no minimum lot, and record no holdings, so no golden month
 changed. The parity tool knows no holdings either; it was re-run on the
 kept exports and its three reports are byte-identical to the
 `_held_gap` reports (`docs/research/parity-2026-10.md`).
+
+## Amendment (2026-10-18, owner decision): the remaining parity scope
+
+The parity runs of the glide path, D7-L and the IRA execution
+(`docs/research/parity-2026-10.md`, "Remaining scope", and "Review fixes
+and re-runs, 2026-10-18") failed only on IRA orders the backtest could not
+place. The owner decided four things on 2026-10-18. The recorded failures
+stand as recorded (AGENTS.md rule 6).
+
+- **Point 8: a stock delisted or acquired at the rebalance.** The list of
+  backtest behaviours live trading does not copy gains one cause: *the
+  stock was delisted or acquired at the rebalance, so the backtest could
+  not trade it.* The backtest's universe still ranks such a stock from the
+  session before, and the IRA planner plans an order for it that
+  QuantConnect cannot fill. The parity tool lists each such order under
+  that cause (`delisted`) **with the detection the export records**, never
+  an inferred cause: QuantConnect refused the order (its placeholder order
+  ID in the first exports, or a refusal that it gave as "non-tradable"), or
+  the stock had no price within five sessions (`unplaced`). An order
+  refused for any other reason still fails. The `ira-orders` check passes
+  when every departure is so listed.
+- **Point 7, item 2: the thresholds proposed for the remaining runs are
+  confirmed** as the rule: the glide path's age and bond share within
+  1e-12 absolute; the IRA plan, orders and sequence exact; the IRA buy
+  scaling's scale within 1e-12 absolute, its shares and skips exact.
+- **The IRA buy delay** is read as point 2, "IRA execution", states it:
+  the buys go only after the rebalance's sells have filled (one session
+  later in the runs), at once when there is no sell. Confirmed.
+- **D7-F is dropped from the parity scope.** Point 7, item 2's "repeat
+  with each D7 option" reads D7-L only: D7-F, fractional shares, is not
+  built (point 2, "D7-L", the owner's choice of 2026-10-16). Point 8's D7
+  row is unchanged: if D7-F is ever built, it enters with its own tests.
+
+The thresholds of the remaining parity checks are now:
+
+| Check | Threshold |
+| --- | --- |
+| glide age, glide share | absolute difference at most 1e-12 |
+| glide weights, glide sleeves, D7-L weights | the same instruments; absolute difference at most 1e-12 |
+| D7-L picks, skipped, kept | exact, a withheld month included |
+| IRA plan | exact |
+| IRA scale | scale within 1e-12 absolute; shares and skips exact |
+| IRA orders | exact; a departure listed under point 8's causes passes |
+| IRA sequence | exact |
+| differences | any live departure whose cause point 8 does not list fails |
+
+The comparison was re-run on the kept exports and on the two IRA runs
+made with the fixed template, with no further QuantConnect run.

@@ -350,6 +350,9 @@ func TestTheCommandRefusesWhatItCannotCompareOfTheNewKinds(t *testing.T) {
 		"ira orders unreadable":   {[]string{"-ira", "A=" + notOrders, "-ira-months", "A=2002-08"}, "A: orders"},
 		"a bad glide flag":        {[]string{"-glide", "nope"}, "NAME=VALUE"},
 		"a missing ira file":      {[]string{"-ira", "A=/nonexistent/o.json", "-ira-months", "A=2002-08"}, "no such file"},
+		"a missing calendar":      {[]string{"-ira", "A=" + good, "-ira-months", "A=2002-08", "-ira-calendar", "/nonexistent/c.json"}, "ira calendar"},
+		"a calendar not a list":   {[]string{"-ira", "A=" + good, "-ira-months", "A=2002-08", "-ira-calendar", calendar(t, `{}`)}, "ira calendar"},
+		"a calendar out of order": {[]string{"-ira", "A=" + good, "-ira-months", "A=2002-08", "-ira-calendar", calendar(t, `["2002-08-02","2002-08-01"]`)}, "does not follow"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out, errs bytes.Buffer
@@ -358,5 +361,46 @@ func TestTheCommandRefusesWhatItCannotCompareOfTheNewKinds(t *testing.T) {
 				t.Fatalf("error %v (%s), want one mentioning %q", err, errs.String(), c.want)
 			}
 		})
+	}
+}
+
+func calendar(t *testing.T, raw string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestTheIRASequenceCountsSessionsByTheCalendarFile(t *testing.T) {
+	// Bought a session after the rebalance, waiting for a price.
+	tag := strings.NewReplacer(`"waited":0,"buy_session":"2002-08-01"`, `"waited":1,"buy_session":"2002-08-02"`,
+		`"for_price":0`, `"for_price":1`).Replace(iraTag)
+	fill := "2002-08-02T20:00:00Z"
+	orders := writeFullOrders(t, []fullOrder{
+		{ID: 1, Symbol: map[string]string{"value": "AAA", "id": "AAA X"}, Quantity: 98, Status: 3,
+			Time: "2002-08-02T12:00:00Z", LastFillTime: &fill, Tag: "IRAORD1 2002-08 buy"},
+		{ID: 2, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
+			Time: "2002-08-02T12:00:00Z", Tag: tag},
+	})
+	args := []string{"-ira", "I=" + orders, "-ira-months", "I=2002-08"}
+	for _, c := range []struct {
+		extra []string
+		want  string
+	}{
+		{nil, "- I ira-sequence: 2002-08: parity: no session calendar covers the span"},
+		{[]string{"-ira-calendar", calendar(t, `["2002-07-31","2002-08-01","2002-08-02"]`)}, "| I | ira-sequence |"},
+	} {
+		var out, errs bytes.Buffer
+		if _, err := run(append(args, c.extra...), &out, &errs); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), c.want) {
+			t.Errorf("report lacks %q:\n%s", c.want, out.String())
+		}
+		if c.extra != nil && strings.Contains(out.String(), "- I ira-sequence:") {
+			t.Errorf("with a calendar the sequence failed:\n%s", out.String())
+		}
 	}
 }
