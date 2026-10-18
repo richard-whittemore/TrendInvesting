@@ -4,7 +4,8 @@ Source (docs/live-trading/plan.md section 4, "Sectors", chosen 2026-10-15
 on docs/research/sector-labels-2026-10.md): the GICS sector in iShares'
 daily IWV (Russell 3000) holdings file where it lists a stock, else the
 sector in Nasdaq's stock screener; a stock neither labels has no label, and
-the momentum rule leaves it out of the ranking.
+the momentum rule ranks it uncapped, as the backtest ranked a stock with no
+Morningstar sector (ADR 0026 point 8, the owner's decision of 2026-10-18).
 
 Both sources' sectors are mapped by name onto Morningstar's eleven sectors,
 the scheme the backtest's cap counted (QuantConnect's MorningstarSectorCode),

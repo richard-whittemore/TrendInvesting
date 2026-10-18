@@ -105,6 +105,36 @@ Tests: `TestTheFirstCompactDecisionSessionWithoutHistoriesIsWithheld`,
 `TestABarsDecisionSessionWithOnlyTheHeldNamesBarsIsWithheld`
 (`internal/targetweight/momentum_universe_test.go`).
 
+## Stocks with no sector label
+
+The book holds at most 3 stocks from any one sector. Each stock's sector
+comes with it in the universe snapshot: the GICS sector from iShares' IWV
+holdings where IWV lists the stock, otherwise Nasdaq's
+([market data](market-data.md)). Some stocks have neither, mostly companies
+based abroad and recent listings.
+
+Such a stock is ranked like any other and can be picked. It counts toward
+the 25 picks, but toward no sector's limit of 3, so any number of unlabelled
+stocks can be picked if their scores put them there. The decision records it
+`picked`, `beyond-top-n`, or with any other status a stock can have, and its
+sector as empty.
+
+This is what the backtests did: QuantConnect's universe held stocks with no
+Morningstar sector (about 4% of the ranked names, 1999-2026), and the
+backtest left them uncapped. Live trading at first left them out instead,
+which made the live book differ from the backtest's in most months the
+parity check looked at (see [parity](parity.md)). The owner chose on
+2026-10-18 to do exactly what the backtest did, so the strategy traded is
+the one that was tested (ADR 0026, point 8; target-weight rules version
+1.13.0). Which stocks lack a label still differs, since live trading's labels
+come from iShares and Nasdaq, not Morningstar; that is measured during
+dry-run and paper trading.
+
+Tests: `TestSelectBookPicksNamesWithNoSectorAsTheBacktestDoes`
+(`internal/targetweight/momentum/book_test.go`) and
+`TestAMomentumRunPicksAnUnlabelledNameUncapped`
+(`internal/targetweight/momentum_handler_test.go`).
+
 ## A session the exchange cancels
 
 If the exchange closes on a day its normal rules call a session, record it

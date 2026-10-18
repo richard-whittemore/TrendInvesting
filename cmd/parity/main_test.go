@@ -118,7 +118,8 @@ func TestABoostExportSplitAcrossOrdersIsJoinedInOrderIDOrderAndPasses(t *testing
 	if !pass {
 		t.Fatalf("a matching export must pass:\n%s", out.String())
 	}
-	for _, want := range []string{"- BX_SYN: 300 sessions from 2 tagged orders of 3", "| BX_SYN | boost-state | latched state and target exact | 90 | 0 | 0 | PASS |", "**Overall: PASS**"} {
+	for _, want := range []string{"- BX_SYN: 300 sessions from 2 tagged orders of 3", "| BX_SYN | boost-state | latched state and target exact | 90 | 0 | 0 | PASS |",
+		"| BX_SYN | boost-rsi | rel <= 1e-09, readiness exact | 300 | 0 | 0 | PASS |", "**Overall: PASS**"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report lacks %q:\n%s", want, out.String())
 		}

@@ -193,10 +193,15 @@ type MinimumLotFigures struct {
 // The closed set of MomentumName.Status values: what the rule did with a
 // universe member (internal/targetweight/momentum's Status).
 const (
-	MomentumStatusScored         = "scored"
-	MomentumStatusPicked         = "picked"
-	MomentumStatusSectorCapped   = "sector-capped"
-	MomentumStatusBeyondTopN     = "beyond-top-n"
+	MomentumStatusScored       = "scored"
+	MomentumStatusPicked       = "picked"
+	MomentumStatusSectorCapped = "sector-capped"
+	MomentumStatusBeyondTopN   = "beyond-top-n"
+	// MomentumStatusNoSector: a name with no sector label, left out by
+	// rules 1.12.0 and earlier. Rules 1.13.0 rank and pick such a name
+	// uncapped (ADR 0026 point 8, the owner's decision of 2026-10-18) and
+	// never record it; it stays in the schema so a decision recorded
+	// before still reads.
 	MomentumStatusNoSector       = "no-sector"
 	MomentumStatusZeroVolatility = "zero-volatility"
 	MomentumStatusShortHistory   = "short-history"

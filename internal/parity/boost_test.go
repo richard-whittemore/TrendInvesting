@@ -1,6 +1,7 @@
 package parity_test
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -58,15 +59,51 @@ func boostFailsOnly(t *testing.T, s []parity.BoostSession, name string) parity.C
 	return checkNamed(r, name)
 }
 
-// Boost's RSI and means must match exactly on every session (ADR 0026
-// point 7, item 2; docs/research/parity-2026-10.md, "Thresholds").
+// Boost's RSI and means must match within RelativeTolerance on every
+// session, readiness exactly: the owner's decision of 2026-10-18, amending
+// ADR 0026 point 7, item 2, which had required them bit for bit
+// (docs/research/parity-2026-10.md, "Thresholds").
 
-func TestAnRSIOneBitOffFails(t *testing.T) {
+func TestAnRSIOneBitOffPasses(t *testing.T) {
 	s := syntheticBoost(400, 210)
 	v := math.Nextafter(*s[300].RSI, math.Inf(1))
 	s[300].RSI = &v
-	if c := boostFailsOnly(t, s, parity.CheckBoostRSI); c.Failures != 1 || c.MaxDiff == 0 {
-		t.Errorf("one session off by one bit: %+v", c)
+	r := compareBoost(s)
+	if c := checkNamed(r, parity.CheckBoostRSI); !c.Pass() || c.MaxDiff == 0 || c.MaxDiff > parity.RelativeTolerance {
+		t.Errorf("one session off by one bit is within the tolerance and reported: %+v", c)
+	}
+	if !r.Pass() {
+		t.Errorf("checks %+v", r.Checks)
+	}
+}
+
+func TestAnRSIOffByMoreThanTheToleranceFails(t *testing.T) {
+	s := syntheticBoost(400, 210)
+	v := *s[300].RSI * (1 + 2*parity.RelativeTolerance)
+	s[300].RSI = &v
+	if c := boostFailsOnly(t, s, parity.CheckBoostRSI); c.Failures != 1 || c.MaxDiff <= parity.RelativeTolerance {
+		t.Errorf("one session off by twice the tolerance: %+v", c)
+	}
+}
+
+func TestBoostIndicatorThresholdsAreRelative(t *testing.T) {
+	r := compareBoost(syntheticBoost(400, 210))
+	want := fmt.Sprintf("rel <= %g, readiness exact", parity.RelativeTolerance)
+	for _, name := range []string{parity.CheckBoostRSI, parity.CheckBoostSMA} {
+		if c := checkNamed(r, name); c.Threshold != want {
+			t.Errorf("%s threshold %q, want %q", name, c.Threshold, want)
+		}
+	}
+}
+
+func TestAMeanOneBitOffPasses(t *testing.T) {
+	s := syntheticBoost(400, 210)
+	v := math.Nextafter(*s[250].TrendMean, 0)
+	s[250].TrendMean = &v
+	w := math.Nextafter(*s[250].ExitMean, math.Inf(1))
+	s[250].ExitMean = &w
+	if c := checkNamed(compareBoost(s), parity.CheckBoostSMA); !c.Pass() || c.MaxDiff == 0 {
+		t.Errorf("means off by one bit are within the tolerance: %+v", c)
 	}
 }
 
@@ -77,9 +114,9 @@ func TestAnRSIReadyEarlierThanGoFails(t *testing.T) {
 	boostFailsOnly(t, s, parity.CheckBoostRSI)
 }
 
-func TestATrendMeanOneBitOffFails(t *testing.T) {
+func TestATrendMeanOffByMoreThanTheToleranceFails(t *testing.T) {
 	s := syntheticBoost(400, 210)
-	v := math.Nextafter(*s[250].TrendMean, 0)
+	v := *s[250].TrendMean * (1 - 2*parity.RelativeTolerance)
 	s[250].TrendMean = &v
 	boostFailsOnly(t, s, parity.CheckBoostSMA)
 }

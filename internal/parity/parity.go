@@ -6,8 +6,10 @@
 //
 // The pass/fail specification is the parity gate's: ranked order and cap
 // marks exact; weights within WeightTolerance given QuantConnect's own
-// inputs; scores and volatility, recomputed from the closes, within
-// RelativeTolerance; Boost's RSI, means and state exact on every session.
+// inputs; scores and volatility, recomputed from the closes, and Boost's
+// RSI and means, within RelativeTolerance, readiness exact; Boost's state
+// exact on every session (ADR 0026 point 7, item 2, as amended on
+// 2026-10-18).
 //
 // The comparison never puts a mismatch down to a cause. For momentum it
 // compares the Go module's recomputation under the backtest's own handling
@@ -36,7 +38,7 @@ const (
 	// WeightTolerance bounds |Go weight - QuantConnect weight|.
 	WeightTolerance = 1e-12
 	// RelativeTolerance bounds |Go - QuantConnect| / max(|Go|, |QuantConnect|)
-	// for scores, volatilities and the trend mean.
+	// for scores, volatilities, the trend mean, and Boost's RSI and means.
 	RelativeTolerance = 1e-9
 )
 
@@ -61,7 +63,9 @@ const (
 type Kind string
 
 // The backtest behaviours live trading does not copy, as ADR 0026 point 8
-// lists them, then the kinds that are not on that list.
+// lists them, then the kind that is not on that list. A name with no
+// sector label is none of them: since the owner's decision of 2026-10-18
+// the live rule ranks and picks it as the backtest did.
 const (
 	// KindShortData: the backtest kept the last book when no name could be
 	// scored (defensive_v2.py:319-320); live withholds.
@@ -81,10 +85,6 @@ const (
 	// (template.py:54-55).
 	KindRSISeed Kind = "rsi-seed"
 
-	// KindNoSector: a name with no sector label, which the backtest left
-	// uncapped and live leaves out (plan.md section 4, "Sectors"). Not on
-	// ADR 0026 point 8's list.
-	KindNoSector Kind = "no-sector"
 	// KindUnexplained: a live departure from the backtest-compatible result
 	// that no rule above produces. Never listed.
 	KindUnexplained Kind = "unexplained"

@@ -42,8 +42,10 @@ The rule only compares a stock whose target is above zero. Three cases follow
   stock is recorded `unaffordable` with its one-share price and target value,
   and the detail names the lot (one share), the momentum scale and the net
   liquidation value used. It also counts the candidates valued and found
-  unaffordable, and the candidates left out for another reason (no sector,
-  or zero volatility), so a left-out name is never reported as valued. The
+  unaffordable, and the candidates left out for another reason (a price that
+  never moved, so zero volatility), so a left-out name is never reported as
+  valued. A stock with no sector label is not left out: it is ranked and
+  valued like any other ([momentum-universe](momentum-universe.md)). The
   reporter sends this as an urgent alert.
 - **(c) Some stocks are affordable.** The book is the affordable stocks after
   substitution, and the decision is made as usual.

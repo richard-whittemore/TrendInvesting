@@ -366,6 +366,12 @@ Lightsail VM (Ubuntu, $12/month, US East)
   from either source (six at the snapshot: APGE, ATAI, CRNX, EA, WBD, WBS)
   is left out of that month's ranking, recorded, and alerted if it would
   otherwise have been among the top 25; it is never left uncapped.
+  **Changed 2026-10-18 (owner decision, #461; ADR 0026 point 8):** a stock
+  with no label from either source is ranked and can be picked, counted
+  toward the 25 but toward no sector's cap, as `defensive_book` treated a
+  stock with no Morningstar sector (69-73). The parity run found the
+  exclusion changed the book in most months compared
+  (`docs/research/parity-2026-10.md`); the owner chose parity.
 - **Universe parity study first** (research, before any build): for each
   month of 2016–2026, compare the 25 names this approach would pick with
   the backtest's own picks, and the return difference.

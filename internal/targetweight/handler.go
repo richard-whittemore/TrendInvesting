@@ -74,7 +74,13 @@ import (
 //     applied (risklimit.Gate.SetKillSwitch; ADR 0019, amendment of
 //     2026-10-17), so a journal written under an earlier version does not
 //     replay.
-const RulesVersion = "1.12.0"
+//   - 1.13.0 ranks and picks a momentum name with no sector label, uncapped
+//     and counted toward no sector's cap, as the backtest did
+//     (defensive_v2.py:69-74), where 1.12.0 left it out as no-sector: the
+//     owner's decision of 2026-10-18 (ADR 0026 point 8). A journal holding
+//     such a name within the book's reach decides differently, so one
+//     written under 1.12.0 does not replay.
+const RulesVersion = "1.13.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

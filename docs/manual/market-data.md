@@ -258,7 +258,8 @@ the whole stream.
 Sector labels are GICS from iShares' IWV holdings where it lists the stock,
 else Nasdaq's sector, both mapped onto Morningstar's eleven sector names so
 the momentum cap counts one vocabulary (plan.md section 4). A stock neither
-source labels gets no label, and the momentum rule leaves it out.
+source labels gets no label, and the momentum rule ranks it with no sector
+cap, as the backtest did ([momentum-universe](momentum-universe.md)).
 
 Both sources serve only today's file, so `sectors` records the latest
 settled session only: from an hour after its close until the next session's

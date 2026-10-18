@@ -43,9 +43,11 @@ func BacktestBoost() boost.Parameters {
 
 // CompareBoost rebuilds Boost's indicators from the logged closes, from the
 // first, and runs the rule from the first session after warm-up, unlatched,
-// on its own readings. It checks every session's RSI(2), both means and
-// their readiness, and the state and target, all exactly (ADR 0026 point
-// 7, item 2: "Boost's state must match day by day").
+// on its own readings. It checks every session's RSI(2) and both means
+// within RelativeTolerance, their readiness exactly, and the state and
+// target exactly (ADR 0026 point 7, item 2: "Boost's state must match day
+// by day"; the indicators' tolerance is the owner's amendment of
+// 2026-10-18, since LEAN computes them in C# decimal and Go in float64).
 //
 // The export must start and end on the plan's first and last session and
 // hold exactly its session count, and the plan must make sense
@@ -56,8 +58,9 @@ func BacktestBoost() boost.Parameters {
 // so a difference on one session shows on every session it affects.
 func CompareBoost(p boost.Parameters, run string, plan BoostPlan, sessions []BoostSession) Report {
 	export := Check{Run: run, Name: CheckExport, Threshold: "well-formed"}
-	rsi := Check{Run: run, Name: CheckBoostRSI, Threshold: "exact, readiness included"}
-	sma := Check{Run: run, Name: CheckBoostSMA, Threshold: "exact, readiness included"}
+	indicators := fmt.Sprintf("rel <= %g, readiness exact", RelativeTolerance)
+	rsi := Check{Run: run, Name: CheckBoostRSI, Threshold: indicators}
+	sma := Check{Run: run, Name: CheckBoostSMA, Threshold: indicators}
 	state := Check{Run: run, Name: CheckBoostState, Threshold: "latched state and target exact"}
 	done := func() Report {
 		return Report{Checks: []Check{export, rsi, sma, state, differencesCheck(run, nil)}}
@@ -93,7 +96,7 @@ func CompareBoost(p boost.Parameters, run string, plan BoostPlan, sessions []Boo
 }
 
 // reading compares one indicator: ready on the same sessions, and then
-// bit for bit.
+// within RelativeTolerance; MaxDiff records the relative difference.
 func reading(c *Check, where string, got float64, ready bool, want *float64) {
 	switch {
 	case want == nil:
@@ -101,8 +104,8 @@ func reading(c *Check, where string, got float64, ready bool, want *float64) {
 	case !ready:
 		c.compare(false, 0, fmt.Sprintf("%s: Go not ready, QuantConnect %v", where, *want))
 	default:
-		d := math.Abs(got - *want)
-		c.compare(got == *want, d, fmt.Sprintf("%s: Go %v, QuantConnect %v", where, got, *want))
+		d := relative(got, *want)
+		c.compare(d <= RelativeTolerance, d, fmt.Sprintf("%s: Go %v, QuantConnect %v", where, got, *want))
 	}
 }
 

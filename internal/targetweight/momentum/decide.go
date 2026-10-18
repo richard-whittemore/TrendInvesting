@@ -2,7 +2,6 @@ package momentum
 
 import (
 	"fmt"
-	"strings"
 )
 
 // Outcome is whether a decision set targets (ADR 0026 point 1, "Output").
@@ -223,31 +222,22 @@ func Decide(cfg Config, in Input) (Decision, error) {
 
 // allUnaffordableDetail counts the candidates D7-L valued and found
 // unaffordable, and the candidates left out for another reason. With no pick
-// every candidate is unaffordable, no sector or zero volatility, since a
-// sector cap or the top-N limit needs a pick first, so only those two reasons
-// can leave a name out here.
+// every candidate is unaffordable or has zero volatility, since a sector cap
+// or the top-N limit needs a pick first, so only zero volatility can leave a
+// name out here.
 func allUnaffordableDetail(names []NameRecord, lot *MinimumLot) string {
-	var valued, noSector, zeroVol int
+	var valued, zeroVol int
 	for _, n := range names {
 		switch n.Status {
 		case StatusUnaffordable:
 			valued++
-		case StatusNoSector:
-			noSector++
 		case StatusZeroVolatility:
 			zeroVol++
 		}
 	}
 	left := "none left out"
-	if noSector+zeroVol > 0 {
-		var reasons []string
-		if noSector > 0 {
-			reasons = append(reasons, fmt.Sprintf("%d no sector", noSector))
-		}
-		if zeroVol > 0 {
-			reasons = append(reasons, fmt.Sprintf("%d zero volatility", zeroVol))
-		}
-		left = fmt.Sprintf("%d left out (%s)", noSector+zeroVol, strings.Join(reasons, ", "))
+	if zeroVol > 0 {
+		left = fmt.Sprintf("%d left out (%d zero volatility)", zeroVol, zeroVol)
 	}
 	candidates := "candidates"
 	if valued == 1 {

@@ -17,7 +17,7 @@ func TestTheReportListsEveryCheckWithItsThresholdAndResult(t *testing.T) {
 		},
 		Differences: []parity.Difference{
 			{Run: "FU", Where: "2009-06 N130", Kind: parity.KindGap, Size: "QuantConnect score 0.1"},
-			{Run: "FU", Where: "2009-06 N100", Kind: parity.KindNoSector, Size: "1 mark"},
+			{Run: "FU", Where: "2009-06 N100", Kind: parity.KindUnexplained, Size: "1 mark"},
 		},
 	}
 	want := strings.Join([]string{
@@ -36,7 +36,7 @@ func TestTheReportListsEveryCheckWithItsThresholdAndResult(t *testing.T) {
 		"| Run | Where | Live departure | On ADR 0026 point 8's list | Size |",
 		"| --- | --- | --- | --- | --- |",
 		"| FU | 2009-06 N130 | gap | yes | QuantConnect score 0.1 |",
-		"| FU | 2009-06 N100 | no-sector | no | 1 mark |",
+		"| FU | 2009-06 N100 | unexplained | no | 1 mark |",
 		"",
 	}, "\n")
 	if got := r.Markdown(); got != want {
@@ -81,7 +81,7 @@ func TestMergeKeepsEveryRunsChecksAndDifferencesInOrder(t *testing.T) {
 		t.Error("two passing reports merge to a pass")
 	}
 	bad := months()
-	bad[1].Ranked[0].Sector = ""
+	bad[1].Ranked[0].Mark = parity.MarkCapped
 	if parity.Merge(compare(bad), b).Pass() {
 		t.Error("one failing report fails the merge")
 	}

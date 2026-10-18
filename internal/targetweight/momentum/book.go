@@ -21,12 +21,10 @@ type RankedName struct {
 	Status    Status
 	// Weight is its target weight when Status is StatusPicked, else 0.
 	Weight float64
-	// BacktestWouldPick reports whether defensive_book, which keeps an
-	// unlabelled name uncapped and weights a zero volatility as 1, would
-	// have picked it. It differs from Status only for names live trading
-	// treats differently, and makes each such difference visible in the
-	// decision (ADR 0026 point 8; plan.md section 4, "Sectors": alerted if
-	// it would otherwise have been among the top 25).
+	// BacktestWouldPick reports whether defensive_book, which weights a
+	// zero volatility as 1, would have picked it. It differs from Status
+	// only for names live trading treats differently, and makes each such
+	// difference visible in the decision (ADR 0026 point 8).
 	BacktestWouldPick bool
 	// OneShare and TargetValue are set when Status is StatusUnaffordable:
 	// its previous raw close, and the target value it exceeded on the pass
@@ -76,18 +74,18 @@ type Book struct {
 }
 
 // SelectBook ranks candidates by score, highest first, picks the first
-// TopN with at most SectorCap per sector label, and weights the picks by
-// inverse volatility to Invested; when riskOff, RiskOffFraction of that
-// goes to RiskOffInstrument instead (defensive_book,
-// defensive_v2.py:49-89, with F_COMBO's sector cap, inv_vol and
-// risk_off_fraction; plan.md section 2).
+// TopN with at most SectorCap per sector label, a name with no sector label
+// uncapped and counted toward no sector's cap, as defensive_book left it
+// (defensive_v2.py:69-74; ADR 0026 point 8, the owner's decision of
+// 2026-10-18), and weights the picks by inverse volatility to Invested;
+// when riskOff, RiskOffFraction of that goes to RiskOffInstrument instead
+// (defensive_book, defensive_v2.py:49-89, with F_COMBO's sector cap,
+// inv_vol and risk_off_fraction; plan.md section 2).
 //
-// Three live rules differ from the backtest, each recorded per name
-// through BacktestWouldPick (ADR 0026 point 8):
+// Two live rules differ from the backtest, each recorded per name through
+// BacktestWouldPick (ADR 0026 point 8):
 //   - equal scores rank by ascending instrument ID; the backtest kept the
 //     order its universe arrived in (sorted, defensive_v2.py:323);
-//   - a name with no sector label is left out (StatusNoSector), never
-//     uncapped as defensive_book left it (plan.md section 4, "Sectors");
 //   - a name with zero volatility is left out (StatusZeroVolatility);
 //     defensive_book weighted it as 1 against others' 1/vol of about 50
 //     (defensive_v2.py:76).
@@ -180,8 +178,6 @@ func pickAndWeigh(cfg Config, ranked []RankedName, riskOff bool, skipped map[str
 		switch {
 		case skipped[r.InstrumentID]:
 			r.Status = StatusUnaffordable
-		case r.Sector == "":
-			r.Status = StatusNoSector
 		case r.Volatility == 0:
 			r.Status = StatusZeroVolatility
 		case live.full():
@@ -229,8 +225,8 @@ type capper struct {
 func (c *capper) full() bool { return c.picks >= c.cfg.TopN }
 
 // take picks a name of sector if the book has room and the sector is under
-// its cap, and reports whether it did. An empty sector is never capped, as
-// defensive_book's sec is None (69-74); the live pass never offers one.
+// its cap, and reports whether it did. An empty sector is never capped and
+// counts toward no sector's cap, as defensive_book's sec is None (69-74).
 func (c *capper) take(sector string) bool {
 	if c.full() {
 		return false
