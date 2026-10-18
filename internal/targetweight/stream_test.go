@@ -219,6 +219,9 @@ type options struct {
 	// fills are the venue's reports of executions fed at session i, after
 	// its cancels: an earlier run's order executing after a restart.
 	fills map[int][]event.TargetWeightFillPayload
+	// hold keeps every working order working through session i: nothing
+	// executes and nothing ends.
+	hold map[int]bool
 }
 
 // lateFill is a further execution of a part-filled order, reported at
@@ -345,8 +348,10 @@ func simulate(t *testing.T, opts options) run {
 				rests[lf.at] = append(rests[lf.at], rest{order: o, shares: lf.shares})
 			}
 		}
-		for _, f := range acct.fillAtMost(price, at.Add(-2*time.Hour), limit, part) {
-			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+		if !opts.hold[i] {
+			for _, f := range acct.fillAtMost(price, at.Add(-2*time.Hour), limit, part) {
+				apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+			}
 		}
 		if part {
 			late[opts.cancelAtOr(i)] = append(late[opts.cancelAtOr(i)], expiring...)

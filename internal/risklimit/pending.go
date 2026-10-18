@@ -115,10 +115,12 @@ type stamped struct {
 	quantity int64
 }
 
-// releasedOrder is a released order and the shares fill reports executed.
+// releasedOrder is a released order, the shares fill reports executed, and
+// those reports, in the order applied.
 type releasedOrder struct {
 	planned  event.OrderPlannedPayload
 	reported int64
+	fills    []event.TargetWeightFillPayload
 }
 
 // ledgerSell is a released sell and the facts recorded of it.
@@ -173,6 +175,16 @@ func (l *sellLedger) release(client, instrumentID string, quantity int64) {
 	s := &ledgerSell{instrumentID: instrumentID, released: quantity, since: l.snapshots}
 	l.sells[client] = s
 	l.byInstrument[instrumentID] = append(l.byInstrument[instrumentID], s)
+}
+
+// restore records a sell an earlier run released, before every snapshot
+// this run records, so no reference of this run is taken before it: first in
+// release order.
+func (l *sellLedger) restore(client, instrumentID string, quantity int64) *ledgerSell {
+	s := &ledgerSell{instrumentID: instrumentID, released: quantity}
+	l.sells[client] = s
+	l.byInstrument[instrumentID] = append([]*ledgerSell{s}, l.byInstrument[instrumentID]...)
+	return s
 }
 
 // snapshot records a snapshot taken at asOf that read held (nil when it read
@@ -425,6 +437,7 @@ func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
 		return fmt.Errorf("risklimit: fill %s takes order %s past its %d shares", p.FillID, p.ClientOrderID, o.planned.Quantity)
 	}
 	o.reported += p.Quantity
+	o.fills = append(o.fills, p)
 	g.fills[p.FillID] = p
 	g.changes = append(g.changes, reconcile.FillChange(p))
 	if s := g.ledger.sells[p.ClientOrderID]; s != nil {
@@ -443,20 +456,56 @@ func (g *Gate) Filled(clientOrderID string) int64 {
 	return 0
 }
 
+// Fills returns the fill reports applied to the released order
+// clientOrderID, each execution once, in the order applied, and none for an
+// order the gate never released.
+func (g *Gate) Fills(clientOrderID string) []event.TargetWeightFillPayload {
+	if o, ok := g.orders[clientOrderID]; ok {
+		return slices.Clone(o.fills)
+	}
+	return nil
+}
+
 // RestoreReleased restores an order an earlier run released and a run
 // restarted from its recorded decision still watches (ADR 0026, point 5),
-// with the shares its fill reports executed before the restart, so the
-// venue's later fill and lifecycle reports on it are read against it and
-// its working order is recognised. It restores no pending sell: a restarted
-// run sizes its exits as before. The order must be this gate's account's,
-// not already known, with fewer shares filled than released.
-func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, filled int64) error {
+// with the executions its fill reports stated before the restart and, when
+// the venue had ended it, the time of that end. The venue's later reports on
+// it are read against it: an execution restored, sent again, is a
+// redelivery that changes nothing (ObserveFill; ADR 0019, "Explained
+// means"). A restored sell is still being sold, so it is netted as any
+// released sell (ADR 0019, amended 2026-10-15, "net of every working
+// sell"): released before every snapshot of this run, filled by its
+// executions as stamped, and ended from its end. The order must be this
+// gate's account's and not already known, its executions its own, with
+// distinct fill ids and fewer shares than released; on a refusal nothing is
+// restored.
+func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.TargetWeightFillPayload, ended time.Time) error {
 	switch _, known := g.orders[o.ClientOrderID]; {
 	case o.AccountID != g.accountID:
 		return fmt.Errorf("risklimit: restored order %s is for account %q; this gate is %q", o.ClientOrderID, o.AccountID, g.accountID)
 	case known || o.ClientOrderID == "":
 		return fmt.Errorf("risklimit: order %q is already known, or unnamed, and cannot be restored", o.ClientOrderID)
-	case o.Quantity <= 0 || filled < 0 || filled >= o.Quantity:
+	case o.Quantity <= 0:
+		return fmt.Errorf("risklimit: restored order %s releases %d shares", o.ClientOrderID, o.Quantity)
+	}
+	var filled int64
+	seen := map[string]bool{}
+	for _, f := range fills {
+		switch err := f.Validate(); {
+		case err != nil:
+			return fmt.Errorf("risklimit: restored order %s: %w", o.ClientOrderID, err)
+		case f.AccountID != o.AccountID || f.ClientOrderID != o.ClientOrderID || f.InstrumentID != o.InstrumentID || f.Side != o.Side:
+			return fmt.Errorf("risklimit: restored order %s is %s %s; fill %s describes %s %s of order %s", o.ClientOrderID, o.Side, o.InstrumentID, f.FillID, f.Side, f.InstrumentID, f.ClientOrderID)
+		case seen[f.FillID]:
+			return fmt.Errorf("risklimit: restored order %s states fill id %s twice", o.ClientOrderID, f.FillID)
+		}
+		if _, applied := g.fills[f.FillID]; applied {
+			return fmt.Errorf("risklimit: restored fill id %s is already applied to another order", f.FillID)
+		}
+		seen[f.FillID] = true
+		filled += f.Quantity
+	}
+	if filled >= o.Quantity {
 		return fmt.Errorf("risklimit: restored order %s has %d of %d shares filled; a watched order has fewer filled than released", o.ClientOrderID, filled, o.Quantity)
 	}
 	g.released[o.ClientOrderID] = true
@@ -465,7 +514,16 @@ func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, filled int64) error
 			AccountID: o.AccountID, Tag: o.Tag, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID,
 			Side: o.Side, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
 		},
-		reported: filled,
+	}
+	if o.Side == event.OrderSideSell {
+		s := g.ledger.restore(o.ClientOrderID, o.InstrumentID, o.Quantity)
+		if !ended.IsZero() {
+			s.ended, s.end = true, ended.Truncate(time.Second)
+		}
+	}
+	for _, f := range fills {
+		// Checked above against the order and its shares, so it applies.
+		_ = g.ObserveFill(f)
 	}
 	return nil
 }

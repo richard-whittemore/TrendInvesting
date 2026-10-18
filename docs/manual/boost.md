@@ -134,7 +134,9 @@ reason may last (a permission, a margin requirement), so the program plans
 it again **once** (`replan` cause `rejected`). If IBKR rejects that order
 too, the program does not try again: that session's decision records it
 (`replan_withheld`), you get one urgent page, and the account stays off its
-target until the target changes or a fresh run. This bound is the
+target until the target changes or a fresh run. The kill switch or a stale
+IBKR snapshot refusing that one retry does not earn it another: the order
+sent once the refusal clears is still the one retry. This bound is the
 orchestrator's reading, put to you for confirmation.
 
 A refusal that moves the account to Degraded or Halted does **not** set up a
@@ -240,7 +242,7 @@ record. For Boost it carries the close, RSI(2), both averages (and whether
 each was ready), the latch before and after, the target in force,
 whether a re-plan is pending and why (`replan`), a re-plan withheld after
 a second rejection (`replan_withheld`), the order being watched
-(`watched`), and any sessions with no bar since the last close it read
+(`watched`, with each of its fills and when it ended), and any sessions with no bar since the last close it read
 (`gap_sessions`). An order adds `strategy.order.planned`, then
 `risk.order.released` or `risk.order.refused`. `journal-query orders` and
 `journal-query refusals` list them ([journal-query](journal-query.md)).
@@ -259,7 +261,7 @@ a second rejection (`replan_withheld`), the order being watched
 | IBKR rejects the order (`invalid`) | The rejection is recorded. The next session that decides plans it once more (`replan` cause `rejected`). If IBKR rejects that one too, it is not planned again (`replan_withheld`) and you get one urgent page; the account stays off its target until the target changes. | Find the reason in IBKR's order log (`journal-query orders` lists the rejection). Once fixed, the next change of target orders as normal; or start a fresh run you approve, whose first decision plans to the target from scratch. |
 | An order is never sent (the adapter refused it for good and you settled it `--never-sent`) | The order stays released in the log. A never-sent **sell** keeps counting as being sold, so every later exit in the run is smaller, or nothing, as in dry-run. A never-sent **buy** is not re-planned: settling it records nothing the engine reads, so the engine never sees the order end (the target in force has not changed). | After settling it, reconcile and start a fresh run you approve: its first decision plans to the target from scratch ([IBKR adapter](ibkr-adapter.md)). |
 | The engine crashes while the boost is on | Resumed from its log, it carries on in the same latch, neither entering nor exiting by mistake (`TestARestartWhileBoostedNeitherEntersNorExits`). | Resume it (`docs/runbooks/durable-log.md`). |
-| The engine restarts while an order is still working | The last decision records the order being watched (`watched`), so the restarted run keeps watching it from the shares filled before the restart, reads IBKR's reports on it, and plans any remainder as above (`TestARunRecoveredWithAnOrderWorkingStillReplansItsRemainder`). | Nothing more. |
+| The engine restarts while an order is still working | It depends on how it starts. **Resume after a crash** replays the whole log: the order, every fill and report on it already recorded, are read again in order, so the engine watches it exactly as before; a fill IBKR sends again counts once, and a fill or cancel IBKR reports after the crash is read and any remainder planned as above. **A fresh run after your approval** does not watch the earlier run's order at all: you start it after the session's end, when a DAY order has expired, and after reconciling; IBKR's reports on that order are refused as reports on an order this run did not release, and the fresh run's first decided session plans to the target from the account as it stands. (Each decision also records the watched order, its fills and its end, `watched`, so a restart from that decision would count a fill sent again once and keep a working sell out of later exits: `TestARunRecoveredWithAnOrderWorkingStillReplansItsRemainder`, `TestARunRecoveredReadsAFillRecordedAfterItsDecisionOnce`.) | After a crash: resume, nothing more. Before a fresh run: wait for the session's end and reconcile, which compares IBKR's open orders too (`docs/runbooks/durable-log.md`, "Start a fresh run after an earlier one"). |
 | A fresh run after a stop | The approval states the latch in force; the engine refuses an approval whose latch is not the one the previous log ended with. | `operator approve` reads it for you ([operator](operator.md)). |
 
 ## What backs this

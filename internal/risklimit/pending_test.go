@@ -974,41 +974,141 @@ func TestFilledCountsEachExecutionOnce(t *testing.T) {
 	}
 }
 
+// restoredSell is a sell of quantity an earlier run released, which a
+// restarted run watches (ADR 0026, point 5).
+func restoredSell(quantity int64) event.OrderReleasedPayload {
+	return event.OrderReleasedPayload{AccountID: "joint", ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: quantity, LimitPrice: 1}
+}
+
+// restoredFill is an execution of the restored sell, minutes after the
+// fixture time.
+func restoredFill(id string, quantity int64, minutes int) event.TargetWeightFillPayload {
+	return event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-old", FillID: id, InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: quantity, Price: 1, FilledAt: at.Add(time.Duration(minutes) * time.Minute)}
+}
+
 // TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart: an order
 // an earlier run released and a restarted run watches (ADR 0026, point 5)
-// is restored with the shares filled before the restart, so the venue's
-// later reports on it are read, the fills counting on from those shares and
-// never past the order's own; a second restore, or one for another account
-// or with every share filled, is refused.
+// is restored with the executions reported before the restart, so the
+// venue's later reports on it are read, the fills counting on from those
+// shares and never past the order's own; a second restore, one for another
+// account, one with every share filled, or one with a fill that is not the
+// order's, is refused.
 func TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
-	o := event.OrderReleasedPayload{AccountID: "joint", ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 39, LimitPrice: 1}
-	if err := g.RestoreReleased(o, 20); err != nil {
+	o := restoredSell(39)
+	if err := g.RestoreReleased(o, []event.TargetWeightFillPayload{restoredFill("f0", 20, -1)}, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	sellFill(t, g, "tw-old", "f1", 10, 1)
 	if got := g.Filled("tw-old"); got != 30 {
 		t.Errorf("Filled = %d, want the 20 before the restart and 10 after", got)
 	}
-	if err := g.ObserveFill(event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-old", FillID: "f2", InstrumentID: "SPY",
-		Side: event.OrderSideSell, Quantity: 10, Price: 1, FilledAt: at}); err == nil {
+	if err := g.ObserveFill(restoredFill("f2", 10, 2)); err == nil {
 		t.Error("a fill past the order's 39 shares must be refused")
 	}
 	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: "tw-old", OrderID: "ib-1", InstrumentID: "SPY",
 		Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled, Quantity: 39, LimitPrice: 1, OccurredAt: at}); err != nil {
 		t.Errorf("the restored order's cancel: %v", err)
 	}
-	if err := g.RestoreReleased(o, 0); err == nil {
+	if err := g.RestoreReleased(o, nil, time.Time{}); err == nil {
 		t.Error("a second restore of the same order must be refused")
 	}
 	other := o
 	other.ClientOrderID, other.AccountID = "tw-other", "ira"
-	if err := g.RestoreReleased(other, 0); err == nil {
+	if err := g.RestoreReleased(other, nil, time.Time{}); err == nil {
 		t.Error("a restore for another account must be refused")
 	}
-	full := o
-	full.ClientOrderID = "tw-full"
-	if err := g.RestoreReleased(full, 39); err == nil {
-		t.Error("a restore with every share filled must be refused")
+	for name, fills := range map[string][]event.TargetWeightFillPayload{
+		"every share filled": {restoredFill("f0", 39, -1)},
+		"another order's": {func() event.TargetWeightFillPayload {
+			f := restoredFill("f0", 1, -1)
+			f.ClientOrderID = "tw-other"
+			return f
+		}()},
+		"a buy's": {func() event.TargetWeightFillPayload {
+			f := restoredFill("f0", 1, -1)
+			f.Side = event.OrderSideBuy
+			return f
+		}()},
+		"an invalid one":    {restoredFill("", 1, -1)},
+		"one fill id twice": {restoredFill("f0", 1, -1), restoredFill("f0", 2, -1)},
+	} {
+		g := gate(t, limits(), event.TradingModeDryRun)
+		if err := g.RestoreReleased(o, fills, time.Time{}); err == nil {
+			t.Errorf("a restore with %s fill must be refused", name)
+		}
+		if got := g.Filled("tw-old"); got != 0 {
+			t.Errorf("a refused restore with %s fill counts %d shares", name, got)
+		}
 	}
+	if err := gate(t, limits(), event.TradingModeDryRun).RestoreReleased(restoredSell(0), nil, time.Time{}); err == nil {
+		t.Error("a restore of an order with no shares released must be refused")
+	}
+	applied := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, applied, "broker:1", broker(100))
+	released(t, check(t, applied, order(event.OrderSideSell, 60, 100))[0])
+	sellFill(t, applied, "tw-sell", "f0", 10, 1)
+	if err := applied.RestoreReleased(o, []event.TargetWeightFillPayload{restoredFill("f0", 1, -1)}, time.Time{}); err == nil {
+		t.Error("a restore stating a fill id another order's execution holds must be refused")
+	}
+}
+
+// TestARestoredOrderCountsAnExecutionFromBeforeTheRestartOnce: the venue
+// re-reports an execution the earlier run had already applied; the restored
+// order knows its identity, so the redelivery changes nothing, as on an
+// order this run released (ADR 0019, "Explained means"), and the same fill
+// id for a different execution is refused.
+func TestARestoredOrderCountsAnExecutionFromBeforeTheRestartOnce(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	before := restoredFill("f1", 10, -1)
+	if err := g.RestoreReleased(restoredSell(39), []event.TargetWeightFillPayload{before}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ObserveFill(before); err != nil {
+		t.Fatalf("the redelivered execution: %v", err)
+	}
+	if got := g.Filled("tw-old"); got != 10 {
+		t.Errorf("Filled = %d, want the execution before the restart counted once", got)
+	}
+	changed := before
+	changed.Quantity = 20
+	if err := g.ObserveFill(changed); err == nil {
+		t.Error("the fill id of an execution before the restart, reused for another, must be refused")
+	}
+	if got := g.Fills("tw-old"); len(got) != 1 || !got[0].SameExecution(before) {
+		t.Errorf("Fills = %+v, want the one execution", got)
+	}
+	if got := g.Fills("tw-unknown"); got != nil {
+		t.Errorf("Fills of an order never released = %+v, want none", got)
+	}
+}
+
+// TestARestoredSellIsNettedAsAWorkingSell: a sell an earlier run released
+// and a restarted run watches is still being sold, so it is netted as any
+// working sell (ADR 0019, amended 2026-10-15, sized "net of every working
+// or pending sell"): 54 released, 20 executed before an account snapshot of
+// 127, so 34 may still sell after it. Its later execution is shown by no
+// snapshot before it, and its end, once a later snapshot follows it, frees
+// what it left unsold.
+func TestARestoredSellIsNettedAsAWorkingSell(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	g.ObserveAccount(account(127, -5))
+	pendingIs(t, g, 34, "the restored sell's 34 still to sell")
+	sellFill(t, g, "tw-old", "f2", 4, 1)
+	pendingIs(t, g, 34, "an account snapshot before the later execution")
+	g.ObserveAccount(account(123, 2))
+	pendingIs(t, g, 30, "an account snapshot after it")
+
+	ended := gate(t, limits(), event.TradingModeDryRun)
+	if err := ended.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, at.Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	ended.ObserveAccount(account(127, -7))
+	pendingIs(t, ended, 34, "an account snapshot before the restored sell ended")
+	ended.ObserveAccount(account(127, -1))
+	pendingIs(t, ended, 0, "an account snapshot after it ended")
 }

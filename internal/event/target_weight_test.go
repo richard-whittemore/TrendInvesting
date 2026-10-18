@@ -3,6 +3,7 @@ package event_test
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,16 @@ func validTargetsDecided() event.TargetsDecidedPayload {
 			LatchedBefore: false, LatchedAfter: true, TargetInForce: 0.98, TargetInForceSet: true,
 		},
 	}
+}
+
+// validTargetsDecidedWatching is validTargetsDecided watching an order
+// cancelled with part filled, its executions recorded.
+func validTargetsDecidedWatching() event.TargetsDecidedPayload {
+	p := validTargetsDecided()
+	p.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, Filled: 20,
+		Fills:  []event.BoostWatchedFill{{FillID: "f1", Quantity: 20, Price: 104, Commission: 1, FilledAt: twSession.Add(-2 * time.Hour)}},
+		Status: event.OrderLifecycleStatusCanceled, EndedAt: twSession.Add(-time.Hour)}
+	return p
 }
 
 func validTargetsWithheld() event.TargetsDecidedPayload {
@@ -543,18 +554,78 @@ func TestBoostRejectedReplanValidate(t *testing.T) {
 // amended 2026-10-18).
 func TestBoostWatchedOrderValidate(t *testing.T) {
 	v := validTargetsDecided()
-	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, Filled: 20, Status: event.OrderLifecycleStatusCanceled}
+	filledAt := time.Date(2026, 3, 2, 19, 0, 0, 0, time.UTC)
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, Filled: 20,
+		Fills: []event.BoostWatchedFill{
+			{FillID: "f1", Quantity: 15, Price: 104, FilledAt: filledAt},
+			{FillID: "f2", Quantity: 5, Price: 104.5, Commission: 1, FilledAt: filledAt.Add(time.Minute)},
+		},
+		Status: event.OrderLifecycleStatusCanceled, EndedAt: filledAt.Add(time.Hour)}
 	if err := v.Validate(); err != nil {
 		t.Fatalf("a watched order is valid: %v", err)
 	}
 	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "fills short of filled", v, func(p *P) { p.Boost.Watched.Fills = p.Boost.Watched.Fills[:1] }, "sum to")
+	expectInvalid(t, "filled with no fills", v, func(p *P) { p.Boost.Watched.Fills = nil }, "sum to")
+	expectInvalid(t, "a fill id twice", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[1].FillID = "f1"
+	}, "fill id f1 twice")
+	expectInvalid(t, "an unnamed fill", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].FillID = ""
+	}, "fill id")
+	expectInvalid(t, "an empty fill", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].Quantity, p.Boost.Watched.Fills[1].Quantity = 0, 20
+	}, "positive quantity")
+	expectInvalid(t, "a fill with no price", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].Price = 0
+	}, "price")
+	expectInvalid(t, "a negative commission", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].Commission = -1
+	}, "commission")
+	expectInvalid(t, "a fill at a fraction of a second", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].FilledAt = filledAt.Add(time.Millisecond)
+	}, "whole second")
+	expectInvalid(t, "ended with no status", v, func(p *P) { p.Boost.Watched.Status = "" }, "ended")
+	expectInvalid(t, "a status with no end", v, func(p *P) { p.Boost.Watched.EndedAt = time.Time{} }, "ended")
 	expectInvalid(t, "no order", v, func(p *P) { p.Boost.Watched.ClientOrderID = "" }, "client order ID")
 	expectInvalid(t, "no side", v, func(p *P) { p.Boost.Watched.Side = "short" }, "buy or a sell")
 	expectInvalid(t, "no limit", v, func(p *P) { p.Boost.Watched.LimitPrice = 0 }, "limit")
-	expectInvalid(t, "filled in full", v, func(p *P) { p.Boost.Watched.Filled = 39 }, "fewer filled")
-	expectInvalid(t, "negative fill", v, func(p *P) { p.Boost.Watched.Filled = -1 }, "fewer filled")
+	expectInvalid(t, "filled in full", v, func(p *P) { p.Boost.Watched.Filled, p.Boost.Watched.Fills = 39, nil }, "fewer filled")
+	expectInvalid(t, "negative fill", v, func(p *P) { p.Boost.Watched.Filled, p.Boost.Watched.Fills = -1, nil }, "fewer filled")
 	expectInvalid(t, "working status", v, func(p *P) { p.Boost.Watched.Status = event.OrderLifecycleStatusSubmitted }, "status")
 	if v.Boost.IsZero() {
 		t.Error("figures with a watched order are not empty")
+	}
+}
+
+// TestBoostWatchedOrderEqualAndFill: two records of a watched order are equal
+// when every field and execution is, each instant the same in any UTC
+// offset, and an execution restates the fill report it came from.
+func TestBoostWatchedOrderEqualAndFill(t *testing.T) {
+	w := validTargetsDecidedWatching().Boost.Watched
+	moved := w
+	moved.Fills = slices.Clone(w.Fills)
+	moved.Fills[0].FilledAt = w.Fills[0].FilledAt.In(time.FixedZone("EST", -5*3600))
+	moved.EndedAt = w.EndedAt.In(time.FixedZone("EST", -5*3600))
+	if !w.Equal(moved) {
+		t.Error("the same record in another offset is equal")
+	}
+	other := w
+	other.Fills = slices.Clone(w.Fills)
+	other.Fills[0].Commission = 2
+	if w.Equal(other) || w.Equal(event.BoostWatchedOrder{}) || w.IsZero() || !(event.BoostWatchedOrder{}).IsZero() {
+		t.Error("a record with another execution, or none, is not equal")
+	}
+	f := w.Fill("joint", "SPY", w.Fills[0])
+	want := event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy,
+		Quantity: 20, Price: 104, Commission: 1, FilledAt: w.Fills[0].FilledAt}
+	if !f.SameExecution(want) {
+		t.Errorf("Fill = %+v, want %+v", f, want)
 	}
 }

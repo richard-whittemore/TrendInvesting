@@ -3,6 +3,7 @@ package event
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -52,7 +53,8 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     ID and its filled and released shares, omitted when the decision
 //     entered with no re-plan pending; BoostFigures.ReplanWithheld, a
 //     rejection's re-plan rejected again; BoostFigures.Watched, the order
-//     watched for an unfilled remainder, so a restart watches it still; and
+//     watched for an unfilled remainder with its executions and its end, so
+//     a restart watches it still; and
 //     BoostFigures.GapSessions, the sessions with no bar the decision's
 //     readings span (ADR 0026, point 5, amended 2026-10-18). Each is omitted
 //     when unset.
@@ -180,8 +182,9 @@ type BoostFigures struct {
 	// no session plans again (ADR 0026, point 2, "Boost", amended
 	// 2026-10-18): cause rejected, with its client order ID and its filled
 	// and released shares. It is recorded once, on the decision of the
-	// session at whose close the second rejection was read, and omitted
-	// otherwise.
+	// session at whose close the second rejection was read or, when that
+	// session only fed the indicators (a restarted run's warm-up), on the
+	// first decision after it, and omitted otherwise.
 	ReplanWithheld BoostReplan       `json:"replan_withheld,omitzero"`
 	Watched        BoostWatchedOrder `json:"watched,omitzero"`
 }
@@ -190,18 +193,57 @@ type BoostFigures struct {
 // released, while it is watched for an unfilled remainder (ADR 0026, point
 // 2, "Boost", amended 2026-10-18): its client order ID, side, released
 // shares and limit as released, the shares its fill reports executed so
-// far, its terminal status once the venue reported it (canceled or
-// invalid), and whether it is the one re-plan of an order the venue
-// rejected. A run restarted from the decision watches it still and reads
-// the venue's reports on it (ADR 0026, point 5).
+// far and each of those executions, its terminal status once the venue
+// reported it (canceled or invalid) and when that end occurred, and whether
+// it is the one re-plan of an order the venue rejected. A run restarted
+// from the decision watches it still and reads the venue's reports on it
+// (ADR 0026, point 5): an execution it holds, sent again, is a redelivery
+// that changes nothing (ADR 0019, "Explained means"), and a sell is netted
+// from its executions and its end as any working sell (ADR 0019, amended
+// 2026-10-15).
 type BoostWatchedOrder struct {
-	ClientOrderID  string  `json:"client_order_id"`
-	Side           string  `json:"side"`
-	Released       int64   `json:"released"`
-	LimitPrice     float64 `json:"limit_price"`
-	Filled         int64   `json:"filled,omitempty"`
-	Status         string  `json:"status,omitempty"`
-	AfterRejection bool    `json:"after_rejection,omitempty"`
+	ClientOrderID  string             `json:"client_order_id"`
+	Side           string             `json:"side"`
+	Released       int64              `json:"released"`
+	LimitPrice     float64            `json:"limit_price"`
+	Filled         int64              `json:"filled,omitempty"`
+	Fills          []BoostWatchedFill `json:"fills,omitempty"`
+	Status         string             `json:"status,omitempty"`
+	EndedAt        time.Time          `json:"ended_at,omitzero"`
+	AfterRejection bool               `json:"after_rejection,omitempty"`
+}
+
+// BoostWatchedFill is one execution of a watched order, as its fill report
+// stated it; the order names its account, instrument and side.
+type BoostWatchedFill struct {
+	FillID     string    `json:"fill_id"`
+	Quantity   int64     `json:"quantity"`
+	Price      float64   `json:"price"`
+	Commission float64   `json:"commission,omitempty"`
+	FilledAt   time.Time `json:"filled_at"`
+}
+
+// IsZero reports whether no order is watched; encoding/json's omitzero
+// reads it.
+func (w BoostWatchedOrder) IsZero() bool { return w.Equal(BoostWatchedOrder{}) }
+
+// Equal reports whether w and o record the same watched order, each instant
+// the same however its UTC offset is written.
+func (w BoostWatchedOrder) Equal(o BoostWatchedOrder) bool {
+	return w.ClientOrderID == o.ClientOrderID && w.Side == o.Side && w.Released == o.Released && w.LimitPrice == o.LimitPrice &&
+		w.Filled == o.Filled && w.Status == o.Status && w.EndedAt.Equal(o.EndedAt) && w.AfterRejection == o.AfterRejection &&
+		slices.EqualFunc(w.Fills, o.Fills, func(a, b BoostWatchedFill) bool {
+			return a.FillID == b.FillID && a.Quantity == b.Quantity && a.Price == b.Price && a.Commission == b.Commission && a.FilledAt.Equal(b.FilledAt)
+		})
+}
+
+// Fill returns the fill report the watched execution f restates, for an
+// order of accountID in instrumentID.
+func (w BoostWatchedOrder) Fill(accountID, instrumentID string, f BoostWatchedFill) TargetWeightFillPayload {
+	return TargetWeightFillPayload{
+		AccountID: accountID, ClientOrderID: w.ClientOrderID, FillID: f.FillID, InstrumentID: instrumentID,
+		Side: w.Side, Quantity: f.Quantity, Price: f.Price, Commission: f.Commission, FilledAt: f.FilledAt,
+	}
 }
 
 // IsZero reports whether b is empty, as a momentum decision's Boost figures
@@ -210,7 +252,7 @@ func (b BoostFigures) IsZero() bool {
 	return b.InstrumentID == "" && b.Close == 0 && b.RSI == 0 && !b.RSIReady && b.TrendMean == 0 && !b.TrendMeanReady &&
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
 		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
-		b.ReplanWithheld == (BoostReplan{}) && b.Watched == (BoostWatchedOrder{})
+		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero()
 }
 
 // validateGaps checks the gap sessions against the decided session's date:
@@ -766,7 +808,7 @@ func (b BoostFigures) validate() []error {
 }
 
 func (w BoostWatchedOrder) validate() []error {
-	if w == (BoostWatchedOrder{}) {
+	if w.IsZero() {
 		return nil
 	}
 	var errs []error
@@ -786,6 +828,37 @@ func (w BoostWatchedOrder) validate() []error {
 	case "", OrderLifecycleStatusCanceled, OrderLifecycleStatusInvalid:
 	default:
 		errs = append(errs, fmt.Errorf("a watched boost order's status is canceled, invalid or none; got %q", w.Status))
+	}
+	switch {
+	case (w.Status == "") != w.EndedAt.IsZero():
+		errs = append(errs, errors.New("a watched boost order has ended_at exactly when it has a status: when the venue ended it"))
+	case !w.EndedAt.IsZero() && !writableTime(w.EndedAt):
+		errs = append(errs, errors.New("a watched boost order's ended_at cannot be written as RFC 3339"))
+	}
+	var sum int64
+	seen := map[string]bool{}
+	for _, f := range w.Fills {
+		switch {
+		case f.FillID == "":
+			errs = append(errs, errors.New("a watched boost order's fill names its fill id"))
+		case seen[f.FillID]:
+			errs = append(errs, fmt.Errorf("a watched boost order records fill id %s twice", f.FillID))
+		}
+		seen[f.FillID] = true
+		if f.Quantity <= 0 {
+			errs = append(errs, fmt.Errorf("a watched boost order's fill %s has a positive quantity; got %d", f.FillID, f.Quantity))
+		}
+		if !isFinite(f.Price) || f.Price <= 0 {
+			errs = append(errs, fmt.Errorf("a watched boost order's fill %s has a finite, positive price", f.FillID))
+		}
+		if !isFinite(f.Commission) || f.Commission < 0 {
+			errs = append(errs, fmt.Errorf("a watched boost order's fill %s has a finite commission, not negative", f.FillID))
+		}
+		errs = append(errs, wholeSecondTime("a watched boost order's fill "+f.FillID+" filled at", f.FilledAt)...)
+		sum += f.Quantity
+	}
+	if sum != w.Filled {
+		errs = append(errs, fmt.Errorf("a watched boost order's fills sum to %d shares; it records %d filled", sum, w.Filled))
 	}
 	return errs
 }

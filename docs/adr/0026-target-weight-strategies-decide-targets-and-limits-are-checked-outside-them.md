@@ -943,9 +943,16 @@ target next changed; point 2 said nothing of a partial fill.
   shares), the reporter pages it once (urgent), and the account waits off
   its target until the target changes or a fresh run, as after a refusal
   under Degraded or Halted. A re-planned order that is instead canceled
-  part-filled is re-planned as any other. (The orchestrator's reading of a
-  review finding, put to the owner for confirmation with the `unfilled`
-  extension.)
+  part-filled is re-planned as any other. The bound counts orders the venue
+  rejected, not decisions: when the gate refuses the one re-plan (the kill
+  switch, a stale broker snapshot) and a later decided session releases it,
+  that order is still the rejection's one re-plan, and a restart from the
+  decision that recorded the refusal recovers it as such. A second rejection
+  read while a refusal's re-plan is pending is recorded all the same. One
+  read during a restarted run's warm-up, whose sessions only feed the
+  indicators, is recorded by the first decision after it. (The
+  orchestrator's reading of a review finding, put to the owner for
+  confirmation with the `unfilled` extension.)
 - An order filled in full plans nothing more, and a re-plan it set is
   cleared if the rest of its fills arrive before the session that would
   plan it: re-planning then would trade drift toward an unchanged target.
@@ -971,20 +978,43 @@ target next changed; point 2 said nothing of a partial fill.
   and its filled and released shares.
 - **Restarts.** Every decision records the watched order as it stands after
   it (`boost.watched`: client order ID, side, released shares, limit, shares
-  filled so far, its terminal status once reported, and whether it is a
-  rejection's one re-plan). A run restarted from that decision watches the
-  order still, from the shares filled before the restart, and reads the
-  venue's fill and lifecycle reports on it as on an order it released; it
-  restores no pending sell, so its exits are sized as before. A run
-  restarted from a withheld decision recovers the pending re-plan's cause;
-  one restarted from a decided decision whose own order was refused
-  recovers `refused`.
+  filled so far and each execution (`fills`: fill ID, shares, price,
+  commission, time), its terminal status once reported and when it
+  occurred (`ended_at`), and whether it is a rejection's one re-plan). A
+  run restarted from that decision watches the order still and reads the
+  venue's fill and lifecycle reports on it as on an order it released,
+  adding it to any order a broker snapshot read before the recovery
+  released. An execution the decision holds, sent again by the venue, is a
+  redelivery that changes nothing, and the same fill ID for a different
+  execution is refused, as on an order this run released (ADR 0019,
+  "Explained means"); an execution the earlier run recorded after its last
+  decision is not in it, so the venue's report of it counts once. A watched
+  **sell** is restored as a working sell (ADR 0019, amended 2026-10-15:
+  every exit and sale back to 98% is sized net of every working sell),
+  released before every snapshot of the restarted run, filled by its
+  recorded executions as stamped and ended at its recorded end, so a later
+  exit cannot sell its shares again. A run restarted from a withheld
+  decision recovers the pending re-plan's cause; one restarted from a
+  decided decision whose own order was refused recovers `refused`, or
+  `rejected` when that order was a rejection's one re-plan.
+- **Which start reads a recorded decision.** Neither of the engine's two
+  starts feeds the handler a recorded decision today. A **resume** after a
+  crash (ADR 0027) re-applies every input of the crashed log, so the order,
+  its executions and its reports are read again in order and the watch is
+  rebuilt exactly; an execution the venue sends again after the resume is a
+  redelivery. A **fresh run** after the owner's approval starts after a
+  session's end and a reconciliation, when a DAY order has expired; it
+  watches no order of the earlier run, refuses the venue's reports on one as
+  on any order it did not release (reconciliation's to explain, ADR 0019),
+  and its first decided session plans to the target from the account as it
+  stands. The recovery from a decided record is the handler's input
+  contract for a restart from a decision (point 5), tested as such.
 
 ### Rules and schema
 
 A journal holding a gap or such an order decides differently under an
 earlier build: target-weight rules version **1.18.0** (ADR 0016).
-`strategy.targets.decided` moves to schema version **6** for the two new
+`strategy.targets.decided` moves to schema version **6** for the four new
 Boost fields, `replan`, `replan_withheld`, `watched` and `gap_sessions`,
 each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
 golden cases for both rules (`TestSyntheticGoldenBoostGap`;
