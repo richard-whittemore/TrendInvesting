@@ -1,0 +1,23 @@
+{
+  "account_id": "DU0000001",
+  "plan_id": "order-planned:tw-paper-1",
+  "tag": "targets-decided:DU0000001:2026-10-16",
+  "client_order_id": "tw-paper-1",
+  "instrument_id": "SPY",
+  "side": "buy",
+  "quantity": 9,
+  "limit_price": 401.5,
+  "mode": "paper",
+  "send": true,
+  "figures": {
+    "net_liquidation": 4000,
+    "reference_price": 400,
+    "exposure_before": 0,
+    "exposure_after": 0.9,
+    "order_fraction": 0.9,
+    "mark": 400.1,
+    "mark_set": true,
+    "mark_deviation": 0.00025,
+    "orders_in_decision": 1
+  }
+}

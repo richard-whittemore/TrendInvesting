@@ -7,6 +7,7 @@ under its ID; the engine answers with the reply it recorded, and never
 applies the input twice. The adapter sends each released order once.
 """
 import copy
+import hashlib
 import json
 import sys
 import tempfile
@@ -22,8 +23,12 @@ if tests_dir not in sys.path:
 
 from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
-                   PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused, main, resolve)
+                   NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
+                   acknowledge_correction, acknowledge_late_fill, journalled_fills, journalled_reports, main,
+                   resolve)
 from sender import OrderRequest
+
+TESTDATA = Path(__file__).resolve().parent / "testdata"
 
 
 def released(client_order_id, send=True):
@@ -104,10 +109,98 @@ class CrashingSender:
             raise ConnectionError("adapter stopped after handing over {}".format(request.client_order_id))
 
 
-def to_request(order):
+class Sending:
+    """A sender as the relay takes one: check refuses what send would, before any mark; send hands it over."""
+
+    def __init__(self, send, check=None):
+        self._send = send
+        self._check = check
+
+    def check(self, request):
+        if self._check is not None:
+            self._check(request)
+        return request
+
+    def send(self, request):
+        return self._send(request)
+
+
+def to_request(order, session=None):
     return OrderRequest(client_order_id=order["client_order_id"], account_id=order["account_id"], con_id=756733,
                         symbol=order["instrument_id"], action=order["side"].upper(), quantity=Decimal(order["quantity"]),
-                        order_type="LMT", limit_price=order["limit_price"], tif="DAY")
+                        order_type="LMT", limit_price=order["limit_price"], tif="DAY", session=session)
+
+
+# The fills the engine's durable log holds, for the acknowledgement tests.
+FILLS = frozenset({"e.1.01"})
+# The engine's durable log as internal/journal writes it (ADR 0027): a
+# header, then each input's group of records closed by a commit.
+LOG_CHAIN = ("seed=sha256(canonical_log_header_bytes); "
+             "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
+LOG_CONFIGURATION = "sha256:" + "0" * 64
+LOG_STRATEGY = "target-weight-ira/1.0.0+test"
+
+
+def log_header():
+    return json.dumps({"log_version": 1, "chain_algorithm": LOG_CHAIN, "configuration_hash": LOG_CONFIGURATION,
+                       "strategy_version": LOG_STRATEGY}, separators=(",", ":")) + "\n"
+
+
+def fill_payload(fill_id, account_id="DU1234567"):
+    return {"account_id": account_id, "client_order_id": "tw-1", "fill_id": fill_id, "instrument_id": "SPY",
+            "side": "buy", "quantity": 4, "price": 401.25, "commission": 1.0, "filled_at": "2026-10-17T13:30:01Z"}
+
+
+def log_group(sequence, entries, committed=True):
+    """One group of the engine's durable log from sequence on: (kind, type, schema version, payload) lines, then its commit.
+
+    The record hashes are stand-ins: the relay reads the log's shape and each
+    payload against its hash, and the chain is the engine's to verify
+    (testdata/engine_log.jsonl is a log the engine's own writer made).
+    """
+    lines = []
+    for n, (kind, event_type, schema_version, payload) in enumerate(entries, sequence):
+        raw = json.dumps(payload, separators=(",", ":"))
+        envelope = json.dumps({"id": "e:{}".format(n), "type": event_type, "envelope_version": 1,
+                               "schema_version": schema_version, "event_time": "2026-10-17T13:30:00Z",
+                               "recorded_at": "2026-10-17T13:30:00Z", "sequence": n, "source": "ibkr-adapter",
+                               "strategy_version": LOG_STRATEGY, "configuration_hash": LOG_CONFIGURATION,
+                               "payload_hash": hashlib.sha256(raw.encode()).hexdigest()}, separators=(",", ":"))
+        record_hash = "sha256:" + hashlib.sha256("record {}".format(n).encode()).hexdigest()
+        lines.append('{{"record":{{"sequence":{},"kind":"{}","envelope":{},"payload":{}}},"record_hash":"{}"}}}}\n'
+                     .format(n, kind, envelope[:-1], raw, record_hash))
+    if committed:
+        lines.append(json.dumps({"commit": {"sequence": sequence + len(entries) - 1, "record_hash": record_hash}},
+                                separators=(",", ":")) + "\n")
+    return lines
+
+
+def write_engine_journal(path, fill_ids):
+    """The engine's durable log holding a committed input fill for each of fill_ids, among other groups."""
+    lines = [log_header()]
+    lines += log_group(1, [("input", "market.session.closed", 1, {"session": "2026-10-16"}),
+                           ("decision", "risk.order.released", 1, {"client_order_id": "tw-1"})])
+    for n, fill_id in enumerate(fill_ids, 3):
+        lines += log_group(n, [("input", "execution.fill", 5, fill_payload(fill_id))])
+    Path(path).write_text("".join(lines), encoding="utf-8")
+    return str(path)
+
+
+def lifecycle_payload(client_order_id, status, account_id="DU1234567"):
+    return {"account_id": account_id, "client_order_id": client_order_id, "order_id": "order:11:7",
+            "instrument_id": "SPY", "side": "buy", "status": status, "quantity": 9, "limit_price": 401.5,
+            "occurred_at": "2026-10-17T13:30:00Z", "message": ""}
+
+
+def write_ended_journal(path, fill_ids, statuses):
+    """The engine's durable log holding committed fills, then a lifecycle input (client order ID, status) for each of statuses."""
+    write_engine_journal(path, fill_ids)
+    lines = []
+    for n, (client_order_id, status) in enumerate(statuses, 3 + len(fill_ids)):
+        lines += log_group(n, [("input", "execution.order.lifecycle", 2, lifecycle_payload(client_order_id, status))])
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("".join(lines))
+    return str(path)
 
 
 def envelope(i):
@@ -123,7 +216,8 @@ class RelayTests(unittest.TestCase):
 
     def relay(self, connect, broker=holding(), reconnects=1, send=None, mapper=to_request, today=date(2026, 10, 16),
               **options):
-        relay = Relay(connect=connect, send=send or self.sent.append, pending=self.pending, broker_orders=broker,
+        sender = send if isinstance(send, Sending) else Sending(send or self.sent.append)
+        relay = Relay(connect=connect, sender=sender, pending=self.pending, broker_orders=broker,
                       to_request=mapper, reconnects=reconnects, today=lambda: today, **options)
         self.addCleanup(relay.close)
         return relay
@@ -197,7 +291,7 @@ class RelayTests(unittest.TestCase):
         log = {}
         decisions = {"session:0": [released("tw-1")]}
 
-        def unshapeable(order):
+        def unshapeable(order, session):
             raise ValueError("cannot shape {}".format(order["client_order_id"]))
 
         unshaping = self.relay(Restarts(log, decisions), mapper=unshapeable)
@@ -209,6 +303,18 @@ class RelayTests(unittest.TestCase):
         self.relay(Restarts(log, decisions)).exchange(envelope(1))
         self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"])
         self.assertIsNone(self.pending.load())
+
+    def test_each_request_is_built_with_the_session_of_the_input_that_released_it(self):
+        # A released order is for its own session (ADR 0026 point 2): the
+        # request carries its input's New York date, or none when the input
+        # has no readable time, and the sender refuses it in another session.
+        log = {}
+        decisions = {"session:0": [released("tw-1")], "session:1": [released("tw-2")]}
+        relay = self.relay(Restarts(log, decisions))
+        relay.exchange(dict(envelope(0), event_time="2026-10-17T01:30:00Z"))
+        relay.exchange(envelope(1))
+        self.assertEqual([(r.client_order_id, r.session) for r in self.sent],
+                         [("tw-1", date(2026, 10, 16)), ("tw-2", None)])
 
     def test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled(self):
         log = {}
@@ -276,6 +382,12 @@ class RelayTests(unittest.TestCase):
             with self.assertRaises(HandoverRecordInvalid):
                 restarted.exchange(envelope(1))
             restarted.close()
+        with open(self.pending.handover_path, "w", encoding="utf-8") as f:
+            json.dump({"tw-1": "Sent"}, f)
+        with self.assertRaises(HandoverRecordInvalid) as unknown:
+            self.pending.handovers()
+        for mark in ("handing-over", "sent", "never-sent", "resend:YYYY-MM-DD"):
+            self.assertIn(repr(mark), str(unknown.exception), "the message names every mark the record may hold")
         with open(self.pending.handover_path, "w", encoding="utf-8") as f:
             f.write('{"tw-1": sent')
         with self.assertRaises(HandoverRecordInvalid):
@@ -636,7 +748,7 @@ class RelayTests(unittest.TestCase):
 
         def record_while_starting_an_adapter(decision):
             try:
-                Relay(connect=Restarts(log, decisions), send=self.sent.append, pending=PendingInput(other.path),
+                Relay(connect=Restarts(log, decisions), sender=Sending(self.sent.append), pending=PendingInput(other.path),
                       broker_orders=holding(), to_request=to_request)
             except PendingInUse as err:
                 blocked.append(err)
@@ -648,7 +760,7 @@ class RelayTests(unittest.TestCase):
 
         first = self.relay(Restarts(log, decisions))
         with self.assertRaises(PendingInUse):
-            Relay(connect=Restarts(log, decisions), send=self.sent.append, pending=PendingInput(self.pending.path),
+            Relay(connect=Restarts(log, decisions), sender=Sending(self.sent.append), pending=PendingInput(self.pending.path),
                   broker_orders=holding(), to_request=to_request)
         first.close()
 
@@ -671,6 +783,411 @@ class RelayTests(unittest.TestCase):
                 resolve(self.pending, cid, decision, reason, today=date(2026, 10, 16))
         self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
         self.assertEqual(self.pending.decisions(), [])
+
+    def test_an_order_the_sender_refuses_for_good_is_settled_never_sent_and_the_relay_goes_on(self):
+        # A release the sender refuses every time it is asked (one for an
+        # earlier session, or one it can never shape) leaves no mark, so the
+        # owner settles it as never sent: a refusal with its reason, which
+        # the relay skips, never a cancel of an order at IBKR.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+
+        def refused(order, session):
+            raise ValueError("order {} was released for an earlier session".format(order["client_order_id"]))
+
+        stuck = self.relay(Restarts(log, decisions), mapper=refused)
+        with self.assertRaises(ValueError):
+            stuck.exchange(envelope(0))
+        stuck.close()
+        self.assertEqual(self.pending.handovers(), {})
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", " ", today=date(2026, 10, 16))
+        resolve(self.pending, "tw-1", "never-sent", "released 2026-10-15, refused as stale", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"})
+        [recorded] = self.pending.decisions()
+        recorded.pop("at")
+        self.assertEqual(recorded, {"client_order_id": "tw-1", "decision": "never-sent", "session_date": "2026-10-16",
+                                    "reason": "released 2026-10-15, refused as stale"})
+
+        goes_on = self.relay(Restarts(log, decisions), mapper=refused)
+        goes_on.exchange(envelope(1))
+        self.assertEqual(self.sent, [], "an order settled as never sent is never handed over")
+        self.assertIsNone(self.pending.load(), "the relay went on to the next input")
+
+    def settled_never_sent(self, log, decisions):
+        """The sender refuses tw-1 for good, and the owner settles it as never sent."""
+        def refused(order, session):
+            raise ValueError("order {} was released for an earlier session".format(order["client_order_id"]))
+
+        stuck = self.relay(Restarts(log, decisions), mapper=refused)
+        with self.assertRaises(ValueError):
+            stuck.exchange(envelope(0))
+        stuck.close()
+        resolve(self.pending, "tw-1", "never-sent", "IBKR shows no order tagged tw-1", today=date(2026, 10, 16))
+        return refused
+
+    def test_a_never_sent_order_ibkr_shows_open_or_executed_stops_for_a_person(self):
+        # A never-sent mark is the owner's judgement that the order never
+        # left the process; IBKR showing its tag contradicts it, so the relay
+        # stops rather than pass over an order the broker holds.
+        for where in ("open_orders", "executions"):
+            with self.subTest(where=where):
+                self.pending.clear()
+                for path in (self.pending.handover_path, self.pending.refused_path):
+                    Path(path).unlink(missing_ok=True)
+                log, decisions = {}, {"session:0": [released("tw-1")]}
+                refused = self.settled_never_sent(log, decisions)
+                broker = holding(**{where: ["tw-1"]})
+                contradicted = self.relay(Restarts(log, decisions), broker=broker, mapper=refused)
+                with self.assertRaises(HandoverUnconfirmed) as raised:
+                    contradicted.exchange(envelope(1))
+                contradicted.close()
+                self.assertIn("never sent", str(raised.exception))
+                self.assertEqual(self.sent, [])
+                self.assertEqual(self.pending.load(), envelope(0), "the input still awaits its reply")
+                # The owner, having found it at IBKR, marks it sent; then the
+                # relay goes on without sending it.
+                with self.assertRaises(ResolveRefused):
+                    resolve(self.pending, "tw-1", "resend", "IBKR has it", today=date(2026, 10, 16))
+                resolve(self.pending, "tw-1", "sent", "IBKR shows it cancelled", today=date(2026, 10, 16))
+                self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+                goes_on = self.relay(Restarts(log, decisions), broker=broker, mapper=refused)
+                goes_on.exchange(envelope(1))
+                goes_on.close()
+                self.assertEqual(self.sent, [])
+
+    def test_never_sent_is_refused_for_any_order_but_the_one_the_relay_is_refusing(self):
+        log = {}
+        decisions = {"session:0": [released("tw-1"), released("tw-2")]}
+
+        def refused(order, session):
+            if order["client_order_id"] == "tw-2":
+                raise ValueError("no IBKR contract for {}".format(order["instrument_id"]))
+            return to_request(order, session)
+
+        stuck = self.relay(Restarts(log, decisions), mapper=refused)
+        with self.assertRaises(ValueError):
+            stuck.exchange(envelope(0))
+        stuck.close()
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"])
+        # tw-1 went out and is marked; tw-3 is a typo the relay never refused.
+        for cid, named in (("tw-1", "sent"), ("tw-3", "tw-2")):
+            with self.subTest(cid=cid), self.assertRaises(ResolveRefused) as raised:
+                resolve(self.pending, cid, "never-sent", "a typo", today=date(2026, 10, 16))
+            self.assertIn(named, str(raised.exception))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+        self.assertEqual(self.pending.decisions(), [])
+        resolve(self.pending, "tw-2", "never-sent", "no contract configured", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent", "tw-2": "never-sent"})
+
+    def test_never_sent_is_refused_when_the_relay_recorded_no_refusal_for_the_waiting_input(self):
+        # An input awaits its reply because the engine did not answer, not
+        # because the sender refused an order: nothing is refused, so nothing
+        # can be settled as never sent.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        down = self.relay(Restarts(log, decisions, crash_before_reply=["session:0"]), reconnects=0)
+        with self.assertRaises(EngineUnavailable):
+            down.exchange(envelope(0))
+        down.close()
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", "guessing", today=date(2026, 10, 16))
+        # A refusal recorded for another input does not carry over.
+        with open(self.pending.refused_path, "w", encoding="utf-8") as f:
+            json.dump({"input_id": "session:9", "client_order_id": "tw-1", "reason": "stale"}, f)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", "guessing", today=date(2026, 10, 16))
+        for bad in ("{not json", "[]", json.dumps({"input_id": "session:0", "client_order_id": "tw-1"})):
+            with self.subTest(bad=bad):
+                with open(self.pending.refused_path, "w", encoding="utf-8") as f:
+                    f.write(bad)
+                with self.assertRaises(HandoverRecordInvalid):
+                    resolve(self.pending, "tw-1", "never-sent", "guessing", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {})
+
+    def test_never_sent_is_refused_for_an_order_with_a_mark_or_with_no_input_awaiting_its_reply(self):
+        today = date(2026, 10, 16)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", "nothing is pending", today=today)
+        decisions = {"session:0": [released("tw-1")]}
+        self.stopped_mid_send(envelope(0), decisions)
+        # Marked about to be sent: it may have reached IBKR, so it is settled
+        # only as sent or resent, after a check at IBKR.
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", "IBKR shows nothing", today=today)
+        resolve(self.pending, "tw-1", "sent", "IBKR shows it cancelled", today=today)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "never-sent", "too late", today=today)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+        self.assertEqual([d["decision"] for d in self.pending.decisions()], ["sent"])
+
+    def test_the_resolve_command_settles_a_never_sent_order(self):
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+
+        def refused(order, session):
+            raise ValueError("no contract ID")
+
+        stuck = self.relay(Restarts(log, decisions), mapper=refused)
+        with self.assertRaises(ValueError):
+            stuck.exchange(envelope(0))
+        stuck.close()
+        path = self.pending.path
+        self.assertEqual(main(["resolve", path, "tw-1", "--never-sent", "--reason", "no IBKR contract for SPY"],
+                              today=date(2026, 10, 16)), 0)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"})
+
+    def test_a_sender_without_a_check_is_refused_before_anything_is_held(self):
+        # The relay itself asks the sender's check before every mark, so a
+        # sender that offers none is refused rather than trusted.
+        class NoCheck:
+            def send(self, request):
+                raise AssertionError("never called")
+
+        for sender in (self.sent.append, NoCheck()):
+            with self.subTest(sender=sender), self.assertRaises(TypeError):
+                Relay(connect=Restarts({}, {}), sender=sender, pending=self.pending, broker_orders=holding(),
+                      to_request=to_request)
+        # The pending file was never held, so a well-formed relay starts.
+        self.relay(Restarts({}, {}))
+
+    def test_the_relay_asks_the_senders_check_before_the_mark_whatever_the_mapper(self):
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+
+        def refuse(request):
+            raise ValueError("the link is not reconciled")
+
+        relay = self.relay(Restarts(log, decisions), send=Sending(self.sent.append, check=refuse))
+        with self.assertRaises(ValueError):
+            relay.exchange(envelope(0))
+        self.assertEqual(self.pending.handovers(), {}, "a request the sender refuses is never marked")
+        self.assertEqual(self.sent, [])
+
+    def test_a_correction_of_an_execution_never_journalled_as_a_fill_is_not_acknowledged(self):
+        # The engine keeps the original fill only if it was recorded; a
+        # correction of one never recorded (its commission had not arrived)
+        # leaves the shares in no fill, so it is reconciled by hand instead.
+        with self.assertRaises(ResolveRefused) as raised:
+            acknowledge_correction(self.pending, "e.1.02", "e.1.01", "IBKR corrected the price", fills={"e.2.01"})
+        message = str(raised.exception)
+        self.assertIn("e.1.01", message)
+        self.assertIn("never recorded", message)
+        self.assertIn("reconcil", message)
+        self.assertEqual(self.pending.acknowledged_corrections(), {})
+
+    def test_an_acknowledged_correction_is_kept_and_read_back_exactly(self):
+        self.assertEqual(self.pending.acknowledged_corrections(), {})
+        acknowledge_correction(self.pending, "e.1.02", "e.1.01", "IBKR corrected the price", fills=FILLS)
+        acknowledge_correction(self.pending, "e.1.02", "e.1.01", "the same, again", fills=FILLS)
+        self.assertEqual(self.pending.acknowledged_corrections(), {"e.1.02": "e.1.01"})
+        for exec_id, corrects, reason in (("e.1.02", "e.1.01", " "), ("e.1.01", "e.1.01", "itself"),
+                                          ("e.2.02", "e.1.01", "another base"), ("nodots", "e.1.01", "no base"),
+                                          ("e.1.02", "e.1.00", "another original")):
+            with self.subTest(exec_id=exec_id, corrects=corrects), self.assertRaises(ResolveRefused):
+                acknowledge_correction(self.pending, exec_id, corrects, reason, fills=FILLS | {corrects})
+        self.assertEqual(self.pending.acknowledged_corrections(), {"e.1.02": "e.1.01"})
+        running = self.relay(Restarts({}, {}))
+        with self.assertRaises(ResolveRefused):
+            acknowledge_correction(self.pending, "e.1.03", "e.1.01", "while the adapter runs", fills=FILLS)
+        running.close()
+
+    def test_a_corrections_file_not_as_acknowledge_correction_writes_it_is_refused(self):
+        good = {"exec_id": "e.1.02", "corrects": "e.1.01", "reason": "r", "at": "2026-10-17T14:00:00+00:00"}
+        for lines in (["{not json"], ["[]"], [json.dumps(dict(good, extra="x"))], [json.dumps(dict(good, reason=""))],
+                      [json.dumps(dict(good, corrects=7))],
+                      [json.dumps(good), json.dumps(dict(good, corrects="e.1.00"))]):
+            with self.subTest(lines=lines):
+                with open(self.pending.corrections_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + "\n")
+                with self.assertRaises(HandoverRecordInvalid):
+                    self.pending.acknowledged_corrections()
+
+    def test_the_acknowledge_correction_command_refuses_with_a_nonzero_exit(self):
+        path = self.pending.path
+        journal = write_engine_journal(Path(self.dir.name) / "journal.jsonl", ["e.1.01"])
+        ack = ["acknowledge-correction", path, "--journal", journal]
+        self.assertEqual(main(ack + ["e.2.02", "--corrects", "e.1.01", "--reason", "x"]), 1)
+        self.assertEqual(main(ack + ["e.3.02", "--corrects", "e.3.01", "--reason", "never journalled"]), 1)
+        self.assertEqual(main(["acknowledge-correction", path, "--journal", str(Path(self.dir.name) / "missing.jsonl"),
+                               "e.1.02", "--corrects", "e.1.01", "--reason", "x"]), 1)
+        self.assertEqual(self.pending.acknowledged_corrections(), {})
+        self.assertEqual(main(ack + ["e.1.02", "--corrects", "e.1.01", "--reason", "x"]), 0)
+        self.assertEqual(self.pending.acknowledged_corrections(), {"e.1.02": "e.1.01"})
+        with open(self.pending.corrections_path, "w", encoding="utf-8") as f:
+            f.write("[]\n")
+        self.assertEqual(main(ack + ["e.1.03", "--corrects", "e.1.01", "--reason", "x"]), 1)
+
+    def test_the_engines_log_names_each_order_it_recorded_ended(self):
+        journal = Path(self.dir.name) / "log.jsonl"
+        write_ended_journal(journal, ["e.1.01"], [("tw-1", "submitted"), ("tw-1", "canceled"), ("tw-2", "invalid"),
+                                                  ("tw-3", "submitted")])
+        reports = journalled_reports(str(journal))
+        self.assertEqual((reports.fills, reports.ended), ({"e.1.01"}, {"tw-1", "tw-2"}))
+        good = journal.read_text(encoding="utf-8")
+        uncommitted = "".join(log_group(8, [("input", "execution.order.lifecycle", 2,
+                                             lifecycle_payload("tw-3", "canceled"))], committed=False))
+        journal.write_text(good + uncommitted, encoding="utf-8")
+        self.assertEqual(journalled_reports(str(journal)).ended, {"tw-1", "tw-2"}, "a group without its commit")
+        for name, payload, version in (("no client order ID", dict(lifecycle_payload("tw-3", "canceled"),
+                                                                   client_order_id=""), 2),
+                                       ("no status", {k: v for k, v in lifecycle_payload("tw-3", "canceled").items()
+                                                      if k != "status"}, 2),
+                                       ("another schema", lifecycle_payload("tw-3", "canceled"), 1)):
+            with self.subTest(name):
+                journal.write_text(good + "".join(log_group(8, [("input", "execution.order.lifecycle", version,
+                                                                 payload)])), encoding="utf-8")
+                with self.assertRaises(ResolveRefused):
+                    journalled_reports(str(journal))
+
+    def test_a_trade_after_an_order_ended_is_acknowledged_only_as_the_engines_log_records_it(self):
+        ended, fills = frozenset({"tw-1"}), frozenset({"e.1.01"})
+        refusals = (("e.5.01", "tw-2", "an order the engine never recorded ended", "neither in the engine"),
+                    ("e.1.01", "tw-1", "a trade the engine holds as a fill", "is recorded as a fill"),
+                    ("e.5.01", "tw-1", " ", "reason"),
+                    ("nodots", "tw-1", "no base", "base"),
+                    ("e.5.01", "", "no order", "order"))
+        for exec_id, after, reason, why in refusals:
+            with self.subTest(why), self.assertRaises(ResolveRefused) as raised:
+                acknowledge_late_fill(self.pending, exec_id, after, reason, fills=fills, ended=ended)
+            self.assertIn(why, str(raised.exception))
+        self.assertEqual(self.pending.acknowledged_late_fills(), {})
+        acknowledge_late_fill(self.pending, "e.5.01", "tw-1", "IBKR shows 4 SPY bought after the cancel",
+                              fills=fills, ended=ended)
+        acknowledge_late_fill(self.pending, "e.5.01", "tw-1", "the same, again", fills=fills, ended=ended)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-1"})
+        with self.assertRaises(ResolveRefused):
+            acknowledge_late_fill(self.pending, "e.5.01", "tw-9", "another order", fills=fills, ended=ended | {"tw-9"})
+        running = self.relay(Restarts({}, {}))
+        with self.assertRaises(ResolveRefused):
+            acknowledge_late_fill(self.pending, "e.6.01", "tw-1", "while the adapter runs", fills=fills, ended=ended)
+        running.close()
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-1"})
+
+    def test_a_trade_after_the_cancellation_awaiting_its_reply_is_acknowledged(self):
+        # The adapter journalled order tw-2's cancellation and stopped before
+        # the engine committed it, so it is the input awaiting its reply and
+        # not yet in the engine's log; the adapter's journal holds the order
+        # ended, so a late trade on it stops every start, and the command
+        # must clear that stop rather than refuse it.
+        ended, fills = frozenset({"tw-1"}), frozenset()
+
+        def waiting(client_order_id, status, event_type="execution.order.lifecycle", schema_version=2):
+            self.pending.save({"id": "lifecycle:{}".format(client_order_id), "type": event_type,
+                               "schema_version": schema_version,
+                               "payload": lifecycle_payload(client_order_id, status)})
+
+        for name, args in (("a working order's status", ("tw-3", "submitted")),
+                           ("another type", ("tw-3", "canceled", "market.session.closed")),
+                           ("another schema", ("tw-3", "canceled", "execution.order.lifecycle", 1))):
+            with self.subTest(name), self.assertRaises(ResolveRefused) as raised:
+                waiting(*args)
+                acknowledge_late_fill(self.pending, "e.7.01", "tw-3", "IBKR shows a trade", fills=fills, ended=ended)
+            self.assertIn("awaiting its reply", str(raised.exception))
+            self.assertIn("docs/runbooks/reconciliation.md", str(raised.exception))
+        waiting("tw-2", "canceled")
+        acknowledge_late_fill(self.pending, "e.5.01", "tw-2", "IBKR shows 4 SPY bought after the cancel",
+                              fills=fills, ended=ended)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-2"})
+        journal = write_ended_journal(Path(self.dir.name) / "journal.jsonl", [], [("tw-1", "canceled")])
+        self.assertEqual(main(["acknowledge-late-fill", self.pending.path, "--journal", journal, "e.6.01",
+                               "--after", "tw-2", "--reason", "x"]), 0)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-2", "e.6.01": "tw-2"})
+
+    def test_a_late_fills_file_not_as_acknowledge_late_fill_writes_it_is_refused(self):
+        good = {"exec_id": "e.5.01", "after": "tw-1", "reason": "r", "at": "2026-10-17T14:00:00+00:00"}
+        for lines in (["{not json"], ["[]"], [json.dumps(dict(good, extra="x"))], [json.dumps(dict(good, reason=""))],
+                      [json.dumps(dict(good, after=7))], [json.dumps(dict(good, exec_id="nodots"))],
+                      [json.dumps(good), json.dumps(dict(good, after="tw-2"))]):
+            with self.subTest(lines=lines):
+                with open(self.pending.late_fills_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + "\n")
+                with self.assertRaises(HandoverRecordInvalid):
+                    self.pending.acknowledged_late_fills()
+
+    def test_the_acknowledge_late_fill_command_refuses_with_a_nonzero_exit(self):
+        path = self.pending.path
+        journal = write_ended_journal(Path(self.dir.name) / "journal.jsonl", ["e.1.01"], [("tw-1", "canceled")])
+        ack = ["acknowledge-late-fill", path, "--journal", journal]
+        self.assertEqual(main(ack + ["e.5.01", "--after", "tw-2", "--reason", "x"]), 1)
+        self.assertEqual(main(ack + ["e.1.01", "--after", "tw-1", "--reason", "x"]), 1)
+        self.assertEqual(main(["acknowledge-late-fill", path, "--journal", str(Path(self.dir.name) / "missing.jsonl"),
+                               "e.5.01", "--after", "tw-1", "--reason", "x"]), 1)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {})
+        self.assertEqual(main(ack + ["e.5.01", "--after", "tw-1", "--reason", "x"]), 0)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-1"})
+
+    def test_the_never_sent_at_broker_stop_names_a_resolve_command_that_runs(self):
+        message = str(NeverSentAtBroker("tw-1"))
+        self.assertIn("relay.py resolve PENDING_FILE tw-1 --sent --reason", message)
+
+    def test_the_fills_are_read_from_the_engines_durable_log_as_its_own_writer_makes_it(self):
+        # testdata/engine_log.jsonl was written by internal/journal's
+        # LogWriter (internal/journal pins it with RecoverLog): one committed
+        # fill, and a torn tail holding a fill record not yet committed,
+        # which is no proof the engine recorded that fill.
+        self.assertEqual(journalled_fills(str(TESTDATA / "engine_log.jsonl")), {"0001f4e8.paper.01.01"})
+
+    def test_only_committed_fills_count_and_a_line_still_being_written_is_not_read(self):
+        journal = Path(write_engine_journal(Path(self.dir.name) / "log.jsonl", ["e.1.01", "e.2.01"]))
+        self.assertEqual(journalled_fills(str(journal)), {"e.1.01", "e.2.01"})
+        good = journal.read_text(encoding="utf-8")
+        uncommitted = "".join(log_group(5, [("input", "execution.fill", 5, fill_payload("e.3.01"))], committed=False))
+        journal.write_text(good + uncommitted, encoding="utf-8")
+        self.assertEqual(journalled_fills(str(journal)), {"e.1.01", "e.2.01"}, "a group without its commit")
+        journal.write_text(good + uncommitted[:40], encoding="utf-8")
+        self.assertEqual(journalled_fills(str(journal)), {"e.1.01", "e.2.01"}, "a line the engine is writing")
+
+    def test_a_durable_log_not_as_the_engine_writes_it_is_reported_unreadable_never_as_no_fills(self):
+        journal = Path(self.dir.name) / "log.jsonl"
+        write_engine_journal(journal, ["e.1.01"])
+        good = journal.read_text(encoding="utf-8").splitlines(keepends=True)
+        header, groups = good[0], good[1:]
+
+        def fill(payload, version=5, kind="input", sequence=5, committed=True):
+            return "".join(log_group(sequence, [(kind, "execution.fill", version, payload)], committed=committed))
+
+        partial = {"fill_id": "e.1.01"}
+        record = json.loads(groups[-2])
+        bad_hash = json.dumps(dict(record, record=dict(record["record"], envelope=dict(
+            record["record"]["envelope"], payload_hash="0" * 64))), separators=(",", ":")) + "\n"
+        cases = {
+            "empty": "",
+            "a header only being written": header[:-1],
+            "an end-of-run journal": json.dumps({"journal_version": 1, "chain_algorithm": LOG_CHAIN}) + "\n",
+            "another log version": header.replace('"log_version":1', '"log_version":2'),
+            "a header field missing": header.replace('"strategy_version"', '"strategy"'),
+            "not JSON": header + "{not json\n",
+            "a bare object": header + "{}\n",
+            "a record and a commit": header + json.dumps({"record": {}, "commit": {}}) + "\n",
+            "a sequence gap": header + "".join(groups) + fill(fill_payload("e.2.01"), sequence=6),
+            "a decision first": header + fill(fill_payload("e.2.01"), kind="decision", sequence=1),
+            "a commit naming another record": header + "".join(groups[:-1]) + json.dumps(
+                {"commit": {"sequence": 3, "record_hash": "sha256:" + "f" * 64}}) + "\n",
+            "a commit with nothing to commit": header + "".join(groups) + groups[-1],
+            "a fill with only a fill ID": header + "".join(groups) + fill(partial),
+            "a fill of another schema": header + "".join(groups) + fill(fill_payload("e.2.01"), version=4),
+            "a fill of no shares": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), quantity=0)),
+            "a fill at no price": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), price=0)),
+            "a fill with a negative commission": header + "".join(groups) + fill(
+                dict(fill_payload("e.2.01"), commission=-1)),
+            "a fill of no side": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), side="short")),
+            "a fill with an extra field": header + "".join(groups) + fill(dict(fill_payload("e.2.01"), extra=1)),
+            "a fill time with no zone": header + "".join(groups) + fill(
+                dict(fill_payload("e.2.01"), filled_at="2026-10-17T13:30:01")),
+            "a fill decided, not input": header + groups[0][:0] + "".join(log_group(1, [
+                ("input", "market.session.closed", 1, {}), ("decision", "execution.fill", 5,
+                                                            fill_payload("e.2.01"))])),
+            "a payload that does not match its hash": header + "".join(groups[:-2]) + bad_hash + groups[-1],
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                journal.write_text(text, encoding="utf-8")
+                with self.assertRaises(ResolveRefused) as raised:
+                    journalled_fills(str(journal))
+                self.assertIn("durable log", str(raised.exception))
+        with self.assertRaises(ResolveRefused):
+            journalled_fills(str(journal) + ".missing")
 
     def test_the_resolve_command_writes_the_decision_and_refuses_with_a_nonzero_exit(self):
         decisions = {"session:0": [released("tw-1")]}

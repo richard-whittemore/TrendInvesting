@@ -1,8 +1,11 @@
 """TWSApi implemented with IBKR's own TWS API Python client, `ibapi` (ADR 0025 point 4).
 
 This is the only module that imports ibapi. It forwards requests to
-EClient and EWrapper callbacks to the adapter's Inbox, and does nothing else,
-so the logic it carries is the logic the fake-client tests already cover.
+EClient and EWrapper callbacks to the adapter's Inbox, so the logic it
+carries is the logic the fake-client tests already cover. The one call it
+cannot simply forward is place_order, which is disabled (can_place_orders is
+False): when the paper-account test enables it, it builds ibapi's Contract
+and Order from the adapter's request shape (tws.TWSApi.place_order).
 
 ibapi is optional at import: until the pinned, checksummed release is
 installed, this module still imports and IbapiClient() raises
@@ -57,6 +60,9 @@ def _forwarder_class():
 
         def nextValidId(self, orderId):
             self._send("next_valid_id", orderId)
+
+        def managedAccounts(self, accountsList):
+            self._send("managed_accounts", accountsList)
 
         def connectionClosed(self):
             self._send("connection_closed")
@@ -244,6 +250,15 @@ class IbapiClient(TWSApi):
         flt.acctCode = account_id
         self._client.reqExecutions(req_id, flt)
 
+    def can_place_orders(self):
+        """False: placing orders on the real client waits for the paper-account test (see place_order)."""
+        return False
+
     def place_order(self, order_id, contract, order):
-        """Disabled: no order reaches IBKR before the paper and limited-live gates (AGENTS.md rule 5)."""
-        raise LiveSendingDisabled("placeOrder is disabled until the paper and limited-live gates")
+        """Disabled: the real client sends nothing until the paper-account test enables it under review.
+
+        The paper path is exercised against the fake client only (AGENTS.md
+        rule 5; ADR 0025 Consequences: the paper-account test is run by hand).
+        """
+        raise LiveSendingDisabled("placeOrder on the real client is disabled until the paper-account test "
+                                  "enables it")

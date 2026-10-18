@@ -6,6 +6,7 @@ code under test is exactly the code that runs against the real client. Every
 figure here is invented; none is a real price or account.
 """
 import sys
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,8 @@ from tws import TWSApi
 
 ACCOUNT = "DU0000001"
 OTHER_ACCOUNT = "DU0000002"
+# IBKR's statuses of an order that has ended.
+ENDED = ("Cancelled", "ApiCancelled", "Inactive")
 SERVER_TIME = 1_800_000_000
 
 
@@ -52,6 +55,11 @@ class FakeTWS(TWSApi):
     "hang" (the socket work overran its timeout, as IbapiClient reports it)
     or "socket-error". connect_hook, if set, runs first, so a test can let
     the clock move while the socket is being opened.
+
+    place_order records each order in placed and hands it to on_place, if
+    set, which answers as IB Gateway would (accept, reject below). An
+    order it accepts stays among open_orders, so a later read of IBKR's
+    open orders shows it, across a reconnect, until it is filled.
     """
 
     def __init__(self):
@@ -73,10 +81,21 @@ class FakeTWS(TWSApi):
         self.open_orders = []
         self.end_open_orders = True
         self.executions = []
+        # IBKR's last orderStatus for each order and its commission report
+        # for each execution, which it replays on a later read.
+        self.order_statuses = {}
+        self.commissions = {}
+        self.client_id = None
+        self.placed = []
+        self.on_place = None
+        self.place_error = None
+        self.can_place = True
+        self.managed_accounts = (ACCOUNT,)
 
     # -- connection ------------------------------------------------------
     def connect(self, host, port, client_id, callbacks, timeout):
         self.calls.append(("connect", host, port, client_id))
+        self.client_id = client_id
         self.connect_timeouts.append(timeout)
         self.callbacks = callbacks
         if self.connect_hook is not None:
@@ -88,6 +107,8 @@ class FakeTWS(TWSApi):
             raise ConnectionRefusedError("synthetic connection refused")
         if behaviour == "ok":
             self.connected = True
+            # IBKR names the login's accounts as the session starts.
+            callbacks.managed_accounts(",".join(self.managed_accounts))
             callbacks.next_valid_id(self.next_order_id)
         elif behaviour == "client-id-in-use":
             callbacks.error(-1, 326, "Unable to connect as the client id is already in use. "
@@ -148,6 +169,9 @@ class FakeTWS(TWSApi):
         self.calls.append(("req_all_open_orders",))
         for order_id, con, ord_, state in self.open_orders:
             self.callbacks.open_order(order_id, con, ord_, state)
+            # IBKR follows each open order with its status.
+            if order_id in self.order_statuses:
+                self.callbacks.order_status(*self.order_statuses[order_id])
         if self.end_open_orders:
             self.callbacks.open_order_end()
 
@@ -155,10 +179,81 @@ class FakeTWS(TWSApi):
         self.calls.append(("req_executions", req_id, account_id))
         for con, ex in self.executions:
             self.callbacks.exec_details(req_id, con, ex)
+            # IBKR follows each execution with its commission report.
+            if ex.execId in self.commissions:
+                self.callbacks.commission_report(self.commissions[ex.execId])
         self.callbacks.exec_details_end(req_id)
+
+    def can_place_orders(self):
+        return self.can_place
 
     def place_order(self, order_id, contract_, order_):
         self.calls.append(("place_order", order_id))
+        if self.place_error is not None:
+            raise self.place_error
+        self.placed.append((order_id, contract_, order_))
+        # IBKR's next valid ID on a later connect is past every ID used.
+        self.next_order_id = max(self.next_order_id, order_id + 1)
+        if self.on_place is not None:
+            self.on_place(order_id, contract_, order_)
+
+    # -- IB Gateway's answers to a placed order --------------------------
+    def echoed(self, order_id, order_):
+        """The order as IBKR echoes it in openOrder: the request plus IBKR's permId and the client ID."""
+        fields = dict(vars(order_))
+        fields.update(permId=9000 + order_id, clientId=self.client_id, auxPrice=None)
+        return SimpleNamespace(**fields)
+
+    def accept(self, order_id, contract_, order_, status="Submitted"):
+        """IBKR takes the order and it works: openOrder, then orderStatus."""
+        echo = self.echoed(order_id, order_)
+        self.open_orders = [o for o in self.open_orders if o[0] != order_id]
+        self.open_orders.append((order_id, contract_, echo, SimpleNamespace(status=status)))
+        self.callbacks.open_order(order_id, contract_, echo, SimpleNamespace(status=status))
+        self.status(order_id, status, filled="0", remaining=str(echo.totalQuantity))
+
+    def reject(self, order_id, contract_, order_, message="Order rejected - reason: synthetic"):
+        """IBKR refuses the order: code 201, then Inactive. It never becomes an open order."""
+        self.callbacks.error(order_id, 201, message)
+        self.status(order_id, "Inactive", filled="0", remaining=str(order_.totalQuantity))
+
+    def status(self, order_id, status, filled, remaining, avg_fill_price=0.0, last_fill_price=0.0):
+        args = (order_id, status, filled, remaining, avg_fill_price, 9000 + order_id, 0, last_fill_price,
+                self.client_id, "", 0.0)
+        self.order_statuses[order_id] = args
+        self.callbacks.order_status(*args)
+
+    def fill(self, order_id, shares, price, exec_id, cum_qty, commission="1.00",
+             time="20261016 09:30:01 US/Eastern", currency="USD"):
+        """One execution of an accepted order: execDetails, its commission report, then orderStatus.
+
+        The order leaves open_orders once cum_qty reaches its quantity, and
+        the execution stays among executions, as IBKR's lists show it.
+        commission None sends no commission report, as when IBKR's is lost.
+        A second execution under an execId with the same base and another
+        last segment is IBKR's correction of the first.
+        """
+        entry = next(o for o in self.open_orders if o[0] == order_id)
+        con, echo = entry[1], entry[2]
+        ex = execution(exec_id=exec_id, order_id=order_id, perm_id=echo.permId, order_ref=echo.orderRef,
+                       account=echo.account, side="BOT" if echo.action == "BUY" else "SLD", shares=shares,
+                       price=price, cum_qty=cum_qty, avg_price=price, time=time, client_id=self.client_id)
+        self.executions.append((con, ex))
+        self.callbacks.exec_details(-1, con, ex)
+        if commission is not None:
+            report = SimpleNamespace(execId=exec_id, commission=commission, currency=currency)
+            self.commissions[exec_id] = report
+            self.callbacks.commission_report(report)
+        remaining = str(Decimal(str(echo.totalQuantity)) - Decimal(cum_qty))
+        done = Decimal(remaining) == 0
+        if done:
+            self.open_orders = [o for o in self.open_orders if o[0] != order_id]
+        # An order IBKR already reported ended keeps that status: its
+        # orderStatus after a late execution repeats it, never Submitted.
+        last = self.order_statuses.get(order_id)
+        ended = last is not None and last[1] in ENDED
+        self.status(order_id, last[1] if ended else "Filled" if done else "Submitted", filled=cum_qty,
+                    remaining=remaining, avg_fill_price=price, last_fill_price=price)
 
     def called(self, name):
         return [c for c in self.calls if c[0] == name]

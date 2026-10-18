@@ -34,6 +34,43 @@ class ConfigTests(unittest.TestCase):
             AdapterConfig.from_mapping(values)
         self.assertIn("connect_timeout", str(caught.exception))
 
+    def test_the_wait_for_a_commission_report_is_required(self):
+        values = config()._asdict()
+        del values["commission_wait"]
+        with self.assertRaises(ConfigError) as caught:
+            AdapterConfig.from_mapping(values)
+        self.assertIn("commission_wait", str(caught.exception))
+
+    def test_the_contract_map_is_configuration_read_strictly(self):
+        # The engine's instrument ID to IBKR's contract ID: the only way the
+        # adapter names a contract, so it is required and read strictly.
+        self.assertEqual(dict(config(con_ids={"SPY": 756733}).con_ids), {"SPY": 756733})
+        values = config()._asdict()
+        del values["con_ids"]
+        with self.assertRaises(ConfigError) as caught:
+            AdapterConfig.from_mapping(values)
+        self.assertIn("con_ids", str(caught.exception))
+        for bad in (["SPY", 756733], {"SPY": 0}, {"SPY": -1}, {"SPY": True}, {"SPY": "756733"}, {"SPY": 7.5},
+                    {"": 756733}, {7: 756733}):
+            with self.subTest(con_ids=bad), self.assertRaises(ConfigError):
+                config(con_ids=bad)
+        source = {"SPY": 756733}
+        c = config(con_ids=source)
+        source["SPY"] = 1
+        self.assertEqual(c.con_ids["SPY"], 756733, "the configuration keeps its own copy")
+        with self.assertRaises(TypeError):
+            c.con_ids["QQQ"] = 320227571
+
+    def test_a_contract_map_giving_two_instruments_one_contract_id_is_refused_naming_both(self):
+        # One contract ID for two instruments would send one instrument's
+        # order on the other's contract.
+        with self.assertRaises(ConfigError) as caught:
+            config(con_ids={"SPY": 756733, "VOO": 756733, "QQQ": 320227571})
+        message = str(caught.exception)
+        self.assertIn("SPY", message)
+        self.assertIn("VOO", message)
+        self.assertIn("756733", message)
+
     def test_client_id_zero_is_refused(self):
         with self.assertRaises(ConfigError):
             config(client_id=0)
@@ -45,12 +82,22 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ConfigError):
                 config(**bad)
 
+    def test_the_account_is_bound_to_the_mode(self):
+        # IBKR paper account IDs begin "DU" and live ones do not, so a paper
+        # configuration can never point the adapter at a live account.
+        self.assertEqual(config(mode="paper", account_id="DU0000001").mode, "paper")
+        for bad in (dict(mode="paper", account_id="U0000001"), dict(mode="live", account_id="DU0000001")):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError) as caught:
+                config(**bad)
+            self.assertIn("DU", str(caught.exception))
+
     def test_timing_values_must_be_finite(self):
         # NaN and infinity both pass a "> 0" test, and either would switch the
         # heartbeat deadline or the connect timeout off.
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
-                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max"):
-            for bad in (float("nan"), float("inf")):
+                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max",
+                     "commission_wait"):
+            for bad in (float("nan"), float("inf"), 0, -1):
                 with self.subTest(name=name, value=bad), self.assertRaises(ConfigError):
                     config(**{name: bad})
 
