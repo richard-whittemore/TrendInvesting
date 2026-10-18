@@ -211,6 +211,9 @@ class Connection:
         self._probe_sent_at = None
         self._last_probe_at = None
         self._lost_at = None
+        # A drop deferred on the old link belongs to it: the new link starts
+        # with none, whichever path led here.
+        self._drop_when_restored = None
         self.time_requests = 0
         self.time_answers = 0
         self._time_restored_at = None
