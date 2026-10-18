@@ -272,8 +272,8 @@ func TestABookWithoutCashComparesPositionsOnly(t *testing.T) {
 
 func TestCentsRoundsHalfAwayFromZero(t *testing.T) {
 	for x, want := range map[float64]int64{512.3: 51230, -4700: -470000, 0.005: 1, -0.005: -1, 273.51: 27351} {
-		if got := reconcile.Cents(x); got != want {
-			t.Errorf("Cents(%v) = %d, want %d", x, got, want)
+		if got, err := reconcile.Cents(x); err != nil || got != want {
+			t.Errorf("Cents(%v) = %d, %v, want %d", x, got, err, want)
 		}
 	}
 }
@@ -287,8 +287,8 @@ func TestCentsRoundsHalfAwayFromZero(t *testing.T) {
 // quantity and decimal price.
 func TestCentsRoundsTheDecimalNotItsBinaryNeighbour(t *testing.T) {
 	for x, want := range map[float64]int64{0.145: 15, 1.005: 101, 2.195: 220, 1.025: 103, -0.145: -15, -1.005: -101, 0.144: 14, 1.0049: 100} {
-		if got := reconcile.Cents(x); got != want {
-			t.Errorf("Cents(%v) = %d, want %d", x, got, want)
+		if got, err := reconcile.Cents(x); err != nil || got != want {
+			t.Errorf("Cents(%v) = %d, %v, want %d", x, got, err, want)
 		}
 	}
 	// 3 at 1.005 is 3.015 exactly, 3.0149999999999997 as a float product;
@@ -312,7 +312,7 @@ func TestCentsRefusesAFigureThatIsNotANumber(t *testing.T) {
 			t.Error("Cents(NaN) returned")
 		}
 	}()
-	reconcile.Cents(math.NaN())
+	_, _ = reconcile.Cents(math.NaN())
 }
 
 // TestTheDetailCountsEachExplainingEventOnce: a fill moves a position and
@@ -364,5 +364,57 @@ func TestTheCashComparisonStatesItsParts(t *testing.T) {
 	explained := classify(t, iraBook(), []reconcile.Change{dividend}, observed(518.7, held("SPY", 147), held("TLT", 20)))
 	if !strings.Contains(explained.Detail, "one net total") {
 		t.Errorf("explained: the limit is stated: %q", explained.Detail)
+	}
+}
+
+// TestAFigureBeyondTheCentRangeIsUnverifiable: a finite dollar figure whose
+// cents do not fit an int64 is no cent count, so a reconciliation that meets
+// one in the broker's cash, the book's cash, or a fill's value or commission
+// halts instead of comparing a wrapped number (ADR 0019, "Explained means":
+// an unreadable figure is never matched).
+func TestAFigureBeyondTheCentRangeIsUnverifiable(t *testing.T) {
+	const huge = 1e17
+	bookWith := func(cash float64) *reconcile.Book {
+		b := reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
+			AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "ira", AsOf: closeAt, Currency: "USD", Positions: []event.AccountPosition{}},
+			SettledCash:                     cash, TotalCash: cash,
+		})
+		return &b
+	}
+	fill := func(price, commission float64) reconcile.Change {
+		c := reconcile.FillChange(event.TargetWeightFillPayload{FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 1, Price: price, Commission: commission, FilledAt: closeAt.Add(time.Hour)})
+		return c
+	}
+	cases := map[string]struct {
+		book    *reconcile.Book
+		changes []reconcile.Change
+		obs     event.ReconciliationPayload
+	}{
+		"broker cash":     {bookWith(512.3), nil, observed(huge)},
+		"book cash":       {bookWith(huge), nil, observed(huge)},
+		"fill value":      {bookWith(512.3), []reconcile.Change{fill(huge, 0)}, observed(512.3, held("SPY", 1))},
+		"fill commission": {bookWith(512.3), []reconcile.Change{fill(1, huge)}, observed(512.3, held("SPY", 1))},
+	}
+	for name, c := range cases {
+		r := classify(t, c.book, c.changes, c.obs)
+		if r.Classification != event.ReconciliationUnverifiable || r.Action != event.ReconciliationActionHalt || len(r.Unverifiable) == 0 {
+			t.Errorf("%s: got %s/%s %v, want unverifiable and halt", name, r.Classification, r.Action, r.Unverifiable)
+		}
+	}
+}
+
+// TestACorporateActionBeyondTheCentRangeIsUnverifiable: a dividend's or a
+// split's cash that no cent count can hold halts the reconciliation that
+// applies it, like any other figure beyond the range.
+func TestACorporateActionBeyondTheCentRangeIsUnverifiable(t *testing.T) {
+	at := closeAt.Add(time.Hour)
+	for name, c := range map[string]reconcile.Change{
+		"dividend": reconcile.CorporateActionChange("ca:1", event.CorporateActionPayload{Kind: event.CorporateActionKindDividend, InstrumentID: "SPY", EffectiveAt: at, CashAmount: 1e17, Currency: "USD"}),
+		"split":    reconcile.CorporateActionChange("ca:2", event.CorporateActionPayload{Kind: event.CorporateActionKindSplit, InstrumentID: "SPY", EffectiveAt: at, NewShares: 2, OldShares: 1, CashInLieu: 1e17, Currency: "USD"}),
+	} {
+		r := classify(t, iraBook(), []reconcile.Change{c}, observed(512.3, held("SPY", 147), held("TLT", 20)))
+		if r.Classification != event.ReconciliationUnverifiable || r.Action != event.ReconciliationActionHalt {
+			t.Errorf("%s: got %s/%s, want unverifiable and halt", name, r.Classification, r.Action)
+		}
 	}
 }

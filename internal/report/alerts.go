@@ -119,6 +119,8 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			if err := read(e, approvalVersions, &p); err != nil {
 				return nil, err
 			}
+			// An approval with no incident in force starts the run clear.
+			inForce = nil
 			if in := p.IncidentInForce; in != nil {
 				inForce = &gateState{in.State, in.ScopeInstrumentIDs, in.ScopeCashComponents}
 			}

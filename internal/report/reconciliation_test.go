@@ -252,4 +252,25 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 	if !strings.Contains(got[0].Body, "The account is Halted") {
 		t.Errorf("an approved Halted incident stays Halted:\n%s", got[0].Body)
 	}
+
+	// An approval that carries no incident in force starts the run clear:
+	// the earlier run's Halted state does not outlive it.
+	cleared := newStream(t)
+	cleared.add(event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "operator-run-approved:a", day(0), event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-0.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("0", 64),
+		ApprovedBy: "owner", ApprovedAt: day(0), Boost: event.BoostStateInForce{Latched: new(false)},
+		IncidentInForce: &event.IncidentInForce{IncidentID: "engine-state:joint:0", State: event.EngineStateHalted, SaleAttempted: new(true)},
+	})
+	cleared.add(event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "operator-run-approved:b", day(1), event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("0", 64),
+		ApprovedBy: "owner", ApprovedAt: day(1), Boost: event.BoostStateInForce{Latched: new(false)},
+	})
+	cleared.mismatchAlone(2, "reconciliation:1")
+	got, err = report.Alerts(cleared.out)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("alerts = %+v, %v", got, err)
+	}
+	if strings.Contains(got[0].Body, "The account is Halted") || !strings.Contains(got[0].Body, "Degraded on instruments [SPY]") {
+		t.Errorf("an approval with no incident clears the earlier run's state:\n%s", got[0].Body)
+	}
 }

@@ -7,6 +7,7 @@
 package reconcile
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"math/big"
@@ -28,6 +29,9 @@ type Book struct {
 	CashSet   bool
 	Cash      int64
 	Currency  string
+	// Fault, when set, is why the book's cash is no cent count: Classify
+	// cannot compare against it and reports the book unverifiable.
+	Fault string
 }
 
 // PositionsBook is the book of account.snapshot version 3, envelope id: its
@@ -45,7 +49,12 @@ func PositionsBook(id string, p event.AccountPositionsSnapshotPayload) Book {
 // the balance IBKR's TotalCashValue reports.
 func CashBook(id string, p event.AccountCashSnapshotPayload) Book {
 	b := PositionsBook(id, p.AccountPositionsSnapshotPayload)
-	b.CashSet, b.Cash = true, Cents(p.TotalCash)
+	b.CashSet = true
+	cash, err := Cents(p.TotalCash)
+	if err != nil {
+		b.Fault = fmt.Sprintf("the book's total cash: %v", err)
+	}
+	b.Cash = cash
 	return b
 }
 
@@ -62,8 +71,9 @@ const (
 // is its stable identity, a fill's fill ID or a corporate action's envelope
 // ID. Shares is a fill's signed change in raw shares; Cash its signed effect
 // in whole cents, and Commission the part of Cash that is a fill's
-// commission, in whole cents, a cost (so Cash+Commission is the fill's
-// value). Any other corporate action is recorded with its own kind, which no
+// commission, in whole cents, a cost already inside Cash (so Cash+Commission
+// is the fill's signed value: negative for a buy's cost, positive for a
+// sale's proceeds). Any other corporate action is recorded with its own kind, which no
 // book can apply.
 type Change struct {
 	ID           string
@@ -77,6 +87,10 @@ type Change struct {
 	// fill, which is in the account's own.
 	Currency             string
 	NewShares, OldShares int64
+	// Fault, when set, is why a figure of the change is no cent count:
+	// Classify reports the reconciliation unverifiable if it applies the
+	// change.
+	Fault string
 }
 
 // FillChange is fill p's change: a buy adds its shares and costs its value
@@ -85,11 +99,14 @@ type Change struct {
 // quantity and the decimal price, and the commission are each rounded to the
 // cent, half away from zero, as IBKR books them.
 func FillChange(p event.TargetWeightFillPayload) Change {
-	value := roundCents(new(big.Rat).Mul(decimal(p.Price), new(big.Rat).SetInt64(p.Quantity)))
-	commission := Cents(p.Commission)
+	value, valueErr := roundCents(new(big.Rat).Mul(decimal(p.Price), new(big.Rat).SetInt64(p.Quantity)))
+	commission, commissionErr := Cents(p.Commission)
 	c := Change{ID: p.FillID, Kind: ChangeFill, InstrumentID: p.InstrumentID, At: p.FilledAt, Shares: p.Quantity, Cash: -value - commission, Commission: commission}
 	if p.Side == event.OrderSideSell {
 		c.Shares, c.Cash = -p.Quantity, value-commission
+	}
+	if err := errors.Join(valueErr, commissionErr); err != nil {
+		c.Fault = fmt.Sprintf("fill %s: %v", p.FillID, err)
 	}
 	return c
 }
@@ -100,11 +117,16 @@ func FillChange(p event.TargetWeightFillPayload) Change {
 // keeps its kind, which Classify cannot apply.
 func CorporateActionChange(id string, p event.CorporateActionPayload) Change {
 	c := Change{ID: id, Kind: p.Kind, InstrumentID: p.InstrumentID, At: p.EffectiveAt, Currency: p.Currency}
+	var err error
 	switch p.Kind {
 	case event.CorporateActionKindDividend:
-		c.Cash = Cents(p.CashAmount)
+		c.Cash, err = Cents(p.CashAmount)
 	case event.CorporateActionKindSplit:
-		c.NewShares, c.OldShares, c.Cash = p.NewShares, p.OldShares, Cents(p.CashInLieu)
+		c.NewShares, c.OldShares = p.NewShares, p.OldShares
+		c.Cash, err = Cents(p.CashInLieu)
+	}
+	if err != nil {
+		c.Fault = fmt.Sprintf("corporate action %s: %v", id, err)
 	}
 	return c
 }
@@ -115,8 +137,9 @@ func CorporateActionChange(id string, p event.CorporateActionPayload) Change {
 // such as 0.145 just below the half: binary floating-point epsilon is not a
 // monetary tolerance (ADR 0019, "Quantities and unexplained cash residuals
 // both have zero tolerance"). x is finite: the payloads it comes from refuse
-// anything else.
-func Cents(x float64) int64 { return roundCents(decimal(x)) }
+// anything else. A finite figure whose cents do not fit an int64 is an error,
+// never a wrapped count.
+func Cents(x float64) (int64, error) { return roundCents(decimal(x)) }
 
 // decimal is x's shortest decimal figure, exactly.
 func decimal(x float64) *big.Rat {
@@ -127,14 +150,18 @@ func decimal(x float64) *big.Rat {
 	return r
 }
 
-// roundCents is dollars d in whole cents, rounded half away from zero.
-func roundCents(d *big.Rat) int64 {
+// roundCents is dollars d in whole cents, rounded half away from zero; it is
+// an error when the cents do not fit an int64.
+func roundCents(d *big.Rat) (int64, error) {
 	scaled := new(big.Rat).Mul(d, big.NewRat(100, 1))
 	quo, rem := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
 	if new(big.Int).Mul(new(big.Int).Abs(rem), big.NewInt(2)).Cmp(scaled.Denom()) >= 0 {
 		quo.Add(quo, big.NewInt(int64(scaled.Num().Sign())))
 	}
-	return quo.Int64()
+	if !quo.IsInt64() {
+		return 0, fmt.Errorf("%s dollars is more cents than a book can count", d.FloatString(2))
+	}
+	return quo.Int64(), nil
 }
 
 // Classify reconciles obs, the account.reconciliation envelope inputID,
@@ -177,6 +204,9 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	if obs.AsOf.Before(book.AsOf) {
 		reasons = append(reasons, fmt.Sprintf("the observation as of %s precedes the book as of %s", stamp(obs.AsOf), stamp(book.AsOf)))
 	}
+	if book.Fault != "" {
+		reasons = append(reasons, book.Fault)
+	}
 	cashRead := false
 	if book.CashSet {
 		r.CashCompared, r.Currency = true, book.Currency
@@ -187,6 +217,14 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			reasons = append(reasons, fmt.Sprintf("the broker's cash is in %s; the book's is in %s", obs.Currency, book.Currency))
 		default:
 			cashRead = true
+		}
+	}
+	observedCash := int64(0)
+	if cashRead {
+		var err error
+		if observedCash, err = Cents(obs.TotalCash); err != nil {
+			reasons = append(reasons, fmt.Sprintf("the broker's total cash: %v", err))
+			cashRead = false
 		}
 	}
 
@@ -208,6 +246,10 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			reasons = append(reasons, fmt.Sprintf("%s pays cash in %s; the book's is in %s", c.ID, c.Currency, book.Currency))
 			continue
 		}
+		if c.Fault != "" {
+			reasons = append(reasons, c.Fault)
+			continue
+		}
 		if c.Kind == ChangeSplit {
 			expected[c.InstrumentID] = expected[c.InstrumentID] * c.NewShares / c.OldShares
 		} else {
@@ -225,7 +267,7 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 
 	if cashRead {
 		r.Components = append(r.Components, entry(event.ReconciliationComponent{
-			Component: event.ReconciliationComponentCash, Book: book.Cash, Expected: cash, Observed: Cents(obs.TotalCash), Explanations: cashExplained,
+			Component: event.ReconciliationComponentCash, Book: book.Cash, Expected: cash, Observed: observedCash, Explanations: cashExplained,
 		}))
 	}
 	if positionsRead {
