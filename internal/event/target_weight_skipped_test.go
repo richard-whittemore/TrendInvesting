@@ -69,3 +69,28 @@ func TestUnaffordableNamesValidate(t *testing.T) {
 		t.Errorf("an all-unaffordable withhold: %v", err)
 	}
 }
+
+// TestHeldOneLotShortNamesValidate: a held pick D7-L keeps one lot short
+// (ADR 0026, point 2, "D7-L", amended 2026-10-18) keeps its weight and
+// records its one-share price above its target value, needs the minimum-lot
+// figures, and records the holding it keeps: whole shares, their value and
+// that value's share of net liquidation, all positive. No other status
+// records a holding.
+func TestHeldOneLotShortNamesValidate(t *testing.T) {
+	v := validMomentumDecided()
+	v.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: 30000, MomentumScale: 1}
+	v.Momentum.Names[0].Status = event.MomentumStatusHeldOneLotShort
+	v.Momentum.Names[0].OneShare, v.Momentum.Names[0].TargetValue = 20000, 14700
+	v.Momentum.Names[0].HeldQuantity, v.Momentum.Names[0].HeldValue, v.Momentum.Names[0].HeldShare = 2, 40000, 40000.0/30000
+	if err := v.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "no lot figures", v, func(p *P) { p.Momentum.MinimumLot = event.MinimumLotFigures{} }, "minimum lot figures")
+	expectInvalid(t, "affordable", v, func(p *P) { p.Momentum.Names[0].OneShare = 14000 }, "exceeds its target value")
+	expectInvalid(t, "no weight", v, func(p *P) { p.Momentum.Names[0].Weight = 0 }, "keeps its weight")
+	expectInvalid(t, "no holding", v, func(p *P) { p.Momentum.Names[0].HeldQuantity = 0 }, "holding it keeps")
+	expectInvalid(t, "no held value", v, func(p *P) { p.Momentum.Names[0].HeldValue = 0 }, "holding it keeps")
+	expectInvalid(t, "no held share", v, func(p *P) { p.Momentum.Names[0].HeldShare = 0 }, "holding it keeps")
+	expectInvalid(t, "holding on a pick", validMomentumDecided(), func(p *P) { p.Momentum.Names[0].HeldValue = 10 }, "only a held name kept one lot short")
+}

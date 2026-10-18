@@ -334,3 +334,36 @@ func TestBudgetLosesCashANewerSnapshotCannotExplain(t *testing.T) {
 		t.Fatalf("remaining %v after a release, want 1000", got)
 	}
 }
+
+// keptOneLotShort marks the decision's AAA a held pick D7-L keeps one lot
+// short (ADR 0026, point 2, "D7-L", amended 2026-10-18).
+func keptOneLotShort(d event.TargetsDecidedPayload, weight float64) event.TargetsDecidedPayload {
+	d.Momentum.UniverseMembers = 1
+	d.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: 10000, MomentumScale: 1}
+	d.Momentum.Names = []event.MomentumName{{
+		InstrumentID: "AAA", UniverseRank: 1, Status: event.MomentumStatusHeldOneLotShort, Weight: weight,
+		OneShare: 5000, TargetValue: weight * 10000, HeldQuantity: 3, HeldValue: 15000, HeldShare: 1.5,
+	}}
+	return d
+}
+
+// TestIRAPlacesNoOrderForAHeldNameKeptOneLotShort: AAA is held, 3 shares at
+// $5,000 against a target of $1,000. Past the band the planner would sell 2
+// shares; kept one lot short it places no order and records no skip, while
+// BBB, held with no target, is still sold in full.
+func TestIRAPlacesNoOrderForAHeldNameKeptOneLotShort(t *testing.T) {
+	d := keptOneLotShort(momentumDecision(event.TargetWeight{InstrumentID: "AAA", Weight: 0.1}), 0.1)
+	prices := map[string]float64{"AAA": 5000, "BBB": 10}
+	plan := planIRA(t, iraInput(d, 10000, prices,
+		event.AccountPosition{InstrumentID: "AAA", Quantity: 3}, event.AccountPosition{InstrumentID: "BBB", Quantity: 50}))
+	sameLegs(t, "sells", plan.Sells, leg{"BBB", event.OrderSideSell, 50})
+	sameLegs(t, "buys", plan.Buys)
+	if len(plan.Skipped) != 0 {
+		t.Errorf("skipped %+v", plan.Skipped)
+	}
+	// The decision says the account holds AAA; a snapshot that holds none
+	// disagrees with it, which is a defect in the caller.
+	if _, err := orderplan.PlanIRA(iraInput(d, 10000, prices)); err == nil || !strings.Contains(err.Error(), "kept one lot short") {
+		t.Errorf("a kept name not held: %v", err)
+	}
+}

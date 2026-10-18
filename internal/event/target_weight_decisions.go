@@ -40,7 +40,12 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     decided session plans the difference to the target in force after a
 //     refusal that left the engine Normal, so a restart from the decision
 //     recovers it (ADR 0026, point 5). It is omitted when unset, so a
-//     decision without a pending re-plan has version 4's bytes.
+//     decision without a pending re-plan has version 4's bytes. The name
+//     status held-one-lot-short and a name's HeldQuantity, HeldValue and
+//     HeldShare, which rules 1.17.0 and later record for a held pick D7-L
+//     keeps one lot short (ADR 0026, point 2, "D7-L", amended 2026-10-18),
+//     are of this version too; the figures are omitted when unset, so a
+//     decision with no such name has the bytes it had before.
 const TargetsDecidedSchemaVersion uint32 = 5
 
 // The two outcomes of a target decision (ADR 0026, point 1).
@@ -234,6 +239,12 @@ const (
 	// MomentumStatusUnaffordable: D7-L skipped the pick, since one share at
 	// its previous raw close exceeds its target value.
 	MomentumStatusUnaffordable = "unaffordable"
+	// MomentumStatusHeldOneLotShort: a pick the account holds whose one
+	// share at its previous raw close exceeds its target value. D7-L keeps
+	// it: it keeps its place, sector slot and weight, and the planner
+	// places no order in it, no buy and no sell, at that rebalance (ADR
+	// 0026, point 2, "D7-L", amended 2026-10-18).
+	MomentumStatusHeldOneLotShort = "held-one-lot-short"
 )
 
 // MomentumName is one ranked universe member: its universe rank and dollar
@@ -253,10 +264,19 @@ type MomentumName struct {
 	ScoreRank         int     `json:"score_rank"`
 	Weight            float64 `json:"weight"`
 	BacktestWouldPick bool    `json:"backtest_would_pick"`
-	// OneShare and TargetValue are set for an unaffordable name: its
-	// previous raw close and the target value it exceeded.
+	// OneShare and TargetValue are set for an unaffordable name, and for a
+	// held name kept one lot short: its previous raw close and the target
+	// value it exceeded.
 	OneShare    float64 `json:"one_share,omitzero"`
 	TargetValue float64 `json:"target_value,omitzero"`
+	// HeldQuantity, HeldValue and HeldShare are set for a held name kept one
+	// lot short: the whole shares it keeps, their value at its previous raw
+	// close, and that value as a fraction of the net liquidation it was
+	// valued against, so the concentration a kept holding carries is on the
+	// record (ADR 0026, point 2, "D7-L", amended 2026-10-18).
+	HeldQuantity int64   `json:"held_quantity,omitzero"`
+	HeldValue    float64 `json:"held_value,omitzero"`
+	HeldShare    float64 `json:"held_share,omitzero"`
 	// GapSessions are the sessions, YYYY-MM-DD and ascending, with no close
 	// in the window the name was scored or refused on: a gap name's, or a
 	// held name's scored across its gap (ADR 0026 point 5, amended
@@ -425,7 +445,7 @@ func (m MomentumFigures) validate() []error {
 	for i, n := range m.Names {
 		errs = append(errs, n.validate(i+1)...)
 		errs = append(errs, n.validateGaps(m.CloseSession)...)
-		if n.Status == MomentumStatusUnaffordable && !lot {
+		if (n.Status == MomentumStatusUnaffordable || n.Status == MomentumStatusHeldOneLotShort) && !lot {
 			errs = append(errs, fmt.Errorf("momentum name %s: an unaffordable name needs the minimum lot figures", n.InstrumentID))
 		}
 	}
@@ -446,7 +466,7 @@ func (n MomentumName) validate(rank int) []error {
 		if n.OneShare != 0 || n.TargetValue != 0 {
 			errs = append(errs, fmt.Errorf("momentum name %s: only an unaffordable name records a one-share price and target value", n.InstrumentID))
 		}
-	case MomentumStatusUnaffordable:
+	case MomentumStatusUnaffordable, MomentumStatusHeldOneLotShort:
 		if !isFinite(n.OneShare) || !isFinite(n.TargetValue) || n.TargetValue < 0 || !(n.OneShare > n.TargetValue) {
 			errs = append(errs, fmt.Errorf("momentum name %s: an unaffordable name's one share exceeds its target value", n.InstrumentID))
 		}
@@ -467,8 +487,30 @@ func (n MomentumName) validate(rank int) []error {
 	if !isFinite(n.Score) {
 		errs = append(errs, fmt.Errorf("momentum name %s: score must be finite", n.InstrumentID))
 	}
-	if n.Weight > 0 && n.Status != MomentumStatusPicked {
+	if n.Weight > 0 && n.Status != MomentumStatusPicked && n.Status != MomentumStatusHeldOneLotShort {
 		errs = append(errs, fmt.Errorf("momentum name %s: only a picked name has a weight", n.InstrumentID))
+	}
+	errs = append(errs, n.validateHolding()...)
+	return errs
+}
+
+// validateHolding checks the holding a held name kept one lot short records
+// (ADR 0026, point 2, "D7-L", amended 2026-10-18): it keeps its weight, and
+// its whole shares, their value and that value's share of net liquidation
+// are all positive and finite. No other status records a holding.
+func (n MomentumName) validateHolding() []error {
+	if n.Status != MomentumStatusHeldOneLotShort {
+		if n.HeldQuantity != 0 || n.HeldValue != 0 || n.HeldShare != 0 {
+			return []error{fmt.Errorf("momentum name %s: only a held name kept one lot short records a holding", n.InstrumentID)}
+		}
+		return nil
+	}
+	var errs []error
+	if !(n.Weight > 0) {
+		errs = append(errs, fmt.Errorf("momentum name %s: a held name kept one lot short keeps its weight", n.InstrumentID))
+	}
+	if n.HeldQuantity < 1 || !isFinite(n.HeldValue) || !(n.HeldValue > 0) || !isFinite(n.HeldShare) || !(n.HeldShare > 0) {
+		errs = append(errs, fmt.Errorf("momentum name %s: a held name kept one lot short records the holding it keeps, its value and its share of net liquidation", n.InstrumentID))
 	}
 	return errs
 }

@@ -55,6 +55,11 @@ type IRAPlan struct {
 //
 // Whole shares rounded toward zero are D7-L's rounding; D7-L's substitution of
 // a pick whose one share exceeds its target is the momentum rule's, not this.
+// A held pick the decision records kept one lot short
+// (event.MomentumStatusHeldOneLotShort) gets no order, no buy and no sell,
+// and no skip: the decision itself records why (ADR 0026, point 2, "D7-L",
+// amended 2026-10-18). A kept name the snapshot does not hold contradicts
+// the decision and is an error.
 // A decision that is not a decided momentum decision, a snapshot of another
 // account, a short holding or an instrument without a positive reference
 // price is a defect in the caller and an error.
@@ -76,6 +81,15 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 	case !(in.PriceBand > 0 && in.PriceBand < 1) || !(in.RebalanceBand > 0 && in.RebalanceBand < 1):
 		return IRAPlan{}, errors.New("orderplan: the price band and the rebalance band must lie strictly between 0 and 1")
 	}
+	kept := map[string]bool{}
+	for _, n := range d.Momentum.Names {
+		if n.Status == event.MomentumStatusHeldOneLotShort {
+			if in.Snapshot.Quantity(n.InstrumentID) < 1 {
+				return IRAPlan{}, fmt.Errorf("orderplan: %s is kept one lot short, but the snapshot holds none of it", n.InstrumentID)
+			}
+			kept[n.InstrumentID] = true
+		}
+	}
 	targets := make(map[string]float64, len(d.Targets))
 	union := make([]string, 0, len(d.Targets)+len(in.Snapshot.Positions))
 	for _, t := range d.Targets {
@@ -95,6 +109,9 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 	v := in.Snapshot.NetLiquidation
 	var plan IRAPlan
 	for _, id := range union {
+		if kept[id] {
+			continue // D7-L's held-name exception: the holding is kept as it is
+		}
 		price := in.ReferencePrices[id]
 		if !(price > 0) || math.IsInf(price, 0) {
 			return IRAPlan{}, fmt.Errorf("orderplan: %s has no finite, positive reference price", id)

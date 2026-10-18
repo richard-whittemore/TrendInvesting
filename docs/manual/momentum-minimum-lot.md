@@ -23,6 +23,40 @@ never reconsidered in the same decision.
 The decision records each skipped stock with the status `unaffordable`, the
 price of one share and the target value it exceeded.
 
+## A stock the account already holds is kept, not sold
+
+Since rules version 1.17.0 (the owner's decision of 2026-10-18, ADR 0026
+amendment of that date) the rule treats a stock the account already holds
+differently. Before, a held stock that was still in the book but whose
+target had dropped below one share's price was skipped like any other, so
+the program sold the whole holding, even though the 25% rebalance band would
+otherwise have left it alone.
+
+Now such a stock is **kept**:
+
+- it keeps its place in the book, its sector slot and its weight, so no other
+  stock takes its place;
+- the program places **no order** in it at that rebalance: nothing is bought
+  and nothing is sold, and it is not resized;
+- the decision records it with the status `held-one-lot-short`, the price of
+  one share, the target value, and the holding it keeps: the number of
+  shares, what they are worth at the previous close, and that value as a
+  share of the account. The decision's detail repeats these figures in a
+  sentence.
+
+At the next rebalance the stock is compared afresh. A stock that is **not**
+held is still skipped and replaced as described above, and a held stock that
+has dropped out of the book altogether is still sold in full.
+
+**What this costs.** A kept holding is not trimmed, so it can be worth more
+than its target, by up to about one share's price for each share held. The
+owner accepted this for now; the recorded share of the account is how paper
+trading will show how large it gets. The measurement behind the decision
+(`docs/research/d7l-held-name-2026-10.md`) found the situation rare at
+$30,000 (a stock kept three times in ten and a half years, never in the seventeen
+years before) and no harm: returns and drawdown within noise, a few orders
+and dollars of commission saved.
+
 ## When nothing is affordable
 
 The rule only compares a stock whose target is above zero. Three cases follow
@@ -33,8 +67,9 @@ The rule only compares a stock whose target is above zero. Three cases follow
   decision is made: the whole invested fraction goes to the risk-off
   instrument and every held stock is sold, as the risk-off rule asks. The
   decision's detail says so.
-- **(b) Every stock with a target is unaffordable.** If no stock is picked and
-  at least one was skipped as unaffordable, the decision is **withheld** with
+- **(b) Every stock with a target is unaffordable.** If no stock can be
+  bought at its target and at least one was skipped as unaffordable or kept
+  as a held stock one lot short, the decision is **withheld** with
   the reason `all-unaffordable`, and the account keeps the book it has. This
   is the same in a risk-on month and a partly risk-off month. A wrong net
   liquidation value or wrong prices would look exactly like this, and
@@ -83,7 +118,13 @@ The rule is not applied at all when there is no account snapshot as of the
 previous close (the decision is withheld whatever the picks), or when the bond
 share is 1 and there is no momentum sleeve.
 
-## Rules version 1.4.0
+## Rules versions 1.4.0 and 1.17.0
+
+Keeping a held stock one lot short changes what the program does with it,
+so the rules version moved to **1.17.0**; a journal written under 1.16.0 or
+earlier does not replay under this build. The decision record stays at
+version 5: the new status and figures appear only on a kept stock.
+
 
 Applying D7-L changes which stocks the momentum rule picks, so the rules
 version moved to **1.4.0**. The decision record is version 4 and the
@@ -107,6 +148,23 @@ In `internal/targetweight/momentum/minimum_lot_test.go`:
 `TestMinimumLotLeavesAFullyRiskOffBookAsSelectBookMakesIt`,
 `TestDecideWithholdsAnUnaffordablePartialRiskOffBook` and
 `TestDecideWithNoCandidateUnderTheLotIsStillWithheld`.
+
+In `internal/targetweight/momentum/minimum_lot_held_test.go`:
+`TestMinimumLotKeepsAHeldPickOneLotShort`,
+`TestMinimumLotKeepsAHeldPicksSectorSlot`,
+`TestMinimumLotStillSkipsAPickNotHeld`,
+`TestMinimumLotRefusesABadHolding`,
+`TestDecideKeepsAHeldPickOneLotShort` and
+`TestDecideWithholdsABookWithNoAffordablePickThoughOneIsHeld`.
+
+In `internal/targetweight/momentum_d7_held_test.go`:
+`TestMinimumLotKeepsAHeldNameOneLotShort` (no order for the kept stock, the
+held stock outside the book still sold) and
+`TestMinimumLotWithholdsAnAllUnaffordableBookThoughOneIsHeld`.
+`TestIRAPlacesNoOrderForAHeldNameKeptOneLotShort` (in `internal/orderplan`)
+pins the planner, `TestHeldOneLotShortNamesValidate` (in `internal/event`)
+the recorded figures, and `TestRulesVersionDeclaresTheHeldNameKeptOneLotShort`
+the version.
 
 In `internal/targetweight/momentum_d7_test.go`:
 `TestMinimumLotSubstitutesAnUnaffordablePick`,
@@ -133,6 +191,10 @@ alert.
   the one-share prices of the `unaffordable` names against the market. If the
   figures are right, the account is too small for the book; if not, fix the
   data and the next decision runs on it.
+- **A held stock is kept although it costs more than its target.** That is
+  intended (`held-one-lot-short`). Check its recorded share of the account:
+  if it has grown large, the account is small for that stock's price; the
+  next rebalance compares it again.
 - **A stock is skipped and the book holds fewer or different names than the
   research.** That is intended. The decision keeps whether the backtest would
   have picked each stock, so the difference can be measured.
