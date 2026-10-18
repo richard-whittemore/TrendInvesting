@@ -1823,6 +1823,8 @@ def _utc(text):
     year, month, day, hour, minute, second, fraction, sign, hours, minutes = TIME_PARTS.fullmatch(text).groups()
     at = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
     if sign:
+        if int(hours) > 23 or int(minutes) > 59:
+            raise ValueError("a zone offset is 00:00 to 23:59")
         offset = timedelta(hours=int(hours), minutes=int(minutes))
         at = at - offset if sign == "+" else at + offset
     fraction = (fraction or "").rstrip("0")
@@ -1898,7 +1900,7 @@ def _is_time(value, shape):
         datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         return False
-    return True
+    return value[-1] == "Z" or (int(value[-5:-3]) <= 23 and int(value[-2:]) <= 59)
 
 
 def acknowledge_correction(pending, exec_id, corrects, reason, fills):

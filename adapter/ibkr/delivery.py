@@ -378,16 +378,15 @@ def stream_run(streams, engine_log_path):
     Only the logs of folders are read, and each first by its head
     (relay.head_identity: its first two committed inputs, where a run's
     identity is): a log whose head names another run is read no further,
-    and one whose head cannot be read cannot be matched to any run, so,
-    when the run's folder is found, it is skipped with a warning naming its
-    folder (an older build's log, or one damaged after its run ended). A
-    log whose head names this run is read whole and strictly. Fail closed
+    and one whose head cannot be read cannot be matched to any run: a
+    warning names its folder (an older build's log, or one damaged after its
+    run ended) and the start is refused, as below. A log whose head names this run is read whole and strictly. Fail closed
     (StreamRefused, AGENTS.md):
 
     - this run's log, or a log whose head names this run, cannot be read;
-    - no folder of the run is found and a log was skipped: it may be this
-      resumed run's own first log, its head damaged, and the run is never
-      sent to a warm-up under its new name;
+    - a log was skipped, a folder of the run's own name or none: it may be
+      this resumed run's own first log, its head damaged, and the run is
+      never sent to a warm-up under its new name, nor handed that folder;
     - two folders of the run, its own name's among them: one run's stream
       is never split across two folders;
     - one folder of another name whose log is not the head of this log's
@@ -453,10 +452,10 @@ def stream_run(streams, engine_log_path):
             "its warm-up; nothing is delivered until a person decides which is the run's "
             "(docs/manual/market-data.md, \"A crash resume\")".format(
                 engine_log_path, ", ".join(os.path.join(streams, n) for n in found)))
-    if not found and skipped:
+    if skipped:
         raise StreamRefused(
-            "no stream folder of the run of {} is found, and the logs of {} cannot be matched to any run (their "
-            "first records cannot be read): one may be this run's own first log, damaged, so nothing is delivered "
+            "the run of {} is not started: the logs of {} cannot be matched to any run (their first records cannot "
+            "be read): one may be this run's own first log, damaged, so no stream folder is trusted, nothing is delivered "
             "and no warm-up is to be run for this run's name. If this run is a crash resume, restore its first "
             "run's log from the backup as the engine wrote it; if a log is an old run's, {}".format(
                 engine_log_path, ", ".join(os.path.join(streams, n) for n in skipped), move_aside(streams, logs)))

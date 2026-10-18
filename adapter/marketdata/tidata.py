@@ -308,6 +308,8 @@ def _utc(text):
     year, month, day, hour, minute, second, fraction, sign, hours, minutes = TIME_PARTS.fullmatch(text).groups()
     at = dt.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=dt.timezone.utc)
     if sign:
+        if int(hours) > 23 or int(minutes) > 59:
+            raise ValueError("a zone offset is 00:00 to 23:59")
         offset = dt.timedelta(hours=int(hours), minutes=int(minutes))
         at = at - offset if sign == "+" else at + offset
     fraction = (fraction or "").rstrip("0")
@@ -385,11 +387,10 @@ def stream_run(engine_streams, engine_log, log, warn=None):
 
     Only the logs of folders are read, each first by its head
     (head_identity): one whose head names another run is read no further,
-    and one whose head cannot be read cannot be matched to any run, so,
-    when the run's folder is found, it is skipped and warn (by default a
-    line on stderr) names its folder (an older build's log, or one damaged
-    after its run ended). With no folder of the run found and a log
-    skipped, the job is refused: that log may be the resumed run's own
+    and one whose head cannot be read cannot be matched to any run: warn
+    (by default a line on stderr) names its folder (an older build's log, or
+    one damaged after its run ended). With a log skipped, a folder of the
+    run's own name found or not, the job is refused: that log may be the resumed run's own
     first log, its head damaged, and the run is never sent to a warm-up
     under its new name. A log whose head names the run is read whole and
     strictly, and refused if it cannot be. The record hashes compared are
@@ -443,10 +444,10 @@ def stream_run(engine_streams, engine_log, log, warn=None):
         raise Refused("the run of {} has more than one stream folder: {}. One run's stream is in one folder, made "
                       "by its warm-up; this stops the job for a person (docs/manual/market-data.md, \"A crash "
                       "resume\")".format(engine_log, ", ".join(os.path.join(engine_streams, n) for n in found)))
-    if not found and skipped:
+    if skipped:
         raise Refused(
-            "no stream folder of the run of {} is found, and the logs of {} cannot be matched to any run (their "
-            "first records cannot be read): one may be this run's own first log, damaged, so nothing is written "
+            "the run of {} is not started: the logs of {} cannot be matched to any run (their first records cannot "
+            "be read): one may be this run's own first log, damaged, so no stream folder is trusted, nothing is written "
             "and no warm-up is to be run for this run's name. If this run is a crash resume, restore its first "
             "run's log from the backup as the engine wrote it; if a log is an old run's, {}".format(
                 engine_log, ", ".join(os.path.join(engine_streams, n) for n in skipped),

@@ -15,6 +15,9 @@ import contextlib
 import hashlib
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,6 +26,12 @@ from pathlib import Path
 from unittest import mock
 
 tests_dir = Path(__file__).resolve().parent
+# The longest any Go build, run or engine start may take here, in seconds
+# (TI_TEST_GO_TIMEOUT): generous, so a cold runner passes; a process that
+# outlasts it is killed and the test fails with what it printed.
+GO_TIMEOUT = float(os.environ.get("TI_TEST_GO_TIMEOUT", "300"))
+# How long a real engine may take to listen, and to stop (TI_TEST_ENGINE_TIMEOUT).
+ENGINE_TIMEOUT = float(os.environ.get("TI_TEST_ENGINE_TIMEOUT", "120"))
 if str(tests_dir) not in sys.path:
     sys.path.insert(0, str(tests_dir))
 
@@ -697,14 +706,14 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.types(), [])
         self.assertEqual(self.records(), [(RUN, "dropped"), ("run-b", "queued")])
 
-    def test_a_log_beside_another_stream_folder_that_cannot_be_read_is_skipped_with_a_warning(self):
+    def test_a_log_beside_another_stream_folder_that_cannot_be_read_stops_the_start_with_a_warning(self):
         (self.streams / "run-x").mkdir()
         Path(self.dir.name, "run-x.log").write_text("not a durable log\n")
         loop = self.loop()
-        with self.assertLogs("ibkr", level="WARNING") as logs:
+        with self.assertLogs("ibkr", level="WARNING") as logs, self.assertRaises(StreamRefused) as caught:
             loop.start()
-        self.assertEqual(loop.delivery.run, RUN)
         self.assertIn(str(self.streams / "run-x"), "\n".join(logs.output))
+        self.assertIn("cannot be matched to any run", str(caught.exception))
 
     def test_two_stream_folders_of_one_run_stop_the_start(self):
         log, _ = self.crash_resume()
@@ -1371,7 +1380,7 @@ class StreamFolderRuleTests(unittest.TestCase):
         resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
         self.assertEqual(self.found(resumed), ("run-a", "run-a"))
 
-    def test_an_unreadable_log_of_another_runs_folder_is_skipped_with_a_warning(self):
+    def test_an_unreadable_log_of_another_runs_folder_is_warned_of_and_stops_the_start(self):
         self.folder("run-old")
         (self.root / "run-old.log").write_text("written by another build\n")
         other = LoggedEngine(str(self.root / "run-older.log"), configuration=self.cfg,
@@ -1382,7 +1391,7 @@ class StreamFolderRuleTests(unittest.TestCase):
         self.folder("run-older")
         fresh = self.first_run(approved=True)
         with self.assertLogs("ibkr", level="WARNING") as logs, contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(self.found(fresh), ("run-a", "run-a"))
+            self.assertEqual(self.found(fresh), ("refused", "refused"))
         self.assertEqual(len(logs.output), 1, logs.output)
         self.assertIn(str(self.streams / "run-old"), logs.output[0])
         self.assertIn(str(self.streams / "run-old"), err.getvalue())
@@ -1461,18 +1470,39 @@ class StreamFolderRuleTests(unittest.TestCase):
             self.assertIn(str(self.streams / "run-a"), refusal)
             self.assertIn("restore", refusal)
 
+    def test_a_resume_whose_first_log_is_damaged_is_still_stopped_when_a_folder_of_its_own_name_exists(self):
+        from delivery import stream_run
+        from marketdata import tidata
+        first = self.first_run()
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        commit(resumed, "input-c")
+        lines = Path(first.path).read_bytes().splitlines(keepends=True)
+        Path(first.path).write_bytes(b"a damaged header\n" + b"".join(lines[1:]))
+        self.folder("run-c")
+        log = str(resumed.path)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(StreamRefused) as adapter:
+                stream_run(str(self.streams), log)
+            with self.assertRaises(tidata.Refused) as data:
+                tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log), warn=lambda text: None)
+        for refusal in (str(adapter.exception), str(data.exception)):
+            self.assertIn(str(self.streams / "run-a"), refusal)
+            self.assertIn("cannot be matched to any run", refusal)
+
     def test_a_skipped_logs_remedy_names_the_engines_log_folder_not_the_streams(self):
+        from delivery import stream_run
         from marketdata import tidata
         self.folder("run-old")
         (self.root / "run-old.log").write_text("written by another build\n")
         fresh = self.first_run(approved=True)
+        log = str(fresh.path)
         warnings = []
         with self.assertLogs("ibkr", level="WARNING") as logs:
-            from delivery import stream_run
-            stream_run(str(self.streams), str(fresh.path))
-        log = str(fresh.path)
-        tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log), warn=warnings.append)
-        for text in (logs.output[0], warnings[0]):
+            with self.assertRaises(StreamRefused) as adapter:
+                stream_run(str(self.streams), log)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log), warn=warnings.append)
+        for text in (logs.output[0], warnings[0], str(adapter.exception), str(data.exception)):
             self.assertIn("cannot be matched to any run", text)
             self.assertIn("the engine's log folder {}".format(self.root), text)
 
@@ -1494,32 +1524,70 @@ class LogChainTests(unittest.TestCase):
         from relay import _committed_groups
         return _committed_groups(str(path)).chain_break, tidata.read_engine_log(str(path)).chain_break
 
+    @unittest.skipUnless(shutil.which("go"), "no Go toolchain: the canonical bytes are Go's own output")
     def test_the_canonical_envelope_bytes_are_the_engines(self):
-        # internal/event CanonicalEnvelopeBytes of this envelope, as Go
-        # computes it: Go's string escapes, UTC times without trailing zeros,
-        # an absent correlation ID as "", the payload as stored text.
+        # The vector is what internal/event CanonicalEnvelopeBytes renders,
+        # run here by Go: Go's string escapes (<, >, &, U+2028, U+2029,
+        # control bytes), a time stated at an offset, the largest sequence.
         import relay
         from marketdata import tidata
-        envelope = {"id": "a<b>&c\u2028d\u2029\u00e9\x01\x7f", "type": "t", "envelope_version": 1,
-                    "schema_version": 2, "event_time": "2026-10-16T09:30:00.120000000-04:00",
-                    "recorded_at": "2026-10-16T09:30:00.120000000-04:00", "sequence": 3, "causation_id": "c",
-                    "source": "s", "strategy_version": "v", "configuration_hash": "h", "payload_hash": "p"}
-        payload = '{"x":"<&>\u2028"}'
-        want = "2f151b29fe7c95a751cee7fedd2c3281d614360c49aedfb2b38bf88daebf04bd"
-        fields = {k: envelope.get(k, "") for k in (relay.ENVELOPE_FIELDS | relay.ENVELOPE_OPTIONAL) - {"payload"}}
-        fields.update(event_time="2026-10-16T13:30:00.12Z", recorded_at="2026-10-16T13:30:00.12Z", payload=payload)
-        self.assertEqual(hashlib.sha256(relay._canonical_bytes(fields)).hexdigest(), want)
-        self.assertEqual(hashlib.sha256(tidata._canonical_bytes(fields)).hexdigest(), want)
+        base = {"id": "a", "type": "t", "envelope_version": 1, "schema_version": 2,
+                "event_time": "2026-10-16T09:30:00.120000000-04:00",
+                "recorded_at": "2026-10-16T09:30:00Z", "sequence": 3, "causation_id": "c",
+                "source": "s", "strategy_version": "v", "configuration_hash": "h", "payload_hash": "p"}
+        payloads = ['{"x":"<&>\\u2028"}', '{"k":"\u2028\u2029 \u00e9 \\u0001"}', '{}']
+        cases = [
+            (dict(base, id="a<b>&c\u2028d\u2029\u00e9\x01\x08\x0c\t\n\r\x1f\x7f\"\\/"), payloads[0]),
+            (dict(base, sequence=18446744073709551615, correlation_id="run<1>"), payloads[1]),
+            (dict(base, event_time="2026-10-16T23:45:10.5+05:30", recorded_at="2026-10-17T00:10:00.100200-23:59"),
+             payloads[2]),
+            (dict(base, event_time="2026-10-16T09:30:00.000000001Z", recorded_at="2026-12-31T23:59:59+00:00"),
+             payloads[2]),
+        ]
+        sent = "".join(json.dumps(envelope, ensure_ascii=False)[:-1] + ',"payload":' + payload + "}\n"
+                       for envelope, payload in cases)
+        run = subprocess.run(["go", "run", "./adapter/ibkr/tests/testdata/canonical_vector.go"], cwd=str(tests_dir.parents[2]),
+                             input=sent, text=True, capture_output=True, timeout=GO_TIMEOUT, env=dict(os.environ, GOTOOLCHAIN="local"))
+        self.assertEqual(run.returncode, 0, run.stderr)
         previous = bytes(32)
-        expected = hashlib.sha256(previous + b"input" + relay._canonical_bytes(fields)).digest()
-        self.assertEqual(relay.log_chain_next(previous, "input", envelope, payload.encode()), expected)
-        for unchained in ({}, dict(envelope, event_time="2026-13-16T09:30:00Z")):
-            self.assertIsNone(relay.log_chain_next(previous, "input", unchained, payload.encode()))
-        self.assertEqual(tidata._record_digest(previous, "input", envelope, payload), expected)
+        wants = [json.loads(line) for line in run.stdout.splitlines()]
+        self.assertEqual(len(wants), len(cases))
+        for (envelope, payload), want in zip(cases, wants):
+            with self.subTest(envelope["id"]):
+                digest = hashlib.sha256(previous + b"input" + want["canonical"].encode("utf-8")).digest()
+                self.assertEqual(relay.log_chain_next(previous, "input", envelope, payload.encode("utf-8")), digest)
+                self.assertEqual(tidata._record_digest(previous, "input", envelope, payload), digest)
+                fields = {k: envelope.get(k, "") for k in (relay.ENVELOPE_FIELDS | relay.ENVELOPE_OPTIONAL) - {"payload"}}
+                fields.update(event_time=relay._utc(envelope["event_time"]), recorded_at=relay._utc(envelope["recorded_at"]),
+                              payload=payload)
+                self.assertEqual(relay._canonical_bytes(fields).decode("utf-8"), want["canonical"])
+                self.assertEqual(tidata._canonical_bytes(fields).decode("utf-8"), want["canonical"])
+                self.assertEqual(hashlib.sha256(relay._canonical_bytes(fields)).hexdigest(), want["sha256"])
+        for unchained in ({}, dict(base, event_time="2026-13-16T09:30:00Z")):
+            self.assertIsNone(relay.log_chain_next(previous, "input", unchained, b"{}"))
         with self.assertRaises(TypeError):
             relay._canonical_bytes({"x": 1.5})
         with self.assertRaises(TypeError):
             tidata._canonical_bytes({"x": True})
+
+    def test_a_time_with_an_impossible_offset_follows_no_chain(self):
+        import relay
+        from marketdata import tidata
+        base = {"id": "a", "type": "t", "envelope_version": 1, "schema_version": 2,
+                "event_time": "2026-10-16T13:30:00Z", "recorded_at": "2026-10-16T13:30:00Z", "sequence": 3,
+                "causation_id": "c", "source": "s", "strategy_version": "v", "configuration_hash": "h",
+                "payload_hash": "p"}
+        previous = bytes(32)
+        self.assertIsNotNone(relay.log_chain_next(previous, "input", base, b"{}"))
+        for bad in ("2026-10-17T16:30:00+27:00", "2026-10-16T13:30:00-24:00", "2026-10-16T13:30:00+05:60",
+                    "2026-10-16T13:30:00.5-00:99"):
+            with self.subTest(bad):
+                envelope = dict(base, event_time=bad)
+                self.assertIsNone(relay.log_chain_next(previous, "input", envelope, b"{}"))
+                with self.assertRaises(ValueError):
+                    tidata._record_digest(previous, "input", envelope, "{}")
+                self.assertFalse(relay._is_time(bad, relay.TIME))
+        self.assertTrue(relay._is_time("2026-10-16T13:30:00+23:59", relay.TIME))
 
     def test_an_engine_log_and_the_doubles_follow_the_chain(self):
         engine = LoggedEngine(str(self.root / "run-a.log"), configuration=json.loads(
@@ -1564,10 +1632,9 @@ class LogChainTests(unittest.TestCase):
 class RealEngineResumeTests(unittest.TestCase):
     """The record hash chain rule rests on what cmd/engine -resume writes: the real engine, built here, crashed and resumed."""
 
+    @unittest.skipUnless(shutil.which("go"), "no Go toolchain: the real engine is built here")
     def test_a_real_resume_keeps_every_copied_record_hash_and_both_chains_verify(self):
-        import os
         import signal
-        import subprocess
         import time
         from delivery import stream_run
         from relay import _committed_groups
@@ -1581,38 +1648,60 @@ class RealEngineResumeTests(unittest.TestCase):
         self.addCleanup(work.cleanup)
         root = Path(work.name)
         sockets = tempfile.mkdtemp(dir="/tmp")
-        self.addCleanup(lambda: __import__("shutil").rmtree(sockets, True))
+        self.addCleanup(lambda: shutil.rmtree(sockets, True))
         env = dict(os.environ, GOTOOLCHAIN="local")
+
+        def run(command, **kwargs):
+            """command to completion within GO_TIMEOUT, else killed and the test fails with what it printed."""
+            try:
+                return subprocess.run(command, timeout=GO_TIMEOUT, capture_output=True, text=True, check=True, **kwargs)
+            except subprocess.TimeoutExpired as err:
+                self.fail("{} did not finish within {} s (TI_TEST_GO_TIMEOUT): {}".format(
+                    command[0], GO_TIMEOUT, (err.stdout or b"") + (err.stderr or b"")))
+            except subprocess.CalledProcessError as err:
+                self.fail("{} failed: {}{}".format(command[0], err.stdout, err.stderr))
+
         engine_bin, demo_bin = str(root / "engine"), str(root / "boost-demo")
-        subprocess.run(["go", "build", "-ldflags",
-                        "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=resume-test",
-                        "-o", engine_bin, "./cmd/engine"], cwd=str(repo), env=env, check=True)
-        subprocess.run(["go", "build", "-o", demo_bin, "./cmd/boost-demo"], cwd=str(repo), env=env, check=True)
+        run(["go", "build", "-ldflags",
+             "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=resume-test",
+             "-o", engine_bin, "./cmd/engine"], cwd=str(repo), env=env)
+        run(["go", "build", "-o", demo_bin, "./cmd/boost-demo"], cwd=str(repo), env=env)
         logs = root / "engines"
         logs.mkdir()
         streams = root / "streams" / "boost"
         (streams / "run-a").mkdir(parents=True)
         socket = os.path.join(sockets, "s.sock")
 
+        def stop(engine, sig):
+            if engine.poll() is None:
+                engine.send_signal(sig)
+            try:
+                engine.wait(timeout=ENGINE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                engine.kill()
+                engine.wait()
+                self.fail("the engine did not stop within {} s (TI_TEST_ENGINE_TIMEOUT)".format(ENGINE_TIMEOUT))
+
         def start(name, *extra):
             out = root / (name + ".out")
-            engine = subprocess.Popen([engine_bin, "-mode", "dry-run", "-config", config,
-                                       "-as-of", "2024-01-02T21:00:00Z", "-socket", socket,
-                                       "-log", str(logs / (name + ".log")), "-out", str(root / (name + ".journal")),
-                                       *extra], stdout=open(out, "w"), stderr=subprocess.STDOUT)
-            self.addCleanup(lambda: engine.poll() is None and engine.kill())
-            for _ in range(200):
+            with open(out, "w") as sink:
+                engine = subprocess.Popen([engine_bin, "-mode", "dry-run", "-config", config,
+                                           "-as-of", "2024-01-02T21:00:00Z", "-socket", socket,
+                                           "-log", str(logs / (name + ".log")), "-out", str(root / (name + ".journal")),
+                                           *extra], stdout=sink, stderr=subprocess.STDOUT)
+            self.addCleanup(lambda: engine.poll() is None and (engine.kill(), engine.wait()))
+            deadline = time.monotonic() + ENGINE_TIMEOUT
+            while time.monotonic() < deadline:
                 if "listening on" in out.read_text():
                     return engine
                 self.assertIsNone(engine.poll(), out.read_text())
                 time.sleep(0.05)
-            self.fail("the engine did not listen: " + out.read_text())
+            self.fail("the engine did not listen within {} s (TI_TEST_ENGINE_TIMEOUT): {}".format(
+                ENGINE_TIMEOUT, out.read_text()))
 
         crashed = start("run-a")
-        subprocess.run([demo_bin, "-socket", socket, "-log", str(logs / "run-a.log"), "-config", config,
-                        "-sessions", "40"], check=True, capture_output=True)
-        crashed.send_signal(signal.SIGKILL)
-        crashed.wait()
+        run([demo_bin, "-socket", socket, "-log", str(logs / "run-a.log"), "-config", config, "-sessions", "40"])
+        stop(crashed, signal.SIGKILL)
         resumed = start("run-c", "-resume", str(logs / "run-a.log"))
         first, copy = str(logs / "run-a.log"), str(logs / "run-c.log")
         a, c = _committed_groups(first), _committed_groups(copy)
@@ -1623,8 +1712,7 @@ class RealEngineResumeTests(unittest.TestCase):
                          (None, None))
         self.assertEqual(stream_run(str(streams), copy), "run-a")
         self.assertEqual(tidata.stream_run(str(streams), copy, tidata.read_engine_log(copy)), "run-a")
-        resumed.send_signal(signal.SIGTERM)
-        resumed.wait(timeout=60)
+        stop(resumed, signal.SIGTERM)
 
 
 if __name__ == "__main__":
