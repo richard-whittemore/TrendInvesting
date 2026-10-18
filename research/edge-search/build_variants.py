@@ -47,6 +47,25 @@ _CTRY_OOS = {"MODE": "country_rot", "START": (2015, 1, 1), "END": (2026, 6, 30),
 _US3X = {"SPY": 1, "MDY": 1, "IWM": 1, "EFA": 1}
 _D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
 
+def _every(first, last, step):
+    """(year, month) from ``first`` to ``last`` inclusive, every ``step`` months."""
+    out, (y, m) = [], first
+    while (y, m) <= last:
+        out.append((y, m))
+        y, m = y + (m - 1 + step) // 12, (m - 1 + step) % 12 + 1
+    return out
+
+
+#: Parity (docs/research/parity-2026-10.md, "Months"), chosen before any
+#: comparison: every 8th rebalance of the tuning years from 1999-03 and every
+#: 5th of the held-out years from 2016-01 (at least 24 each), plus every month
+#: the golden runs logged in that window.
+PARITY_MONTHS_IS = tuple(sorted(set(_every((1999, 3), (2015, 12), 8))
+                                | {(2000, 3), (2008, 11), (2009, 6), (2013, 5)}))
+PARITY_MONTHS_OOS = tuple(sorted(set(_every((2016, 1), (2026, 6), 5))
+                                 | {(2016, 2), (2020, 4), (2021, 3), (2022, 6), (2024, 3)}))
+
+
 #: variant -> (template, {class constant: value}), exactly as run.
 VARIANTS = {
     # Boost deep-dive
@@ -170,6 +189,15 @@ VARIANTS = {
                                                 "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "FRESH_SELECTION": True}),
     "OOS_FU_COMBO": ("momentum/fresh_universe.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
                                                         RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True)),
+    # Parity (ADR 0026 point 7, item 2): FU_COMBO, OOS_FU_COMBO and BX_SPY
+    # unchanged, exporting their inputs for the parity months in order tags.
+    "FU_PARITY": ("momentum/parity_log.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                             "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "FRESH_SELECTION": True,
+                                             "PARITY_MONTHS": PARITY_MONTHS_IS}),
+    "OOS_FU_PARITY": ("momentum/parity_log.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                     RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                     PARITY_MONTHS=PARITY_MONTHS_OOS)),
+    "BX_PARITY": ("boost/parity_log.py", {"PARITY": True}),
     # Commission drag at $30k (#376, slice 7): FU_COMBO, OOS_FU_COMBO, F_COMBO
     # and OOS_F_COMBO with only the starting cash changed. The templates set
     # the Interactive Brokers brokerage model, which applies LEAN's
@@ -344,7 +372,7 @@ def render(template_src, params, rates):
 #: Templates whose long-only modes ignore VOL_TARGET: their book comes from
 #: defensive_book, which has no volatility scaling.
 NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py",
-                 "momentum/fresh_universe.py")
+                 "momentum/fresh_universe.py", "momentum/parity_log.py")
 
 
 def check_variant(template, params):

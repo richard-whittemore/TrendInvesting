@@ -9,6 +9,7 @@ import ast
 import datetime as _dt
 import difflib
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -1965,6 +1966,296 @@ class BoostGoldenLogTest(unittest.TestCase):
         # 2023-10-02/03 and 2024-07-23/24; BX_GOLD's months hold none.
         months = _class_constants(*build_variants.VARIANTS["BX_GOLD_2"])["GOLDEN_MONTHS"]
         self.assertEqual(tuple(map(tuple, months)), ((2023, 10), (2024, 7)))
+
+
+def _additions_only(test, original, derived):
+    """Every code line of ``original`` is kept, in order, in ``derived``;
+    only comment lines may change."""
+    with open(os.path.join(HERE, original)) as f:
+        old = f.read().splitlines()
+    with open(os.path.join(HERE, derived)) as f:
+        new = f.read().splitlines()
+    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+               for line in old[i1:i2]]
+    test.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+
+class _Ticket:
+    def __init__(self, order_id, ok=True):
+        self.OrderId, self.ok, self.tags = order_id, ok, []
+
+    def UpdateTag(self, tag):
+        self.tags.append(tag)
+        return types.SimpleNamespace(IsSuccess=self.ok)
+
+
+class _Transactions:
+    def __init__(self, tickets=()):
+        self.tickets = list(tickets)
+
+    def GetOpenOrderTickets(self):
+        return list(self.tickets)
+
+
+def _limit_orders(algo):
+    """Record LimitOrder calls on ``algo`` and the cancel of each."""
+    algo.limits = []
+
+    def limit(sym, qty, price, tag=""):
+        rec = {"sym": sym, "qty": qty, "price": price, "tag": tag, "cancelled": False}
+        algo.limits.append(rec)
+        return types.SimpleNamespace(Cancel=lambda: rec.__setitem__("cancelled", True))
+
+    algo.LimitOrder = limit
+
+
+class ParityLogTest(unittest.TestCase):
+    """momentum/parity_log.py: fresh_universe.py exporting the parity
+    months' inputs in an order tag (ADR 0026, point 7, item 2)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/parity_log.py", {})
+        self.sym = namedtuple("Sym", "Value ID")
+
+    def _record(self, **kw):
+        sym = self.sym
+        a, b, c, d, e, new, spy, ief = (sym("A", "A1"), sym("B", "B1"), sym("C", "C1"), sym("D", "D1"),
+                                        sym("E", "E1"), sym("NEW", "N1"), sym("SPY", "S1"), sym("IEF", "I1"))
+        nan = float("nan")
+        index = ["2020-03-27", "2020-03-30", "2020-03-31"]
+        columns = {spy: [250.0, 251.5, 249.25], a: [1.0, 1.1, 1.2], b: [2.0, nan, 2.2], c: [3.0, 3.1, 3.2],
+                   d: [4.0, 4.1, 4.2], e: [5.0, 5.1, 5.2], new: [nan, nan, 9.5]}
+        counts = {s: sum(1 for x in col if x == x) for s, col in columns.items()}
+        args = dict(month="2020-04", index=index, columns=columns, spy=spy, risk_off=True, spy_close=249.25,
+                    spy_mean=250.1234567890123, spy_n=3, members=[a, b, c, d, e, new], ranked=[a, b, c, d, e],
+                    scores={a: 0.5, b: 0.4, c: 0.3, d: 0.2, e: 0.1},
+                    vol={a: 0.0123456789012345, b: 0.02, c: 0.03, d: 0.04, e: 0.05},
+                    sectors={a: 311, b: 311, c: 311, d: None, e: 206},
+                    targets={a: 0.2, b: 0.2, d: 0.09, ief: 0.49}, counts=counts, top_n=3, sector_cap=2, sample=1)
+        args.update(kw)
+        tag = self.module.parity_record(**args)
+        self.assertTrue(tag.startswith("PARITY1 "))
+        return json.loads(tag[len("PARITY1 "):])
+
+    def test_the_record_carries_the_month_its_inputs_and_its_book(self):
+        r = self._record()
+        self.assertEqual((r["month"], r["risk_off"], r["spy_close"], r["spy_n"], r["members"], r["scored"]),
+                         ("2020-04", True, 249.25, 3, 6, 5))
+        self.assertEqual(r["spy_mean"], 250.1234567890123)                 # repr round-trips
+        self.assertEqual(r["index"], ["2020-03-27", "2020-03-30", "2020-03-31"])
+        self.assertEqual(r["ranked"], [["A", 0.5, 0.0123456789012345, 311, "P"], ["B", 0.4, 0.02, 311, "P"],
+                                       ["C", 0.3, 0.03, 311, "C"], ["D", 0.2, 0.04, None, "P"],
+                                       ["E", 0.1, 0.05, 206, "-"]])
+        self.assertEqual(r["weights"], {"A": 0.2, "B": 0.2, "D": 0.09, "IEF": 0.49})
+        self.assertEqual(r["short"], {"NEW": 1})
+
+    def test_the_sample_is_every_pick_then_each_kind_up_to_its_size_with_spy(self):
+        r = self._record()
+        # Picks A B D; one capped (C), one beyond (E), one short (NEW), one gapped (B, already in).
+        self.assertEqual(sorted(r["closes"]), ["A", "B", "C", "D", "E", "NEW", "SPY"])
+        self.assertEqual(r["closes"]["B"], [2.0, None, 2.2])
+        self.assertEqual(r["closes"]["NEW"], [None, None, 9.5])
+        self.assertEqual(r["closes"]["SPY"], [250.0, 251.5, 249.25])
+
+    def test_a_sample_of_none_keeps_only_the_picks_and_spy(self):
+        self.assertEqual(sorted(self._record(sample=0)["closes"]), ["A", "B", "D", "SPY"])
+
+    def test_a_member_with_no_history_is_short_with_no_closes(self):
+        sym = self.sym
+        ghost = sym("GHOST", "G1")
+        base = self._record()
+        r = self._record(members=[sym("A", "A1"), ghost], sample=5)
+        self.assertEqual(r["short"]["GHOST"], 0)
+        self.assertEqual(r["closes"]["GHOST"], [None] * len(base["index"]))
+
+    def test_a_ticker_two_members_share_is_written_as_its_security_id(self):
+        sym = self.sym
+        a2 = sym("A", "A2")
+        args = dict(members=[sym("A", "A1"), a2], ranked=[sym("A", "A1"), a2])
+        r = self._record(scores={sym("A", "A1"): 0.5, a2: 0.4}, vol={}, sectors=None,
+                         targets={sym("A", "A1"): 0.49, a2: 0.49}, sample=0, **args)
+        self.assertEqual([row[0] for row in r["ranked"]], ["A1", "A2"])
+        self.assertEqual(sorted(r["weights"]), ["A1", "A2"])
+
+    def test_the_marks_are_defensive_books_picks(self):
+        names = ["T%d" % i for i in range(6)]
+        sectors = {n: 311 for n in names[:4]}
+        sectors.update({names[4]: 101, names[5]: 102})
+        marks = self.module.parity_marks(names, sectors, 2, 1)
+        self.assertEqual([marks[n] for n in names], ["P", "C", "C", "C", "P", "-"])
+        targets = self.module.defensive_book(names, 2, sector=sectors, sector_cap=1)
+        self.assertEqual(sorted(n for n in names if marks[n] == "P"), sorted(t for t in targets if t != "IEF"))
+
+    def _algo(self, tickets):
+        algo = self.module.MomentumResearch()
+        algo.Transactions = _Transactions(tickets)
+        algo.spy = "SPY"
+        algo.Securities = {"SPY": types.SimpleNamespace(Price=300.0)}
+        _limit_orders(algo)
+        return algo
+
+    def test_the_tag_goes_on_the_newest_open_order(self):
+        old, new = _Ticket(7), _Ticket(12)
+        algo = self._algo([new, old])
+        algo._parity_attach("PARITY1 {}")
+        self.assertEqual((new.tags, old.tags, algo.limits), (["PARITY1 {}"], [], []))
+        self.assertEqual((algo.parity_logged, algo.parity_bytes), (1, 10))
+
+    def test_with_no_open_order_a_cancelled_one_share_limit_order_carries_it(self):
+        for tickets in ([], [_Ticket(3, ok=False)]):
+            algo = self._algo(tickets)
+            algo._parity_attach("PARITY1 {}")
+            self.assertEqual(algo.limits, [{"sym": "SPY", "qty": 1, "price": 3.0, "tag": "PARITY1 {}",
+                                            "cancelled": True}])
+            self.assertEqual(algo.parity_dummies, 1)
+
+    def test_only_the_parity_months_are_exported(self):
+        algo = self.module.MomentumResearch()
+        algo.PARITY_MONTHS = ((2020, 4),)
+        algo.Time = _dt.datetime(2020, 4, 1, 8)
+        self.assertTrue(algo._parity_month())
+        algo.Time = _dt.datetime(2020, 5, 1, 8)
+        self.assertFalse(algo._parity_month())
+
+    def test_the_end_statistic_counts_the_months_and_bytes(self):
+        algo = self._algo([_Ticket(1)])
+        algo.PARITY_MONTHS = ((2020, 4), (2020, 5))
+        algo._parity_attach("PARITY1 {}")
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        algo.Portfolio, algo.equity_curve, algo.spy_curve, algo.scales = [], [], [], []
+        algo.Transactions.OrdersCount = 1
+        for attr in ("rebalances", "risk_off_months", "borrow_paid", "resizes", "skipped", "retried", "cash_sum",
+                     "cash_days", "fund_reads", "fund_hits", "early_selections"):
+            setattr(algo, attr, 0)
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(stats["Parity"], "months=2 logged=1 bytes=10 dummies=0")
+
+    def test_the_template_only_adds_to_fresh_universe(self):
+        _additions_only(self, "momentum/fresh_universe.py", "momentum/parity_log.py")
+
+    def test_the_template_fits_the_free_plans_file_limit(self):
+        with open(os.path.join(HERE, "momentum", "parity_log.py")) as f:
+            self.assertLess(len(f.read()), 32_000)
+
+    def test_the_runs_are_fu_combo_and_oos_fu_combo_plus_their_months(self):
+        for name, base, months in (("FU_PARITY", "FU_COMBO", build_variants.PARITY_MONTHS_IS),
+                                   ("OOS_FU_PARITY", "OOS_FU_COMBO", build_variants.PARITY_MONTHS_OOS)):
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/parity_log.py", name)
+            c = _class_constants(template, params)
+            self.assertEqual(tuple(map(tuple, c.pop("PARITY_MONTHS"))), months, name)
+            self.assertEqual(c.pop("PARITY_SAMPLE"), 5, name)
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
+
+    def test_the_months_are_at_least_24_a_window_plus_every_golden_month_in_it(self):
+        golden_is, golden_oos = {(2000, 3), (2008, 11), (2009, 6), (2013, 5)}, {(2016, 2), (2020, 4), (2021, 3),
+                                                                                (2022, 6), (2024, 3)}
+        for months, golden, first, last in ((build_variants.PARITY_MONTHS_IS, golden_is, (1999, 1), (2015, 12)),
+                                            (build_variants.PARITY_MONTHS_OOS, golden_oos, (2016, 1), (2026, 6))):
+            self.assertGreaterEqual(len(months) - len(golden), 24)
+            self.assertTrue(golden <= set(months))
+            self.assertEqual(list(months), sorted(set(months)))
+            self.assertTrue(first <= months[0] and months[-1] <= last)
+
+    def test_every_steps_by_months_across_years(self):
+        self.assertEqual(build_variants._every((2015, 11), (2016, 9), 5), [(2015, 11), (2016, 4), (2016, 9)])
+
+
+class BoostParityLogTest(unittest.TestCase):
+    """boost/parity_log.py: template.py exporting every bar's close,
+    indicators and state in order tags (ADR 0026, point 7, item 2)."""
+
+    def setUp(self):
+        self.module = _load_template(self, "boost/parity_log.py", {})
+
+    def test_a_row_carries_the_bar_and_the_ready_indicators(self):
+        row = self.module.parity_row(_dt.datetime(1993, 2, 1), 44.25, _Indicator(50.0), _Indicator(1.0, False),
+                                     _Indicator(44.1))
+        self.assertEqual(row, ["1993-02-01", 44.25, 50.0, None, 44.1, None, None])
+        self.module.set_parity_state(row, True, 1.47)
+        self.assertEqual(row[5:], [1, 1.47])
+        tag = self.module.parity_chunk([row])
+        self.assertTrue(tag.startswith("BPARITY1 "))
+        self.assertEqual(json.loads(tag[9:]), {"rows": [row]})
+
+    def _algo(self):
+        algo = _algorithm(self.module, "BoostResearch")
+        algo.PARITY = True
+        algo.END = (1992, 6, 30)
+        algo.Transactions = _Transactions()
+        _limit_orders(algo)
+        placed = algo.SetHoldings
+
+        def set_holdings(target, size=None):
+            placed(target, size)
+            algo.Transactions.tickets = [_Ticket(len(algo.orders))]
+        algo.SetHoldings = set_holdings
+        return algo
+
+    def test_warm_up_bars_are_rows_without_state_and_each_order_carries_the_rows_before_it(self):
+        algo = self._algo()
+        algo.IsWarmingUp = True
+        _day(algo, 99.0, when=_dt.datetime(1992, 1, 2))
+        algo.IsWarmingUp = False
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))           # first decision: 98%, an order
+        first = algo.Transactions.tickets[0]
+        rows = json.loads(first.tags[0][9:])["rows"]
+        self.assertEqual([r[0] for r in rows], ["1992-01-02", "1992-01-15"])
+        self.assertEqual((rows[0][5:], rows[1][5:]), ([None, None], [0, 0.98]))
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 16))           # no order: kept
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 17))           # a boost: an order with both rows
+        rows = json.loads(algo.Transactions.tickets[0].tags[0][9:])["rows"]
+        self.assertEqual([(r[0], r[5], r[6]) for r in rows], [("1992-01-16", 0, 0.98), ("1992-01-17", 1, 1.47)])
+        self.assertEqual(algo.orders, [{"SPY": 0.98}, {"SPY": 1.47}])  # trading unchanged
+        self.assertEqual(algo.limits, [])
+
+    def test_rows_past_the_chunk_size_and_near_the_end_go_on_a_cancelled_limit_order(self):
+        algo = self._algo()
+        algo.PARITY_CHUNK = 2
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 16))
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 17))
+        self.assertEqual(len(algo.limits), 1)
+        self.assertTrue(algo.limits[0]["cancelled"] and algo.limits[0]["qty"] == 1)
+        self.assertEqual(len(json.loads(algo.limits[0]["tag"][9:])["rows"]), 2)
+        algo.PARITY_CHUNK = 1500
+        _day(algo, 100.0, when=_dt.datetime(1992, 6, 22))           # within 10 days of END
+        self.assertEqual(len(algo.limits), 2)
+
+    def test_the_end_sends_what_is_left_and_counts_it(self):
+        algo = self._algo()
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        algo.curve = algo.px = []
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))           # an order: one tag
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 16))
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(stats["Parity"], "rows=2 tags=2 dummies=1")
+        algo.OnEndOfAlgorithm()                                       # nothing left: no further order
+        self.assertEqual(len(algo.limits), 1)
+
+    def test_without_the_switch_nothing_is_exported(self):
+        algo = self._algo()
+        algo.PARITY = False
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))
+        algo.OnEndOfAlgorithm()
+        self.assertNotIn("Parity", stats)
+        self.assertEqual((algo.limits, algo.Transactions.tickets[0].tags), ([], []))
+
+    def test_the_template_only_adds_to_template_py(self):
+        _additions_only(self, "boost/template.py", "boost/parity_log.py")
+
+    def test_the_run_is_bx_spy_with_the_switch(self):
+        c = _class_constants(*build_variants.VARIANTS["BX_PARITY"])
+        self.assertIs(c.pop("PARITY"), True)
+        self.assertEqual(c.pop("PARITY_CHUNK"), 1500)
+        self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]))
 
 if __name__ == "__main__":
     unittest.main()
