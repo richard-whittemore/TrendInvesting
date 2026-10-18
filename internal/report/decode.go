@@ -48,11 +48,11 @@ func read(e event.Envelope, versions []uint32, into interface{ Validate() error 
 	// A payload whose fields depend on its version is checked against the
 	// version it was recorded at, so a record carrying a later version's
 	// field is refused (ADR 0015).
-	err := into.Validate()
+	validate := into.Validate
 	if v, ok := into.(interface{ ValidateSchema(uint32) error }); ok {
-		err = v.ValidateSchema(e.SchemaVersion)
+		validate = func() error { return v.ValidateSchema(e.SchemaVersion) }
 	}
-	if err != nil {
+	if err := validate(); err != nil {
 		return fmt.Errorf("report: %s %q: %w", e.Type, e.ID, err)
 	}
 	return nil

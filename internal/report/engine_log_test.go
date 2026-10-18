@@ -28,6 +28,13 @@ func engineLog(t *testing.T, closes []float64) []byte {
 // among them, at the version it writes them at.
 func engineLogHolding(t *testing.T, closes []float64, positions []event.AccountPosition) []byte {
 	t.Helper()
+	return engineLogWith(t, closes, positions, false)
+}
+
+// engineLogWith is engineLogHolding with the kill switch engaged before the
+// first session when killed, so the gate refuses every order it would release.
+func engineLogWith(t *testing.T, closes []float64, positions []event.AccountPosition, killed bool) []byte {
+	t.Helper()
 	const strategyVersion = "boost/1.0.0+test"
 	cfg := event.TargetWeightConfigurationPayload{
 		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
@@ -65,6 +72,10 @@ func engineLogHolding(t *testing.T, closes []float64, positions []event.AccountP
 		}
 	}
 	apply(event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", day(0).Add(-time.Hour), cfg)
+	if killed {
+		apply(event.KillSwitchEventType, event.KillSwitchSchemaVersion, "kill-switch", day(0).Add(-time.Minute),
+			event.KillSwitchPayload{AccountID: "joint", AsOf: day(0).Add(-time.Minute), Engaged: true, Operator: "owner", Detail: "test"})
+	}
 	for n, c := range closes {
 		at := day(n)
 		view := func(label string, p float64) event.PriceView {
@@ -168,5 +179,52 @@ func TestTheReporterReadsTheReleasesTheGateWrites(t *testing.T) {
 	}
 	if !released {
 		t.Errorf("the summary's orders %+v do not show the sell %s released", summary.Orders, sell)
+	}
+}
+
+// TestTheReporterReadsTheRefusalsTheGateWrites: the gate journals a kill-switch,
+// broker-holding or stale-broker-snapshot refusal at risk.order.refused
+// version 3, so the reporter reads every refusal version the event package
+// holds (ADR 0015). A log the real gate wrote with such a refusal still
+// raises its alert and yields its summary, not a refused log that silences
+// every alert.
+func TestTheReporterReadsTheRefusalsTheGateWrites(t *testing.T) {
+	raw := engineLogWith(t, []float64{100}, nil, true)
+	_, envelopes, err := report.Load(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusals := 0
+	for _, e := range envelopes {
+		if e.Type == event.OrderRefusedEventType && e.SchemaVersion == event.OrderRefusedSafetyVersion {
+			refusals++
+		}
+	}
+	if refusals == 0 {
+		t.Fatal("the gate wrote no version 3 refusal: the fixture no longer shows what the gate writes")
+	}
+	alerts, err := report.Alerts(envelopes)
+	if err != nil {
+		t.Fatalf("alerts of the gate's own log: %v", err)
+	}
+	if len(alerts) != refusals {
+		t.Errorf("%d alerts for %d version 3 refusals: %+v", len(alerts), refusals, alerts)
+	}
+	date, ok := report.ClosedSessionDate(envelopes)
+	if !ok {
+		t.Fatal("the log records no closed session")
+	}
+	summary, err := report.Summarize(envelopes, date, "SPY")
+	if err != nil {
+		t.Fatalf("summary of the gate's own log: %v", err)
+	}
+	refused := 0
+	for _, o := range summary.Orders {
+		if o.Status == report.OrderRefused {
+			refused++
+		}
+	}
+	if refused != refusals {
+		t.Errorf("the summary shows %d refused orders, want %d: %+v", refused, refusals, summary.Orders)
 	}
 }
