@@ -166,7 +166,7 @@ func TestAnEngineStateAlertRepeatsAndAnAcknowledgementStopsIt(t *testing.T) {
 
 func TestReconciliationRecordsAreReadLikeAnyOther(t *testing.T) {
 	for name, eventType := range map[string]string{
-		"result": event.ReconciliationResultEventType, "acknowledgement": event.AlertAcknowledgedEventType,
+		"result":   event.ReconciliationResultEventType,
 		"approval": event.OperatorRunApprovedEventType, "caused state": event.EngineStateEventType,
 	} {
 		s := newStream(t)

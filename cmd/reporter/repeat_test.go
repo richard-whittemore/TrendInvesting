@@ -231,3 +231,31 @@ func TestEachPagerDutyRepeatOpensANewIncidentUntilTheJournalAcknowledges(t *test
 		t.Fatalf("an acknowledgement recorded in the journal stops the pages, got %d triggers", after)
 	}
 }
+
+// TestARefusedAcknowledgementDoesNotStopTheRepeats: the journal keeps an
+// acknowledgement the engine refused (here, one naming another account); the
+// halt keeps repeating on both channels until a delivered one is journalled.
+func TestARefusedAcknowledgementDoesNotStopTheRepeats(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	client := &http.Client{Transport: r}
+	dir := t.TempDir()
+	entries := haltedEntries(t)
+	key := alertKey(t, entries, report.KindHalted)
+	refused := event.AlertAcknowledgedPayload{AccountID: "ira", AlertKey: key, AcknowledgedBy: "owner", AcknowledgedAt: t0.Add(time.Hour)}
+	entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 6, event.AlertAcknowledgedEventType, event.AlertAcknowledgedSchemaVersion, "ack", t0, refused)})
+	path := writeRun(t, dir, entries)
+	if err := os.Chtimes(path, t0, t0); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-repeat-interval", "30m"}
+	for _, after := range []time.Duration{time.Hour, time.Hour + 31*time.Minute} {
+		if err := run(args, twoChannels(), func() time.Time { return t0.Add(after) }, &bytes.Buffer{}, client); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{"ntfy.private.test", "events.pagerduty.test"} {
+		if got := r.to(host); count(got, "engine halted") != 2 {
+			t.Fatalf("%s: a refused acknowledgement leaves the halt repeating:\n%s", host, strings.Join(got, "\n---\n"))
+		}
+	}
+}

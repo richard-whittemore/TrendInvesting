@@ -105,7 +105,9 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //
 // Engine-state and reconciliation alerts repeat until acknowledged; an
 // operator.alert.acknowledged anywhere in the journal acknowledges the alert
-// whose key it names.
+// whose key it names, provided the engine delivered it: one that is for
+// another account, fails validation or is at a version the engine does not
+// read was refused and acknowledges nothing.
 func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	account, _, err := AccountOf(envelopes)
 	if err != nil {
@@ -147,11 +149,13 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				out = append(out, reconciliationAlert(account, e, p, after))
 			}
 		case event.AlertAcknowledgedEventType:
+			// The journal keeps an acknowledgement the engine refused (another
+			// account, an invalid or unreadable record, a version it does not
+			// read); only one it delivered stops the repeats (ADR 0019).
 			var p event.AlertAcknowledgedPayload
-			if err := read(e, acknowledgedVersions, &p); err != nil {
-				return nil, err
+			if err := read(e, acknowledgedVersions, &p); err == nil && p.AccountID == account {
+				acknowledged[p.AlertKey] = true
 			}
-			acknowledged[p.AlertKey] = true
 		case event.OrderRefusedEventType:
 			var p event.OrderRefusedPayload
 			if err := read(e, refusedVersions, &p); err != nil {
