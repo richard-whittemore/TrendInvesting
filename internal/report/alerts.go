@@ -93,7 +93,9 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     (missing bars, stale snapshot, missing universe, missing close
 //     histories) and a refusal for a missing mark are missing data; every
 //     other withheld reason is a withheld decision, routine except
-//     all-unaffordable, which may rest on a bad valuation and is urgent.
+//     all-unaffordable, which may rest on a bad valuation, and
+//     labels-missing, which may rest on a broken sector-label source; both
+//     are urgent.
 //   - A risk.reconciliation.result that degrades or halts is one incident,
 //     however many components it names; the engine-state record the same
 //     reconciliation caused is that incident too, not another alert. A
@@ -339,6 +341,10 @@ func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPaylo
 	case event.WithheldAllUnaffordable:
 		// The valuation itself may be wrong (a bad net liquidation or bad
 		// raw closes), which a person checks now (ADR 0026, point 2, "D7-L").
+		severity = Urgent
+	case event.WithheldLabelsMissing:
+		// A sector-label source or its mapping may have failed, which a
+		// person fixes before the next decision (ADR 0026, points 5 and 8).
 		severity = Urgent
 	}
 	return Alert{

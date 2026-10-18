@@ -44,7 +44,12 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 //     input the run reads (bars or compact), required for momentum: the
 //     run applies the compact input's rules from its first decision session
 //     instead of inferring the shape from the first close history read.
-const TargetWeightConfigurationSchemaVersion uint32 = 6
+//   - Version 7 adds Momentum's MaxUnlabelledShare, the largest share of the
+//     ranked members that may have no sector label in a decided month,
+//     required for momentum: above it the decision is withheld as
+//     labels-missing, since a name with no label is ranked uncapped (ADR 0026
+//     points 5 and 8).
+const TargetWeightConfigurationSchemaVersion uint32 = 7
 
 // The strategies this schema configures: Boost on SPY for the joint margin
 // account, and the momentum combination for an IRA (docs/live-trading/plan.md,
@@ -174,6 +179,14 @@ type MomentumConfiguration struct {
 	// inferred from the inputs, so the rules of the compact input hold from
 	// the first decision session (ADR 0026, point 5, "fail closed").
 	UniverseInput string `json:"universe_input"`
+	// MaxUnlabelledShare is the largest share of the ranked members that may
+	// have no sector label in a month that is decided, in (0, 1). A name with
+	// no label is ranked uncapped, as the backtest ranked a stock with no
+	// Morningstar sector (ADR 0026 point 8); a snapshot above the share is a
+	// label outage and is withheld as labels-missing (ADR 0026 point 5). The
+	// backtest's months had 3.5% to 5.3% unlabelled
+	// (docs/research/parity-2026-10.md); the configured value is 0.20.
+	MaxUnlabelledShare float64 `json:"max_unlabelled_share"`
 }
 
 // GlideConfiguration is an IRA's glide path (plan.md section 2, "Bond sleeve
@@ -388,7 +401,7 @@ func (c MomentumConfiguration) isZero() bool {
 		c.SectorCap == 0 && !c.InverseVolatility && c.Invested == 0 && c.TrendInstrument == "" &&
 		c.TrendCloses == 0 && c.RiskOffInstrument == "" && c.RiskOffFraction == 0 &&
 		c.RebalanceBand == 0 && c.UniverseSource == "" && len(c.SectorSources) == 0 &&
-		c.UniverseInput == ""
+		c.UniverseInput == "" && c.MaxUnlabelledShare == 0
 }
 
 func (c MomentumConfiguration) validate() []error {
@@ -433,6 +446,9 @@ func (c MomentumConfiguration) validate() []error {
 	}
 	if c.UniverseSource == "" {
 		errs = append(errs, errors.New("momentum universe source is required"))
+	}
+	if !isFinite(c.MaxUnlabelledShare) || c.MaxUnlabelledShare <= 0 || c.MaxUnlabelledShare >= 1 {
+		errs = append(errs, errors.New("momentum max unlabelled share must lie strictly between 0 and 1"))
 	}
 	if c.UniverseInput != UniverseInputBars && c.UniverseInput != UniverseInputCompact {
 		errs = append(errs, fmt.Errorf("momentum universe input %q is not %q or %q", c.UniverseInput, UniverseInputBars, UniverseInputCompact))

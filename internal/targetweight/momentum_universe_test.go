@@ -32,6 +32,7 @@ func closeHistories(t *testing.T, cfg event.TargetWeightConfigurationPayload, ca
 		TopN: m.TopN, SectorCap: m.SectorCap, Invested: m.Invested,
 		TrendInstrument: m.TrendInstrument, TrendCloses: m.TrendCloses,
 		RiskOffInstrument: m.RiskOffInstrument, RiskOffFraction: m.RiskOffFraction,
+		MaxUnlabelledShare: m.MaxUnlabelledShare,
 	}
 	rows := make([]momentum.Row, len(snap.Rows))
 	for k, r := range snap.Rows {
@@ -457,9 +458,13 @@ func TestACompactDecisionSessionRankingNoMemberNeedsNoHistory(t *testing.T) {
 // dollar volume is ranked in its place, and the run configured for bars
 // decides, from the bars of every member it ranks, exactly as the compact
 // run does. A universe of 4 leaves FFF, the next by dollar volume, outside
-// it on clean data.
+// it on clean data. HHH, unlabelled, is one member in four, above the
+// default unlabelled-share ceiling, so the ceiling is raised to isolate the
+// missing bar.
 func TestABarsRunDecidesWithoutAMemberLeftOutOfTheDecisionSession(t *testing.T) {
-	four := func(c *event.TargetWeightConfigurationPayload) { c.Momentum.UniverseSize = 4 }
+	four := func(c *event.TargetWeightConfigurationPayload) {
+		c.Momentum.UniverseSize, c.Momentum.MaxUnlabelledShare = 4, 0.3
+	}
 	spoiled := map[string]string{"2025-01-31": "AAA"}
 	full := simulateMomentum(t, momentumOptions{mutate: four, noBar: spoiled})
 	compact := simulateMomentum(t, momentumOptions{mutate: four, noBar: spoiled, compact: true})

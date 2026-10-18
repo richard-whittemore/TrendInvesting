@@ -22,9 +22,9 @@ func capCandidates() []momentum.Candidate {
 		{InstrumentID: "C", Sector: "Y", Score: 0.4, Volatility: 0.04}, // ties B; C after B by ID
 		{InstrumentID: "B", Sector: "X", Score: 0.4, Volatility: 0.05}, // X already holds A: capped
 		{InstrumentID: "A", Sector: "X", Score: 0.5, Volatility: 0.02},
-		{InstrumentID: "D", Sector: "", Score: 0.3, Volatility: 0.02},  // no label: left out
+		{InstrumentID: "D", Sector: "", Score: 0.3, Volatility: 0.02},  // no label: uncapped, third pick
 		{InstrumentID: "G", Sector: "V", Score: 0.25, Volatility: 0},   // zero volatility: left out
-		{InstrumentID: "E", Sector: "Z", Score: 0.2, Volatility: 0.01}, // third pick
+		{InstrumentID: "E", Sector: "Z", Score: 0.2, Volatility: 0.01}, // the book is full by then
 	}
 }
 
@@ -43,9 +43,9 @@ func TestSelectBookRanksCapsAndExcludes(t *testing.T) {
 		{"A", 1, momentum.StatusPicked, true},
 		{"B", 2, momentum.StatusSectorCapped, false},
 		{"C", 3, momentum.StatusPicked, true},
-		{"D", 4, momentum.StatusNoSector, true},        // uncapped in the backtest: its third pick
-		{"G", 5, momentum.StatusZeroVolatility, false}, // the backtest's book is full by then
-		{"E", 6, momentum.StatusPicked, false},
+		{"D", 4, momentum.StatusPicked, true},          // uncapped, as in the backtest: the third pick
+		{"G", 5, momentum.StatusZeroVolatility, false}, // the book is full by then
+		{"E", 6, momentum.StatusBeyondTopN, false},
 		{"F", 7, momentum.StatusBeyondTopN, false},
 	}
 	if len(book.Ranked) != len(want) {
@@ -58,16 +58,52 @@ func TestSelectBookRanksCapsAndExcludes(t *testing.T) {
 		mustEqual(t, w.id+" status", got.Status, w.status)
 		mustEqual(t, w.id+" backtest pick", got.BacktestWouldPick, w.backtest)
 	}
-	// Inverse volatility over A, C, E: 50, 25 and 100 of 175, of 0.98.
+	// Inverse volatility over A, C, D: 50, 25 and 50 of 125, of 0.98.
 	weights := map[string]float64{}
 	for _, tg := range book.Targets {
 		weights[tg.InstrumentID] = tg.Weight
 	}
-	near(t, "A", weights["A"], 0.28, 1e-15)
-	near(t, "C", weights["C"], 0.14, 1e-15)
-	near(t, "E", weights["E"], 0.56, 1e-15)
+	near(t, "A", weights["A"], 0.392, 1e-15)
+	near(t, "C", weights["C"], 0.196, 1e-15)
+	near(t, "D", weights["D"], 0.392, 1e-15)
 	mustEqual(t, "targets", len(book.Targets), 3)
-	mustEqual(t, "target order", book.Targets[0].InstrumentID+book.Targets[1].InstrumentID+book.Targets[2].InstrumentID, "ACE")
+	mustEqual(t, "target order", book.Targets[0].InstrumentID+book.Targets[1].InstrumentID+book.Targets[2].InstrumentID, "ACD")
+}
+
+// TestSelectBookPicksNamesWithNoSectorAsTheBacktestDoes: a name with no
+// sector label is ranked and picked, counted toward the book's TopN but
+// toward no sector's cap, as defensive_book left it (defensive_v2.py:69-74;
+// ADR 0026 point 8, the owner's decision of 2026-10-18). With no tie and no
+// zero volatility, the live book is BacktestBook's, status for status and
+// weight for weight.
+func TestSelectBookPicksNamesWithNoSectorAsTheBacktestDoes(t *testing.T) {
+	cands := []momentum.Candidate{
+		{InstrumentID: "A", Sector: "X", Score: 0.9, Volatility: 0.02},
+		{InstrumentID: "B", Sector: "", Score: 0.8, Volatility: 0.03},
+		{InstrumentID: "C", Sector: "X", Score: 0.7, Volatility: 0.05}, // X holds A: capped
+		{InstrumentID: "D", Sector: "", Score: 0.6, Volatility: 0.04},  // a second unlabelled pick: no cap
+		{InstrumentID: "E", Sector: "", Score: 0.5, Volatility: 0.06},  // the book is full
+	}
+	live, err := momentum.SelectBook(smallBook(), cands, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backtest, err := momentum.BacktestBook(smallBook(), cands, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []momentum.Status{momentum.StatusPicked, momentum.StatusPicked, momentum.StatusSectorCapped, momentum.StatusPicked, momentum.StatusBeyondTopN}
+	for i, w := range want {
+		l, b := live.Ranked[i], backtest.Ranked[i]
+		mustEqual(t, l.InstrumentID+" live status", l.Status, w)
+		mustEqual(t, l.InstrumentID+" backtest status", b.Status, w)
+		mustEqual(t, l.InstrumentID+" backtest pick", l.BacktestWouldPick, w == momentum.StatusPicked)
+		mustEqual(t, l.InstrumentID+" weight", l.Weight, b.Weight)
+	}
+	mustEqual(t, "targets", len(live.Targets), len(backtest.Targets))
+	for i := range live.Targets {
+		mustEqual(t, "target", live.Targets[i], backtest.Targets[i])
+	}
 }
 
 func TestSelectBookRiskOffMovesHalfToTheBond(t *testing.T) {
@@ -79,7 +115,7 @@ func TestSelectBookRiskOffMovesHalfToTheBond(t *testing.T) {
 	for _, tg := range book.Targets {
 		weights[tg.InstrumentID] = tg.Weight
 	}
-	near(t, "A", weights["A"], 0.14, 1e-15)
+	near(t, "A", weights["A"], 0.196, 1e-15)
 	near(t, "IEF", weights["IEF"], 0.49, 1e-15)
 	mustEqual(t, "targets", len(book.Targets), 4)
 	mustEqual(t, "bond last", book.Targets[3].InstrumentID, "IEF")

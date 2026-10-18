@@ -23,7 +23,7 @@ func validMomentumConfiguration() event.TargetWeightConfigurationPayload {
 			InverseVolatility: true, Invested: 0.98, TrendInstrument: "SPY", TrendCloses: 200,
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "massive", SectorSources: []string{"ishares-iwv-gics", "nasdaq-screener"},
-			UniverseInput: event.UniverseInputCompact,
+			UniverseInput: event.UniverseInputCompact, MaxUnlabelledShare: 0.20,
 		},
 		Glide:     synthGlide(),
 		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
@@ -119,6 +119,9 @@ func TestMomentumConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "risk-off fraction", v, func(p *P) { p.Momentum.RiskOffFraction = 1.5 }, "risk-off fraction")
 	expectInvalid(t, "band", v, func(p *P) { p.Momentum.RebalanceBand = 0 }, "rebalance band")
 	expectInvalid(t, "universe source", v, func(p *P) { p.Momentum.UniverseSource = "" }, "universe source")
+	expectInvalid(t, "no unlabelled share ceiling", v, func(p *P) { p.Momentum.MaxUnlabelledShare = 0 }, "unlabelled share")
+	expectInvalid(t, "unlabelled share ceiling of one", v, func(p *P) { p.Momentum.MaxUnlabelledShare = 1 }, "unlabelled share")
+	expectInvalid(t, "non-finite unlabelled share ceiling", v, func(p *P) { p.Momentum.MaxUnlabelledShare = math.NaN() }, "unlabelled share")
 	expectInvalid(t, "no universe input", v, func(p *P) { p.Momentum.UniverseInput = "" }, "universe input")
 	expectInvalid(t, "unknown universe input", v, func(p *P) { p.Momentum.UniverseInput = "both" }, "universe input")
 	expectInvalid(t, "no sector sources", v, func(p *P) { p.Momentum.SectorSources = nil }, "sector sources")
@@ -448,14 +451,13 @@ func TestALifecycleReportDescribesAnOrderAsReleased(t *testing.T) {
 	}
 }
 
-// TestTargetWeightConfigurationSchemaVersionDeclaresTheUniverseInput pins
-// the version that adds Momentum's UniverseInput: version 5 is the
-// margin-cushion thresholds and MaxSnapshotAge, so the universe input is
-// version 6, a new hash (ADR 0016) that a reader of version 5 refuses (ADR
-// 0015).
-func TestTargetWeightConfigurationSchemaVersionDeclaresTheUniverseInput(t *testing.T) {
-	if event.TargetWeightConfigurationSchemaVersion != 6 {
-		t.Fatalf("TargetWeightConfigurationSchemaVersion = %d, want 6 (version 6 adds the universe input)", event.TargetWeightConfigurationSchemaVersion)
+// TestTargetWeightConfigurationSchemaVersionDeclaresTheUnlabelledCeiling
+// pins the version that adds Momentum's MaxUnlabelledShare: version 6 is the
+// universe input, so the unlabelled-share ceiling is version 7, a new hash
+// (ADR 0016) that a reader of version 6 refuses (ADR 0015).
+func TestTargetWeightConfigurationSchemaVersionDeclaresTheUnlabelledCeiling(t *testing.T) {
+	if event.TargetWeightConfigurationSchemaVersion != 7 {
+		t.Fatalf("TargetWeightConfigurationSchemaVersion = %d, want 7 (version 7 adds the unlabelled-share ceiling)", event.TargetWeightConfigurationSchemaVersion)
 	}
 }
 

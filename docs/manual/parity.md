@@ -26,15 +26,27 @@ never rewritten (AGENTS.md rule 6).
 
 ## The thresholds
 
-They were fixed before any comparison was run:
+They were fixed before any comparison was run, and the owner amended one of
+them on 2026-10-18 (ADR 0026, amendment of that date):
 
 | Check | Must hold |
 | --- | --- |
 | ranked order, cap marks | exactly the same |
 | weights | within 0.000000000001 (1e-12) of QuantConnect's |
 | scores, volatility, the SPY average | within one part in a billion (1e-9) |
-| Boost RSI, both averages, state and target | exactly the same, every session |
+| Boost RSI, both averages | within one part in a billion (1e-9), every session; ready on exactly the same sessions |
+| Boost state and target | exactly the same, every session |
 | a live departure from the backtest | fails, unless ADR 0026 point 8 lists its cause |
+
+Boost's RSI and averages were first required to match bit for bit. They
+cannot: QuantConnect works them out in C#'s `decimal` numbers and Go in
+ordinary 64-bit floating point, so the last digits differ (the largest
+difference found was about six parts in ten trillion). None of those
+differences changed a decision: the boosted-or-not state and the SPY target
+matched on every one of 7,166 sessions. Matching QuantConnect to the last
+bit would mean rewriting its arithmetic in Go operation for operation, so
+the owner accepted the same one-in-a-billion tolerance the scores already
+had. The state and target must still match exactly.
 
 ### The one rule: no mismatch is ever excused
 
@@ -43,8 +55,7 @@ things.
 
 **First, it checks Go against QuantConnect exactly.** Go recomputes each
 month the way the backtest did, including the cases where live trading
-deliberately does something else: a stock with no sector label is ranked
-and left uncapped, as QuantConnect did; equal scores stay in QuantConnect's
+deliberately does something else: equal scores stay in QuantConnect's
 order; a stock whose price never moved is picked and weighted as if its
 volatility were 1; a price history with a missing day is scored over the
 prices it has, and one with fewer than 253 prices is left out; SPY's
@@ -71,7 +82,7 @@ the same inputs and lists every way the live result differs from that
 backtest-compatible one, each with its cause. It works this out by
 applying the live rules one at a time: equal scores by ticker, then
 leaving out a stock with a gap in its prices, then one whose price never
-moved, then one with no sector label. Every stock whose mark changes at a
+moved. Every stock whose mark changes at a
 step, and the month's weights if they change, is listed under that
 step's cause, and the live result must then match the last step exactly.
 Anything left over is listed as `unexplained`.
@@ -83,9 +94,16 @@ slides over a missing day, equal scores ranked in whatever order the data
 arrived, a stock whose price never moved weighted as if its volatility
 were 1, and RSI's dependence on where its history starts. The
 `differences` check passes only if every listed departure has one of those
-causes. A stock with no sector label is not on the list (the backtest left
-it uncapped, live leaves it out), and nor is `unexplained`, so either one
-fails it.
+causes. `unexplained` is not on the list, so it fails it.
+
+A stock with no sector label is not a departure at all. Live trading used
+to leave such a stock out, which the backtest did not, and the 2026-10-18
+comparison failed on it. The owner decided on 2026-10-18 that live trading
+should do what the backtest did: such a stock is ranked and can be picked,
+and it counts toward the 25 picks but not toward any sector's limit of 3
+(target-weight rules version 1.13.0). So the live result must equal the
+backtest's for it, and a live result that left one out would be listed as
+`unexplained`.
 
 A check that had nothing to compare fails too: it proves nothing.
 
@@ -161,12 +179,15 @@ valid, a run with no planned months).
   length, dates out of order or repeated, a picked stock with no weight, a
   stock ranked twice, a member count that is not the ranked plus the too
   short); nothing in that month is compared further. It also fails when
-  Go gave a stock a status the tool has no backtest mark for. A required
+  Go gave a stock a status the tool has no backtest mark for. A Boost
+  export fails it for a close that is not positive, or an RSI outside 0 to
+  100 (an RSI just above 100 would otherwise pass the 1e-9 tolerance
+  against a Go RSI of 100). A required
   field that is missing or null (a weight or a close count included), or an
   empty ticker, stops the tool before any comparison (exit status 2).
 - **`differences` fails**: the live rule departs from the backtest for a
-  reason ADR 0026 point 8 does not list. A `no-sector` row needs an owner
-  decision; an `unexplained` row is a Go defect until shown otherwise.
+  reason ADR 0026 point 8 does not list. An `unexplained` row is a Go
+  defect until shown otherwise.
 - **A check fails**: the Go code and the backtest disagree. The first failure
   line says where. This is a result, not a tool fault: record it, open an
   issue for it, and do not change a threshold after seeing it.

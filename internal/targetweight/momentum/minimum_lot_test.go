@@ -19,6 +19,19 @@ func lot(prices map[string]float64) momentum.MinimumLot {
 	return momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: all}
 }
 
+// lotCandidates is capCandidates without D, its unlabelled name, which the
+// rule picks uncapped as the third pick: these tests value the book of A, C
+// and E and the names that replace them.
+func lotCandidates() []momentum.Candidate {
+	var out []momentum.Candidate
+	for _, c := range capCandidates() {
+		if c.InstrumentID != "D" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func statusOf(book momentum.Book) map[string]momentum.RankedName {
 	out := map[string]momentum.RankedName{}
 	for _, r := range book.Ranked {
@@ -40,7 +53,7 @@ func targetIDs(book momentum.Book) []string {
 // unaffordable and F, the next eligible ranked name, takes its place (ADR
 // 0026, point 2, "D7-L"; plan.md lines 380-383).
 func TestMinimumLotSkipsAPickWhoseOneShareExceedsItsTarget(t *testing.T) {
-	book, err := momentum.SelectBookWithMinimumLot(smallBook(), capCandidates(), false, lot(map[string]float64{"C": 150}))
+	book, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, lot(map[string]float64{"C": 150}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +78,7 @@ func TestMinimumLotSkipsAPickWhoseOneShareExceedsItsTarget(t *testing.T) {
 // X goes to B, which the cap had kept out, so the cap still holds (one per
 // sector) and counts only the names held.
 func TestMinimumLotFreesTheSectorSlot(t *testing.T) {
-	book, err := momentum.SelectBookWithMinimumLot(smallBook(), capCandidates(), false, lot(map[string]float64{"A": 300}))
+	book, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, lot(map[string]float64{"A": 300}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +94,7 @@ func TestMinimumLotFreesTheSectorSlot(t *testing.T) {
 // repeats until no pick's one share exceeds its target; each pass skips at
 // least one more name, so it ends.
 func TestMinimumLotIteratesUntilEveryPickIsAffordable(t *testing.T) {
-	book, err := momentum.SelectBookWithMinimumLot(smallBook(), capCandidates(), false, lot(map[string]float64{"C": 150, "A": 270}))
+	book, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, lot(map[string]float64{"C": 150, "A": 270}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,13 +116,13 @@ func TestMinimumLotIteratesUntilEveryPickIsAffordable(t *testing.T) {
 // E's $560 target becomes $280, below its $300 share.
 func TestMinimumLotUsesTheMomentumSleevesScale(t *testing.T) {
 	l := lot(map[string]float64{"E": 300})
-	full, err := momentum.SelectBookWithMinimumLot(smallBook(), capCandidates(), false, l)
+	full, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, l)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustEqual(t, "E at full scale", statusOf(full)["E"].Status, momentum.StatusPicked)
 	l.Scale = 0.5
-	half, err := momentum.SelectBookWithMinimumLot(smallBook(), capCandidates(), false, l)
+	half, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,21 +244,26 @@ func mustAllUnaffordable(t *testing.T, d momentum.Decision, n int) {
 	}
 }
 
-// TestDecideWithholdsAMixedBookOfDearAndUnlabelledNames leaves BBB without
-// a sector label and prices AAA's one share above its target: no pick is
-// affordable and one was skipped as unaffordable, so the decision is
-// withheld as all-unaffordable, not decided.
-func TestDecideWithholdsAMixedBookOfDearAndUnlabelledNames(t *testing.T) {
+// TestDecideSubstitutesAnUnlabelledNameForADearOne leaves BBB without a
+// sector label and prices AAA's one share above its target: BBB is ranked
+// and picked uncapped, as the backtest picked such a name (ADR 0026 point
+// 8, the owner's decision of 2026-10-18), so it takes AAA's place and the
+// decision is decided, not withheld. One unlabelled member in four is above
+// the default unlabelled-share ceiling, so the ceiling is raised to isolate
+// the substitution.
+func TestDecideSubstitutesAnUnlabelledNameForADearOne(t *testing.T) {
 	in := decideInput()
 	in.Universe.Rows[1].Sector, in.Universe.Rows[1].SectorSource = "", ""
 	in.MinimumLot = &momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: map[string]float64{"AAA": 2000, "BBB": 1}}
-	d, err := momentum.Decide(momentum.FCombo(), in)
+	cfg := momentum.FCombo()
+	cfg.MaxUnlabelledShare = 0.5
+	d, err := momentum.Decide(cfg, in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustAllUnaffordable(t, d, 1)
-	mustEqual(t, "BBB", d.Names[1].Status, momentum.StatusNoSector)
-	mustEqual(t, "detail", d.Detail, "1 candidate valued, every one unaffordable (one share at its previous raw close exceeds its target value: weight x momentum scale 1 x net liquidation 1000.00); 1 left out (1 no sector); the book is kept: check the net liquidation and the raw closes")
+	mustEqual(t, "outcome", d.Outcome, momentum.OutcomeDecided)
+	mustEqual(t, "AAA", d.Names[0].Status, momentum.StatusUnaffordable)
+	mustEqual(t, "BBB", d.Names[1].Status, momentum.StatusPicked)
 }
 
 // TestDecideNamesTheZeroVolatilityLeftOut flattens BBB, so its volatility is
@@ -345,13 +363,12 @@ func TestDecideWithholdsAnUnaffordablePartialRiskOffBook(t *testing.T) {
 }
 
 // TestDecideWithNoCandidateUnderTheLotIsStillWithheld: a book with no pick
-// and none skipped as unaffordable (here every member unlabelled) is
-// withheld as no-eligible-names, not all-unaffordable.
+// and none skipped as unaffordable (here every scored member with zero
+// volatility) is withheld as no-eligible-names, not all-unaffordable.
 func TestDecideWithNoCandidateUnderTheLotIsStillWithheld(t *testing.T) {
 	in := decideInput()
-	for i := range in.Universe.Rows {
-		in.Universe.Rows[i].Sector, in.Universe.Rows[i].SectorSource = "", ""
-	}
+	in.Closes["AAA"] = series(in.Sessions, constant(300, 50))
+	in.Closes["BBB"] = series(in.Sessions, constant(300, 40))
 	in.MinimumLot = &momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: map[string]float64{"AAA": 1, "BBB": 1}}
 	d, err := momentum.Decide(momentum.FCombo(), in)
 	if err != nil {

@@ -270,6 +270,7 @@ func momentumRule(m event.MomentumConfiguration) momentum.Config {
 		TopN: m.TopN, SectorCap: m.SectorCap, Invested: m.Invested,
 		TrendInstrument: m.TrendInstrument, TrendCloses: m.TrendCloses,
 		RiskOffInstrument: m.RiskOffInstrument, RiskOffFraction: m.RiskOffFraction,
+		MaxUnlabelledShare: m.MaxUnlabelledShare,
 	}
 }
 
