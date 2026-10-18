@@ -160,6 +160,14 @@ and after a crash.
     and `test_an_approved_fresh_run_resumed_after_a_crash_takes_its_own_input_awaiting_its_reply`:
     a run with no Run approval still has an identity of its own, and a
     resumed run, approved or not, is asked for its own input again.
+    `test_a_crash_resume_keeps_the_saved_batch_and_delivers_the_rest_of_it_once`
+    and `test_a_crash_resume_after_every_input_was_committed_sends_nothing_again`
+    (`adapter/ibkr/tests/test_delivery.py`): a crash resume under a new
+    `TI_RUN` keeps the day's market-data batch and its stream folder (found
+    by the run's identity, [market data](market-data.md), "A crash
+    resume"), so what the crashed run committed is never sent again and the
+    rest goes once; `test_a_fresh_run_drops_the_earlier_runs_batch_and_needs_its_own_warm_up_folder`:
+    a fresh run never takes the earlier run's batch or folder.
   - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
     a changed copy under the waiting input's ID is refused; the original's
     reply is asked for and its order sent once.

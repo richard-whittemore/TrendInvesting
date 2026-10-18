@@ -68,6 +68,9 @@ class LoggedEngine:
         self.configuration_hash = configuration_hash
         self.strategy_version = strategy_version
         self.committed = {}
+        # A resumed run's copy of the crashed run's committed inputs, each
+        # answered from the log as the engine answers it (ADR 0027 section 4).
+        self.copied = {}
         self.received = []
         self.connects = 0
         self.records = 0
@@ -91,6 +94,34 @@ class LoggedEngine:
             f.write(line + json.dumps({"commit": {"sequence": 1, "record_hash": last}}, separators=COMPACT) + "\n")
         self.next_sequence = 2
 
+    @classmethod
+    def resumed(cls, crashed_log, log_path, decisions=None):
+        """A crash resume of the run whose log is crashed_log, in a new log log_path (a new TI_RUN, engine -resume).
+
+        As cmd/engine's resume: the new log holds a copy of the crashed log's
+        records, so the run's identity carries over (relay.run_identity), its
+        next sequence follows them, and an input the crashed run committed is
+        answered from the copy, never committed again (ADR 0027 section 6).
+        """
+        data = Path(crashed_log).read_bytes()
+        Path(log_path).write_bytes(data)
+        engine = cls(log_path, decisions)
+        lines = [json.loads(line) for line in data.decode("utf-8").splitlines()[1:]]
+        group = []
+        for line in lines:
+            if "record" in line:
+                group.append(line["record"])
+                continue
+            envelope = group[0]["envelope"]
+            decided = [{"type": r["envelope"]["type"], "payload": r["envelope"]["payload"]} for r in group[1:]]
+            reply = {"id": "decisions:" + envelope["id"], "type": "engine.decisions", "envelope_version": 1,
+                     "schema_version": 1, "causation_id": envelope["id"], "sequence": envelope["sequence"],
+                     "configuration_hash": engine.configuration_hash, "strategy_version": engine.strategy_version,
+                     "payload": {"decisions": decided}}
+            engine.copied[envelope["id"]] = (envelope, reply)
+            group = []
+        return engine
+
     def __call__(self):
         self.connects += 1
         return self
@@ -101,7 +132,7 @@ class LoggedEngine:
 
     def decide(self, envelope):
         self.received.append(copy.deepcopy(envelope))
-        committed = self.committed.get(envelope["id"])
+        committed = self.committed.get(envelope["id"]) or self.copied.get(envelope["id"])
         if committed is not None:
             if json.dumps(committed[0], sort_keys=True) != json.dumps(envelope, sort_keys=True):
                 raise EngineRefused("input {} was committed with other content".format(envelope["id"]))

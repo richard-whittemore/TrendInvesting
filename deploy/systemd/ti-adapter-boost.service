@@ -25,9 +25,11 @@ EnvironmentFile=/var/lib/trend-investing/engines/boost/run.env
 # adapter's configuration names no account.
 # --streams: the data job's Boost stream folders (ti-data.service writes
 # ${TI_DATA_DIR}/streams/boost/${TI_RUN}/); the adapter delivers the run's
-# own, <streams>/${TI_RUN}, the run its --engine-log names. It refuses to
-# start until that folder exists: run the data job's warm-up first
-# (docs/manual/market-data.md, "The one-time warm-up").
+# own, <streams>/${TI_RUN}, the run its --engine-log names, or after a crash
+# resume (a new TI_RUN carrying the crashed run's identity) the folder of
+# the run that began it, as the data job finds it. It refuses to start
+# until that folder exists: run the data job's warm-up first
+# (docs/manual/market-data.md, "The one-time warm-up", "A crash resume").
 LoadCredential=account:/etc/trend-investing/accounts/boost.env
 WorkingDirectory=/opt/trend-investing/adapter
 ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --streams /var/lib/trend-investing/data/streams/boost --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env

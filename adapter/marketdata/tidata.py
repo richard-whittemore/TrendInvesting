@@ -16,7 +16,12 @@ For the Boost engine, each run:
    must be the run's Boost configuration, and the ``--config`` file must
    agree with it on every field the stream depends on, so a stream is never
    stamped with a hash its history was not built for. The run's streams
-   live in ``STREAMS/boost/<run>/``;
+   live in ``STREAMS/boost/<run>/``, found by the run's identity
+   (stream_run): a crash resume runs under a new log name with the crashed
+   run's identity, and keeps writing into the folder of the run that began
+   it, under that run's name, so its earlier files still re-encode byte for
+   byte; a fresh run after an earlier one has its own identity, so its own
+   folder and its own warm-up;
 3. records Massive's grouped daily bars (the encoder's bar source, one
    request a session) for every session after the run's last stream, and the
    bulk splits and dividends for a window reaching back over the last
@@ -83,6 +88,9 @@ STREAM = re.compile(r"boost-(\d{4}-\d{2}-\d{2})\.jsonl")
 ACTION_OVERLAP = dt.timedelta(days=14)
 KEY_NAME = "MASSIVE_API_KEY"
 CONFIGURATION_TYPE = "strategy.target-weight.configuration"
+# The owner's Run approval, which a fresh run after an earlier one records
+# (cmd/engine; ADR 0027, the restart model).
+RUN_APPROVED = "operator.run.approved"
 # The engine's durable log header (internal/journal durable_log.go, ADR 0027),
 # as adapter/ibkr's reader of the same log checks it.
 LOG_VERSION = 1
@@ -100,7 +108,10 @@ try:   # written by deploy/build-data.sh into the packed file
 except ImportError:
     STAMP = "dev"
 
-EngineLog = namedtuple("EngineLog", "configuration_hash strategy_version run_id boost")
+EngineLog = namedtuple("EngineLog", "configuration_hash strategy_version run_id boost identity")
+"""The engine's durable log as the job reads it: the header's identity, the
+log's own run name (its file name without ``.log``), the Boost
+configuration, and the run's identity (see read_engine_log)."""
 
 
 class Boost(namedtuple("Boost", "instrument warm_up_start trend_days exit_sma rsi_period")):
@@ -153,7 +164,14 @@ def read_engine_log(path):
     the group's last record and its hash; only committed groups count (the
     tail may be a group still being written). The first committed group's
     input must be the run's Boost configuration. A log not of that shape is
-    refused, never read as empty."""
+    refused, never read as empty.
+
+    The run's identity is the ID of its Run approval, else its first
+    committed input's ID and recorded time, as adapter/ibkr/relay.py's
+    run_identity defines it: a crash resume's log holds a copy of the
+    crashed run's records, its approval included (ADR 0027 section 6), so
+    the resume keeps the identity, and a fresh run after an earlier one has
+    its own approval."""
     run = os.path.basename(path)[:-len(".log")]
     if not path.endswith(".log") or not run:
         raise Refused("{} is not an engine durable log (<run>.log)".format(path))
@@ -176,7 +194,7 @@ def read_engine_log(path):
             or header["log_version"] != LOG_VERSION or header["chain_algorithm"] != LOG_CHAIN_ALGORITHM
             or not all(isinstance(header[k], str) and header[k] for k in ("configuration_hash", "strategy_version"))):
         raise _log_error(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
-    sequence, last_hash, group, configuration = 0, None, [], None
+    sequence, last_hash, group, configuration, first, approved = 0, None, [], None, None, None
     for n, line in enumerate(parsed[1:], 2):
         if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
             raise _log_error(path, n, "a line is exactly one of a record and a commit")
@@ -199,11 +217,44 @@ def read_engine_log(path):
             raise _log_error(path, n, "it is not the commit of the group before it")
         if configuration is None:
             configuration = _logged_configuration(path, header, *group[0])
+            first = group[0][1]
+        if approved is None and group[0][1].get("type") == RUN_APPROVED:
+            approved = group[0][1].get("id")
         group = []
     if configuration is None:
         raise Refused("the engine's durable log {} holds no committed configuration input: start the engine "
                       "first".format(path))
-    return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration)
+    identity = approved if approved else "{}@{}".format(first.get("id"), first.get("recorded_at"))
+    return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration, identity)
+
+
+def stream_run(engine_streams, engine_log, log):
+    """The name of the run's stream folder in engine_streams (STREAMS/boost):
+    the run's, found by its identity, never by its log's name alone.
+
+    A fresh run's folder bears its own name, made by its warm-up. A crash
+    resume runs under a new name (a new TI_RUN; a log is never reused) with
+    the crashed run's identity, and keeps the folder of the run that began
+    it: the one folder whose name is that of a log beside engine_log with the
+    same identity (read_engine_log). So the folder, and each envelope's
+    correlation id, is the first run's name of a chain of resumes, and an
+    abandoned resume, which has no folder, is never taken for it. The
+    adapter finds the same folder by the same rule (adapter/ibkr/delivery.py,
+    stream_run). With no such folder the run's own name is returned (a fresh
+    run before its warm-up); with two, the job is refused (fail closed,
+    AGENTS.md): one run's stream is never split across two folders."""
+    if os.path.isdir(os.path.join(engine_streams, log.run_id)):
+        return log.run_id
+    logs = os.path.dirname(os.path.abspath(engine_log))
+    names = sorted(os.listdir(engine_streams)) if os.path.isdir(engine_streams) else []
+    found = [n for n in names if os.path.isdir(os.path.join(engine_streams, n))
+             and os.path.isfile(os.path.join(logs, n + ".log"))
+             and read_engine_log(os.path.join(logs, n + ".log")).identity == log.identity]
+    if len(found) > 1:
+        raise Refused("the run of {} has more than one stream folder: {}. One run's stream is in one folder, made "
+                      "by its warm-up; this stops the job for a person (docs/manual/market-data.md, \"A crash "
+                      "resume\")".format(engine_log, ", ".join(os.path.join(engine_streams, n) for n in found)))
+    return found[0] if found else log.run_id
 
 
 def _logged_configuration(path, header, n, envelope):
@@ -343,8 +394,9 @@ def run(data, streams, config, engine_log, key, now, settle, session=None, backf
         raise Refused("the Boost configuration {} is not the one the engine's durable log {} holds ({} there, {} "
                       "here): the stream would carry the run's configuration hash over another history".format(
                           config, engine_log, log.boost, cfg))
-    identity = encode.Identity(log.configuration_hash, log.strategy_version, log.run_id)
-    directory = os.path.join(streams, ENGINE, log.run_id)
+    run_id = stream_run(os.path.join(streams, ENGINE), engine_log, log)
+    identity = encode.Identity(log.configuration_hash, log.strategy_version, run_id)
+    directory = os.path.join(streams, ENGINE, run_id)
     existing = _streams(directory)
     for last, path in existing:
         if session <= last:
@@ -353,7 +405,7 @@ def run(data, streams, config, engine_log, key, now, settle, session=None, backf
     previous = existing[-1][0] if existing else None
     if previous is None and backfill_from is None:
         raise Refused("run {} has no stream yet: run the warm-up once first, ti-data --backfill-from {}".format(
-            log.run_id, cfg.warm_up_start))
+            run_id, cfg.warm_up_start))
     first = cfg.warm_up_start if previous is None else nyse_calendar.sessions_after(previous, 1)[0]
     span = nyse_calendar.sessions(first, session)
     if previous is None and len(span) < cfg.min_sessions:

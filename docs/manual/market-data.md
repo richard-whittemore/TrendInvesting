@@ -406,6 +406,40 @@ A new engine run (a fresh `TI_RUN`) starts with no files and needs the
 warm-up again; the recordings are already on disk, so it fetches only the
 days since.
 
+**A crash resume.** After a crash the engine is resumed under a new
+`TI_RUN` ([durable log](../runbooks/durable-log.md), "Resume after a
+crash"): a new log that holds a copy of the crashed run's records. It is the
+same run, not a new one, so it needs **no** warm-up and gets no folder of
+its own. The data job and the adapter both find the run's folder by the
+run's identity, not by the log's name: its Run approval (or, for the
+engine's very first run, its configuration and as-of time), which the
+copied log carries. The folder is the one named after the run that began
+the chain, the `TI_RUN` its warm-up was run for, and stays so through any
+number of resumes:
+
+- the data job writes the next day's file into
+  `/var/lib/trend-investing/data/streams/boost/<first TI_RUN>/`, and every
+  line still carries that first run's name, so the files already written
+  still check byte for byte;
+- the adapter, started on the new log, carries on with the files it had
+  written down before the crash: whatever the crashed run had already
+  recorded (it is in the copied log) is struck off and never sent again,
+  the input it was waiting on is asked for again and answered from the
+  copied log, and the rest of the batch goes to the resumed run, behind the
+  snapshot already taken, once.
+
+Keep the first run's log (`<first TI_RUN>.log`) in the engine's folder
+while its resumes run: the folder is matched to the run through it. If it
+is missing, both stop as for a run with no warm-up ("No warm-up yet",
+below); restore the log from the backup rather than running a warm-up for
+the new name. Do not run the warm-up for a resumed `TI_RUN`: a second
+folder of the same run stops the data job and the adapter, naming both
+folders ("more than one stream folder"). Move the one you made out of
+`streams/boost/` (keep it, it is evidence) and start them again. A fresh run
+after an earlier one (with your approval) is a new run with its own
+identity: it never takes the earlier run's folder, and needs its own
+warm-up.
+
 **What you see.** Each run prints the build it is (`ti-data <commit>`), then
 the path of the file it wrote, or of the file that already held the session;
 `journalctl -u ti-data` shows it. `ti-data --version` prints the build too. A
@@ -673,9 +707,14 @@ which writes the sessions again from its recordings, and start the adapter
   the whole history again. The old run's files are then marked "dropped" in
   `.delivered`, not delivered, as they are when a stop left them written
   down but not yet in the outbox. If you later resume the old run (its own
-  `TI_RUN` again, after a crash: [durable log](../runbooks/durable-log.md)),
-  the adapter hands its dropped files over again behind a fresh snapshot;
-  any line its engine had already recorded is skipped, never sent twice.
+  under a new `TI_RUN` with its log's copy, after a crash: [durable
+  log](../runbooks/durable-log.md), and "A crash resume", above), the
+  adapter hands its dropped files over again behind a fresh snapshot; any
+  line its engine had already recorded is skipped, never sent twice.
+- **More than one stream folder of one run** (a warm-up run for a resumed
+  `TI_RUN`, say: "A crash resume", above): the adapter refuses to start,
+  naming both folders, and sends nothing. Move the folder that should not
+  be there out of `streams/boost/`, keep it, and start the adapter again.
 
 ## What can go wrong, and what the step does
 

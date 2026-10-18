@@ -650,16 +650,20 @@ class AdapterLoop:
                     self.outbox.strike(entry["id"])
                     continue
                 batch_run = _batch_run(entry)
-                if batch_run is not None and batch_run != run_name(self._engine_log_path):
-                    # An earlier run's stream batch: the run now running has
-                    # its own, and the earlier run gets it again if resumed.
+                # The run's stream folder name: a crash resume keeps the
+                # first run's (delivery.stream_run), so its batch goes on.
+                running = self.delivery.run if self.delivery is not None else run_name(self._engine_log_path)
+                if batch_run is not None and batch_run != running:
+                    # An earlier run's stream batch: the run now running is a
+                    # fresh run with its own, and the earlier run gets it
+                    # again if resumed.
                     # Marked dropped first, then struck off whole in one
                     # write, so a stop leaves the batch whole in the outbox
                     # (sent whole to that run if it is resumed) or wholly
                     # gone, never its stream without its snapshot.
                     batch = [e["id"] for e in entries if _batch_run(e) == batch_run]
                     log.info("ibkr stream batch of run %s (%d inputs) struck off unsent: the engine now runs %s",
-                             batch_run, len(batch), run_name(self._engine_log_path))
+                             batch_run, len(batch), running)
                     if self.delivery is not None:
                         self.delivery.dropped(batch_run)
                     self.outbox.strike_all(batch)

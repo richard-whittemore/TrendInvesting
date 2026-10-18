@@ -28,7 +28,9 @@ ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/boost/run.env 
 # MASSIVE_API_KEY, read from %d/secrets and never printed.
 LoadCredential=secrets:/etc/trend-investing/secrets.env
 # Records into TI_DATA_DIR and writes the day's stream to
-# ${TI_DATA_DIR}/streams/boost/${TI_RUN}/boost-<session>.jsonl. Settle
+# ${TI_DATA_DIR}/streams/boost/${TI_RUN}/boost-<session>.jsonl (after a crash
+# resume, the folder of the run that began it: docs/manual/market-data.md,
+# "A crash resume"). Settle
 # minutes: the close plus this long before a session is recorded; the timer
 # fires after it (ti-data.timer).
 ExecStart=/opt/trend-investing/bin/ti-data --data ${TI_DATA_DIR} --streams ${TI_DATA_DIR}/streams --config /etc/trend-investing/engines/boost.config --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --secrets-file %d/secrets --settle-minutes 60

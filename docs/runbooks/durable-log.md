@@ -62,6 +62,13 @@ The engine reads its settings from
    unchanged; an order in it is sent once (docs/manual/redelivery.md; ADR
    0027, amendment "re-delivery on request"). Run the reporter: an "order …
    not acknowledged" alert names any order still unaccounted for.
+   Start the data job and the adapter as they are (`run.env` now names the
+   new `TI_RUN`): both keep the run's market-data folder, the one named
+   after the run that began it, found by the run's identity in the copied
+   log, and the adapter carries on with the batch it had written down. Do
+   not run the data job's warm-up for the new name, and keep the crashed
+   run's log (and the first run's, if this is a resume of a resume) where
+   it is (docs/manual/market-data.md, "A crash resume").
 3. A refusal naming another build or configuration means this is not a
    crash restart: follow "Upgrading the build" or start a fresh run. A
    refusal naming a later log means the log you named is not the crashed

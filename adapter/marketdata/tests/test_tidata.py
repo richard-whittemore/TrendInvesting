@@ -68,16 +68,21 @@ def _digest(text):
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
-def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/test", inputs=1, config=None):
+def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/test", inputs=1, config=None,
+              approval=None):
     """A durable log in the engine's shape (testdata/boost-fixture.log is one
     the engine wrote): a header, then one committed group per input, the
     first the configuration input carrying ``config`` (default the shipped
-    Boost configuration), the others inputs only, no decisions."""
+    Boost configuration), the others inputs only, no decisions. With
+    ``approval`` (an input ID), the second input is the run's Run approval
+    under that ID, which names a fresh run after an earlier one."""
     lines = [json.dumps({"chain_algorithm": CHAIN, "configuration_hash": configuration_hash, "log_version": 1,
                          "strategy_version": strategy_version}, sort_keys=True, separators=(",", ":"))]
     for n in range(1, inputs + 1):
         if n == 1:
             ident, kind, payload = "configuration:" + configuration_hash, tidata.CONFIGURATION_TYPE, config or shipped_config()
+        elif n == 2 and approval:
+            ident, kind, payload = approval, "operator.run.approved", {"approved_by": "owner"}
         else:
             ident, kind, payload = "input-{}".format(n), "x", {"n": n}
         raw = json.dumps(payload, separators=(",", ":"))
@@ -262,7 +267,10 @@ class EngineLogTest(unittest.TestCase):
             write_log(p, inputs=2)
             got = tidata.read_engine_log(str(p))
             boost = tidata.read_config(str(REPO / "deploy/etc/engines/boost.config"))
-            self.assertEqual(got, tidata.EngineLog("hash-boost", "boost/r1/test", RUN, boost))
+            self.assertEqual(got, tidata.EngineLog("hash-boost", "boost/r1/test", RUN, boost,
+                                                   "configuration:hash-boost@2026-03-13T21:00:00Z"))
+            write_log(p, inputs=3, approval="operator.run.approved:1")
+            self.assertEqual(tidata.read_engine_log(str(p)).identity, "operator.run.approved:1")
 
     def test_a_log_the_engine_wrote_gives_its_identity(self):
         # testdata/boost-fixture.log was written by cmd/engine's own LogWriter
@@ -525,6 +533,55 @@ class DailyTest(unittest.TestCase):
             status, _, err = job.main(after_settle(WARM))
             self.assertEqual(status, 1)
             self.assertIn("differs", err)
+
+    def test_a_crash_resume_writes_on_in_the_first_runs_folder_under_its_name(self):
+        # engine -resume under a new TI_RUN: the new log holds the crashed
+        # log's records, so the run's identity carries over, and the run
+        # keeps the folder its warm-up made (ADR 0027, the restart model).
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            resumed = Path(root, "run-2026-03-16-resumed.log")
+            resumed.write_bytes(job.log.read_bytes())
+            job.log = resumed
+            status, out, err = job.main(after_settle(D(2026, 3, 16)))
+            self.assertEqual(status, 0, err)
+            self.assertEqual(out.strip(), str(job.stream_dir() / "boost-2026-03-16.jsonl"))
+            self.assertEqual({e["correlation_id"] for e in job.envelopes(D(2026, 3, 16))}, {RUN})
+            self.assertEqual(sorted(p.name for p in (job.streams / "boost").iterdir()), [RUN])
+            # A resume of the resume keeps it too.
+            again = Path(root, "run-2026-03-17-resumed.log")
+            again.write_bytes(resumed.read_bytes())
+            job.log = again
+            status, out, err = job.main(after_settle(D(2026, 3, 17)))
+            self.assertEqual(status, 0, err)
+            self.assertEqual(out.strip(), str(job.stream_dir() / "boost-2026-03-17.jsonl"))
+
+    def test_a_fresh_run_after_an_earlier_one_needs_its_own_warm_up(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            job.log = Path(root, "run-b.log")
+            write_log(job.log, config=job.cfg, inputs=2, approval="operator.run.approved:fresh")
+            status, _, err = job.main(after_settle(D(2026, 3, 16)))
+            self.assertEqual(status, 1)
+            self.assertIn("run run-b has no stream yet", err)
+            status, out, err = job.main(after_settle(D(2026, 3, 16)), "--backfill-from", BASE.isoformat())
+            self.assertEqual(status, 0, err)
+            self.assertEqual(out.strip(), str(job.streams / "boost" / "run-b" / "boost-2026-03-16.jsonl"))
+
+    def test_two_stream_folders_of_one_run_are_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.warmed(root)
+            twin = Path(root, "run-twin.log")
+            twin.write_bytes(job.log.read_bytes())
+            (job.streams / "boost" / "run-twin").mkdir()
+            job.log = Path(root, "run-c.log")
+            job.log.write_bytes(twin.read_bytes())
+            made = job.made
+            status, _, err = job.main(after_settle(D(2026, 3, 16)))
+            self.assertEqual(status, 1)
+            self.assertIn(str(job.stream_dir()), err)
+            self.assertIn(str(job.streams / "boost" / "run-twin"), err)
+            self.assertEqual(job.made, made, "nothing is fetched")
 
     def test_an_unsettled_session_is_refused_and_nothing_is_written(self):
         with tempfile.TemporaryDirectory() as root:

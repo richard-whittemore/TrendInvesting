@@ -563,6 +563,133 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
         self.assertEqual(engine.inputs()[1]["id"], "marketdata:bar:SPY:2027-01-13")
 
+    # -- a crash resume and a fresh run ------------------------------------
+    def crash_resume(self, name="run-c"):
+        """The crashed run resumed (engine -resume) under a new TI_RUN: a new log holding the crashed log's copy."""
+        log = str(Path(self.dir.name) / (name + ".log"))
+        return log, LoggedEngine.resumed(self.engine_log, log)
+
+    def records(self):
+        return [(b["run"], b["state"]) for b in json.loads(Path(self.pending + DELIVERED_SUFFIX).read_text())["batches"]]
+
+    def test_a_crash_resume_keeps_the_saved_batch_and_delivers_the_rest_of_it_once(self):
+        write_stream(self.folder, FRIDAY, session_envelopes([date(2027, 1, 12), date(2027, 1, 13), FRIDAY]))
+
+        class StopsAtThird:
+            def __init__(self, engine):
+                self.engine, self.n = engine, 0
+
+            def __call__(self):
+                return self
+
+            def decide(self, envelope):
+                self.n += 1
+                if self.n >= 3:
+                    raise EngineUnavailable("synthetic: the engine crashed")
+                return self.engine.decide(envelope)
+        loop = self.loop(engine=StopsAtThird(self.engine))
+        loop.start()
+        with self.assertRaises(EngineUnavailable):
+            self.settle(loop)
+        loop.close()
+        first = self.ids()
+        self.assertEqual(len(first), 2, "the snapshot and the first bar")
+        log, engine = self.crash_resume()
+        reads = len(self.fake.called("req_mkt_data"))
+        resumed = self.loop(engine=engine, engine_log=log)
+        resumed.start()
+        self.settle(resumed)
+        rest = [e["id"] for e in engine.inputs()]
+        self.assertEqual([e["type"] for e in engine.inputs()], [CLOSED, BAR, CLOSED, BAR, CLOSED])
+        self.assertEqual(rest, [e["id"] for e in session_envelopes(
+            [date(2027, 1, 12), date(2027, 1, 13), FRIDAY])][1:])
+        self.assertEqual(len(set(first + rest)), 7, "each input once, across the crash")
+        self.assertEqual([e["sequence"] for e in engine.inputs()], list(range(4, 9)))
+        self.assertEqual(len(self.fake.called("req_mkt_data")), reads, "no second snapshot: the batch continues")
+        self.assertEqual(resumed.outbox.load(), [])
+        self.assertEqual(self.records(), [(RUN, "queued")], "the batch is the resumed run's, never dropped")
+        self.assertFalse((self.streams / "run-c").exists(), "the resumed run keeps the first run's folder")
+
+    def test_a_crash_resume_after_every_input_was_committed_sends_nothing_again(self):
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+
+        class CrashesAfterTheLast:
+            def __init__(self, engine):
+                self.engine, self.n = engine, 0
+
+            def __call__(self):
+                return self
+
+            def decide(self, envelope):
+                self.n += 1
+                if self.n > 3:
+                    raise EngineUnavailable("synthetic: the engine is down")
+                reply = self.engine.decide(envelope)
+                if self.n == 3:
+                    raise EngineUnavailable("synthetic: the engine crashed after committing, before replying")
+                return reply
+        loop = self.loop(engine=CrashesAfterTheLast(self.engine))
+        loop.start()
+        with self.assertRaises(EngineUnavailable):
+            self.settle(loop)
+        loop.close()
+        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(len(loop.outbox.load()), 1, "the close is committed but not yet struck off")
+        log, engine = self.crash_resume()
+        reads = len(self.fake.called("req_mkt_data"))
+        resumed = self.loop(engine=engine, engine_log=log)
+        resumed.start()
+        self.settle(resumed)
+        self.assertEqual(engine.inputs(), [], "nothing is committed twice")
+        self.assertEqual([e["id"] for e in engine.received], ["marketdata:session-closed:2027-01-14"],
+                         "only the input awaiting its reply is asked for again, answered from the copied log")
+        self.assertEqual(len(self.fake.called("req_mkt_data")), reads, "no new snapshot")
+        self.assertEqual(resumed.outbox.load(), [])
+        self.assertEqual(self.records(), [(RUN, "queued")])
+        # The next day's file goes to the resumed run from the same folder.
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        self.settle(resumed)
+        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.records(), [(RUN, "queued"), (RUN, "queued")])
+
+    def test_a_fresh_run_drops_the_earlier_runs_batch_and_needs_its_own_warm_up_folder(self):
+        self.queue_unsent()
+        log = str(Path(self.dir.name) / "run-b.log")
+        # A fresh run after the owner's approval: a new identity.
+        engine = LoggedEngine(log, started_at="2027-01-15T13:30:00Z")
+        fresh = self.loop(engine=engine, engine_log=log)
+        with self.assertRaises(StreamRefused) as caught:
+            fresh.start()
+        self.assertIn(str(self.streams / "run-b"), str(caught.exception))
+        fresh.close()
+        write_stream(self.streams / "run-b", FRIDAY, session_envelopes([FRIDAY], run="run-b"))
+        fresh = self.loop(engine=engine, engine_log=log)
+        fresh.start()
+        self.settle(fresh)
+        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), [])
+        self.assertEqual(self.records(), [(RUN, "dropped"), ("run-b", "queued")])
+
+    def test_a_log_beside_a_stream_folder_that_cannot_be_read_stops_the_start(self):
+        log, _ = self.crash_resume()
+        (self.streams / "run-x").mkdir()
+        Path(self.dir.name, "run-x.log").write_text("not a durable log\n")
+        loop = self.loop(engine_log=log)
+        with self.assertRaises(StreamRefused) as caught:
+            loop.start()
+        self.assertIn("run-x.log", str(caught.exception))
+
+    def test_two_stream_folders_of_one_run_stop_the_start(self):
+        log, _ = self.crash_resume()
+        other = str(Path(self.dir.name) / "run-d.log")
+        Path(other).write_bytes(Path(self.engine_log).read_bytes())
+        (self.streams / "run-d").mkdir()
+        loop = self.loop(engine_log=log)
+        with self.assertRaises(StreamRefused) as caught:
+            loop.start()
+        self.assertIn(str(self.folder), str(caught.exception))
+        self.assertIn(str(self.streams / "run-d"), str(caught.exception))
+
     # -- the account read the snapshot is made from -----------------------
     def test_a_partial_account_read_is_read_again_and_never_delivered_as_the_snapshot(self):
         class PartialOnce(FakeTWS):

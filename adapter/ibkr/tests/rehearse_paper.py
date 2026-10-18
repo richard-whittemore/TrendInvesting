@@ -30,7 +30,13 @@ It proves, in order, and stops at the first that fails, exiting 1:
 5. a dropped link is reconnected and matched again, and neither the order
    nor any stream input is sent again;
 6. a restart of the adapter on the same files sends nothing again and
-   records nothing twice.
+   records nothing twice;
+7. a crash of the engine, resumed under a new run name (a new TI_RUN,
+   engine -resume: the new log holds the crashed run's records, so the
+   run's identity carries over, ADR 0027): the data job writes the next
+   day's stream into the run's own folder, and the adapter, started on the
+   new log, delivers it to the resumed run behind one broker snapshot,
+   once, sending nothing earlier again.
 
 ibapi is not installed here, so the imported ibapi's version is given as
 the pinned one; everything else the start command checks is checked. The
@@ -266,13 +272,16 @@ def rehearse(work, account):
     # IBKR's clock: the evening of the day, after the data job has run.
     gateway.server_time = int(settled(session).timestamp()) + 600
     gateway.on_place = gateway.accept
-    argv = ["run", "--config", str(adapter_config), "--pending", str(pending), "--engine-log", str(engine_log),
-            "--socket", sock_path, "--streams", str(streams), "--secrets", str(secrets),
-            "--account-key", "IBKR_ACCOUNT_BOOST", "--ibapi-record", str(record), "--versions", str(versions)]
+
+    def argv(engine_log):
+        return ["run", "--config", str(adapter_config), "--pending", str(pending), "--engine-log", str(engine_log),
+                "--socket", sock_path, "--streams", str(streams), "--secrets", str(secrets),
+                "--account-key", "IBKR_ACCOUNT_BOOST", "--ibapi-record", str(record), "--versions", str(versions)]
     log = (work / "adapter.log").open("w")
 
-    def run(phase):
-        status = adapter_main(argv, api_factory=lambda cfg: gateway, should_stop=phase, err=log, poll=0.01,
+    def run(phase, engine_log=engine_log):
+        status = adapter_main(argv(engine_log), api_factory=lambda cfg: gateway, should_stop=phase, err=log,
+                              poll=0.01,
                               ibapi_version=lambda: tuple(int(p) for p in version.split(".")),
                               today=lambda: session,
                               now=lambda: datetime.fromtimestamp(gateway.server_time, timezone.utc))
@@ -382,6 +391,23 @@ def rehearse(work, account):
               + [BROKER_SNAPSHOT_TYPE, BAR, CLOSED, LIFECYCLE_TYPE, FILL_TYPE, FILL_TYPE],
               "the engine holds the warm-up, the day's snapshot, bar and close, the acceptance and two fills, "
               "in that order")
+
+        # The engine crashes and is resumed under a new run name; the next
+        # session settles, and the data job and the adapter run on its log.
+        resumed_log = work / (RUN + "-resumed.log")
+        resumed = LoggedEngine.resumed(str(engine_log), str(resumed_log))
+        server.engine = resumed
+        following = nyse_calendar.sessions_after(session, 1)[0]
+        nxt = data_job(work, config, resumed_log, settled(following))
+        gateway.server_time = int(settled(following).timestamp()) + 600
+        following_close = "marketdata:session-closed:{}".format(following)
+        run(Phase([(lambda: following_close in [e["id"] for e in resumed.inputs()], None,
+                    "the next day's stream to reach the resumed run")]), engine_log=resumed_log)
+        check(nxt == streams / RUN / "boost-{}.jsonl".format(following) and sorted(os.listdir(streams)) == [RUN]
+              and [e["type"] for e in resumed.inputs()] == [BROKER_SNAPSHOT_TYPE, BAR, CLOSED]
+              and not set(e["id"] for e in resumed.inputs()) & set(ids()) and placed() == 1,
+              "after a crash resume under a new run name, the next day's stream went from the run's own folder "
+              "to the resumed run, once, and nothing earlier was sent again")
     finally:
         server.close()
         log.close()

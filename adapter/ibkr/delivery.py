@@ -2,7 +2,12 @@
 
 The data job (adapter/marketdata/tidata.py, its file contract) writes each
 run's stream to STREAMS/<run>/<engine>-<last session>.jsonl, where <run> is
-the engine's durable log's name without ".log": one envelope per line, in
+the engine's durable log's name without ".log", found by the run's identity
+(stream_run): a crash resume, under a new log name with the crashed run's
+identity (ADR 0027, the restart model), keeps the folder, and the name, of
+the run that began it, so its batch left in the outbox is sent on to it and
+any of it the copied log already commits is struck off unsent, as every
+committed outbox entry is; a fresh run has its own: one envelope per line, in
 delivery order, each file's ``sequence`` a file-local ordinal 1..N, and each
 file covering the sessions since the one before it. Only the deliverer
 knows the engine's sequence, so it sets each envelope's sequence as it sends
@@ -42,7 +47,8 @@ A batch not delivered to its run is marked dropped: one a stop left queuing
 before its outbox write when a fresh run then started (nothing of it was
 recorded or sent), and one whose entries a fresh run struck off the outbox
 unsent (loop.AdapterLoop._drain, through dropped). Its files are not
-delivered: if that run is resumed (a crash resumes the same run, ADR 0027),
+delivered: if that run is resumed (a crash resumes the same run, ADR 0027,
+under its identity, stream_run),
 they are queued for it again behind a fresh snapshot, and any of their
 inputs its engine already committed is struck off unsent, as every
 committed outbox entry is.
@@ -62,7 +68,8 @@ schema version and payload, as the data job writes each one its calendar
 covers into every file: that one is recorded once. Any of these refusals:
 nothing of that batch is recorded or sent, and the adapter stops for a
 person, naming the file and how to settle it. A run whose stream folder
-does not exist yet stops the start: its warm-up has not been written.
+does not exist yet stops the start: its warm-up has not been written; so do
+two folders of one run (stream_run).
 """
 import hashlib
 import importlib.util
@@ -73,7 +80,8 @@ import re
 from collections import namedtuple
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 
-from relay import ENVELOPE_VERSION, PAYLOAD_HASH, TIME, _is_count, _is_text, _is_time, read_engine_log
+from relay import (ENVELOPE_VERSION, PAYLOAD_HASH, TIME, ResolveRefused, _is_count, _is_text, _is_time,
+                   read_engine_log, run_identity)
 from snapshot import BROKER_SNAPSHOT_TYPE
 
 log = logging.getLogger("ibkr")
@@ -347,13 +355,54 @@ class DeliveryRecord:
 
 
 def run_name(engine_log_path):
-    """The run's name: its durable log's file name without ".log", as the data job names its stream folder."""
+    """The log's run name: its durable log's file name without ".log" (TI_RUN)."""
     name = os.path.basename(engine_log_path)
     return name[:-len(".log")] if name.endswith(".log") else name
 
 
+def stream_run(streams, engine_log_path):
+    """The name of the stream folder in streams of the run whose durable log is engine_log_path, found by its identity.
+
+    The data job's rule (adapter/marketdata/tidata.py, stream_run): a fresh
+    run's folder bears its own name, made by its warm-up. A crash resume
+    runs under a new name (a new TI_RUN) with the crashed run's identity
+    (relay.run_identity: its log holds a copy of the crashed run's records,
+    ADR 0027 section 6), and keeps the folder of the run that began it: the
+    one folder whose name is that of a log beside engine_log_path with the
+    same identity. So the folder, and every stream envelope's correlation
+    id, is the first run's name of a chain of resumes; an abandoned resume
+    has no folder and is never taken for it. With no such folder the run's
+    own name is returned (check then refuses: its warm-up is not written);
+    with two, StreamRefused (fail closed, AGENTS.md): one run's stream is
+    never split across two folders.
+    """
+    own = run_name(engine_log_path)
+    if os.path.isdir(os.path.join(streams, own)):
+        return own
+    logs = os.path.dirname(os.path.abspath(engine_log_path))
+    candidates = [n for n in (sorted(os.listdir(streams)) if os.path.isdir(streams) else [])
+                  if os.path.isdir(os.path.join(streams, n)) and os.path.isfile(os.path.join(logs, n + ".log"))]
+    if not candidates:
+        return own
+    try:
+        identity = run_identity(engine_log_path)
+        found = [n for n in candidates if run_identity(os.path.join(logs, n + ".log")) == identity]
+    except ResolveRefused as err:
+        raise StreamRefused("the run's stream folder is found by the run's identity, from its durable log and "
+                            "those of the folders in {}, and a log cannot be read: {}".format(streams, err)) from None
+    if len(found) > 1:
+        raise StreamRefused(
+            "the run of {} has more than one stream folder: {}. One run's stream is in one folder, made by its "
+            "warm-up; nothing is delivered until a person decides which is the run's (docs/manual/market-data.md, "
+            "\"A crash resume\")".format(engine_log_path, ", ".join(os.path.join(streams, n) for n in found)))
+    return found[0] if found else own
+
+
 class Deliverer:
     """Delivers the stream folder <streams>/<run> of the run whose durable log is engine_log_path (see the module).
+
+    <run> is stream_run's, found at check: the run's own name, or for a
+    crash resume the name of the run that began it.
 
     outbox is the adapter's relay.Outbox; record_path the delivery record's
     file; snapshot() returns the broker snapshot's snapshot.Record, or None
@@ -364,6 +413,8 @@ class Deliverer:
     """
 
     def __init__(self, streams, record_path, outbox, engine_log_path, snapshot, new_id):
+        self._streams = streams
+        # The log's own run name until check finds the run's folder.
         self.run = run_name(engine_log_path)
         self.folder = os.path.join(streams, self.run)
         self.record = DeliveryRecord(record_path)
@@ -374,6 +425,8 @@ class Deliverer:
 
     def check(self):
         """At start: the run's stream folder exists and the delivery record reads; StreamRefused or DeliveryRecordInvalid."""
+        self.run = stream_run(self._streams, self._engine_log_path)
+        self.folder = os.path.join(self._streams, self.run)
         if not os.path.isdir(self.folder):
             raise StreamRefused(
                 "the run's stream folder {} does not exist: the data job has not written run {}'s warm-up yet. "

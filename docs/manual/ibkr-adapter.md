@@ -83,7 +83,8 @@ adapter/ibkr/relay.py ...`.
 | "has not replayed that execution" | A cancellation held for a trade's commission, and IBKR did not repeat that trade after a restart | Check the order and its trades at IBKR, then reconcile. Leave the `.held` file alone |
 | A report it cannot state exactly (part shares, a zero or odd price, a commission in another currency) | It will not record an approximation | A fault: investigate before starting again |
 | "the stream file ... is refused" | A market-data file is not as the data job writes it, is another run's, or is older than one already delivered; nothing from it was sent | With the adapter stopped, move the file aside (never edit it), `sudo systemctl start ti-data`, then start the adapter ([market data](market-data.md), "What happens to the file") |
-| "the run's stream folder ... does not exist" | The data job has not written this run's warm-up | Run the warm-up, then start the adapter |
+| "the run's stream folder ... does not exist" | The data job has not written this run's warm-up (after a crash resume: the first run's log is missing) | Run the warm-up, then start the adapter; after a crash resume, restore the first run's log instead ([market data](market-data.md), "A crash resume") |
+| "has more than one stream folder" | Two stream folders belong to the run (a warm-up run for a resumed `TI_RUN`) | Move the extra folder out of `streams/boost/`, keep it, start the adapter |
 | "the delivery record ... cannot be read" | The `.delivered` file beside the pending file holds something the adapter did not write | Restore it from the backup as it was; never edit it |
 | IBKR error 326 | Another program holds this engine's client ID; the adapter does not retry or pick another | Stop the other program |
 | Started in live mode | Refused until the limited-live gate | Use paper |
