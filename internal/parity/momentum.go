@@ -1,6 +1,7 @@
 package parity
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -65,11 +66,21 @@ func (r *momentumRun) diff(where string, k Kind, size string) {
 // planned months, which were chosen before any comparison
 // (docs/research/parity-2026-10.md, "Months").
 //
-// The ranked order, cap marks and weights come from momentum.SelectBook
-// given QuantConnect's own scores, volatilities, sectors and risk-off
-// flag; the scores, volatilities and close counts of the sampled names
-// from momentum.Score, and the risk-off inputs from momentum.EvaluateTrend,
-// given QuantConnect's adjusted closes.
+// It never puts a mismatch down to a cause. The ranked order, cap marks
+// and weights come from momentum.BacktestBook, the scores, volatilities
+// and close counts of the sampled names from momentum.BacktestScore and
+// the risk-off inputs from momentum.BacktestTrend: the module's own
+// recomputation under the backtest's handling of every case ADR 0026
+// point 8 lists and of a name with no sector. Each is compared with
+// QuantConnect's export exactly, within the spec's thresholds only, every
+// month. The book is given QuantConnect's own scores, volatilities,
+// sectors and risk-off flag, in QuantConnect's order.
+//
+// Apart from that, the live rule (momentum.SelectBook, Score and
+// EvaluateTrend) is run on the same inputs and every departure from the
+// backtest-compatible result is listed as a difference, classified by
+// cause (departures); the differences check fails on any cause ADR 0026
+// point 8 does not list.
 func CompareMomentum(cfg momentum.Config, run string, planned []string, months []MomentumMonth) Report {
 	r, order := newMomentumRun(cfg, run)
 	r.monthsCheck(planned, months)
@@ -98,7 +109,7 @@ func newMomentumRun(cfg momentum.Config, run string) (*momentumRun, []*Check) {
 	order := []*Check{
 		add(CheckMonths, "every planned month exported, no other"),
 		add(CheckExport, "well-formed"),
-		add(CheckRiskOff, fmt.Sprintf("flag and close exact; mean rel <= %g", RelativeTolerance)),
+		add(CheckRiskOff, fmt.Sprintf("flag, close and close count exact; mean rel <= %g", RelativeTolerance)),
 		add(CheckRankedOrder, "exact"),
 		add(CheckCapMarks, "exact"),
 		add(CheckWeights, fmt.Sprintf("abs <= %g", WeightTolerance)),
@@ -144,16 +155,18 @@ func (r *momentumRun) month(m *MomentumMonth) {
 	for i, e := range m.Ranked {
 		cands[i] = momentum.Candidate{InstrumentID: e.Ticker, Sector: e.Sector, Score: e.Score, Volatility: e.Volatility}
 	}
-	book, err := momentum.SelectBook(r.cfg, cands, m.RiskOff)
+	gaps, err := r.histories(m)
+	var b books
 	if err == nil {
-		err = r.histories(m)
+		b, err = r.books(m, cands, gaps)
 	}
 	export.compare(err == nil, 0, fmt.Sprintf("%s: %v", m.Month, err))
 	if err != nil {
 		return
 	}
 	r.trend(m)
-	r.book(m, book)
+	r.book(m, b.backtest)
+	r.departures(m, b)
 }
 
 func (r *momentumRun) wellFormed(m *MomentumMonth) error {
@@ -203,45 +216,6 @@ func (m *MomentumMonth) closes(name string) map[string]float64 {
 	return out
 }
 
-// trend compares the risk-off inputs. Fewer than TrendCloses closes, which
-// the backtest treated as risk-on, and a missing close in the window, which
-// it dropped, are differences ADR 0026 point 8 lists.
-func (r *momentumRun) trend(m *MomentumMonth) {
-	tr, reason, err := momentum.EvaluateTrend(r.cfg, m.Index, m.closes(r.cfg.TrendInstrument))
-	if err != nil {
-		r.checks[CheckExport].fail(fmt.Sprintf("%s: %s: %v", m.Month, r.cfg.TrendInstrument, err))
-		return
-	}
-	r.trendResult(m, tr, reason)
-}
-
-// trendResult compares EvaluateTrend's result with QuantConnect's. A
-// listed difference is attributed only when QuantConnect's own data shows
-// it: fewer than TrendCloses closes counted, or a close missing from the
-// window; otherwise Go's reason is a failure.
-func (r *momentumRun) trendResult(m *MomentumMonth, tr momentum.Trend, reason momentum.WithheldReason) {
-	c := r.checks[CheckRiskOff]
-	where := m.Month + " " + r.cfg.TrendInstrument
-	switch {
-	case reason == momentum.ReasonInsufficientTrendHistory && m.SPYCloses < r.cfg.TrendCloses:
-		c.Attributed++
-		r.diff(where, KindTrendHistory,
-			fmt.Sprintf("%d closes; QuantConnect counted %d and decided risk_off=%v, Go withholds", tr.Closes, m.SPYCloses, m.RiskOff))
-	case reason == momentum.ReasonMissingBars && missingIn(m.Closes[r.cfg.TrendInstrument], r.cfg.TrendCloses):
-		c.Attributed++
-		r.diff(where, KindGap,
-			fmt.Sprintf("a close missing from the %d-close window; QuantConnect decided risk_off=%v, Go withholds", r.cfg.TrendCloses, m.RiskOff))
-	case reason != "":
-		c.compare(false, 0, fmt.Sprintf("%s: Go withholds (%s) with %d closes; QuantConnect counted %d, none missing from the window",
-			where, reason, tr.Closes, m.SPYCloses))
-	default:
-		rel := relative(tr.Mean, m.SPYMean)
-		c.compare(tr.RiskOff == m.RiskOff && tr.Close == m.SPYClose && rel <= RelativeTolerance, rel,
-			fmt.Sprintf("%s: Go risk_off=%v close %v mean %v, QuantConnect risk_off=%v close %v mean %v",
-				m.Month, tr.RiskOff, tr.Close, tr.Mean, m.RiskOff, m.SPYClose, m.SPYMean))
-	}
-}
-
 // missingIn reports whether any of the last n rows of col has no close.
 func missingIn(col []*float64, n int) bool {
 	for _, p := range col[max(0, len(col)-n):] {
@@ -252,9 +226,51 @@ func missingIn(col []*float64, n int) bool {
 	return false
 }
 
+// trend compares BacktestTrend's risk-off inputs with QuantConnect's, and
+// lists EvaluateTrend's departure from them.
+func (r *momentumRun) trend(m *MomentumMonth) {
+	closes := m.closes(r.cfg.TrendInstrument)
+	bt, berr := momentum.BacktestTrend(r.cfg, m.Index, closes)
+	live, reason, lerr := momentum.EvaluateTrend(r.cfg, m.Index, closes)
+	if err := errors.Join(berr, lerr); err != nil {
+		r.checks[CheckExport].fail(fmt.Sprintf("%s: %s: %v", m.Month, r.cfg.TrendInstrument, err))
+		return
+	}
+	rel := relative(bt.Mean, m.SPYMean)
+	r.checks[CheckRiskOff].compare(
+		bt.RiskOff == m.RiskOff && bt.Close == m.SPYClose && bt.Closes == m.SPYCloses && rel <= RelativeTolerance, rel,
+		fmt.Sprintf("%s: Go risk_off=%v close %v mean %v from %d closes, QuantConnect risk_off=%v close %v mean %v from %d",
+			m.Month, bt.RiskOff, bt.Close, bt.Mean, bt.Closes, m.RiskOff, m.SPYClose, m.SPYMean, m.SPYCloses))
+	r.trendDeparture(m, bt, live, reason)
+}
+
+// trendDeparture lists the live risk-off test's departure from the
+// backtest's: withholding with fewer than TrendCloses closes, or with a
+// close missing from the window, each as Go's own data shows it. Any
+// other departure is unexplained.
+func (r *momentumRun) trendDeparture(m *MomentumMonth, bt, live momentum.Trend, reason momentum.WithheldReason) {
+	where := m.Month + " " + r.cfg.TrendInstrument
+	switch {
+	case reason == "" && live == bt:
+	case reason == momentum.ReasonInsufficientTrendHistory && bt.Closes < r.cfg.TrendCloses:
+		r.diff(where, KindTrendHistory,
+			fmt.Sprintf("%d closes; the backtest decided risk_off=%v, live withholds", bt.Closes, bt.RiskOff))
+	case reason == momentum.ReasonMissingBars && missingIn(m.Closes[r.cfg.TrendInstrument], r.cfg.TrendCloses):
+		r.diff(where, KindGap,
+			fmt.Sprintf("a close missing from the %d-close window; the backtest decided risk_off=%v, live withholds", r.cfg.TrendCloses, bt.RiskOff))
+	default:
+		r.diff(where, KindUnexplained,
+			fmt.Sprintf("live risk_off=%v close %v mean %v withheld %q; backtest-compatible risk_off=%v close %v mean %v",
+				live.RiskOff, live.Close, live.Mean, reason, bt.RiskOff, bt.Close, bt.Mean))
+	}
+}
+
 // histories recomputes each sampled name's score and volatility, or why it
-// has none, from its closes. It returns an error for closes Score refuses.
-func (r *momentumRun) histories(m *MomentumMonth) error {
+// has none, from its closes, under the backtest's handling and under the
+// live rule's. It returns the names the live rule leaves out for a gap,
+// each with whether its closes show one, and an error for closes either
+// refuses.
+func (r *momentumRun) histories(m *MomentumMonth) (map[string]bool, error) {
 	names := make([]string, 0, len(m.Closes))
 	for name := range m.Closes {
 		if name != r.cfg.TrendInstrument && name != r.cfg.RiskOffInstrument {
@@ -263,72 +279,145 @@ func (r *momentumRun) histories(m *MomentumMonth) error {
 	}
 	sort.Strings(names)
 	type result struct {
-		name string
-		h    momentum.History
+		name     string
+		bt, live momentum.History
 	}
 	results := make([]result, 0, len(names))
 	for _, name := range names {
-		h, err := momentum.Score(r.cfg, m.Index, m.closes(name))
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+		closes := m.closes(name)
+		bt, berr := momentum.BacktestScore(r.cfg, m.Index, closes)
+		live, lerr := momentum.Score(r.cfg, m.Index, closes)
+		if err := errors.Join(berr, lerr); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
 		}
-		results = append(results, result{name, h})
+		results = append(results, result{name, bt, live})
 	}
 	ranked := map[string]RankedEntry{}
 	for _, e := range m.Ranked {
 		ranked[e.Ticker] = e
 	}
+	gaps := map[string]bool{}
 	for _, x := range results {
-		r.history(m, ranked, x.name, x.h)
+		r.history(m, ranked, x.name, x.bt)
+		if shown := r.scoreDeparture(m, x.name, x.bt, x.live); x.live.Status == momentum.StatusGap {
+			gaps[x.name] = shown
+		}
 	}
-	return nil
+	return gaps, nil
 }
 
-// history compares one sampled name's Go history with what QuantConnect
-// did with it.
+// history compares one sampled name's backtest-compatible history with
+// what QuantConnect did with it.
 func (r *momentumRun) history(m *MomentumMonth, ranked map[string]RankedEntry, name string, h momentum.History) {
 	hist, scores, vols := r.checks[CheckHistory], r.checks[CheckScores], r.checks[CheckVolatility]
 	where := m.Month + " " + name
 	e, scored := ranked[name]
 	n, short := m.Short[name]
 	switch {
-	case scored && h.Status == momentum.StatusGap && missingIn(m.Closes[name], r.cfg.ScoreLookback+1):
-		hist.Attributed++
-		r.diff(where, KindGap, fmt.Sprintf("QuantConnect scored %v, volatility %v across a missing close; Go leaves it out", e.Score, e.Volatility))
-	case scored && (h.Status == momentum.StatusScored || h.Status == momentum.StatusZeroVolatility):
-		hist.compare(true, 0, "")
-		rs, rv := relative(h.Score, e.Score), relative(h.Volatility, e.Volatility)
-		scores.compare(rs <= RelativeTolerance, rs, fmt.Sprintf("%s: Go %v, QuantConnect %v", where, h.Score, e.Score))
-		vols.compare(rv <= RelativeTolerance, rv, fmt.Sprintf("%s: Go %v, QuantConnect %v", where, h.Volatility, e.Volatility))
+	case scored:
+		ok := h.Status == momentum.StatusScored || h.Status == momentum.StatusZeroVolatility
+		hist.compare(ok, 0, fmt.Sprintf("%s: QuantConnect scored it; Go %s with %d closes", where, h.Status, h.Closes))
+		if ok {
+			rs, rv := relative(h.Score, e.Score), relative(h.Volatility, e.Volatility)
+			scores.compare(rs <= RelativeTolerance, rs, fmt.Sprintf("%s: Go %v, QuantConnect %v", where, h.Score, e.Score))
+			vols.compare(rv <= RelativeTolerance, rv, fmt.Sprintf("%s: Go %v, QuantConnect %v", where, h.Volatility, e.Volatility))
+		}
 	case short:
 		hist.compare(h.Status == momentum.StatusShortHistory && h.Closes == n, 0,
 			fmt.Sprintf("%s: QuantConnect left it out with %d closes; Go %s with %d", where, n, h.Status, h.Closes))
 	default:
-		hist.compare(false, 0, fmt.Sprintf("%s: Go %s with %d closes; QuantConnect scored=%v", where, h.Status, h.Closes, scored))
+		hist.compare(false, 0, fmt.Sprintf("%s: Go %s with %d closes; QuantConnect neither scored it nor left it out", where, h.Status, h.Closes))
 	}
 }
 
-// cause is a backtest behaviour that changes the book from some rank on:
-// a tie reordered, a zero volatility or a missing sector. inBook is
-// whether QuantConnect's book held it (marked P or C): only then can it
-// change a later mark or the picked set.
-type cause struct {
-	kind   Kind
-	where  string
-	rank   int
-	inBook bool
+// scoreDeparture lists the live Score's departure from the backtest's: a
+// name left out for a missing close in its window, when its closes show
+// one. Any other departure is unexplained. It reports whether a gap was
+// shown.
+func (r *momentumRun) scoreDeparture(m *MomentumMonth, name string, bt, live momentum.History) bool {
+	where := m.Month + " " + name
+	switch {
+	case live == bt:
+		return false
+	case live.Status == momentum.StatusGap && bt.Status != momentum.StatusShortHistory &&
+		missingIn(m.Closes[name], r.cfg.ScoreLookback+1):
+		r.diff(where, KindGap, fmt.Sprintf("the backtest scored %v, volatility %v across a missing close; live leaves it out", bt.Score, bt.Volatility))
+		return true
+	default:
+		r.diff(where, KindUnexplained, fmt.Sprintf("live %s score %v volatility %v from %d closes; backtest-compatible %s score %v volatility %v from %d",
+			live.Status, live.Score, live.Volatility, live.Closes, bt.Status, bt.Score, bt.Volatility, bt.Closes))
+		return false
+	}
 }
 
-func inBook(k Mark) bool { return k == MarkPicked || k == MarkCapped }
+// stage is the backtest-compatible book with one more live rule applied
+// than the stage before it.
+type stage struct {
+	kind Kind
+	book momentum.Book
+}
 
-// book compares the ranked order, the cap marks and the weights. A listed
-// cause, or a no-sector name, is that cause's difference, not a failure;
-// it excuses only what can follow from it: a cap mark at or after the
-// first cause QuantConnect's book held, and the weights of a month whose
-// picked set differs because of such a cause. Every other item is
-// compared (parity.go: any other difference fails).
+// books holds a month's backtest-compatible book, the stages that apply
+// the live rules to it one at a time, and the live book.
+type books struct {
+	backtest momentum.Book
+	stages   []stage
+	live     momentum.Book
+}
+
+// books computes them from QuantConnect's candidates, in its order, and
+// the names the live rule leaves out for a gap (gaps: whether the closes
+// show it). The stages apply, in turn: the live tie order (ascending ID),
+// leaving out each name whose closes show a gap, each zero volatility and
+// each name with no sector. The live book is SelectBook given every
+// candidate but the live rule's gaps. Every book takes QuantConnect's
+// risk-off flag.
+func (r *momentumRun) books(m *MomentumMonth, cands []momentum.Candidate, gaps map[string]bool) (books, error) {
+	var b books
+	var errs [6]error
+	b.backtest, errs[0] = momentum.BacktestBook(r.cfg, cands, m.RiskOff)
+	live := append([]momentum.Candidate(nil), cands...)
+	sort.SliceStable(live, func(i, j int) bool {
+		if live[i].Score != live[j].Score {
+			return live[i].Score > live[j].Score
+		}
+		return live[i].InstrumentID < live[j].InstrumentID
+	})
+	keep := live
+	for i, s := range []struct {
+		kind Kind
+		out  func(momentum.Candidate) bool
+	}{
+		{KindTie, func(momentum.Candidate) bool { return false }},
+		{KindGap, func(c momentum.Candidate) bool { return gaps[c.InstrumentID] }},
+		{KindZeroVolatility, func(c momentum.Candidate) bool { return c.Volatility == 0 }},
+		{KindNoSector, func(c momentum.Candidate) bool { return c.Sector == "" }},
+	} {
+		var next []momentum.Candidate
+		for _, c := range keep {
+			if !s.out(c) {
+				next = append(next, c)
+			}
+		}
+		keep = next
+		st := stage{kind: s.kind}
+		st.book, errs[i+1] = momentum.BacktestBook(r.cfg, keep, m.RiskOff)
+		b.stages = append(b.stages, st)
+	}
+	var liveCands []momentum.Candidate
+	for _, c := range cands {
+		if _, gap := gaps[c.InstrumentID]; !gap {
+			liveCands = append(liveCands, c)
+		}
+	}
+	b.live, errs[5] = momentum.SelectBook(r.cfg, liveCands, m.RiskOff)
+	return b, errors.Join(errs[:]...)
+}
+
+// book compares the backtest-compatible ranked order, cap marks and
+// weights with QuantConnect's, every name and every target, exactly.
 func (r *momentumRun) book(m *MomentumMonth, book momentum.Book) {
-	order, marks, weights := r.checks[CheckRankedOrder], r.checks[CheckCapMarks], r.checks[CheckWeights]
+	order, marks := r.checks[CheckRankedOrder], r.checks[CheckCapMarks]
 	if len(book.Ranked) != len(m.Ranked) {
 		order.compare(false, 0, fmt.Sprintf("%s: Go ranked %d names, QuantConnect %d", m.Month, len(book.Ranked), len(m.Ranked)))
 		return
@@ -337,103 +426,24 @@ func (r *momentumRun) book(m *MomentumMonth, book momentum.Book) {
 	for _, e := range m.Ranked {
 		byTicker[e.Ticker] = e
 	}
-	var causes []cause
 	for i, g := range book.Ranked {
 		q := m.Ranked[i]
-		where := fmt.Sprintf("%s rank %d", m.Month, i+1)
-		switch {
-		case g.InstrumentID == q.Ticker:
-			order.compare(true, 0, "")
-		case g.Score == q.Score:
-			order.Attributed++
-			r.diff(where, KindTie, fmt.Sprintf("Go %s, QuantConnect %s, both scored %v", g.InstrumentID, q.Ticker, q.Score))
-			causes = append(causes, cause{KindTie, where, i, inBook(q.Mark) || inBook(byTicker[g.InstrumentID].Mark)})
-		default:
-			order.compare(false, 0, fmt.Sprintf("%s: Go %s (%v), QuantConnect %s (%v)", where, g.InstrumentID, g.Score, q.Ticker, q.Score))
-		}
+		order.compare(g.InstrumentID == q.Ticker, 0,
+			fmt.Sprintf("%s rank %d: Go %s (%v), QuantConnect %s (%v)", m.Month, i+1, g.InstrumentID, g.Score, q.Ticker, q.Score))
 	}
-	// A cause of Go's own status is recorded only when QuantConnect's data
-	// shows it: a zero volatility, or no sector.
-	own := map[int]Kind{}
-	for j, g := range book.Ranked {
-		q := byTicker[g.InstrumentID]
+	for _, g := range book.Ranked {
 		where := fmt.Sprintf("%s %s", m.Month, g.InstrumentID)
-		switch {
-		case g.Status == momentum.StatusZeroVolatility && q.Volatility == 0:
-			own[j] = KindZeroVolatility
-		case g.Status == momentum.StatusNoSector && q.Sector == "":
-			own[j] = KindNoSector
-		default:
-			continue
-		}
-		causes = append(causes, cause{own[j], where, j, inBook(q.Mark)})
-	}
-	var from *cause
-	for i := range causes {
-		if c := &causes[i]; c.inBook && (from == nil || c.rank < from.rank) {
-			from = c
-		}
-	}
-	for j, g := range book.Ranked {
-		q := byTicker[g.InstrumentID]
-		where := fmt.Sprintf("%s %s", m.Month, g.InstrumentID)
-		if k, ok := own[j]; ok {
-			marks.Attributed++
-			r.diff(where, k, fmt.Sprintf("QuantConnect marked %q; Go leaves it out (%s)", q.Mark, g.Status))
-			continue
-		}
-		mark, err := liveMark(g.Status)
-		switch {
-		case g.Status == momentum.StatusZeroVolatility || g.Status == momentum.StatusNoSector:
-			marks.compare(false, 0, fmt.Sprintf("%s: Go leaves it out (%s), but QuantConnect has volatility %v, sector %q",
-				where, g.Status, q.Volatility, q.Sector))
-		case err != nil:
+		mark, err := backtestMark(g.Status)
+		if err != nil {
 			r.checks[CheckExport].fail(fmt.Sprintf("%s: %v", where, err))
-		case mark == q.Mark:
-			marks.compare(true, 0, "")
-		case from != nil && j >= from.rank:
-			marks.Attributed++
-			r.diff(where, from.kind, fmt.Sprintf("Go %q, QuantConnect %q, following %s", mark, q.Mark, from.where))
-		default:
-			marks.compare(false, 0, fmt.Sprintf("%s: Go %q (%s), QuantConnect %q", where, mark, g.Status, q.Mark))
+			continue
 		}
+		q := byTicker[g.InstrumentID]
+		marks.compare(mark == q.Mark, 0, fmt.Sprintf("%s: Go %q, QuantConnect %q", where, mark, q.Mark))
 	}
-	r.weights(m, book, from, weights)
-}
-
-// weights compares every target weight, unless the picked sets differ and
-// a cause QuantConnect's book held explains it: then the month's weights
-// follow from that cause and are attributed to it.
-func (r *momentumRun) weights(m *MomentumMonth, book momentum.Book, from *cause, c *Check) {
-	goW := map[string]float64{}
-	for _, t := range book.Targets {
-		goW[t.InstrumentID] = t.Weight
-	}
-	names := map[string]bool{}
-	for n := range goW {
-		names[n] = true
-	}
-	for n := range m.Weights {
-		names[n] = true
-	}
-	sorted := make([]string, 0, len(names))
-	for n := range names {
-		sorted = append(sorted, n)
-	}
-	sort.Strings(sorted)
-	setsDiffer, maxDiff := false, 0.0
-	for _, n := range sorted {
-		_, inGo := goW[n]
-		_, inQC := m.Weights[n]
-		setsDiffer = setsDiffer || inGo != inQC
-		maxDiff = math.Max(maxDiff, math.Abs(goW[n]-m.Weights[n]))
-	}
-	if setsDiffer && from != nil {
-		c.Attributed += len(sorted)
-		r.diff(m.Month+" weights", from.kind, fmt.Sprintf("picked sets differ; largest weight difference %.3g, following %s", maxDiff, from.where))
-		return
-	}
-	for _, n := range sorted {
+	goW := targets(book)
+	c := r.checks[CheckWeights]
+	for _, n := range union(goW, m.Weights) {
 		g, inGo := goW[n]
 		q, inQC := m.Weights[n]
 		d := math.Abs(g - q)
@@ -442,10 +452,137 @@ func (r *momentumRun) weights(m *MomentumMonth, book momentum.Book, from *cause,
 	}
 }
 
-// liveMark maps a live status the backtest's marks can express to that
-// mark. Any other status (an unaffordable skip, a status added later) is
-// an error: the comparison refuses what it does not understand.
-func liveMark(s momentum.Status) (Mark, error) {
+func targets(b momentum.Book) map[string]float64 {
+	out := map[string]float64{}
+	for _, t := range b.Targets {
+		out[t.InstrumentID] = t.Weight
+	}
+	return out
+}
+
+// union returns the names of a and b, sorted.
+func union(a, b map[string]float64) []string {
+	names := map[string]bool{}
+	for n := range a {
+		names[n] = true
+	}
+	for n := range b {
+		names[n] = true
+	}
+	out := make([]string, 0, len(names))
+	for n := range names {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// departures lists, stage by stage, every change one live rule makes to
+// the backtest-compatible book, classified by that rule; then every way
+// the live book differs from the last stage, which no listed rule
+// explains.
+func (r *momentumRun) departures(m *MomentumMonth, b books) {
+	prev := b.backtest
+	for _, s := range b.stages {
+		r.stageDepartures(m, prev, s.book, s.kind)
+		prev = s.book
+	}
+	r.unexplained(m, prev, b.stages[1].book, b.live)
+}
+
+// stageDepartures lists what changes between two books: the order of the
+// names both rank, a name left out, a status and the targets.
+func (r *momentumRun) stageDepartures(m *MomentumMonth, prev, next momentum.Book, k Kind) {
+	if len(prev.Ranked) == len(next.Ranked) {
+		for i, p := range prev.Ranked {
+			if n := next.Ranked[i]; n.InstrumentID != p.InstrumentID {
+				r.diff(fmt.Sprintf("%s rank %d", m.Month, i+1), k,
+					fmt.Sprintf("live order %s (%v), backtest order %s (%v)", n.InstrumentID, n.Score, p.InstrumentID, p.Score))
+			}
+		}
+	}
+	after := map[string]momentum.Status{}
+	for _, n := range next.Ranked {
+		after[n.InstrumentID] = n.Status
+	}
+	for _, p := range prev.Ranked {
+		where := fmt.Sprintf("%s %s", m.Month, p.InstrumentID)
+		switch s, ok := after[p.InstrumentID]; {
+		case !ok:
+			r.diff(where, k, fmt.Sprintf("backtest %s; live leaves it out", p.Status))
+		case s != p.Status:
+			r.diff(where, k, fmt.Sprintf("backtest %s, live %s", p.Status, s))
+		}
+	}
+	pw, nw := targets(prev), targets(next)
+	changed, largest := 0, 0.0
+	for _, n := range union(pw, nw) {
+		p, inP := pw[n]
+		q, inN := nw[n]
+		if inP != inN || p != q {
+			changed++
+			largest = math.Max(largest, math.Abs(p-q))
+		}
+	}
+	if changed > 0 {
+		r.diff(m.Month+" weights", k, fmt.Sprintf("%d targets differ, largest by %.3g", changed, largest))
+	}
+}
+
+// unexplained lists every way the live book differs from the last stage:
+// a name the live rule leaves out for no sector or a zero volatility its
+// data does not show, a name ranked, given a status or weighted
+// otherwise, a target, or a BacktestWouldPick that is not whether the
+// backtest's handling of the live candidates in live order (withGaps)
+// picks it.
+func (r *momentumRun) unexplained(m *MomentumMonth, last, withGaps, live momentum.Book) {
+	var rest []momentum.RankedName
+	for _, n := range live.Ranked {
+		ownRule := (n.Status == momentum.StatusNoSector && n.Sector == "") ||
+			(n.Status == momentum.StatusZeroVolatility && n.Volatility == 0 && n.Sector != "")
+		if !ownRule {
+			rest = append(rest, n)
+		}
+	}
+	for i := 0; i < max(len(rest), len(last.Ranked)); i++ {
+		var g, w momentum.RankedName
+		if i < len(rest) {
+			g = rest[i]
+		}
+		if i < len(last.Ranked) {
+			w = last.Ranked[i]
+		}
+		if g.InstrumentID != w.InstrumentID || g.Status != w.Status || g.Weight != w.Weight {
+			r.diff(fmt.Sprintf("%s rank %d of the book", m.Month, i+1), KindUnexplained,
+				fmt.Sprintf("live %q %s weight %v; with the listed rules applied %q %s weight %v",
+					g.InstrumentID, g.Status, g.Weight, w.InstrumentID, w.Status, w.Weight))
+		}
+	}
+	lw, sw := targets(live), targets(last)
+	for _, n := range union(lw, sw) {
+		g, inL := lw[n]
+		w, inS := sw[n]
+		if inL != inS || g != w {
+			r.diff(fmt.Sprintf("%s target %s", m.Month, n), KindUnexplained,
+				fmt.Sprintf("live %v (set %v); with the listed rules applied %v (set %v)", g, inL, w, inS))
+		}
+	}
+	picks := map[string]bool{}
+	for _, n := range withGaps.Ranked {
+		picks[n.InstrumentID] = n.Status == momentum.StatusPicked
+	}
+	for _, n := range live.Ranked {
+		if want, ok := picks[n.InstrumentID]; !ok || n.BacktestWouldPick != want {
+			r.diff(fmt.Sprintf("%s %s", m.Month, n.InstrumentID), KindUnexplained,
+				fmt.Sprintf("live BacktestWouldPick=%v; the backtest's handling picks it: %v", n.BacktestWouldPick, want))
+		}
+	}
+}
+
+// backtestMark maps a status BacktestBook gives to the backtest's mark.
+// Any other status is an error: the comparison refuses what it does not
+// understand.
+func backtestMark(s momentum.Status) (Mark, error) {
 	switch s {
 	case momentum.StatusPicked:
 		return MarkPicked, nil

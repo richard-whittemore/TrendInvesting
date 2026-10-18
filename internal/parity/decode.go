@@ -15,8 +15,9 @@ import (
 // Python's repr, the shortest string that round-trips, so they decode to
 // the very float64 QuantConnect held.
 
-// The required scalars are pointers, so a field that is missing or null is
-// refused rather than read as zero.
+// The required scalars, and the values of weights and short, are pointers,
+// so a field or value that is missing or null is refused rather than read
+// as zero.
 type momentumPayload struct {
 	Month     *string               `json:"month"`
 	RiskOff   *bool                 `json:"risk_off"`
@@ -27,13 +28,13 @@ type momentumPayload struct {
 	Scored    *int                  `json:"scored"`
 	Index     []string              `json:"index"`
 	Ranked    [][]json.RawMessage   `json:"ranked"`
-	Weights   map[string]float64    `json:"weights"`
-	Short     map[string]int        `json:"short"`
+	Weights   map[string]*float64   `json:"weights"`
+	Short     map[string]*int       `json:"short"`
 	Closes    map[string][]*float64 `json:"closes"`
 }
 
 // DecodeMomentum decodes one logged month, refusing an unknown field, a
-// required field missing or null, a ranked row that is not [ticker, score,
+// required field missing or null, a null weight or close count, a ranked row that is not [ticker, score,
 // volatility, sector or null, mark], an empty ticker and an unknown mark.
 func DecodeMomentum(raw []byte) (MomentumMonth, error) {
 	var p momentumPayload
@@ -49,14 +50,23 @@ func DecodeMomentum(raw []byte) (MomentumMonth, error) {
 	}{
 		{"risk_off", p.RiskOff != nil}, {"spy_close", p.SPYClose != nil}, {"spy_mean", p.SPYMean != nil},
 		{"spy_n", p.SPYCloses != nil}, {"members", p.Members != nil}, {"scored", p.Scored != nil},
+		{"weights", p.Weights != nil}, {"short", p.Short != nil},
 	} {
 		if !f.present {
 			return MomentumMonth{}, fmt.Errorf("parity: %s: %s missing or null", *p.Month, f.name)
 		}
 	}
+	weights, err := required(*p.Month, "weights", p.Weights)
+	if err != nil {
+		return MomentumMonth{}, err
+	}
+	short, err := required(*p.Month, "short", p.Short)
+	if err != nil {
+		return MomentumMonth{}, err
+	}
 	m := MomentumMonth{Month: *p.Month, RiskOff: *p.RiskOff, SPYClose: *p.SPYClose, SPYMean: *p.SPYMean,
 		SPYCloses: *p.SPYCloses, Members: *p.Members, Scored: *p.Scored, Index: p.Index,
-		Weights: p.Weights, Short: p.Short, Closes: p.Closes}
+		Weights: weights, Short: short, Closes: p.Closes}
 	for i, row := range p.Ranked {
 		e, err := rankedEntry(row)
 		if err != nil {
@@ -65,6 +75,18 @@ func DecodeMomentum(raw []byte) (MomentumMonth, error) {
 		m.Ranked = append(m.Ranked, e)
 	}
 	return m, nil
+}
+
+// required returns the values of field, refusing a null one.
+func required[T any](month, field string, in map[string]*T) (map[string]T, error) {
+	out := make(map[string]T, len(in))
+	for k, v := range in {
+		if v == nil {
+			return nil, fmt.Errorf("parity: %s: %s[%s] null", month, field, k)
+		}
+		out[k] = *v
+	}
+	return out, nil
 }
 
 func rankedEntry(row []json.RawMessage) (RankedEntry, error) {

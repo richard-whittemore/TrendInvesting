@@ -8,9 +8,18 @@
 // marks exact; weights within WeightTolerance given QuantConnect's own
 // inputs; scores and volatility, recomputed from the closes, within
 // RelativeTolerance; Boost's RSI, means and state exact on every session.
-// A difference ADR 0026 point 8 lists is reported with its size and does
-// not fail; any other difference fails. A failed result is recorded, never
-// rewritten (AGENTS.md rule 6).
+//
+// The comparison never puts a mismatch down to a cause. For momentum it
+// compares the Go module's recomputation under the backtest's own handling
+// of each case ADR 0026 point 8 lists, and of a name with no sector (ranked
+// and capped as QuantConnect did, ties kept in QuantConnect's order, a zero
+// volatility weighted as 1, a short or gapped history scored as
+// QuantConnect scored it), with QuantConnect's export exactly: ranked
+// order, cap marks, picked set and weights, every month, with no tolerance
+// beyond the specification's. Separately, the differences check lists
+// every departure of the live rule from that backtest-compatible result,
+// classified by cause, and fails on any cause ADR 0026 point 8 does not
+// list. A failed result is recorded, never rewritten (AGENTS.md rule 6).
 //
 // The package is pure: it reads decoded exports and returns a Report.
 package parity
@@ -76,6 +85,9 @@ const (
 	// uncapped and live leaves out (plan.md section 4, "Sectors"). Not on
 	// ADR 0026 point 8's list.
 	KindNoSector Kind = "no-sector"
+	// KindUnexplained: a live departure from the backtest-compatible result
+	// that no rule above produces. Never listed.
+	KindUnexplained Kind = "unexplained"
 )
 
 // Listed reports whether ADR 0026 point 8 lists the kind.
@@ -88,18 +100,15 @@ func (k Kind) Listed() bool {
 }
 
 // Check is one row of the report: what was compared, against which
-// threshold, how many items were attributed to a named difference instead
-// of compared, how many comparisons failed and the largest difference seen.
+// threshold, how many comparisons there were, how many failed and the
+// largest difference seen.
 type Check struct {
 	Run       string
 	Name      string
 	Threshold string
 	Compared  int
-	// Attributed counts the items put down to a difference ADR 0026 point
-	// 8 lists, or to a no-sector name, instead of compared.
-	Attributed int
-	Failures   int
-	MaxDiff    float64
+	Failures  int
+	MaxDiff   float64
 	// First describes the first failure, for the record.
 	First string
 	// MayBeEmpty marks a check that passes with nothing to compare (the
@@ -108,8 +117,7 @@ type Check struct {
 }
 
 // Pass reports whether the check held. A check that compared nothing
-// proves nothing and fails, unless MayBeEmpty; attributed items are not
-// comparisons.
+// proves nothing and fails, unless MayBeEmpty.
 func (c Check) Pass() bool {
 	return c.Failures == 0 && (c.Compared > 0 || c.MayBeEmpty)
 }
@@ -131,8 +139,8 @@ func (c *Check) fail(what string) {
 	}
 }
 
-// Difference is one place where the Go module and the backtest differ by a
-// behaviour the comparison can name.
+// Difference is one place where the live rule departs from the
+// backtest-compatible result, and the cause.
 type Difference struct {
 	Run   string
 	Where string
@@ -173,8 +181,8 @@ func Merge(reports ...Report) Report {
 // first failure of each failing check, and the differences table.
 func (r Report) Markdown() string {
 	var b strings.Builder
-	b.WriteString("| Run | Check | Threshold | Compared | Attributed | Failures | Max difference | Result |\n")
-	b.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
+	b.WriteString("| Run | Check | Threshold | Compared | Failures | Max difference | Result |\n")
+	b.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
 	var failing []Check
 	for _, c := range r.Checks {
 		result := "PASS"
@@ -182,8 +190,8 @@ func (r Report) Markdown() string {
 			result = "FAIL"
 			failing = append(failing, c)
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %d | %s | %s |\n",
-			c.Run, c.Name, c.Threshold, c.Compared, c.Attributed, c.Failures, formatDiff(c.MaxDiff), result)
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %s | %s |\n",
+			c.Run, c.Name, c.Threshold, c.Compared, c.Failures, formatDiff(c.MaxDiff), result)
 	}
 	overall := "PASS"
 	if !r.Pass() {
@@ -205,7 +213,7 @@ func (r Report) Markdown() string {
 		b.WriteString("No differences.\n")
 		return b.String()
 	}
-	b.WriteString("| Run | Where | Difference | On ADR 0026 point 8's list | Size |\n")
+	b.WriteString("| Run | Where | Live departure | On ADR 0026 point 8's list | Size |\n")
 	b.WriteString("| --- | --- | --- | --- | --- |\n")
 	for _, d := range r.Differences {
 		listed := "no"

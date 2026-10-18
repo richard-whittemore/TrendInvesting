@@ -34,30 +34,54 @@ They were fixed before any comparison was run:
 | weights | within 0.000000000001 (1e-12) of QuantConnect's |
 | scores, volatility, the SPY average | within one part in a billion (1e-9) |
 | Boost RSI, both averages, state and target | exactly the same, every session |
-| any other difference | fails, unless ADR 0026 point 8 lists it |
+| a live departure from the backtest | fails, unless ADR 0026 point 8 lists its cause |
 
-ADR 0026 point 8 lists the backtest behaviours the live code deliberately
-does not copy: keeping last month's book when nothing can be scored, treating
-SPY as risk-on with fewer than 200 prices, a price window that slides over a
-missing day, equal scores ranked in whatever order the data arrived, a stock
-whose price never moved weighted as if its volatility were 1, and RSI's
-dependence on where its history starts. When one of these shows up the
-report lists it with its size, and it does not fail the check. Anything else
-fails, including a difference the code makes on purpose that is not on that
-list (for example a stock with no sector label: the backtest left it
-uncapped, live leaves it out).
+### The one rule: no mismatch is ever excused
 
-Such a difference excuses only what can follow from it, and only when
-QuantConnect's own data shows it (a SPY price count under 200, a missing
-price in the window, a volatility of exactly zero, no sector label). A
-stock left out changes the marks of the stocks ranked after it, but only if
-QuantConnect's book held it (picked or capped); and it changes the weights
-only in a month where the two sides picked different stocks. Every other
-mark and weight is still compared, and a mismatch there fails.
+The tool never puts a mismatch down to a cause. It does two separate
+things.
 
-A check that had nothing to compare fails too: it proves nothing. The
-items put down to a difference are counted apart (the `Attributed` column)
-and do not count as compared.
+**First, it checks Go against QuantConnect exactly.** Go recomputes each
+month the way the backtest did, including the cases where live trading
+deliberately does something else: a stock with no sector label is ranked
+and left uncapped, as QuantConnect did; equal scores stay in QuantConnect's
+order; a stock whose price never moved is picked and weighted as if its
+volatility were 1; a price history with a missing day is scored over the
+prices it has, and one with fewer than 253 prices is left out; SPY's
+average is taken over the prices it has, and with fewer than 200 it counts
+as risk-on. That
+recomputation is compared with QuantConnect's export: the ranked order,
+every cap mark, the picked stocks and every weight, every month, with no
+allowance beyond the thresholds above. A single mismatch fails the check.
+
+One thing the export cannot show: the order the backtest's universe
+arrived in, which is how it broke ties. Go keeps tied stocks in
+QuantConnect's own order, so the ranked-order check proves that every
+other pair of stocks is in the right order, but not the order within a
+tie.
+
+**Second, it lists every live departure.** Go then runs the live rule on
+the same inputs and lists every way the live result differs from that
+backtest-compatible one, each with its cause. It works this out by
+applying the live rules one at a time: equal scores by ticker, then
+leaving out a stock with a gap in its prices, then one whose price never
+moved, then one with no sector label. Every stock whose mark changes at a
+step, and the month's weights if they change, is listed under that
+step's cause, and the live result must then match the last step exactly.
+Anything left over is listed as `unexplained`.
+
+ADR 0026 point 8 lists the backtest behaviours live trading deliberately
+does not copy: keeping last month's book when nothing can be scored,
+treating SPY as risk-on with fewer than 200 prices, a price window that
+slides over a missing day, equal scores ranked in whatever order the data
+arrived, a stock whose price never moved weighted as if its volatility
+were 1, and RSI's dependence on where its history starts. The
+`differences` check passes only if every listed departure has one of those
+causes. A stock with no sector label is not on the list (the backtest left
+it uncapped, live leaves it out), and nor is `unexplained`, so either one
+fails it.
+
+A check that had nothing to compare fails too: it proves nothing.
 
 ## Where the inputs come from
 
@@ -103,11 +127,10 @@ The exact command used for the recorded result, with every month, is in
 
 A line per input saying how many months or sessions it found, then a table
 with one row per check and run: what was compared, the threshold, how many
-comparisons, how many items were put down to a named difference instead of
-compared (`Attributed`), how many comparisons failed, the largest difference
-seen and PASS or FAIL.
+comparisons, how many failed, the largest difference seen and PASS or FAIL.
 Then the overall result, the first failure of each failing check, and a
-table of the differences, each marked as on ADR 0026 point 8's list or not.
+table of the live departures, each with its cause and whether ADR 0026
+point 8 lists it.
 
 It exits with status 0 when everything passes, 1 when any check fails, and 2
 when an input cannot be read at all (a missing file, a tag that is not
@@ -122,9 +145,12 @@ valid, a run with no planned months).
   length, dates out of order or repeated, a picked stock with no weight, a
   stock ranked twice, a member count that is not the ranked plus the too
   short); nothing in that month is compared further. It also fails when
-  Go gave a stock a status the tool has no backtest mark for. A required field that is
-  missing or null, or an empty ticker, stops the tool before any
-  comparison (exit status 2).
+  Go gave a stock a status the tool has no backtest mark for. A required
+  field that is missing or null (a weight or a close count included), or an
+  empty ticker, stops the tool before any comparison (exit status 2).
+- **`differences` fails**: the live rule departs from the backtest for a
+  reason ADR 0026 point 8 does not list. A `no-sector` row needs an owner
+  decision; an `unexplained` row is a Go defect until shown otherwise.
 - **A check fails**: the Go code and the backtest disagree. The first failure
   line says where. This is a result, not a tool fault: record it, open an
   issue for it, and do not change a threshold after seeing it.

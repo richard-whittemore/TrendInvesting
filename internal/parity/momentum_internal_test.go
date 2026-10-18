@@ -1,6 +1,7 @@
 package parity
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
@@ -70,19 +71,80 @@ func TestAStatusTheComparisonDoesNotKnowFailsTheExport(t *testing.T) {
 	}
 }
 
-func TestAGoZeroVolatilityQuantConnectDidNotHaveFailsCapMarks(t *testing.T) {
-	r, m := internalRun(), twoNames()
-	r.book(m, goBook(m, momentum.StatusPicked, momentum.StatusZeroVolatility))
-	if c := r.checks[CheckCapMarks]; c.Failures != 1 || len(r.diffs) != 0 {
-		t.Errorf("Go's zero volatility on a nonzero one must fail, not be listed: %+v %+v", c, r.diffs)
+// The live rule's departures from the backtest-compatible book are
+// classified by cause; a live result no listed rule produces is
+// unexplained, is not on ADR 0026 point 8's list, and fails the
+// differences check.
+
+func onlyUnexplained(t *testing.T, r *momentumRun, what string) {
+	t.Helper()
+	if len(r.diffs) == 0 {
+		t.Fatalf("%s must be listed", what)
+	}
+	for _, d := range r.diffs {
+		if d.Kind != KindUnexplained || d.Listed() {
+			t.Errorf("%s: difference %+v, want unexplained", what, d)
+		}
+	}
+	if differencesCheck(r.run, r.diffs).Pass() {
+		t.Errorf("%s must fail the differences check", what)
 	}
 }
 
-func TestAGoNoSectorQuantConnectDidNotHaveFailsCapMarks(t *testing.T) {
+// withPicks sets BacktestWouldPick on each picked name, as SelectBook does
+// when no live rule changed the picks.
+func withPicks(b momentum.Book) momentum.Book {
+	for i := range b.Ranked {
+		b.Ranked[i].BacktestWouldPick = b.Ranked[i].Status == momentum.StatusPicked
+	}
+	return b
+}
+
+func TestALiveBookTheListedRulesExplainIsNoDeparture(t *testing.T) {
 	r, m := internalRun(), twoNames()
-	r.book(m, goBook(m, momentum.StatusPicked, momentum.StatusNoSector))
-	if c := r.checks[CheckCapMarks]; c.Failures != 1 || len(r.diffs) != 0 {
-		t.Errorf("Go's no-sector on a labelled name must fail, not be a difference: %+v %+v", c, r.diffs)
+	book := withPicks(goBook(m, momentum.StatusPicked, momentum.StatusPicked))
+	r.unexplained(m, book, book, book)
+	if len(r.diffs) != 0 {
+		t.Errorf("differences %+v", r.diffs)
+	}
+}
+
+func TestALiveNoSectorOrZeroVolatilityTheDataDoesNotShowIsUnexplained(t *testing.T) {
+	for _, s := range []momentum.Status{momentum.StatusNoSector, momentum.StatusZeroVolatility} {
+		t.Run(string(s), func(t *testing.T) {
+			r, m := internalRun(), twoNames()
+			want := withPicks(goBook(m, momentum.StatusPicked, momentum.StatusPicked))
+			live := withPicks(goBook(m, momentum.StatusPicked, s))
+			r.unexplained(m, want, want, live)
+			onlyUnexplained(t, r, fmt.Sprintf("a labelled name with volatility left out as %s", s))
+		})
+	}
+}
+
+func TestALiveRankingStatusOrWeightNoListedRuleProducesIsUnexplained(t *testing.T) {
+	for name, alter := range map[string]func(*momentum.Book){
+		"a capped pick":  func(b *momentum.Book) { b.Ranked[1].Status = momentum.StatusSectorCapped },
+		"another weight": func(b *momentum.Book) { b.Ranked[0].Weight = 0.1; b.Targets[0].Weight = 0.1 },
+		"a missing name": func(b *momentum.Book) { b.Ranked = b.Ranked[:1] },
+		"an extra target": func(b *momentum.Book) {
+			b.Targets = append(b.Targets, momentum.Target{InstrumentID: "IEF", Weight: 0.01})
+		},
+		"a would-pick off": func(b *momentum.Book) { b.Ranked[0].BacktestWouldPick = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, m := internalRun(), twoNames()
+			want := withPicks(goBook(m, momentum.StatusPicked, momentum.StatusPicked))
+			for i, n := range want.Ranked {
+				want.Ranked[i].Weight = m.Weights[n.InstrumentID]
+			}
+			live := momentum.Book{
+				Ranked:  append([]momentum.RankedName(nil), want.Ranked...),
+				Targets: append([]momentum.Target(nil), want.Targets...),
+			}
+			alter(&live)
+			r.unexplained(m, want, want, live)
+			onlyUnexplained(t, r, name)
+		})
 	}
 }
 
@@ -97,20 +159,31 @@ func trendMonth() *MomentumMonth {
 	return m
 }
 
-func TestAGoMissingTrendCloseQuantConnectHadFailsRiskOff(t *testing.T) {
-	r, m := internalRun(), trendMonth()
-	r.trendResult(m, momentum.Trend{Closes: 210}, momentum.ReasonMissingBars)
-	if c := r.checks[CheckRiskOff]; c.Failures != 1 || len(r.diffs) != 0 {
-		t.Errorf("no close is missing from SPY's window, so the gap must fail: %+v %+v", c, r.diffs)
+func TestALiveWithheldTrendTheDataDoesNotExplainIsUnexplained(t *testing.T) {
+	for name, reason := range map[string]momentum.WithheldReason{
+		"a missing close": momentum.ReasonMissingBars,
+		"short history":   momentum.ReasonInsufficientTrendHistory,
+		"another result":  "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, m := internalRun(), trendMonth()
+			bt := momentum.Trend{Closes: 210, Close: 309, Mean: 250}
+			live := bt
+			if reason == "" {
+				live.RiskOff = true
+			}
+			r.trendDeparture(m, bt, live, reason)
+			onlyUnexplained(t, r, name)
+		})
 	}
 }
 
-func TestAGoGapQuantConnectDidNotHaveFailsHistory(t *testing.T) {
+func TestALiveGapTheClosesDoNotShowIsUnexplained(t *testing.T) {
 	r, m := internalRun(), trendMonth()
 	m.Closes["AAA"] = m.Closes["SPY"]
-	e := RankedEntry{Ticker: "AAA", Score: 0.1, Volatility: 0.01, Sector: "101", Mark: MarkBeyond}
-	r.history(m, map[string]RankedEntry{"AAA": e}, "AAA", momentum.History{Status: momentum.StatusGap, Closes: 210})
-	if c := r.checks[CheckHistory]; c.Failures != 1 || len(r.diffs) != 0 {
-		t.Errorf("no close is missing from its window, so the gap must fail: %+v %+v", c, r.diffs)
+	bt := momentum.History{Status: momentum.StatusScored, Closes: 210, Score: 0.1, Volatility: 0.01}
+	if r.scoreDeparture(m, "AAA", bt, momentum.History{Status: momentum.StatusGap, Closes: 210}) {
+		t.Error("no close is missing, so no gap is shown")
 	}
+	onlyUnexplained(t, r, "a gap with every close present")
 }

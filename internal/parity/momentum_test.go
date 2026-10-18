@@ -216,10 +216,8 @@ func TestAWindowShiftedAcrossAGapIsAListedDifference(t *testing.T) {
 	if !r.Pass() {
 		t.Fatalf("a gap is on ADR 0026 point 8's list: %+v", r)
 	}
-	d := onlyDifference(t, r)
-	if d.Kind != parity.KindGap || !d.Listed() || !strings.Contains(d.Where, gapped) || d.Size == "" {
-		t.Errorf("difference %+v", d)
-	}
+	// Its score, and the book that leaves it out.
+	classified(t, r, parity.KindGap, gapped, 2)
 }
 
 func TestTiedScoresRankedInAnotherOrderAreAListedDifference(t *testing.T) {
@@ -279,8 +277,13 @@ func TestTooFewTrendClosesIsAListedDifference(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		col[i] = nil
 	}
-	m.SPYCloses = 160 // the backtest treated fewer than 200 as risk-on
-	m.SPYMean = 0
+	// The backtest treated fewer than 200 as risk-on; QuantConnect logged
+	// the mean of the closes it had.
+	sum := 0.0
+	for _, p := range col[100:] {
+		sum += *p
+	}
+	m.SPYCloses, m.SPYMean = 160, sum/160
 	r := compare(ms)
 	if !r.Pass() {
 		t.Fatalf("fewer than 200 trend closes is on the list: %+v", r.Checks)
@@ -318,7 +321,21 @@ func onlyDifference(t *testing.T, r parity.Report) parity.Difference {
 
 func TestAMissingTrendCloseInTheWindowIsAListedDifference(t *testing.T) {
 	ms := months()
-	ms[1].Closes["SPY"][250] = nil // the backtest dropped it (defensive_v2.py:278)
+	m := &ms[1]
+	col := m.Closes["SPY"]
+	col[250] = nil // the backtest dropped it (defensive_v2.py:278)
+	// QuantConnect logged the mean of the last 200 closes it had.
+	var had []float64
+	for _, p := range col {
+		if p != nil {
+			had = append(had, *p)
+		}
+	}
+	sum := 0.0
+	for _, p := range had[len(had)-200:] {
+		sum += p
+	}
+	m.SPYCloses, m.SPYMean = len(had), sum/200
 	r := compare(ms)
 	if !r.Pass() {
 		t.Fatalf("a gap is on the list: %+v", r.Checks)
@@ -381,9 +398,8 @@ func tieBeyondTheBook(ms []parity.MomentumMonth) {
 	delete(m.Closes, m.Ranked[39].Ticker)
 }
 
-// A listed cause excuses only what can follow from it: a cap mark at or
-// after a cause inside QuantConnect's book, and the weights only when the
-// picked set differs. Anything else is still compared and fails.
+// A listed cause is a live departure, not an excuse: every mark and
+// weight is still compared with the backtest-compatible book.
 
 func TestATieBeyondTheBookDoesNotExcuseAChangedCapMark(t *testing.T) {
 	ms := months()
@@ -411,7 +427,7 @@ func TestANoSectorNameBeyondTheBookDoesNotExcuseAWeightOffByMoreThanTheTolerance
 	markAndWeigh(m)
 	m.Weights[m.Ranked[0].Ticker] += 2e-12
 	r := compare(ms)
-	if c := checkNamed(r, parity.CheckWeights); c.Pass() || c.Attributed != 0 {
+	if c := checkNamed(r, parity.CheckWeights); c.Pass() {
 		t.Errorf("the picked set is the same on both sides, so the weight must be compared and fail: %+v", c)
 	}
 }
@@ -431,36 +447,15 @@ func TestANoSectorNameBeyondTheBookDoesNotExcuseALaterChangedMark(t *testing.T) 
 	}
 }
 
-func TestANoSectorPickExcusesTheMarksAfterItButNotBeforeIt(t *testing.T) {
-	ms := months()
-	m := &ms[1]
-	m.Ranked[10].Sector = "" // a pick in QuantConnect's book
-	markAndWeigh(m)
-	if m.Ranked[10].Mark != parity.MarkPicked || m.Ranked[4].Mark != parity.MarkCapped {
-		t.Fatal("fixture: rank 11 must be a pick and rank 5 capped")
-	}
-	r := compare(ms)
-	if c := checkNamed(r, parity.CheckCapMarks); !c.Pass() || c.Attributed == 0 {
-		t.Fatalf("the marks after a no-sector pick follow from it: %+v", c)
-	}
-	if c := checkNamed(r, parity.CheckWeights); c.Attributed == 0 || c.Compared != 26 {
-		t.Errorf("the picked set differs, so that month's weights follow from it: %+v", c)
-	}
-	m.Ranked[4].Mark = parity.MarkBeyond // before the no-sector pick; Go caps it
-	if c := checkNamed(compare(ms), parity.CheckCapMarks); c.Pass() {
-		t.Errorf("a mark before the cause must be compared and fail: %+v", c)
-	}
-}
-
-func TestAttributedItemsAreCountedApartFromComparedOnes(t *testing.T) {
+func TestEveryNameAndTargetIsCompared(t *testing.T) {
 	ms := months()
 	tieBeyondTheBook(ms)
 	r := compare(ms)
-	if c := checkNamed(r, parity.CheckRankedOrder); c.Compared != 78 || c.Attributed != 2 || !c.Pass() {
-		t.Errorf("two reordered tied names are attributed, the other 78 compared: %+v", c)
+	if c := checkNamed(r, parity.CheckRankedOrder); c.Compared != 80 || !c.Pass() {
+		t.Errorf("the tied names are compared in the backtest's order with the other 78: %+v", c)
 	}
-	if c := checkNamed(r, parity.CheckWeights); c.Compared != 51 || c.Attributed != 0 {
-		t.Errorf("the book is the same, so every weight is compared: %+v", c)
+	if c := checkNamed(r, parity.CheckWeights); c.Compared != 51 || !c.Pass() {
+		t.Errorf("every target is compared: %+v", c)
 	}
 }
 
