@@ -93,6 +93,11 @@ type Gate struct {
 
 	killEngaged bool
 	killID      string
+	// lastKill is the kill switch last applied, by envelope ID, and the time
+	// it states; lastKillSet whether there is one (SetKillSwitch).
+	lastKill    string
+	lastKillAt  time.Time
+	lastKillSet bool
 
 	broker   *event.BrokerSnapshotPayload
 	brokerID string

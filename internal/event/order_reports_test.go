@@ -217,3 +217,49 @@ func TestTheIBKRAdaptersPaperReportsAreReadByOrderReports(t *testing.T) {
 		})
 	}
 }
+
+// TestOrderReportsClearsExactlyTheOrdersNotTerminal: the owner's clearance
+// is read by the same rule as the venue's reports, so the engine and the
+// reporter agree on which orders it made terminal. It is refused unless an
+// order is working and it is for their account, names their rebalance and
+// every one of them not terminal, exactly; once read, each is terminal, and
+// a later venue report on one is refused as on a terminal order (ADR 0026,
+// point 5; ADR 0019, "Alerting").
+func TestOrderReportsClearsExactlyTheOrdersNotTerminal(t *testing.T) {
+	at := time.Date(2025, 2, 3, 21, 0, 0, 0, time.UTC)
+	order := func(id string) event.OrderReleasedPayload {
+		return event.OrderReleasedPayload{AccountID: "ira", Tag: "decision", ClientOrderID: id, InstrumentID: "AAA", Side: event.OrderSideSell, Quantity: 9, LimitPrice: 10}
+	}
+	cleared := func(account, decision string, ids ...string) event.RebalanceClearedPayload {
+		return event.RebalanceClearedPayload{AccountID: account, AsOf: at, DecisionID: decision, ClientOrderIDs: ids, Operator: "owner", Detail: "cancelled"}
+	}
+	r := event.NewOrderReports()
+	if err := r.Clear(cleared("ira", "decision", "tw-1")); err == nil || !strings.Contains(err.Error(), "no rebalance is in progress") {
+		t.Errorf("a clearance with nothing working: %v, want it refused", err)
+	}
+	r.Release(order("tw-1"))
+	r.Release(order("tw-2"))
+	for want, p := range map[string]event.RebalanceClearedPayload{
+		"is for account":                        cleared("joint", "decision", "tw-1", "tw-2"),
+		"the rebalance in progress is decision": cleared("ira", "other", "tw-1", "tw-2"),
+		"name exactly":                          cleared("ira", "decision", "tw-1"),
+	} {
+		if err := r.Clear(p); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("clearance %+v: %v, want it refused mentioning %q", p, err, want)
+		}
+	}
+	if got := r.Working(); !slices.Equal(got, []string{"tw-1", "tw-2"}) {
+		t.Fatalf("working %v after refused clearances, want both orders", got)
+	}
+	if err := r.Clear(cleared("ira", "decision", "tw-1", "tw-2")); err != nil {
+		t.Fatalf("the clearance naming every order working: %v", err)
+	}
+	if got := r.Working(); len(got) != 0 {
+		t.Errorf("working %v after the clearance, want none", got)
+	}
+	late := event.LimitOrderLifecyclePayload{AccountID: "ira", ClientOrderID: "tw-1", OrderID: "7", InstrumentID: "AAA", Side: event.OrderSideSell,
+		Status: event.OrderLifecycleStatusCanceled, Quantity: 9, LimitPrice: 10, OccurredAt: at}
+	if _, err := r.Lifecycle(late); err == nil || !strings.Contains(err.Error(), "already terminal") {
+		t.Errorf("a venue report on a cleared order: %v, want it refused as on a terminal order", err)
+	}
+}

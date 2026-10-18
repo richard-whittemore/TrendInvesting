@@ -49,6 +49,7 @@ func parseAndRunWithBuild(ctx context.Context, args []string, out io.Writer, bui
 	logPath := flags.String("log", "", "path to stream this process's durable log to, each input flushed before its decisions are returned (ADR 0027); must not exist")
 	resumePath := flags.String("resume", "", "path of a previous process's durable log to rebuild state from before listening; requires -log")
 	approvalPath := flags.String("approval", "", "path of the owner's operator.run.approved file: required for a fresh run when the -log directory already holds an earlier run's durable log; never with -resume")
+	operatorDir := flags.String("operator", "", "path of the operator inbox, where the operator tool records the owner's kill switch and rebalance clearances; never with -mode backtest")
 	asOf := flags.String("as-of", "", "required nonzero run start as an RFC 3339 time; warm-up bars may precede it (ADR 0012)")
 	mode := flags.String("mode", "", "required: what the adapter does with decisions: backtest, dry-run, paper or live (live is refused until the limited-live gate); every mode but backtest requires -log (ADR 0027)")
 	maxFrame := flags.Int("max-frame", transport.DefaultMaxFrameBytes, "maximum frame size in bytes")
@@ -63,6 +64,7 @@ func parseAndRunWithBuild(ctx context.Context, args []string, out io.Writer, bui
 		logPath:         *logPath,
 		resumePath:      *resumePath,
 		approvalPath:    *approvalPath,
+		operatorDir:     *operatorDir,
 		asOf:            *asOf,
 		mode:            *mode,
 		build:           build,

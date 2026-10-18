@@ -57,6 +57,15 @@ type ServerConfig struct {
 	// envelope", nothing more); admission is a fact about a CONNECTION, and
 	// only Server ever sees one of those.
 	MaxConnections int
+	// AfterReply, when set, is called on a connection's goroutine each
+	// time a reply to a request has been written to it, before the next
+	// request is read, and once more when the connection's goroutine ends
+	// for any reason, including a reply that could not be written. A
+	// caller that must stop serving because of an answer stops it here, so
+	// the answer reaches the client first, and an answer that cannot reach
+	// it still stops serving. It must not block on the server (Close waits
+	// for this goroutine).
+	AfterReply func()
 }
 
 func (c ServerConfig) maxFrameBytes() int {
@@ -334,6 +343,11 @@ func (s *Server) untrack(conn net.Conn) {
 }
 
 func (s *Server) handle(conn net.Conn) {
+	if s.cfg.AfterReply != nil {
+		// A reply that could not be written, or a connection that ended,
+		// leaves nothing to wait for, so the hook runs on every exit too.
+		defer s.cfg.AfterReply()
+	}
 	maxFrame := s.cfg.maxFrameBytes()
 	reader := newFrameReader(conn, maxFrame)
 	for {
@@ -357,6 +371,9 @@ func (s *Server) handle(conn net.Conn) {
 		if writeFrame(conn, s.respond(frame), maxFrame) != nil {
 			return
 		}
+		if s.cfg.AfterReply != nil {
+			s.cfg.AfterReply()
+		}
 	}
 }
 
@@ -370,7 +387,11 @@ func (s *Server) respond(frame []byte) Response {
 	}
 	decision, err := s.decideWithTimeout(bar)
 	if err != nil {
-		return errorResponse(decisionErrorCode(err), err.Error(), bar.ID)
+		response := errorResponse(decisionErrorCode(err), err.Error(), bar.ID)
+		if sequenced := (*SequencedError)(nil); errors.As(err, &sequenced) {
+			response.Error.Sequence = sequenced.Sequence
+		}
+		return response
 	}
 	return Response{Envelope: &decision, Error: nil}
 }
