@@ -355,7 +355,9 @@ session it missed in one file. A run that hangs is stopped after an hour
    session close, for each session, to
    `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<YYYY-MM-DD>.jsonl`,
    named by the last session it holds. Each file follows on from the one
-   before it, and the adapter reads them in date order.
+   before it, to be read in date order. **Not built yet:** nothing reads
+   these files and delivers them to the engine; that is the adapter's work
+   ([IBKR adapter](ibkr-adapter.md)).
 
 **The file format.** One event per line, in the order they are to be
 delivered. The `sequence` on each line is its position in that file (1, 2,
@@ -363,8 +365,9 @@ delivered. The `sequence` on each line is its position in that file (1, 2,
 of a run in one series, whatever it came from (the configuration, the Run
 approval, fills, account snapshots, these files), so only the program that
 delivers the files, which sends one input at a time and reads the engine's
-answer, knows the next number: it replaces each line's `sequence` with it as
-it sends the line, and sends everything else as written. A file therefore
+answer, knows the next number: it is to replace each line's `sequence` with
+it as it sends the line, and send everything else as written. (That program
+is not built yet.) A file therefore
 never claims a number another input could already have taken.
 
 **The one-time warm-up.** The engine's 200-day average and its RSI need
@@ -433,7 +436,8 @@ carries on from them.
   with it; an edited configuration is a new run.
 - **Massive returns nothing for a trading day**, or a recording from an
   earlier day is missing: the run names the day. A missing earlier day means
-  a recording was removed; restore it from the backup.
+  a recording was removed; restore it from the backup (today that means a
+  Lightsail snapshot, if snapshots are on: [server](server.md), "Backups").
 - **A history shorter than the indicators need** at the warm-up.
 - **A file already written differs** from what its recordings now give.
   Every run checks every earlier file, so this stops the job the day it
@@ -451,7 +455,8 @@ carries on from them.
   history is wrong from that date on: stop the engine, and start a new run
   (a fresh `TI_RUN`, `docs/runbooks/durable-log.md`) with its own warm-up,
   which builds the whole history with the action in it. If a file was edited
-  or removed, restore it from the backup, unchanged. If it began after a new
+  or removed, restore it from the backup, unchanged ([server](server.md),
+  "Backups"). If it began after a new
   ti-data build was installed, put the previous build back
   (`/opt/trend-investing/bin/ti-data`) and the job carries on; install a new
   build only together with a fresh engine run and its warm-up, or after

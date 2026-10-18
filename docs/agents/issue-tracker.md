@@ -2,7 +2,7 @@
 
 Issues and specs for this repo live as **GitHub issues in `richard-whittemore/TrendInvesting`**.
 
-**Access them only through the GitHub MCP tools.** The `gh` CLI is **not installed** on this machine — any instruction elsewhere to run `gh issue …` should be translated to the MCP equivalent below.
+**Use the `gh` CLI or the GitHub MCP tools.** `gh` is installed and logged in on the Mac mini and has been the working route since 2026-10 (`gh issue …`, `gh pr …`, `gh api …`). The GitHub MCP tools below remain an alternative, with the same operations.
 
 | Operation | Tool |
 |---|---|

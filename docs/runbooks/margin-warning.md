@@ -1,18 +1,28 @@
 # Runbook: a margin warning on the joint account
 
-Boost borrows to hold up to 147% of the joint account in SPY. The
+Boost borrows to hold 147% of the joint account in SPY while its boost is
+on (its target, 98% x 1.5); the separate hard limit no buy may exceed is
+150% ([boost](../manual/boost.md)). The
 margin-cushion alarm watches IBKR's Excess Liquidity as a share of net
 liquidation from every broker snapshot (plan.md section 5; ADR 0026,
 point 6). Its thresholds are in the account's hashed configuration
 (`excess_liquidity_warning`, `excess_liquidity_urgent`,
 `excess_liquidity_stale_minutes`). Each change of level is recorded as a
-`risk.margin.alarm` decision and alerted
-([alerts-and-dashboard](../manual/alerts-and-dashboard.md)).
+`risk.margin.alarm` decision.
+
+> **Not built yet: the reporter sends no alert for the margin alarm**,
+> warning or urgent, nor for the sale back to 98% being sent, filling or
+> failing ([alerts-and-dashboard](../manual/alerts-and-dashboard.md),
+> "Alerts the reporter does not send"; tracked with the reporter follow-up
+> on missing alerts). Until it does, nothing tells you the alarm moved:
+> check the joint account's Excess Liquidity in IBKR's app on any day SPY
+> falls sharply, and read the alarm's records with
+> `grep '"risk.margin.alarm"' <log>`.
 
 | Level | When | What the program does | What you do |
 | --- | --- | --- | --- |
-| **warning** | below the warning threshold (40%) | records and alerts; orders as usual | check the position the same day (below) |
-| **urgent** | below the urgent threshold (20%), a net liquidation of zero or less, or no reading for the stale period while the market is open | records, alerts, and sells back to 98% once per urgent alarm (ADR 0019, amended 2026-10-15; ADR 0026, point 4) | below |
+| **warning** | below the warning threshold (40%) | records it (no alert yet); orders as usual | check the position the same day (below) |
+| **urgent** | below the urgent threshold (20%), a net liquidation of zero or less, or no reading for the stale period while the market is open | records it (no alert yet), and sells back to 98% once per urgent alarm (ADR 0019, amended 2026-10-15; ADR 0026, point 4) | below |
 | **clear** | back above the warning threshold | records the clear | nothing |
 
 ## A warning
@@ -35,8 +45,8 @@ point 6). Its thresholds are in the account's hashed configuration
 ## An urgent alarm
 
 1. **The program sells back to 98%** from the latest IBKR snapshot, once for
-   this alarm. Watch for the alert that it was sent, and the one that it
-   filled or failed (`journal-query orders`).
+   this alarm. No alert says it was sent, filled or failed yet: check it
+   with `journal-query orders` and in IBKR's app.
 2. **If the sale was withheld** (`sale-withheld` in `journal-query
    refusals`):
    - `broker-values-unreadable` or `unknown-working-sell`: the program will

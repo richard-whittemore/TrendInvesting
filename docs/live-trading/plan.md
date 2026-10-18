@@ -1,6 +1,6 @@
 # Live trading plan (reviewed 2026-10-15)
 
-Status: **reviewed** by the owner and independently (2026-10-15). Nothing here is built. Owner decisions are marked
+Status: **reviewed** by the owner and independently (2026-10-15). Built since: slices 1 to 6, 8 and 9 (the Boost engine in dry-run, the momentum rule and order planner, the risk gate and its states, the durable log and restarts, the morning reconciliation's engine side, the reporter and dashboard programs, paper sending against a stand-in gateway, the daily data job for Boost). What is built and what is not is kept in one place, `docs/manual/README.md`, "Built today and not built yet". Owner decisions are marked
 **Decision** and are listed together at the end.
 
 This plan moves the strategies the research kept from QuantConnect
@@ -226,7 +226,10 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - an urgent alert when any account enters Degraded or Halted, with the
     reason (the reconciliation difference or the missing evidence);
   - an alert when the automatic flatten is sent, and another when it fills
-    or fails;
+    or fails (*not built yet, 2026-10-19: the reporter sends neither, nor an
+    alert for the margin alarm or for a sale withheld for the owner to act
+    by hand; tracked with the reporter follow-up on missing alerts.
+    `docs/manual/alerts-and-dashboard.md` lists what is sent*);
   - the flatten is sell-only and sized from IBKR's own figures, never the
     journal's (which is what is in doubt), taken from the latest account
     snapshot only (the latest journalled at or before the event that
@@ -521,7 +524,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
 
 - Daily: data refresh after the close, decisions, a summary to the phone
   (PagerDuty or a private ntfy server, never the public relay), heartbeat
-  to Healthchecks.io; an alert if the heartbeat is missed.
+  to Healthchecks.io; an alert if the heartbeat is missed (*the outside
+  heartbeat is not built yet; nothing reads `HEALTHCHECK_URL`*).
 - Alert channels (owner decision, 2026-10-17): ntfy plus PagerDuty as the
   second channel (the owner signs up; the reporter uses the Events API and
   reads the acknowledgement back). An alert is delivered only when every real
@@ -532,7 +536,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
 - Weekly: approve IBC's 2FA prompt on the phone (Sunday).
 - Monthly: momentum rebalance on the first session; report against SPY.
 - Logs and the journal are kept on the VM and copied off it nightly; a
-  weekly Lightsail snapshot.
+  weekly Lightsail snapshot (*neither is built yet: `docs/manual/server.md`,
+  "Backups"*).
 - Runbooks for a halted account, a missed rebalance, a gateway that will
   not log in, and a margin warning.
 

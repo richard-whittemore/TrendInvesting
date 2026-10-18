@@ -98,7 +98,8 @@ after a full log start a fresh one (see [restart](restart.md)), and the
 engine records it before the adapter's first input, so a kill switch is
 never lost to a disk fault or a full log.
 
-The adapter (not built yet) follows the engine's numbering: the decisions
+The adapter follows the engine's numbering (its link to the engine's socket
+is not built yet: [IBKR adapter](ibkr-adapter.md)): the decisions
 the engine sends back carry the number of the last input it recorded, and
 the adapter's next input carries the number after it. When the engine
 records your instructions first and then refuses the adapter's input, the
