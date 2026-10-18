@@ -90,11 +90,20 @@ SESSION_ZONE = ZoneInfo("America/New_York")
 CLOSE_TIMEOUT = 60
 
 
+# The longest a close may be told to wait (seconds): far below the limit of
+# threading's lock acquire, so a huge timeout is refused, never an overflow.
+MAX_CLOSE_TIMEOUT = 24 * 60 * 60
+
+
 def _positive_seconds(name, value):
-    """value as a finite number of seconds greater than zero, else ValueError naming the argument."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-        raise ValueError("{} must be a finite number of seconds greater than zero, not {!r}".format(name, value))
+    """value as a finite number of seconds above zero and at most MAX_CLOSE_TIMEOUT, else ValueError naming the argument."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float)) or value != value
+            or value <= 0 or value > MAX_CLOSE_TIMEOUT):
+        raise ValueError("{} must be a number of seconds above zero and at most {}, not {!r}".format(
+            name, MAX_CLOSE_TIMEOUT, value))
     return value
+
+
 # The person's decisions on a stopped hand-over.
 DECIDE_SENT = "sent"
 DECIDE_RESEND = "resend"

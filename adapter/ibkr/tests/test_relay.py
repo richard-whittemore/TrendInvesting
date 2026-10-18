@@ -21,8 +21,8 @@ if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 
 from orders import BrokerOrders
-from relay import (EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged, PendingInput,
-                   PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused, main, resolve)
+from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
+                   PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused, main, resolve)
 from sender import OrderRequest
 
 
@@ -581,8 +581,18 @@ class RelayTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as refused:
                     relay.close(timeout=bad)
                 self.assertIn("timeout", str(refused.exception))
-        with self.assertRaises(ResolveRefused):
-            resolve(PendingInput(self.pending.path), "tw-1", "sent", "still held", today=date(2026, 10, 16))
+        with self.assertRaises(PendingInUse):
+            self.relay(Restarts({}, {}))
+
+    def test_a_timeout_above_the_stated_maximum_is_a_value_error_not_an_overflow(self):
+        for too_long in (MAX_CLOSE_TIMEOUT + 1, 1e10, 10 ** 400):
+            with self.subTest(timeout=too_long):
+                with self.assertRaises(ValueError):
+                    self.relay(Restarts({}, {}), close_timeout=too_long)
+                relay = self.relay(Restarts({}, {}))
+                with self.assertRaises(ValueError):
+                    relay.close(timeout=too_long)
+                relay.close(timeout=MAX_CLOSE_TIMEOUT)
 
     def test_close_uses_the_configured_timeout_by_default(self):
         in_send, let_send_return = threading.Event(), threading.Event()
