@@ -69,16 +69,17 @@ const (
 	// backtest treats as risk-on and live withholds (ADR 0026, point 5).
 	WithheldInsufficientTrendHistory = "insufficient-trend-history"
 	// WithheldNoEligibleNames: the ranking left no name to hold, none of
-	// them skipped as unaffordable.
+	// them skipped as unaffordable or kept held one lot short.
 	WithheldNoEligibleNames = "no-eligible-names"
 	// WithheldRebalanceInProgress: an order of an earlier decision is not
 	// yet terminal, so no new rebalance is planned until it is (ADR 0026,
 	// point 5: nothing is sent mid-rebalance until the owner clears it).
 	WithheldRebalanceInProgress = "rebalance-in-progress"
-	// WithheldAllUnaffordable: D7-L skipped every pick with a positive
-	// target as unaffordable, so no stock could be picked. The book is kept,
-	// since a bad net liquidation or bad raw closes would look the same
-	// (ADR 0026, point 2, "D7-L", and point 5, "fail closed").
+	// WithheldAllUnaffordable: D7-L skipped as unaffordable or kept held one
+	// lot short every pick with a positive target, so no affordable stock
+	// could be picked. The book is kept, since a bad net liquidation or bad
+	// raw closes would look the same (ADR 0026, point 2, "D7-L", and point
+	// 5, "fail closed").
 	WithheldAllUnaffordable = "all-unaffordable"
 	// WithheldHistoriesMissing: a run reading the compact universe input
 	// reached a decision session without a market.close.history for the
@@ -448,6 +449,9 @@ func (m MomentumFigures) validate() []error {
 		if (n.Status == MomentumStatusUnaffordable || n.Status == MomentumStatusHeldOneLotShort) && !lot {
 			errs = append(errs, fmt.Errorf("momentum name %s: an unaffordable name needs the minimum lot figures", n.InstrumentID))
 		}
+		if n.Status == MomentumStatusHeldOneLotShort && lot {
+			errs = append(errs, n.validateHoldingFigures(m.MinimumLot.NetLiquidation)...)
+		}
 	}
 	return errs
 }
@@ -511,6 +515,22 @@ func (n MomentumName) validateHolding() []error {
 	}
 	if n.HeldQuantity < 1 || !isFinite(n.HeldValue) || !(n.HeldValue > 0) || !isFinite(n.HeldShare) || !(n.HeldShare > 0) {
 		errs = append(errs, fmt.Errorf("momentum name %s: a held name kept one lot short records the holding it keeps, its value and its share of net liquidation", n.InstrumentID))
+	}
+	return errs
+}
+
+// validateHoldingFigures checks that a held name's recorded holding agrees
+// with the record, so the concentration it reports is the one it holds (ADR
+// 0026, point 2, "D7-L", amended 2026-10-18): its value is its shares at the
+// one-share price and its share is that value over net liquidation, each
+// recomputed exactly as the writer computes it, so no tolerance is needed.
+func (n MomentumName) validateHoldingFigures(netLiquidation float64) []error {
+	var errs []error
+	if n.HeldValue != float64(float64(n.HeldQuantity)*n.OneShare) {
+		errs = append(errs, fmt.Errorf("momentum name %s: held value %v is not its %d shares x one share %v", n.InstrumentID, n.HeldValue, n.HeldQuantity, n.OneShare))
+	}
+	if n.HeldShare != n.HeldValue/netLiquidation {
+		errs = append(errs, fmt.Errorf("momentum name %s: held share %v is not its held value over net liquidation %v", n.InstrumentID, n.HeldShare, netLiquidation))
 	}
 	return errs
 }

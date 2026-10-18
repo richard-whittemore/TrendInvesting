@@ -76,6 +76,65 @@ func TestMinimumLotStillSkipsAPickNotHeld(t *testing.T) {
 	mustEqual(t, "targets", strings.Join(targetIDs(book), ","), "A,E,F")
 }
 
+// invVolWeight is the weight SelectBook gives a pick of volatility vol in a
+// book of picks with volatilities vols, in pick order, out of invested,
+// computed in the order SelectBook computes it so it matches to the bit.
+func invVolWeight(invested, vol float64, vols ...float64) float64 {
+	total := 0.0
+	for _, v := range vols {
+		total += 1 / v
+	}
+	return invested * (1 / vol) / total
+}
+
+// TestMinimumLotKeepsAHeldPickThatBecomesDearOnALaterPass holds one A at
+// $270, affordable on the first pass at its $280 target, and prices C, not
+// held, at $150: C is skipped, F takes its place, and A's weight falls to
+// about 0.267, so on the second pass A's one share exceeds its target. A is
+// held, so it is kept one lot short with that pass's figures, not skipped as
+// TestMinimumLotIteratesUntilEveryPickIsAffordable skips it; a decided book
+// then has both a kept and an unaffordable name.
+func TestMinimumLotKeepsAHeldPickThatBecomesDearOnALaterPass(t *testing.T) {
+	book, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, heldLot(map[string]float64{"C": 150, "A": 270}, map[string]int64{"A": 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := statusOf(book)
+	weight := invVolWeight(0.98, 0.02, 0.02, 0.01, 0.03)
+	mustEqual(t, "A", s["A"].Status, momentum.StatusHeldOneLotShort)
+	mustEqual(t, "A weight", s["A"].Weight, weight)
+	mustEqual(t, "A target value", s["A"].TargetValue, float64(weight*1000))
+	mustEqual(t, "A one share", s["A"].OneShare, 270.0)
+	mustEqual(t, "A held value", s["A"].HeldValue, 270.0)
+	mustEqual(t, "A held share", s["A"].HeldShare, 0.27)
+	mustEqual(t, "C", s["C"].Status, momentum.StatusUnaffordable)
+	mustEqual(t, "C held quantity", s["C"].HeldQuantity, int64(0))
+	mustEqual(t, "B", s["B"].Status, momentum.StatusSectorCapped)
+	mustEqual(t, "targets", strings.Join(targetIDs(book), ","), "A,E,F")
+}
+
+// TestMinimumLotPicksAHeldNameThatBecomesAffordable holds 2 C at $200, dear
+// on the first pass at its $140 target, and prices E, not held, at $600
+// against its $560: E is skipped and F takes its place, which raises C's
+// weight to about 0.226, a $226 target its one share fits. C ends an
+// ordinary pick, its one-lot and holding figures from the first pass
+// cleared, since only the final pass marks a held name kept one lot short.
+func TestMinimumLotPicksAHeldNameThatBecomesAffordable(t *testing.T) {
+	book, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, heldLot(map[string]float64{"C": 200, "E": 600}, map[string]int64{"C": 2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := statusOf(book)
+	mustEqual(t, "E", s["E"].Status, momentum.StatusUnaffordable)
+	mustEqual(t, "C", s["C"].Status, momentum.StatusPicked)
+	c := s["C"]
+	if c.OneShare != 0 || c.TargetValue != 0 || c.HeldQuantity != 0 || c.HeldValue != 0 || c.HeldShare != 0 {
+		t.Errorf("C picked with one-lot figures %+v", c)
+	}
+	mustEqual(t, "C weight", c.Weight, invVolWeight(0.98, 0.04, 0.02, 0.04, 0.03))
+	mustEqual(t, "targets", strings.Join(targetIDs(book), ","), "A,C,F")
+}
+
 // TestMinimumLotRefusesABadHolding: a holding is whole shares, at least one.
 func TestMinimumLotRefusesABadHolding(t *testing.T) {
 	if _, err := momentum.SelectBookWithMinimumLot(smallBook(), lotCandidates(), false, heldLot(nil, map[string]int64{"C": 0})); err == nil || !strings.Contains(err.Error(), "held") {

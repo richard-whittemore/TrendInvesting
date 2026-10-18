@@ -19,7 +19,8 @@ type RankedName struct {
 	// ScoreRank is its place among all candidates by score, 1 the highest.
 	ScoreRank int
 	Status    Status
-	// Weight is its target weight when Status is StatusPicked, else 0.
+	// Weight is its target weight when Status is StatusPicked or
+	// StatusHeldOneLotShort, else 0.
 	Weight float64
 	// BacktestWouldPick reports whether defensive_book, which weights a
 	// zero volatility as 1, would have picked it. It differs from Status
@@ -107,7 +108,8 @@ type Book struct {
 //
 // With no pick the whole of Invested goes to RiskOffInstrument, as
 // defensive_book does (84-85); Decide withholds such a decision instead
-// (no-eligible-names, or all-unaffordable when D7-L skipped a name).
+// (no-eligible-names, or all-unaffordable when D7-L skipped a name or kept
+// one held one lot short).
 //
 // The inverse volatilities are summed in pick order, as Python summed its
 // dict's values, so the weights can match the backtest's to the last bit.

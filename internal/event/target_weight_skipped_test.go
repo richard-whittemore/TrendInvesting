@@ -86,11 +86,31 @@ func TestHeldOneLotShortNamesValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	type P = event.TargetsDecidedPayload
+	// first mutates a copy of the first name, so no case leaks into the next
+	// through the Names slice the copies of v share.
+	first := func(f func(n *event.MomentumName)) func(*P) {
+		return func(p *P) {
+			p.Momentum.Names = append([]event.MomentumName(nil), p.Momentum.Names...)
+			f(&p.Momentum.Names[0])
+		}
+	}
 	expectInvalid(t, "no lot figures", v, func(p *P) { p.Momentum.MinimumLot = event.MinimumLotFigures{} }, "minimum lot figures")
-	expectInvalid(t, "affordable", v, func(p *P) { p.Momentum.Names[0].OneShare = 14000 }, "exceeds its target value")
-	expectInvalid(t, "no weight", v, func(p *P) { p.Momentum.Names[0].Weight = 0 }, "keeps its weight")
-	expectInvalid(t, "no holding", v, func(p *P) { p.Momentum.Names[0].HeldQuantity = 0 }, "holding it keeps")
-	expectInvalid(t, "no held value", v, func(p *P) { p.Momentum.Names[0].HeldValue = 0 }, "holding it keeps")
-	expectInvalid(t, "no held share", v, func(p *P) { p.Momentum.Names[0].HeldShare = 0 }, "holding it keeps")
+	expectInvalid(t, "affordable", v, first(func(n *event.MomentumName) { n.OneShare = 14000 }), "exceeds its target value")
+	expectInvalid(t, "no weight", v, first(func(n *event.MomentumName) { n.Weight = 0 }), "keeps its weight")
+	expectInvalid(t, "no holding", v, first(func(n *event.MomentumName) { n.HeldQuantity = 0 }), "holding it keeps")
+	expectInvalid(t, "no held value", v, first(func(n *event.MomentumName) { n.HeldValue = 0 }), "holding it keeps")
+	expectInvalid(t, "no held share", v, first(func(n *event.MomentumName) { n.HeldShare = 0 }), "holding it keeps")
+	// The figures agree with the record: the value is the shares at the one-share
+	// price, and the share is that value over the net liquidation, each as the
+	// writer computes it, so a record cannot understate the concentration.
+	expectInvalid(t, "value not shares x one share", v, first(func(n *event.MomentumName) { n.HeldValue = 1 }), "shares x one share")
+	expectInvalid(t, "value off by one share", v, first(func(n *event.MomentumName) {
+		n.HeldValue, n.HeldShare = 20000, 20000.0/30000
+	}), "shares x one share")
+	expectInvalid(t, "share not value over net liquidation", v, first(func(n *event.MomentumName) { n.HeldShare = 0.00001 }), "value over net liquidation")
+	expectInvalid(t, "share against another net liquidation", v, func(p *P) { p.Momentum.MinimumLot.NetLiquidation = 40000 }, "value over net liquidation")
+	if err := v.Validate(); err != nil {
+		t.Errorf("a case changed the valid record: %v", err)
+	}
 	expectInvalid(t, "holding on a pick", validMomentumDecided(), func(p *P) { p.Momentum.Names[0].HeldValue = 10 }, "only a held name kept one lot short")
 }

@@ -29,8 +29,10 @@ Since rules version 1.17.0 (the owner's decision of 2026-10-18, ADR 0026
 amendment of that date) the rule treats a stock the account already holds
 differently. Before, a held stock that was still in the book but whose
 target had dropped below one share's price was skipped like any other, so
-the program sold the whole holding, even though the 25% rebalance band would
-otherwise have left it alone.
+the program sold the whole holding. Had the stock kept its target, the 25%
+rebalance band would have left a holding of one share alone, and trimmed a
+holding of more shares down to one share. Now the holding is neither sold
+nor trimmed.
 
 Now such a stock is **kept**:
 

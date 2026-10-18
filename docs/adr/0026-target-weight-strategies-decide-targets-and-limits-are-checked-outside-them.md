@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost")
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L")
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -780,15 +780,18 @@ with a gap, 2026-10-18").
 ## Amendment (2026-10-18, owner decision, #437): D7-L keeps a held name one lot short
 
 Accepted by the owner on 2026-10-18 (option 2 of #437), on condition that it
-was measured once first (AGENTS.md rule 6); measured on 2026-10-18 and
-2026-10-19 (`docs/research/d7l-held-name-2026-10.md`), verdict adopt. It
+was measured once first (AGENTS.md rule 6); measured on 2026-10-18, all
+five QuantConnect runs that day (`docs/research/d7l-held-name-2026-10.md`),
+verdict adopt. It
 amends point 2, "D7-L", and its amendment of 2026-10-17.
 
 **What happened before.** D7-L did not look at what the account holds. A
 stock that was held and still ranked into the book, but whose target value
 had fallen below one share's price, was skipped like any other pick: it got
-no target and the planner sold the whole holding, where the rebalance band
-would otherwise have left it alone.
+no target and the planner sold the whole holding. Had it kept its target,
+the rebalance band would have left a one-share holding alone, and trimmed a
+holding of more shares to one share; the kept holding is now neither sold
+nor trimmed.
 
 **The rule now.**
 

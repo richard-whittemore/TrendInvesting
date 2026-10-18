@@ -29,14 +29,15 @@ const (
 	// ReasonMissingUniverse: no universe snapshot for the close session.
 	ReasonMissingUniverse WithheldReason = "missing-universe"
 	// ReasonNoEligibleNames: no universe member could be picked, and none
-	// was skipped as unaffordable under D7-L. The backtest kept the last
-	// book (defensive_v2.py:319-320).
+	// was skipped as unaffordable or kept held one lot short under D7-L. The
+	// backtest kept the last book (defensive_v2.py:319-320).
 	ReasonNoEligibleNames WithheldReason = "no-eligible-names"
 	// ReasonAllUnaffordable: no universe member could be picked and D7-L
-	// skipped at least one, every pick with a positive target being dear by
-	// the share. The last book is kept: a bad net liquidation or bad raw
-	// closes would look the same, and selling every stock on them is the
-	// wrong failure (ADR 0026, point 2, "D7-L", and point 5).
+	// skipped as unaffordable or kept held one lot short at least one, every
+	// pick with a positive target being dear by the share. The last book is
+	// kept: a bad net liquidation or bad raw closes would look the same, and
+	// selling every stock on them is the wrong failure (ADR 0026, point 2,
+	// "D7-L", and point 5).
 	ReasonAllUnaffordable WithheldReason = "all-unaffordable"
 	// ReasonLabelsMissing: more than Config.MaxUnlabelledShare of the ranked
 	// members have no sector label. A name with no label is ranked uncapped
@@ -114,9 +115,12 @@ type NameRecord struct {
 type Decision struct {
 	Outcome Outcome
 	Reason  WithheldReason
-	// Detail explains an all-unaffordable withhold, naming the valuation, a
-	// labels-missing withhold, counting the unlabelled members, and a decided book whose every pick has weight zero, which sells every
-	// stock held. Empty otherwise.
+	// Detail explains an all-unaffordable withhold, naming the valuation; a
+	// labels-missing withhold, counting the unlabelled members; a decided
+	// book whose every pick has weight zero, which sells every stock held;
+	// and a decided book with a held name kept one lot short, naming each
+	// kept holding (ADR 0026, point 2, "D7-L", amended 2026-10-18). Empty
+	// otherwise.
 	Detail       string
 	CloseSession string
 	Trend        Trend
