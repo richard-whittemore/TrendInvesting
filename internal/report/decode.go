@@ -76,7 +76,10 @@ var (
 	refusedVersions  = event.OrderRefusedVersions()
 	// A target-weight account's orders are limit orders, reported at
 	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
-	lifecycleVersions        = []uint32{event.OrderLifecycleLimitVersion}
+	lifecycleVersions = []uint32{event.OrderLifecycleLimitVersion}
+	// syntheticVersions: a dry-run engine's own report, a decision, never
+	// the venue's input (event.LimitOrderLifecycleVersions).
+	syntheticVersions        = []uint32{event.OrderLifecycleSyntheticVersion}
 	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
 	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
 	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}

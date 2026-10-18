@@ -57,7 +57,15 @@ import (
 //     version 2 (the incident in force states its cash scope) and refuses
 //     version 1, so a journal written under 1.8.0, or holding a version 1
 //     approval, does not replay.
-const RulesVersion = "1.9.0"
+//   - 1.10.0 is the operator inputs' rule change; 1.7.0 was never released.
+//   - 1.11.0 records, in a dry-run momentum run only, a synthetic terminal
+//     report (execution.order.lifecycle version 3) for each order it
+//     releases and plans the buy phase at the same close (ADR 0026, point 3,
+//     "Mode", amended 2026-10-17), so a dry-run journal written under an
+//     earlier rules version, which waited on its unsent sells and withheld
+//     later months as rebalance-in-progress, does not replay. Paper and live
+//     decisions are unchanged.
+const RulesVersion = "1.11.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -278,7 +286,16 @@ func decodeInput[T interface{ Validate() error }](in event.Envelope, version uin
 	if err := json.Unmarshal(in.Payload, &p); err != nil {
 		return p, fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
 	}
-	if err := p.Validate(); err != nil {
+	// A payload whose fields depend on its version is checked against the
+	// version it arrived at, so a synthetic lifecycle report, which only an
+	// engine records (version 3), is never read as a venue's (ADR 0015).
+	var err error
+	if v, ok := any(p).(interface{ ValidateSchema(uint32) error }); ok {
+		err = v.ValidateSchema(in.SchemaVersion)
+	} else {
+		err = p.Validate()
+	}
+	if err != nil {
 		return p, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
 	return p, nil

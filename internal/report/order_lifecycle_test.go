@@ -409,3 +409,57 @@ func TestAnOrderStillCommittedSaysTheAdapterMayNotHaveIt(t *testing.T) {
 		t.Fatalf("alerts %+v, want one saying the adapter may never have received the order", alerts)
 	}
 }
+
+// TestASyntheticReportAcknowledgesNothing: a dry-run momentum run records its
+// own synthetic terminal report on each order it releases (ADR 0026, point 3,
+// "Mode", amended 2026-10-17). It is a decision, not the venue's report, so
+// it acknowledges nothing and counts no fill; but it ends the order as the
+// engine reads it, so a venue's report on that order afterwards is one the
+// engine refuses, and is unread. A synthetic report the engine could not
+// have recorded refuses the log.
+func TestASyntheticReportAcknowledgesNothing(t *testing.T) {
+	order := releasedOrder("tw-1", event.TradingModeDryRun)
+	synthetic := event.LimitOrderLifecyclePayload{AccountID: order.AccountID, ClientOrderID: order.ClientOrderID, InstrumentID: order.InstrumentID,
+		Side: order.Side, Status: event.OrderLifecycleStatusCanceled, Quantity: order.Quantity, LimitPrice: order.LimitPrice, OccurredAt: day(0),
+		Message: "dry-run: never sent", Synthetic: true}
+	run := &logRun{t: t}
+	run.session(0)
+	run.release(0, order)
+	run.add(journal.KindDecision, event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion, "synthetic-lifecycle:tw-1", day(0), synthetic)
+	run.session(1)
+	orders, unread, err := report.OrderLifecycles(run.out, event.TargetWeightStrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stateOf(t, orders, "tw-1"); got.State != report.LifecycleReleased || len(unread) != 0 {
+		t.Fatalf("after its synthetic report: %+v, unread %+v, want released, unacknowledged, nothing unread", got, unread)
+	}
+
+	filled := day(1).Add(time.Hour)
+	run.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", filled,
+		event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 9, Price: 100, FilledAt: filled})
+	orders, unread, err = report.OrderLifecycles(run.out, event.TargetWeightStrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stateOf(t, orders, "tw-1").State; got != report.LifecycleReleased || len(unread) != 1 || !strings.Contains(unread[0].Reason, "already terminal") {
+		t.Fatalf("a fill after it: %s, unread %+v, want released and the fill unread as the engine refuses it", got, unread)
+	}
+
+	for name, c := range map[string]struct {
+		version uint32
+		p       event.LimitOrderLifecyclePayload
+		want    string
+	}{
+		"at the venue's version": {event.OrderLifecycleLimitVersion, synthetic, "does not read"},
+		"on no released order":   {event.OrderLifecycleSyntheticVersion, func() event.LimitOrderLifecyclePayload { p := synthetic; p.ClientOrderID = "tw-9"; return p }(), "never released"},
+	} {
+		bad := &logRun{t: t}
+		bad.session(0)
+		bad.release(0, order)
+		bad.add(journal.KindDecision, event.OrderLifecycleEventType, c.version, "synthetic-lifecycle", day(0), c.p)
+		if _, _, err := report.OrderLifecycles(bad.out, event.TargetWeightStrategyMomentum); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want a refusal naming %q", name, err, c.want)
+		}
+	}
+}

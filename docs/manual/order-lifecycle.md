@@ -34,6 +34,13 @@ engine does, and only a report the engine would accept counts:
 The engine and the reporter share this rule in one place, so the reporter
 cannot count a report the engine refused.
 
+A dry-run momentum engine records its own **synthetic** report on each order
+it releases, since it never sends one (`execution.order.lifecycle` version 3,
+see [the engine](engine.md)). It is the engine's decision, not IBKR's report,
+so it acknowledges nothing and counts no fill. It does end the order, as it
+did in the engine, so a report from IBKR on that order afterwards is one the
+engine refused, and it is "not read".
+
 A Boost engine now records IBKR's report about an order it released and
 decides nothing from it (ADR 0022), beyond what the risk gate's pending-sell
 count takes from it: a cancelled or invalid sell's remainder is no longer
@@ -127,7 +134,7 @@ incident reach a person; an order IBKR never acknowledged is one.
 | "order … not acknowledged", and the adapter has it | The order was sent and lost, or is still waiting at the adapter. | Look in IBKR for an order whose `orderRef` is the client order ID **before** placing anything by hand. A second order with the same tag is one reconciliation cannot explain. |
 | The engine refuses a lifecycle report naming an order "which this run did not release" | IBKR reported an order this run never released, for example one left working by the previous run. | The run stops on it. This is a reconciliation question: follow `docs/runbooks/reconciliation.md`. |
 | "venue report … not read" | The log holds a report from IBKR that the engine refused: it is at a version the run does not read, does not validate, does not describe the order it names as it was released, takes it past its quantity, reuses a fill id, or arrives after the order finished. It acknowledged nothing. | Look in IBKR at the order the alert names. If its "not acknowledged" alert is also open, treat the order as unconfirmed and follow that alert first. |
-| No alert ever fires in dry-run | Expected: nothing is sent, so nothing is acknowledged. | Nothing. |
+| No alert ever fires in dry-run | Expected: nothing is sent, so nothing is acknowledged, and a synthetic report acknowledges nothing either. | Nothing. |
 
 What this does **not** do yet: a fresh run after an approval does not know the
 previous run's orders that are still working, so IBKR's report about one of
