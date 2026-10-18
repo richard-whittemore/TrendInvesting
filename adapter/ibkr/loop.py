@@ -53,7 +53,7 @@ sends nothing twice: an entry the log already holds as a committed input,
 with the same type, schema version and payload, is struck off unsent, and
 one whose ID the log holds with any other content stops the adapter
 (OutboxInvalid). The records already committed, in the outbox, or awaiting
-their reply seed the report journal, oldest run first, so IBKR's replay
+their reply seed the report journal in the order of their event time, so IBKR's replay
 after a restart records nothing twice and each order keeps its latest
 status.
 
@@ -113,6 +113,18 @@ class ReconcileMismatch(Exception):
 
 def _utc_now():
     return datetime.now(timezone.utc)
+
+
+def _event_time(record):
+    """A report record's event time, for ordering: (True, its time) when it can be read, else (False,), which sorts first."""
+    text = record.payload.get(EVENT_TIME_FIELD[record.event_type]) if isinstance(record.payload, dict) else None
+    try:
+        at = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return (False,)
+    if at.tzinfo is None:
+        return (False,)
+    return (True, at)
 
 
 def _stamp(at):
@@ -285,8 +297,16 @@ class AdapterLoop:
     def _journalled(self, engine_logs):
         """The report records this run's or an earlier run's engine holds, the outbox holds, or that await a reply: never recorded again.
 
-        engine_logs is newest first (relay.run_logs); the journal keeps each
-        order's last status seeded, so the logs are read oldest first.
+        The journal keeps the last status seeded for each order, so every
+        record (the logs' inputs, the outbox's entries, the inputs and
+        entries settled at a run-ended settlement, and the input awaiting
+        its reply) is seeded in the order of its event time, whichever of
+        them holds it: a status struck at a settlement never outlives a
+        later run's report on the same order. Records of the same time keep
+        the order of their sources (engine_logs is newest first, relay.run_logs,
+        and is read oldest first); a record whose event time cannot be read
+        is seeded before every other, so it never stands as an order's
+        latest status.
         """
         records = [Record(i.event_type, i.schema_version, i.payload) for log_ in reversed(engine_logs)
                    for i in log_.inputs]
@@ -298,7 +318,7 @@ class AdapterLoop:
         waiting = self.pending.load()
         if waiting is not None:
             records.append(Record(waiting.get("type"), waiting.get("schema_version"), waiting.get("payload") or {}))
-        return [r for r in records if r.event_type in EVENT_TIME_FIELD]
+        return sorted((r for r in records if r.event_type in EVENT_TIME_FIELD), key=_event_time)
 
     def _record(self, record):
         """The report journal's sink: record IBKR's report as the engine's next input."""

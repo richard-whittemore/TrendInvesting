@@ -25,8 +25,8 @@ if tests_dir not in sys.path:
 from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
-                   acknowledge_correction, acknowledge_late_fill, journalled_fills, journalled_reports, main,
-                   resolve, run_identity, run_logs)
+                   acknowledge_correction, acknowledge_late_fill, earlier_run, journalled_fills, journalled_reports,
+                   main, resolve, resolve_run_ended, run_identity, run_logs)
 from sender import OrderRequest
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -1418,6 +1418,18 @@ class RunLogsTests(unittest.TestCase):
                 ("execution.fill", 5, dict(fill_payload("e.1.02"), quantity=5)))}, False),
             "a working status struck at a settlement": ({"run_ended": struck(
                 ("execution.order.lifecycle", 2, dict(canceled, status="submitted")))}, True),
+            "a cancellation settled as the input awaiting its reply": ({"run_ended": {
+                "unsent": [], "outbox": [], "input": {"id": "ibkr:execution.order.lifecycle:9",
+                                                      "type": "execution.order.lifecycle", "schema_version": 2,
+                                                      "payload": canceled}}}, False),
+            "the last of the fills settled as the input awaiting its reply": ({"run_ended": dict(
+                struck(("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4))),
+                input={"id": "ibkr:execution.fill:9", "type": "execution.fill", "schema_version": 5,
+                       "payload": dict(fill_payload("e.1.02"), quantity=5)})}, False),
+            "a working status settled as the input awaiting its reply": ({"run_ended": {
+                "unsent": [], "outbox": [], "input": {"id": "ibkr:execution.order.lifecycle:9",
+                                                      "type": "execution.order.lifecycle", "schema_version": 2,
+                                                      "payload": dict(canceled, status="submitted")}}}, True),
             "nothing recorded": ({}, True),
         }
         first = self.earlier_day_run("a.log")
@@ -1431,11 +1443,71 @@ class RunLogsTests(unittest.TestCase):
                 for cid, mark in records.get("marks", {}).items():
                     pending.mark(cid, mark)
                 if "run_ended" in records:
-                    pending.record_run_ended(dict(records["run_ended"], input={"id": "session:9"},
+                    pending.record_run_ended(dict({"input": {"id": "session:9"}}, **records["run_ended"],
                                                   refused="run ended", reason="a fresh run", run=None,
                                                   at="2026-10-16T12:00:00+00:00", session_date="2026-10-16"))
                 self.assertEqual(run_logs(second, today=TODAY, settled=pending.settled_orders()),
                                  [second, first] if kept else [second])
+
+    def test_a_decision_line_that_cannot_be_read_stops_rather_than_settling_its_order(self):
+        # An order settled --never-sent and then found at IBKR (--sent): if
+        # the later line were skipped, the earlier one would end the order
+        # although IBKR has it. Every line is read strictly, so any damage
+        # stops the start (fail closed).
+        first = self.earlier_day_run("a.log")
+        second = self.write("b.log", ["a.log"])
+        never_sent = {"client_order_id": "tw-1", "decision": "never-sent", "reason": "checked",
+                      "at": "2026-10-16T12:00:00+00:00", "session_date": "2026-10-16"}
+        bad_lines = {
+            "not JSON": '{"client_order_id": "tw-1", "decision": "se',
+            "not an object": '["tw-1", "sent"]',
+            "no client order ID": json.dumps(dict(never_sent, client_order_id=None, decision="sent")),
+            "an unknown decision": json.dumps(dict(never_sent, decision="maybe")),
+        }
+        for name, line in bad_lines.items():
+            with self.subTest(name):
+                pending = PendingInput(str(Path(self.dir.name) / (name.replace(" ", "-") + ".json")))
+                pending.record_decision(never_sent)
+                with open(pending.decisions_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+                with self.assertRaises(HandoverRecordInvalid) as raised:
+                    pending.settled_orders()
+                self.assertIn(pending.decisions_path, str(raised.exception))
+        pending = PendingInput(str(Path(self.dir.name) / "readable.json"))
+        pending.record_decision(never_sent)
+        self.assertEqual(run_logs(second, today=TODAY, settled=pending.settled_orders()), [second])
+        self.assertTrue(os.path.exists(first))
+
+    def test_the_chain_is_read_whole_on_the_first_days_of_the_calendar(self):
+        # No session before the first date the calendar holds: every run is
+        # read, never a date out of range.
+        first = self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        for today in (date.min, date.min + timedelta(days=1), date.min + timedelta(days=3)):
+            with self.subTest(today=today.isoformat()):
+                self.assertEqual(run_logs(second, today=today), [second, first])
+
+    def test_an_input_awaiting_its_reply_with_no_readable_recorded_time_is_refused_not_settled(self):
+        # The session the waiting input was recorded in bounds the chain an
+        # earlier run is looked for in: without it, the adapter stops with a
+        # reason rather than guess.
+        self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        for recorded_at in (None, "", "yesterday", "2026-10-16T21:00:00"):
+            with self.subTest(recorded_at=recorded_at):
+                pending = PendingInput(str(Path(self.dir.name) / "pending-{}.json".format(abs(hash(recorded_at)))))
+                waiting = {"id": "session:9", "type": "market.session.closed", "schema_version": 1,
+                           "event_time": "2026-10-16T20:00:00Z", "payload": {}}
+                if recorded_at is not None:
+                    waiting["recorded_at"] = recorded_at
+                pending.save(waiting)
+                with self.assertRaises(ResolveRefused) as raised:
+                    earlier_run(pending, second)
+                self.assertIn("recorded_at", str(raised.exception))
+                with self.assertRaises(ResolveRefused):
+                    resolve_run_ended(pending, "session:9", "a fresh run", second, today=TODAY)
+                self.assertEqual(pending.load()["id"], "session:9")
+                self.assertEqual(pending.run_ended(), [])
 
     def earlier_day_run(self, name, reports=()):
         """A run of an earlier day (the 15th) whose one decision released tw-1 for 9, then the reports in reports.

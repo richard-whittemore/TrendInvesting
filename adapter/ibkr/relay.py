@@ -650,13 +650,20 @@ class PendingInput:
         ended holds each client order ID whose last recorded decision
         settles it as never sent (--never-sent or --not-handed-over), that
         the hand-over record marks never sent, that a run-ended settlement
-        left unsent, or that a cancellation or refusal struck off at such a
-        settlement ends; fills each fill struck off at a settlement. Nothing
-        at IBKR ever reports on an order never sent, and a struck report is
-        in no engine's log, so only these records end such an order. A
-        decision line that cannot be read settles nothing, so its order is
-        not taken as ended (fail closed: its run's log is kept); the other
-        records are read strictly, as handovers and run_ended read them.
+        left unsent, or that a cancellation or refusal settled at such a
+        settlement ends (the input it settled, or an outbox entry struck off
+        with it); fills each fill settled there. A report settled there is
+        in no engine's log, so only these records end such an order. An
+        order left unsent at a run-ended settlement is every order its
+        input's reply released that the hand-over record did not mark sent:
+        one marked handing-over may have reached IBKR, and if IBKR still
+        shows it once its run is left out of the chain, reconciliation stops
+        on it ("no order the engine released explains"). Every record is
+        read strictly, as handovers and run_ended read theirs (fail closed,
+        AGENTS.md): a decision line that is not JSON, or not an object with
+        a text client order ID and one of DECISIONS, raises
+        HandoverRecordInvalid, so a damaged later decision never leaves an
+        earlier one settling its order.
         """
         last = {}
         try:
@@ -664,26 +671,31 @@ class PendingInput:
                 lines = [line for line in f if line.strip()]
         except FileNotFoundError:
             lines = []
-        for line in lines:
+        for n, line in enumerate(lines, 1):
             try:
                 decision = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(decision, dict) and _is_text(decision.get("client_order_id")):
-                last[decision["client_order_id"]] = decision.get("decision")
+            except ValueError as err:
+                raise HandoverRecordInvalid("{} line {} is not JSON: {}".format(self.decisions_path, n, err)) from None
+            if (not isinstance(decision, dict) or not _is_text(decision.get("client_order_id"))
+                    or decision.get("decision") not in DECISIONS):
+                raise HandoverRecordInvalid("{} line {} is not a decision as relay.py resolve writes one".format(
+                    self.decisions_path, n))
+            last[decision["client_order_id"]] = decision["decision"]
         ended = {cid for cid, decision in last.items() if decision in (DECIDE_NEVER_SENT, DECIDE_NOT_HANDED_OVER)}
         ended |= {cid for cid, mark in self.handovers().items() if mark == NEVER_SENT}
         fills = {}
         for entry in self.run_ended():
             ended.update(entry["unsent"])
-            for struck in entry["outbox"]:
-                payload = struck["payload"]
-                cid = payload.get("client_order_id")
+            settled = entry["input"]
+            reports = [(settled.get("type"), settled.get("payload"))]
+            reports += [(struck["event_type"], struck["payload"]) for struck in entry["outbox"]]
+            for event_type, payload in reports:
+                cid = payload.get("client_order_id") if isinstance(payload, dict) else None
                 if not _is_text(cid):
                     continue
-                if struck["event_type"] == LIFECYCLE_TYPE and payload.get("status") in LIFECYCLE_TERMINAL:
+                if event_type == LIFECYCLE_TYPE and payload.get("status") in LIFECYCLE_TERMINAL:
                     ended.add(cid)
-                elif (struck["event_type"] == FILL_TYPE and _is_text(payload.get("fill_id"))
+                elif (event_type == FILL_TYPE and _is_text(payload.get("fill_id"))
                       and _is_count(payload.get("quantity"))):
                     fills[payload["fill_id"]] = (cid, payload["quantity"])
         return SettledOrders(frozenset(ended), fills)
@@ -1222,8 +1234,18 @@ def earlier_run(pending, engine_log_path):
 
 
 def _earlier_logs(pending, engine_log_path, waiting):
-    """The logs of the earlier runs the chain from engine_log_path reaches, from the session waiting was recorded in (run_logs)."""
-    since = _session_date({"event_time": waiting.get("recorded_at")}) or date.min
+    """The logs of the earlier runs the chain from engine_log_path reaches, from the session waiting was recorded in (run_logs).
+
+    The input's recorded_at (the loop's envelope always holds one) bounds
+    the chain; one that cannot be read raises ResolveRefused (fail closed,
+    AGENTS.md): no session is guessed for it.
+    """
+    since = _session_date({"event_time": waiting.get("recorded_at")})
+    if since is None:
+        raise ResolveRefused(
+            "the input awaiting its reply in {} ({}) has no recorded_at that can be read (a time with its zone), "
+            "so the session it was recorded in, and the earlier run it may belong to, cannot be found: the pending "
+            "file is not as the adapter writes it; check it before starting".format(pending.path, waiting.get("id")))
     return run_logs(engine_log_path, since, settled=pending.settled_orders())[1:]
 
 
@@ -1374,7 +1396,7 @@ def run_logs(path, today=None, settled=None):
     journals IBKR's reports into the run now running), or when the
     adapter's own durable records settle it (settled, a SettledOrders from
     PendingInput.settled_orders: an order never sent, left unsent by a
-    run-ended settlement, or ended by reports struck off there). Only an
+    run-ended settlement, or ended by reports settled there). Only an
     input's reports count: a decision (the dry-run engine's synthetic
     terminal report) is the engine's own, never IBKR's. A calendar date is
     never taken as proof an order ended: an earlier day's run with an order
@@ -1432,7 +1454,12 @@ def run_logs(path, today=None, settled=None):
 
 
 def _yesterdays_session(today):
-    """The weekday before today: the session whose DAY orders released after its close may still work today."""
+    """The weekday before today: the session whose DAY orders released after its close may still work today.
+
+    Near the first date the calendar holds, date.min: every run is then read.
+    """
+    if today <= date.min + timedelta(days=3):
+        return date.min
     day = today - timedelta(days=1)
     while day.weekday() >= 5:
         day -= timedelta(days=1)

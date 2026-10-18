@@ -694,6 +694,59 @@ class LoopTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in third.received], ["operator.run.approved"])
         self.assertEqual(loop.outbox.load(), [])
 
+    def test_a_struck_working_status_never_outlives_a_later_runs_cancellation_of_the_same_order(self):
+        # Run one releases tw-paper-1 and IBKR's working status of it is
+        # recorded in the outbox while that run decides; the run stops and
+        # resolve --run-ended strikes the status off with its input. Run two
+        # commits IBKR's cancellation. A third run seeds the journal by event
+        # time across every source, so the cancellation, not the older
+        # struck status, is the order's latest, and IBKR's replay of it is
+        # never recorded again.
+        loop = self.loop()
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        self.session_closed(loop)
+        self.settle(loop)
+        loop.close()
+        working = self.engine.inputs(LIFECYCLE_TYPE)[-1]
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        Outbox(self.pending + OUTBOX_SUFFIX).append({
+            "id": "ibkr:execution.order.lifecycle:replayed", "event_type": LIFECYCLE_TYPE,
+            "schema_version": working["schema_version"], "event_time": "2026-10-17T13:29:00Z",
+            "payload": dict(working["payload"], occurred_at="2026-10-17T13:29:00Z")})
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        self.assertEqual([[o["id"] for o in r["outbox"]] for r in PendingInput(self.pending).run_ended()],
+                         [["ibkr:execution.order.lifecycle:replayed"]])
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        self.fake.status(7, "Cancelled", filled="0", remaining="9")
+        self.settle(loop)
+        loop.close()
+        self.assertEqual([e["payload"]["status"] for e in second.inputs(LIFECYCLE_TYPE)], ["canceled"])
+        third = self.fresh_run("run-2.log", "run-3.log")
+        loop = self.loop(engine=third, engine_log=third.path)
+        loop.start()
+        self.fake.status(7, "Cancelled", filled="0", remaining="9")
+        self.settle(loop)
+        self.assertEqual([e["type"] for e in third.received], ["operator.run.approved"])
+        self.assertEqual(loop.outbox.load(), [])
+
+    def test_a_report_whose_event_time_cannot_be_read_is_seeded_before_every_other(self):
+        # It never stands as an order's latest status, and it never stops
+        # the seed from ordering the rest by time.
+        loop = self.loop()
+        status = {"account_id": ACCOUNT, "order_id": "order:1:7", "client_order_id": "tw-paper-1"}
+        logs = [SimpleNamespace(inputs=[SimpleNamespace(event_type=LIFECYCLE_TYPE, schema_version=2, payload=dict(
+            status, status="canceled", occurred_at="2026-10-17T13:30:00Z"))])]
+        for occurred_at in (None, 7, "", "not a time", "2026-10-17T13:31:00"):
+            with self.subTest(occurred_at=occurred_at):
+                Path(self.pending + OUTBOX_SUFFIX).unlink(missing_ok=True)
+                loop.outbox.append({"id": "ibkr:execution.order.lifecycle:odd", "event_type": LIFECYCLE_TYPE,
+                                    "schema_version": 2, "event_time": "2026-10-17T13:31:00Z",
+                                    "payload": dict(status, status="submitted", occurred_at=occurred_at)})
+                self.assertEqual([r.payload["status"] for r in loop._journalled(logs)], ["submitted", "canceled"])
+
     def test_an_outbox_entry_recorded_at_a_settlement_is_never_sent_even_if_the_strike_was_cut_short(self):
         # A stop between the settlement's record and its strike: the record
         # alone keeps the entry from the fresh run.
