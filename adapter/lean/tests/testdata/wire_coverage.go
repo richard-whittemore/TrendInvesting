@@ -129,16 +129,17 @@ var notYetCrossed = map[string]string{
 	"strategy.order.planned":               "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"risk.order.released":                  "acted on by the IBKR adapter (ADR 0025), never by LEAN",
 	"risk.order.refused":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
-	"operator.kill-switch":                 "recorded by the target-weight engine's composition root from the operator, never by LEAN",
+	"operator.kill-switch":                 "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
 	"account.broker.snapshot":              "sent by the IBKR adapter (ADR 0025), never by LEAN",
 	"risk.margin.alarm":                    "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"risk.sale.withheld":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	// cmd/engine delivers the owner's approval itself, from -approval,
 	// before the socket opens; no adapter sends or receives it.
-	"operator.run.approved":    "cmd/engine's approval input (-approval), not an adapter",
-	"market.universe.snapshot": "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
-	"market.session.calendar":  "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
-	"strategy.order.skipped":   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"operator.run.approved":      "cmd/engine's approval input (-approval), not an adapter",
+	"operator.rebalance.cleared": "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
+	"market.universe.snapshot":   "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.session.calendar":    "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"strategy.order.skipped":     "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 }
 
 func main() {

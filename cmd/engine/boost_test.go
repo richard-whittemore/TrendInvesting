@@ -64,6 +64,8 @@ type boostFeed struct {
 	held     int64
 	pending  []event.OrderReleasedPayload
 	released []event.OrderReleasedPayload
+	// beforeClose, when set, runs before session i's close is sent.
+	beforeClose func(i int)
 }
 
 func newBoostFeed(t *testing.T, socketPath string, cfg event.TargetWeightConfigurationPayload, build string, next uint64) *boostFeed {
@@ -123,11 +125,14 @@ func (f *boostFeed) send(eventType string, version uint32, id string, at time.Ti
 		EventTime: at, RecordedAt: at, Sequence: f.sequence, Source: "test-adapter",
 		StrategyVersion: f.version, ConfigurationHash: f.hash, PayloadHash: event.HashPayload(raw), Payload: raw,
 	}
-	f.sequence++
 	reply, err := f.client.Decide(context.Background(), in)
 	if err != nil {
 		f.t.Fatalf("decide %s: %v", id, err)
 	}
+	// The decisions carry the last sequence this exchange recorded, after
+	// any operator input the engine recorded first; the next input
+	// continues it (the wire contract, engine.go).
+	f.sequence = reply.Sequence + 1
 	var bundle decisionsPayload
 	if err := json.Unmarshal(reply.Payload, &bundle); err != nil {
 		f.t.Fatalf("decode the decisions for %s: %v", id, err)
@@ -174,6 +179,9 @@ func (f *boostFeed) sessions(from, to int) {
 		f.send(event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), at, snapshot)
 		f.send(event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i), at,
 			event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: price, Source: event.AdapterIBKR})
+		if f.beforeClose != nil {
+			f.beforeClose(i)
+		}
 		f.send(event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("session:%d", i), at,
 			event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}})
 	}

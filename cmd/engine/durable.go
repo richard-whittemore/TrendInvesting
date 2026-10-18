@@ -164,6 +164,15 @@ func reportResume(out io.Writer, path string, recovery journal.Recovery) error {
 	if _, err := fmt.Fprintf(out, "resumed %d record(s) from %s\n", len(recovery.Entries), path); err != nil {
 		return fmt.Errorf("engine: report the resume: %w", err)
 	}
+	last := recovery.Entries[0].Envelope.Sequence
+	for _, entry := range recovery.Entries {
+		if entry.Kind == journal.KindInput {
+			last = entry.Envelope.Sequence
+		}
+	}
+	if _, err := fmt.Fprintf(out, "the adapter's next input carries sequence %d\n", last+1); err != nil {
+		return fmt.Errorf("engine: report the resume: %w", err)
+	}
 	if recovery.Torn == nil {
 		return nil
 	}

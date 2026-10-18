@@ -115,21 +115,27 @@ type wireGuard struct {
 // decide applies input through engine while holding g for the call's whole
 // duration (see wireGuard's own doc comment), and permanently poisons g the
 // moment ctx is found to have been cancelled once engine.Apply returns.
-func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input event.Envelope) ([]event.Envelope, error) {
+// With an operator inbox, its pending records are delivered first, in the
+// same hold (operatorInbox), and input is recorded after them; decide
+// returns their decisions before input's, and input as recorded.
+func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input event.Envelope, inbox *operatorInbox) (decisions []event.Envelope, recorded event.Envelope, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.poisoned != nil {
-		return nil, g.poisoned
+		return nil, input, g.poisoned
 	}
 	g.wg.Add(1)
 	defer g.wg.Done()
 
-	decisions, err := engine.Apply(ctx, input)
+	if inbox != nil {
+		decisions, input.Sequence = inbox.deliver(ctx, engine, input)
+	}
+	own, err := engine.Apply(ctx, input)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		g.poisoned = fmt.Errorf("engine: this decision's deadline passed while it was still running against the reducer, so the wire had already abandoned it; this engine's state can no longer be vouched for, and no further decisions will be made: %w", ctxErr)
-		return nil, g.poisoned
+		return nil, input, g.poisoned
 	}
-	return decisions, err
+	return append(decisions, own...), input, err
 }
 
 // awaitIdle blocks until no call to decide is in progress. Call it once
@@ -256,9 +262,9 @@ func (g *wireGuard) awaitIdle() {
 // goroutine either one came from, would race that state — memory corruption
 // in the component that sizes real positions, not a mere correctness
 // nicety.
-func newDecider(guard *wireGuard, engine *replay.Engine, strategyVersion, configurationHash string) transport.Decider {
+func newDecider(guard *wireGuard, engine *replay.Engine, strategyVersion, configurationHash string, inbox *operatorInbox) transport.Decider {
 	return func(ctx context.Context, input event.Envelope) (event.Envelope, error) {
-		decisions, err := guard.decide(ctx, engine, input)
+		decisions, recorded, err := guard.decide(ctx, engine, input, inbox)
 		if err != nil {
 			// Fail closed (docs/development.md principle 4): an envelope the
 			// reducer rejects, a bound journal.Recorder itself enforces
@@ -268,10 +274,14 @@ func newDecider(guard *wireGuard, engine *replay.Engine, strategyVersion, config
 			// the adapter as a protocol error (transport/server.go's
 			// decisionErrorCode maps any non-nil error here to
 			// CodeDeciderFailed, absent a deadline of its own). Nothing is
-			// fabricated in its place.
+			// fabricated in its place. When operator inputs were recorded
+			// first, the error names where the input itself was recorded.
+			if recorded.Sequence != input.Sequence {
+				return event.Envelope{}, fmt.Errorf("%w (operator inputs were recorded first, so %s was applied at sequence %d)", err, input.ID, recorded.Sequence)
+			}
 			return event.Envelope{}, err
 		}
-		return bundleDecisions(input, decisions, strategyVersion, configurationHash)
+		return bundleDecisions(recorded, decisions, strategyVersion, configurationHash)
 	}
 }
 

@@ -32,8 +32,10 @@ import (
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
 //   - execution.order.lifecycle version 2 and execution.fill version 5 for the
 //     orders this run released;
-//   - operator.kill-switch, which refuses every order while engaged, and
-//     account.broker.snapshot, whose holdings net of working sells size
+//   - operator.kill-switch, which refuses every order while engaged;
+//   - operator.rebalance.cleared, the owner's clearance of the rebalance in
+//     progress (applyCleared); and
+//   - account.broker.snapshot, whose holdings net of working sells size
 //     every sell the gate checks after it (ADR 0026, points 2.5, 3 and 4).
 //     An IRA gets no sale back to 98% and no margin alarm.
 //
@@ -201,6 +203,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		// The kill switch refuses every order of an IRA, which gets no sale
 		// back to 98% (ADR 0026, points 3 and 4).
 		return nil, r.h.applyKillSwitch(in)
+	case event.RebalanceClearedEventType:
+		return nil, r.applyCleared(in)
 	case event.BrokerSnapshotEventType:
 		// The latest broker holdings and open orders size every sell (ADR
 		// 0026, point 2.5); an IRA has no margin alarm, so this emits nothing.
@@ -592,6 +596,51 @@ func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (re
 		}
 	}
 	return "", ""
+}
+
+// applyCleared applies the owner's clearance of the rebalance in progress:
+// a rebalance whose orders are not all terminal sends nothing more and
+// withholds every later decision until the owner clears it (ADR 0026, point
+// 5 and "A new rebalance is withheld while an earlier one's orders are
+// working"). The clearance must name that rebalance's decision and exactly
+// the orders of it not terminal, which the owner has dealt with at the
+// broker; each is then terminal and the rebalance plans nothing more, so its
+// buy phase, if still pending, is never planned and the next decision time
+// decides afresh. A later venue report on a cleared order is refused as one
+// on a terminal order (tracked). The gate's pending sells are left to the
+// broker snapshots, which show what each cleared sell sold (ADR 0026, point
+// 2.5).
+func (r *momentumRun) applyCleared(in event.Envelope) error {
+	p, err := decodeInput[event.RebalanceClearedPayload](in, event.RebalanceClearedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if p.AccountID != r.h.cfg.AccountID {
+		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, r.h.cfg.AccountID)
+	}
+	var working []string
+	for _, id := range slices.Sorted(maps.Keys(r.orders)) {
+		if !r.orders[id].terminal {
+			working = append(working, id)
+		}
+	}
+	switch {
+	case len(working) == 0:
+		return fmt.Errorf("targetweight: clearance %s: no rebalance is in progress, every order released is terminal", in.ID)
+	case p.DecisionID != r.rebalance.decisionID:
+		return fmt.Errorf("targetweight: clearance %s names %s, but the rebalance in progress is %s", in.ID, p.DecisionID, r.rebalance.decisionID)
+	case !slices.Equal(p.ClientOrderIDs, working):
+		return fmt.Errorf("targetweight: clearance %s names orders %v, but the orders of %s not terminal are %v: name exactly those, each dealt with at the broker",
+			in.ID, p.ClientOrderIDs, r.rebalance.decisionID, working)
+	}
+	for _, id := range working {
+		o := r.orders[id]
+		o.terminal = true
+		if o.planned.Side == event.OrderSideBuy {
+			r.rebalance.budget.Close(id)
+		}
+	}
+	return nil
 }
 
 // cash is the cash the D5 rule funds buys from (ADR 0026, point 2, "Budget").

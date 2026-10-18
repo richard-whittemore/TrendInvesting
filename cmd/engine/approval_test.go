@@ -853,3 +853,97 @@ func TestAnOldLogWithAPermissionFaultIsNeverQuarantined(t *testing.T) {
 		t.Fatalf("run() = %v, want a refusal naming the owner or mode to fix, with no quarantine step", err)
 	}
 }
+
+// craftedLog writes a durable log at path under comp's header: the
+// configuration input, then one input whose decisions are decisions.
+func craftedLog(t *testing.T, path string, comp composition, decisions ...event.Envelope) journal.Recovery {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	log, err := journal.CreateLog(file, logHeader(comp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append([]journal.Entry{{Kind: journal.KindInput, Envelope: comp.configEnvelope}}); err != nil {
+		t.Fatal(err)
+	}
+	stamp := func(id, eventType string, version uint32, sequence uint64, payload any) event.Envelope {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := boostSession(1)
+		return event.Envelope{
+			ID: id, Type: eventType, SchemaVersion: version, EnvelopeVersion: event.CurrentEnvelopeVersion, EventTime: at, RecordedAt: at,
+			Sequence: sequence, Source: "test", StrategyVersion: comp.strategyVersion, ConfigurationHash: comp.configurationHash,
+			PayloadHash: event.HashPayload(raw), Payload: raw,
+		}
+	}
+	group := []journal.Entry{{Kind: journal.KindInput, Envelope: stamp("session:1", event.SessionClosedEventType, event.SessionClosedSchemaVersion, 2,
+		event.SessionClosedPayload{PeriodEnd: boostSession(1), InstrumentIDs: []string{"SPY"}})}}
+	for i, d := range decisions {
+		group = append(group, journal.Entry{Kind: journal.KindDecision, Envelope: stamp(d.ID, d.Type, d.SchemaVersion, uint64(i+1), d.Payload)})
+	}
+	if err := log.Append(group); err != nil {
+		t.Fatal(err)
+	}
+	return recoverFile(t, path)
+}
+
+// TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt: the previous run
+// ended Halted after attempting the incident's one sale back to 98%, so an
+// approval carrying that incident in force with the sale not attempted is
+// refused; a fresh run would otherwise attempt it again (ADR 0019, amended
+// 2026-10-15). Stated attempted, the fresh run starts.
+func TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt(t *testing.T) {
+	dir := t.TempDir()
+	comp, err := compose(boostConfigPath, "test-build", boostSession(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(p any) json.RawMessage {
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encode(event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})}
+	sale := event.Envelope{ID: "order-planned:joint-sale-1", Type: event.OrderPlannedEventType, SchemaVersion: event.OrderPlannedSafetyVersion,
+		Payload: encode(event.OrderPlannedPayload{AccountID: "joint", Tag: "engine-state:joint:1", ClientOrderID: "joint-sale-1", InstrumentID: "SPY",
+			Side: event.OrderSideSell, Phase: event.OrderSideSell, OrderType: event.OrderTypeLimit, Quantity: 1, LimitPrice: 99,
+			NetLiquidation: 4000, HeldQuantity: 10, ReferencePrice: 100, PriceBand: 0.05,
+			Sale: event.SaleFigures{Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit}})}
+	previous := craftedLog(t, filepath.Join(dir, "run-1.log"), comp, halted, sale)
+
+	approval := func(attempted bool) string {
+		raw, err := json.Marshal(event.OperatorRunApprovedPayload{
+			AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: previous.FinalRecordHash,
+			ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+			Boost:           event.BoostStateInForce{Latched: new(false)},
+			IncidentInForce: &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(attempted)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "approval.json")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath, fresh.asOf = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal"), laterAsOf
+	fresh.approvalPath = approval(false)
+	refuse(t, "the sale stated not attempted", fresh, "records an attempt")
+
+	fresh.approvalPath = approval(true)
+	stop := startEngine(t, fresh)
+	if err := stop(); err != nil {
+		t.Fatalf("the approved run: %v", err)
+	}
+}

@@ -985,3 +985,31 @@ func TestEngineRunNamesBothAnInvalidFinalEmissionAndTheHandlerError(t *testing.T
 		t.Errorf("Run() error = %v, want it to name the emission as invalid", err)
 	}
 }
+
+// TestEngineNextIsTheSequenceApplyAcceptsNext: a composition root that
+// inserts its own inputs into the stream reads where the stream stands: none
+// before the first call, then the last accepted Sequence + 1, unchanged by a
+// call refused before its handler ran.
+func TestEngineNextIsTheSequenceApplyAcceptsNext(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, ok := engine.Next(); ok {
+		t.Fatal("Next before any input reports a sequence")
+	}
+	if _, err := engine.Apply(context.Background(), envelope(41)); err != nil {
+		t.Fatal(err)
+	}
+	if next, ok := engine.Next(); !ok || next != 42 {
+		t.Fatalf("Next = %d, %v; want 42", next, ok)
+	}
+	if _, err := engine.Apply(context.Background(), envelope(44)); err == nil {
+		t.Fatal("a gap is accepted")
+	}
+	if next, _ := engine.Next(); next != 42 {
+		t.Fatalf("Next after a refused gap = %d, want 42", next)
+	}
+}

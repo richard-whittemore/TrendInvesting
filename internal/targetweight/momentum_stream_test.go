@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,9 @@ type momentumOptions struct {
 	rawScale map[string]float64
 	// held is the IRA's holdings before the first session.
 	held map[string]int64
+	// refusals names inputs, by envelope ID, the run must refuse, with what
+	// the refusal says.
+	refusals map[string]string
 }
 
 type momentumResult struct {
@@ -206,6 +210,13 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	apply := func(in event.Envelope) []event.Envelope {
 		t.Helper()
 		out, err := rec.Apply(context.Background(), in)
+		if want, refused := opts.refusals[in.ID]; refused {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("apply %s = %v, want a refusal saying %q", in.ID, err, want)
+			}
+			res.inputs = append(res.inputs, in)
+			return nil
+		}
 		if err != nil {
 			t.Fatalf("apply %s: %v", in.ID, err)
 		}

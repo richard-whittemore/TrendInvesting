@@ -7,6 +7,9 @@ prints, and what happens when something goes wrong.
 - [journal-query](journal-query.md): ask a run's journals what happened, such
   as which orders were planned, released or refused, which fills happened and
   what they cost, and whether the positions add up.
+- [operator](operator.md): the operator tool: how you engage or release the
+  kill switch, approve a fresh run, and clear a stuck rebalance, what each
+  records, and how to see it in the log.
 - [states-and-kill-switch](states-and-kill-switch.md): what Degraded, Halted
   and the kill switch do to the target-weight accounts' orders, the margin
   account's one sale back to 98%, the margin-cushion alarm, and what can go

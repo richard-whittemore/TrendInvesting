@@ -294,11 +294,13 @@ func (g *Gate) StaleEpisodeOpen() bool { return g.staleOpen }
 // stale episode open, which ADR 0026 point 5 lists among the state a restart
 // recovers from the journal ("Whether a stale-snapshot episode is open for
 // the account, from its opening `stale-broker-snapshot` record" and what
-// closes it), so a restart within it does not alert again. It is an unwired
-// seam: a crash resume rebuilds the episode by replaying the durable log's
-// inputs (ADR 0027, section 6), and the owner's approval of a fresh run,
-// which restores the incident's sale attempt, is where a restore of the
-// episode would be wired.
+// closes it), so a restart within it does not alert again. A crash resume
+// rebuilds the episode by replaying the durable log's inputs (ADR 0027,
+// section 6), so it never calls this. A fresh run's approval does not
+// restore it either: the approval is the run's input before any other, and
+// a stale check needs a latest broker snapshot, whose ObserveBroker ends
+// the episode, so an episode restored open would be ended before any check
+// could read it. The fresh run's first stale check alerts.
 func (g *Gate) RestoreStaleEpisode(open bool) { g.staleOpen = open }
 
 // freshCheck applies a gate check of the latest broker snapshot at at, the

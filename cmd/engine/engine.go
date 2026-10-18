@@ -6,7 +6,7 @@
 // file. It is composition only and contains no rules
 // (cmd-is-composition-only, .golangci.yml; AGENTS.md rule 7).
 //
-//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]]
+//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]] [-approval <approval.json>] [-operator <inbox>]
 //
 // # Wire contract: the adapter's first input continues the engine's own
 //
@@ -25,6 +25,16 @@
 // is not a convenience: the journal this run writes is read back as ONE
 // input stream (configuration included), and a stream in which two records
 // both claim Sequence 1 fails its own replay.
+//
+// With -operator, the owner's recorded instructions (operator.go) join the
+// same sequence: before the adapter's input, every instruction not yet
+// recorded is applied at the sequence the adapter's input names and the
+// ones after it, and the adapter's input follows them. The decisions
+// returned carry, as their Sequence, the sequence the adapter's input was
+// recorded at, so the adapter's next input always carries the returned
+// Sequence + 1; without operator instructions that is the adapter's own
+// Sequence + 1, as before. A resume reports the sequence the adapter's next
+// input carries.
 //
 // The reducer's decisions are received over that socket and written to a
 // journal; that is the whole of this command's job. Four design decisions
@@ -87,7 +97,11 @@ type options struct {
 	// approvalPath names the owner's operator.run.approved file for a
 	// fresh run after an earlier one (approval.go).
 	approvalPath string
-	asOf         string
+	// operatorDir names the operator inbox (operator.go), where the
+	// operator tool records the owner's kill switch and rebalance
+	// clearances for a run that can reach a broker.
+	operatorDir string
+	asOf        string
 	// mode is required and is what the adapter on the socket does with the
 	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
 	// broker. A mode other than backtest requires logPath (ADR 0027).
@@ -146,6 +160,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	default:
 		missing = append(missing, fmt.Errorf("-mode must be one of %s, %s, %s or %s, not %q", modeBacktest, modeDryRun, modePaper, modeLive, opts.mode))
 	}
+	if opts.operatorDir != "" && opts.mode == modeBacktest {
+		missing = append(missing, errors.New("-operator applies to a run that can reach a broker; a backtest takes no operator input"))
+	}
 	if opts.resumePath != "" && opts.logPath == "" {
 		missing = append(missing, errors.New("-resume requires -log: a resumed run streams its own durable log, which begins with the records it resumes (ADR 0027)"))
 	}
@@ -200,6 +217,12 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 	if err := armApproval(comp.handler, approval); err != nil {
 		return err
+	}
+	var inbox *operatorInbox
+	if opts.operatorDir != "" {
+		if inbox, err = openOperatorInbox(opts, comp, out); err != nil {
+			return err
+		}
 	}
 	configurationHash, strategyVersion, configEnvelope := comp.configurationHash, comp.strategyVersion, comp.configEnvelope
 	reducer := comp.handler
@@ -349,7 +372,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 
 	guard := &wireGuard{}
-	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, strategyVersion, configurationHash), transport.ServerConfig{
+	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, strategyVersion, configurationHash, inbox), transport.ServerConfig{
 		MaxFrameBytes:   opts.maxFrameBytes,
 		DecisionTimeout: opts.decisionTimeout,
 		// Decision 4: at most one connection may be open at a time (see

@@ -32,6 +32,9 @@ type item struct {
 	engine    *event.EngineStatePayload
 	snapshot  *event.AccountPositionsSnapshotPayload
 	renamed   *event.InstrumentSymbolChangedPayload
+	killed    *event.KillSwitchPayload
+	cleared   *event.RebalanceClearedPayload
+	approved  *event.OperatorRunApprovedPayload
 }
 
 // fill is one execution in either fill version the queries read: a Turtle
@@ -107,6 +110,18 @@ func decode(j Journal) ([]item, error) {
 		case event.EngineStateEventType:
 			it.engine = new(event.EngineStatePayload)
 			err = read(env, []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}, it.engine)
+		case event.KillSwitchEventType:
+			it.killed = new(event.KillSwitchPayload)
+			err = read(env, []uint32{event.KillSwitchSchemaVersion}, it.killed)
+			it.at, it.account = it.killed.AsOf, it.killed.AccountID
+		case event.RebalanceClearedEventType:
+			it.cleared = new(event.RebalanceClearedPayload)
+			err = read(env, []uint32{event.RebalanceClearedSchemaVersion}, it.cleared)
+			it.at, it.account = it.cleared.AsOf, it.cleared.AccountID
+		case event.OperatorRunApprovedEventType:
+			it.approved = new(event.OperatorRunApprovedPayload)
+			err = read(env, []uint32{event.OperatorRunApprovedSchemaVersion}, it.approved)
+			it.at, it.account = it.approved.ApprovedAt, it.approved.AccountID
 		case event.AccountSnapshotEventType:
 			// Version 2 (equity and cash) carries no positions and is not
 			// read here. Version 3 is the broker's positions and version 4

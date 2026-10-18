@@ -248,6 +248,9 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 	if err := restart.CheckIncidentInForce(entries, approval, stateLog); err != nil {
 		return nil, err
 	}
+	if err := restart.CheckSaleAttempt(entries, approval, stateLog); err != nil {
+		return nil, err
+	}
 	return &approval, nil
 }
 

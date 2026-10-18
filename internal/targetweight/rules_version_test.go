@@ -78,3 +78,13 @@ func TestRulesVersionDeclaresTheVersion5ConfigurationBreak(t *testing.T) {
 		}
 	}
 }
+
+func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.5.0 once a momentum run reads the owner's clearance of a rebalance in progress", targetweight.RulesVersion)
+		}
+	}
+}
