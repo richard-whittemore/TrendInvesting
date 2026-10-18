@@ -61,7 +61,8 @@ account.
 | Alert | Urgency | Sent once per |
 | --- | --- | --- |
 | An order was refused | urgent | refused order |
-| The engine went Degraded or Halted | urgent | change of state, reason and scope; the same state coming back after another is a new alert |
+| The engine went Degraded or Halted | urgent, repeated until acknowledged | change of state, reason and scope; the same state coming back after another is a new alert |
+| A reconciliation did not match: an unexplained difference (Degraded) or evidence that could not be compared (Halted); see [reconciliation](reconciliation.md) | urgent, repeated until acknowledged | reconciliation; the state change it caused is part of the same alert, not a second one |
 | A decision was withheld for missing data (bars, account snapshot, universe, the close histories of the stocks ranked) | urgent | run of the same reason |
 | A momentum decision was withheld because no stock with a target was affordable (`all-unaffordable`; the net liquidation or prices may be wrong) | urgent | run of the same reason |
 | A decision was withheld for another reason | routine | run of the same reason |
@@ -88,6 +89,26 @@ ADR 0019 asks for is a separate service and is not built.
 If the log cannot be read, the alert is named by the account the log names,
 or by `-account`, or by the log file's name.
 
+## Repeated until you acknowledge it
+
+A Degraded, Halted or reconciliation alert is sent again, on every channel,
+each `-repeat-interval` (default 30 minutes, your setting under ADR 0019),
+for as long as you have not acknowledged it. Every other alert is sent once.
+
+The alert's text ends with its **alert key**. You acknowledge it by recording
+an `operator.alert.acknowledged` input naming that key, which the engine
+writes to the log like any other input; the reporter reads it there and
+stops repeating that alert. Acknowledging changes no state: the account stays
+Degraded or Halted until recovery (`docs/runbooks/reconciliation.md`). The
+tool you will use to record the acknowledgement from the server comes with
+the operator inputs and is not in this build. Acknowledging the PagerDuty
+incident on your phone stops PagerDuty's own escalation, but not the
+reporter's repeats, which follow the log.
+
+A repeat is timed per channel from when that channel last took the alert, and
+recorded in the state file. A state file written by an earlier reporter has
+no send times, so its unacknowledged alerts repeat once at the next run.
+
 ## Where alerts go
 
 Alerts go to real channels. You choose them with `-channel`, comma-separated.
@@ -111,6 +132,9 @@ The delivery rules:
 - Each send has a time limit (`-send-timeout`, default 30 seconds). A channel
   that does not answer in time has failed and is retried next run, so one
   stalled channel cannot hold up the other alerts.
+- On the public ntfy.sh relay, a reconciliation alert is sent in a shorter
+  form that names what is in doubt (the instruments and the cash) but no
+  figure; the figures go to PagerDuty and to your own ntfy server.
 - The daily summary carries your balances, so it never goes through a public
   relay. With ntfy on the public ntfy.sh server the summary skips ntfy and goes
   only to PagerDuty or your own ntfy server. If no such channel is named, the
@@ -161,7 +185,9 @@ whose session has closed in the log; a stated day whose session has not
 closed is an error); `-benchmark` (default SPY); `-heartbeat-sessions`
 (default 2 NYSE sessions with nothing written); `-account` (the name for
 alerts when the log cannot name its account; default the log file's name);
-`-send-timeout` (default 30 seconds per send).
+`-send-timeout` (default 30 seconds per send); `-repeat-interval` (default 30
+minutes; how often an unacknowledged Degraded, Halted or reconciliation alert
+is sent again; must be positive).
 
 If it exits with an error, read it: it names the channel that failed or the
 file it refused. Nothing is lost; the next run tries again.

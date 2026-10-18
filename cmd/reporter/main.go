@@ -200,8 +200,8 @@ func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Al
 // loadState reads the delivered channel keys and when each was last sent. A
 // key with no send time (a state file written before repeats) is due for its
 // repeat at once, if it repeats.
-func loadState(path string) (map[string]bool, map[string]time.Time, error) {
-	seen, sent := map[string]bool{}, map[string]time.Time{}
+func loadState(path string) (seen map[string]bool, sent map[string]time.Time, err error) {
+	seen, sent = map[string]bool{}, map[string]time.Time{}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return seen, sent, nil

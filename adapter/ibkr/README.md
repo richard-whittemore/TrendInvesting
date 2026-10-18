@@ -3,7 +3,8 @@
 The live broker adapter (ADR 0025): Python, over IBKR's TWS API, between IB
 Gateway and the Go engine. It has no strategy logic.
 
-**Built so far: the connection and account layer only.** It does not yet
+**Built so far: the connection and account layer, and the payloads of the
+broker snapshot and the morning reconciliation.** It does not yet
 speak the envelope transport (ADR 0014). The new event types it will publish
 are being defined in Go first, so everything here produces plain records
 that the transport layer will map to envelopes later. Nothing here can send
@@ -16,6 +17,7 @@ an order (AGENTS.md rule 5).
 | `config.py` | host, port, per-engine client ID, account ID, mode, and the timing bounds. Every value is required. Credential-like keys are refused |
 | `connection.py` | connect, reconnect with capped exponential backoff, disconnect detection (socket close, IBKR codes 1100/1101/1102/2110/504/1300, an unanswered `reqCurrentTime` heartbeat), and `ConnectionStatus` records for ADR 0019's heartbeat. `maintain()`, called from the adapter's loop, is what brings a lost link back: at once after a drop, or after `restore_timeout` if Gateway has lost IBKR's servers (1100/2110) and not restored them |
 | `account.py` | `read_snapshot`: positions, NetLiquidation, TotalCashValue and ExcessLiquidity for the configured account, as exact decimals with currency |
+| `snapshot.py` | `read_account`: positions, the account summary and every open order in one pass, marking what could not be read. `broker_snapshot_record` and `reconciliation_record` build the `account.broker.snapshot` and `account.reconciliation` payloads from that one read, every field stated (`[]` for none, the `unreadable` marker for what failed), times in whole seconds. `tests/testdata/` holds the payloads the engine's own test decodes and validates |
 | `orders.py` | `OrderTracker`: order status, open-order, execution and commission callbacks as records. `collect_broker_orders` and `match_on_reconnect`: matching by client order ID, under this engine's own client ID, on reconnect |
 | `sender.py` | `DryRunSender` journals with `send=False` and holds no IBKR client. `make_sender` refuses `paper` and `live` |
 

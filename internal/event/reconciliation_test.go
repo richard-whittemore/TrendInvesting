@@ -3,6 +3,8 @@ package event_test
 import (
 	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -224,4 +226,34 @@ func TestReconciliationActionFollowsClassification(t *testing.T) {
 	halted := v
 	halted.Classification, halted.ScopeInstrumentIDs, halted.Unverifiable = event.ReconciliationUnverifiable, nil, []string{"x"}
 	expectInvalid(t, "unverifiable halts", halted, func(p *P) { p.Action = event.ReconciliationActionDegrade }, "halts")
+}
+
+// TestTheIBKRAdapterPayloadsDecodeAndValidate is the contract with the IBKR
+// adapter (adapter/ibkr/snapshot.py): its test produces exactly these files,
+// and the engine decodes and validates them, so a field one side renames or
+// leaves unstated fails here.
+func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
+	read := func(name string, into interface{ Validate() error }) {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join("..", "..", "adapter", "ibkr", "tests", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, into); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := into.Validate(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	var snapshot event.BrokerSnapshotPayload
+	read("broker_snapshot.json", &snapshot)
+	if !snapshot.MarketOpen || len(snapshot.OpenOrders) != 2 || snapshot.Positions[0].Quantity != 147 {
+		t.Errorf("broker snapshot %+v", snapshot)
+	}
+	var reconciliation event.ReconciliationPayload
+	read("reconciliation.json", &reconciliation)
+	if reconciliation.TotalCash != -4700 || reconciliation.Currency != "USD" {
+		t.Errorf("reconciliation %+v", reconciliation)
+	}
 }
