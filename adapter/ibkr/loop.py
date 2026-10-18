@@ -287,8 +287,6 @@ class AdapterLoop:
     def start(self):
         """Take the pending file's lock, connect, reconcile, and settle any input left awaiting its reply."""
         cfg = self.config
-        if self.delivery is not None:
-            self.delivery.check()
         self.conn = Connection(self._api, cfg, self._status, sleep=self._sleep, monotonic=self._monotonic,
                                wall_clock=self._now)
         sender = make_sender(cfg, self._sent, conn=self.conn, today=self._today)
@@ -302,7 +300,12 @@ class AdapterLoop:
         # fresh run's Run approval included (cmd/engine), so nothing of the
         # log is read, and nothing of IBKR's journalled, before it listens:
         # a log read earlier could lack the approval naming the run before.
+        # So the run's stream folder, found by the run's identity from the
+        # log (delivery.stream_run), is looked up only now: a resume's copy
+        # of the crashed run's records is whole once the engine listens.
         self.relay.connect_engine()
+        if self.delivery is not None:
+            self.delivery.check()
         # The earlier runs' reports too: IBKR replays the day's executions
         # and the session's orders after a fresh run starts, and a report an
         # earlier run's engine recorded is never recorded again.

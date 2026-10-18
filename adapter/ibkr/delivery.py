@@ -363,22 +363,35 @@ def run_name(engine_log_path):
 def stream_run(streams, engine_log_path):
     """The name of the stream folder in streams of the run whose durable log is engine_log_path, found by its identity.
 
-    The data job's rule (adapter/marketdata/tidata.py, stream_run): a fresh
-    run's folder bears its own name, made by its warm-up. A crash resume
-    runs under a new name (a new TI_RUN) with the crashed run's identity
-    (relay.run_identity: its log holds a copy of the crashed run's records,
-    ADR 0027 section 6), and keeps the folder of the run that began it: the
-    one folder whose name is that of a log beside engine_log_path with the
-    same identity. So the folder, and every stream envelope's correlation
+    The data job applies the same rule (adapter/marketdata/tidata.py,
+    stream_run). A folder is a run's when the log beside engine_log_path
+    named after it (<folder>.log; the run's own log for the folder of its
+    own name) has the run's identity (relay.run_identity: its Run approval's
+    ID, else its configuration and as-of time). A fresh run's folder bears
+    its own name, made by its warm-up. A crash resume runs under a new name
+    (a new TI_RUN) and keeps the folder of the run that began it: its log
+    holds a copy of the crashed run's records, its approval included (ADR
+    0027 section 6), so the folder, and every stream envelope's correlation
     id, is the first run's name of a chain of resumes; an abandoned resume
-    has no folder and is never taken for it. With no such folder the run's
-    own name is returned (check then refuses: its warm-up is not written);
-    with two, StreamRefused (fail closed, AGENTS.md): one run's stream is
-    never split across two folders.
+    has no folder and is never taken for it. Fail closed (StreamRefused,
+    AGENTS.md):
+
+    - two folders of the run, its own name's among them: one run's stream
+      is never split across two folders;
+    - one folder of another name whose log's committed inputs are not the
+      first of this log's, or are its configuration alone: nothing shows
+      this run is that run's resume. A run with no approval is named by its
+      configuration and as-of time only, which a second start of a first
+      run from the same run.env repeats; it is never handed the first run's
+      folder, delivery record and stream without its warm-up (ADR 0027: a
+      run that is not a crash's resume is a fresh run, with its approval).
+      The log is read once the engine listens (its copy is then whole), so
+      a copy still being written is refused too, never taken for the run.
+
+    With no folder of the run, the run's own name is returned (check then
+    refuses: its warm-up is not written).
     """
     own = run_name(engine_log_path)
-    if os.path.isdir(os.path.join(streams, own)):
-        return own
     logs = os.path.dirname(os.path.abspath(engine_log_path))
     candidates = [n for n in (sorted(os.listdir(streams)) if os.path.isdir(streams) else [])
                   if os.path.isdir(os.path.join(streams, n)) and os.path.isfile(os.path.join(logs, n + ".log"))]
@@ -387,15 +400,28 @@ def stream_run(streams, engine_log_path):
     try:
         identity = run_identity(engine_log_path)
         found = [n for n in candidates if run_identity(os.path.join(logs, n + ".log")) == identity]
+        if len(found) > 1:
+            raise StreamRefused(
+                "the run of {} has more than one stream folder: {}. One run's stream is in one folder, made by "
+                "its warm-up; nothing is delivered until a person decides which is the run's "
+                "(docs/manual/market-data.md, \"A crash resume\")".format(
+                    engine_log_path, ", ".join(os.path.join(streams, n) for n in found)))
+        if not found or found == [own]:
+            return own
+        earlier = os.path.join(logs, found[0] + ".log")
+        before = [i.id for i in read_engine_log(earlier).inputs]
+        if len(before) < 2 or [i.id for i in read_engine_log(engine_log_path).inputs][:len(before)] != before:
+            raise StreamRefused(
+                "the run of {} has the identity of the run of {} (with no Run approval, the same configuration "
+                "and as-of time) but its log holds no whole copy of that run's committed inputs, so "
+                "nothing shows it is that run's crash resume, and it is never handed that run's stream folder "
+                "{}: resume the crashed run with engine -resume, or start a fresh run with its approval and its "
+                "own warm-up (docs/manual/market-data.md, \"A crash resume\")".format(
+                    engine_log_path, earlier, os.path.join(streams, found[0])))
     except ResolveRefused as err:
         raise StreamRefused("the run's stream folder is found by the run's identity, from its durable log and "
                             "those of the folders in {}, and a log cannot be read: {}".format(streams, err)) from None
-    if len(found) > 1:
-        raise StreamRefused(
-            "the run of {} has more than one stream folder: {}. One run's stream is in one folder, made by its "
-            "warm-up; nothing is delivered until a person decides which is the run's (docs/manual/market-data.md, "
-            "\"A crash resume\")".format(engine_log_path, ", ".join(os.path.join(streams, n) for n in found)))
-    return found[0] if found else own
+    return found[0]
 
 
 class Deliverer:
@@ -424,7 +450,8 @@ class Deliverer:
         self._new_id = new_id
 
     def check(self):
-        """At start: the run's stream folder exists and the delivery record reads; StreamRefused or DeliveryRecordInvalid."""
+        """At start, once the engine listens (its log is whole): the run's stream folder exists and the delivery
+        record reads; StreamRefused or DeliveryRecordInvalid."""
         self.run = stream_run(self._streams, self._engine_log_path)
         self.folder = os.path.join(self._streams, self.run)
         if not os.path.isdir(self.folder):

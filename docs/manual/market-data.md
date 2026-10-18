@@ -432,13 +432,37 @@ Keep the first run's log (`<first TI_RUN>.log`) in the engine's folder
 while its resumes run: the folder is matched to the run through it. If it
 is missing, both stop as for a run with no warm-up ("No warm-up yet",
 below); restore the log from the backup rather than running a warm-up for
-the new name. Do not run the warm-up for a resumed `TI_RUN`: a second
-folder of the same run stops the data job and the adapter, naming both
-folders ("more than one stream folder"). Move the one you made out of
+the new name. While the first log is there, a warm-up run for the resumed
+`TI_RUN` makes no second folder: it writes the next day into the first
+run's folder like any day. Run while the first log was missing, it makes a
+folder named after the resumed `TI_RUN`; once the first log is back, the
+data job and the adapter both stop, naming both folders ("more than one
+stream folder"), as they do for any two folders of one run, the one named
+after the running `TI_RUN` included. Move the one you made out of
 `streams/boost/` (keep it, it is evidence) and start them again. A fresh run
 after an earlier one (with your approval) is a new run with its own
 identity: it never takes the earlier run's folder, and needs its own
 warm-up.
+
+A run is taken for a resume of the run whose folder it finds only when its
+log begins with a whole copy of that run's committed inputs, as `-resume`
+writes it. Otherwise both stop, naming both logs ("no whole copy of that
+run's committed inputs"), and nothing is written or sent:
+
+- **the engine's first run started again without an approval** (same
+  `run.env`, same configuration and as-of time): it has the first run's
+  identity but none of its inputs, and is never handed the first run's
+  folder, record of files sent and stream without its own warm-up. Start it
+  as a fresh run, with its approval and its warm-up ([paper
+  trading](paper-trading.md), "Never start the engine's first run again
+  without an approval");
+- **a first run that crashed having committed nothing but its
+  configuration**: nothing in the two logs tells its resume from a second
+  start, so it is not taken for either; start a fresh run with its
+  approval;
+- **a copy still being written** (the data job ran while `-resume` was
+  copying): run the job again once the engine is listening. The adapter
+  reads the log only then, so it never meets one.
 
 **What you see.** Each run prints the build it is (`ti-data <commit>`), then
 the path of the file it wrote, or of the file that already held the session;
@@ -712,9 +736,15 @@ which writes the sessions again from its recordings, and start the adapter
   adapter hands its dropped files over again behind a fresh snapshot; any
   line its engine had already recorded is skipped, never sent twice.
 - **More than one stream folder of one run** (a warm-up run for a resumed
-  `TI_RUN`, say: "A crash resume", above): the adapter refuses to start,
-  naming both folders, and sends nothing. Move the folder that should not
+  `TI_RUN` while the first run's log was missing, then the log restored,
+  say: "A crash resume", above): the adapter refuses to start, naming both
+  folders, and sends nothing. Move the folder that should not
   be there out of `streams/boost/`, keep it, and start the adapter again.
+- **A run that only shares the identity of the run whose folder it finds**
+  ("no whole copy of that run's committed inputs": the engine's first run
+  started again without an approval, say: "A crash resume", above): the
+  adapter refuses to start, naming both logs, and sends nothing. Start a
+  fresh run with its approval and its own warm-up.
 
 ## What can go wrong, and what the step does
 

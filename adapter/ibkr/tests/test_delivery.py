@@ -73,6 +73,27 @@ def write_stream(folder, last, envelopes, prefix="boost"):
     return path
 
 
+def commit(engine, ident, kind="test.input", payload=None):
+    """An input committed to engine's durable log under ident, as the engine commits one."""
+    payload = payload or {"input": ident}
+    raw = json.dumps(payload, separators=(",", ":"))
+    engine.decide({"id": ident, "type": kind, "envelope_version": 1, "schema_version": 1,
+                   "event_time": "2027-01-14T22:05:00Z", "recorded_at": "2027-01-14T22:05:00Z",
+                   "sequence": engine.next_sequence, "source": "engine",
+                   "configuration_hash": engine.configuration_hash, "strategy_version": engine.strategy_version,
+                   "payload": payload, "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+
+
+def approve(engine, previous_log):
+    """The run's Run approval committed first, naming previous_log, as cmd/engine records a fresh run's."""
+    lines = Path(previous_log).read_text(encoding="utf-8").splitlines()
+    final = [json.loads(line)["commit"]["record_hash"] for line in lines if line.startswith('{"commit"')][-1]
+    commit(engine, "operator-run-approved:" + final, kind="operator.run.approved", payload={
+        "account_id": ACCOUNT, "previous_log": Path(previous_log).name, "previous_log_final_hash": final,
+        "incident_id": "", "approved_by": "owner", "approved_at": "2027-01-14T14:00:00Z",
+        "boost": {"latched": False}, "incident_in_force": None})
+
+
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -510,8 +531,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(len(loop.outbox.load()), 3)
 
     def fresh_run(self, name="run-b"):
+        """A fresh run after this one: its own Run approval, so its own identity, and its warm-up's folder."""
         log = str(Path(self.dir.name) / (name + ".log"))
         engine = LoggedEngine(log)
+        approve(engine, self.engine_log)
         write_stream(self.streams / name, FRIDAY, session_envelopes([FRIDAY], run=name))
         return log, engine
 
@@ -521,9 +544,10 @@ class DeliveryTests(unittest.TestCase):
         fresh = self.loop(engine=engine, engine_log=log)
         fresh.start()
         self.settle(fresh)
-        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
-        self.assertEqual([e["id"] for e in engine.inputs()][1:], ["marketdata:bar:SPY:2027-01-14",
-                                                                  "marketdata:session-closed:2027-01-14"])
+        sent = engine.inputs()[1:]  # after its Run approval
+        self.assertEqual([e["type"] for e in sent], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual([e["id"] for e in sent][1:], ["marketdata:bar:SPY:2027-01-14",
+                                                       "marketdata:session-closed:2027-01-14"])
         self.assertEqual(len(engine.inputs(BROKER_SNAPSHOT_TYPE)), 1, "only the fresh run's own snapshot")
         self.assertEqual(self.types(), [], "nothing reached the earlier run either")
         self.assertEqual(fresh.outbox.load(), [])
@@ -556,7 +580,8 @@ class DeliveryTests(unittest.TestCase):
         self.settle(loop)
         loop.close()
         log = str(Path(self.dir.name) / (earlier + ".log"))
-        engine = LoggedEngine(log)
+        # The earlier run: another as-of time, so another identity.
+        engine = LoggedEngine(log, started_at="2027-01-13T13:30:00Z")
         resumed = self.loop(engine=engine, engine_log=log)
         resumed.start()
         self.settle(resumed)
@@ -689,6 +714,53 @@ class DeliveryTests(unittest.TestCase):
             loop.start()
         self.assertIn(str(self.folder), str(caught.exception))
         self.assertIn(str(self.streams / "run-d"), str(caught.exception))
+
+    def test_a_resume_with_a_folder_of_its_own_name_and_the_first_runs_stops_the_start(self):
+        commit(self.engine, "input-2")
+        log, _ = self.crash_resume()
+        (self.streams / "run-c").mkdir()
+        loop = self.loop(engine_log=log)
+        with self.assertRaises(StreamRefused) as caught:
+            loop.start()
+        self.assertIn(str(self.folder), str(caught.exception))
+        self.assertIn(str(self.streams / "run-c"), str(caught.exception))
+
+    def test_an_unapproved_second_start_of_the_first_run_never_takes_its_folder(self):
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        self.settle(loop)
+        loop.close()
+        # The same configuration and as-of time, no Run approval: not a
+        # resume (its log holds no copy of the first run's inputs).
+        log = str(Path(self.dir.name) / "run-b.log")
+        engine = LoggedEngine(log)
+        again = self.loop(engine=engine, engine_log=log)
+        with self.assertRaises(StreamRefused) as caught:
+            again.start()
+        self.assertIn(self.engine_log, str(caught.exception))
+        self.assertIn(log, str(caught.exception))
+        self.assertEqual(engine.inputs(), [])
+
+    def test_the_folder_is_found_from_the_log_only_once_the_engine_listens_after_its_copy(self):
+        # An approved fresh run crashed; its resume is still copying its log.
+        first, _ = self.fresh_run()
+        log = str(Path(self.dir.name) / "run-c.log")
+        engine = LoggedEngine.resumed(first, log)
+        whole = Path(log).read_bytes()
+        # engine -resume is still copying: only the configuration so far.
+        Path(log).write_bytes(b"".join(whole.splitlines(keepends=True)[:3]))
+
+        class CopiesThenListens:
+            def __call__(self):
+                Path(log).write_bytes(whole)
+                return engine()
+        loop = self.loop(engine=CopiesThenListens(), engine_log=log)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(loop.delivery.run, "run-b")
+        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertFalse((self.streams / "run-c").exists())
 
     # -- the account read the snapshot is made from -----------------------
     def test_a_partial_account_read_is_read_again_and_never_delivered_as_the_snapshot(self):
@@ -1195,6 +1267,94 @@ class MarketOpenTests(unittest.TestCase):
         for at, want in cases:
             with self.subTest(at=at):
                 self.assertIs(market_open(at), want)
+
+
+class StreamFolderRuleTests(unittest.TestCase):
+    """The adapter and the data job find a run's stream folder by one rule: each case is laid out once, read by both."""
+
+    def setUp(self):
+        adapter_dir = str(tests_dir.parents[1])
+        if adapter_dir not in sys.path:
+            sys.path.insert(0, adapter_dir)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.streams = self.root / "boost"
+        self.streams.mkdir()
+        repo = tests_dir.parents[2]
+        self.cfg = json.loads((repo / "deploy" / "etc" / "engines" / "boost.config").read_text())
+
+    def engine(self, name):
+        return LoggedEngine(str(self.root / (name + ".log")), configuration=self.cfg)
+
+    def folder(self, name):
+        (self.streams / name).mkdir()
+
+    def found(self, engine):
+        """(the adapter's folder name, the data job's), "refused" where one refuses."""
+        from delivery import stream_run
+        from marketdata import tidata
+        log = str(engine.path)
+        try:
+            adapter = stream_run(str(self.streams), log)
+        except StreamRefused:
+            adapter = "refused"
+        try:
+            data = tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log))
+        except tidata.Refused:
+            data = "refused"
+        return adapter, data
+
+    def first_run(self, approved=False):
+        first = self.engine("run-a")
+        if approved:
+            approve(first, str(self.engine("run-0").path))
+        commit(first, "input-a")
+        self.folder("run-a")
+        return first
+
+    def test_a_fresh_run_with_its_own_folder_takes_it(self):
+        self.assertEqual(self.found(self.first_run()), ("run-a", "run-a"))
+
+    def test_a_crash_resume_keeps_the_first_runs_folder(self):
+        for approved in (False, True):
+            with self.subTest(approved=approved):
+                self.setUp()
+                first = self.first_run(approved)
+                resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+                commit(resumed, "input-c")
+                self.assertEqual(self.found(resumed), ("run-a", "run-a"))
+
+    def test_a_crash_resume_with_a_folder_of_its_own_name_too_is_refused(self):
+        first = self.first_run()
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        self.folder("run-c")
+        self.assertEqual(self.found(resumed), ("refused", "refused"))
+
+    def test_an_unapproved_second_start_with_the_same_configuration_and_as_of_is_refused(self):
+        self.first_run()
+        again = self.engine("run-b")
+        commit(again, "input-b")
+        self.assertEqual(self.found(again), ("refused", "refused"))
+
+    def test_a_resume_of_a_run_that_committed_only_its_configuration_is_refused(self):
+        first = self.engine("run-a")
+        self.folder("run-a")
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        self.assertEqual(self.found(resumed), ("refused", "refused"))
+
+    def test_a_copy_still_being_written_is_never_taken_for_the_run(self):
+        first = self.first_run()
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        lines = Path(resumed.path).read_bytes().splitlines(keepends=True)
+        Path(resumed.path).write_bytes(b"".join(lines[:3]))
+        self.assertEqual(self.found(resumed), ("refused", "refused"))
+
+    def test_an_approved_fresh_run_never_takes_an_earlier_runs_folder(self):
+        self.first_run()
+        fresh = self.engine("run-b")
+        approve(fresh, str(self.root / "run-a.log"))
+        self.assertEqual(self.found(fresh), ("run-b", "run-b"))
 
 
 if __name__ == "__main__":

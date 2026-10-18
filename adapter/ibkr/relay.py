@@ -1218,7 +1218,9 @@ def run_identity(path):
     configuration and as-of time (a first run started again the same day
     from the same run.env, without -approval) share an identity, so the
     second is taken for a resume of the first and is asked for the first
-    one's waiting input; nothing in the two logs tells them apart. Never
+    one's waiting input; nothing in the two logs tells them apart by
+    identity (delivering market data, delivery.stream_run stops such a
+    start: its log holds no copy of the first run's inputs). Never
     start a first run again without an approval (docs/manual/paper-trading.md,
     "Starting the adapter"): a crashed first run is resumed, and any other
     restart is a fresh run with its approval. Read as journalled_reports

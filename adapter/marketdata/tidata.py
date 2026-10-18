@@ -108,10 +108,11 @@ try:   # written by deploy/build-data.sh into the packed file
 except ImportError:
     STAMP = "dev"
 
-EngineLog = namedtuple("EngineLog", "configuration_hash strategy_version run_id boost identity")
+EngineLog = namedtuple("EngineLog", "configuration_hash strategy_version run_id boost identity inputs")
 """The engine's durable log as the job reads it: the header's identity, the
 log's own run name (its file name without ``.log``), the Boost
-configuration, and the run's identity (see read_engine_log)."""
+configuration, the run's identity (see read_engine_log), and the IDs of its
+committed inputs in order (a crash resume's begin with the crashed run's)."""
 
 
 class Boost(namedtuple("Boost", "instrument warm_up_start trend_days exit_sma rsi_period")):
@@ -194,7 +195,7 @@ def read_engine_log(path):
             or header["log_version"] != LOG_VERSION or header["chain_algorithm"] != LOG_CHAIN_ALGORITHM
             or not all(isinstance(header[k], str) and header[k] for k in ("configuration_hash", "strategy_version"))):
         raise _log_error(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
-    sequence, last_hash, group, configuration, first, approved = 0, None, [], None, None, None
+    sequence, last_hash, group, configuration, first, approved, inputs = 0, None, [], None, None, None, []
     for n, line in enumerate(parsed[1:], 2):
         if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
             raise _log_error(path, n, "a line is exactly one of a record and a commit")
@@ -220,31 +221,41 @@ def read_engine_log(path):
             first = group[0][1]
         if approved is None and group[0][1].get("type") == RUN_APPROVED:
             approved = group[0][1].get("id")
+        inputs.append(group[0][1].get("id"))
         group = []
     if configuration is None:
         raise Refused("the engine's durable log {} holds no committed configuration input: start the engine "
                       "first".format(path))
     identity = approved if approved else "{}@{}".format(first.get("id"), first.get("recorded_at"))
-    return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration, identity)
+    return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration, identity,
+                     tuple(inputs))
 
 
 def stream_run(engine_streams, engine_log, log):
     """The name of the run's stream folder in engine_streams (STREAMS/boost):
     the run's, found by its identity, never by its log's name alone.
 
-    A fresh run's folder bears its own name, made by its warm-up. A crash
-    resume runs under a new name (a new TI_RUN; a log is never reused) with
-    the crashed run's identity, and keeps the folder of the run that began
-    it: the one folder whose name is that of a log beside engine_log with the
-    same identity (read_engine_log). So the folder, and each envelope's
-    correlation id, is the first run's name of a chain of resumes, and an
-    abandoned resume, which has no folder, is never taken for it. The
-    adapter finds the same folder by the same rule (adapter/ibkr/delivery.py,
-    stream_run). With no such folder the run's own name is returned (a fresh
-    run before its warm-up); with two, the job is refused (fail closed,
-    AGENTS.md): one run's stream is never split across two folders."""
-    if os.path.isdir(os.path.join(engine_streams, log.run_id)):
-        return log.run_id
+    The adapter finds the same folder by the same rule (adapter/ibkr/
+    delivery.py, stream_run). A folder is the run's when the log beside
+    engine_log named after it (<folder>.log; the run's own log for the
+    folder of its own name) has the run's identity (read_engine_log: its Run
+    approval's ID, else its configuration and as-of time). A fresh run's
+    folder bears its own name, made by its warm-up. A crash resume runs
+    under a new name (a new TI_RUN; a log is never reused) and keeps the
+    folder of the run that began it: its log holds a copy of the crashed
+    run's records, its approval included (ADR 0027 section 6), so the folder,
+    and each envelope's correlation id, is the first run's name of a chain
+    of resumes, and an abandoned resume, which has no folder, is never taken
+    for it. The job is refused (fail closed, AGENTS.md) with two folders of
+    the run, its own name's among them (one run's stream is never split
+    across two folders), and with one folder of another name whose log's
+    committed inputs are not the first of engine_log's, or are its
+    configuration alone: nothing then shows this run is that run's resume
+    (a second start of a first run from the same run.env, with no approval,
+    repeats its configuration and as-of time and is a fresh run, never
+    handed the first run's folder without its own warm-up, ADR 0027; or a
+    copy the engine is still writing). With no folder of the run, the run's
+    own name is returned (a fresh run before its warm-up)."""
     logs = os.path.dirname(os.path.abspath(engine_log))
     names = sorted(os.listdir(engine_streams)) if os.path.isdir(engine_streams) else []
     found = [n for n in names if os.path.isdir(os.path.join(engine_streams, n))
@@ -254,7 +265,18 @@ def stream_run(engine_streams, engine_log, log):
         raise Refused("the run of {} has more than one stream folder: {}. One run's stream is in one folder, made "
                       "by its warm-up; this stops the job for a person (docs/manual/market-data.md, \"A crash "
                       "resume\")".format(engine_log, ", ".join(os.path.join(engine_streams, n) for n in found)))
-    return found[0] if found else log.run_id
+    if not found or found == [log.run_id]:
+        return log.run_id
+    earlier = os.path.join(logs, found[0] + ".log")
+    before = read_engine_log(earlier).inputs
+    if len(before) < 2 or log.inputs[:len(before)] != before:
+        raise Refused("the run of {} has the identity of the run of {} (with no Run approval, the same "
+                      "configuration and as-of time) but its log holds no whole copy of that run's committed "
+                      "inputs, so nothing shows it is that run's crash resume, and it is never handed that run's "
+                      "stream folder {}: resume the crashed run with engine -resume, or start a fresh run with its "
+                      "approval and its own warm-up (docs/manual/market-data.md, \"A crash resume\")".format(
+                          engine_log, earlier, os.path.join(engine_streams, found[0])))
+    return found[0]
 
 
 def _logged_configuration(path, header, n, envelope):

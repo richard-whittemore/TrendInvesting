@@ -109,7 +109,12 @@ from the same `run.env`, without `-approval`, it looks exactly like the
 first run resumed, and the adapter treats it so: an input the first run
 left waiting for its answer is asked of the second run as if it were the
 same run, and the second run decides on it. The adapter cannot tell the two
-apart. If the first run crashed, resume it ([the durable log
+apart by identity. With market data delivered (`--streams`), it does stop
+such a start, naming both logs ("no whole copy of that run's committed
+inputs"): the second start holds none of the first run's inputs, so it is
+never handed the first run's stream folder, nor only the days since its
+last file without the warm-up ([market data](market-data.md), "A crash
+resume"). If the first run crashed, resume it ([the durable log
 runbook](../runbooks/durable-log.md), "Restarting an engine"); any other
 restart is a fresh run, started with its Run approval.
 
@@ -402,7 +407,8 @@ the first real paper order:
 | IB Gateway's Read-Only API is still on when an order goes out | Not yet observed against IBKR. IBKR refuses API orders while Read-Only is on, with its error 321 ("Error validating request ... Read-Only mode") under the order's number. The adapter has written "sent" by then, so it never sends it again; it records IBKR's refusal for the engine as the order refused (`invalid`) with IBKR's reason, so the engine reads the order as ended. The same holds for IBKR's other codes that refuse a newly placed order before it works (103 duplicate order number, 110 price off the minimum tick, 200 no security definition, 203 security not allowed for the account), but only for an order this adapter placed in this session that IBKR has not yet shown working. If the adapter stops after it placed the order but before it read IBKR's refusal, no report is recorded: IBKR does not repeat error messages, and the order, already written "sent", is not sent again, so the engine holds it as released with no report. | Read IBKR's reason in the engine's record. If no report was recorded (the adapter stopped first), the reporter's not-acknowledged alert shows the order: confirm in IBKR that it was refused or that no order carries that client order ID, and settle it by hand as an order IBKR never took ([re-delivery](redelivery.md), "What can go wrong"). Otherwise, confirm in IBKR that no order carries that client order ID. Turn Read-Only off before the next order; the next rebalance places a fresh order if one is still wanted. |
 | The adapter stops: "the stream file ... is refused" | A market-data file is not as the data job writes it, is not this run's, or is older than one already delivered. Nothing from it was sent | [Market data](market-data.md), "What happens to the file": move the file aside, run the data job again, start the adapter |
 | The adapter stops at start: "the run's stream folder ... does not exist" | The data job has not written this run's warm-up yet. Nothing was read or sent. After a crash resume this means the first run's log, through which the run's folder is found, is missing from the engine's folder | Run the warm-up ([market data](market-data.md), "The one-time warm-up"), then start the adapter. After a crash resume, do not: restore the first run's log, unchanged, from the backup ([market data](market-data.md), "A crash resume") |
-| The adapter stops at start: "has more than one stream folder" | Two stream folders belong to the run (a warm-up was run for a resumed `TI_RUN`, say). Nothing was read or sent | Move the folder that should not be there out of `streams/boost/` (keep it), then start the adapter ([market data](market-data.md), "A crash resume") |
+| The adapter stops at start: "no whole copy of that run's committed inputs" | The run has the identity of the run whose stream folder it found but is not its crash resume (the engine's first run started again without an approval, say). Nothing was read or sent | Start a fresh run with its approval and its own warm-up ([market data](market-data.md), "A crash resume") |
+| The adapter stops at start: "has more than one stream folder" | Two stream folders belong to the run, the one named after the running `TI_RUN` included (a warm-up was run for a resumed `TI_RUN` while the first run's log was missing, say). Nothing was read or sent | Move the folder that should not be there out of `streams/boost/` (keep it), then start the adapter ([market data](market-data.md), "A crash resume") |
 | You start the engine or adapter in live mode | It refuses to start and says the limited-live gate has not been passed. | Use paper. |
 | A paper configuration names an account not beginning `DU` | It refuses to start. | Correct the account number in the configuration (a new configuration and a new run). |
 
