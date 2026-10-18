@@ -31,6 +31,10 @@ func payloadFor(e event.Envelope) (validated, error) {
 		return &event.CompletedBarAdjustedPayload{}, nil
 	case e.Type == event.SessionClosedEventType && e.SchemaVersion == event.SessionClosedSchemaVersion:
 		return &event.SessionClosedPayload{}, nil
+	case e.Type == event.CloseHistoryEventType && e.SchemaVersion == event.CloseHistorySchemaVersion:
+		return &event.CloseHistoryPayload{}, nil
+	case e.Type == event.SessionRetractedEventType && e.SchemaVersion == event.SessionRetractedSchemaVersion:
+		return &event.SessionRetractedPayload{}, nil
 	}
 	return nil, fmt.Errorf("unexpected type/schema %s/%d", e.Type, e.SchemaVersion)
 }

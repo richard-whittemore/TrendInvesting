@@ -975,3 +975,36 @@ func TestTheGlidePathRecordVersionsAreRead(t *testing.T) {
 		t.Errorf("fills across both runs: %v %v", fills.Rows, err)
 	}
 }
+
+// TestTheCompactUniverseInputsAreRead: a momentum journal records its
+// configuration, version 6, declaring the compact universe input, then that
+// input: the universe snapshot, the ranked members' close histories and any
+// session retraction. No report draws a figure from them, so a journal
+// holding them reads in every report, its fills unchanged.
+func TestTheCompactUniverseInputsAreRead(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t,
+		rec{journal.KindInput, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, at(time.January, 1),
+			map[string]any{"strategy_id": event.TargetWeightStrategyMomentum, "momentum": map[string]any{"universe_input": event.UniverseInputCompact}}},
+		rec{journal.KindInput, event.SessionRetractedEventType, event.SessionRetractedSchemaVersion, at(time.January, 1),
+			event.SessionRetractedPayload{Source: "marketdata-retraction", Session: "2026-03-03", Reason: "storm"}},
+		rec{journal.KindInput, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, d,
+			event.UniverseSnapshotPayload{Session: "2026-03-02", Source: "massive", Rows: []event.UniverseRow{{InstrumentID: "AAA", Type: "CS", Close: 2, Volume: 1}}}},
+		rec{journal.KindInput, event.CloseHistoryEventType, event.CloseHistorySchemaVersion, d,
+			event.CloseHistoryPayload{InstrumentID: "AAA", Session: "2026-03-02", AdjustedBase: "2026-01-02", Closes: []event.SessionClose{{Session: "2026-03-02", Close: 2}}}},
+		cashSnap(at(time.January, 1)),
+		limitFill("f-1", "buy", 5, 0.1, d),
+	)
+	js := []journalquery.Journal{load(t, "ira", data)}
+	for report, query := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"fills": journalquery.Fills, "totals": journalquery.Totals, "orders": journalquery.Orders,
+		"refusals": journalquery.Refusals, "positions": journalquery.Positions, "reconcile": journalquery.Reconcile,
+	} {
+		if _, err := query(js, journalquery.Filter{}); err != nil {
+			t.Errorf("%s: %v", report, err)
+		}
+	}
+	if fills, err := journalquery.Fills(js, journalquery.Filter{}); err != nil || len(fills.Rows) != 1 {
+		t.Errorf("fills: %v %v", fills.Rows, err)
+	}
+}

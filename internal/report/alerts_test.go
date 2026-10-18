@@ -117,6 +117,21 @@ func TestAnAllUnaffordableWithholdIsUrgent(t *testing.T) {
 	}
 }
 
+// TestMissingHistoriesAreMissingData: a decision withheld because the
+// compact stream sent no close history for the ranked members names absent
+// inputs, as missing bars do.
+func TestMissingHistoriesAreMissingData(t *testing.T) {
+	s := newStream(t)
+	s.withheld(0, event.WithheldHistoriesMissing)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Kind != report.KindMissingData || got[0].Severity != report.Urgent {
+		t.Fatalf("alerts = %+v", got)
+	}
+}
+
 func TestAStaleSnapshotAndAMissingMarkAreMissingData(t *testing.T) {
 	s := newStream(t)
 	s.withheld(0, event.WithheldStaleAccountSnapshot)
