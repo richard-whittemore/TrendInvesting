@@ -572,7 +572,7 @@ func (r *momentumRun) sellsTerminal(reb *rebalance) bool {
 
 // endUnsent records, in a dry-run only, a synthetic terminal report for each
 // of the orders just released, which the run never sent (ADR 0026, point 3,
-// "Mode"), and ends each as a venue's cancellation would: the gate no longer
+// "Mode", amended 2026-10-17), and ends each as a venue's cancellation would: the gate no longer
 // counts the sell as pending and a buy commits nothing more. The report is
 // marked synthetic and names no venue order, so no reader can take it for a
 // venue's report or an execution (LimitOrderLifecyclePayload.Synthetic).

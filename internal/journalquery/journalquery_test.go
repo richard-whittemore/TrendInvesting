@@ -785,7 +785,7 @@ func TestTheTargetWeightAccountsRecordVersionsAreRead(t *testing.T) {
 }
 
 // A dry-run engine's synthetic terminal report (execution.order.lifecycle
-// version 3, ADR 0026, point 3, "Mode") is shown as synthetic, and is never
+// version 3, ADR 0026, point 3, "Mode", amended 2026-10-17) is shown as synthetic, and is never
 // an execution: no fill, commission or position change follows from it.
 func TestASyntheticReportIsShownAndCountsNoFill(t *testing.T) {
 	d := at(time.March, 2)

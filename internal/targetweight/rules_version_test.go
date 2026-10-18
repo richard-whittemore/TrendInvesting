@@ -97,6 +97,24 @@ func TestRulesVersionDeclaresTheDeclaredUniverseInput(t *testing.T) {
 	}
 }
 
+// TestRulesVersionDeclaresTheDryRunSyntheticReports pins ADR 0016's
+// same-rules-version replay guarantee for dry-run: a dry-run momentum run
+// records a synthetic terminal report (execution.order.lifecycle version 3)
+// for each order it releases and plans its buys at the same close, where a
+// 1.6.0 build waited and withheld later months as rebalance-in-progress, so a
+// dry-run journal written under rules 1.6.0 cannot replay under this build
+// and the build must not claim 1.6.0 or earlier (ADR 0026, point 3, "Mode",
+// amended 2026-10-17).
+func TestRulesVersionDeclaresTheDryRunSyntheticReports(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.6.0 once a dry-run records synthetic terminal reports", targetweight.RulesVersion)
+		}
+	}
+}
+
 // TestHandlerRefusesAVersion5Configuration: version 5 has no universe input,
 // so a momentum run cannot know which input shape it reads from a version-5
 // configuration; the handler refuses it rather than inferring the shape (ADR

@@ -48,6 +48,8 @@ and records everything, and marks every order "do not send".
    writing, and nothing from that input was ever released.
 6. **In dry-run, every released order says `send: false`.** The adapter must
    never send it. Paper and live say `send: true`.
+7. **When stopped** (SIGTERM, which `systemctl stop` sends), it also writes a
+   journal of the whole run (ADR 0017).
 
 ### What dry-run simulates, and what it does not
 
@@ -68,9 +70,21 @@ the account's cash alone. The holdings never move, so each month's dry-run
 decides from the same positions. `journal-query orders` shows the record as
 `synthetic-lifecycle-canceled`. Paper and live never record one: there the
 venue's own reports end each order. A synthetic report arriving as an input
-is refused. Boost has no buy phase to wait for and records none.
-7. **When stopped** (SIGTERM, which `systemctl stop` sends), it also writes a
-   journal of the whole run (ADR 0017).
+is refused.
+
+Boost records none, and that has a consequence. It has no buy phase to wait
+for, but the gate still counts each released Boost sell as pending until a
+venue reports a fill or a cancellation on it, and every later Boost sell is
+sized net of the shares still pending (ADR 0026, point 2, step 5). In a
+dry-run against an adapter that sends nothing, no report ever comes, so after
+Boost's first exit sell (147% back to 98%) that sell's shares stay pending
+for the rest of the run: the next exit's sell is smaller than paper would
+make it, and none at all once the pending shares reach the holding. The
+broker-holding check and the sale back to 98% net the same phantom sell. So
+a dry-run rehearses one Boost exit faithfully; read any later exit in the
+same run as under-sized (a resumed run replays the same pending sell). (`make
+demo-boost-dry-run` does not show this: its simulated account reports a fill
+for every released order at the next close, which ends each sell.)
 
 ## Build identity
 
@@ -118,7 +132,11 @@ from the first one's log and checks the two logs are identical byte for byte.
 - ADRs: 0014 (socket), 0016 (configuration hash and build), 0017 (journal),
   0019 (Degraded and Halted), 0025 (IBKR adapter), 0026 (target-weight
   strategies and the risk gate), 0027 (durable log, restart).
+- The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
+  rules version 1.7.0 (ADR 0016), so a dry-run journal written under 1.6.0
+  does not replay.
 - Tests of the synthetic reports, in `internal/targetweight`:
+  `TestRulesVersionDeclaresTheDryRunSyntheticReports`,
   `TestADryRunRebalanceThatSellsPlansItsBuysInTheSameRun`,
   `TestOnlyADryRunRecordsSyntheticReports`,
   `TestADryRunCountsNoProceedsOrCommissionFromASyntheticReport`,

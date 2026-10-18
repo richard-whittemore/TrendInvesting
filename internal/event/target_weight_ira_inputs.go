@@ -159,7 +159,7 @@ const OrderLifecycleLimitVersion uint32 = 2
 
 // OrderLifecycleSyntheticVersion is version 3 of execution.order.lifecycle:
 // a synthetic report, which a dry-run engine records itself for an order it
-// never sent (ADR 0026, point 3, "Mode"). It is a decision, never an input,
+// never sent (ADR 0026, point 3, "Mode", amended 2026-10-17). It is a decision, never an input,
 // and holds only a synthetic report: a venue's report stays version 2.
 const OrderLifecycleSyntheticVersion uint32 = 3
 
@@ -182,9 +182,10 @@ type LimitOrderLifecyclePayload struct {
 	Message      string    `json:"message"`
 	// Synthetic marks a report no venue sent: a dry-run engine's own end of
 	// an order released with send false, so the rebalance it belongs to can
-	// complete (ADR 0026, point 3, "Mode"; point 2, "IRA execution"). It is
-	// canceled, names no venue order ID, says why in Message, and is never
-	// an execution: no fill, proceeds or commission follows from it.
+	// complete (ADR 0026, point 3, "Mode", amended 2026-10-17; point 2, "IRA
+	// execution"). It is canceled, names no venue order ID, says why in
+	// Message, and is never an execution: no fill, proceeds or commission
+	// follows from it.
 	Synthetic bool `json:"synthetic,omitempty"`
 }
 

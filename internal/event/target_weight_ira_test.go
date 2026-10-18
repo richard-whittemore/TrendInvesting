@@ -339,7 +339,7 @@ func TestLimitOrderLifecycleValidate(t *testing.T) {
 }
 
 // A synthetic report is the engine's own end of a dry-run order it never
-// sent (ADR 0026, point 3, "Mode"): canceled, with no venue order ID and a
+// sent (ADR 0026, point 3, "Mode", amended 2026-10-17): canceled, with no venue order ID and a
 // message, and only version 3 holds it.
 func TestSyntheticLimitOrderLifecycle(t *testing.T) {
 	v := validLimitOrderLifecycle()

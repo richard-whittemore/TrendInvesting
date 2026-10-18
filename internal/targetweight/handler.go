@@ -44,7 +44,14 @@ import (
 //     (configuration schema version 6) and refuses version 5, and withholds
 //     a decision session whose ranked members sent neither their bars nor
 //     their histories, so a journal written under 1.5.0 does not replay.
-const RulesVersion = "1.6.0"
+//   - 1.7.0 records, in a dry-run momentum run only, a synthetic terminal
+//     report (execution.order.lifecycle version 3) for each order it
+//     releases and plans the buy phase at the same close (ADR 0026, point 3,
+//     "Mode", amended 2026-10-17), so a dry-run journal written under 1.6.0,
+//     which waited on its unsent sells and withheld later months as
+//     rebalance-in-progress, does not replay. Paper and live decisions are
+//     unchanged.
+const RulesVersion = "1.7.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
