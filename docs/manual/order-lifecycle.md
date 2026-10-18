@@ -21,7 +21,10 @@ engine does, and only a report the engine would accept counts:
 - a lifecycle report must name the order's account, instrument, side and
   quantity, and its limit price to within half a cent (the limit is rounded
   to a cent, and IBKR's copy of it need not match to the last digit; prices
-  are never compared for exact equality);
+  are never compared for exact equality). The engine's risk gate reads it
+  by the same match from rules version 1.8.0; 1.6.0 refused a limit that was
+  not identical, so a journal holding such a report does not replay across
+  the two;
 - a fill counts only in a momentum run, and only on the order's account, instrument and side, when all its fills
   together come to no more than the order's quantity, and under a fill id
   no other execution has used (the same execution sent twice counts once);

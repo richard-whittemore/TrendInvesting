@@ -346,7 +346,7 @@ func TestOrderLifecyclesReadsOnlyWhatItCanRead(t *testing.T) {
 	order := releasedOrder("tw-1", event.TradingModePaper)
 	run := &logRun{t: t}
 	run.session(0)
-	run.add(journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion+1, "release", day(0), order)
+	run.add(journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSafetyVersion+1, "release", day(0), order)
 	if _, _, err := report.OrderLifecycles(run.out, event.TargetWeightStrategyBoost); err == nil {
 		t.Error("a release at another version: read without error")
 	}

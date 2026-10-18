@@ -44,7 +44,12 @@ import (
 //     (configuration schema version 6) and refuses version 5, and withholds
 //     a decision session whose ranked members sent neither their bars nor
 //     their histories, so a journal written under 1.5.0 does not replay.
-const RulesVersion = "1.6.0"
+//   - 1.8.0 has the gate read a venue's lifecycle report on a released order
+//     whose limit is within half a cent of the order's (event.SameLimitPrice,
+//     the cent a limit is rounded to) where 1.6.0 refused any limit not
+//     bit-equal to it, so a journal holding such a report decides differently
+//     under 1.6.0.
+const RulesVersion = "1.8.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

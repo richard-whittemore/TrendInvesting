@@ -20,6 +20,14 @@ import (
 // benchmark's close from it would report the wrong return.
 func engineLog(t *testing.T, closes []float64) []byte {
 	t.Helper()
+	return engineLogHolding(t, closes, nil)
+}
+
+// engineLogHolding is engineLog with every snapshot reporting positions as
+// held, so the gate journals the orders a holding leads to, a sell within it
+// among them, at the version it writes them at.
+func engineLogHolding(t *testing.T, closes []float64, positions []event.AccountPosition) []byte {
+	t.Helper()
 	const strategyVersion = "boost/1.0.0+test"
 	cfg := event.TargetWeightConfigurationPayload{
 		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
@@ -68,7 +76,7 @@ func engineLog(t *testing.T, closes []float64) []byte {
 			AdjustedBase:        "2024-01-02",
 		})
 		apply(event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", n), at,
-			event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: at, Currency: "USD", NetLiquidation: 4000 + float64(100*n)})
+			event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: at, Currency: "USD", NetLiquidation: 4000 + float64(100*n), Positions: positions})
 		apply(event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", n), at,
 			event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: c, Source: event.AdapterIBKR})
 		apply(event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("session:%d", n), at,
@@ -101,5 +109,64 @@ func TestSummaryOfAnEngineDurableLogReadsItsBarsAndComparesEquity(t *testing.T) 
 	}
 	if !near(got.Equity.AccountReturn, 4200.0/4000-1) {
 		t.Fatalf("account return = %v", got.Equity.AccountReturn)
+	}
+}
+
+// TestTheReporterReadsTheReleasesTheGateWrites: the gate journals a sell
+// within the holding it was sized from at risk.order.released version 3
+// (its broker figures), so the reporter reads every release version the
+// event package holds, as journalquery does (ADR 0015). A log the real
+// engine wrote yields its order lifecycles, its alerts and its summary, not a
+// refused log that silences every alert.
+func TestTheReporterReadsTheReleasesTheGateWrites(t *testing.T) {
+	raw := engineLogHolding(t, []float64{100}, []event.AccountPosition{{InstrumentID: "SPY", Quantity: 60}})
+	_, entries, err := report.LoadEntries(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sell string
+	for _, e := range entries {
+		if e.Envelope.Type != event.OrderReleasedEventType {
+			continue
+		}
+		var p event.OrderReleasedPayload
+		if err := json.Unmarshal(e.Envelope.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Side == event.OrderSideSell && e.Envelope.SchemaVersion == event.OrderReleasedSafetyVersion {
+			sell = p.ClientOrderID
+		}
+	}
+	if sell == "" {
+		t.Fatal("the engine released no sell at version 3: the fixture no longer shows what the gate writes")
+	}
+	orders, _, err := report.OrderLifecycles(entries, event.TargetWeightStrategyBoost)
+	if err != nil {
+		t.Fatalf("order lifecycles of the engine's own log: %v", err)
+	}
+	if got := stateOf(t, orders, sell); got.State != report.LifecycleCommitted {
+		t.Errorf("the sell released in the log's last group is %q, want committed", got.State)
+	}
+	_, envelopes, err := report.Load(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := report.Alerts(envelopes); err != nil {
+		t.Errorf("alerts of the engine's own log: %v", err)
+	}
+	date, ok := report.ClosedSessionDate(envelopes)
+	if !ok {
+		t.Fatal("the log records no closed session")
+	}
+	summary, err := report.Summarize(envelopes, date, "SPY")
+	if err != nil {
+		t.Fatalf("summary of the engine's own log: %v", err)
+	}
+	released := false
+	for _, o := range summary.Orders {
+		released = released || (o.ClientOrderID == sell && o.Status == report.OrderReleased)
+	}
+	if !released {
+		t.Errorf("the summary's orders %+v do not show the sell %s released", summary.Orders, sell)
 	}
 }

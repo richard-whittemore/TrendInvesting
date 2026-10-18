@@ -82,18 +82,18 @@ func decode(j Journal) ([]item, error) {
 			}
 		case event.OrderPlannedEventType:
 			it.planned = new(event.OrderPlannedPayload)
-			err = read(env, []uint32{event.OrderPlannedSchemaVersion, event.OrderPlannedSafetyVersion}, it.planned)
+			err = read(env, event.OrderPlannedVersions(), it.planned)
 			it.account = it.planned.AccountID
 		case event.OrderReleasedEventType:
 			// Version 2 adds the IRA cash figures and account-wide exposure
 			// to version 1's fields, and version 3 the broker figures, so
 			// one payload type reads all three.
 			it.released = new(event.OrderReleasedPayload)
-			err = read(env, []uint32{1, event.OrderReleasedSchemaVersion, event.OrderReleasedSafetyVersion}, it.released)
+			err = read(env, event.OrderReleasedVersions(), it.released)
 			it.account = it.released.AccountID
 		case event.OrderRefusedEventType:
 			it.refused = new(event.OrderRefusedPayload)
-			err = read(env, []uint32{1, event.OrderRefusedSchemaVersion, event.OrderRefusedSafetyVersion}, it.refused)
+			err = read(env, event.OrderRefusedVersions(), it.refused)
 			it.account = it.refused.AccountID
 		case event.SaleWithheldEventType:
 			it.withheld = new(event.SaleWithheldPayload)
