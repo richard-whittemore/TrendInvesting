@@ -134,6 +134,12 @@ backtest runs on their servers.
   month's universe is chosen on the last session before the month, so the
   first rebalance never ranks the previous month's universe; the
   `Selections` statistic counts the months chosen before the 1st.
+- `momentum/minimum_lot.py` — the D7-L held-name study
+  (`docs/research/d7l-held-name-2026-10.md`). `fresh_universe.py` with
+  additions only: `MIN_LOT` adds ADR 0026's minimum-lot rule (a pick whose
+  one share at the raw close exceeds its target value is skipped for the
+  next eligible name), as written (`"literal"`) or with a held pick kept
+  untraded (`"held"`); the `MinLot` statistic counts what the rule did.
 - `momentum/golden_log.py` — golden cases for the Go target-weight module
   (`docs/adr/0026-*.md`, point 7). `defensive_v2.py` with additions only:
   for each month in `GOLDEN_MONTHS` it logs the risk-off inputs, the top

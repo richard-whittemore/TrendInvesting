@@ -150,8 +150,98 @@ one-name change in one month moves every later month's sizes.
 
 ## Runs
 
-(To be filled in after the runs.)
+All five ran on 2026-10-18 on QuantConnect project 38022068 (Free plan, LEAN
+IB brokerage model, $30,000 starting cash), one after another, in the order
+below. The in-sample runs came first; the held-out pair ran once, after
+them. Each script is its variant rendered by `build_variants.render` from
+`momentum/minimum_lot.py`.
+
+| Run | Backtest ID | Created (UTC) | Window | CAGR | MaxDD | Ratio | Orders | Fees | MinLot | Fundamentals |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| D7L_LIT_30K | bd2e8ad19d01fa1d8aba39b6ceb008cb | 10:21 | 1999-01 to 2015-12 | 14.51% | 41.58% | 0.3490 | 5533 | $8,259.50 | skipped=8 heldSold=0 kept=0 withheld=0 noPrice=0 | reads=107500 hits=194735 |
+| D7L_HELD_30K | f105daf10f4d1f525a5de8f9af912fae | 10:55 | same | 14.51% | 41.58% | 0.3490 | 5533 | $8,259.50 | skipped=8 heldSold=0 kept=0 withheld=0 noPrice=0 | reads=107500 hits=194735 |
+| D7L_NONE_30K | eaf06cdbcd1e47e79d2c44431b441f4a | 11:30 | same | 14.50% | 43.06% | 0.3367 | 5528 | $8,257.05 | (rule off) | reads=107500 hits=194735 |
+| OOS_D7L_LIT_30K (held-out, once) | cdbc58fb9dec63a9741cada858555bb7 | 11:58 | 2016-01 to 2026-06-30 | 18.93% | 36.83% | 0.5141 | 3801 | $3,919.63 | skipped=18 heldSold=2 kept=0 withheld=0 noPrice=0 | reads=69000 hits=126722 |
+| OOS_D7L_HELD_30K (held-out, once) | e1dcf24f4496f7ff30b3c00acf8934aa | 12:18 | same | 18.95% | 36.94% | 0.5132 | 3789 | $3,908.13 | skipped=15 heldSold=0 kept=3 withheld=0 noPrice=0 | reads=69000 hits=126722 |
+
+SPY over the same windows (the runs' own SPY line): 1999-2015 4.91% /
+55.17%; 2016-2026-06 15.19% / 33.72%. Orders are `Transactions.OrdersCount`;
+fees are the backtest's `Total Fees`.
+
+### Checks
+
+- **Control.** D7L_NONE_30K reproduces FU_COMBO_30K
+  (28188ee1f1c4776a6f68080005c9d974, 2026-10-17) statistic for statistic:
+  14.50% / 43.06%, ratio 0.3367, 5,528 orders, $8,257.05 in fees, 572
+  resizes, the same Fundamentals counter. So the added code is inert with
+  the rule off, and the day's data state is the one the $30k runs used.
+- **Raw closes.** `RawCheck` counted 89,124 (in-sample) and 50,082
+  (held-out) month-choosing rows whose coarse `Price` is more than 1% above
+  their `AdjustedPrice`, so `Price` is the raw close D7-L tests, not the
+  adjusted one.
+- `noPrice` is 0 in every run, nothing was withheld as all-unaffordable,
+  and each pair has the same rebalance count (203 in-sample, 138 held-out)
+  and risk-off months (59, 25).
 
 ## Result
 
-(To be filled in after the runs.)
+### The comparison the owner asked for (exception minus literal rule)
+
+| Window | CAGR (pp) | MaxDD (pp) | Orders | Fees | Full sells of a held marginal name |
+| --- | --- | --- | --- | --- | --- |
+| 1999-2015 | 0.00 | 0.00 | 0 | $0.00 | 0 under the literal rule; the exception never fired |
+| 2016-2026-06 (held-out) | +0.02 | +0.11 (deeper) | -12 | -$11.50 | 2 under the literal rule; the exception kept 3 name-months |
+
+A positive MaxDD delta is a deeper drawdown.
+
+In the tuning years, D7-L skipped 8 name-months, and none of them was a
+stock the account held. The exception therefore never fired, and the two
+runs are identical. Over the held-out years D7-L skipped 18 name-months,
+and 2 of those were held stocks that the literal rule sold in full. With the
+exception, the account kept 3 name-months it held, skipped 15, and placed 12
+fewer orders. Once one held stock is kept, the later months' books and
+values differ, which is why the counts do not pair one for one (2 sold
+against 3 kept). The return, drawdown and fee differences are all well
+inside the margins the plan treats as path noise (0.10 pp of CAGR, 1.0 pp
+of drawdown), and the fees are lower.
+
+### Verdict: adopt
+
+The rule fixed before the runs gives **adopt**. The exception fired
+(kept = 3), and neither pair shows harm: CAGR was not lower, the drawdown
+was deeper by 0.11 pp against a 1.0 pp margin, and fees were not higher
+($11.50 lower held-out, equal in-sample).
+
+What the verdict rests on, stated plainly:
+
+- **The evidence is small.** At $30,000 the situation option 2 addresses is
+  rare. It never arose in 17 tuning years (1999-2015), when few stocks
+  traded above about $1,000 a share, the size of a typical target. It arose
+  2 or 3 times in 10.5 held-out years, when four-figure share prices were
+  common. The measurement shows the exception does no harm and saves a few
+  orders and dollars. It does not show a return benefit; none was expected
+  at this size.
+- **The only window where it fired is the held-out one.** That pair ran
+  once, on the same day as the unchanged rule, and nothing was tuned on it.
+  There is no setting to tune: option 2 has no parameter.
+- **What the instrument can and cannot show.** These runs measure the
+  rule's choice of names on raw closes, as the Go rule makes it. Sizes and
+  fees come from LEAN's adjusted shares (see "Known limits"), so the fee
+  difference is indicative, not exact.
+
+### A side observation, not part of the verdict
+
+D7-L itself (literal rule against no rule) moved the in-sample drawdown
+from 43.06% to 41.58% and CAGR from 14.50% to 14.51%, at 5 more orders.
+Held out, against the recorded OOS_FU_COMBO_30K (94dc8977, 2026-10-17;
+18.86% / 37.22%, 3,778 orders, $3,895.99), it moved CAGR to 18.93%,
+drawdown to 36.83% and orders to 3,801. That earlier run was recorded on
+another day, not as a pair from today, so it gives context only. Either
+way, at $30k D7-L substitutes a handful of names and does not change the
+strategy's character.
+
+### Next step (not done here)
+
+As the owner decided on 2026-10-18 for a no-harm result: implement option 2
+as an ADR 0026 D7-L amendment, with a RulesVersion bump and a golden-case
+update. That work is a separate change. This note only measures.
