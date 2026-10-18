@@ -69,9 +69,20 @@ the adapter ([operator](operator.md)). While it is on:
   borrowed because the switch is on;
 - the engine state does not change. Turning the switch off puts things back
   as they were. Turning it on twice is still one engagement.
-- Boost orders only when its target changes, so a Boost order refused while
-  the switch was on is not tried again when you turn it off; the next target
-  change orders as usual. The IRAs plan afresh at every decision time.
+- A Boost order refused while the switch was on is planned again at the
+  next decision, after the next close: Boost orders the difference between
+  what the account holds and its target, even though the target has not
+  changed. So if the switch refused the first buy to 98%, the account buys
+  at the first close after you turn the switch off that decides (a withheld
+  close waits), while the account is Normal; while the switch stays on,
+  each close is refused again, but only the engagement's first refusal
+  sends you an alert. If the refused order was a sell, a later engagement
+  may send one more small sale back to 98% for the share or two left over.
+  A run restarted from the last decision of an earlier run picks the
+  re-plan up from that decision. This holds for any refusal that leaves the engine
+  Normal, a too-old IBKR snapshot included; a refusal while Degraded or
+  Halted follows those states' rules below (owner's decision, 2026-10-18).
+  The IRAs plan afresh at every decision time.
 - A fresh run starts with the switch off. `operator approve` warns you when
   the previous run ended with it on, so you can record it again.
 
@@ -289,7 +300,8 @@ record says by how much. The wall clock is never read.
 For any other sell, the IBKR snapshot gates only the broker-holding check. A
 sell checked against a stale latest snapshot is refused
 (`stale-broker-snapshot`) with no state change. The sell is planned again at
-the next decision.
+the next decision: for Boost, the difference between the holding and its
+target, even when the target has not changed.
 
 **One alert per stale episode.** The first stale refusal or stale withhold
 for the account opens a *stale episode* and carries its one urgent alert
@@ -332,7 +344,7 @@ refused, because working sells could not be checked.
 The thresholds are in the configuration. They were introduced in version 5 of
 `strategy.target-weight.configuration`, carried unchanged in versions 6 and the
 current 7, and read from rules version 1.5.0 on. This build (rules version
-1.13.0) reads only configuration version 7, so a journal written under an earlier rules
+1.16.0) reads only configuration version 7, so a journal written under an earlier rules
 version will not replay. Only the margin account has them: an
 IRA has no margin cushion, so its configuration leaves them out and it gets no
 alarm. A change of level is recorded as
@@ -374,6 +386,9 @@ the dashboard read every version. See [journal-query](journal-query.md).
   account stays in its state until you recover.
 - **The kill switch is on and the margin alarm turns urgent.** The sale still
   goes. That is intended: the switch never keeps you borrowed.
+- **You release the kill switch after it refused a Boost order.** Nothing
+  to do: the next close plans the difference to Boost's target and, the
+  account still Normal, releases it. Check it with `journal-query`.
 - **The account is Halted and Boost wants to buy.** Refused. Only the sale
   goes until you recover.
 - **The engine crashes mid-incident.** It replays its durable log and resumes

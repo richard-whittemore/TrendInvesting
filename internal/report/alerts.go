@@ -82,7 +82,19 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 
 // Alerts returns the journal's alerts in recording order, each incident once.
 //
-//   - Every risk.order.refused is its own incident.
+//   - Every risk.order.refused is its own incident, except that a kill-switch
+//     engagement and a stale episode alert once: the gate flags the first
+//     kill-switch or stale-broker-snapshot refusal of its engagement or
+//     episode (ADR 0026, point 3, kill switch: "alert once"; ADR 0019,
+//     amendment of 2026-10-17, reading 10), and an unflagged one sends
+//     nothing once an earlier record of the same reason in the journal
+//     carried the flag. Without that proof the journal may predate the flag,
+//     so an unflagged refusal alerts as any other (ADR 0019, "Alerting": an
+//     alert is a safety requirement).
+//   - A risk.sale.withheld the gate flagged opens the account's stale
+//     episode and is that episode's one urgent alert, as missing data
+//     (ADR 0019, amendment of 2026-10-17, reading 10, "Stale episode"); it
+//     proves the gate flags stale episodes, as a flagged stale refusal does.
 //   - A strategy.engine.state record is an incident when its state, reason and
 //     scope differ from the previous one: a repeat of the same state is the
 //     same incident, and Degraded to Halted is a new one (ADR 0019). The
@@ -123,6 +135,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 		return nil, err
 	}
 	var inForce *gateState
+	// flagged holds each refusal reason the gate is proven to flag: a record
+	// of that reason earlier in the journal carried the flag.
+	flagged := map[string]bool{}
 	for _, e := range envelopes {
 		switch e.Type {
 		case event.OperatorRunApprovedEventType:
@@ -159,7 +174,19 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			if err := read(e, refusedVersions, &p); err != nil {
 				return nil, err
 			}
-			out = append(out, refusalAlerts(account, e, p)...)
+			out = append(out, refusalAlerts(account, e, p, flagged[p.Reason])...)
+			if p.Alert {
+				flagged[p.Reason] = true
+			}
+		case event.SaleWithheldEventType:
+			var p event.SaleWithheldPayload
+			if err := read(e, saleWithheldVersions, &p); err != nil {
+				return nil, err
+			}
+			if p.Alert {
+				flagged[event.RefusedStaleBrokerSnapshot] = true
+				out = append(out, staleSaleAlert(account, e, p))
+			}
 		case event.EngineStateEventType:
 			var p event.EngineStatePayload
 			if err := read(e, engineStateVersions, &p); err != nil {
@@ -286,7 +313,13 @@ func reconciliationAlert(account string, e event.Envelope, p event.Reconciliatio
 
 func slicesConcat(a, b []string) []string { return append(append([]string{}, a...), b...) }
 
-func refusalAlerts(account string, e event.Envelope, p event.OrderRefusedPayload) []Alert {
+// refusalAlerts states one refusal. flags reports that the journal has
+// proven the gate flags refusals of this reason; only then is an unflagged
+// kill-switch or stale-broker-snapshot refusal a repeat that sends nothing.
+func refusalAlerts(account string, e event.Envelope, p event.OrderRefusedPayload, flags bool) []Alert {
+	if (p.Reason == event.RefusedKillSwitch || p.Reason == event.RefusedStaleBrokerSnapshot) && !p.Alert && flags {
+		return nil
+	}
 	out := []Alert{{
 		Key: "refusal:" + e.ID, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order refused (%s)", account, p.Reason),
@@ -301,6 +334,17 @@ func refusalAlerts(account string, e event.Envelope, p event.OrderRefusedPayload
 		})
 	}
 	return out
+}
+
+// staleSaleAlert states the withheld sale that opened the account's stale
+// episode: the sale was not placed, so the owner may need to act by hand.
+func staleSaleAlert(account string, e event.Envelope, p event.SaleWithheldPayload) Alert {
+	return Alert{
+		Key: "missing-data:sale-withheld:" + e.ID, Kind: KindMissingData, Severity: Urgent, AccountID: account, At: e.EventTime,
+		Title: fmt.Sprintf("%s: sale of %s withheld (%s)", account, p.InstrumentID, p.Reason),
+		Body: fmt.Sprintf("The %s sale back to 98%% of %s (%s, order %s) was not placed: %s. %s. Later stale refusals of this episode send nothing more; check the IBKR snapshot and sell by hand if it is needed.",
+			p.Kind, p.InstrumentID, p.Trigger, p.ClientOrderID, p.Reason, p.Detail),
+	}
 }
 
 func engineStateKey(p event.EngineStatePayload) string {

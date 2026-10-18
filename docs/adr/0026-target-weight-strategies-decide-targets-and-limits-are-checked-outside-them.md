@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5)
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost")
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -71,7 +71,8 @@ contract are Turtle-shaped too (Consequences).
   cited in source comments to that section and the research lines above. Two
   clarifications from the sources:
   - Boost trades only when its state changes (`template.py:97-100`); drift is
-    not traded.
+    not traded. Amended 2026-10-18: a refusal that leaves the engine Normal
+    is re-planned at the next decision (point 2).
   - Weights use split- and dividend-adjusted closes; the planner (point 2)
     uses raw closes, which are what trades (ADR 0004).
 - **Floating point:** every product feeding a sum is rounded first
@@ -129,6 +130,9 @@ want·V / p − q whole shares, rounded toward zero, where want is 0.98 or
 **first** decision has no state in force (the research starts with
 `last_want = None`, `template.py`), so it always produces the order to the
 first target, normally 98% from cash, whether or not a boost is on.
+Amended 2026-10-18 (owner): after a refusal that leaves the engine Normal,
+the next decision also plans the difference to the target in force (see the
+amendment of that date).
 
 **D7, whole shares, open: both options specified.** The choice is
 configuration (point 6):
@@ -646,6 +650,52 @@ The comparison was re-run on the kept exports with no new QuantConnect run
 (`docs/research/parity-2026-10.md`, "Owner decisions applied,
 2026-10-18").
 
+## Amendment (2026-10-18, owner decision): Boost re-plans after a refusal that leaves the engine Normal
+
+Accepted by the owner on 2026-10-18. It amends point 2, "Boost", and the
+clarification in point 1 that Boost trades only when its state changes.
+
+- **The rule.** After Boost's planned order is refused and the refusal
+  leaves the engine Normal, the next decided session plans the difference
+  between the account's position and the target in force, want·V / p − q
+  whole shares rounded toward zero as before, even though the target has not
+  changed. This is consistent with ADR 0019 reading 10: a refused sell "is
+  re-planned at the next decision". The refusals that leave the engine
+  Normal are the kill switch and `stale-broker-snapshot` (point 3).
+- **Why.** Ordering on a state change only left the account away from its
+  target after such a refusal until Boost's target next changed: the kill
+  switch engaged at the first decision refused the 98% entry, and after its
+  release the account stayed in cash.
+- **What does not change.** A refusal under Degraded or Halted, or one that
+  degrades or halts the account (a limit breach, an undecided order),
+  follows those states' own rules (ADR 0019, amended 2026-09-24), including
+  the sale back to 98% that a refused exit fires. Drift is still not
+  traded: with no refusal before it, an unchanged target plans nothing. A
+  withheld session plans nothing, so the re-plan waits for the next decided
+  one. If the re-planned order is refused again while the engine is still
+  Normal (the switch still on), the decision after it re-plans again, so a
+  switch left on records one refusal per decision. The switch still alerts
+  once per engagement (point 3, limits table, kill switch: "alert once"):
+  the gate flags the engagement's first refusal (`risk.order.refused`
+  `alert`), as it flags a stale episode's first (ADR 0019 reading 10), and
+  the reporter sends nothing for the later ones. A refused re-planned sell
+  is the strategy's exit firing again (ADR 0019 reading 7), so a switch
+  released and engaged again, a new engagement, may send one more sale back
+  to 98% for the difference left after the first: a share or two, since the
+  sale keeps ceil(0.98·V/mark) shares at the broker's mark and the planner
+  sizes from the close. A sell is still net of the sells already working,
+  so it never sells below the target alongside the sale back to 98%.
+- **Replay and restart.** The re-plan is derived from the journal's own
+  refusal, so a resumed run rebuilds it by replaying its durable log (ADR
+  0027). Each Boost decision also records whether a re-plan is pending
+  after it (`strategy.targets.decided` version 5, `boost.replan_pending`,
+  omitted when unset; ADR 0015), so a run restarted from an earlier run's
+  last decision (point 5) re-plans as that run would have; a withheld
+  decision carries the pending re-plan forward. A journal holding such a
+  refusal decides differently from an earlier build, so this is a rules
+  change: target-weight RulesVersion 1.16.0 (ADR 0016; 1.14.0 was reserved for it and
+  never released).
+
 ## Amendment (2026-10-18, owner decision, #434): a held stock with a gap in its window
 
 Accepted by the owner on 2026-10-18 (option (b) of #434).
@@ -712,10 +762,11 @@ recorded.
   docs/manual/momentum-universe.md, "The configuration says which shape the
   run reads"), and naming every holding with `--optional` is mandatory there.
 
-A rules change: target-weight rules version 1.15.0 (1.14.0 is reserved for
-a change landing in parallel), so a journal written under 1.13.0 does not
-replay. `strategy.targets.decided` keeps schema version 4: `gap_sessions`
-is omitted when empty, so a Boost decision's bytes are unchanged. A reader
+A rules change: target-weight rules version 1.15.0 (1.14.0 was reserved for the
+Boost re-plan, which is 1.16.0), so a journal written under 1.13.0 does not
+replay. `strategy.targets.decided` kept schema version 4 at rules 1.15.0 (the Boost
+re-plan amendment above raised it to 5): `gap_sessions` is omitted when empty,
+so a Boost decision's bytes were unchanged. A reader
 accepts a `gap` name that names no sessions, as a record written before
 `gap_sessions` existed does; the writer refuses to stamp one.
 
@@ -725,4 +776,3 @@ narrowed. The parity tool compares the live `Score` with `BacktestScore`
 for each name and knows no holdings, so its results are unchanged; it was
 re-run on the kept exports (`docs/research/parity-2026-10.md`, "Held stock
 with a gap, 2026-10-18").
-

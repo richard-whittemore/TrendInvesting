@@ -1,6 +1,7 @@
 package risklimit_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +219,37 @@ func TestKillSwitchRefusesEveryRoutineOrderAndLeavesTheState(t *testing.T) {
 		}
 		kill(t, g, "kill:2", false)
 		released(t, check(t, g, order(event.OrderSideSell, 1, 9800))[0])
+	}
+}
+
+// TestAKillSwitchEngagementAlertsAtItsFirstRefusalOnly: the kill switch
+// alerts once per engagement (ADR 0026, point 3, limits table, kill switch:
+// "alert once"): its first refusal carries the alert flag and every later
+// refusal under the same engagement is recorded without it, so a switch left
+// on is not paged at every close. An engaged input while already engaged is
+// the same engagement; engaging again after a release is a new one and
+// alerts again.
+func TestAKillSwitchEngagementAlertsAtItsFirstRefusalOnly(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(9800))
+	var alerts []bool
+	refuse := func() {
+		t.Helper()
+		got := check(t, g, order(event.OrderSideBuy, 1, 9800))[0]
+		refusedFor(t, got, event.RefusedKillSwitch)
+		alerts = append(alerts, got.Refused.Alert)
+	}
+	kill(t, g, "kill:1", true)
+	refuse()
+	refuse()
+	kill(t, g, "kill:2", true)
+	refuse()
+	kill(t, g, "kill:3", false)
+	kill(t, g, "kill:4", true)
+	refuse()
+	refuse()
+	if want := []bool{true, false, false, true, false}; !slices.Equal(alerts, want) {
+		t.Errorf("alert flags %v, want %v", alerts, want)
 	}
 }
 

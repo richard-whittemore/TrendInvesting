@@ -96,7 +96,7 @@ func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 	g.lastKill, g.lastKillAt, g.lastKillSet = id, p.AsOf, true
 	switch {
 	case p.Engaged && !g.killEngaged:
-		g.killEngaged, g.killID = true, id
+		g.killEngaged, g.killID, g.killAlerted = true, id, false
 		g.saleTags[id] = true
 	case !p.Engaged:
 		g.killEngaged, g.killID = false, ""

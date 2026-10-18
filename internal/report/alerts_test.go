@@ -40,6 +40,104 @@ func TestEveryRefusalAlertsOnceUrgently(t *testing.T) {
 	}
 }
 
+// TestAKillSwitchOrStaleRefusalAlertsOnlyWhenFlagged: a kill-switch
+// engagement alerts once (ADR 0026, point 3, kill switch: "alert once") and a
+// stale episode once (ADR 0019, amendment of 2026-10-17, reading 10): the
+// gate flags the first refusal of each, and the later refusals it records
+// without the flag send nothing, so a switch left on is not paged at every
+// close.
+func TestAKillSwitchOrStaleRefusalAlertsOnlyWhenFlagged(t *testing.T) {
+	s := newStream(t)
+	s.flaggedRefusal(0, "tw-a", event.RefusedKillSwitch, true)
+	s.flaggedRefusal(1, "tw-b", event.RefusedKillSwitch, false)
+	s.flaggedRefusal(2, "tw-c", event.RefusedStaleBrokerSnapshot, true)
+	s.flaggedRefusal(3, "tw-d", event.RefusedStaleBrokerSnapshot, false)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Key != "refusal:refuse:tw-a" || got[1].Key != "refusal:refuse:tw-c" {
+		t.Fatalf("alerts = %+v, want the flagged refusals tw-a and tw-c only", got)
+	}
+	for _, a := range got {
+		if a.Kind != report.KindRefusal || a.Severity != report.Urgent {
+			t.Errorf("alert = %+v", a)
+		}
+	}
+}
+
+// TestAnUnflaggedRefusalAlertsUnlessTheJournalProvesTheGateFlags: a journal
+// recorded before the gate flagged kill-switch or stale refusals carries no
+// flag on any of them, and its refusals each alert, as they did before; an
+// unflagged refusal is skipped only once an earlier one of the same reason
+// in the journal carried the flag (ADR 0019, "Alerting": an alert is a
+// safety requirement, so it is never silenced on a missing flag alone).
+func TestAnUnflaggedRefusalAlertsUnlessTheJournalProvesTheGateFlags(t *testing.T) {
+	s := newStream(t)
+	s.flaggedRefusal(0, "tw-a", event.RefusedKillSwitch, false)
+	s.flaggedRefusal(1, "tw-b", event.RefusedStaleBrokerSnapshot, false)
+	s.flaggedRefusal(2, "tw-c", event.RefusedKillSwitch, true)
+	s.flaggedRefusal(3, "tw-d", event.RefusedKillSwitch, false)
+	s.flaggedRefusal(4, "tw-e", event.RefusedStaleBrokerSnapshot, false)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, a := range got {
+		keys = append(keys, a.Key)
+	}
+	want := []string{"refusal:refuse:tw-a", "refusal:refuse:tw-b", "refusal:refuse:tw-c", "refusal:refuse:tw-e"}
+	if strings.Join(keys, " ") != strings.Join(want, " ") {
+		t.Fatalf("alert keys = %v, want %v", keys, want)
+	}
+}
+
+// TestAStaleEpisodeOpenedByAWithheldSaleAlertsOnce: the gate's stale episode
+// may open on a withheld sale back to 98% rather than on a refusal; that
+// withhold carries the episode's one urgent alert (ADR 0019, amendment of
+// 2026-10-17, reading 10, "Stale episode"), and the unflagged refusals of the
+// same episode send nothing more.
+func TestAStaleEpisodeOpenedByAWithheldSaleAlertsOnce(t *testing.T) {
+	s := newStream(t)
+	s.flaggedRefusal(0, "tw-a", event.RefusedStaleBrokerSnapshot, true)
+	s.decided(1, 0.98)
+	s.staleSaleWithheld(2, "sell-a", true)
+	s.flaggedRefusal(3, "tw-b", event.RefusedStaleBrokerSnapshot, false)
+	s.staleSaleWithheld(4, "sell-b", false)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Key != "refusal:refuse:tw-a" {
+		t.Fatalf("alerts = %+v, want the first episode's refusal and the second episode's withheld sale", got)
+	}
+	a := got[1]
+	if a.Key != "missing-data:sale-withheld:sale-withheld:sell-a" || a.Kind != report.KindMissingData || a.Severity != report.Urgent || a.AccountID != "joint" {
+		t.Fatalf("withheld-sale alert = %+v", a)
+	}
+	if !contains(a.Body, "sell-a") || !contains(a.Body, event.SaleWithheldStaleBrokerSnapshot) || !contains(a.Body, "snapshot too old") {
+		t.Fatalf("body = %q", a.Body)
+	}
+}
+
+// TestAlertsRefuseAWithheldSaleTheyCannotRead: a withheld sale that does not
+// validate, or is at a version this build does not read, refuses the
+// journal rather than drop an alert it might carry.
+func TestAlertsRefuseAWithheldSaleTheyCannotRead(t *testing.T) {
+	for name, mutate := range map[string]func(s *stream){
+		"invalid":         func(s *stream) { s.rewrite(1, event.SaleWithheldPayload{AccountID: "joint"}) },
+		"unknown version": func(s *stream) { s.out[1].SchemaVersion = 9 },
+	} {
+		s := newStream(t)
+		s.staleSaleWithheld(0, "sell-a", true)
+		mutate(s)
+		if _, err := report.Alerts(s.out); err == nil {
+			t.Errorf("%s: Alerts accepted it", name)
+		}
+	}
+}
+
 func TestADegradedOrHaltedStateAlertsOncePerIncident(t *testing.T) {
 	s := newStream(t)
 	s.engineState(0, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "SPY")

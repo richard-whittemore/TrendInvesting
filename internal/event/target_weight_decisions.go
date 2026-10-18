@@ -32,10 +32,16 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     which only a run reading the compact universe input emits, is a
 //     reason of this version too: no journal read before that input has it.
 //     So is labels-missing, which only a run under configuration version 7
-//     emits, and a name's GapSessions, which only rules 1.15.0 record and
+//     emits, and a name's GapSessions, which rules 1.15.0 and later record and
 //     which are omitted when empty, so a Boost decision's bytes are still
 //     version 1's (ADR 0026 point 5, amended 2026-10-18).
-const TargetsDecidedSchemaVersion uint32 = 4
+//   - Version 5 records Boost's pending re-plan (ADR 0026, point 2, "Boost",
+//     amended 2026-10-18): BoostFigures.ReplanPending, set when the next
+//     decided session plans the difference to the target in force after a
+//     refusal that left the engine Normal, so a restart from the decision
+//     recovers it (ADR 0026, point 5). It is omitted when unset, so a
+//     decision without a pending re-plan has version 4's bytes.
+const TargetsDecidedSchemaVersion uint32 = 5
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -135,6 +141,14 @@ type BoostFigures struct {
 	LatchedAfter     bool    `json:"latched_after"`
 	TargetInForce    float64 `json:"target_in_force"`
 	TargetInForceSet bool    `json:"target_in_force_set"`
+	// ReplanPending is set when, after this decision, the next decided
+	// session plans the difference to the target in force though the target
+	// has not changed: this session's order, or an earlier one's still
+	// waiting, was refused and the refusal left the engine Normal (ADR 0026,
+	// point 2, "Boost", amended 2026-10-18). A restart recovers it from the
+	// last decision with the target in force (ADR 0026, point 5). Omitted
+	// when unset.
+	ReplanPending bool `json:"replan_pending,omitempty"`
 }
 
 // TargetsDecidedPayload is one account's target decision.
@@ -944,9 +958,13 @@ type OrderRefusedPayload struct {
 	Reason        string      `json:"reason"`
 	Detail        string      `json:"detail"`
 	Figures       RiskFigures `json:"figures"`
-	// Alert marks the first stale-broker-snapshot refusal against one latest
-	// broker snapshot: it raises the urgent alert, once per snapshot, until a
-	// later snapshot is recorded (ADR 0019, amendment of 2026-10-17).
+	// Alert marks the refusal that raises the urgent alert: the first
+	// stale-broker-snapshot refusal of the account's stale episode (ADR 0019,
+	// amendment of 2026-10-17, reading 10), or the first kill-switch refusal
+	// of one engagement (ADR 0026, point 3, kill switch: "alert once"). The
+	// later refusals of the same episode or engagement are recorded without
+	// it and send nothing. Only a journal recorded under rules version 1.16.0
+	// or later flags a kill-switch refusal.
 	Alert bool `json:"alert,omitempty"`
 }
 
@@ -993,8 +1011,8 @@ func (p OrderRefusedPayload) Validate() error {
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a refusal without its figures cannot be checked"))
 	}
-	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot {
-		errs = append(errs, errors.New("only a stale-broker-snapshot refusal raises the alert"))
+	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot && p.Reason != RefusedKillSwitch {
+		errs = append(errs, errors.New("only a stale-broker-snapshot or kill-switch refusal raises the alert"))
 	}
 	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {
