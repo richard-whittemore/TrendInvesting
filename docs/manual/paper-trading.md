@@ -330,7 +330,9 @@ the first real paper order:
   configured 30-minute limit) and is sized against it. If the server's
   clock is behind IBKR's, the snapshot's IBKR time comes out later than
   the close's recorded time; the engine counts that as stale (ADR 0019)
-  and withholds every sell (`stale-broker-snapshot`), failing closed:
+  and blocks every sell (reason `stale-broker-snapshot`), failing closed:
+  the sale back to 98% is withheld (`risk.sale.withheld`) and any other
+  sell is refused (`risk.order.refused`);
   check the server's clock (`timedatectl`) against IBKR's
   ([market data](market-data.md), "What happens to the file"). It is
   the account some minutes after the close, not at it: whether a reading

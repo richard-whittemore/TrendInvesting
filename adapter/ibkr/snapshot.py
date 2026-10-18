@@ -81,10 +81,11 @@ AccountReading = namedtuple("AccountReading", (
 tag to Money, open_orders lists open-order payload rows; unread holds the
 components that could not be read; as_of is a whole-second UTC datetime.
 unended names the components whose answers carry no request ID (positions,
-open orders) that IBKR had not ended when the read gave up with the link
-still up: their late answers may still arrive on that link, where nothing
-tells them from a later read's, so no later read on that link can be
-trusted to be complete."""
+open orders) that were asked for and that IBKR had not ended when the read
+gave up, however it gave up (a timeout, Gateway losing IBKR's servers,
+which it restores on the same socket, or the link closing): their late
+answers may still arrive on that link, where nothing tells them from a
+later read's, so no later read on that link can be trusted to be complete."""
 
 
 def read_account(conn):
@@ -99,7 +100,8 @@ def read_account(conn):
     positions, balances, orders = {}, {}, {}
     received = conn.now_utc()
     done = {"positions": False, "summary": False, "orders": False}
-    if conn.connected:
+    asked = conn.connected
+    if asked:
         summary_id = conn.new_req_id()
         conn.api.req_positions()
         conn.api.req_account_summary(summary_id, SUMMARY_GROUP, ",".join(SUMMARY_TAGS))
@@ -138,7 +140,7 @@ def read_account(conn):
         if tag in balances and balances[tag].currency != BASE_CURRENCY:
             unread.add(component)
     unended = set()
-    if conn.connected:
+    if asked:
         if not done["positions"]:
             unended.add(POSITIONS)
         if not done["orders"]:
@@ -231,7 +233,8 @@ def read_marks(conn, con_ids):
     """IBKR's mark for each symbol of con_ids (symbol to IBKR's contract ID): {symbol: Decimal}.
 
     One market-data snapshot per contract, asked together and waited for up
-    to the configuration's request_timeout. A symbol has a mark only when
+    to the configuration's mark_timeout, which outlasts the 11-second window
+    at whose end IBKR ends a snapshot (config.MARK_TIMEOUT). A symbol has a mark only when
     its request completed (IBKR ended its snapshot) and every LAST price it
     carried was finite and positive, the mark being the last of them. A
     request refused (IBKR's error under it, such as no market-data
@@ -250,7 +253,7 @@ def read_marks(conn, con_ids):
                                                       currency=CURRENCY, exchange=EXCHANGE))
     prices, failed, ended = {}, set(), set()
     try:
-        for event in conn.events(conn.config.request_timeout):
+        for event in conn.events(conn.config.mark_timeout):
             if not conn.connected:
                 break
             # Another callback (an order report, say) may carry no request ID.

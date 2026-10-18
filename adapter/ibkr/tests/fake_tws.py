@@ -99,7 +99,10 @@ class FakeTWS(TWSApi):
         # mark_errors instead; nothing at all with answer_marks false; the
         # link dropped as the snapshot is asked for with drop_on_mark;
         # mark_ticks gives a conId's (tick type, price) ticks in place of
-        # its one mark, and end_marks false leaves every snapshot unended.
+        # its one mark, and end_marks false leaves every snapshot unended;
+        # mark_end_delay ends each snapshot that many seconds after its
+        # price instead, as IBKR does at the end of its 11-second snapshot
+        # window (late_end passes the time).
         self.marks = {}
         self.mark_tick = 4
         self.mark_ticks = {}
@@ -107,6 +110,8 @@ class FakeTWS(TWSApi):
         self.mark_errors = {}
         self.answer_marks = True
         self.drop_on_mark = False
+        self.mark_end_delay = None
+        self._late_ends = []
 
     # -- connection ------------------------------------------------------
     def connect(self, host, port, client_id, callbacks, timeout):
@@ -218,8 +223,19 @@ class FakeTWS(TWSApi):
                 self.callbacks.tick_price(req_id, tick, price, SimpleNamespace())
         elif contract_.conId in self.marks:
             self.callbacks.tick_price(req_id, self.mark_tick, self.marks[contract_.conId], SimpleNamespace())
-        if self.end_marks:
+        if self.mark_end_delay is not None:
+            self._late_ends.append(req_id)
+        elif self.end_marks:
             self.callbacks.tick_snapshot_end(req_id)
+
+    def late_end(self, clock):
+        """A Connection subscriber: once a delayed snapshot's price is taken, clock passes mark_end_delay and IBKR ends it."""
+        def handler(event):
+            if event.name == "tick_price" and event.args[0] in self._late_ends:
+                self._late_ends.remove(event.args[0])
+                clock.now += self.mark_end_delay
+                self.callbacks.tick_snapshot_end(event.args[0])
+        return handler
 
     def cancel_mkt_data(self, req_id):
         self.calls.append(("cancel_mkt_data", req_id))

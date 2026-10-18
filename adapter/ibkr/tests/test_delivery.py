@@ -27,7 +27,7 @@ if str(tests_dir) not in sys.path:
 from decimal import Decimal
 
 from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine
-from fake_tws import ACCOUNT, FakeTWS, contract
+from fake_tws import ACCOUNT, FakeTWS, contract, execution
 from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
 from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, StreamRefused, market_open,
@@ -787,9 +787,15 @@ class DeliveryTests(unittest.TestCase):
     def test_a_trade_placed_outside_the_adapter_during_the_snapshots_reads_makes_it_read_again(self):
         class TradedByHandDuringMarks(FakeTWS):
             trade_next = False
+            reads = 0
+
+            def req_positions(self):
+                self.reads += 1
+                super().req_positions()
 
             def req_mkt_data(self, req_id, contract_):
-                if self.trade_next:
+                traded = self.trade_next
+                if traded:
                     # An order placed in IBKR's own app fills: IBKR reports
                     # its execution to that app, not to this client, and the
                     # account's holdings and cash change all the same.
@@ -798,6 +804,10 @@ class DeliveryTests(unittest.TestCase):
                     self.summary = [(a, t, "96388.75" if t == "TotalCashValue" else v, c) for a, t, v, c in
                                     self.summary]
                 super().req_mkt_data(req_id, contract_)
+                if traded:
+                    # The price moves after this mark, so only marks read
+                    # again after the trade carry the new one.
+                    self.marks = {SPY_CON_ID: 402.5}
         fake = TradedByHandDuringMarks()
         fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
         self.fake = fake
@@ -805,13 +815,47 @@ class DeliveryTests(unittest.TestCase):
         loop = self.loop(fake=fake)
         loop.start()
         self.settle(loop)
-        fake.trade_next = True
+        fake.trade_next, fake.reads = True, 0
         write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
         self.settle(loop)
         snapshots = self.engine.inputs(BROKER_SNAPSHOT_TYPE)
         self.assertEqual(len(snapshots), 2)
-        self.assertEqual(snapshots[1]["payload"]["positions"][0]["quantity"], 156,
-                         "the snapshot was read again after the trade, so it holds it")
+        self.assertEqual(fake.reads, 4, "read, confirm, then read and confirm again: the reads differed")
+        self.assertEqual(snapshots[1]["payload"]["positions"],
+                         [{"instrument_id": "SPY", "quantity": 156, "mark": 402.5, "mark_set": True}],
+                         "the snapshot is the second attempt's, its marks read for the holdings after the trade")
+
+    def test_an_execution_of_another_clients_order_between_the_snapshots_reads_makes_it_read_again(self):
+        class ForeignExecutionDuringMarks(FakeTWS):
+            execute_next = False
+            reads = 0
+
+            def req_positions(self):
+                self.reads += 1
+                super().req_positions()
+
+            def req_mkt_data(self, req_id, contract_):
+                if self.execute_next:
+                    # Another client's order in the account executes; this
+                    # client sees its execution but the holdings it reads
+                    # are the same both times.
+                    self.execute_next = False
+                    self.callbacks.exec_details(-1, contract(), execution(
+                        exec_id="0001f4e8.other.01.01", order_id=3, perm_id=5005, order_ref="", client_id=42,
+                        time="20270115 15:59:00 US/Eastern"))
+                super().req_mkt_data(req_id, contract_)
+        fake = ForeignExecutionDuringMarks()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop(fake=fake)
+        loop.start()
+        self.settle(loop)
+        fake.execute_next, fake.reads = True, 0
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        self.settle(loop)
+        self.assertEqual(len(self.engine.inputs(BROKER_SNAPSHOT_TYPE)), 2)
+        self.assertEqual(fake.reads, 4, "the execution came between the reads, so the account was read again")
 
     # -- a read whose answers carry no request ID -----------------------------
     def test_an_open_order_read_that_timed_out_is_never_retried_on_the_same_link(self):
@@ -853,6 +897,50 @@ class DeliveryTests(unittest.TestCase):
                          [json.loads((tests_dir / "testdata" / "paper_released.json").read_text())["client_order_id"]],
                          "the working order is in the snapshot: no late answer completed a later read")
         self.assertGreater(fake.connects, 1, "the link was made again before the account was read again")
+
+    def test_an_account_read_cut_off_by_gateway_losing_ibkrs_servers_is_never_followed_on_the_same_link(self):
+        class LosesIbkrDuringOrders(FakeTWS):
+            connects = 0
+            lose = False
+            lost_on = None
+
+            def connect(self, *args):
+                self.connects += 1
+                super().connect(*args)
+
+            def req_all_open_orders(self):
+                if self.lose:
+                    # Gateway loses IBKR's servers mid-list and restores
+                    # them on the same socket; the list's end comes later.
+                    self.lose, self.lost_on = False, self.connects
+                    self.calls.append(("req_all_open_orders",))
+                    self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+                    self.callbacks.error(-1, 1102, "Connectivity between IB and Trader Workstation has been "
+                                                   "restored - data maintained.")
+                    return
+                if self.lost_on == self.connects:
+                    # The abandoned list's end arrives first, on the same
+                    # link, ahead of this read's rows.
+                    self.lost_on = None
+                    self.callbacks.open_order_end()
+                super().req_all_open_orders()
+        fake = LosesIbkrDuringOrders()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        self.place_the_days_order()
+        loop = self.loop(fake=fake)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(len(fake.placed), 1)
+        fake.lose = True
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        self.settle(loop)
+        self.assertGreater(fake.connects, 1, "the link was made again, not taken back as Gateway restored it")
+        snapshots = self.engine.inputs(BROKER_SNAPSHOT_TYPE)
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual([o["client_order_id"] for o in snapshots[1]["payload"]["open_orders"]],
+                         [json.loads((tests_dir / "testdata" / "paper_released.json").read_text())["client_order_id"]],
+                         "the working order is in the snapshot: no late answer completed a later read")
 
     # -- a fresh run strikes an earlier run's batch -------------------------
     def test_a_stop_while_a_fresh_run_strikes_an_earlier_batch_never_parts_its_snapshot_from_its_stream(self):
@@ -923,8 +1011,13 @@ class DeliveryTests(unittest.TestCase):
                          "the encoder repeats the retraction in every file its calendar covers")
         loop = self.loop()
         loop.start()
-        self.settle(loop, steps=80)
+        with self.assertLogs("ibkr", level="INFO") as logs:
+            self.settle(loop, steps=80)
         self.assertEqual(self.ids().count("marketdata:retracted:2026-11-25"), 1)
+        queued = [m for m in logs.output if "ibkr stream queued" in m]
+        self.assertEqual(len(queued), 1)
+        self.assertTrue(queued[0].endswith(" inputs={}".format(len(self.ids()))),
+                        "the log counts the inputs queued, the repeated retraction once: " + queued[0])
         self.assertEqual(self.ids()[-1], "marketdata:session-closed:2026-11-30")
         self.assertEqual(loop.outbox.load(), [])
 

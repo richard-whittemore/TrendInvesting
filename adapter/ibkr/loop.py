@@ -92,10 +92,12 @@ open orders or cash differ (a trade IBKR reports to another client only,
 such as one placed in its own app), or if any component could not be read.
 A reading still incomplete then stops the adapter for a person
 (delivery.SnapshotRefused); one still overtaken waits for the next step.
-IBKR's positions and open orders carry no request ID, so a read that timed
-out on either is never followed by another on that link, where the late
-end of the abandoned list would complete the new one: the link is dropped
-(Connection.drop), and the snapshot waits until it is back and reconciled.
+IBKR's positions and open orders carry no request ID, so a read cut off
+before either ended (it timed out, or Gateway lost IBKR's servers, which it
+restores on the same socket) is never followed by another on that link,
+where the late end of the abandoned list would complete the new one: the
+link is dropped (Connection.drop), and the snapshot, or the order due,
+waits until it is back and reconciled.
 Each snapshot's cutoff is logged: the last report recorded before it.
 
 The outbox goes oldest first, but a broker report recorded behind a stream
@@ -511,8 +513,8 @@ class AdapterLoop:
         """The account.broker.snapshot of one consistent account read, with IBKR's marks (see the module).
 
         None when it cannot be taken now (the link went, an execution awaits
-        its commission, a read timed out on answers that carry no request
-        ID, or the account changed on every attempt); SnapshotRefused when
+        its commission, a read was cut off before answers that carry no
+        request ID ended, or the account changed on every attempt); SnapshotRefused when
         the account could not be read in full within SNAPSHOT_ATTEMPTS.
         Marks are asked for each holding the configuration has IBKR's
         contract number for; any other holding is stated with no mark.
@@ -576,13 +578,13 @@ class AdapterLoop:
         return None
 
     def _unended(self, reading):
-        """Whether reading timed out on answers that carry no request ID; if so the link is dropped (see the module)."""
+        """Whether reading was cut off before answers that carry no request ID ended; if so the link is dropped (see the module)."""
         if not reading.unended:
             return False
-        log.info("ibkr broker snapshot: IBKR did not end its %s within request_timeout, and a late end would "
+        log.info("ibkr broker snapshot: IBKR had not ended its %s when the read gave up, and a late end would "
                  "complete a later read on this link, so the link is made again and reconciled first",
                  ",".join(sorted(reading.unended)))
-        self.conn.drop("untagged-read-timed-out")
+        self.conn.drop("untagged-read-interrupted")
         return True
 
     def _envelope(self, entry, engine_log):
@@ -695,6 +697,12 @@ class AdapterLoop:
             # The link went while IBKR's orders were read for an order due:
             # nothing was marked or sent, so the input is held as above.
             log.info("ibkr input held until the link is reconciled: %s", err)
+            if "open-orders" in err.missing:
+                # IBKR's open-order list carries no request ID, and Gateway
+                # restores a link it lost IBKR's servers on as the same
+                # socket, where the abandoned list's late end would complete
+                # the next read: the link is made again (see the module).
+                self.conn.drop("untagged-read-interrupted")
 
     def _status(self, status):
         log.info("ibkr link %s %s", status.state, status.reason)

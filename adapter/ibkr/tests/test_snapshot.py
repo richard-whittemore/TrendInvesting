@@ -153,6 +153,22 @@ class BrokerSnapshotTests(unittest.TestCase):
         self.assertEqual(rec["unreadable"], ["positions", "total-cash"])
         self.assertEqual((rec["total_cash"], rec["currency"]), (0, ""))
 
+    def test_a_list_cut_off_by_gateway_losing_ibkrs_servers_is_unended(self):
+        # Gateway restores the same socket itself (1101/1102) after losing
+        # IBKR's servers (1100), so the abandoned list's late end could
+        # complete a later read on it, as after a timeout.
+        h = scripted()
+        h.fake.end_open_orders = False
+        asked = h.fake.req_all_open_orders
+
+        def lost():
+            asked()
+            h.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+        h.fake.req_all_open_orders = lost
+        reading = read_account(h.conn)
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(reading.unended, frozenset({"open-orders"}))
+
     def test_no_server_time_after_the_read_leaves_it_unbounded_and_unreadable(self):
         h = scripted()
         h.fake.answer_current_time = False
@@ -226,6 +242,16 @@ class MarkTests(unittest.TestCase):
         self.assertEqual(read_marks(h.conn, {"SPY": 756733, "IEF": 8314}), {})
         self.assertEqual(sorted(c[1] for c in h.fake.called("cancel_mkt_data")),
                          sorted(c[1] for c in h.fake.called("req_mkt_data")))
+
+    def test_a_snapshot_ibkr_ends_at_the_end_of_its_window_gives_its_mark(self):
+        # IBKR ends a snapshot at the end of its 11-second window, after the
+        # account reads' request_timeout: the marks wait mark_timeout.
+        h = connected(request_timeout=0.05, mark_timeout=15.0)
+        h.fake.marks = {756733: 401.17}
+        h.fake.mark_end_delay = 11.0
+        h.conn.subscribe(h.fake.late_end(h.clock))
+        self.assertEqual(read_marks(h.conn, {"SPY": 756733}), {"SPY": Decimal("401.17")})
+        self.assertEqual(h.fake.called("cancel_mkt_data"), [], "the snapshot ended, so it needs no cancel")
 
     def test_a_request_left_unanswered_is_cancelled(self):
         h = connected()

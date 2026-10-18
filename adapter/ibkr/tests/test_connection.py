@@ -18,7 +18,7 @@ def config(**overrides):
                   connect_timeout=0.05, request_timeout=0.05, heartbeat_interval=30.0,
                   heartbeat_timeout=10.0, restore_timeout=60.0, backoff_initial=1.0,
                   backoff_max=8.0, max_connect_attempts=5, commission_wait=30.0,
-                  con_ids={"SPY": 756733})
+                  con_ids={"SPY": 756733}, mark_timeout=0.05)
     values.update(overrides)
     return AdapterConfig.from_mapping(values)
 

@@ -248,7 +248,7 @@ def rehearse(work, account):
     adapter_config = work / "boost.json"
     adapter_config.write_text(json.dumps({
         "host": "127.0.0.1", "port": 4002, "client_id": 11, "mode": "paper", "paper_sending_enabled": True,
-        "connect_timeout": 2.0, "request_timeout": 0.2, "heartbeat_interval": 30.0, "heartbeat_timeout": 10.0,
+        "connect_timeout": 2.0, "request_timeout": 0.2, "mark_timeout": 0.2, "heartbeat_interval": 30.0, "heartbeat_timeout": 10.0,
         "restore_timeout": 60.0, "backoff_initial": 0.01, "backoff_max": 0.05, "max_connect_attempts": 3,
         "commission_wait": 30.0, "con_ids": {"SPY": SPY_CON_ID}}, indent=2))
     versions = repo / "deploy" / "versions.env"

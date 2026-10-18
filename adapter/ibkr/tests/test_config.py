@@ -113,12 +113,23 @@ class ConfigTests(unittest.TestCase):
         values = config(mode="paper", paper_sending_enabled=True)._asdict()
         self.assertIs(AdapterConfig.from_mapping(values).paper_sending_enabled, True)
 
+    def test_the_wait_for_a_market_data_snapshot_outlasts_ibkrs_snapshot_window_unless_set(self):
+        # IBKR ends a market-data snapshot only at the end of its 11-second
+        # window; the account reads keep request_timeout.
+        values = config()._asdict()
+        values.pop("mark_timeout", None)
+        c = AdapterConfig.from_mapping(values)
+        self.assertEqual(c.mark_timeout, 15)
+        self.assertGreater(c.mark_timeout, 11)
+        self.assertEqual(config(mark_timeout=20, request_timeout=3).mark_timeout, 20)
+        self.assertEqual(config(mark_timeout=20, request_timeout=3).request_timeout, 3)
+
     def test_timing_values_must_be_finite(self):
         # NaN and infinity both pass a "> 0" test, and either would switch the
         # heartbeat deadline or the connect timeout off.
         for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
                      "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max",
-                     "commission_wait"):
+                     "commission_wait", "mark_timeout"):
             for bad in (float("nan"), float("inf"), 0, -1):
                 with self.subTest(name=name, value=bad), self.assertRaises(ConfigError):
                     config(**{name: bad})

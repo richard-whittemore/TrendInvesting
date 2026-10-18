@@ -410,10 +410,11 @@ class Deliverer:
         batch = {"run": self.run, "snapshot": self._new_id(BROKER_SNAPSHOT_TYPE),
                  "files": [{"name": s.name, "sha256": s.sha256, "lines": len(s.envelopes)} for s in streams]}
         self.record.begin(batch)
-        self._outbox.extend(_entries(self.run, batch["snapshot"], snapshot, streams))
+        entries = _entries(self.run, batch["snapshot"], snapshot, streams)
+        self._outbox.extend(entries)
         self.record.mark_queued()
         log.info("ibkr stream queued run=%s files=%s inputs=%d", self.run, ",".join(s.name for s in streams),
-                 1 + sum(len(s.envelopes) for s in streams))
+                 len(entries))
 
     def dropped(self, run):
         """A fresh run struck run's entries off the outbox unsent: its last batch is not delivered (see the module)."""

@@ -516,7 +516,9 @@ days), it takes them all, oldest first.
    market was open at that moment (by the NYSE calendar the data job uses:
    9:30 to 4 p.m. New York, 1 p.m. on an early close). After 17:05 that is
    always "closed". A price counts only if IBKR's answer for it finished in
-   time and every last price in it was a real price above zero; otherwise
+   time (IBKR finishes it at the end of an 11-second window, so the adapter
+   waits up to `mark_timeout`, 15 seconds unless the configuration sets
+   it) and every last price in it was a real price above zero; otherwise
    the holding is listed with no mark ("mark set false"), as it is when IBKR
    gives no last price at all (the paper login has no market data for SPY,
    say). The engine then cannot size the joint account's emergency sale
@@ -542,11 +544,13 @@ days), it takes them all, oldest first.
    timed out on the balances, say), it reads the whole account again, up
    to three times. The snapshot is the second read, with its IBKR time.
    IBKR's answers for the positions and the open orders carry no request
-   number, so if IBKR does not finish either list in time, a late end of it
+   number, so if IBKR does not finish either list in time, or Gateway
+   loses IBKR's servers part-way through (it restores them on the same
+   link), a late end of it
    could be taken for the end of the next read's list on the same link:
    the adapter then drops the link instead of reading again on it, and
    takes the snapshot once the link is back and matched (`ibkr broker
-   snapshot: IBKR did not end its ...` in its log). The log line `ibkr
+   snapshot: IBKR had not ended its ...` in its log). The log line `ibkr
    broker snapshot as_of=... cutoff: ...` names the last report recorded
    before each snapshot.
 2. **The file, line by line, as written**: each session's SPY bar, then that
@@ -561,10 +565,12 @@ days), it takes them all, oldest first.
    the snapshot's IBKR time); nothing else in it changes. If the server's
    clock is behind IBKR's by more than the moment it takes to send the
    file, the snapshot's IBKR time is later than the close's recorded time:
-   the engine counts that negative age as stale (ADR 0019) and withholds
-   every sell at that close (`stale-broker-snapshot`) rather than trust it.
-   A withhold at every close is the sign: check the server's clock
-   (`timedatectl`) against IBKR's. A fill or a cancellation IBKR reports
+   the engine counts that negative age as stale (ADR 0019) and blocks
+   every sell at that close (reason `stale-broker-snapshot`) rather than
+   trust it: the sale back to 98% is withheld (`risk.sale.withheld`), and
+   any other sell, such as an ordinary strategy sale, is refused
+   (`risk.order.refused`). Either at every close is the sign: check the
+   server's clock (`timedatectl`) against IBKR's. A fill or a cancellation IBKR reports
    while the engine works through the file goes to the engine before the
    file's next line, so no session is decided on an account behind a
    report already received. A trade IBKR has reported but whose commission
