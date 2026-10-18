@@ -135,20 +135,9 @@ func SelectBookWithMinimumLot(cfg Config, candidates []Candidate, riskOff bool, 
 }
 
 func selectBook(cfg Config, candidates []Candidate, riskOff bool, lot *MinimumLot) (Book, error) {
-	if err := cfg.Validate(); err != nil {
+	ranked, err := rankable(cfg, candidates)
+	if err != nil {
 		return Book{}, err
-	}
-	ranked := make([]RankedName, len(candidates))
-	seen := make(map[string]bool, len(candidates))
-	for i, c := range candidates {
-		if err := c.validate(cfg); err != nil {
-			return Book{}, err
-		}
-		if seen[c.InstrumentID] {
-			return Book{}, fmt.Errorf("momentum: candidate %s repeated", c.InstrumentID)
-		}
-		seen[c.InstrumentID] = true
-		ranked[i] = RankedName{Candidate: c}
 	}
 	sort.Slice(ranked, func(i, j int) bool {
 		if ranked[i].Score != ranked[j].Score {
@@ -257,6 +246,27 @@ func (c *capper) take(sector string) bool {
 		c.counts[sector]++
 	}
 	return true
+}
+
+// rankable validates cfg and the candidates, refusing a repeated
+// instrument, and returns them as unranked names in the order given.
+func rankable(cfg Config, candidates []Candidate) ([]RankedName, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	ranked := make([]RankedName, len(candidates))
+	seen := make(map[string]bool, len(candidates))
+	for i, c := range candidates {
+		if err := c.validate(cfg); err != nil {
+			return nil, err
+		}
+		if seen[c.InstrumentID] {
+			return nil, fmt.Errorf("momentum: candidate %s repeated", c.InstrumentID)
+		}
+		seen[c.InstrumentID] = true
+		ranked[i] = RankedName{Candidate: c}
+	}
+	return ranked, nil
 }
 
 func (c Candidate) validate(cfg Config) error {

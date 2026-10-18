@@ -69,6 +69,15 @@ type History struct {
 // a malformed input, so each is an error rather than a skipped name, as
 // is a configuration that fails Validate.
 func Score(cfg Config, sessions []string, closes map[string]float64) (History, error) {
+	return score(cfg, sessions, closes, lastCloses)
+}
+
+// window returns the n closes a computation reads, oldest first, and false
+// when it refuses them: lastCloses for the live rule, lastClosesHad for
+// the backtest's.
+type window func(sessions []string, closes map[string]float64, n int) ([]float64, bool)
+
+func score(cfg Config, sessions []string, closes map[string]float64, last window) (History, error) {
 	if err := cfg.Validate(); err != nil {
 		return History{}, err
 	}
@@ -81,13 +90,13 @@ func Score(cfg Config, sessions []string, closes map[string]float64) (History, e
 		h.Status = StatusShortHistory
 		return h, nil
 	}
-	window, ok := lastCloses(sessions, closes, need)
+	w, ok := last(sessions, closes, need)
 	if !ok {
 		h.Status = StatusGap
 		return h, nil
 	}
-	h.Score = window[need-1-cfg.ScoreSkip]/window[0] - 1
-	h.Volatility = populationStd(window[need-1-cfg.VolatilityReturns:])
+	h.Score = w[need-1-cfg.ScoreSkip]/w[0] - 1
+	h.Volatility = populationStd(w[need-1-cfg.VolatilityReturns:])
 	h.Status = StatusScored
 	if h.Volatility == 0 {
 		h.Status = StatusZeroVolatility
@@ -146,18 +155,23 @@ func EvaluateTrend(cfg Config, sessions []string, closes map[string]float64) (Tr
 	if tr.Closes < cfg.TrendCloses {
 		return tr, ReasonInsufficientTrendHistory, nil
 	}
-	window, ok := lastCloses(sessions, closes, cfg.TrendCloses)
+	w, ok := lastCloses(sessions, closes, cfg.TrendCloses)
 	if !ok {
 		return tr, ReasonMissingBars, nil
 	}
-	sum := 0.0
-	for _, p := range window {
-		sum += p
-	}
-	tr.Close = window[len(window)-1]
-	tr.Mean = sum / float64(len(window))
+	tr.Close, tr.Mean = closeAndMean(w)
 	tr.RiskOff = tr.Close < tr.Mean
 	return tr, "", nil
+}
+
+// closeAndMean returns the last of closes and their mean, summed oldest
+// first.
+func closeAndMean(closes []float64) (last, mean float64) {
+	sum := 0.0
+	for _, p := range closes {
+		sum += p
+	}
+	return closes[len(closes)-1], sum / float64(len(closes))
 }
 
 // lastCloses returns the closes of the last n sessions, oldest first, and

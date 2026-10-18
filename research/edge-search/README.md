@@ -144,6 +144,17 @@ backtest runs on their servers.
   each trading day of the months in `GOLDEN_MONTHS`, and the first decision
   after warm-up, logs the close, RSI(2), both averages, the boost state and
   the target; the `Golden` statistic counts the lines.
+- `momentum/parity_log.py` and `boost/parity_log.py` — the parity check's
+  exports (`docs/adr/0026-*.md`, point 7, item 2;
+  `docs/research/parity-2026-10.md`). `fresh_universe.py` and `template.py`
+  with additions only: for each month in `PARITY_MONTHS` the momentum one
+  writes the rebalance's risk-off inputs, every scored name with its score,
+  volatility, sector and mark, the weights, and a sample of names' adjusted
+  closes; with `PARITY` the Boost one writes every bar's close, indicators
+  and state. The Free plan's log is too small and its object store cannot
+  be written, so each export rides in an order tag (`UpdateTag` on an order
+  the strategy places anyway, which changes no fill). `cmd/parity` reads
+  the orders and prints the pass/fail report.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same
