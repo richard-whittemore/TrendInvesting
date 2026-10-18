@@ -280,20 +280,33 @@ func (s *stream) ack(id string, version uint32, p event.AlertAcknowledgedPayload
 }
 
 // TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats: the journal
-// keeps an acknowledgement the engine refused (another account, an unreadable
-// or invalid one, a version it does not read) next to the delivered ones; only
-// a delivered one stops the repeats (ADR 0019, "Alerting"; owner decision
-// 2026-10-18).
+// keeps an acknowledgement for another account next to the delivered ones; it
+// is not counted and the alert keeps repeating. Acknowledgements the engine
+// refuses on time, validity or readability are never journalled (ADR 0019,
+// "Alerting"; owner decision 2026-10-18).
 func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 	good := func(key string) event.AlertAcknowledgedPayload {
 		return event.AlertAcknowledgedPayload{AccountID: "joint", AlertKey: key, AcknowledgedBy: "owner", AcknowledgedAt: day(1)}
 	}
-	refused := map[string]func(key string, s *stream){
-		"another account": func(key string, s *stream) {
-			p := good(key)
-			p.AccountID = "ira"
-			s.ack("ack", event.AlertAcknowledgedSchemaVersion, p)
-		},
+	t.Run("another account is not counted", func(t *testing.T) {
+		s := newStream(t)
+		s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
+		alerts, err := report.Alerts(s.out)
+		if err != nil || len(alerts) != 1 {
+			t.Fatalf("alerts = %v, %v", alerts, err)
+		}
+		p := good(alerts[0].Key)
+		p.AccountID = "ira"
+		s.ack("ack", event.AlertAcknowledgedSchemaVersion, p)
+		got, err := report.Alerts(s.out)
+		if err != nil {
+			t.Fatalf("a readable acknowledgement for another account is no error: %v", err)
+		}
+		if len(got) != 1 || got[0].Acknowledged {
+			t.Fatalf("it must not stop the repeats: %+v", got)
+		}
+	})
+	unreadable := map[string]func(key string, s *stream){
 		"a payload that fails validation": func(key string, s *stream) {
 			p := good(key)
 			p.AcknowledgedBy = ""
@@ -303,25 +316,18 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 			s.ack("ack", event.AlertAcknowledgedSchemaVersion, good(key))
 			s.out[len(s.out)-1].Payload = []byte(`{`)
 		},
-		"a schema version the engine does not read": func(key string, s *stream) {
+		"a schema version this build does not read": func(key string, s *stream) {
 			s.ack("ack", 9, good(key))
 		},
 	}
-	for name, record := range refused {
-		t.Run("refused: "+name, func(t *testing.T) {
+	for name, record := range unreadable {
+		t.Run("unreadable is a read error: "+name, func(t *testing.T) {
 			s := newStream(t)
 			s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
-			alerts, err := report.Alerts(s.out)
-			if err != nil || len(alerts) != 1 {
-				t.Fatalf("alerts = %v, %v", alerts, err)
-			}
+			alerts, _ := report.Alerts(s.out)
 			record(alerts[0].Key, s)
-			got, err := report.Alerts(s.out)
-			if err != nil {
-				t.Fatalf("a refused acknowledgement is skipped, never an error: %v", err)
-			}
-			if len(got) != 1 || got[0].Acknowledged {
-				t.Fatalf("a refused acknowledgement must not stop the repeats: %+v", got)
+			if _, err := report.Alerts(s.out); err == nil {
+				t.Fatal("an acknowledgement the engine could not have journalled means a build mismatch: want a read error")
 			}
 		})
 	}
