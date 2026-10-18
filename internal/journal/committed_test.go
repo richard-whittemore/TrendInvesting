@@ -117,8 +117,8 @@ func TestARecorderStatesWhichInputsItCommitted(t *testing.T) {
 
 // TestInputsRecordedBeforeCountsBackToTheFirstThatDoesNotMatch: the inputs
 // recorded immediately before a committed input, decisions skipped, are
-// counted back to the nearest input that does not match, so a caller can
-// tell how far inputs of its own moved an input from the sequence it was
+// counted back to the nearest input that does not match, which bounds how
+// far inputs a caller recorded ahead of it moved it from the sequence it was
 // sent with (ADR 0027, amendment "re-delivery on request"). An input never
 // committed has none before it.
 func TestInputsRecordedBeforeCountsBackToTheFirstThatDoesNotMatch(t *testing.T) {
@@ -140,5 +140,28 @@ func TestInputsRecordedBeforeCountsBackToTheFirstThatDoesNotMatch(t *testing.T) 
 		if got := recorder.InputsRecordedBefore(c.id, own); got != c.want {
 			t.Errorf("InputsRecordedBefore(%s) = %d, want %d", c.id, got, c.want)
 		}
+	}
+}
+
+// TestTheSentSequenceIsHeldBesideTheGroup: the sequence a caller states an
+// input was sent with is held beside its committed group and returned with
+// it; an ID with no committed group is ignored, and a group noted nothing
+// has none (ADR 0027, amendment "re-delivery on request").
+func TestTheSentSequenceIsHeldBesideTheGroup(t *testing.T) {
+	t.Parallel()
+
+	recorder := journal.NewRecorder(emittingHandler())
+	inputs := testInputs(2)
+	driveRecorder(t, recorder, inputs)
+	recorder.NoteSent(inputs[1].ID, 1)
+	recorder.NoteSent("never-sent", 1)
+	if c, ok := recorder.Committed(inputs[1].ID); !ok || c.Sent != 1 {
+		t.Errorf("Committed(%s) = %+v, %v; want it sent with 1", inputs[1].ID, c, ok)
+	}
+	if c, _ := recorder.Committed(inputs[0].ID); c.Sent != 0 {
+		t.Errorf("Committed(%s).Sent = %d, want none noted", inputs[0].ID, c.Sent)
+	}
+	if _, ok := recorder.Committed("never-sent"); ok {
+		t.Error("noting a sequence for an ID never committed committed it")
 	}
 }

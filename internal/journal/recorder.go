@@ -116,15 +116,21 @@ type Recorder struct {
 type committedGroup struct {
 	start, end int
 	refusal    string
+	sent       uint64
 }
 
 // Committed is one input as it was committed, with the decisions recorded
 // for it, in order and stamped, and the refusal its application returned
 // (empty when there was none).
+//
+// Sent is the sequence the input was sent with, as its caller stated it
+// (Recorder.NoteSent), or zero when none was stated. The log holds the input
+// as recorded, not as sent, so a group Resume recovers has none.
 type Committed struct {
 	Input     event.Envelope
 	Decisions []event.Envelope
 	Refusal   string
+	Sent      uint64
 }
 
 // Committed returns the group committed for the input with this ID: made
@@ -140,19 +146,31 @@ func (r *Recorder) Committed(inputID string) (Committed, bool) {
 	if !ok {
 		return Committed{}, false
 	}
-	c := Committed{Input: r.entries[g.start].Envelope, Refusal: g.refusal}
+	c := Committed{Input: r.entries[g.start].Envelope, Refusal: g.refusal, Sent: g.sent}
 	for _, e := range r.entries[g.start+1 : g.end] {
 		c.Decisions = append(c.Decisions, e.Envelope)
 	}
 	return c, true
 }
 
+// NoteSent states the sequence the input committed under inputID was sent
+// with, for a caller that records inputs of its own ahead of another's and
+// so records that input later than it was sent (ADR 0027, amendment
+// "re-delivery on request"). It is held in memory beside the group, never
+// in the log, and is ignored for an ID with no committed group.
+func (r *Recorder) NoteSent(inputID string, sequence uint64) {
+	if g, ok := r.committed[inputID]; ok {
+		g.sent = sequence
+		r.committed[inputID] = g
+	}
+}
+
 // InputsRecordedBefore returns how many inputs recorded immediately before
 // the input committed under inputID match, counted back, decisions skipped,
 // to the nearest input that does not; 0 when no input with that ID was
-// committed. A caller that records inputs of its own ahead of another's
-// learns from it how far they moved that input from the sequence it was
-// sent with (ADR 0027, amendment "re-delivery on request").
+// committed. The log records no boundary between one exchange's inputs and
+// another's, so for a group it recovers this bounds, and does not state,
+// how far inputs a caller recorded ahead of it moved it.
 func (r *Recorder) InputsRecordedBefore(inputID string, match func(event.Envelope) bool) uint64 {
 	g, ok := r.committed[inputID]
 	if !ok {

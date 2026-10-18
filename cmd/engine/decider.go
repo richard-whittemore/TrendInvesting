@@ -128,54 +128,80 @@ type wireGuard struct {
 //
 // With an operator inbox, its pending records are delivered first, in the
 // same hold (operatorInbox), and input is recorded after them, at the
-// sequence they leave; the group returned is input's as recorded. A record
-// that could not be delivered poisons g and stops the run with its error,
-// and input is not applied; when records before it were delivered, the
-// error states the last sequence they were recorded at
-// (transport.SequencedError). When records were delivered and the recorder
-// then refuses input of its own, without committing it, the error states
-// the last sequence the engine spent, so the adapter's next input continues
-// the stream. An input not committed always gets an error.
+// sequence they leave; the group returned is input's as recorded, and the
+// recorder notes beside it the sequence input was sent with
+// (journal.Recorder.NoteSent), so a re-send is checked against that
+// sequence (sentWith). An input not committed always gets an error.
 //
-// moved is how many operator inputs were recorded immediately before the
-// committed input, so the sequence it was sent with is the committed one
-// less moved (journal.Recorder.InputsRecordedBefore).
-func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder *journal.Recorder, input event.Envelope, inbox *operatorInbox) (committed journal.Committed, moved uint64, ok bool, err error) {
+// The durable log must never miss a sequence, or Resume refuses it. So when
+// records were delivered and input was then not recorded, whether a record
+// could not be delivered or the recorder refused input of its own (its
+// record bound, its emission ceiling) and so spent its sequence, g is
+// poisoned and the run stops with the cause, and the error states the last
+// sequence recorded, the last record's (transport.SequencedError). Resumed,
+// the log ends there, and the adapter's next input continues from it.
+func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder *journal.Recorder, input event.Envelope, inbox *operatorInbox) (committed journal.Committed, ok bool, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.poisoned != nil {
-		return journal.Committed{}, 0, false, g.poisoned
+		return journal.Committed{}, false, g.poisoned
 	}
 	if committed, ok = recorder.Committed(input.ID); ok {
-		return committed, operatorInputsBefore(recorder, input.ID), true, nil
+		return committed, true, nil
 	}
 	at, err := g.applyLocked(ctx, engine, input, inbox)
 	if g.poisoned != nil {
-		return journal.Committed{}, 0, false, err
+		return journal.Committed{}, false, err
 	}
 	if committed, ok = recorder.Committed(input.ID); ok {
-		return committed, operatorInputsBefore(recorder, input.ID), true, err
+		recorder.NoteSent(input.ID, input.Sequence)
+		committed.Sent = input.Sequence
+		return committed, true, err
 	}
 	if err == nil {
 		err = fmt.Errorf("engine: input %s was applied but not committed, so it has no reply", input.ID)
 	}
-	if spent, has := engine.Next(); at != input.Sequence && has {
-		// Operator inputs were recorded first and the recorder refused
-		// input of its own: the refusal states the last sequence spent,
-		// which the adapter's next input continues
-		// (transport.ProtocolError.Sequence).
-		err = &transport.SequencedError{
-			Sequence: spent - 1,
-			Err:      fmt.Errorf("%w (operator inputs were recorded first, so %s was not recorded; the last sequence spent is %d)", err, input.ID, spent-1),
-		}
+	if at != input.Sequence {
+		return journal.Committed{}, false, g.stopAfterDelivery(fmt.Errorf("%w (%s was given sequence %d and not recorded, so the log would miss it; the run stops)", err, input.ID, at), at, input.ID)
 	}
-	return journal.Committed{}, 0, false, err
+	return journal.Committed{}, false, err
 }
 
-// operatorInputsBefore is how many operator inputs were recorded
-// immediately before the input committed under inputID.
-func operatorInputsBefore(recorder *journal.Recorder, inputID string) uint64 {
-	return recorder.InputsRecordedBefore(inputID, func(e event.Envelope) bool { return e.Source == operator.Source })
+// stopAfterDelivery poisons g and stops the run with cause, for an exchange
+// that recorded operator records up to the sequence before at and then did
+// not record the adapter's input inputID; the error it returns states that
+// sequence (transport.ProtocolError.Sequence).
+func (g *wireGuard) stopAfterDelivery(cause error, at uint64, inputID string) error {
+	g.poisoned, g.stopped = cause, cause
+	if g.stop != nil {
+		g.stop(cause)
+	}
+	return &transport.SequencedError{
+		Sequence: at - 1,
+		Err:      fmt.Errorf("%w (operator inputs were recorded through sequence %d, so %s was not recorded)", cause, at-1, inputID),
+	}
+}
+
+// sentWith reports whether sequence is one the input committed as committed
+// can have been sent with: the sequence it was recorded at, or the one the
+// recorder noted it was sent with. A group recovered from the log has no
+// sent sequence noted, and the log records no boundary between exchanges,
+// so for it any sequence from the first of the operator inputs recorded
+// immediately before it is accepted (journal.Recorder.InputsRecordedBefore):
+// an operator input stands at each of those sequences, so no other input
+// can have been sent with one, and the adapter's waiting input after a
+// restart carries one of them.
+func sentWith(recorder *journal.Recorder, committed journal.Committed, sequence uint64) bool {
+	recorded := committed.Input.Sequence
+	switch {
+	case sequence == recorded:
+		return true
+	case committed.Sent != 0:
+		return sequence == committed.Sent
+	default:
+		moved := recorder.InputsRecordedBefore(committed.Input.ID, func(e event.Envelope) bool { return e.Source == operator.Source })
+		return sequence < recorded && sequence >= recorded-moved
+	}
 }
 
 // applyLocked delivers the inbox's pending records, if any, and applies
@@ -191,20 +217,16 @@ func (g *wireGuard) applyLocked(ctx context.Context, engine *replay.Engine, inpu
 	if inbox != nil {
 		sequence, failed := inbox.deliver(ctx, engine, input)
 		if failed != nil {
+			if sequence != input.Sequence {
+				// Records before the failed one were journalled: the reply
+				// states the last sequence recorded, theirs.
+				return sequence, g.stopAfterDelivery(failed, sequence, input.ID)
+			}
 			g.poisoned, g.stopped = failed, failed
 			if g.stop != nil {
 				g.stop(failed)
 			}
-			if sequence == input.Sequence {
-				return sequence, failed
-			}
-			// Records before the failed one were journalled: the reply
-			// states the last sequence recorded, theirs, and that input
-			// was not recorded (transport.ProtocolError.Sequence).
-			return sequence, &transport.SequencedError{
-				Sequence: sequence - 1,
-				Err:      fmt.Errorf("%w (operator inputs were recorded through sequence %d, so %s was not recorded)", failed, sequence-1, input.ID),
-			}
+			return sequence, failed
 		}
 		input.Sequence = sequence
 	}
@@ -350,7 +372,7 @@ func (g *wireGuard) failure() error {
 // nicety.
 func newDecider(guard *wireGuard, engine *replay.Engine, recorder *journal.Recorder, strategyVersion, configurationHash string, inbox *operatorInbox) transport.Decider {
 	return func(ctx context.Context, input event.Envelope) (event.Envelope, error) {
-		committed, moved, ok, err := guard.answer(ctx, engine, recorder, input, inbox)
+		committed, ok, err := guard.answer(ctx, engine, recorder, input, inbox)
 		if !ok {
 			// Fail closed (docs/development.md principle 4): an envelope the
 			// reducer rejects, a bound journal.Recorder itself enforces
@@ -364,14 +386,15 @@ func newDecider(guard *wireGuard, engine *replay.Engine, recorder *journal.Recor
 			// is refused with that error (wireGuard.answer).
 			return event.Envelope{}, err
 		}
-		reply, replyErr := committedReply(committed, input, moved, strategyVersion, configurationHash)
+		sent := sentWith(recorder, committed, input.Sequence)
+		reply, replyErr := committedReply(committed, input, sent, strategyVersion, configurationHash)
 		if replyErr != nil && err != nil && committed.Refusal != "" {
 			// The first answer to a refused input: the committed refusal's
 			// text, which a later re-delivery repeats, unwrapping to the
 			// error the reducer returned.
 			replyErr = &refusalError{text: committed.Refusal, err: err}
 		}
-		if replyErr != nil && committed.Refusal != "" && committed.Input.Sequence != input.Sequence && sameInput(committed.Input, input, moved) {
+		if replyErr != nil && committed.Refusal != "" && committed.Input.Sequence != input.Sequence && sameInput(committed.Input, input, sent) {
 			// Operator inputs were recorded first, so the refusal states
 			// where the input was recorded, in the reply's Sequence
 			// (transport.SequencedError), and the adapter continues from it
@@ -400,8 +423,10 @@ func (e *refusalError) Unwrap() error { return e.err }
 // the same bytes, before a restart or after one (ADR 0027, sections 4 and
 // 6). An input ID names one input: a different input sent under a
 // committed input's ID is refused, never answered with the other's reply.
-func committedReply(committed journal.Committed, input event.Envelope, moved uint64, strategyVersion, configurationHash string) (event.Envelope, error) {
-	if !sameInput(committed.Input, input, moved) {
+// sent reports whether input carries a sequence the committed input can
+// have been sent with (sentWith).
+func committedReply(committed journal.Committed, input event.Envelope, sent bool, strategyVersion, configurationHash string) (event.Envelope, error) {
+	if !sameInput(committed.Input, input, sent) {
 		return event.Envelope{}, fmt.Errorf("engine: input %s was committed with different content; an input ID names one input, so this one is refused and nothing is recorded", input.ID)
 	}
 	if committed.Refusal != "" {
@@ -412,15 +437,14 @@ func committedReply(committed journal.Committed, input event.Envelope, moved uin
 
 // sameInput reports whether input is the input committed. The engine
 // records operator inputs before an adapter's input and so records it at a
-// later sequence than the one it was sent with (operatorInbox): moved
-// operator inputs recorded immediately before it put it moved sequences
-// later. Sent again, it carries the sequence it was recorded at or exactly
-// the one it was sent with, and every other field must match; any other
-// sequence is another input.
-func sameInput(committed, input event.Envelope, moved uint64) bool {
-	if moved > 0 && input.Sequence == committed.Sequence-moved {
-		input.Sequence = committed.Sequence
+// later sequence than the one it was sent with (operatorInbox). Sent again,
+// it carries a sequence it can have been sent with (sent, from sentWith),
+// and every other field must match; any other sequence is another input.
+func sameInput(committed, input event.Envelope, sent bool) bool {
+	if !sent {
+		return false
 	}
+	input.Sequence = committed.Sequence
 	return bytes.Equal(event.CanonicalEnvelopeBytes(committed), event.CanonicalEnvelopeBytes(input))
 }
 

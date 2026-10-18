@@ -102,9 +102,21 @@ the engine sends back carry the number of the last input it recorded, and
 the adapter's next input carries the number after it. When the engine
 records your instructions first and then refuses the adapter's input, the
 refusal carries that number too, in its `sequence` field, and the adapter
-continues from it. When one of your instructions could not be recorded, the
-refusal's `sequence` is the number of the last instruction that was, says
-the adapter's input was not recorded, and the run stops. After a crash resume the engine prints `the adapter's
+continues from it. When one of your instructions could not be recorded,
+or the engine could not record the adapter's input after yours (a log that
+has reached the most records a run holds, or one input deciding more than a
+run takes from one input), the refusal's `sequence` is the number of the
+last instruction that was, says the adapter's input was not recorded, and
+the run stops: a log missing a number could never be resumed, so the run
+stops where its log ends, and resumed, the adapter's next input carries the
+number after it.
+
+When the engine records your instructions before the adapter's input, the
+input is recorded under a later number than the one it was sent with. If
+the adapter sends that input again to ask for its reply, it is answered
+under either number, and refused under any other. After a restart the log
+no longer says which number it was sent with, so it is answered under any
+number from the first of the instructions recorded just before it. After a crash resume the engine prints `the adapter's
 next input carries sequence N`; a resume that also records an approval
 prints the number once, on the approval's line.
 
@@ -270,6 +282,9 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAKillSwitchOlderThanTheOneInForceIsRefused`,
 `TestADeliveredRecordIsNotReadAgain`,
 `TestARefusedInputAfterOperatorInputsStatesItsSequence`,
+`TestARecorderRefusalAfterOperatorInputsStopsTheRun`,
+`TestAResumedLogEndingInOperatorInputsAnswersTheNextInput`,
+`TestAnInputSentAgainIsCheckedAgainstTheSequenceItWasSentWith`,
 `TestAResumeWithAnApprovalStatesOneNextSequence`,
 `TestTheOperatorInboxIsForARunThatCanReachABroker`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how

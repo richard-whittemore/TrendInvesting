@@ -36,17 +36,20 @@
 // Sequence + 1, as before. When operator instructions were recorded and the
 // adapter's input is then refused, the refusal (transport.ProtocolError)
 // states in its Sequence the last sequence recorded: the input's own, where
-// its refusal was recorded, or, when an instruction could not be recorded
-// and the run stops, the last instruction's, the input not recorded. When
-// the recorder refuses the input of its own (its record bound or emission
-// ceiling, ADR 0017), the input is not recorded and the refusal states the
-// last sequence the engine spent. The adapter's next input carries that
-// Sequence + 1. A resume reports the sequence the adapter's next input
-// carries, once (with an approval, on the approval's line).
+// its refusal was recorded, or, when the input was not recorded (an
+// instruction could not be recorded, or the recorder refused the input of
+// its own: its record bound or emission ceiling, ADR 0017), the last
+// instruction's, and the run stops, so its durable log never misses a
+// sequence and resumes. The adapter's next input carries that Sequence + 1.
+// A resume reports the sequence the adapter's next input carries, once
+// (with an approval, on the approval's line).
 //
 // An adapter's input sent again under its ID is the request below: it may
-// carry exactly the sequence it was first sent with, before operator
-// instructions moved it, and no instruction is delivered before it.
+// carry the sequence it was recorded at or exactly the one it was sent
+// with, before operator instructions moved it, and no instruction is
+// delivered before it. After a restart, the log holding no sent sequence,
+// it may carry any sequence from the first of the instructions recorded
+// immediately before it.
 //
 // # Wire contract: an input sent again is a request for its committed reply
 //
