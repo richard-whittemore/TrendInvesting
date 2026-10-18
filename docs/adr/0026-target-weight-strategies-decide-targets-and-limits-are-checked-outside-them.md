@@ -598,9 +598,12 @@ stand as recorded (AGENTS.md rule 6).
   `labels-missing` as an urgent alert. The market-data step also refuses a
   session whose sector file has lost its sector column, or in which no
   label from either source maps onto a Morningstar sector, rather than
-  writing a snapshot with no labels. Both are part of rules version
-  1.13.0; neither changes a month the parity run compared, since the
-  parity tool compares the book selection, not the withhold.
+  writing a snapshot with no labels, and likewise a session in which either
+  source that parsed maps none of its labels. The withhold is part of rules
+  version 1.13.0; the market-data refusal is a change to the encoder, which
+  has no rules version and alters recordings, not decisions. Neither changes
+  a month the parity run compared, since the parity tool compares the book
+  selection, not the withhold.
 - **Point 7, item 2: Boost's indicators (#462, #463).** The thresholds
   were fixed before the first parity run (`docs/research/parity-2026-10.md`,
   "Thresholds"), with Boost's RSI(2) and its 200-day and 5-day means

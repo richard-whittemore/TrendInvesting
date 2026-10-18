@@ -152,9 +152,9 @@ The reporter sends `labels-missing` as an urgent alert
 `sectors-iwv` and `sectors-nasdaq` recordings for the session and check that
 each still has a sector column and its usual sector names. The market-data
 step already refuses a session whose sector file has no sector column, or in
-which no label from either source maps onto a Morningstar sector
-([market data](market-data.md)), so a total outage stops there; this check
-catches a partial one.
+which either source's sectors map to no Morningstar sector at all
+([market data](market-data.md)), so a whole-source outage stops there; this
+check catches a partial one.
 
 Tests: `TestSelectBookPicksNamesWithNoSectorAsTheBacktestDoes`
 (`internal/targetweight/momentum/book_test.go`),
@@ -253,7 +253,7 @@ bars (ADR 0026, point 5).
 - ADR 0026, points 1 (inputs, ranking in Go, decision times) and 5 (missing
   bars fail closed); ADR 0015 (the two new record types start at version 1;
   the configuration's `universe_input` is its version 6, and version 5 is
-  refused; version 7 adds `max_unlabelled_share`, below); ADR 0016 (the value is part of the configuration hash; rules
+  refused; version 7 adds `max_unlabelled_share`, in "Too many stocks with no label" above); ADR 0016 (the value is part of the configuration hash; rules
   version 1.6.0);
   ADR 0004 and the adjusted-bar rule in `internal/event/bar_adjusted.go` (how
   closes are adjusted).

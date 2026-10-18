@@ -137,8 +137,20 @@ class LabelsTest(unittest.TestCase):
         with self.assertRaises(sectors.Unusable):
             sectors.labels(iwv, nasdaq)
 
-    def test_one_source_mapping_still_labels_the_session(self):
-        iwv, nasdaq = records([("AAPL", "Info Tech", "Equity")], [("SHOP", "Technology")])
+    def test_one_source_whose_vocabulary_maps_nothing_refuses_the_session(self):
+        # The other source covering nearly every stock would hide a renamed
+        # vocabulary: the cap would silently count in another scheme.
+        for iwv_rows, nasdaq_rows in ((([("AAPL", "Info Tech", "Equity")]), [("SHOP", "Technology")]),
+                                      ([("AAPL", "Information Technology", "Equity")], [("SHOP", "Tech")])):
+            iwv, nasdaq = records(iwv_rows, nasdaq_rows)
+            with self.assertRaises(sectors.Unusable):
+                sectors.labels(iwv, nasdaq)
+
+    def test_a_source_with_only_ambiguous_rows_is_not_a_vocabulary_outage(self):
+        # Every row ambiguous leaves the source nothing to map, but its
+        # vocabulary is not at fault: the other source labels the session.
+        iwv, nasdaq = records([("BF.B", "Consumer Staples", "Equity"), ("BFB", "Energy", "Equity")],
+                              [("SHOP", "Technology")])
         self.assertEqual(sectors.labels(iwv, nasdaq), {"SHOP": ("Technology", sectors.NASDAQ_SOURCE)})
 
     def test_tickers_match_without_punctuation(self):

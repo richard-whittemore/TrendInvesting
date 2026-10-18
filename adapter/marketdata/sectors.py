@@ -185,19 +185,28 @@ def _unambiguous(rows):
 def labels(iwv, nasdaq):
     """{normalised ticker: (Morningstar sector, source)} from the two
     recordings: IWV's GICS label where it maps, else Nasdaq's, else none.
-    Raises Unusable when no label maps at all."""
+    Raises Unusable when a source that parsed unambiguous rows maps none of
+    them: each normally maps thousands, so none is a renamed vocabulary or a
+    broken file, which the other source would otherwise cover unseen (ADR 0026
+    point 5). A source whose every row was ambiguous has no vocabulary to
+    judge and is skipped."""
     out = {}
-    for ticker, sector in parse_nasdaq({"data": {"rows": nasdaq["rows"]}}).items():
+    nasdaq_rows = parse_nasdaq({"data": {"rows": nasdaq["rows"]}})
+    iwv_rows = parse_iwv(iwv["body"])[1]
+    for name, rows, table in (("screener", nasdaq_rows, NASDAQ_SECTORS), ("iShares", iwv_rows, GICS_SECTORS)):
+        mapped = {t: s for t, s in rows.items() if s in table}
+        if rows and not mapped:
+            raise Unusable("none of the {} source's sectors map onto a Morningstar sector".format(name))
+    for ticker, sector in nasdaq_rows.items():
         if sector in NASDAQ_SECTORS:
             out[ticker] = (NASDAQ_SECTORS[sector], NASDAQ_SOURCE)
-    for ticker, sector in parse_iwv(iwv["body"])[1].items():
+    for ticker, sector in iwv_rows.items():
         if sector in GICS_SECTORS:
             out[ticker] = (GICS_SECTORS[sector], IWV_SOURCE)
     if not out:
-        # Neither source's sectors map: a renamed vocabulary or a broken
-        # file, not a session with no labelled stock. Refused rather than
-        # written as a snapshot with no label (ADR 0026 point 5).
-        raise Unusable("neither source's sectors map onto a Morningstar sector")
+        # Every row of both sources was ambiguous: no label to write, refused
+        # rather than written as a snapshot with none (ADR 0026 point 5).
+        raise Unusable("neither source labels any stock unambiguously")
     return out
 
 

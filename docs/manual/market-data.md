@@ -261,8 +261,8 @@ the momentum cap counts one vocabulary (plan.md section 4). A stock neither
 source labels gets no label, and the momentum rule ranks it with no sector
 cap, as the backtest did ([momentum-universe](momentum-universe.md)).
 `encode` refuses a session whose iShares file has no `Sector` column, whose
-screener response has no `sector` field, or in which no label from either
-source maps onto a Morningstar sector: a renamed column or vocabulary is an
+screener response has no `sector` field, or in which either
+source's stocks map to no Morningstar sector at all: a renamed column or vocabulary is an
 outage to fix, not a month of unlabelled stocks.
 
 Both sources serve only today's file, so `sectors` records the latest

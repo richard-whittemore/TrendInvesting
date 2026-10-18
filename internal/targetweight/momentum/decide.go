@@ -178,8 +178,10 @@ func Decide(cfg Config, in Input) (Decision, error) {
 	// A name with no sector label is ranked uncapped, as the backtest did
 	// (ADR 0026 point 8), but too many at once is a label outage, which
 	// would decide a book with the sector cap silently absent: withheld,
-	// the last book kept (ADR 0026 point 5).
-	if unlabelled := countUnlabelled(members); float64(unlabelled) > cfg.MaxUnlabelledShare*float64(len(members)) {
+	// the last book kept (ADR 0026 point 5). The share is compared as a
+	// quotient: a product with the ceiling rounds below the exact count for
+	// many decimal ceilings, withholding a month exactly at it.
+	if unlabelled := countUnlabelled(members); float64(unlabelled)/float64(len(members)) > cfg.MaxUnlabelledShare {
 		d = withhold(d, ReasonLabelsMissing)
 		d.Detail = fmt.Sprintf("%d of %d ranked members (%.4g%%) have no sector label, above the ceiling of %.4g%%: "+
 			"a sector-label source or its mapping may have failed; the book is kept: check the sector-label recordings",
