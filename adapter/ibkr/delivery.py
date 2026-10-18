@@ -454,10 +454,10 @@ def stream_run(streams, engine_log_path):
                 engine_log_path, ", ".join(os.path.join(streams, n) for n in found)))
     if skipped:
         raise StreamRefused(
-            "the run of {} is not started: the logs of {} cannot be matched to any run (their first records cannot "
-            "be read): one may be this run's own first log, damaged, so no stream folder is trusted, nothing is delivered "
+            "nothing is delivered for the run of {}: the logs of {} cannot be matched to any run (their first records cannot "
+            "be read): one may be this run's own first log, damaged, so no stream folder is trusted "
             "and no warm-up is to be run for this run's name. If this run is a crash resume, restore its first "
-            "run's log from the backup as the engine wrote it; if a log is an old run's, {}".format(
+            "run's log from the backup as the engine wrote it; if a log is an old run's, once its run has ended, {}".format(
                 engine_log_path, ", ".join(os.path.join(streams, n) for n in skipped), move_aside(streams, logs)))
     if not found or found == [own]:
         return own

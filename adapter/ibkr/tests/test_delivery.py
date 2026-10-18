@@ -26,9 +26,10 @@ from pathlib import Path
 from unittest import mock
 
 tests_dir = Path(__file__).resolve().parent
-# The longest any Go build, run or engine start may take here, in seconds
-# (TI_TEST_GO_TIMEOUT): generous, so a cold runner passes; a process that
-# outlasts it is killed and the test fails with what it printed.
+# The longest any `go build`, `go run` or boost-demo run may take here, in
+# seconds (TI_TEST_GO_TIMEOUT): generous, so a cold runner passes; a process
+# that outlasts it is killed and the test fails with what it printed. The
+# engine's own start and stop are bounded by ENGINE_TIMEOUT.
 GO_TIMEOUT = float(os.environ.get("TI_TEST_GO_TIMEOUT", "300"))
 # How long a real engine may take to listen, and to stop (TI_TEST_ENGINE_TIMEOUT).
 ENGINE_TIMEOUT = float(os.environ.get("TI_TEST_ENGINE_TIMEOUT", "120"))
@@ -1505,6 +1506,9 @@ class StreamFolderRuleTests(unittest.TestCase):
         for text in (logs.output[0], warnings[0], str(adapter.exception), str(data.exception)):
             self.assertIn("cannot be matched to any run", text)
             self.assertIn("the engine's log folder {}".format(self.root), text)
+        for refusal in (str(adapter.exception), str(data.exception)):
+            self.assertTrue(refusal.startswith("nothing is "), refusal)
+            self.assertIn("once its run has ended, move the folder out of", refusal)
 
 
 class LogChainTests(unittest.TestCase):
@@ -1524,19 +1528,15 @@ class LogChainTests(unittest.TestCase):
         from relay import _committed_groups
         return _committed_groups(str(path)).chain_break, tidata.read_engine_log(str(path)).chain_break
 
-    @unittest.skipUnless(shutil.which("go"), "no Go toolchain: the canonical bytes are Go's own output")
-    def test_the_canonical_envelope_bytes_are_the_engines(self):
-        # The vector is what internal/event CanonicalEnvelopeBytes renders,
-        # run here by Go: Go's string escapes (<, >, &, U+2028, U+2029,
-        # control bytes), a time stated at an offset, the largest sequence.
-        import relay
-        from marketdata import tidata
+    def canonical_cases(self):
+        """The envelopes (and payloads) the canonical bytes are held to: Go's string escapes (<, >, &, U+2028,
+        U+2029, control bytes), a time stated at an offset, the largest sequence."""
         base = {"id": "a", "type": "t", "envelope_version": 1, "schema_version": 2,
                 "event_time": "2026-10-16T09:30:00.120000000-04:00",
                 "recorded_at": "2026-10-16T09:30:00Z", "sequence": 3, "causation_id": "c",
                 "source": "s", "strategy_version": "v", "configuration_hash": "h", "payload_hash": "p"}
         payloads = ['{"x":"<&>\\u2028"}', '{"k":"\u2028\u2029 \u00e9 \\u0001"}', '{}']
-        cases = [
+        return base, [
             (dict(base, id="a<b>&c\u2028d\u2029\u00e9\x01\x08\x0c\t\n\r\x1f\x7f\"\\/"), payloads[0]),
             (dict(base, sequence=18446744073709551615, correlation_id="run<1>"), payloads[1]),
             (dict(base, event_time="2026-10-16T23:45:10.5+05:30", recorded_at="2026-10-17T00:10:00.100200-23:59"),
@@ -1544,13 +1544,12 @@ class LogChainTests(unittest.TestCase):
             (dict(base, event_time="2026-10-16T09:30:00.000000001Z", recorded_at="2026-12-31T23:59:59+00:00"),
              payloads[2]),
         ]
-        sent = "".join(json.dumps(envelope, ensure_ascii=False)[:-1] + ',"payload":' + payload + "}\n"
-                       for envelope, payload in cases)
-        run = subprocess.run(["go", "run", "./adapter/ibkr/tests/testdata/canonical_vector.go"], cwd=str(tests_dir.parents[2]),
-                             input=sent, text=True, capture_output=True, timeout=GO_TIMEOUT, env=dict(os.environ, GOTOOLCHAIN="local"))
-        self.assertEqual(run.returncode, 0, run.stderr)
+
+    def assert_canonical_bytes(self, cases, wants):
+        """Both Python readers hash and render each case as wants (dicts of canonical text and sha256) say."""
+        import relay
+        from marketdata import tidata
         previous = bytes(32)
-        wants = [json.loads(line) for line in run.stdout.splitlines()]
         self.assertEqual(len(wants), len(cases))
         for (envelope, payload), want in zip(cases, wants):
             with self.subTest(envelope["id"]):
@@ -1563,12 +1562,46 @@ class LogChainTests(unittest.TestCase):
                 self.assertEqual(relay._canonical_bytes(fields).decode("utf-8"), want["canonical"])
                 self.assertEqual(tidata._canonical_bytes(fields).decode("utf-8"), want["canonical"])
                 self.assertEqual(hashlib.sha256(relay._canonical_bytes(fields)).hexdigest(), want["sha256"])
+
+    def test_the_canonical_envelope_bytes_are_the_engines_own_output(self):
+        # Go's own output, run here: the authoritative check. Without a Go
+        # toolchain it fails, as the data job's Go-driven tests do.
+        import relay
+        from marketdata import tidata
+        base, cases = self.canonical_cases()
+        sent = "".join(json.dumps(envelope, ensure_ascii=False)[:-1] + ',"payload":' + payload + "}\n"
+                       for envelope, payload in cases)
+        try:
+            run = subprocess.run(["go", "run", "./adapter/ibkr/tests/testdata/canonical_vector.go"],
+                                 cwd=str(tests_dir.parents[2]), input=sent, text=True, capture_output=True,
+                                 timeout=GO_TIMEOUT, env=dict(os.environ, GOTOOLCHAIN="local"))
+        except FileNotFoundError:
+            self.fail("no Go toolchain on PATH: the canonical bytes are checked against Go's own output")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assert_canonical_bytes(cases, [json.loads(line) for line in run.stdout.splitlines()])
+        previous = bytes(32)
         for unchained in ({}, dict(base, event_time="2026-13-16T09:30:00Z")):
             self.assertIsNone(relay.log_chain_next(previous, "input", unchained, b"{}"))
         with self.assertRaises(TypeError):
             relay._canonical_bytes({"x": 1.5})
         with self.assertRaises(TypeError):
             tidata._canonical_bytes({"x": True})
+
+    def test_the_canonical_envelope_bytes_match_a_vector_frozen_from_the_engine(self):
+        # Printed once by adapter/ibkr/tests/testdata/canonical_vector.go (internal/event
+        # CanonicalEnvelopeBytes, as of the engine at commit 40b2851, hash chain algorithm
+        # LOG_CHAIN_ALGORITHM) for canonical_cases(); checked with no Go toolchain.
+        _, cases = self.canonical_cases()
+        self.assert_canonical_bytes(cases, [
+            {"canonical": '{"causation_id":"c","configuration_hash":"h","correlation_id":"","envelope_version":1,"event_time":"2026-10-16T13:30:00.12Z","id":"a\\u003cb\\u003e\\u0026c\\u2028d\\u2029\u00e9\\u0001\\b\\f\\t\\n\\r\\u001f\x7f\\"\\\\/","payload":"{\\"x\\":\\"\\u003c\\u0026\\u003e\\\\u2028\\"}","payload_hash":"p","recorded_at":"2026-10-16T09:30:00Z","schema_version":2,"sequence":3,"source":"s","strategy_version":"v","type":"t"}',
+             "sha256": "23a3e9e571eb30718c9fd7193d3de7c3ddb67d820eb7c3760379bab08ebf4a7a"},
+            {"canonical": '{"causation_id":"c","configuration_hash":"h","correlation_id":"run\\u003c1\\u003e","envelope_version":1,"event_time":"2026-10-16T13:30:00.12Z","id":"a","payload":"{\\"k\\":\\"\\u2028\\u2029 \u00e9 \\\\u0001\\"}","payload_hash":"p","recorded_at":"2026-10-16T09:30:00Z","schema_version":2,"sequence":18446744073709551615,"source":"s","strategy_version":"v","type":"t"}',
+             "sha256": "99a78a4ada7a7eea39d2ba100c97c4c650152603b5cb14cc963253fa96ebbc17"},
+            {"canonical": '{"causation_id":"c","configuration_hash":"h","correlation_id":"","envelope_version":1,"event_time":"2026-10-16T18:15:10.5Z","id":"a","payload":"{}","payload_hash":"p","recorded_at":"2026-10-18T00:09:00.1002Z","schema_version":2,"sequence":3,"source":"s","strategy_version":"v","type":"t"}',
+             "sha256": "95e35539c413516cd4014f52b81d0c330426dad98afc12f50c4b4103d74ae2ff"},
+            {"canonical": '{"causation_id":"c","configuration_hash":"h","correlation_id":"","envelope_version":1,"event_time":"2026-10-16T09:30:00.000000001Z","id":"a","payload":"{}","payload_hash":"p","recorded_at":"2026-12-31T23:59:59Z","schema_version":2,"sequence":3,"source":"s","strategy_version":"v","type":"t"}',
+             "sha256": "b7e76cefed5b008baef8afa9c5c1af09c809c2d67b874d9830e903692cae1d45"},
+        ])
 
     def test_a_time_with_an_impossible_offset_follows_no_chain(self):
         import relay
@@ -1632,7 +1665,6 @@ class LogChainTests(unittest.TestCase):
 class RealEngineResumeTests(unittest.TestCase):
     """The record hash chain rule rests on what cmd/engine -resume writes: the real engine, built here, crashed and resumed."""
 
-    @unittest.skipUnless(shutil.which("go"), "no Go toolchain: the real engine is built here")
     def test_a_real_resume_keeps_every_copied_record_hash_and_both_chains_verify(self):
         import signal
         import time
@@ -1658,6 +1690,8 @@ class RealEngineResumeTests(unittest.TestCase):
             except subprocess.TimeoutExpired as err:
                 self.fail("{} did not finish within {} s (TI_TEST_GO_TIMEOUT): {}".format(
                     command[0], GO_TIMEOUT, (err.stdout or b"") + (err.stderr or b"")))
+            except FileNotFoundError:
+                self.fail("{} is not on PATH: the real engine is built here, so a Go toolchain is required".format(command[0]))
             except subprocess.CalledProcessError as err:
                 self.fail("{} failed: {}{}".format(command[0], err.stdout, err.stderr))
 
