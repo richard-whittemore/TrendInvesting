@@ -1444,7 +1444,7 @@ class RunLogsTests(unittest.TestCase):
                     pending.mark(cid, mark)
                 if "run_ended" in records:
                     pending.record_run_ended(dict({"input": {"id": "session:9"}}, **records["run_ended"],
-                                                  refused="run ended", reason="a fresh run", run=None,
+                                                  refused="run ended", reason="a fresh run", run="run-0",
                                                   at="2026-10-16T12:00:00+00:00", session_date="2026-10-16"))
                 self.assertEqual(run_logs(second, today=TODAY, settled=pending.settled_orders()),
                                  [second, first] if kept else [second])
@@ -1462,13 +1462,27 @@ class RunLogsTests(unittest.TestCase):
             pending.settled_orders()
         self.assertIn("{} line 3 is not JSON".format(pending.decisions_path), str(raised.exception))
         pending.record_run_ended({"input": {"id": "session:9"}, "refused": "run ended", "reason": "a fresh run",
-                                  "run": None, "unsent": [], "outbox": [], "at": "2026-10-16T12:00:00+00:00",
+                                  "run": "run-0", "unsent": [], "outbox": [], "at": "2026-10-16T12:00:00+00:00",
                                   "session_date": "2026-10-16"})
         with open(pending.run_ended_path, "a", encoding="utf-8") as f:
             f.write("\n\n" + '{"input": {"id": "sess' + "\n")
         with self.assertRaises(HandoverRecordInvalid) as raised:
             pending.run_ended()
         self.assertIn("{} line 4 is not JSON".format(pending.run_ended_path), str(raised.exception))
+
+    def test_a_settlement_with_no_recorded_run_is_refused_naming_its_line(self):
+        # The adapter records the run an input is sent to before it saves
+        # the input, so a settlement naming no run is not one resolve
+        # --run-ended writes: where its records fall among the runs cannot
+        # be known, and it is never guessed.
+        pending = PendingInput(str(Path(self.dir.name) / "no-run.json"))
+        pending.record_run_ended({"input": {"id": "session:9"}, "refused": "run ended", "reason": "a fresh run",
+                                  "run": None, "unsent": [], "outbox": [], "at": "2026-10-16T12:00:00+00:00",
+                                  "session_date": "2026-10-16"})
+        with self.assertRaises(HandoverRecordInvalid) as raised:
+            pending.run_ended()
+        for part in ("{} line 1".format(pending.run_ended_path), "no recorded run"):
+            self.assertIn(part, str(raised.exception))
 
     def test_a_decision_line_that_cannot_be_read_stops_rather_than_settling_its_order(self):
         # An order settled --never-sent and then found at IBKR (--sent): if
@@ -1529,6 +1543,27 @@ class RunLogsTests(unittest.TestCase):
                     resolve_run_ended(pending, "session:9", "a fresh run", second, today=TODAY)
                 self.assertEqual(pending.load()["id"], "session:9")
                 self.assertEqual(pending.run_ended(), [])
+
+    def test_an_input_awaiting_its_reply_with_no_record_of_its_run_is_refused_not_settled(self):
+        # A settlement records the run it ends, so without the adapter's
+        # .run record for the input nothing is written: the line would name
+        # no run, and every later start would stop on it.
+        self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        for name, run_of in (("missing", None), ("another input", "session:8")):
+            with self.subTest(name):
+                pending = PendingInput(str(Path(self.dir.name) / "pending-{}.json".format(name.replace(" ", "-"))))
+                if run_of is not None:
+                    pending.record_run(run_of, "run-0", "a.log")
+                pending.save({"id": "session:9", "type": "market.session.closed", "schema_version": 1,
+                              "event_time": "2026-10-16T20:00:00Z", "recorded_at": "2026-10-16T20:00:00Z",
+                              "payload": {}})
+                with self.assertRaises(ResolveRefused) as raised:
+                    resolve_run_ended(pending, "session:9", "a fresh run", second, today=TODAY)
+                for part in ("session:9", pending.run_path):
+                    self.assertIn(part, str(raised.exception))
+                self.assertEqual(pending.load()["id"], "session:9")
+                self.assertFalse(Path(pending.run_ended_path).exists())
 
     def earlier_day_run(self, name, reports=()):
         """A run of an earlier day (the 15th) whose one decision released tw-1 for 9, then the reports in reports.

@@ -766,8 +766,7 @@ class LoopTests(unittest.TestCase):
         self.assertEqual([r.payload["status"] for r in records], ["submitted", "canceled"])
 
     def test_a_settlement_is_seeded_after_the_run_it_ended_and_before_the_runs_after_it(self):
-        # One of a run older than the chain was made before every run of
-        # it; one with no recorded run is placed before the run now running.
+        # One of a run older than the chain was made before every run of it.
         loop = self.loop()
         pending = PendingInput(self.pending)
 
@@ -788,10 +787,27 @@ class LoopTests(unittest.TestCase):
                                            for name, n in names])
         settle("run-0", "older-than-the-chain", 1)
         settle("run-1", "ended-run-1", 2)
-        settle(None, "no-recorded-run", 3)
         chain = [("run-3", log(("run-3", 4))), ("run-2", log(("run-2", 5))), ("run-1", log(("run-1", 6)))]
         self.assertEqual([r.payload["status"] for r in loop._journalled(chain)],
-                         ["older-than-the-chain", "run-1", "ended-run-1", "run-2", "no-recorded-run", "run-3"])
+                         ["older-than-the-chain", "run-1", "ended-run-1", "run-2", "run-3"])
+
+    def test_a_settlement_with_no_recorded_run_stops_the_adapter_at_start(self):
+        # Its place among the runs cannot be known, so its statuses are never
+        # seeded at a guessed one: a person checks the file.
+        PendingInput(self.pending).record_run_ended({
+            "input": {"id": "session:9", "type": LIFECYCLE_TYPE, "schema_version": 2,
+                      "payload": {"account_id": ACCOUNT, "order_id": "order:1:7", "client_order_id": "tw-paper-1",
+                                  "status": "submitted", "occurred_at": "2026-10-17T13:30:00Z"}},
+            "refused": "run ended", "reason": "a fresh run", "run": None, "unsent": [], "outbox": [],
+            "at": "2026-10-17T13:30:00+00:00", "session_date": "2026-10-17"})
+        loop = self.loop()
+        try:
+            with self.assertRaises(HandoverRecordInvalid) as raised:
+                loop.start()
+        finally:
+            loop.close()
+        self.assertIn(self.pending + ".run-ended", str(raised.exception))
+        self.assertEqual(self.fake.placed, [])
 
     def test_a_report_whose_event_time_cannot_be_read_stops_the_adapter_at_start(self):
         # Read strictly, like every other record the adapter keeps: a report

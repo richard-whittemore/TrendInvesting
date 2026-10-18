@@ -611,7 +611,12 @@ class PendingInput:
         recorded before the settlement.
 
         Read strictly (fail closed, AGENTS.md): a line that is not exactly
-        what record_run_ended writes raises HandoverRecordInvalid.
+        what record_run_ended writes raises HandoverRecordInvalid, and so
+        does one with no recorded run. The adapter records the run an input
+        is sent to before it saves the input (record_run), so a settlement
+        naming no run is hand-made or another tool's: its place among the
+        runs, and so which of an order's statuses is the latest, cannot be
+        known, and none is guessed.
         """
         try:
             with open(self.run_ended_path, encoding="utf-8") as f:
@@ -635,6 +640,11 @@ class PendingInput:
                     or not isinstance(entry["outbox"], list) or not all(_is_outbox_entry(e) for e in entry["outbox"])):
                 raise HandoverRecordInvalid("{} line {} is not a settled input as resolve --run-ended writes "
                                             "one".format(self.run_ended_path, n))
+            if not _is_text(entry["run"]):
+                raise HandoverRecordInvalid(
+                    "{} line {} settles input {} with no recorded run: resolve --run-ended writes the run the "
+                    "input was sent to, so the line is not one the adapter wrote; check it before starting "
+                    "(docs/manual/redelivery.md)".format(self.run_ended_path, n, entry["input"]["id"]))
             entries.append(entry)
         return entries
 
@@ -1275,8 +1285,10 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
     the adapter goes on with the fresh run's own inputs. Refuses (ResolveRefused,
     nothing changed) while an adapter holds the pending file, an empty
     reason, no input awaiting its reply, another input than the one
-    awaiting, and an input of the run whose durable log is engine_log_path
-    (earlier_run: that run is asked for its reply again, never settled).
+    awaiting, an input of the run whose durable log is engine_log_path
+    (earlier_run: that run is asked for its reply again, never settled),
+    and an input with no record of the run it was sent to (the settlement
+    would name no run, which run_ended refuses).
     today defaults to today in New York.
     """
     if not reason or not reason.strip():
@@ -1296,6 +1308,14 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
             raise ResolveRefused(
                 "input {} belongs to the run now running (its durable log {}): it is asked for its reply again "
                 "from that run, never settled as run ended; start the adapter".format(input_id, engine_log_path))
+        if ended.run is None:
+            # The adapter records the run before it saves the input, so a
+            # settlement here would name no run, and run_ended refuses such
+            # a line at every later start (fail closed, AGENTS.md).
+            raise ResolveRefused(
+                "input {} has no record of the run it was sent to ({} is missing or names another input): the "
+                "adapter records it before it saves the input, so the pending file is not as the adapter writes "
+                "it; check it against the engine's logs and IBKR before starting".format(input_id, pending.run_path))
         outbox = Outbox(pending.path + OUTBOX_SUFFIX)
         settled = pending.run_ended()
         recorded = {e["input"]["id"] for e in settled} | {o["id"] for e in settled for o in e["outbox"]}

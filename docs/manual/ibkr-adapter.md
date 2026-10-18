@@ -29,7 +29,11 @@ link, not the program that holds the record (ADR 0025, plan section 3).
 | Relay (`relay.py`) | Keeps the input waiting for the engine's reply in a small file on disk (the **pending file**), asks the engine for that reply again after either side restarts, and hands each released order marked `send` to the sender once, writing "about to send" before and "sent" after (the **hand-over** marks) ([re-delivery](redelivery.md)) | Built |
 | Sender (`sender.py`) | Sends a released order to IB Gateway only in paper, on a paper account the login manages, while the link is up and matched, as a whole-share DAY limit order released in today's New York session, under IBKR's next order number (never reused). Dry-run never sends. Live is refused | Built, against a stand-in for IB Gateway only |
 | Reports (`orders.py`, `reports.py`) | Turns IBKR's answers on this engine's orders into the engine's inputs: a status change (working, cancelling, cancelled, refused) and each fill with IBKR's commission and time. A fill is recorded only once its commission arrives | Built |
-| Real IBKR client (`real_client.py`) | The only part that imports `ibapi` | Built; it places an order only in paper, on a paper account the login manages, and the paper-account test against IBKR is still to be run by hand |
+| Real IBKR client (`real_client.py`) | The only part that imports `ibapi` | Built; it places an order only in paper, on a paper account the login manages, with `paper_sending_enabled` switched on, and the paper-account test against IBKR is still to be run by hand |
+| Main loop (`loop.py`) | At start: takes the pending file's lock, connects to the engine's socket, reads the engine's durable log, connects to IB Gateway, matches IBKR's orders against the orders the engine released, then asks again for any input a stop left waiting. Each step reads IB Gateway's callbacks and, while the link is up and matched, sends the engine its waiting inputs in order ([re-delivery](redelivery.md)) | Built, against the stand-in gateway and a stand-in engine |
+| Engine link (`engine_client.py`) | The adapter's side of the engine's socket: one input at a time, and a reply is used only if it is the answer to that input from the run now running | Built, against a stand-in engine |
+| `ibapi` pin (`ibapi_pin.py`) | Refuses to start unless the `ibapi` installed (`provision.sh twsapi`) is the version pinned with the adapter's code | Built |
+| Start command (`cli.py`) | `python3 -m adapter.ibkr run ...`, what `ti-adapter-boost.service` runs; reads the account number from the adapter's own account file and never logs it ([paper trading](paper-trading.md), "Starting the adapter") | Built; not yet run on the server |
 
 ### "Reconciled": what the adapter means by it
 
@@ -135,8 +139,11 @@ the order stays released:
 - `adapter/ibkr/README.md` lists every module's rules.
 - Tests in `adapter/ibkr/tests/`: `test_config.py`, `test_connection.py`,
   `test_account.py`, `test_snapshot.py`, `test_orders.py`,
-  `test_sender.py`, `test_relay.py`, `test_paper.py` and
-  `test_real_client.py`, all against the stand-in gateway. The tests named
+  `test_sender.py`, `test_relay.py`, `test_paper.py`,
+  `test_real_client.py`, `test_loop.py`, `test_engine_client.py`,
+  `test_engine_log.py`, `test_ibapi_pin.py`, `test_cli.py` and
+  `test_rehearsal.py`, all against the stand-in gateway (and, for the
+  engine's side, a stand-in engine). The tests named
   row by row are in [paper trading](paper-trading.md), "The tests", and
   [re-delivery](redelivery.md), "The tests".
 - Not yet tested: anything against IBKR's real paper servers.

@@ -43,7 +43,7 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 | `ti-dashboard.service` | The read-only dashboard | Starts at boot once installed | **Not working as shipped.** Not installed; the unit sets `TI_DASHBOARD_ADDR=127.0.0.1:8080`, which the program does not read (it listens on `-addr`, default `127.0.0.1:8088`), and passes no `-journal`, without which it refuses to start |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
 
-`ti-adapter-boost.service` carries the IBKR adapter ([IBKR adapter](ibkr-adapter.md)): never started at boot or restarted by systemd, every start is yours, after the engine ([paper trading](paper-trading.md), "Starting the adapter"). It is skipped until `provision.sh twsapi` and `provision.sh adapter` have installed `ibapi` and the adapter's code. The `operator` and `journal-query` tools are not on the server yet.
+`ti-adapter-boost.service` carries the IBKR adapter ([IBKR adapter](ibkr-adapter.md)): never started at boot or restarted by systemd, every start is yours, after the engine ([paper trading](paper-trading.md), "Starting the adapter"). It is skipped until `provision.sh twsapi` and `provision.sh adapter` have installed `ibapi` and the adapter's code, and `provision.sh services` has created its configuration (`/etc/trend-investing/adapters/boost.json`). The `operator` and `journal-query` tools are not on the server yet.
 
 Updates: `unattended-upgrades` applies security updates only and never
 reboots by itself, because a reboot logs the Gateway out.

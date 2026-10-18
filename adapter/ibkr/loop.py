@@ -315,9 +315,10 @@ class AdapterLoop:
         run's committed inputs); then the input awaiting its reply, which is
         the outbox's head while it is exchanged; then the outbox's entries
         in order. A settlement whose run is no run of the chain was made
-        before every run it reaches; one with no recorded run (the input was
-        never sent) is placed as late as the settlements recorded after it
-        allow, before the run now running. The outbox's own copy of a
+        before every run it reaches; one with no recorded run (its .run
+        record was missing or named another input) has no place that can
+        be known, so run_ended refuses it and the start stops for a person.
+        The outbox's own copy of a
         record placed earlier is not seeded again. A record whose event
         time cannot be read stops the start (ReportRecordInvalid; fail
         closed, AGENTS.md), as every other record the adapter keeps is read
@@ -329,9 +330,7 @@ class AdapterLoop:
         placed = [None] * len(settled)
         bound = len(oldest) - 2
         for k in reversed(range(len(settled))):
-            run = settled[k]["run"]
-            at = bound if run is None else position.get(run, -1)
-            placed[k] = bound = min(at, bound)
+            placed[k] = bound = min(position.get(settled[k]["run"], -1), bound)
         sources = []
 
         def add_settled(at):
@@ -368,7 +367,7 @@ class AdapterLoop:
                 raise ReportRecordInvalid(
                     "the report {} in {} has no {} that can be read (a time with its zone): it is not as the "
                     "adapter records one, so it is never seeded as an order's status; check it against IBKR "
-                    "before starting (docs/manual/paper-trading.md)".format(input_id, where, field))
+                    "before starting (docs/manual/redelivery.md)".format(input_id, where, field))
             records.append(Record(event_type, schema_version, payload))
         return records
 
