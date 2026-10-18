@@ -119,8 +119,12 @@ configuration names `warm_up_start`, the first session whose close feeds the
 readings; sessions before the run's first decision session (`-as-of`) only
 feed the readings and decide nothing, as QuantConnect's warm-up does. The
 daily data job's one-time warm-up delivers that history
-([market data](market-data.md), "The one-time warm-up"). The shipped
-dry-run file says 2024-01-02, which is outside Massive's two-year window, so the data job refuses the warm-up for the shipped dry-run configuration; a run fed by the data job needs a date inside the window, which is a new configuration and a new run. A paper run uses a date inside Massive's
+([market data](market-data.md#the-one-time-warm-up)).
+
+The shipped dry-run file says 2024-01-02, which is outside Massive's
+two-year window. The data job therefore refuses to fetch a warm-up for that
+file. A run fed by the data job needs a date inside the window; that is a
+different configuration, so it starts as a new run. A paper run uses a date inside Massive's
 two-year window (the first-paper-order runbook, step A5, recommends
 2025-01-02).
 

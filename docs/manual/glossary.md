@@ -251,8 +251,9 @@ chapter's "since version x" notes say when a rule arrived.
 log and journal. A resume continues a run's history in a new log; a fresh
 run starts a new one.
 
-**Sale back to 98%.** The joint account's one automatic sale, once per incident,
-per kill-switch engagement or per urgent alarm, that brings SPY back to 98% when Boost's exit is refused or the margin
+**Sale back to 98%.** The joint account's one automatic sale, once per incident
+(under the kill switch, once per engagement; for the urgent alarm, once per
+alarm), that brings SPY back to 98% when Boost's exit is refused or the margin
 alarm is urgent. See [states and kill switch](states-and-kill-switch.md#the-one-sale-back-to-98).
 
 **Scope.** What a Degraded account has frozen: the instruments named, and

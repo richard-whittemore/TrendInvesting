@@ -97,9 +97,10 @@ Each input must say `engaged` true or false. An input that leaves it out, or
 sets it to null, is rejected rather than read as "off", so a malformed input
 can never turn the switch off.
 
-The kill switch stops new orders from this program. To stop everything,
-including orders already at the broker, stop the gateway or use IBKR's own
-app.
+The kill switch stops new orders from this program. To cancel orders already
+at the broker, cancel them in IBKR's own app. Stopping the Gateway is not a
+cancel: it only delays an order the engine has released, which goes out once
+the Gateway is back the same day.
 
 ## The one sale back to 98%
 

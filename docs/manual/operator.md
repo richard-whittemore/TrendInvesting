@@ -350,8 +350,10 @@ reports ([journal-query](journal-query.md)).
 | A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
 | The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-trader`) |
 
-The kill switch stops new orders from this program only. To stop everything,
-including orders already at IBKR, stop the gateway or use IBKR's own app.
+The kill switch stops new orders from this program only. To cancel orders
+already at IBKR, cancel them in IBKR's own app. Stopping the Gateway is not a
+cancel: it only delays an order the engine has released, which goes out once
+the Gateway is back the same day.
 
 ## What backs this
 

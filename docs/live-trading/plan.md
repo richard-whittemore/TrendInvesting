@@ -500,7 +500,9 @@ Lightsail VM (Ubuntu, $12/month, US East)
   2026-10-15 and 2026-10-16 amendments) still goes, so leverage is never
   kept because the switch is on. Routine sells, the IRAs' included, stop
   (owner decision 2026-10-16). A full stop remains outside the program:
-  stopping the gateway, or IBKR's own app.
+  cancel orders already at the broker in IBKR's own app. (Note, 2026-10-18:
+  stopping the gateway is not a cancel; it only delays a released order,
+  which goes out once the gateway is back the same day.)
 - **Modes**: dry-run (decide and journal, send nothing) → IBKR paper →
   live, set per account in configuration.
 

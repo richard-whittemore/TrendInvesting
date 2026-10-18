@@ -155,12 +155,15 @@ inbox"):
   kill switch on the server.** The operator tool, and with it
   `operator kill-switch`, will be there once the pending change that
   installs it is merged; until then, to stop the program trading, stop the
-  engine (`sudo systemctl stop ti-engine@<account>`) and the adapter, and
-  cancel anything already at IBKR by calling IBKR or using IBKR's own app.
+  engine (`sudo systemctl stop ti-engine@<account>`). No adapter runs on the
+  server yet, so stopping the engine is the whole step today. Once the
+  adapter exists, it is also stopped, and an order that must not go is
+  settled `--never-sent` with the relay's `resolve` command, run on the
+  adapter's machine (the first-paper-order runbook shows it). Cancel anything already at
+  IBKR in IBKR's own app.
   Do not treat stopping the Gateway (`sudo systemctl stop ti-gateway`) as a
   kill switch: it only delays. An order the engine has released waits in the
-  adapter and goes out once the Gateway is back the same day (settle it
-  `--never-sent` if it must not go), and an order already at IBKR keeps
+  adapter and goes out once the Gateway is back the same day, and an order already at IBKR keeps
   working until you cancel it in IBKR's app.
 
 ## What can go wrong, and what happens then
