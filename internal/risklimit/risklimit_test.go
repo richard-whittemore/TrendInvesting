@@ -501,7 +501,6 @@ func TestRestoreState(t *testing.T) {
 		"risk limit at v1": {"engine-state:joint:x", halted, event.EngineStateSchemaVersion},
 		"no envelope id":   {"", halted, event.EngineStateScopedVersion},
 		"order scope":      {"engine-state:joint:x", event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeOrderIDs: []string{"tw-1"}}, event.EngineStateScopedVersion},
-		"cash scope":       {"engine-state:joint:x", event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeCashComponents: []string{"USD"}}, event.EngineStateScopedVersion},
 	} {
 		n := gate(t, limits(), event.TradingModeDryRun)
 		if err := n.RestoreState(bad.id, bad.p, bad.version); err == nil {
@@ -554,20 +553,20 @@ func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
 // is refused, leaving the gate as it was.
 func TestAnApprovedIncidentRestoresItsState(t *testing.T) {
 	degraded := gate(t, limits(), event.TradingModeDryRun)
-	if err := degraded.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, []string{"SPY"}); err != nil {
+	if err := degraded.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, []string{"SPY"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if degraded.State() != risklimit.StateDegraded {
 		t.Errorf("an approved Degraded incident leaves the gate %s", degraded.State())
 	}
 	halted := gate(t, limits(), event.TradingModeDryRun)
-	if err := halted.RestoreIncidentState("engine-state:joint:1", event.EngineStateHalted, nil); err != nil {
+	if err := halted.RestoreIncidentState("engine-state:joint:1", event.EngineStateHalted, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if halted.State() != risklimit.StateHalted {
 		t.Errorf("an approved Halted incident leaves the gate %s", halted.State())
 	}
-	if err := halted.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, []string{"SPY"}); err == nil || halted.State() != risklimit.StateHalted {
+	if err := halted.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, []string{"SPY"}, nil); err == nil || halted.State() != risklimit.StateHalted {
 		t.Errorf("a Degraded incident loosened a Halted gate: %v, %s", err, halted.State())
 	}
 	for name, c := range map[string]struct {
@@ -579,7 +578,7 @@ func TestAnApprovedIncidentRestoresItsState(t *testing.T) {
 		"halted with a scope":    {event.EngineStateHalted, []string{"SPY"}},
 	} {
 		n := gate(t, limits(), event.TradingModeDryRun)
-		if err := n.RestoreIncidentState("engine-state:joint:1", c.state, c.scope); err == nil {
+		if err := n.RestoreIncidentState("engine-state:joint:1", c.state, c.scope, nil); err == nil {
 			t.Errorf("%s: restored", name)
 		}
 		if n.State() != risklimit.StateNormal {

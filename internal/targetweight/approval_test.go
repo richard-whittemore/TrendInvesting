@@ -40,7 +40,8 @@ func TestAnApprovedFreshRunStartsFromTheApprovedLatch(t *testing.T) {
 func TestApprovalInputRules(t *testing.T) {
 	at := sessionEnd(0)
 	h, s := configured(t)
-	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 2, "x", at, approval(false)), "schema version")
+	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 1, "x", at, approval(false)), "schema version")
+	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 3, "x", at, approval(false)), "schema version")
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "x", at, event.OperatorRunApprovedPayload{}), "invalid")
 	other := approval(false)
 	other.AccountID = "ira"
@@ -119,13 +120,14 @@ func TestAFreshRunNeverAttemptsAnIncidentsSaleTwice(t *testing.T) {
 // market input: "a crash or restart while Degraded or Halted resumes in that
 // same state and scope", and leaving either is never automatic (ADR 0019,
 // amended 2026-09-24, "The state survives a restart"; ADR 0026, point 5).
-// Degraded on SPY or Halted, the first session's buy is refused, never
-// released.
+// Degraded on SPY, Degraded on cash alone, or Halted, the first session's
+// buy is refused, never released.
 func TestAFreshRunContinuesTheIncidentsRestrictions(t *testing.T) {
 	at := sessionEnd(0)
 	for name, in := range map[string]event.IncidentInForce{
-		"degraded on SPY": {IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: []string{"SPY"}, SaleAttempted: new(false)},
-		"halted":          {IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(false)},
+		"degraded on SPY":  {IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: []string{"SPY"}, SaleAttempted: new(false)},
+		"halted":           {IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(false)},
+		"degraded on cash": {IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeCashComponents: []string{event.ReconciliationComponentCash}, SaleAttempted: new(false)},
 	} {
 		h, s := configured(t)
 		p := approval(false)

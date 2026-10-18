@@ -141,6 +141,12 @@ var notYetCrossed = map[string]string{
 	"market.close.history":     "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
 	"market.session.retracted": "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
 	"strategy.order.skipped":   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	// ADR 0019's reconciliation belongs to the live path too: the IBKR
+	// adapter records the observation, the target-weight engines classify
+	// it, and the owner's acknowledgement is an operator input.
+	"account.reconciliation":      "sent by the IBKR adapter (ADR 0025), never by LEAN",
+	"risk.reconciliation.result":  "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"operator.alert.acknowledged": "recorded by the target-weight engine's composition root from the operator, never by LEAN",
 }
 
 func main() {

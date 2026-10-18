@@ -53,6 +53,7 @@ func marshalPayloads() []validatedPayload {
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
 		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
 		validAdjustedBar(), validCloseHistory(), validSessionRetracted(),
+		validReconciliation(), validReconciliationResult(), validAlertAcknowledged(),
 	}
 }
 
