@@ -80,7 +80,7 @@ import re
 from collections import namedtuple
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 
-from relay import (ENVELOPE_VERSION, PAYLOAD_HASH, TIME, ResolveRefused, _committed_groups, _is_count, _is_text,
+from relay import (ENVELOPE_VERSION, LOG_INPUT, PAYLOAD_HASH, RUN_APPROVED, TIME, ResolveRefused, _committed_groups, _is_count, _is_text,
                    _is_time, head_identity, read_engine_log, run_identity)
 from snapshot import BROKER_SNAPSHOT_TYPE
 
@@ -405,15 +405,20 @@ def stream_run(streams, engine_log_path):
       edited after the engine wrote it is refused. The log is read once the
       engine listens, so a resume's copy is then whole.
 
-    With no folder of the run, the run's own name is returned (check then
-    refuses: its warm-up is not written).
+    With no folder of the run, a log holding no history beyond its
+    configuration and approval is a fresh run's before its warm-up, and its
+    own name is returned (check then refuses: its warm-up is not written); a
+    log already holding more committed inputs than a fresh run's holds copied
+    history, so it is a crash resume whose first run's log is missing, and it
+    is refused with that case named, never sent to a warm-up
+    (_own_or_resume).
     """
     own = run_name(engine_log_path)
     logs = os.path.dirname(os.path.abspath(engine_log_path))
     candidates = [n for n in (sorted(os.listdir(streams)) if os.path.isdir(streams) else [])
                   if os.path.isdir(os.path.join(streams, n)) and os.path.isfile(os.path.join(logs, n + ".log"))]
     if not candidates:
-        return own
+        return _own_or_resume(streams, logs, engine_log_path, own)
     try:
         mine = _committed_groups(engine_log_path)
         identity = run_identity(engine_log_path)
@@ -459,8 +464,10 @@ def stream_run(streams, engine_log_path):
             "and no warm-up is to be run for this run's name. If this run is a crash resume, restore its first "
             "run's log from the backup as the engine wrote it; if a log is an old run's, once its run has ended, {}".format(
                 engine_log_path, ", ".join(os.path.join(streams, n) for n in skipped), move_aside(streams, logs)))
-    if not found or found == [own]:
+    if found == [own]:
         return own
+    if not found:
+        return _own_or_resume(streams, logs, engine_log_path, own)
     earlier = chains[found[0]]
     broken = [(path, chain.chain_break) for path, chain in ((os.path.join(logs, found[0] + ".log"), earlier),
                                                             (engine_log_path, mine))
@@ -488,6 +495,39 @@ def move_aside(streams, logs):
     return ("move the folder out of {} and its log out of the engine's log folder {}, "
             "keeping both as evidence in a folder outside both (docs/manual/market-data.md, \"A crash "
             "resume\")".format(streams, logs))
+
+
+def _own_or_resume(streams, logs, engine_log_path, own):
+    """own for a log of a fresh run; StreamRefused for a log that holds history, no folder being found.
+
+    A fresh run's log holds its configuration and its Run approval, if any; a
+    log whose committed inputs extend beyond them holds copied history a
+    fresh run's cannot (ADR 0027), so it is a crash resume whose first run's
+    log is not in the engine's log folder, and a warm-up under its new name
+    would make the second folder the manual forbids.
+    """
+    try:
+        groups = _committed_groups(engine_log_path).groups
+    except ResolveRefused as err:
+        raise StreamRefused("the run's stream folder is found by the run's identity, from its durable log, and "
+                            "that log cannot be read: {}".format(err)) from None
+    inputs = [g[0] for g in groups if g[0][1] == LOG_INPUT]
+    approved = any(i[2]["type"] == RUN_APPROVED for i in inputs)
+    history = len(inputs) - 1 - (1 if approved else 0)
+    if history <= 0:
+        return own
+    unmatched = sorted(n for n in (os.listdir(streams) if os.path.isdir(streams) else [])
+                       if n != own and os.path.isdir(os.path.join(streams, n))
+                       and not os.path.isfile(os.path.join(logs, n + ".log")))
+    hint = ""
+    if unmatched:
+        hint = " The stream folder {} has no log beside it: it is likely the first run's.".format(
+            ", ".join(os.path.join(streams, n) for n in unmatched))
+    raise StreamRefused(
+        "the log {} already holds {} committed inputs beyond its configuration; if it is a crash resume of an "
+        "earlier run, restore that run's log beside it and start again; do not run a warm-up under this name "
+        "(a second stream folder splits one run's stream).{} (docs/manual/market-data.md, \"A crash "
+        "resume\")".format(engine_log_path, history, hint))
 
 
 def no_whole_copy(engine_log, earlier, folder, why):

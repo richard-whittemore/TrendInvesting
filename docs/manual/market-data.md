@@ -430,15 +430,22 @@ number of resumes:
 
 Keep the first run's log (`<first TI_RUN>.log`) in the engine's folder
 while its resumes run: the folder is matched to the run through it. If it
-is missing, both stop as for a run with no warm-up ("No warm-up yet",
-below); restore the log from the backup rather than running a warm-up for
-the new name. While the first log is there, a warm-up run for the resumed
-`TI_RUN` makes no second folder: it writes the next day into the first
-run's folder like any day. Run while the first log was missing, it makes a
-folder named after the resumed `TI_RUN`; once the first log is back, the
-data job and the adapter both stop, naming both folders ("more than one
-stream folder"), as they do for any two folders of one run, the one named
-after the running `TI_RUN` included. Move the one you made out of
+is missing, both stop, and say so from the resumed log itself: a log that
+already holds committed inputs beyond its configuration (and approval)
+holds copied history, which a fresh run's log cannot, so the message says
+"this log already holds N committed inputs", that if it is a crash resume
+of an earlier run you restore that run's log beside it and start again, and
+that you do not run a warm-up under this name; if a stream folder with no
+log beside it exists, the message names it as the likely first run's.
+Restore the log from the backup rather than running a warm-up for the new
+name. A fresh run's log holds nothing but its configuration and approval,
+and only that gets the "No warm-up yet" instruction (below). While the
+first log is there, a warm-up run for the resumed `TI_RUN` makes no second
+folder: it writes the next day into the first run's folder like any day. If
+a folder named after the resumed `TI_RUN` exists anyway, once the first log
+is back the data job and the adapter both stop, naming both folders ("more
+than one stream folder"), as they do for any two folders of one run, the
+one named after the running `TI_RUN` included. Move the one you made out of
 `streams/boost/` (keep it, it is evidence) and start them again. A fresh run
 after an earlier one (with your approval) is a new run with its own
 identity: it never takes the earlier run's folder, and needs its own
@@ -529,7 +536,17 @@ carries on from them.
 - **The session has not settled**: only when a session is named with
   `--session` before its close plus an hour.
 - **No warm-up yet** for the engine's run: the message gives the warm-up
-  command's date.
+  command's date. It is given only to a fresh run, whose log holds nothing
+  but its configuration and approval; a log that already holds more
+  committed inputs is a crash resume whose first log is missing, and the
+  message says to restore that log instead (next but one, below).
+- **A log that already holds committed inputs, with no stream folder of its
+  run** (a crash resume whose first run's log is missing from the engine's
+  folder: "A crash resume", above): the data job and the adapter refuse,
+  naming the log and its committed inputs, and the stream folder with no
+  log beside it as the likely first run's. Restore the first run's log
+  from the backup, unchanged, and start again; do not run a warm-up under
+  the new name.
 - **The engine has not been started yet** (no `run.env`: the unit fails
   before the job runs, naming the file), or **its durable log cannot be
   read**, or its first input is not a Boost configuration.

@@ -407,7 +407,11 @@ def stream_run(engine_streams, engine_log, log, warn=None):
     run.env, with no approval, repeats that record hash for hash: it is a
     fresh run, never handed the first run's folder without its own warm-up,
     ADR 0027). With no folder of the run, the run's own name is returned (a
-    fresh run before its warm-up)."""
+    fresh run before its warm-up) when the log holds no committed input
+    beyond its configuration and approval; a log that does holds copied
+    history a fresh run's cannot, so it is a crash resume whose first run's
+    log is missing, and it is refused with that case named, never sent to a
+    warm-up (_own_or_resume)."""
     if warn is None:
         def warn(text):
             print("ti-data warning: " + text, file=sys.stderr)
@@ -452,8 +456,10 @@ def stream_run(engine_streams, engine_log, log, warn=None):
             "run's log from the backup as the engine wrote it; if a log is an old run's, once its run has ended, {}".format(
                 engine_log, ", ".join(os.path.join(engine_streams, n) for n in skipped),
                 _move_aside(engine_streams, logs)))
-    if not found or found == [log.run_id]:
+    if found == [log.run_id]:
         return log.run_id
+    if not found:
+        return _own_or_resume(engine_streams, logs, engine_log, log)
     earlier = chains[found[0]]
     broken = [(path, chain.chain_break) for path, chain in ((os.path.join(logs, found[0] + ".log"), earlier),
                                                             (engine_log, log))
@@ -482,6 +488,32 @@ def stream_run(engine_streams, engine_log, log, warn=None):
         "while the engine is still copying, run this again once it listens) (docs/manual/market-data.md, \"A "
         "crash resume\")".format(engine_log, os.path.join(logs, found[0] + ".log"), why,
                                  os.path.join(engine_streams, found[0])))
+
+
+def _own_or_resume(engine_streams, logs, engine_log, log):
+    """The run's own name for a log of a fresh run; Refused for a log that holds history, no folder being found.
+
+    The adapter's rule is the same (adapter/ibkr/delivery.py,
+    _own_or_resume): a log whose committed inputs extend beyond its
+    configuration and Run approval holds copied history, so it is a crash
+    resume whose first run's log is not in the engine's log folder, and a
+    warm-up under its new name would make a second folder."""
+    approved = not log.identity.startswith(log.inputs[0] + "@") if log.inputs else False
+    history = len(log.inputs) - 1 - (1 if approved else 0)
+    if history <= 0:
+        return log.run_id
+    unmatched = sorted(n for n in (os.listdir(engine_streams) if os.path.isdir(engine_streams) else [])
+                       if n != log.run_id and os.path.isdir(os.path.join(engine_streams, n))
+                       and not os.path.isfile(os.path.join(logs, n + ".log")))
+    hint = ""
+    if unmatched:
+        hint = " The stream folder {} has no log beside it: it is likely the first run's.".format(
+            ", ".join(os.path.join(engine_streams, n) for n in unmatched))
+    raise Refused(
+        "the log {} already holds {} committed inputs beyond its configuration; if it is a crash resume of an "
+        "earlier run, restore that run's log beside it and start again; do not run a warm-up under this name (a "
+        "second stream folder splits one run's stream).{} (docs/manual/market-data.md, \"A crash "
+        "resume\")".format(engine_log, history, hint))
 
 
 def _move_aside(engine_streams, logs):

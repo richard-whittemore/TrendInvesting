@@ -1490,6 +1490,57 @@ class StreamFolderRuleTests(unittest.TestCase):
             self.assertIn(str(self.streams / "run-a"), refusal)
             self.assertIn("cannot be matched to any run", refusal)
 
+    def test_a_resume_whose_first_log_is_missing_is_told_it_is_a_resume_never_to_run_a_warm_up(self):
+        from delivery import Deliverer, stream_run
+        from marketdata import tidata
+        first = self.first_run(approved=True)
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        commit(resumed, "input-c")
+        os.remove(first.path)
+        log = str(resumed.path)
+        with self.assertRaises(StreamRefused) as adapter:
+            stream_run(str(self.streams), log)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log))
+        for refusal in (str(adapter.exception), str(data.exception)):
+            self.assertIn("crash resume of an earlier run", refusal)
+            self.assertIn("restore that run's log beside it", refusal)
+            self.assertIn("committed inputs", refusal)
+            self.assertIn(str(self.streams / "run-a"), refusal)
+            self.assertIn("do not run a warm-up under this name", refusal)
+            self.assertNotIn("Run it once", refusal)
+        check = Deliverer(str(self.streams), str(self.root / "record.json"), None, log, None, None)
+        with self.assertRaises(StreamRefused) as checked:
+            check.check()
+        self.assertNotIn("Run it once", str(checked.exception))
+
+    def test_a_resume_with_no_folder_of_any_run_and_no_first_log_still_gets_the_resume_message(self):
+        from delivery import stream_run
+        from marketdata import tidata
+        first = self.engine("run-a")
+        commit(first, "input-a")
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        os.remove(first.path)
+        log = str(resumed.path)
+        with self.assertRaises(StreamRefused) as adapter:
+            stream_run(str(self.streams), log)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log))
+        for refusal in (str(adapter.exception), str(data.exception)):
+            self.assertIn("crash resume of an earlier run", refusal)
+            self.assertNotIn("Run it once", refusal)
+
+    def test_a_true_fresh_run_with_no_folder_is_still_told_to_run_the_warm_up(self):
+        from delivery import Deliverer
+        self.first_run()
+        fresh = self.engine("run-b")
+        approve(fresh, str(self.root / "run-a.log"))
+        self.assertEqual(self.found(fresh), ("run-b", "run-b"))
+        check = Deliverer(str(self.streams), str(self.root / "record.json"), None, str(fresh.path), None, None)
+        with self.assertRaises(StreamRefused) as checked:
+            check.check()
+        self.assertIn("Run it once", str(checked.exception))
+
     def test_a_skipped_logs_remedy_names_the_engines_log_folder_not_the_streams(self):
         from delivery import stream_run
         from marketdata import tidata
