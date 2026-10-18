@@ -91,6 +91,28 @@ class ConfigTests(unittest.TestCase):
                 config(**bad)
             self.assertIn("DU", str(caught.exception))
 
+    def test_paper_sending_is_off_unless_the_configuration_switches_it_on(self):
+        # The one switch that lets the real client place an order: absent
+        # means off, and only a strict true on a paper configuration is on.
+        self.assertIs(config().paper_sending_enabled, False)
+        self.assertIs(config(mode="paper").paper_sending_enabled, False)
+        self.assertIs(config(mode="paper", paper_sending_enabled=False).paper_sending_enabled, False)
+        self.assertIs(config(mode="paper", paper_sending_enabled=True).paper_sending_enabled, True)
+        for bad in (1, 0, "true", "yes", None, [True]):
+            with self.subTest(value=bad), self.assertRaises(ConfigError) as caught:
+                config(mode="paper", paper_sending_enabled=bad)
+            self.assertIn("paper_sending_enabled", str(caught.exception))
+        for mode in ("dry-run",):
+            with self.subTest(mode=mode), self.assertRaises(ConfigError) as caught:
+                config(mode=mode, paper_sending_enabled=True)
+            self.assertIn("paper", str(caught.exception))
+        with self.assertRaises(ConfigError):
+            config(mode="live", account_id="U0000001", paper_sending_enabled=True)
+        # The switch survives a round trip through the mapping, as a test
+        # or the command line rebuilds a configuration.
+        values = config(mode="paper", paper_sending_enabled=True)._asdict()
+        self.assertIs(AdapterConfig.from_mapping(values).paper_sending_enabled, True)
+
     def test_timing_values_must_be_finite(self):
         # NaN and infinity both pass a "> 0" test, and either would switch the
         # heartbeat deadline or the connect timeout off.

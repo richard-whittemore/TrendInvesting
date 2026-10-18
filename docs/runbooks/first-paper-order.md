@@ -164,10 +164,10 @@ files never contain it, because the repository is public.
 
 | Where | What | Why |
 | --- | --- | --- |
-| `/etc/trend-investing/secrets.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo -e`; root-only, mode 0600) | your paper account (DU…) | The shipped file holds names only; each engine reads only its own line |
+| `/etc/trend-investing/accounts/boost.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo -e`; root-only, mode 0600) | your paper account (DU…), with no quotes and no spaces | The shipped file holds the name only. It is the only file the Boost adapter is given: no other account's number and no alert URL. Do not put the account in `/etc/trend-investing/secrets.env`: no program reads an `IBKR_ACCOUNT_*` line from that file (the IRA lines there are names kept for later engines), so a number there is used by nothing |
 | The Boost engine's paper configuration, `/etc/trend-investing/engines/boost.config`: a copy of the shipped dry-run file with `"mode": "paper"`, `"account_id"` set to your paper account (DU…), and `"warm_up_start": "2025-01-02"` | the mode, the account and the warm-up start | The engine refuses to start if the mode in this file is not the mode you start it with, or if a paper configuration names an account not beginning `DU`. The file is hashed into the run (ADR 0016), so a change is a new run. `warm_up_start` must lie within Massive's two-year window, or the data job's warm-up cannot fetch the history: the shipped 2024-01-02 is outside it. 2025-01-02 is the recommended value (your choice: any session inside the window with at least 200 sessions before the first paper day); it stays inside the window until 2 January 2027. It changes the paper configuration's hash only (`docs/manual/market-data.md`, "The one-time warm-up") |
 | `/etc/trend-investing/engines/boost.env`: set `TI_MODE=paper` | the engine's start mode | It must equal the mode in the configuration |
-| The adapter's configuration: `mode` paper, `account_id` your paper account (DU…), `host` 127.0.0.1, `port` 4002, the engine's `client_id` (Boost is 11), the timing values and `con_ids` with SPY's IBKR contract number | the adapter's side of the binding | See B2 |
+| The adapter's configuration, `/etc/trend-investing/adapters/boost.json`: `"mode": "paper"`, `"paper_sending_enabled": true`, `host` 127.0.0.1, `port` 4002, the engine's `client_id` (Boost is 11), the timing values and `con_ids` with SPY's IBKR contract number. No `account_id`: the account comes from `accounts/boost.env` only, and naming it in both places is refused | the adapter's side of the binding | See B2 |
 
 Two cautions:
 
@@ -210,9 +210,12 @@ amended). It is its own step and is not part of `all`, so a change at IBKR
 never blocks the Gateway or the services. The file is not stored in the
 repository (IBKR's licence terms) and the step only fetches and verifies it.
 
-**Installing `ibapi` into the adapter's environment [AFTER SECOND HALF]**:
-the second half adds that step and its command. Until then the real client
-cannot connect.
+**Installing `ibapi` into the adapter's environment [NOW]**: the same
+`provision.sh twsapi` step installs the verified build's Python client into
+the adapter's own environment and records it; then install the adapter's
+code and pin file with `sudo deploy/provision.sh adapter` from the same
+checkout ([paper trading](../manual/paper-trading.md), "Starting the
+adapter").
 
 ### B2. The configuration binds paper mode to the DU account [NOW]
 
@@ -268,20 +271,25 @@ Order of starting, each on the server, each an explicit step of yours:
    section of `docs/runbooks/durable-log.md` says: a new `TI_RUN`, a
    `TI_AS_OF`, and an empty `TI_RESTART_ARGS` for a first run. A log is never
    reused.
-4. Start the adapter, then the engine: `sudo systemctl start ti-engine@boost`.
+4. Start the engine, then the adapter: `sudo systemctl start ti-engine@boost`,
+   then, once the engine's log (`journalctl -u ti-engine@boost`) shows its
+   start, `sudo systemctl start ti-adapter-boost`. The adapter refuses to
+   start until the engine's socket is open and its durable log exists; for a
+   fresh run the engine records the Run approval before it opens its socket.
    For a run's first paper day, run the data job's one-time warm-up once the
    engine has started, before the adapter delivers anything
    (`docs/manual/market-data.md`, "The daily data job"); from then on the
    timer writes each day's file at 17:05.
-   Engines are never started by systemd on their own and never restarted by
-   it; every start is yours.
+   Neither is started or restarted by systemd on its own; every start is
+   yours.
 5. Confirm the engine's log begins with the paper configuration, and that the
-   adapter says it connected on 4002, and matched IBKR's open orders, trades
-   and balances ("reconciled") before anything else. The adapter does this on
+   adapter says it connected on 4002, read the account's balances in full
+   and matched IBKR's open orders and today's trades to the orders the
+   engine released ("[reconciled](../manual/glossary.md)", the adapter's matching) before anything else. The adapter does this on
    every start and reconnect (ADR 0025 point 5).
 
-The adapter's startup command and service unit are added by the second half;
-this document does not guess them.
+The adapter's startup command, its options and its service unit are in
+[paper trading](../manual/paper-trading.md), "Starting the adapter".
 
 ### B5. What the first order is [AFTER SECOND HALF]
 
@@ -312,7 +320,7 @@ One order, from the Boost engine on the paper account:
 | The engine's durable log (`-log`, in `/var/lib/trend-investing/engines/boost/`) | the order released with `mode: paper` and `send: true`; then each report IBKR sent, as the engine read it |
 | IBKR's reports, as records | an order-lifecycle record each time the order's state changes (working, cancelling, cancelled or refused, with IBKR's reason), and one fill record for each execution, with shares, price, IBKR's commission and IBKR's time. A fill is recorded only once IBKR's commission report arrives |
 | The adapter's own files beside its pending file (the file's name followed by a suffix) | `.handover` (the "about to send" and "sent" marks), `.handover.decisions` (every decision you make with `relay.py resolve`), `.refused` (an order the sender refused and why), `.corrections` and `.late-fills` (your acknowledgements) |
-| The adapter's held-reports file, beside the journal | a cancellation or refusal waiting for a fill's commission before it is recorded. Its name is set when the adapter's main loop is built |
+| The adapter's held-reports file, `PENDING_FILE.held` (the pending file's name followed by `.held`; on the server `/var/lib/trend-investing/adapters/boost/pending.json.held`) | a cancellation or refusal waiting for a fill's commission before it is recorded |
 
 You never edit any of these files by hand. The adapter reads them strictly
 and stops on a value it does not know.
@@ -321,8 +329,9 @@ and stops on a value it does not know.
 
 The rule is in the manual (`docs/manual/paper-trading.md`) and in
 `docs/manual/redelivery.md`: on every reconnect the adapter reconnects with
-the same client ID and matches IBKR's open orders, trades and balances to its
-own records **before** anything else is sent. An order already marked "sent",
+the same client ID, reads the account's balances in full and matches IBKR's
+open orders and today's trades to its own records **before** anything else is
+sent. An order already marked "sent",
 or one IBKR shows as open or executed, is never sent again. The code's tests
 (`adapter/ibkr/tests/test_paper.py`, against the fake) include a reconnect
 that never resends and a crash between the send and its mark that never
@@ -553,6 +562,59 @@ commands below are on `main` now **[NOW]**.
   account out of Normal.
 - **What to do:** `docs/runbooks/halted-account.md` and
   `docs/runbooks/reconciliation.md`.
+
+### D12. The engine refuses to start
+
+- **What you will see:** `sudo systemctl start ti-engine@boost` fails, and
+  `journalctl -u ti-engine@boost -n 20` shows the reason. Nothing was
+  decided or sent.
+- **What it means and what to do**, by the reason it gives:
+  - **An unstamped build** ("refuses an unstamped build"): the binary was
+    built without its version. Build it again from a clean checkout with
+    `deploy/build-engine.sh` (or `make engine` on the Mac) and install it
+    (`docs/runbooks/lightsail-deployment.md`).
+  - **The mode does not match**: `TI_MODE` in `engines/boost.env` is not
+    the `"mode"` in `engines/boost.config` (A5). Make both say `paper`. If
+    you change the configuration, that is a new run.
+  - **No `run.env`**: systemd cannot load
+    `/var/lib/trend-investing/engines/boost/run.env`. Create it from
+    `deploy/etc/engines/run.env.example` (B4), with `TI_RUN`, `TI_AS_OF` and,
+    for a first run, an empty `TI_RESTART_ARGS`.
+  - **A repeated start** (the `TI_AS_OF` and configuration an earlier log in
+    the folder already opens with): pick a new `TI_AS_OF`, or, if the latest
+    log holds nothing past its configuration, resume that log instead
+    (`docs/runbooks/durable-log.md`, "Restarting an engine").
+  - **Any other reason** (a paper configuration naming an account not
+    beginning `DU`, a fresh run without your approval, a resume naming a log
+    that is not the latest): `docs/manual/engine.md` and
+    `docs/manual/restart.md` list each one and what it needs.
+
+### D13. The data job's warm-up fails
+
+- **What you will see:** the warm-up command (`docs/manual/market-data.md`,
+  "The one-time warm-up") prints `ti-data refused:` and a reason, and exits
+  1. No file is written, so the engine reads nothing half-made, and every
+  recording already fetched is kept: running the same command again fetches
+  only what is missing.
+- **What to do**, by the reason it gives: an empty `MASSIVE_API_KEY=` line
+  (A6); a date that is not the configuration's `warm_up_start` (use that
+  date exactly); a history shorter than the indicators need, or a
+  `warm_up_start` outside Massive's two-year window (set a later
+  `warm_up_start` in your paper configuration, A5: a new configuration, so a
+  new run); the engine not started yet, or its log not readable (start the
+  engine once first, B4). The full list is "What can go wrong" in
+  `docs/manual/market-data.md`. Do not start paper trading until the warm-up
+  has written the run's first file.
+
+### D14. The dry-run month is not done yet
+
+- **What you will see:** nothing stops you: the program does not check the
+  plan's gates.
+- **What it means:** this runbook starts the plan's Phase 4 (IBKR paper
+  trading). Phase 3's gate comes first: a clean dry-run month for Boost on
+  Lightsail (`docs/live-trading/plan.md` section 9).
+- **What to do:** finish that month before the first paper order. The
+  **[NOW]** steps in part A that only set up IBKR can be done earlier.
 
 ## The rules and their sources
 

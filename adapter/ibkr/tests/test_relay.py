@@ -9,6 +9,7 @@ applies the input twice. The adapter sends each released order once.
 import copy
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -24,8 +25,8 @@ if tests_dir not in sys.path:
 from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
-                   acknowledge_correction, acknowledge_late_fill, journalled_fills, journalled_reports, main,
-                   resolve)
+                   acknowledge_correction, acknowledge_late_fill, earlier_run, journalled_fills, journalled_reports,
+                   main, resolve, resolve_run_ended, run_identity, run_logs)
 from sender import OrderRequest
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -109,6 +110,16 @@ class CrashingSender:
             raise ConnectionError("adapter stopped after handing over {}".format(request.client_order_id))
 
 
+class NotHandedOver(HandoverUnconfirmed):
+    """A send that knows nothing reached the broker, as the real client's socket closed before placeOrder."""
+
+    handed_over = False
+
+    def __init__(self, client_order_id):
+        Exception.__init__(self, "socket closed before placeOrder: {}".format(client_order_id))
+        self.client_order_id = client_order_id
+
+
 class Sending:
     """A sender as the relay takes one: check refuses what send would, before any mark; send hands it over."""
 
@@ -139,6 +150,8 @@ LOG_CHAIN = ("seed=sha256(canonical_log_header_bytes); "
              "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
 LOG_CONFIGURATION = "sha256:" + "0" * 64
 LOG_STRATEGY = "target-weight-ira/1.0.0+test"
+# The session the run-chain tests are read against (New York date).
+TODAY = date(2026, 10, 17)
 
 
 def log_header():
@@ -151,7 +164,7 @@ def fill_payload(fill_id, account_id="DU1234567"):
             "side": "buy", "quantity": 4, "price": 401.25, "commission": 1.0, "filled_at": "2026-10-17T13:30:01Z"}
 
 
-def log_group(sequence, entries, committed=True):
+def log_group(sequence, entries, committed=True, at="2026-10-17T13:30:00Z"):
     """One group of the engine's durable log from sequence on: (kind, type, schema version, payload) lines, then its commit.
 
     The record hashes are stand-ins: the relay reads the log's shape and each
@@ -162,8 +175,8 @@ def log_group(sequence, entries, committed=True):
     for n, (kind, event_type, schema_version, payload) in enumerate(entries, sequence):
         raw = json.dumps(payload, separators=(",", ":"))
         envelope = json.dumps({"id": "e:{}".format(n), "type": event_type, "envelope_version": 1,
-                               "schema_version": schema_version, "event_time": "2026-10-17T13:30:00Z",
-                               "recorded_at": "2026-10-17T13:30:00Z", "sequence": n, "source": "ibkr-adapter",
+                               "schema_version": schema_version, "event_time": at,
+                               "recorded_at": at, "sequence": n, "source": "ibkr-adapter",
                                "strategy_version": LOG_STRATEGY, "configuration_hash": LOG_CONFIGURATION,
                                "payload_hash": hashlib.sha256(raw.encode()).hexdigest()}, separators=(",", ":"))
         record_hash = "sha256:" + hashlib.sha256("record {}".format(n).encode()).hexdigest()
@@ -937,6 +950,91 @@ class RelayTests(unittest.TestCase):
                               today=date(2026, 10, 16)), 0)
         self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"})
 
+    def stopped_not_handed_over(self, log, decisions):
+        """The sender's send says nothing reached the broker (IB Gateway's socket closed before placeOrder)."""
+        def closed_before(request):
+            raise NotHandedOver(request.client_order_id)
+
+        stopped = self.relay(Restarts(log, decisions), send=closed_before)
+        with self.assertRaises(HandoverUnconfirmed):
+            stopped.exchange(envelope(0))
+        stopped.close()
+
+    def test_a_send_that_says_nothing_was_handed_over_is_recorded_beside_its_mark(self):
+        log, decisions = {}, {"session:0": [released("tw-1")]}
+        self.stopped_not_handed_over(log, decisions)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        self.assertEqual(self.pending.not_handed_over(), {"client_order_id": "tw-1", "input_id": "session:0",
+                                                          "reason": "socket closed before placeOrder: tw-1"})
+
+    def test_a_send_that_cannot_say_whether_it_handed_over_records_nothing_and_clears_an_earlier_record(self):
+        # An earlier attempt's "before" stays true only until the order is
+        # handed over again: a later attempt that may have reached IBKR must
+        # not leave it behind for resolve to read.
+        log, decisions = {}, {"session:0": [released("tw-1")]}
+        self.stopped_not_handed_over(log, decisions)
+        self.pending.mark("tw-1", "resend:2026-10-16")
+
+        def closed_during(request):
+            raise HandoverUnconfirmed(request.client_order_id)
+
+        during = self.relay(Restarts(log, decisions), send=closed_during)
+        with self.assertRaises(HandoverUnconfirmed):
+            during.exchange(envelope(0))
+        during.close()
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        self.assertIsNone(self.pending.not_handed_over())
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=date(2026, 10, 17))
+
+    def test_an_order_not_handed_over_is_settled_on_a_later_day_and_the_relay_goes_on(self):
+        log, decisions = {}, {"session:0": [released("tw-1")]}
+        self.stopped_not_handed_over(log, decisions)
+        later = date(2026, 10, 17)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "resend", "a day late", today=later)
+        self.assertEqual(main(["resolve", self.pending.path, "tw-1", "--not-handed-over", "--reason",
+                               "IBKR's order history shows no order tagged tw-1"], today=later), 0)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"})
+        [recorded] = self.pending.decisions()
+        self.assertEqual((recorded["decision"], recorded["session_date"]), ("not-handed-over", "2026-10-17"))
+        goes_on = self.relay(Restarts(log, decisions), today=later)
+        goes_on.exchange(envelope(1))
+        goes_on.close()
+        self.assertEqual(self.sent, [], "an order never handed over is not sent")
+        self.assertIsNone(self.pending.load())
+        self.assertIsNone(self.pending.not_handed_over(), "the record goes with its input")
+
+    def test_not_handed_over_is_refused_without_the_relays_record_for_that_order_and_input(self):
+        today = date(2026, 10, 17)
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "not-handed-over", "nothing is pending", today=today)
+        decisions = {"session:0": [released("tw-1")]}
+        # Stopped mid-send: it may be at IBKR, and the relay recorded nothing.
+        self.stopped_mid_send(envelope(0), decisions)
+        with self.assertRaises(ResolveRefused) as raised:
+            resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=today)
+        self.assertIn("--sent", str(raised.exception))
+        # Only an order marked about to be sent can have been not handed over.
+        with self.assertRaises(ResolveRefused) as raised:
+            resolve(self.pending, "tw-9", "not-handed-over", "a typo", today=today)
+        self.assertIn("'handing-over'", str(raised.exception))
+        for entry in ({"input_id": "session:9", "client_order_id": "tw-1", "reason": "before"},
+                      {"input_id": "session:0", "client_order_id": "tw-2", "reason": "before"}):
+            with self.subTest(entry=entry):
+                with open(self.pending.not_handed_over_path, "w", encoding="utf-8") as f:
+                    json.dump(entry, f)
+                with self.assertRaises(ResolveRefused):
+                    resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=today)
+        for bad in ("{not json", "[]", json.dumps({"input_id": "session:0", "client_order_id": "tw-1"})):
+            with self.subTest(bad=bad):
+                with open(self.pending.not_handed_over_path, "w", encoding="utf-8") as f:
+                    f.write(bad)
+                with self.assertRaises(HandoverRecordInvalid):
+                    resolve(self.pending, "tw-1", "not-handed-over", "IBKR shows nothing", today=today)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        self.assertEqual(self.pending.decisions(), [])
+
     def test_a_sender_without_a_check_is_refused_before_anything_is_held(self):
         # The relay itself asks the sender's check before every mark, so a
         # sender that offers none is refused rather than trusted.
@@ -1197,6 +1295,409 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(main(["resolve", path, "tw-1", "--sent", "--reason", "IBKR shows it filled"],
                               today=date(2026, 10, 16)), 0)
         self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+
+
+class RunLogsTests(unittest.TestCase):
+    """The chain of runs a fresh run's Run approvals name, read strictly."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def write(self, name, previous=(), at="2026-10-17T13:30:00Z", final_hash=None):
+        """A run's log: one Run approval per name in previous, each with that log's final record hash, else one input."""
+        lines = [log_header()]
+        lines += log_group(1, [("input", "operator.run.approved", 2, {
+            "previous_log": p, "previous_log_final_hash": final_hash or self.final_hash(p)}) for p in previous]
+                           or [("input", "market.session.closed", 1, {"session": "2026-10-16"})], at=at)
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def final_hash(self, name):
+        """The record hash of the last commit in the log called name, or a stand-in for one not written."""
+        path = Path(self.dir.name) / str(name)
+        if not isinstance(name, str) or not name or not path.is_file():
+            return "sha256:" + "2" * 64
+        commits = [json.loads(line)["commit"] for line in path.read_text(encoding="utf-8").splitlines()
+                   if line.startswith('{"commit"')]
+        return commits[-1]["record_hash"] if commits else "sha256:" + "2" * 64
+
+    def test_the_chain_runs_from_the_newest_run_back_to_the_first(self):
+        first = self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        third = self.write("c.log", ["b.log"])
+        self.assertEqual(run_logs(third, today=TODAY), [third, second, first])
+        self.assertEqual(run_logs(first, today=TODAY), [first])
+
+    def test_the_chain_stops_at_a_run_that_ended_before_yesterdays_session(self):
+        # IBKR's lists reach back only to today's session (the day's DAY
+        # orders, executions since midnight), and a DAY order released after
+        # yesterday's close works today, so a run whose last input is of a
+        # New York date before yesterday's session (the weekday before
+        # today) explains nothing in them, and nothing older than it is
+        # read: an archived first run does not stop a start.
+        first = self.write("a.log", at="2026-10-15T15:00:00Z")
+        # 03:30 UTC on the 17th is still Friday the 16th in New York.
+        second = self.write("b.log", ["a.log"], at="2026-10-17T03:30:00Z")
+        third = self.write("c.log", ["b.log"])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 16)), [third, second, first])
+        # Saturday and Monday: yesterday's session is Friday's.
+        self.assertEqual(run_logs(third, today=TODAY), [third, second])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 19)), [third, second])
+        self.assertEqual(run_logs(third, today=date(2026, 10, 20)), [third])
+        # The run the walk stops at is read; the runs before it never are.
+        os.remove(first)
+        self.assertEqual(run_logs(third, today=date(2026, 10, 20)), [third])
+
+    def log(self, name, groups, at):
+        """A run's log of the given groups of (kind, type, schema version, payload), each recorded at at."""
+        lines = [log_header()]
+        n = 1
+        for entries in groups:
+            lines += log_group(n, entries, at=at)
+            n += len(entries)
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def test_a_run_of_yesterdays_session_with_nothing_open_never_hides_an_earlier_one_with_an_order_working(self):
+        # Run a released tw-1 after Friday's close, a DAY order that works
+        # Monday; run b, started the same evening, released nothing; run c
+        # starts on Saturday (a reboot) or Monday. IBKR still shows tw-1, so
+        # a must be read: b of yesterday's session never ends the walk.
+        first = self.log("a.log", [[("input", "market.session.closed", 1, {"session": "2026-10-16"}),
+                                    ("decision", "risk.order.released", 1, {"client_order_id": "tw-1", "quantity": 9,
+                                                                             "send": True})]],
+                         at="2026-10-16T21:00:00Z")
+        second = self.log("b.log", [[("input", "operator.run.approved", 2, {
+            "previous_log": "a.log", "previous_log_final_hash": self.final_hash("a.log")})]],
+            at="2026-10-16T23:00:00Z")
+        third = self.write("c.log", ["b.log"])
+        for today in (TODAY, date(2026, 10, 19)):
+            with self.subTest(today=today.isoformat()):
+                self.assertEqual(run_logs(third, today=today), [third, second, first])
+
+    def test_a_dry_run_engines_synthetic_report_in_an_earlier_log_is_its_decision_never_read_as_an_input(self):
+        # The dry-run engine records a synthetic terminal report (version 3,
+        # synthetic: true) for each order it releases and never sends, as its
+        # own decision (CONTEXT.md, "Order lifecycle report"); the first paper
+        # run's approval names that run's log.
+        dry = self.log("dry.log", [[("input", "market.session.closed", 1, {"session": "2026-10-16"}),
+                                    ("decision", "risk.order.released", 1, {"client_order_id": "tw-dry-1",
+                                                                             "quantity": 9, "send": False}),
+                                    ("decision", "execution.order.lifecycle", 3, {
+                                        "client_order_id": "tw-dry-1", "status": "canceled", "synthetic": True}),
+                                    ("decision", "execution.fill", 3, {"client_order_id": "tw-dry-1",
+                                                                       "synthetic": True})]],
+                       at="2026-10-16T21:00:00Z")
+        paper = self.write("paper.log", ["dry.log"])
+        self.assertEqual(run_logs(paper, today=TODAY), [paper, dry])
+
+    def test_an_order_the_adapters_own_records_settle_has_ended_for_the_chain(self):
+        # Nothing at IBKR ever reports on an order settled as never sent or
+        # not handed over, or one a run-ended settlement left unsent, and a
+        # report struck off at that settlement is in no engine's log: the
+        # adapter's own durable records end those orders.
+        canceled = {"client_order_id": "tw-1", "status": "canceled", "occurred_at": "2026-10-15T21:00:01Z"}
+
+        def struck(*reports):
+            return {"unsent": [], "outbox": [{"id": "ibkr:{}:{}".format(t, n), "event_type": t, "schema_version": v,
+                                              "event_time": "2026-10-15T21:00:01Z", "payload": p}
+                                             for n, (t, v, p) in enumerate(reports)]}
+        cases = {
+            "settled never sent": ({"decisions": ["never-sent"]}, False),
+            "settled not handed over": ({"decisions": ["not-handed-over"]}, False),
+            "never sent, then found at IBKR": ({"decisions": ["never-sent", "sent"]}, True),
+            "marked never sent while its input waits": ({"marks": {"tw-1": "never-sent"}}, False),
+            "left unsent at a run-ended settlement": ({"run_ended": {"unsent": ["tw-1"], "outbox": []}}, False),
+            "a cancellation struck at a settlement": ({"run_ended": struck(("execution.order.lifecycle", 2,
+                                                                           canceled))}, False),
+            "fills for the whole quantity struck at a settlement": ({"run_ended": struck(
+                ("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4)),
+                ("execution.fill", 5, dict(fill_payload("e.1.02"), quantity=5)))}, False),
+            "a working status struck at a settlement": ({"run_ended": struck(
+                ("execution.order.lifecycle", 2, dict(canceled, status="submitted")))}, True),
+            "a cancellation settled as the input awaiting its reply": ({"run_ended": {
+                "unsent": [], "outbox": [], "input": {"id": "ibkr:execution.order.lifecycle:9",
+                                                      "type": "execution.order.lifecycle", "schema_version": 2,
+                                                      "payload": canceled}}}, False),
+            "the last of the fills settled as the input awaiting its reply": ({"run_ended": dict(
+                struck(("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4))),
+                input={"id": "ibkr:execution.fill:9", "type": "execution.fill", "schema_version": 5,
+                       "payload": dict(fill_payload("e.1.02"), quantity=5)})}, False),
+            "a working status settled as the input awaiting its reply": ({"run_ended": {
+                "unsent": [], "outbox": [], "input": {"id": "ibkr:execution.order.lifecycle:9",
+                                                      "type": "execution.order.lifecycle", "schema_version": 2,
+                                                      "payload": dict(canceled, status="submitted")}}}, True),
+            "nothing recorded": ({}, True),
+        }
+        first = self.earlier_day_run("a.log")
+        second = self.write("b.log", ["a.log"])
+        for name, (records, kept) in cases.items():
+            with self.subTest(name):
+                pending = PendingInput(str(Path(self.dir.name) / (name.replace(" ", "-") + ".json")))
+                for decision in records.get("decisions", ()):
+                    pending.record_decision({"client_order_id": "tw-1", "decision": decision, "reason": "checked",
+                                             "at": "2026-10-16T12:00:00+00:00", "session_date": "2026-10-16"})
+                for cid, mark in records.get("marks", {}).items():
+                    pending.mark(cid, mark)
+                if "run_ended" in records:
+                    pending.record_run_ended(dict({"input": {"id": "session:9"}}, **records["run_ended"],
+                                                  refused="run ended", reason="a fresh run", run="run-0",
+                                                  at="2026-10-16T12:00:00+00:00", session_date="2026-10-16"))
+                self.assertEqual(run_logs(second, today=TODAY, settled=pending.settled_orders()),
+                                 [second, first] if kept else [second])
+
+    def test_a_record_line_that_cannot_be_read_is_named_by_its_line_in_the_file(self):
+        # A blank line counts, so the number in the stop is the line the
+        # owner finds in the file.
+        never_sent = {"client_order_id": "tw-1", "decision": "never-sent", "reason": "checked",
+                      "at": "2026-10-16T12:00:00+00:00", "session_date": "2026-10-16"}
+        pending = PendingInput(str(Path(self.dir.name) / "numbered.json"))
+        pending.record_decision(never_sent)
+        with open(pending.decisions_path, "a", encoding="utf-8") as f:
+            f.write("\n" + '{"client_order_id": "tw-1", "decision": "se' + "\n")
+        with self.assertRaises(HandoverRecordInvalid) as raised:
+            pending.settled_orders()
+        self.assertIn("{} line 3 is not JSON".format(pending.decisions_path), str(raised.exception))
+        pending.record_run_ended({"input": {"id": "session:9"}, "refused": "run ended", "reason": "a fresh run",
+                                  "run": "run-0", "unsent": [], "outbox": [], "at": "2026-10-16T12:00:00+00:00",
+                                  "session_date": "2026-10-16"})
+        with open(pending.run_ended_path, "a", encoding="utf-8") as f:
+            f.write("\n\n" + '{"input": {"id": "sess' + "\n")
+        with self.assertRaises(HandoverRecordInvalid) as raised:
+            pending.run_ended()
+        self.assertIn("{} line 4 is not JSON".format(pending.run_ended_path), str(raised.exception))
+
+    def test_a_settlement_with_no_recorded_run_is_refused_naming_its_line(self):
+        # The adapter records the run an input is sent to before it saves
+        # the input, so a settlement naming no run is not one resolve
+        # --run-ended writes: where its records fall among the runs cannot
+        # be known, and it is never guessed.
+        pending = PendingInput(str(Path(self.dir.name) / "no-run.json"))
+        pending.record_run_ended({"input": {"id": "session:9"}, "refused": "run ended", "reason": "a fresh run",
+                                  "run": None, "unsent": [], "outbox": [], "at": "2026-10-16T12:00:00+00:00",
+                                  "session_date": "2026-10-16"})
+        with self.assertRaises(HandoverRecordInvalid) as raised:
+            pending.run_ended()
+        for part in ("{} line 1".format(pending.run_ended_path), "no recorded run"):
+            self.assertIn(part, str(raised.exception))
+
+    def test_a_decision_line_that_cannot_be_read_stops_rather_than_settling_its_order(self):
+        # An order settled --never-sent and then found at IBKR (--sent): if
+        # the later line were skipped, the earlier one would end the order
+        # although IBKR has it. Every line is read strictly, so any damage
+        # stops the start (fail closed).
+        first = self.earlier_day_run("a.log")
+        second = self.write("b.log", ["a.log"])
+        never_sent = {"client_order_id": "tw-1", "decision": "never-sent", "reason": "checked",
+                      "at": "2026-10-16T12:00:00+00:00", "session_date": "2026-10-16"}
+        bad_lines = {
+            "not JSON": '{"client_order_id": "tw-1", "decision": "se',
+            "not an object": '["tw-1", "sent"]',
+            "no client order ID": json.dumps(dict(never_sent, client_order_id=None, decision="sent")),
+            "an unknown decision": json.dumps(dict(never_sent, decision="maybe")),
+        }
+        for name, line in bad_lines.items():
+            with self.subTest(name):
+                pending = PendingInput(str(Path(self.dir.name) / (name.replace(" ", "-") + ".json")))
+                pending.record_decision(never_sent)
+                with open(pending.decisions_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+                with self.assertRaises(HandoverRecordInvalid) as raised:
+                    pending.settled_orders()
+                self.assertIn(pending.decisions_path, str(raised.exception))
+        pending = PendingInput(str(Path(self.dir.name) / "readable.json"))
+        pending.record_decision(never_sent)
+        self.assertEqual(run_logs(second, today=TODAY, settled=pending.settled_orders()), [second])
+        self.assertTrue(os.path.exists(first))
+
+    def test_the_chain_is_read_whole_on_the_first_days_of_the_calendar(self):
+        # No session before the first date the calendar holds: every run is
+        # read, never a date out of range.
+        first = self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        for today in (date.min, date.min + timedelta(days=1), date.min + timedelta(days=3)):
+            with self.subTest(today=today.isoformat()):
+                self.assertEqual(run_logs(second, today=today), [second, first])
+
+    def test_an_input_awaiting_its_reply_with_no_readable_recorded_time_is_refused_not_settled(self):
+        # The session the waiting input was recorded in bounds the chain an
+        # earlier run is looked for in: without it, the adapter stops with a
+        # reason rather than guess.
+        self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        for recorded_at in (None, "", "yesterday", "2026-10-16T21:00:00"):
+            with self.subTest(recorded_at=recorded_at):
+                pending = PendingInput(str(Path(self.dir.name) / "pending-{}.json".format(abs(hash(recorded_at)))))
+                waiting = {"id": "session:9", "type": "market.session.closed", "schema_version": 1,
+                           "event_time": "2026-10-16T20:00:00Z", "payload": {}}
+                if recorded_at is not None:
+                    waiting["recorded_at"] = recorded_at
+                pending.save(waiting)
+                with self.assertRaises(ResolveRefused) as raised:
+                    earlier_run(pending, second)
+                self.assertIn("recorded_at", str(raised.exception))
+                with self.assertRaises(ResolveRefused):
+                    resolve_run_ended(pending, "session:9", "a fresh run", second, today=TODAY)
+                self.assertEqual(pending.load()["id"], "session:9")
+                self.assertEqual(pending.run_ended(), [])
+
+    def test_an_input_awaiting_its_reply_with_no_record_of_its_run_is_refused_not_settled(self):
+        # A settlement records the run it ends, so without the adapter's
+        # .run record for the input nothing is written: the line would name
+        # no run, and every later start would stop on it.
+        self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        for name, run_of in (("missing", None), ("another input", "session:8")):
+            with self.subTest(name):
+                pending = PendingInput(str(Path(self.dir.name) / "pending-{}.json".format(name.replace(" ", "-"))))
+                if run_of is not None:
+                    pending.record_run(run_of, "run-0", "a.log")
+                pending.save({"id": "session:9", "type": "market.session.closed", "schema_version": 1,
+                              "event_time": "2026-10-16T20:00:00Z", "recorded_at": "2026-10-16T20:00:00Z",
+                              "payload": {}})
+                with self.assertRaises(ResolveRefused) as raised:
+                    resolve_run_ended(pending, "session:9", "a fresh run", second, today=TODAY)
+                for part in ("session:9", pending.run_path):
+                    self.assertIn(part, str(raised.exception))
+                self.assertEqual(pending.load()["id"], "session:9")
+                self.assertFalse(Path(pending.run_ended_path).exists())
+
+    def earlier_day_run(self, name, reports=()):
+        """A run of an earlier day (the 15th) whose one decision released tw-1 for 9, then the reports in reports.
+
+        With a fill of more than 9 among reports, the release's quantity is
+        written as one that cannot be read, so fills never end it.
+        """
+        quantity = "9" if any(r[2].get("quantity", 0) > 9 for r in reports) else 9
+        lines = [log_header()]
+        lines += log_group(1, [("input", "market.session.closed", 1, {"session": "2026-10-15"}),
+                               ("decision", "risk.order.released", 1, {"client_order_id": "tw-1",
+                                                                        "quantity": quantity, "send": True})],
+                           at="2026-10-15T21:00:00Z")
+        for n, (event_type, version, payload) in enumerate(reports, 3):
+            lines += log_group(n, [("input", event_type, version, payload)], at="2026-10-15T21:00:00Z")
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def test_the_chain_keeps_an_earlier_day_run_whose_released_order_has_no_terminal_report(self):
+        # A DAY order placed after the close works the next session, so
+        # IBKR's open orders still show it on the day after its run's last
+        # input: that run's log is read until its order ends.
+        canceled = {"client_order_id": "tw-1", "status": "canceled"}
+        cases = {
+            "no report at all": ((), True),
+            "a partial fill": ((("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4)),), True),
+            "a working status only": ((("execution.order.lifecycle", 2, dict(canceled, status="submitted")),), True),
+            "a cancellation": ((("execution.order.lifecycle", 2, canceled),), False),
+            "a refusal": ((("execution.order.lifecycle", 2, dict(canceled, status="invalid")),), False),
+            "fills for the whole quantity": ((("execution.fill", 5, dict(fill_payload("e.1.01"), quantity=4)),
+                                              ("execution.fill", 5, dict(fill_payload("e.1.02"), quantity=5))), False),
+            "fills beyond a quantity that cannot be read": ((("execution.fill", 5, dict(fill_payload("e.1.01"),
+                                                                                         quantity=20)),), True),
+        }
+        for name, (reports, kept) in cases.items():
+            with self.subTest(name):
+                first = self.earlier_day_run("a.log", reports)
+                second = self.write("b.log", ["a.log"])
+                self.assertEqual(run_logs(second, today=TODAY), [second, first] if kept else [second])
+
+    def test_the_chain_walks_on_past_each_earlier_day_run_that_still_has_an_order_open(self):
+        # The report that ends an earlier run's order may be journalled into
+        # a later run's log: the adapter records IBKR's reports into the run
+        # now running.
+        first = self.earlier_day_run("a.log")
+        canceled = {"client_order_id": "tw-1", "status": "canceled"}
+        for name, b_reports, kept in (("still open", [], True),
+                                      ("ended in the later run", [("execution.order.lifecycle", 2, canceled)], False)):
+            with self.subTest(name):
+                lines = [log_header()]
+                lines += log_group(1, [("input", "operator.run.approved", 2, {
+                    "previous_log": "a.log", "previous_log_final_hash": self.final_hash("a.log")}),
+                    ("decision", "risk.order.released", 1, {"client_order_id": "tw-2", "quantity": 1,
+                                                             "send": True})], at="2026-10-16T21:00:00Z")
+                for n, (event_type, version, payload) in enumerate(b_reports, 3):
+                    lines += log_group(n, [("input", event_type, version, payload)], at="2026-10-16T21:00:00Z")
+                second = Path(self.dir.name) / "b.log"
+                second.write_text("".join(lines), encoding="utf-8")
+                third = self.write("c.log", ["b.log"])
+                self.assertEqual(run_logs(third, today=TODAY),
+                                 [third, str(second), first] if kept else [third, str(second)])
+
+    def test_an_approval_whose_final_hash_is_not_the_named_logs_is_refused(self):
+        self.write("a.log")
+        wrong = self.write("b.log", ["a.log"], final_hash="sha256:" + "f" * 64)
+        with self.assertRaises(ResolveRefused) as raised:
+            run_logs(wrong, today=TODAY)
+        self.assertIn("final record hash", str(raised.exception))
+        for bad in ("", "f" * 64, 7, None):
+            with self.subTest(final_hash=bad):
+                path = Path(self.dir.name) / "bad.log"
+                path.write_text("".join([log_header()] + log_group(1, [("input", "operator.run.approved", 2, {
+                    "previous_log": "a.log", "previous_log_final_hash": bad})])), encoding="utf-8")
+                with self.assertRaises(ResolveRefused):
+                    run_logs(str(path), today=TODAY)
+        # A named log with no committed group has no final record to match.
+        Path(self.dir.name, "empty.log").write_text(log_header(), encoding="utf-8")
+        with self.assertRaises(ResolveRefused):
+            run_logs(self.write("e.log", ["empty.log"]), today=TODAY)
+
+    def test_a_log_with_two_approvals_or_a_chain_that_loops_is_refused(self):
+        self.write("a.log")
+        for name, previous in (("two.log", ["a.log", "a.log"]), ("self.log", ["self.log"])):
+            with self.subTest(name), self.assertRaises(ResolveRefused):
+                run_logs(self.write(name, previous), today=TODAY)
+        self.write("x.log", ["y.log"])
+        with self.assertRaises(ResolveRefused):
+            run_logs(self.write("y.log", ["x.log"]), today=TODAY)
+
+    def test_an_approval_naming_no_log_file_name_is_refused(self):
+        for previous in ("", ".", "..", "../a.log", "d/a.log", 7):
+            with self.subTest(previous=previous), self.assertRaises(ResolveRefused):
+                run_logs(self.write("n.log", [previous]), today=TODAY)
+
+
+
+class RunIdentityTests(unittest.TestCase):
+    """A run's identity: its Run approval's ID, else its log's first committed input, which a resume copies."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def write(self, name, groups, at="2026-10-16T13:30:00Z"):
+        lines = [log_header()]
+        n = 1
+        for entries in groups:
+            lines += log_group(n, entries, at=at)
+            n += len(entries)
+        path = Path(self.dir.name) / name
+        path.write_text("".join(lines), encoding="utf-8")
+        return str(path)
+
+    def test_a_run_with_no_approval_is_named_by_its_first_committed_input_never_by_nothing(self):
+        configuration = [("input", "strategy.target-weight.configuration", 7, {"strategy_id": "boost"})]
+        first = self.write("a.log", [configuration])
+        resumed = self.write("a-resumed.log", [configuration])
+        later = self.write("b.log", [configuration], at="2026-10-17T13:30:00Z")
+        self.assertNotEqual(run_identity(first), "")
+        self.assertEqual(run_identity(first), run_identity(resumed))
+        self.assertNotEqual(run_identity(first), run_identity(later))
+
+    def test_a_log_with_no_committed_input_has_no_identity_and_is_refused(self):
+        empty = Path(self.dir.name) / "empty.log"
+        empty.write_text(log_header(), encoding="utf-8")
+        with self.assertRaises(ResolveRefused) as raised:
+            run_identity(str(empty))
+        self.assertIn("no committed input", str(raised.exception))
+
+    def test_a_run_with_an_approval_is_named_by_it(self):
+        path = self.write("c.log", [[("input", "strategy.target-weight.configuration", 7, {})],
+                                    [("input", "operator.run.approved", 2, {"previous_log": "a.log"})]])
+        self.assertEqual(run_identity(path), "e:2")
 
 
 if __name__ == "__main__":

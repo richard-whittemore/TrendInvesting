@@ -81,6 +81,9 @@ class FakeTWS(TWSApi):
         self.open_orders = []
         self.end_open_orders = True
         self.executions = []
+        # (code, message) IBKR answers reqExecutions with under its request
+        # ID, before the end of the list; None for none.
+        self.executions_error = None
         # IBKR's last orderStatus for each order and its commission report
         # for each execution, which it replays on a later read.
         self.order_statuses = {}
@@ -177,6 +180,8 @@ class FakeTWS(TWSApi):
 
     def req_executions(self, req_id, account_id):
         self.calls.append(("req_executions", req_id, account_id))
+        if self.executions_error is not None:
+            self.callbacks.error(req_id, *self.executions_error)
         for con, ex in self.executions:
             self.callbacks.exec_details(req_id, con, ex)
             # IBKR follows each execution with its commission report.

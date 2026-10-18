@@ -28,6 +28,11 @@ CODE_SERVER_LINK_BROKEN = 2110
 # 2100 and above are warnings and notices (market-data farm status and the
 # like); none of them ends a connection attempt.
 FIRST_NOTICE_CODE = 2100
+# The first request ID: IBKR answers a request's error under its request ID
+# and an order's rejection under its order ID, with message codes shared by
+# both, so request IDs start far above any order ID an account reaches
+# (IBKR's are 32-bit) and an error on a request never names an order.
+REQUEST_ID_BASE = 1 << 30
 
 ConnectionStatus = namedtuple(
     "ConnectionStatus", "state reason client_id at attempt ibkr_code data_lost")
@@ -105,7 +110,7 @@ class Connection:
         # Monotonic time Gateway reported losing IBKR's servers (1100/2110);
         # None while it has not, or once it is restored or the link is dropped.
         self._lost_at = None
-        self._next_req_id = 1
+        self._next_req_id = REQUEST_ID_BASE
         self.time_requests = 0
         self.time_answers = 0
         # Monotonic time of a restoration that found server-time requests

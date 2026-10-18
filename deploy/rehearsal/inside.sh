@@ -37,7 +37,7 @@ for u in ti-gateway ti-trader; do
   test "$(getent passwd "$u" | cut -d: -f7)" = /usr/sbin/nologin || fail "$u has a login shell"
   test "$(id -u "$u")" -ne 0 || fail "$u is uid 0"
 done
-for f in ibkr-login.env secrets.env; do
+for f in ibkr-login.env secrets.env accounts/boost.env; do
   test "$(mode_of "/etc/trend-investing/$f")" = 600 || fail "$f is not mode 600"
   test "$(stat -c %U:%G "/etc/trend-investing/$f")" = root:root || fail "$f is not root-owned"
 done
@@ -135,12 +135,15 @@ pass "the data step is installed, runs, and refuses a missing key with nothing w
 for b in ti-engine ti-reporter ti-dashboard; do
   install -m 0755 /dev/null "/opt/trend-investing/bin/$b"
 done
+# The adapter's environment and code (provision.sh twsapi and adapter).
+install -d /opt/trend-investing/adapter-venv/bin /opt/trend-investing/adapter
+install -m 0755 /dev/null /opt/trend-investing/adapter-venv/bin/python3
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter.service ti-reporter.timer ti-dashboard.service >"$verify_log" 2>&1 || verify_status=$?
+  ti-reporter.service ti-reporter.timer ti-dashboard.service ti-adapter-boost.service >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"
 # Every line is a finding: no warning is expected in this container (the
 # rehearsal of 2026-10-16 printed none), so nothing is filtered out, and a
@@ -168,4 +171,9 @@ ids=$(grep -h '^TI_ADAPTER_CLIENT_ID=' /etc/trend-investing/engines/*.env | sort
 test "$(echo "$ids" | uniq | wc -l)" -eq 3 || fail "engine client IDs not unique"
 grep -q 'TI_ADAPTER_CLIENT_ID' /etc/systemd/system/ti-data.service && fail "the data step names an IB Gateway client ID"
 pass "three distinct engine client IDs, and none for the data step"
+
+# The adapter's state directory and its configuration, created once and kept.
+test "$(stat -c %U:%a /var/lib/trend-investing/adapters/boost)" = ti-trader:750 || fail "adapter state directory not ti-trader 0750"
+grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.json || fail "adapter configuration not created from the example"
+pass "adapter state directory and configuration in place, sending off"
 echo "REHEARSAL COMPLETE"
