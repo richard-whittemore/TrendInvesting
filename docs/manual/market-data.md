@@ -328,7 +328,29 @@ session it missed in one file. A run that hangs is stopped after an hour
    weeks, and records them.
 4. Checks every file it has already written for the run: each must still come
    out byte for byte the same from the recordings. If one does not, it stops
-   (see "A file already written differs" below) and writes nothing.
+   (see "A file already written differs" below) and writes nothing. A split
+   or dividend dated after a file never changes that file: prices are
+   adjusted forward from `warm_up_start`, so an action changes only the
+   sessions on and after its ex-date, and SPY's routine quarterly dividend
+   goes into the next file without stopping anything (a test pins this for a
+   dividend and for a split). Only SPY's actions matter to the Boost stream,
+   so a revised figure for another ticker's dividend in the market-wide
+   recordings is ignored; a revision of SPY's own is not (below).
+
+   **What the check costs.** The job encodes the recordings once, from
+   `warm_up_start` through the newest file's last session, and compares each
+   file with its own sessions of that one encoding, so the check grows with
+   the number of sessions, not with the number of files. Measured on the Mac
+   mini with market-sized recordings (about 11,000 tickers a session) for a
+   warm-up from 2025-01-02 and ten daily files (447 sessions): about 8
+   seconds for the check, about 16 seconds for a whole daily run (the check
+   and the new file each read the history once), 8 seconds for a firing that
+   finds the day already written. That grows by about 18 milliseconds a
+   session per read, so a year more of sessions adds about 5 seconds to
+   each; allow two or three times as long on the Lightsail server. Encoding
+   every file separately instead would have cost about 8 seconds per file,
+   over half an hour a run after a year, against the unit's one-hour
+   timeout.
 5. Writes the engine's input for the new sessions: SPY's bar, then the
    session close, for each session, to
    `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<YYYY-MM-DD>.jsonl`,
@@ -418,7 +440,10 @@ carries on from them.
   happens, naming the file. The causes: Massive published a split or
   dividend late, dated inside a file already written; the engine's log
   header changed (the engine was restarted under the same run name with
-  another build or configuration); or a file was edited or removed. The job
+  another build or configuration); a file was edited or removed; or a new
+  ti-data build encodes an earlier session differently (a change to the
+  encoder, the calendar or the adjustment arithmetic that alters any byte of
+  a session already delivered). The job
   never rewrites a file and writes nothing more for the run, because the
   engine has already read the old one: a vendor's revision after delivery is
   your decision, not the job's. What to do: read the message, and for a late
@@ -426,24 +451,38 @@ carries on from them.
   history is wrong from that date on: stop the engine, and start a new run
   (a fresh `TI_RUN`, `docs/runbooks/durable-log.md`) with its own warm-up,
   which builds the whole history with the action in it. If a file was edited
-  or removed, restore it from the backup, unchanged. Never edit a file or a
-  recording to make them agree.
+  or removed, restore it from the backup, unchanged. If it began after a new
+  ti-data build was installed, put the previous build back
+  (`/opt/trend-investing/bin/ti-data`) and the job carries on; install a new
+  build only together with a fresh engine run and its warm-up, or after
+  confirming that the new build reproduces every file of the current run
+  (`ti-data --session <the last written session>` reports the file and exits
+  0 when it does). Never edit a file or a recording to make them agree.
 - **Two recordings give different figures for one dividend** (or split):
   the refusal reads `ConflictingActions: dividends <id> differs between
   recordings`. Massive changed its figure between two fetches whose windows
-  overlap, and the job will not choose. What to do:
-  1. Find the two recordings:
+  overlap, and the job will not choose. Only SPY's actions are checked: a
+  revised figure for another ticker does not stop the Boost job. Each daily
+  run records the last two weeks of actions again, so an action Massive
+  published some days before revising it is held, with the old figure, in
+  every daily recording from its first appearance to the day before the
+  change, and in the warm-up's recording too when its long window covers the
+  ex-date. What to do:
+  1. Find every recording that holds it:
      `grep -l '"<id>"' /var/lib/trend-investing/data/dividends_*.json`, and
-     compare their `cash_amount` (and ex-date).
+     compare their `cash_amount` (and ex-date). The list is usually more
+     than two files.
   2. Check the true figure against the fund's own published distribution
      notice.
-  3. Move the recording with the wrong figure, unchanged, into
+  3. Move every recording that holds the wrong figure, unchanged, into
      `/var/lib/trend-investing/data/quarantine/` (create it, owned by
-     `ti-trader`). The job reads only the data folder itself, never
-     `quarantine`, and never deletes or edits a recording. If the correct
-     figure is in neither recording, quarantine both.
-  4. Run `sudo systemctl start ti-data`. The window the quarantined file
-     covered is now missing, so the job fetches it again from Massive. If
+     `ti-trader`), the warm-up's included if it is among them. Moving only
+     one leaves the others to stop the next run the same way. The job reads
+     only the data folder itself, never `quarantine`, and never deletes or
+     edits a recording. If the correct figure is in none of them, quarantine
+     them all.
+  4. Run `sudo systemctl start ti-data`. The windows the quarantined files
+     covered are now missing, so the job fetches them again from Massive. If
      Massive still gives the wrong figure, stop: the job can record only what
      Massive publishes, and the paper run waits while you decide.
   5. If the corrected figure falls inside a file already written, the run

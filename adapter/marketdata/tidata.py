@@ -270,17 +270,37 @@ def _encode(data, first, last, cfg, identity):
                          engine=ENGINE, first_sequence=1)
 
 
+def _session_of(envelope):
+    """The session a Boost envelope belongs to: its id ends with it (a bar's
+    "marketdata:bar:<instrument>:<session>", a close's
+    "marketdata:session-closed:<session>")."""
+    return dt.date.fromisoformat(envelope["id"].rsplit(":", 1)[1])
+
+
 def _verify(existing, data, cfg, identity, engine_log):
     """Refuses unless every written stream, oldest first, re-encodes byte for
-    byte; each file's first session follows the one before it."""
+    byte; each file's first session follows the one before it.
+
+    The recordings are encoded once, from the warm-up start through the
+    newest file's last session, and each file is compared with its sessions'
+    slice of that encoding, numbered from 1 again. That equals encoding the
+    file alone: the adjustment is forward from the warm-up start, so a
+    session's envelopes depend only on the sessions and actions up to it
+    (adjust.forward_factors), and a file's sequence is its own ordinal (the
+    file contract above). One encoding a run keeps the work linear in the
+    sessions, not files times sessions."""
+    if not existing:
+        return
+    try:
+        whole = _encode(data, cfg.warm_up_start, existing[-1][0], cfg, identity)
+    except Exception as e:   # a recording missing, a gap or a conflict: the files cannot be re-derived
+        raise Refused("the run's files through {} cannot be encoded again from their recordings ({}: {}); this "
+                      "stops the job for a person".format(existing[-1][1], type(e).__name__, e)) from None
     previous = None
     for last, path in existing:
         first = cfg.warm_up_start if previous is None else nyse_calendar.sessions_after(previous, 1)[0]
-        try:
-            again = _bytes(_encode(data, first, last, cfg, identity))
-        except Exception as e:   # a recording missing, a gap or a conflict: the file cannot be re-derived
-            raise Refused("{} cannot be encoded again from its recordings ({}: {}); this stops the job for a "
-                          "person".format(path, type(e).__name__, e)) from None
+        part = [e for e in whole if first <= _session_of(e) <= last]
+        again = _bytes(dict(e, sequence=n) for n, e in enumerate(part, 1))
         with open(path, "rb") as f:
             if f.read() != again:
                 raise Refused("{} differs from the stream its recordings and the engine log {} give now; the "

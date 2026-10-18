@@ -43,7 +43,7 @@ class FakeMassive:
     """Massive's three endpoints the job uses, answered from synthetic rows."""
 
     def __init__(self, empty=()):
-        self.calls, self.empty, self.dividends = [], set(empty), []
+        self.calls, self.empty, self.dividends, self.splits_rows = [], set(empty), [], []
 
     def grouped(self, day):
         self.calls.append(("grouped", day))
@@ -53,7 +53,7 @@ class FakeMassive:
 
     def splits(self, first, last):
         self.calls.append(("splits", first, last))
-        return [{"results": []}]
+        return [{"results": list(self.splits_rows)}]
 
     def all_dividends(self, first, last):
         self.calls.append(("dividends", first, last))
@@ -270,6 +270,10 @@ class EngineLogTest(unittest.TestCase):
         path = REPO / "adapter/marketdata/tests/testdata/boost-fixture.log"
         lines = path.read_text().splitlines()
         header, envelope = json.loads(lines[0]), json.loads(lines[1])["record"]["envelope"]
+        # Later groups too: an input followed by its decision, then an input,
+        # numbered in one series and committed as the engine commits them.
+        records = [json.loads(line)["record"] for line in lines[1:] if line.startswith('{"record"')]
+        self.assertEqual([r["kind"] for r in records], ["input", "input", "decision", "input"])
         got = tidata.read_engine_log(str(path))
         self.assertEqual(got.configuration_hash, header["configuration_hash"])
         self.assertEqual(got.configuration_hash, envelope["configuration_hash"])
@@ -599,6 +603,80 @@ class ReverifyTest(unittest.TestCase):
                                      "cash_amount": 1.0}]
             self.assert_refused_naming(job, after_settle(D(2026, 3, 17)), job.stream_dir() / "boost-{}.jsonl".format(WARM))
             self.assertIn(("dividends", D(2026, 3, 3), D(2026, 3, 17)), job.client.calls)
+
+    def test_an_ordinary_dividend_after_a_delivered_file_leaves_every_earlier_file_unchanged(self):
+        # Forward adjustment: an action changes only the sessions on and
+        # after its ex-date, so the next quarterly ex-date never stops the job.
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            before = {p.name: p.read_bytes() for p in job.stream_dir().iterdir()}
+            job.client.dividends = [{"id": "DIV1", "ticker": "SPY", "ex_dividend_date": "2026-03-17",
+                                     "cash_amount": 1.0}]
+            status, _, err = job.main(after_settle(D(2026, 3, 17)))
+            self.assertEqual(status, 0, err)
+            self.assertEqual({n: (job.stream_dir() / n).read_bytes() for n in before}, before)
+            bar = job.envelopes(D(2026, 3, 17))[0]["payload"]
+            prior = spy(D(2026, 3, 16))["c"]
+            self.assertAlmostEqual(bar["adjusted"]["close"], bar["raw"]["close"] * prior / (prior - 1.0))
+            self.assertEqual(bar["split_adjusted"]["close"], bar["raw"]["close"])
+            status, _, err = job.main(after_settle(D(2026, 3, 18)))   # and the run after it
+            self.assertEqual(status, 0, err)
+
+    def test_an_ordinary_split_after_a_delivered_file_leaves_every_earlier_file_unchanged(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            before = {p.name: p.read_bytes() for p in job.stream_dir().iterdir()}
+            job.client.splits_rows = [{"id": "SPL1", "ticker": "SPY", "execution_date": "2026-03-17",
+                                       "split_from": 1, "split_to": 2}]
+            status, _, err = job.main(after_settle(D(2026, 3, 17)))
+            self.assertEqual(status, 0, err)
+            self.assertEqual({n: (job.stream_dir() / n).read_bytes() for n in before}, before)
+            bar = job.envelopes(D(2026, 3, 17))[0]["payload"]
+            self.assertEqual(bar["split_adjusted"]["close"], bar["raw"]["close"] * 2)
+
+    def test_a_revised_dividend_of_another_ticker_does_not_stop_the_boost_job(self):
+        # The bulk action windows hold every ticker and overlap day to day,
+        # so a vendor revision of a figure the Boost stream never reads is
+        # in the data folder twice; only the encoded instrument's actions
+        # are checked for conflicts.
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            row = {"id": "DIVO", "ticker": "OTHER", "ex_dividend_date": "2026-03-10", "cash_amount": 1.0}
+            job.client.dividends = [row]
+            self.assertEqual(job.main(after_settle(D(2026, 3, 17)))[0], 0)
+            job.client.dividends = [dict(row, cash_amount=1.5)]
+            status, _, err = job.main(after_settle(D(2026, 3, 18)))
+            self.assertEqual(status, 0, err)
+            self.assertTrue((job.stream_dir() / "boost-2026-03-18.jsonl").exists())
+
+    def test_a_revised_dividend_of_the_encoded_instrument_still_stops_the_job(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            row = {"id": "DIVS", "ticker": "SPY", "ex_dividend_date": "2026-03-17", "cash_amount": 1.0}
+            job.client.dividends = [row]
+            self.assertEqual(job.main(after_settle(D(2026, 3, 17)))[0], 0)
+            job.client.dividends = [dict(row, cash_amount=1.5)]
+            status, _, err = job.main(after_settle(D(2026, 3, 18)))
+            self.assertEqual(status, 1)
+            self.assertIn("dividends DIVS differs between recordings", err)
+            self.assertIn("a person", err)
+            self.assertFalse((job.stream_dir() / "boost-2026-03-18.jsonl").exists())
+
+    def test_the_written_files_are_encoded_again_once_per_run(self):
+        # One encoding of the base through the newest file's last session,
+        # each file compared with its slice, so a run's work grows with the
+        # sessions, not with files times sessions.
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            for day in (17, 18, 19):
+                self.assertEqual(job.main(after_settle(D(2026, 3, day)))[0], 0)
+            with mock.patch.object(tidata.encode, "encode", wraps=tidata.encode.encode) as enc:
+                self.assertEqual(job.main(after_settle(D(2026, 3, 20)))[0], 0)
+                self.assertEqual([(c.args[1], c.args[2]) for c in enc.call_args_list],
+                                 [(BASE, D(2026, 3, 19)), (D(2026, 3, 20), D(2026, 3, 20))])
+                enc.reset_mock()
+                self.assertEqual(job.main(after_settle(D(2026, 3, 20)))[0], 0)   # the idempotent path
+                self.assertEqual(enc.call_count, 1)
 
     def test_an_earlier_file_changed_on_disk_stops_the_job(self):
         with tempfile.TemporaryDirectory() as root:

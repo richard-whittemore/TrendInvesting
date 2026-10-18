@@ -12,7 +12,10 @@ Type=oneshot
 # A run that hangs (a stalled fetch) is stopped and shows as failed rather
 # than staying "activating", which would also make the timer skip every
 # later firing. An hour is far more than the worst daily catch-up (a week of
-# sessions at the free plan's 5 requests a minute is a few minutes).
+# sessions at the free plan's 5 requests a minute is a few minutes) plus the
+# re-verification, which encodes the run's history once a run (measured at
+# about 8 seconds for 447 market-sized sessions; docs/manual/market-data.md,
+# "What the check costs").
 TimeoutStartSec=1h
 User=ti-trader
 Group=ti-trader
