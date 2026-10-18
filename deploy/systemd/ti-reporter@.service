@@ -1,0 +1,37 @@
+[Unit]
+Description=Reporter for account %i: alerts, their repeats and the daily summary
+# No Condition: a missing binary, a missing run.env or an empty secret fails
+# the unit with a message, so the owner sees a failed unit, never a silent
+# skip (docs/manual/alerts-and-dashboard.md, "What can go wrong").
+
+[Service]
+Type=oneshot
+# Stopped well before the timer's next firing (ti-reporter@.timer, every 5
+# minutes), which systemd would otherwise skip while this run is active.
+TimeoutStartSec=4min
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
+Environment=TI_REPORTS_DIR=/var/lib/trend-investing/reports
+# TI_RUN: the engine's current run, whose durable log is read. systemd reads
+# the file again at every start, so after a fresh run the next firing follows
+# the new log. Optional here ("-") so that its absence reaches the check
+# below, which names it.
+EnvironmentFile=-/var/lib/trend-investing/engines/%i/run.env
+ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/%i/run.env || { echo "ti-reporter: /var/lib/trend-investing/engines/%i/run.env is missing or empty: start the %i engine once first (it names the run whose durable log is reported)" >&2; exit 1; }'
+# TI_NTFY_TOPIC, TI_NTFY_SERVER and TI_PAGERDUTY_ROUTING_KEY, read from
+# %d/secrets and never printed.
+LoadCredential=secrets:/etc/trend-investing/secrets.env
+# The state file of delivered alerts is per account, so it outlives a run:
+# an alert already delivered is not sent again from a later run's log.
+ExecStart=/opt/trend-investing/bin/ti-reporter -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account %i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/reports
+ReadOnlyPaths=/var/lib/trend-investing/engines
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

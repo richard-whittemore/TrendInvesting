@@ -130,17 +130,86 @@ grep -q 'ti-data refused: .*MASSIVE_API_KEY' "$scratch/err" || fail "the data st
 test ! -e "$scratch/data" || fail "the data step wrote something while refusing"
 pass "the data step is installed, runs, and refuses a missing key with nothing written"
 
-# Unit files. The placeholder binaries do not exist; stand-ins let
-# systemd-analyze check the rest of each unit.
-for b in ti-engine ti-reporter ti-dashboard; do
-  install -m 0755 /dev/null "/opt/trend-investing/bin/$b"
+# The reporter, the dashboard and the owner's two tools are installed from
+# the build beside deploy/, and the tools are on sudo's PATH for ti-trader,
+# as the runbooks run them.
+for b in ti-reporter ti-dashboard operator journal-query; do
+  cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "$b is not installed from the build"
 done
+# Each tool exits 1 with its usage when given no command.
+for b in operator journal-query; do
+  out=$(sudo -u ti-trader "$b" 2>&1 || true)
+  case $out in "usage: $b"*) ;; *) fail "sudo -u ti-trader $b does not run the installed tool: $out" ;; esac
+done
+test ! -e /etc/systemd/system/ti-reporter.timer || fail "the old single reporter timer is still installed"
+pass "reporter, dashboard, operator and journal-query installed; the tools run under sudo -u ti-trader"
+
+# The reporter, run with its unit's own command line (systemd is not running
+# here, so the line is expanded as systemd would: %i, %d, and the unit's and
+# run.env's variables), against the engine's durable log and a stand-in for
+# both channels on loopback. Its secrets come only from the credential file.
+# It must deliver, write its state file, and send nothing new the second
+# time.
+rep=$(mktemp -d)
+mkdir -p "$rep/engines/boost" "$rep/reports" "$rep/creds"
+cp /root/dist/boost-fixture.log "$rep/engines/boost/run-rehearsal.log"
+python3 - "$rep/posts" <<'PY' &
+import http.server
+import sys
+
+posts = sys.argv[1]
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with open(posts, "a") as f:
+            f.write(self.path + "\n")
+        self.send_response(202)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"success"}')
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.HTTPServer(("127.0.0.1", 8099), Handler).serve_forever()
+PY
+fake=$!
+for _ in $(seq 50); do
+  python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8099), 1)' 2>/dev/null && break
+  sleep 0.1
+done
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\n' >"$rep/creds/secrets"
+line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
+line=${line//%i/boost}
+line=${line//%d/$rep/creds}
+line=${line//'${TI_STATE_DIR}'/$rep/engines/boost}
+line=${line//'${TI_REPORTS_DIR}'/$rep/reports}
+line=${line//'${TI_RUN}'/run-rehearsal}
+case $line in *'$'* | *%*) fail "the reporter's ExecStart has a variable the rehearsal does not expand: $line" ;; esac
+# shellcheck disable=SC2086
+env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter, run as its unit runs it, failed"
+test -s "$rep/reports/boost.reporter.json" || fail "the reporter wrote no state file"
+grep -q '^/rehearsal$' "$rep/posts" || fail "the reporter reached no ntfy topic"
+grep -q '^/v2/enqueue$' "$rep/posts" || fail "the reporter reached no PagerDuty endpoint"
+sent=$(wc -l <"$rep/posts")
+# shellcheck disable=SC2086
+env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter's second run failed"
+test "$(wc -l <"$rep/posts")" = "$sent" || fail "the reporter's second run sent its alerts again"
+kill "$fake"
+pass "the reporter runs as its unit runs it, delivers to both channels once, and keeps its state"
+
+# Unit files. The engine's binary is installed by hand on the server; a
+# stand-in lets systemd-analyze check the rest of its unit.
+test -e /opt/trend-investing/bin/ti-engine || install -m 0755 /dev/null /opt/trend-investing/bin/ti-engine
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter.service ti-reporter.timer ti-dashboard.service >"$verify_log" 2>&1 || verify_status=$?
+  ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"
 # Every line is a finding: no warning is expected in this container (the
 # rehearsal of 2026-10-16 printed none), so nothing is filtered out, and a

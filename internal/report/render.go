@@ -53,9 +53,18 @@ func RenderText(s Summary) string {
 		b.WriteString(" none")
 	}
 	for _, f := range s.Fills {
+		if f.Side != "" {
+			fmt.Fprintf(&b, " %s", f.Side)
+		}
 		fmt.Fprintf(&b, " %s %d @ %.2f", f.InstrumentID, f.Quantity, f.Price)
 	}
 	b.WriteString("\n")
+	if len(s.SalesWithheld) > 0 {
+		b.WriteString("Sales back to 98% withheld:\n")
+	}
+	for _, w := range s.SalesWithheld {
+		fmt.Fprintf(&b, "  %s %s: %s (%s). %s\n", w.ClientOrderID, w.InstrumentID, w.Reason, w.Trigger, w.Detail)
+	}
 	if s.Equity.Available {
 		e := s.Equity
 		fmt.Fprintf(&b, "Equity vs %s, %s to %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",

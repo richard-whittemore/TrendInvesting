@@ -41,3 +41,22 @@ func TestDashboardShowsEveryTimeInUTC(t *testing.T) {
 		t.Fatalf("a time with an offset must be shown in UTC, as its Z says:\n%s", body)
 	}
 }
+
+// TestDashboardShowsTheDaysWithheldSalesAndFillSides: the dashboard shows
+// the summary the reporter sends, so a lapsed sale back to 98% and a
+// target-weight fill's side appear on the page as in the daily summary.
+func TestDashboardShowsTheDaysWithheldSalesAndFillSides(t *testing.T) {
+	var buf bytes.Buffer
+	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
+		Fills:         []report.FillLine{{InstrumentID: "SPY", Side: event.OrderSideSell, ClientOrderID: "sale-1", Quantity: 5, Price: 96}},
+		SalesWithheld: []report.SaleWithheldLine{{ClientOrderID: "sale-1", InstrumentID: "SPY", Trigger: event.SaleTriggerExit, Reason: event.SaleWithheldLapsed, Detail: "the exit is no longer refused"}}}
+	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
+		t.Fatal(err)
+	}
+	body := buf.String()
+	for _, want := range []string{"<td>sell</td><td>SPY</td><td>5 @ 96.00</td><td>sale-1</td>", "<h3>Sales back to 98% withheld</h3>", "<td>sale-1</td><td>SPY</td><td>lapsed</td><td>exit</td><td>the exit is no longer refused</td>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q:\n%s", want, body)
+		}
+	}
+}

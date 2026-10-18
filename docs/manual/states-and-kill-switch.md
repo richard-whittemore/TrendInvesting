@@ -17,8 +17,12 @@ What is built today: the gate, the states, the kill switch input, the
 margin-cushion alarm and the sale, all recorded in the journal and replayed
 byte for byte, and the way you switch the kill switch on and off from the
 server: `operator kill-switch` ([operator](operator.md)). The reporter alerts
-you when a state changes, and repeats the alert until you acknowledge it
-([alerts-and-dashboard](alerts-and-dashboard.md)).
+you when a state changes, and repeats the alert until you acknowledge it. It
+also alerts each change of the margin alarm's level, each step of the sale
+back to 98% (sent, each fill, and IBKR ending it unfilled), and a withheld
+sale you must make by hand. On the server it checks every 5 minutes on
+weekdays from 09:00 to 20:55 New York time, so that is when these reach you
+([alerts-and-dashboard](alerts-and-dashboard.md), "When the reporter runs").
 
 ## The three states
 
@@ -261,7 +265,8 @@ alarm.
   (`nothing-to-sell`).
 
 In the first two cases the sale counts as attempted and is never tried again
-automatically. The alert will ask you to act by hand, and a later automatic
+automatically. The reporter's urgent "sale withheld, sell by hand" alert asks
+you to act by hand, and a later automatic
 sale could duplicate yours. No IBKR snapshot recorded yet counts as
 unreadable. In the other three nothing was attempted: the engine state does
 not change, and the sale is decided again at the next IBKR snapshot that is
@@ -383,7 +388,10 @@ the dashboard read every version. See [journal-query](journal-query.md).
 - **You sold by hand after a withheld sale.** The program never repeats the
   attempt in that incident, so it cannot sell a second time.
 - **The sale fills only partly, or IBKR rejects it.** It is not retried. The
-  account stays in its state until you recover.
+  reporter sends an urgent "sale back to 98% failed" alert saying how many
+  shares filled; sell the rest by hand if exposure is still above 98% of net
+  liquidation, after checking no other sell is working. The account stays in
+  its state until you recover.
 - **The kill switch is on and the margin alarm turns urgent.** The sale still
   goes. That is intended: the switch never keeps you borrowed.
 - **You release the kill switch after it refused a Boost order.** Nothing

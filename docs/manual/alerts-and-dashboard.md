@@ -62,6 +62,11 @@ account.
 | --- | --- | --- |
 | An order was refused | urgent | refused order, except: a kill-switch refusal once per engagement (turning the switch off and on again is a new one), and a refusal for a too-old IBKR snapshot once per stale episode ([states-and-kill-switch](states-and-kill-switch.md)); a log written before the engine marked those first refusals alerts for every one |
 | A sale back to 98% was not placed because the IBKR snapshot was too old, and it opened the stale episode (sell by hand if it is needed) | urgent | stale episode; the episode's later too-old refusals send nothing more |
+| A sale back to 98% was not placed because IBKR's values could not be read (`broker-values-unreadable`) or a sell this program did not release is working at IBKR (`unknown-working-sell`, CONTAINMENT REQUIRED). The program will not try again: sell by hand | urgent | withheld sale |
+| The margin-cushion alarm changed level ([margin warning](../runbooks/margin-warning.md)): warning (check the account the same day), urgent (the program sells back to 98% once) or clear | urgent for the urgent level; routine for warning and clear | change of level |
+| A sale back to 98% was released to be sent, sized from the IBKR snapshot it names; in dry-run, released and not sent | routine | sale (its client order ID) |
+| A sale back to 98% filled, in part or in full: the alert says how many shares are filled and how many are left | routine | fill (its fill ID; a resent fill is not counted again) |
+| IBKR canceled or refused a sale back to 98% before it filled in full. The program will not try again: sell the rest by hand | urgent | sale |
 | The engine went Degraded or Halted | urgent, repeated until acknowledged | change of state, reason and scope; the same state coming back after another is a new alert |
 | A reconciliation did not match: an unexplained difference (Degraded) or evidence that could not be compared (Halted); see [reconciliation](reconciliation.md) | urgent, repeated until acknowledged | reconciliation; the state change it caused is part of the same alert, not a second one |
 | A decision was withheld for missing data (bars, account snapshot, universe, the close histories of the stocks ranked) | urgent | run of the same reason |
@@ -75,6 +80,16 @@ account.
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
+
+A sale back to 98% withheld for any other reason sends none of these
+alerts: `non-positive-broker-values` is decided again from the next good
+snapshot, `nothing-to-sell` has nothing to do, and a lapse (`lapsed`) goes in
+the daily summary. A sale the gate refused alerts as a refused order, and one
+IBKR never reported on alerts as an order not acknowledged. The sale alerts
+read the records the engine already writes: the planned sale, its release, the
+fills and IBKR's reports on it. A fill or report the engine could not read
+raises no sale alert; an IBKR report of that kind alerts as "a report from
+IBKR the engine did not read".
 
 "No sign of life" is measured in NYSE sessions, not hours: the alert fires
 once `-heartbeat-sessions` sessions (default 2, minimum 2) have closed since the log
@@ -98,7 +113,11 @@ or by `-account`, or by the log file's name.
 
 A Degraded, Halted or reconciliation alert is sent again, on every channel,
 each `-repeat-interval` (default 30 minutes, your setting under ADR 0019),
-for as long as you have not acknowledged it. Every other alert is sent once.
+for as long as you have not acknowledged it, while the reporter's timer runs
+(below, "When the reporter runs"). Every other alert is sent once. ADR 0019
+asks for "a fixed interval" and leaves its length to you; 30 minutes is the
+program's default and the server's setting, not a recorded decision of yours.
+Change it with `-repeat-interval` in the unit if you want another.
 
 The alert's text ends with its **alert key**. You acknowledge it by recording
 an `operator.alert.acknowledged` input naming that key, which the engine
@@ -134,15 +153,46 @@ recorded in the state file with how many repeats that channel has taken. A
 state file written by an earlier reporter has no send times, so its
 unacknowledged alerts repeat once at the next run.
 
+## When the reporter runs
+
+The reporter checks the log only when it runs. On the server
+`ti-reporter@boost.timer` runs it **every 5 minutes from 09:00 to 20:55 New
+York time, Monday to Friday**: from before the 09:30 open to after the data
+step's last retry at 20:05. So, within those hours:
+
+- an alert is sent at most 5 minutes after the engine writes its record;
+- a repeat comes every 30 minutes (a multiple of 5, so on time);
+- an order IBKR has not acknowledged within `-ack-within` (10 minutes) of
+  its commit is reported at most 5 minutes after that, so within 15 minutes;
+- the daily summary goes at the first run after the log records that day's
+  session closed.
+
+Outside those hours, and at weekends, nothing is sent until 09:00 the next
+weekday. The engine trades only at the session's close and reads IBKR's
+snapshots while the market is open, so its records fall inside them; a
+heartbeat loss or a refused journal noticed overnight waits for 09:00. A run
+that takes more than 4 minutes is stopped, so the next firing is never
+skipped. `cmd/reporter`'s unit test checks that the timer's period divides
+the repeat interval and is at most half the acknowledgement bound.
+
 ## Where alerts go
 
 Alerts go to real channels. You choose them with `-channel`, comma-separated.
 
-| Channel | What it is | Secret (environment) |
+| Channel | What it is | Secret |
 | --- | --- | --- |
 | `ntfy` | Push to your phone through ntfy (the public ntfy.sh relay unless you run your own server) | `TI_NTFY_TOPIC`, an unguessable topic name; optionally `TI_NTFY_SERVER` |
 | `pagerduty` | The second channel, chosen by the owner: PagerDuty, through its Events API | `TI_PAGERDUTY_ROUTING_KEY`, the integration key; optionally `TI_PAGERDUTY_URL` |
 | `stdout` | Prints to the terminal or the system log | none |
+
+Each secret is read from the environment, or, when `-secrets-file` names a
+file of `KEY=VALUE` lines, from that file for any name the environment leaves
+empty. On the server the secrets go in `/etc/trend-investing/secrets.env`
+(root only, mode 0600; the names are in `deploy/etc/secrets.env.example`),
+which systemd hands the reporter as a private credential file; nothing puts
+them in its environment. A secrets file that cannot be read, or a line in it
+that is not `KEY=VALUE`, stops the run with an error naming the line's number,
+never its text.
 
 `stdout` is only an echo for whoever is watching the terminal. It reaches no
 one else, so it never counts as a delivery: `-channel stdout` alone is refused,
@@ -198,16 +248,35 @@ the reporter has no way to listen for it.
 
 ## Running the reporter
 
-From the repository root, once per timer tick:
+On the server it runs as `ti-reporter@boost.service`, started by its timer,
+with:
+
+```
+/opt/trend-investing/bin/ti-reporter \
+  -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log \
+  -state /var/lib/trend-investing/reports/boost.reporter.json \
+  -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account boost
+```
+
+`TI_RUN` comes from the engine's `run.env`, which systemd reads again at
+every firing, so after a fresh run the next firing reads the new log. The
+state file is per account, not per run, so an alert already delivered is not
+sent again from a later log. The reporter only reads the engine's directory
+and writes only in `/var/lib/trend-investing/reports`. Check a run with
+`systemctl status ti-reporter@boost` and `journalctl -u ti-reporter@boost`.
+Only the Boost account's timer is enabled: the IRA engines have no
+configuration yet.
+
+On the Mac, from the repository root, against a copy of a log:
 
 ```
 TI_NTFY_TOPIC=... TI_PAGERDUTY_ROUTING_KEY=... \
-  go run ./cmd/reporter -journal /var/lib/trend-investing/joint.log \
-  -state /var/lib/trend-investing/joint.reporter.json \
+  go run ./cmd/reporter -journal boost.log -state boost.reporter.json \
   -channel ntfy,pagerduty -summary
 ```
 
-Flags: `-journal` and `-state` are required; `-channel` (default `stdout`,
+Flags: `-journal` and `-state` are required; `-secrets-file` (a
+`KEY=VALUE` file read for any secret the environment leaves empty); `-channel` (default `stdout`,
 which is refused on its own, so always name a real channel); `-summary`
 (also send the day's summary); `-date YYYY-MM-DD` (default: the latest day
 whose session has closed in the log; a stated day whose session has not
@@ -224,6 +293,21 @@ If it exits with an error, read it: it names the channel that failed or the
 file it refused. Nothing is lost; the next run tries again.
 
 ## Running the dashboard
+
+On the server it runs as `ti-dashboard.service`:
+
+```
+/opt/trend-investing/bin/ti-dashboard \
+  -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log -addr 127.0.0.1:8088
+```
+
+Port 8088 is the program's default, the unit's, and the one the Lightsail
+runbook publishes to your tailnet (`sudo tailscale serve --bg 8088`). `TI_RUN`
+is read when the dashboard starts, so after a fresh run restart it
+(`sudo systemctl restart ti-dashboard`) to show the new log. It reads no
+secret and is given none.
+
+On the Mac:
 
 ```
 go run ./cmd/dashboard -journal joint.log -journal ira.log -addr 127.0.0.1:8088
@@ -256,5 +340,37 @@ read is answered "method not allowed". If a log does not verify the page says
   it, and names both dates, so a gap of missing days shows as a longer span.
   When the summary's day has no paired point it says "Day: not available"
   rather than showing an earlier day's change as today's.
-- The fills list stays empty until the engine records fills for target-weight
-  strategies.
+- Fills are read in both forms the engines record: the Turtle engine's and
+  the Boost and momentum engines' (which name the side and the client order
+  ID). Neither is counted in "Inputs not read".
+- Every sale back to 98% withheld that day is listed under "Sales back to 98%
+  withheld", with its reason, what fired it and the engine's detail. A lapse
+  (`lapsed`: what fired the sale ended before a good snapshot came) appears
+  only here, never as an alert.
+
+## What can go wrong
+
+| What you see | What it means | What you do |
+| --- | --- | --- |
+| Nothing at all for a long time | The timer is not running, the binary is not installed, or every run fails. Nothing outside the server notices: the outside dead-man's switch is not built | `systemctl list-timers ti-reporter@boost.timer` shows the next firing; `systemctl status ti-reporter@boost` and `journalctl -u ti-reporter@boost` show the last run and its error |
+| The unit failed: "run.env is missing or empty" | The Boost engine has never been started on this server | Start it by `docs/runbooks/durable-log.md`, "Restarting an engine" |
+| The unit failed: "the ntfy channel needs TI_NTFY_TOPIC" (or the PagerDuty key) | That line of `/etc/trend-investing/secrets.env` is empty | Fill it in with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses it |
+| The unit failed: "ntfy: server answered 4xx" or "pagerduty: server answered 400" | A wrong topic, server or routing key | Correct the line in `secrets.env`. Only that channel is retried, at the next firing |
+| PagerDuty shows incidents but the phone is silent | PagerDuty's own notification rules | Check the PagerDuty app's notification settings; the reporter's delivery was accepted |
+| "the state file is unreadable and is not reset" | The state file in `/var/lib/trend-investing/reports` is damaged | Move it aside and run again: every alert in the log is sent once more, which is safer than none |
+| The dashboard says "journal unavailable" or "journal does not verify" | The log cannot be read, or its fingerprints fail | The reporter sends "the reporter cannot read the journal" with the reason; check the file with `journal-query` |
+| The dashboard shows the previous run | It was not restarted after a fresh run | `sudo systemctl restart ti-dashboard` |
+
+## What backs this
+
+- ADR 0019, "Alerting" (amended 2026-09-24 and 2026-10-17): what alerts, once
+  per incident, repeats until acknowledged, the stale episode.
+- ADR 0027: the durable log both programs read.
+- `docs/live-trading/plan.md` section 3 and decision D6 (the sale's steps),
+  section 5 (the margin-cushion alarm) and section 7 (the channels).
+- Tests: `internal/report` (each alert and the summary, read from synthetic
+  logs), `cmd/reporter` (delivery, repeats, the secrets file, and the unit
+  and timer as shipped, run against a synthetic log), `cmd/dashboard` (the
+  page and the unit), and `deploy/rehearse.sh`, which installs the programs
+  in a clean Ubuntu container and runs the reporter with its unit's own
+  command line.

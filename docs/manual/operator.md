@@ -210,8 +210,10 @@ also raises the urgent "venue report not read" alert.
 ## Acknowledging an alert
 
 A Degraded, Halted or reconciliation alert is sent again every
-`-repeat-interval` until you acknowledge it ([alerts](alerts-and-dashboard.md),
-"Repeated until you acknowledge it"). Its text ends with `acknowledge with
+`-repeat-interval` (30 minutes on the server) while the reporter's timer runs,
+weekdays 09:00 to 20:55 New York, until you acknowledge it
+([alerts](alerts-and-dashboard.md), "Repeated until you acknowledge it" and
+"When the reporter runs"). Its text ends with `acknowledge with
 alert key: <key>`. Copy that key, exactly, into:
 
 ```

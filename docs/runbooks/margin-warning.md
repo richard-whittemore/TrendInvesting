@@ -6,14 +6,17 @@ liquidation from every broker snapshot (plan.md section 5; ADR 0026,
 point 6). Its thresholds are in the account's hashed configuration
 (`excess_liquidity_warning`, `excess_liquidity_urgent`,
 `excess_liquidity_stale_minutes`). Each change of level is recorded as a
-`risk.margin.alarm` decision and alerted
-([alerts-and-dashboard](../manual/alerts-and-dashboard.md)).
+`risk.margin.alarm` decision and alerted: "margin cushion warning" and
+"margin cushion clear" as routine messages, "margin cushion urgent" as an
+urgent one, each with the reading and the thresholds
+([alerts-and-dashboard](../manual/alerts-and-dashboard.md); on the server the
+reporter checks every 5 minutes on weekdays, 09:00 to 20:55 New York).
 
 | Level | When | What the program does | What you do |
 | --- | --- | --- | --- |
 | **warning** | below the warning threshold (40%) | records and alerts; orders as usual | check the position the same day (below) |
 | **urgent** | below the urgent threshold (20%), a net liquidation of zero or less, or no reading for the stale period while the market is open | records, alerts, and sells back to 98% once per urgent alarm (ADR 0019, amended 2026-10-15; ADR 0026, point 4) | below |
-| **clear** | back above the warning threshold | records the clear | nothing |
+| **clear** | back above the warning threshold | records and alerts the clear | nothing |
 
 ## A warning
 
@@ -35,15 +38,21 @@ point 6). Its thresholds are in the account's hashed configuration
 ## An urgent alarm
 
 1. **The program sells back to 98%** from the latest IBKR snapshot, once for
-   this alarm. Watch for the alert that it was sent, and the one that it
-   filled or failed (`journal-query orders`).
+   this alarm. Watch for the alert that it was sent ("sale back to 98%
+   sent"), one for each fill ("filled N of M", which says how many are left),
+   or the urgent one that IBKR canceled or refused it ("sale back to 98%
+   failed": sell the rest by hand). `journal-query orders` and
+   `journal-query fills` show the same.
 2. **If the sale was withheld** (`sale-withheld` in `journal-query
    refusals`):
    - `broker-values-unreadable` or `unknown-working-sell`: the program will
-     not try again. **Act by hand at IBKR now**: sell back to 98% of net
-     liquidation, after checking no other sell is working.
+     not try again, and the urgent "sale withheld, sell by hand" alert says
+     so. **Act by hand at IBKR now**: sell back to 98% of net liquidation,
+     after checking no other sell is working.
    - `stale-broker-snapshot` or `non-positive-broker-values`: the program
      decides it again from the next good snapshot while the alarm is urgent.
+     The first stale one of an outage alerts (once per stale episode); a
+     non-positive one sends no alert, so look for it here.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
      by hand.
 3. **No reading** (the cause says `no-reading`): the adapter has had no

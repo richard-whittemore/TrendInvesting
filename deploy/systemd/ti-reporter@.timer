@@ -1,0 +1,21 @@
+[Unit]
+Description=Run the reporter for account %i every 5 minutes on weekdays
+
+[Timer]
+# Every 5 minutes from 09:00 to 20:55 New York, Monday to Friday: from before
+# the 09:30 open to after the data step's last retry (20:05, ti-data.timer),
+# so the day's summary goes the evening its session closes. The reporter
+# checks only when it runs, so within these hours a Degraded, Halted or
+# reconciliation alert repeats every -repeat-interval (30 minutes, a multiple
+# of 5) until acknowledged, and an order IBKR has not acknowledged within
+# -ack-within (10 minutes) is reported at most 5 minutes after that; outside
+# them nothing is sent until 09:00 the next weekday
+# (docs/manual/alerts-and-dashboard.md, "When the reporter runs").
+# cmd/reporter's unit test checks these bounds against the reporter's
+# defaults. Persistent: a firing missed while the server was down runs at boot.
+OnCalendar=Mon..Fri 09..20:00/5:00 America/New_York
+Persistent=true
+Unit=ti-reporter@%i.service
+
+[Install]
+WantedBy=timers.target

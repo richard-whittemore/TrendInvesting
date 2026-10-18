@@ -196,6 +196,26 @@ CONF
   else
     log "no $data_job: the data step is not installed (deploy/build-data.sh builds it)"
   fi
+  # The reporter, the dashboard and the owner's two tools, built for the
+  # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
+  # and copied to dist/ beside deploy/. A missing one is named here, and its
+  # unit fails when it runs, so the gap is seen. The owner runs the tools as
+  # `sudo -u ti-trader operator ...` and `sudo -u ti-trader journal-query ...`:
+  # sudo's PATH includes /usr/local/bin, where each is linked.
+  local dist=${TI_DIST:-$here/../dist} b
+  for b in ti-reporter ti-dashboard operator journal-query; do
+    if test -f "$dist/$b"; then
+      install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
+      log "installed $b from $dist"
+    else
+      log "no $dist/$b: $b is not installed (deploy/build-engine.sh builds it)"
+    fi
+  done
+  for b in operator journal-query; do
+    if test -x "/opt/trend-investing/bin/$b"; then
+      ln -sfn "/opt/trend-investing/bin/$b" "/usr/local/bin/$b"
+    fi
+  done
   write_stub "$etc/ibkr-login.env" "$here/etc/ibkr-login.env.example"
   write_stub "$etc/secrets.env" "$here/etc/secrets.env.example"
   install -d -o ti-trader -g ti-trader -m 0750 \
@@ -206,10 +226,16 @@ CONF
   done
 
   log "systemd units"
+  # The reporter is one instance per account (ti-reporter@<account>); an
+  # earlier provisioner's single unit and its timer link are removed.
+  rm -f /etc/systemd/system/ti-reporter.service /etc/systemd/system/ti-reporter.timer \
+    /etc/systemd/system/timers.target.wants/ti-reporter.timer
   install -m 0644 "$here"/systemd/*.service "$here"/systemd/*.timer /etc/systemd/system/
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
-    systemctl enable ti-gateway.service ti-data.timer ti-reporter.timer ti-dashboard.service
+    # The Boost account's reporter only: the IRA engines have no
+    # configuration yet, and an enabled IRA reporter would fail every firing.
+    systemctl enable ti-gateway.service ti-data.timer ti-reporter@boost.timer ti-dashboard.service
     # Engines are not enabled: every engine start is the owner's explicit step
     # (docs/runbooks/durable-log.md, "Restarting an engine"), so a reboot
     # leaves them stopped. An earlier provisioner enabled them, and those
@@ -217,10 +243,10 @@ CONF
     # restart model). Disabling stops nothing that is running.
     systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
     # The gateway starts only once the owner has filled
-    # the login file; the unit's own check refuses an empty one. The
-    # reporter and dashboard are skipped (a unit condition) until their
-    # binaries are installed. The data step fails, with a message, until its
-    # file is installed and the Boost engine's run.env exists.
+    # the login file; the unit's own check refuses an empty one. The data
+    # step, the reporter and the dashboard fail, each with a message, until
+    # their files are installed and the Boost engine's run.env exists; the
+    # reporter also until secrets.env holds its channel secrets.
     log "enabled; start with: systemctl start ti-gateway (after the owner enters the IBKR login)"
   fi
 }
