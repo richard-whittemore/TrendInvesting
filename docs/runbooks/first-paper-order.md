@@ -14,15 +14,12 @@ nothing live.
 
 ## What waits for what
 
-Two pieces of work are not finished, and every step below is tagged with
-the one it waits for:
+One piece of work is not finished, and every step below is tagged with
+whether it waits for it:
 
-- **[NOW]** Can be done today, on what is already merged.
-- **[AFTER FIRST HALF]** Waits for the change that adds the paper sender, the
-  `twsapi` step of `provision.sh` and the manual chapter
-  `docs/manual/paper-trading.md`. It is open for review; the commands and
-  files it adds do not exist on `main` until it merges. Until then, do not
-  look for them.
+- **[NOW]** Can be done today, on what is already on `main`: the paper
+  sender, the `twsapi` step of `provision.sh` and the manual chapter
+  `docs/manual/paper-trading.md`.
 - **[AFTER SECOND HALF]** Waits for the second half of the paper-sending
   work: enabling the real IBKR client (today it refuses to place any order),
   installing IBKR's `ibapi` into the adapter's environment, and the adapter's
@@ -49,9 +46,8 @@ Do the owner steps in part A that are **[NOW]** first: they take the longest
   case.
 - **Paper only.** Today the engine refuses a paper configuration that names
   an account not beginning `DU`, and refuses a start mode that differs from
-  its configuration's mode. **[AFTER FIRST HALF]** Once the paper-sending
-  change has merged, the adapter's configuration refuses the same
-  mismatch, and the sender sends only to a paper account that your IBKR
+  its configuration's mode. **[NOW]** The adapter's configuration refuses the
+  same mismatch, and the sender sends only to a paper account that your IBKR
   login manages (the manual's "What sends" in
   `docs/manual/paper-trading.md`). A live-mode configuration is a different
   thing and is not what this checklist builds: nothing here sets live mode.
@@ -71,8 +67,8 @@ alternative for a first look. The trade-offs:
 | | Lightsail server (the plan) | Mac mini (first look) |
 | --- | --- | --- |
 | Matches what will run live | Yes: the same machine, users, service units and the Gateway and TWS API builds pinned in `deploy/versions.env` | No: IB Gateway for macOS and the TWS API for Mac are different downloads from the Linux builds the pins cover |
-| Checksummed download | `provision.sh gateway` fetches the pinned Linux file and refuses a mismatch; once the paper-sending change has merged, `provision.sh twsapi` does the same for the TWS API | You download the Mac installers yourself and compare their SHA-256 to a value you compute and write down; nothing in the repository pins them |
-| Counts as the ADR 0025 point 5 coverage test | Yes, if it ran on the pinned Gateway (10.50.1f) and, once the paper-sending change has merged, the pinned API (10.51.01) | No: it proves the order path, not that IBKR's execution history covers the nightly restart on the pinned versions. That test must be repeated on the server |
+| Checksummed download | `provision.sh gateway` fetches the pinned Linux file and refuses a mismatch; `provision.sh twsapi` does the same for the TWS API | You download the Mac installers yourself and compare their SHA-256 to a value you compute and write down; nothing in the repository pins them |
+| Counts as the ADR 0025 point 5 coverage test | Yes, if it ran on the pinned Gateway (10.50.1f) and the pinned API (10.51.01) | No: it proves the order path, not that IBKR's execution history covers the nightly restart on the pinned versions. That test must be repeated on the server |
 | Cost and effort | Needs the instance (a purchase only you make) and the setup in the Lightsail runbook, including Tailscale | Nothing to buy; no firewall or Tailscale to set up |
 | Weekly phone approval (2FA) | The Gateway logs out each Sunday and sends a prompt to your phone | Same prompt, and the Mac must not sleep: a sleeping Mac drops the link mid-session |
 | Credentials | Root-only file on the server, handed to the Gateway only, rendered into a memory-only directory (`deploy/libexec/render-ibc-config.sh`) | Typed into Gateway's login screen each time; keep it off the iCloud-synced Desktop |
@@ -159,7 +155,7 @@ Also confirm the paper account was given trading permissions for US stocks
 and ETFs in Account Management (SPY is one); a missing permission shows up
 later as an IBKR refusal (part D).
 
-### A5. Put the paper account number on the machine, and nowhere else [NOW to prepare; used AFTER FIRST HALF]
+### A5. Put the paper account number on the machine, and nowhere else [NOW]
 
 Find your paper account number (DU…) at the top of IB Gateway's window, or in
 Account Management with the paper switch on. Then enter it on the machine,
@@ -194,7 +190,7 @@ adapter are pointed at them.
 Most of these are commands you start, but nothing in this part needs a
 decision from you.
 
-### B1. Fetch IBKR's TWS API [AFTER FIRST HALF]
+### B1. Fetch IBKR's TWS API [NOW]
 
 ```sh
 sudo deploy/provision.sh twsapi
@@ -210,7 +206,7 @@ repository (IBKR's licence terms) and the step only fetches and verifies it.
 the second half adds that step and its command. Until then the real client
 cannot connect.
 
-### B2. The configuration binds paper mode to the DU account [AFTER FIRST HALF]
+### B2. The configuration binds paper mode to the DU account [NOW]
 
 Three checks, and any one stops the order (the manual's "What sends"):
 
@@ -223,7 +219,7 @@ Three checks, and any one stops the order (the manual's "What sends"):
    login does not manage it, the link is never treated as matched to IBKR and
    nothing is sent.
 
-### B3. Rehearse against the fake with the real account-ID shape [AFTER FIRST HALF]
+### B3. Rehearse against the fake with the real account-ID shape [NOW]
 
 Before pointing anything at IBKR, prove the checks accept your account number
 and the adapter's suite is green on this machine. It sends nothing to IBKR.
@@ -364,11 +360,12 @@ Check in this order, and compare the three: they must agree.
    account in Degraded or Halted; follow `docs/runbooks/reconciliation.md`.
 
 When the order is filled, reconciled and the reconnect proof (B7) passed, the
-first paper order is done. Then turn the Read-Only API back on: on the server set
-`TWS_READONLY_API=yes` in `ibkr-login.env` and `sudo systemctl restart
-ti-gateway`; on the Mac tick Read-Only API in Gateway's settings. Do this
-even if you plan to run again soon, so a stray start cannot send. Record the result: which machine, which Gateway and API
-builds, the date, and what you saw. Phase 4 continues from here with the
+first paper order is done. Then turn the Read-Only API back on: on the server
+set `TWS_READONLY_API=yes` in `ibkr-login.env` and `sudo systemctl restart
+ti-gateway`; on the Mac tick Read-Only API in Gateway's settings. Do this even
+if you plan to run again soon, so a stray start cannot send. Record the
+result: which machine, which Gateway and API builds, the date, and what you
+saw. Phase 4 continues from here with the
 daily checks (plan section 9).
 
 ## D. What can go wrong, and what to do
@@ -388,15 +385,14 @@ does" in `docs/manual/paper-trading.md`.
    look right.
 4. If you are unsure: stop, look in IBKR, change nothing, and ask.
 
-Two names are used in the commands. **PENDING_FILE** is the adapter's
+Three names are used in the commands. **PENDING_FILE** is the adapter's
 pending file: its path is named in the adapter's stop message and in its
 start command (added by the second half). **ENGINE_LOG** is the engine's
 `-log` file, the `<TI_RUN>.log` in `/var/lib/trend-investing/engines/boost/`
 (B4). **CLIENT_ORDER_ID** is the order's tag, shown in the stop message and
 in IBKR as the order's reference. Replace these capitals with the real
 values and leave everything else exactly as written. The `relay.py`
-commands below exist once the paper-sending change has merged
-**[AFTER FIRST HALF]**.
+commands below are on `main` now **[NOW]**.
 
 ### D1. The order was never sent
 
@@ -411,7 +407,7 @@ commands below exist once the paper-sending change has merged
 - **What to do:** if the day has not ended, do nothing. If it has: stop the
   adapter, look in IBKR (orders, including cancelled ones) and confirm no
   order has that CLIENT_ORDER_ID as its reference, then run this, replacing
-  the capitals and the day:
+  the capitals:
 
   ```sh
   python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --never-sent --reason "released for DAY, refused as stale"
@@ -568,4 +564,4 @@ commands below exist once the paper-sending change has merged
   client, installing `ibapi`, the first order against IBKR's paper gateway,
   the Gateway and API pairing) is what **[AFTER SECOND HALF]** waits for.
 - PR #467: the first half (paper sender, `provision.sh twsapi`, the manual
-  chapter, the runbooks marked **[AFTER FIRST HALF]**).
+  chapter), merged to `main` as d40b78b.
