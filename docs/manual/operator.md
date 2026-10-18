@@ -311,7 +311,7 @@ reports ([journal-query](journal-query.md)).
 | --- | --- | --- |
 | You run the tool as yourself or as root, not `ti-trader` | Refused, nothing written: the engine could not read the file | Run it again with `sudo -u ti-trader` |
 | A kill switch backdated with `-at` before one already applied | Recorded with no effect, with a `.refused` note naming the later one | Record it again with the current time |
-| A kill switch or clearance with `-at` more than five minutes in the future | Never recorded; a `.refused` note says so | Record it again with the current time |
+| Any instruction (kill switch, clearance or acknowledgement) with `-at` more than five minutes in the future | Never recorded; a `.refused` note says so | Record it again with the current time |
 | The disk fails while the engine records an instruction | No note; the run stops with the error; the file waits | Resume the run; the instruction is recorded first |
 | The log is full (the most records a run holds) when an instruction arrives | No note; the run stops with the error; the file waits | Start a fresh run; the instruction is recorded first |
 | You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
