@@ -16,7 +16,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -34,7 +34,7 @@ from delivery import (DELIVERED_SUFFIX, DeliveryRecordInvalid, StreamRefused, ma
                       read_stream)
 from loop import AdapterLoop, Outbox
 from relay import RELEASED, EngineUnavailable, OutboxInvalid, PendingInput, read_engine_log
-from reports import FILL_TYPE, LIFECYCLE_TYPE
+from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 from snapshot import BROKER_SNAPSHOT_TYPE
 
 RUN = "engine"
@@ -97,7 +97,7 @@ class DeliveryTests(unittest.TestCase):
             clock.now += seconds
         loop = AdapterLoop(config(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT),
                            fake or self.fake, engine or self.engine, self.pending, engine_log or self.engine_log,
-                           now=lambda: now, today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
+                           now=now if callable(now) else (lambda: now), today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
                            new_id=self.new_id, streams=str(self.streams) if streams else None)
         self.addCleanup(loop.close)
         return loop
@@ -582,7 +582,9 @@ class DeliveryTests(unittest.TestCase):
         self.settle(loop)
         self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
         self.assertEqual(self.engine.inputs()[0]["payload"]["unreadable"], [])
-        self.assertEqual(fake.reads, 3)
+        # The start's reconciliation, the partial read, then a complete read
+        # and the read after the marks that confirms nothing changed.
+        self.assertEqual(fake.reads, 4)
 
     def test_an_account_read_that_stays_partial_stops_for_a_person_and_records_nothing(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -728,6 +730,212 @@ class DeliveryTests(unittest.TestCase):
         self.settle(loop)
         self.assertEqual(len(self.fake.placed), 1)
         self.assertEqual(self.types()[:3], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+
+
+    # -- an execution whose commission is still to come ---------------------
+    def fill_awaiting_commission_during_a_bar(self):
+        """FRIDAY's order is placed; during the next file's first bar it executes, its commission not yet sent."""
+        class FillsOn:
+            def __init__(self, engine, input_id, act):
+                self.engine, self.input_id, self.act = engine, input_id, act
+
+            def __call__(self):
+                self.engine()
+                return self
+
+            def decide(self, envelope):
+                if envelope["id"] == self.input_id and self.act is not None:
+                    act, self.act = self.act, None
+                    act()
+                return self.engine.decide(envelope)
+        self.place_the_days_order()
+        later = [date(2027, 1, 15), date(2027, 1, 19)]
+        return FillsOn(self.engine, "marketdata:bar:SPY:2027-01-15", lambda: self.fake.fill(
+            7, shares="9", price=401.25, exec_id="0001f4e8.t.01.01", cum_qty="9", commission=None,
+            time="20270114 15:59:00 US/Eastern")), later
+
+    def test_the_stream_waits_while_an_execution_awaits_its_commission_and_the_fill_goes_first(self):
+        engine, later = self.fill_awaiting_commission_during_a_bar()
+        loop = self.loop(engine=engine)
+        loop.start()
+        self.settle(loop)
+        write_stream(self.folder, later[-1], session_envelopes(later))
+        self.settle(loop, steps=10)
+        self.assertNotIn("marketdata:session-closed:2027-01-15", self.ids(),
+                         "no stream input goes ahead of a fill the engine has not been told about")
+        self.fake.callbacks.commission_report(mock.Mock(execId="0001f4e8.t.01.01", commission=Decimal("1.00"),
+                                                        currency="USD"))
+        self.settle(loop)
+        ids = self.ids()
+        self.assertLess(self.types().index(FILL_TYPE), ids.index("marketdata:session-closed:2027-01-15"))
+        self.assertEqual(ids[-1], "marketdata:session-closed:2027-01-19")
+
+    def test_a_commission_that_never_comes_stops_the_adapter_with_the_stream_still_held(self):
+        engine, later = self.fill_awaiting_commission_during_a_bar()
+        clock = {"now": RECEIVED}
+        loop = self.loop(engine=engine, now=lambda: clock["now"])
+        loop.start()
+        self.settle(loop)
+        write_stream(self.folder, later[-1], session_envelopes(later))
+        self.settle(loop, steps=5)
+        clock["now"] = RECEIVED + timedelta(seconds=COMMISSION_WAIT)
+        with self.assertRaises(UnreportableOrder):
+            self.settle(loop, steps=5)
+        self.assertNotIn("marketdata:session-closed:2027-01-15", self.ids())
+
+    # -- activity in the account outside this adapter's orders ----------------
+    def test_a_trade_placed_outside_the_adapter_during_the_snapshots_reads_makes_it_read_again(self):
+        class TradedByHandDuringMarks(FakeTWS):
+            trade_next = False
+
+            def req_mkt_data(self, req_id, contract_):
+                if self.trade_next:
+                    # An order placed in IBKR's own app fills: IBKR reports
+                    # its execution to that app, not to this client, and the
+                    # account's holdings and cash change all the same.
+                    self.trade_next = False
+                    self.positions = [(ACCOUNT, contract(), Decimal("156"), 312.5)]
+                    self.summary = [(a, t, "96388.75" if t == "TotalCashValue" else v, c) for a, t, v, c in
+                                    self.summary]
+                super().req_mkt_data(req_id, contract_)
+        fake = TradedByHandDuringMarks()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop(fake=fake)
+        loop.start()
+        self.settle(loop)
+        fake.trade_next = True
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        self.settle(loop)
+        snapshots = self.engine.inputs(BROKER_SNAPSHOT_TYPE)
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[1]["payload"]["positions"][0]["quantity"], 156,
+                         "the snapshot was read again after the trade, so it holds it")
+
+    # -- a read whose answers carry no request ID -----------------------------
+    def test_an_open_order_read_that_timed_out_is_never_retried_on_the_same_link(self):
+        class LateOrderEnd(FakeTWS):
+            connects = 0
+            stall = False
+            stalled_on = None
+
+            def connect(self, *args):
+                self.connects += 1
+                super().connect(*args)
+
+            def req_all_open_orders(self):
+                if self.stall:
+                    # IBKR is slow: the list's end comes after the read gave up.
+                    self.stall, self.stalled_on = False, self.connects
+                    self.calls.append(("req_all_open_orders",))
+                    return
+                if self.stalled_on == self.connects:
+                    # The abandoned read's end arrives first, on the same link,
+                    # ahead of this read's rows.
+                    self.stalled_on = None
+                    self.callbacks.open_order_end()
+                super().req_all_open_orders()
+        fake = LateOrderEnd()
+        fake.summary, fake.positions, fake.marks = self.fake.summary, self.fake.positions, self.fake.marks
+        self.fake = fake
+        self.place_the_days_order()
+        loop = self.loop(fake=fake)
+        loop.start()
+        self.settle(loop)
+        self.assertEqual(len(fake.placed), 1)
+        fake.stall = True
+        write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
+        self.settle(loop)
+        snapshots = self.engine.inputs(BROKER_SNAPSHOT_TYPE)
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual([o["client_order_id"] for o in snapshots[1]["payload"]["open_orders"]],
+                         [json.loads((tests_dir / "testdata" / "paper_released.json").read_text())["client_order_id"]],
+                         "the working order is in the snapshot: no late answer completed a later read")
+        self.assertGreater(fake.connects, 1, "the link was made again before the account was read again")
+
+    # -- a fresh run strikes an earlier run's batch -------------------------
+    def test_a_stop_while_a_fresh_run_strikes_an_earlier_batch_never_parts_its_snapshot_from_its_stream(self):
+        self.queue_unsent()
+        log, engine = self.fresh_run()
+        fresh = self.loop(engine=engine, engine_log=log)
+        fresh.start()
+
+        class Stop(Exception):
+            pass
+        real = Outbox._write
+        writes = []
+
+        def stop_on_the_second(outbox, entries):
+            writes.append(entries)
+            if len(writes) == 2:
+                raise Stop("the power went")
+            real(outbox, entries)
+        with mock.patch.object(Outbox, "_write", stop_on_the_second):
+            try:
+                fresh.step()
+            except Stop:
+                pass
+        fresh.close()
+        left = [e["id"] for e in Outbox(self.pending + ".outbox").load()]
+        self.assertIn(left, [[], ["ibkr:account.broker.snapshot:1", "marketdata:bar:SPY:2027-01-14",
+                                  "marketdata:session-closed:2027-01-14"]],
+                      "the earlier batch is whole in the outbox or wholly gone")
+        resumed = self.loop()
+        resumed.start()
+        self.settle(resumed)
+        self.assertEqual(self.types()[:3], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED],
+                         "the resumed run gets its stream behind its snapshot")
+
+    # -- a compact stream repeats each retraction its calendar covers --------
+    def compact_files(self, reason=None):
+        """Two compact momentum files as the data job's encoder writes them, each repeating the 2026-11-25 retraction."""
+        adapter_dir = str(tests_dir.parents[1])
+        if adapter_dir not in sys.path:
+            sys.path.insert(0, adapter_dir)
+        from marketdata import encode
+        from marketdata.tests.test_compact import FakeRanker, retract
+        from marketdata.tests.test_encode import FIRST, LAST, build
+        data = tempfile.TemporaryDirectory()
+        self.addCleanup(data.cleanup)
+        build(data.name)
+        retract(data.name, "2026-11-25")
+        identity = encode.Identity(CONFIGURATION_HASH, STRATEGY_VERSION, RUN)
+        spans = [(FIRST, date(2026, 11, 24)), (date(2026, 11, 27), LAST)]
+        out = []
+        for first, last in spans:
+            envelopes = encode.encode(data.name, first, last, identity, required=["SPY", "IEF"], optional=[],
+                                      base=FIRST, first_sequence=1, ranker=FakeRanker())
+            if reason is not None and last == LAST:
+                for e in envelopes:
+                    if e["type"] == "market.session.retracted":
+                        e["payload"] = dict(e["payload"], reason=reason)
+                        raw = json.dumps(e["payload"], separators=(",", ":"), allow_nan=False)
+                        e["payload_hash"] = hashlib.sha256(raw.encode()).hexdigest()
+            out.append(write_stream(self.folder, last, envelopes, prefix="momentum"))
+        return out
+
+    def test_a_compact_stream_repeating_a_retraction_in_each_file_is_delivered_with_the_retraction_once(self):
+        files = self.compact_files()
+        retractions = [[e for e in map(json.loads, f.read_text().splitlines())
+                        if e["type"] == "market.session.retracted"] for f in files]
+        self.assertEqual([[e["id"] for e in r] for r in retractions], [["marketdata:retracted:2026-11-25"]] * 2,
+                         "the encoder repeats the retraction in every file its calendar covers")
+        loop = self.loop()
+        loop.start()
+        self.settle(loop, steps=80)
+        self.assertEqual(self.ids().count("marketdata:retracted:2026-11-25"), 1)
+        self.assertEqual(self.ids()[-1], "marketdata:session-closed:2026-11-30")
+        self.assertEqual(loop.outbox.load(), [])
+
+    def test_a_retraction_repeated_with_other_content_is_refused(self):
+        files = self.compact_files(reason="another reason")
+        loop = self.loop()
+        loop.start()
+        with self.assertRaises(StreamRefused) as caught:
+            loop.step()
+        self.assertIn(str(files[1]), str(caught.exception))
+        self.assertEqual(self.types(), [])
 
 
 class StreamReadTests(unittest.TestCase):

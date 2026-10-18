@@ -70,28 +70,42 @@ rule; ADR 0021). A stream entry is sent as the data job wrote it, with the
 engine's next sequence (the file's own is a file-local ordinal) and its
 send time as its recorded time, as every input the adapter sends, so the
 snapshot is never recorded after the input it serves (ADR 0019's snapshot
-rule measures its age at the trigger's recorded time). An earlier run's
-batch left in the outbox, its snapshot and its stream entries, is struck
-off unsent, since a run's own stream carries its whole history from its
-warm-up, and the batch is marked dropped, so that run gets its files again
-if it is resumed (delivery.py).
+rule measures its age at the trigger's recorded time, while the adapter's
+clock keeps time with IBKR's: one behind it gives a negative age, which the
+engine finds stale and fails closed on). An earlier run's batch left in
+the outbox, its snapshot and its stream entries, is marked dropped, so that
+run gets its files again if it is resumed (delivery.py), and then struck
+off unsent in one outbox write, since a run's own stream carries its whole
+history from its warm-up: a stop leaves the batch whole or wholly gone,
+never its stream entries without their snapshot.
 
 The broker snapshot is one consistent reading (ADR 0019: its components
 share one cutoff): every callback already received is applied first, so a
 report IBKR sent before the read is recorded ahead of it; it is not taken
 while an execution awaits its commission (its fill is not yet recorded);
-and if an order report is recorded or an execution arrives between the
-start of the account read and the end of the marks, it is read again, as
-it is when any component could not be read, up to SNAPSHOT_ATTEMPTS times.
+the account is read, then the marks, then the account again, and the
+snapshot is the second read. It is read again, up to SNAPSHOT_ATTEMPTS
+times, if an order report is recorded or an execution arrives (of any
+client's order in the account, not only this adapter's) between the start
+of the first read and the end of the second, if the two reads' holdings,
+open orders or cash differ (a trade IBKR reports to another client only,
+such as one placed in its own app), or if any component could not be read.
 A reading still incomplete then stops the adapter for a person
-(delivery.SnapshotRefused); one still overtaken by reports waits for the
-next step. Each snapshot's cutoff is logged: the last report recorded
-before it.
+(delivery.SnapshotRefused); one still overtaken waits for the next step.
+IBKR's positions and open orders carry no request ID, so a read that timed
+out on either is never followed by another on that link, where the late
+end of the abandoned list would complete the new one: the link is dropped
+(Connection.drop), and the snapshot waits until it is back and reconciled.
+Each snapshot's cutoff is logged: the last report recorded before it.
 
 The outbox goes oldest first, but a broker report recorded behind a stream
 entry (a fill or a cancellation IBKR reported while the engine decided a
 bar) is sent before that stream entry, so no decision runs on a state
-behind a report already received.
+behind a report already received. While an execution awaits its
+commission, no stream entry is sent at all: its fill is not recorded yet,
+and goes ahead of the stream once its commission arrives; one that never
+arrives stops the adapter for a person after commission_wait
+(OrderReportJournal.check_overdue).
 
 The engine must be running, with its durable log begun, before the adapter
 starts: the log is the run's identity. The loop connects to the engine's
@@ -121,6 +135,7 @@ from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, Pendin
                    read_engine_log, released_client_order_ids, run_identity, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
+from account import TOTAL_CASH
 from snapshot import Record, broker_snapshot_record, read_account, read_marks
 
 log = logging.getLogger("ibkr")
@@ -164,6 +179,11 @@ def _batch_run(entry):
     if "envelope" in entry:
         return entry["envelope"].get("correlation_id")
     return entry.get("run")
+
+
+def _holdings(reading):
+    """What a trade or an order changes in an account read: its positions, open orders and total cash."""
+    return reading.positions, reading.open_orders, reading.balances.get(TOTAL_CASH)
 
 
 def _next_entry(entries):
@@ -253,6 +273,9 @@ class AdapterLoop:
         # one's input ID (a broker snapshot's cutoff).
         self._reports_recorded = 0
         self._last_report = None
+        # Every execution IBKR reports in the account, whichever client or
+        # app placed its order (a broker snapshot's cutoff watermark too).
+        self._account_executions = 0
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._broker_snapshot, new_id)
 
@@ -287,6 +310,7 @@ class AdapterLoop:
             late_fills=self.pending.acknowledged_late_fills())
         self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record)
         self.conn.subscribe(self.tracker.on_event)
+        self.conn.subscribe(self._count_execution)
         self.conn.connect_with_backoff()
         self.reconcile()
         self._settle_waiting()
@@ -467,16 +491,29 @@ class AdapterLoop:
             pass
         self.reports.check_overdue()
 
+    def _count_execution(self, event):
+        """Count an execution IBKR reports in the account, of any client's order or none (see _activity)."""
+        if event.name == "exec_details" and len(event.args) == 3:
+            if getattr(event.args[2], "acctNumber", None) == self.config.account_id:
+                self._account_executions += 1
+
     def _activity(self):
-        """The order reports recorded and the executions seen so far: a broker snapshot's cutoff watermark."""
-        return self._reports_recorded, self.reports.executions_seen()
+        """A broker snapshot's cutoff watermark: the order reports recorded, and the executions seen.
+
+        The executions are this adapter's (IBKR's replays not counted again)
+        and every one IBKR reports in the account from any client: an order
+        placed in IBKR's own app or by another client changes the holdings
+        and cash as much as this adapter's do.
+        """
+        return self._reports_recorded, self.reports.executions_seen(), self._account_executions
 
     def _broker_snapshot(self):
         """The account.broker.snapshot of one consistent account read, with IBKR's marks (see the module).
 
         None when it cannot be taken now (the link went, an execution awaits
-        its commission, or reports overtook every attempt); SnapshotRefused
-        when the account could not be read in full within SNAPSHOT_ATTEMPTS.
+        its commission, a read timed out on answers that carry no request
+        ID, or the account changed on every attempt); SnapshotRefused when
+        the account could not be read in full within SNAPSHOT_ATTEMPTS.
         Marks are asked for each holding the configuration has IBKR's
         contract number for; any other holding is stated with no mark.
         market_open is the NYSE session's state at the read's time.
@@ -493,8 +530,17 @@ class AdapterLoop:
                 return None
             before = self._activity()
             reading = read_account(self.conn)
+            if self._unended(reading):
+                return None
             con_ids = {s: self.config.con_ids[s] for s in reading.positions if s in self.config.con_ids}
             marks = read_marks(self.conn, con_ids)
+            # Read again after the marks: a trade IBKR reports to another
+            # client only (an order placed in its own app) still changes
+            # the holdings, open orders and cash, and only a second read
+            # shows it.
+            confirm = read_account(self.conn) if not reading.unread else None
+            if confirm is not None and self._unended(confirm):
+                return None
             if not self.ready():
                 log.info("ibkr link went during the broker snapshot; the stream waits until it is reconciled")
                 return None
@@ -503,14 +549,23 @@ class AdapterLoop:
                          "arrived between its reads", attempt, SNAPSHOT_ATTEMPTS)
                 unread = None
                 continue
-            if reading.unread:
-                unread = sorted(reading.unread)
+            incomplete = reading.unread | (confirm.unread if confirm is not None else frozenset())
+            if incomplete:
+                unread = sorted(incomplete)
                 log.info("ibkr broker snapshot read again (attempt %d of %d): %s could not be read", attempt,
                          SNAPSHOT_ATTEMPTS, ",".join(unread))
                 continue
-            log.info("ibkr broker snapshot as_of=%s cutoff: no order report or execution between its reads; "
-                     "the last report recorded before it %s", _stamp(reading.as_of), self._last_report or "none")
-            return broker_snapshot_record(reading, market_open(reading.as_of), marks)
+            if _holdings(reading) != _holdings(confirm):
+                log.info("ibkr broker snapshot read again (attempt %d of %d): the account's holdings, open orders "
+                         "or cash changed between its reads", attempt, SNAPSHOT_ATTEMPTS)
+                unread = None
+                continue
+            log.info("ibkr broker snapshot as_of=%s cutoff: no order report, execution or account change between "
+                     "its reads; the last report recorded before it %s", _stamp(confirm.as_of),
+                     self._last_report or "none")
+            # The second read's as_of is IBKR's time after every component
+            # and the marks were read.
+            return broker_snapshot_record(confirm, market_open(confirm.as_of), marks)
         if unread is not None:
             raise SnapshotRefused(
                 "the account could not be read in full for the broker snapshot in {} attempts ({} could not be "
@@ -519,6 +574,16 @@ class AdapterLoop:
                 "and positions, then start the adapter again (docs/manual/market-data.md, \"What happens to the "
                 "file\")".format(SNAPSHOT_ATTEMPTS, ", ".join(unread)))
         return None
+
+    def _unended(self, reading):
+        """Whether reading timed out on answers that carry no request ID; if so the link is dropped (see the module)."""
+        if not reading.unended:
+            return False
+        log.info("ibkr broker snapshot: IBKR did not end its %s within request_timeout, and a late end would "
+                 "complete a later read on this link, so the link is made again and reconciled first",
+                 ",".join(sorted(reading.unended)))
+        self.conn.drop("untagged-read-timed-out")
+        return True
 
     def _envelope(self, entry, engine_log):
         """The input envelope for an outbox entry: the run's identity and next sequence from the engine's log.
@@ -583,11 +648,16 @@ class AdapterLoop:
                 if batch_run is not None and batch_run != run_name(self._engine_log_path):
                     # An earlier run's stream batch: the run now running has
                     # its own, and the earlier run gets it again if resumed.
-                    log.info("ibkr stream input %s of run %s struck off unsent: the engine now runs %s",
-                             entry["id"], batch_run, run_name(self._engine_log_path))
+                    # Marked dropped first, then struck off whole in one
+                    # write, so a stop leaves the batch whole in the outbox
+                    # (sent whole to that run if it is resumed) or wholly
+                    # gone, never its stream without its snapshot.
+                    batch = [e["id"] for e in entries if _batch_run(e) == batch_run]
+                    log.info("ibkr stream batch of run %s (%d inputs) struck off unsent: the engine now runs %s",
+                             batch_run, len(batch), run_name(self._engine_log_path))
                     if self.delivery is not None:
                         self.delivery.dropped(batch_run)
-                    self.outbox.strike(entry["id"])
+                    self.outbox.strike_all(batch)
                     continue
                 engine_log = read_engine_log(self._engine_log_path)
                 committed = {i.id: i for i in engine_log.inputs}.get(entry["id"])
@@ -600,6 +670,16 @@ class AdapterLoop:
                             "(docs/manual/paper-trading.md)".format(entry["id"]))
                     self.outbox.strike(entry["id"])
                     continue
+                if batch_run is not None and self.reports.awaiting_commission():
+                    # An execution IBKR reported awaits its commission, so its
+                    # fill is not recorded yet: no stream input goes ahead of
+                    # it (ADR 0019: no decision on a book behind a report
+                    # received). The next steps keep reading IB Gateway, and
+                    # check_overdue stops the adapter for a person once the
+                    # commission is commission_wait late.
+                    log.info("ibkr stream input %s waits: an execution awaits its commission, so its fill is "
+                             "not recorded yet", entry["id"])
+                    return
                 # Recorded before it is first sent, so a restart tells this
                 # run's input from an earlier run's.
                 self.pending.record_run(entry["id"], run_identity(self._engine_log_path),

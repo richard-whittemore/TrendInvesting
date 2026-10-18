@@ -76,10 +76,15 @@ Record = namedtuple("Record", "event_type schema_version payload")
 """One recorded input: its event type, schema version and JSON-ready payload."""
 
 AccountReading = namedtuple("AccountReading", (
-    "account_id positions balances open_orders unread as_of"))
+    "account_id positions balances open_orders unread as_of unended"), defaults=(frozenset(),))
 """One read of the account. positions maps symbol to whole shares, balances
 tag to Money, open_orders lists open-order payload rows; unread holds the
-components that could not be read; as_of is a whole-second UTC datetime."""
+components that could not be read; as_of is a whole-second UTC datetime.
+unended names the components whose answers carry no request ID (positions,
+open orders) that IBKR had not ended when the read gave up with the link
+still up: their late answers may still arrive on that link, where nothing
+tells them from a later read's, so no later read on that link can be
+trusted to be complete."""
 
 
 def read_account(conn):
@@ -132,7 +137,14 @@ def read_account(conn):
     for component, tag in ((NET, NET_LIQUIDATION), (EXCESS, EXCESS_LIQUIDITY), (CASH, TOTAL_CASH)):
         if tag in balances and balances[tag].currency != BASE_CURRENCY:
             unread.add(component)
+    unended = set()
+    if conn.connected:
+        if not done["positions"]:
+            unended.add(POSITIONS)
+        if not done["orders"]:
+            unended.add(OPEN_ORDERS)
     return AccountReading(
+        unended=frozenset(unended),
         account_id=account,
         positions={} if POSITIONS in unread else positions,
         balances=balances,

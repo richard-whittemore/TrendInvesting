@@ -449,6 +449,15 @@ class Outbox:
             if len(kept) != len(entries):
                 self._write(kept)
 
+    def strike_all(self, input_ids):
+        """Remove the entries for every one of input_ids in one write: all of them or none."""
+        gone = set(input_ids)
+        with self._locked():
+            entries = self.load()
+            kept = [e for e in entries if e["id"] not in gone]
+            if len(kept) != len(entries):
+                self._write(kept)
+
     @contextlib.contextmanager
     def _locked(self):
         # Never removed: the lock lives on the file's inode.

@@ -324,9 +324,15 @@ the first real paper order:
   read; whether that is acceptable is a rule decision (ADR 0026 point 1).
 - **The broker snapshot is taken after the close.** The adapter reads it
   just before it sends the day's file, and records every line of the file
-  at the time it sends it, so the snapshot is never stamped later than the
-  close it serves, and a sell the engine plans at that close finds it fresh
-  (within the configured 30-minute limit) and is sized against it. It is
+  at the time it sends it, so, while the server's clock keeps time with
+  IBKR's, the snapshot is never stamped later than the close it serves, and
+  a sell the engine plans at that close finds it fresh (within the
+  configured 30-minute limit) and is sized against it. If the server's
+  clock is behind IBKR's, the snapshot's IBKR time comes out later than
+  the close's recorded time; the engine counts that as stale (ADR 0019)
+  and withholds every sell (`stale-broker-snapshot`), failing closed:
+  check the server's clock (`timedatectl`) against IBKR's
+  ([market data](market-data.md), "What happens to the file"). It is
   the account some minutes after the close, not at it: whether a reading
   taken after the close may serve a decision made at the close is ADR
   0019's rule question, and choosing when the adapter takes it (after the

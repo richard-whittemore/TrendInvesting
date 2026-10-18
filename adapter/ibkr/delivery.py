@@ -6,7 +6,8 @@ the engine's durable log's name without ".log": one envelope per line, in
 delivery order, each file's ``sequence`` a file-local ordinal 1..N, and each
 file covering the sessions since the one before it. Only the deliverer
 knows the engine's sequence, so it sets each envelope's sequence as it sends
-it (loop.AdapterLoop._envelope) and sends every other field as written.
+it (loop.AdapterLoop._envelope), stamps its recorded_at with the send time,
+and sends every other field as written.
 
 While the link is up and reconciled, the adapter (Deliverer.deliver) picks
 up the files of its run it has not delivered, oldest session first, reads
@@ -55,7 +56,10 @@ the close of the session its name gives), one whose run identity
 (configuration hash, strategy version, run name) is not the engine's run
 now running, one whose first session is not after the last session already
 delivered or of the file before it in the batch, and one naming an input
-another file of the batch or the outbox names, is refused (StreamRefused):
+another file of the batch or the outbox names, is refused (StreamRefused),
+except a session retraction a later file repeats with the same type,
+schema version and payload, as the data job writes each one its calendar
+covers into every file: that one is recorded once. Any of these refusals:
 nothing of that batch is recorded or sent, and the adapter stops for a
 person, naming the file and how to settle it. A run whose stream folder
 does not exist yet stops the start: its warm-up has not been written.
@@ -430,11 +434,13 @@ class Deliverer:
                     stream.first, previous))
             for envelope in stream.envelopes:
                 if envelope["id"] in named:
-                    raise _refused(path, "it names input {}, which {} names too".format(
-                        envelope["id"], named[envelope["id"]]))
+                    earlier, first = named[envelope["id"]]
+                    if not _repeats(first, envelope):
+                        raise _refused(path, "it names input {}, which {} names too".format(envelope["id"], earlier))
+                    continue
                 if envelope["id"] in recorded:
                     raise _refused(path, "it names input {}, which the outbox already holds".format(envelope["id"]))
-                named[envelope["id"]] = name
+                named[envelope["id"]] = (name, envelope)
             streams.append(stream)
             previous = stream.session
         return streams
@@ -468,6 +474,20 @@ class Deliverer:
         return True
 
 
+def _repeats(first, envelope):
+    """Whether envelope is a later file's copy of first that the data job writes again: a retraction, as it was.
+
+    A compact stream's calendar reaches back to the run's base, and every
+    file writes each recorded retraction that calendar covers under its
+    stable ID (encode.encode), so successive files repeat it. Its type,
+    schema version and payload must be first's (its times are each file's
+    own); any other input named twice is refused.
+    """
+    return ((envelope["type"], envelope["schema_version"]) == kinds.RETRACTED
+            and (first["type"], first["schema_version"], first["payload"]) == (
+                envelope["type"], envelope["schema_version"], envelope["payload"]))
+
+
 def _session_of(name):
     return date.fromisoformat(STREAM_FILE.fullmatch(name).group(1))
 
@@ -476,8 +496,14 @@ def _entries(run, snapshot_id, snapshot, streams):
     """The outbox entries of one batch: the broker snapshot, naming the run it was read for, then every envelope of each file, in order."""
     entries = [{"id": snapshot_id, "event_type": snapshot.event_type, "schema_version": snapshot.schema_version,
                 "event_time": snapshot.payload["as_of"], "payload": snapshot.payload, "run": run}]
+    # A retraction a later file repeats (_repeats) is recorded once, as the
+    # first file wrote it.
+    seen = set()
     for stream in streams:
-        entries.extend({"id": e["id"], "event_type": e["type"], "schema_version": e["schema_version"],
-                        "event_time": e["event_time"], "payload": e["payload"], "envelope": e}
-                       for e in stream.envelopes)
+        for e in stream.envelopes:
+            if e["id"] in seen:
+                continue
+            seen.add(e["id"])
+            entries.append({"id": e["id"], "event_type": e["type"], "schema_version": e["schema_version"],
+                            "event_time": e["event_time"], "payload": e["payload"], "envelope": e})
     return entries

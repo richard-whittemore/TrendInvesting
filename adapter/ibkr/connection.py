@@ -278,6 +278,16 @@ class Connection:
         self._abandon()
         self.connect_with_backoff()
 
+    def drop(self, reason):
+        """Drop the link on purpose; maintain() then connects again, and the new link needs reconciling.
+
+        For a link on which answers that carry no request ID can no longer
+        be matched to their requests: the reconnected session has a new
+        Inbox, which no answer of the old one can reach.
+        """
+        self._abandon()
+        self._report("disconnected", reason)
+
     def maintain(self):
         """Keep the link up: probe its heartbeat, and reconnect it once it is lost.
 

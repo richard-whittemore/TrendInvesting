@@ -365,7 +365,8 @@ of a run in one series, whatever it came from (the configuration, the Run
 approval, fills, account snapshots, these files), so only the program that
 delivers the files, which sends one input at a time and reads the engine's
 answer, knows the next number: it is to replace each line's `sequence` with
-it as it sends the line, and send everything else as written. The adapter
+it, stamp the line's `recorded_at` with the time it sends it, and send
+everything else as written. The adapter
 is that program ("What happens to the file", below). A file therefore
 never claims a number another input could already have taken.
 
@@ -531,12 +532,23 @@ days), it takes them all, oldest first.
    The account read and the marks are one reading. The adapter first
    applies every report IBKR has already sent, so a fill or a cancellation
    received before the read reaches the engine ahead of the snapshot; it
-   does not read while a fill waits for its commission; and if a fill or an
-   order report arrives between the start of the account read and the end
-   of the marks, or any part of the account could not be read (IBKR timed
-   out on the positions or the balances, say), it reads the whole account
-   again, up to three times. The log line `ibkr broker snapshot as_of=...
-   cutoff: ...` names the last report recorded before each snapshot.
+   does not read while a fill waits for its commission; and after the marks
+   it reads the account a second time. If a fill or an order report
+   arrives between the start of the first read and the end of the second
+   (an execution of any client's order counts, not only the engine's), if
+   the holdings, open orders or cash differ between the two reads (a trade
+   you placed in IBKR's own app, which IBKR reports to that app only, still
+   shows there), or if any part of the account could not be read (IBKR
+   timed out on the balances, say), it reads the whole account again, up
+   to three times. The snapshot is the second read, with its IBKR time.
+   IBKR's answers for the positions and the open orders carry no request
+   number, so if IBKR does not finish either list in time, a late end of it
+   could be taken for the end of the next read's list on the same link:
+   the adapter then drops the link instead of reading again on it, and
+   takes the snapshot once the link is back and matched (`ibkr broker
+   snapshot: IBKR did not end its ...` in its log). The log line `ibkr
+   broker snapshot as_of=... cutoff: ...` names the last report recorded
+   before each snapshot.
 2. **The file, line by line, as written**: each session's SPY bar, then that
    session's close. The engine therefore records the snapshot before the
    bars, and each session closes only after its bar, before anything for
@@ -544,11 +556,22 @@ days), it takes them all, oldest first.
    engine's next input number in place of the file's own (the file format,
    above), and with the time it is sent as its "recorded" time, as every
    input the adapter sends, so the snapshot is never recorded later than
-   the close it serves (ADR 0019 measures the snapshot's age at the close's
-   recorded time); nothing else in it changes. A fill or a cancellation IBKR
-   reports while the engine works through the file goes to the engine
-   before the file's next line, so no session is decided on an account
-   behind a report already received.
+   the close it serves while the server's clock keeps time with IBKR's
+   (ADR 0019 measures the snapshot's age at the close's recorded time, from
+   the snapshot's IBKR time); nothing else in it changes. If the server's
+   clock is behind IBKR's by more than the moment it takes to send the
+   file, the snapshot's IBKR time is later than the close's recorded time:
+   the engine counts that negative age as stale (ADR 0019) and withholds
+   every sell at that close (`stale-broker-snapshot`) rather than trust it.
+   A withhold at every close is the sign: check the server's clock
+   (`timedatectl`) against IBKR's. A fill or a cancellation IBKR reports
+   while the engine works through the file goes to the engine before the
+   file's next line, so no session is decided on an account behind a
+   report already received. A trade IBKR has reported but whose commission
+   has not come yet holds the file's next line back until the fill is
+   recorded and sent; if the commission never comes, the adapter stops
+   after `commission_wait` seconds, as it always does
+   ([paper trading](paper-trading.md), "What can go wrong").
 
 Several waiting files go behind one snapshot, oldest first. The next day's
 file gets its own snapshot.
@@ -600,6 +623,10 @@ which writes the sessions again from its recordings, and start the adapter
 - **Two waiting files overlap**: a second file for the same session (a copy
   under another name, say), a file whose first session is not after the
   last session of the file before it, or two files naming the same input.
+  One input may repeat: a momentum stream's calendar reaches back to the
+  run's start, so every file writes each recorded session retraction
+  (`market.session.retracted`) again under the same name. A repeat with the
+  same contents is sent once; one whose contents differ is refused.
   The message names the later file; move it out as below (the earlier one
   is then delivered).
 - **The file is not this run's** ("it is not this run's"): it carries
@@ -634,7 +661,9 @@ which writes the sessions again from its recordings, and start the adapter
   running through the evening of a paper day.
 - **A fresh run with the old run's file still in the outbox** (you started a
   new `TI_RUN` before the old file was all sent): its snapshot and lines are
-  dropped unsent, each with a log line; the new run's own warm-up carries
+  dropped unsent together, in one write, with one log line, so a stop
+  partway never leaves the lines without their snapshot; the new run's own
+  warm-up carries
   the whole history again. The old run's files are then marked "dropped" in
   `.delivered`, not delivered, as they are when a stop left them written
   down but not yet in the outbox. If you later resume the old run (its own
