@@ -12,20 +12,38 @@ For the Boost engine, each run:
 2. reads the run's identity from the engine's durable log (ADR 0027): the
    header's configuration hash and strategy version, which every input
    carries (ADR 0016), and the run's name, the log's file name without
-   ``.log``, as the stream's correlation id. The run's streams live in
-   ``STREAMS/boost/<run>/``;
+   ``.log``, as the stream's correlation id. The log's first committed input
+   must be the run's Boost configuration, and the ``--config`` file must
+   agree with it on every field the stream depends on, so a stream is never
+   stamped with a hash its history was not built for. The run's streams
+   live in ``STREAMS/boost/<run>/``;
 3. records Massive's grouped daily bars (the encoder's bar source, one
    request a session) for every session after the run's last stream, and the
    bulk splits and dividends for a window reaching back over the last
    ``ACTION_OVERLAP`` days (history.record_actions), so an action published
    a few days late is still recorded and the windows stay contiguous;
-4. encodes the Boost stream (encode.encode with engine "boost": its one
+4. re-verifies every stream already written for the run: each must still
+   re-encode byte for byte from the recordings under the current identity.
+   One that does not (an action recorded after its file was delivered, a
+   changed engine log header, a file edited or removed) stops the job for a
+   person: the engine has already read that file, so a revision after
+   delivery is the owner's decision, never the job's;
+5. encodes the Boost stream (encode.encode with engine "boost": its one
    instrument's bars, then each session's close, so the session closes
    before its decision, ADR 0021) for the sessions after the previous stream
    through the session, adjusted forward from the configuration's
    ``warm_up_start`` (the first session whose close feeds the indicators),
-   to ``boost-<last session>.jsonl``. Sequences continue the previous
-   stream's; the first stream starts at the log's next sequence.
+   to ``boost-<last session>.jsonl``.
+
+The file contract: one envelope per line, in delivery order. Each file's
+``sequence`` fields number its own envelopes 1, 2, ... (a file-local
+ordinal), never the engine's sequence: that is global across every source of
+the run's inputs (the configuration, the Run approval, fills, snapshots), so
+only the deliverer, which sends one input at a time and reads the engine's
+reply, can know it. The deliverer reads the files in session order and sets
+each envelope's ``sequence`` to the engine's next input sequence as it sends
+it; everything else in the envelope is sent as written. No sequence is ever
+written into a file that another source could already have taken.
 
 A run's first stream is the warm-up (``--backfill-from`` the configured
 ``warm_up_start``): it records every session from the warm-up start, checks
@@ -34,16 +52,18 @@ window (trend_days, exit_sma, rsi_period + 1), and writes the whole history
 as one stream. A daily run before it is refused.
 
 Fail closed (AGENTS.md rule 5): a missing key, an unsettled session, an
-unreadable engine log, a missing recording, an empty answer on a trading
-day, a gap the encoder finds, or a history too short is refused with exit
-status 1 and a message, and no stream is written (encode.write_stream
-installs the file whole or not at all). Recordings already made are kept:
-they are immutable inputs (record.py) and the next run reuses them. The key
-and an unsettled session are checked before anything is written.
+unreadable engine log, a configuration the log does not hold, a missing
+recording, an empty answer on a trading day, a gap the encoder finds, a
+history too short, or an earlier stream that no longer re-encodes is refused
+with exit status 1 and a message, and no stream is written
+(encode.write_stream installs the file whole or not at all). Recordings
+already made are kept: they are immutable inputs (record.py) and the next
+run reuses them. The key and an unsettled session are checked before
+anything is written. The key is never printed: main replaces it in every
+message it prints.
 
 Idempotent: when a stream already holds the session, the run fetches
-nothing, encodes that stream again from the recordings with the same first
-sequence, and refuses unless the bytes are identical.
+nothing, re-verifies every stream as in step 4, and returns that stream.
 """
 import argparse
 import datetime as dt
@@ -62,15 +82,36 @@ STREAM = re.compile(r"boost-(\d{4}-\d{2}-\d{2})\.jsonl")
 # up to this late is still recorded before a later session needs it.
 ACTION_OVERLAP = dt.timedelta(days=14)
 KEY_NAME = "MASSIVE_API_KEY"
+CONFIGURATION_TYPE = "strategy.target-weight.configuration"
 # The engine's durable log header (internal/journal durable_log.go, ADR 0027),
 # as adapter/ibkr's reader of the same log checks it.
 LOG_VERSION = 1
 LOG_CHAIN_ALGORITHM = ("seed=sha256(canonical_log_header_bytes); "
                        "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
 LOG_HEADER_FIELDS = ("chain_algorithm", "configuration_hash", "log_version", "strategy_version")
+LOG_RECORD_FIELDS = ("envelope", "kind", "record_hash", "sequence")
+LOG_COMMIT_FIELDS = ("record_hash", "sequence")
+RECORD_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+# Stands in for the key in every message main prints.
+KEY_MASK = "[" + KEY_NAME + "]"
 
-EngineLog = namedtuple("EngineLog", "configuration_hash strategy_version run_id next_sequence")
-Boost = namedtuple("Boost", "instrument warm_up_start min_sessions")
+try:   # written by deploy/build-data.sh into the packed file
+    from ._build import STAMP
+except ImportError:
+    STAMP = "dev"
+
+EngineLog = namedtuple("EngineLog", "configuration_hash strategy_version run_id boost")
+
+
+class Boost(namedtuple("Boost", "instrument warm_up_start trend_days exit_sma rsi_period")):
+    """The Boost configuration's fields the stream depends on (internal/event
+    BoostConfiguration)."""
+
+    @property
+    def min_sessions(self):
+        """The history the indicators need: the longest of the trend average,
+        the exit average and the RSI's period plus one."""
+        return max(self.trend_days, self.exit_sma, self.rsi_period + 1)
 
 
 class Refused(Exception):
@@ -107,11 +148,14 @@ def _log_error(path, n, why):
 
 
 def read_engine_log(path):
-    """The run's identity and next input sequence from the engine's durable
-    log: a header line, then per input a group of records closed by a
-    commit; only committed groups count (the tail may be a group still being
-    written). A log not of that shape is refused, never read as empty."""
-    if not path.endswith(".log"):
+    """The run's identity and configuration from the engine's durable log: a
+    header line, then per input a group of records closed by a commit naming
+    the group's last record and its hash; only committed groups count (the
+    tail may be a group still being written). The first committed group's
+    input must be the run's Boost configuration. A log not of that shape is
+    refused, never read as empty."""
+    run = os.path.basename(path)[:-len(".log")]
+    if not path.endswith(".log") or not run:
         raise Refused("{} is not an engine durable log (<run>.log)".format(path))
     try:
         with open(path, "rb") as f:
@@ -132,48 +176,78 @@ def read_engine_log(path):
             or header["log_version"] != LOG_VERSION or header["chain_algorithm"] != LOG_CHAIN_ALGORITHM
             or not all(isinstance(header[k], str) and header[k] for k in ("configuration_hash", "strategy_version"))):
         raise _log_error(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
-    sequence = committed = 0
-    open_group = False
+    sequence, last_hash, group, configuration = 0, None, [], None
     for n, line in enumerate(parsed[1:], 2):
-        if not isinstance(line, dict) or len(line) != 1:
+        if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
             raise _log_error(path, n, "a line is exactly one of a record and a commit")
         if "record" in line:
             rec = line["record"]
-            if not isinstance(rec, dict) or rec.get("sequence") != sequence + 1:
+            if (not isinstance(rec, dict) or tuple(sorted(rec)) != LOG_RECORD_FIELDS
+                    or not isinstance(rec["record_hash"], str) or not RECORD_HASH.fullmatch(rec["record_hash"])
+                    or not isinstance(rec["envelope"], dict)):
+                raise _log_error(path, n, "it is not a record as the engine writes one")
+            if rec["sequence"] != sequence + 1:
                 raise _log_error(path, n, "its sequence does not follow {}".format(sequence))
-            if rec.get("kind") != ("decision" if open_group else "input"):
+            if rec["kind"] != ("decision" if group else "input"):
                 raise _log_error(path, n, "a group is one input followed by its decisions")
-            sequence, open_group = rec["sequence"], True
-        elif "commit" in line:
-            if not open_group or not isinstance(line["commit"], dict) or line["commit"].get("sequence") != sequence:
-                raise _log_error(path, n, "it is not the commit of the group before it")
-            committed, open_group = sequence, False
-        else:
-            raise _log_error(path, n, "a line is exactly one of a record and a commit")
-    inputs = [line["record"]["envelope"].get("sequence") for line in parsed[1:]
-              if "record" in line and line["record"]["kind"] == "input" and line["record"]["sequence"] <= committed]
-    last = max((s for s in inputs if isinstance(s, int)), default=0)
-    run = os.path.basename(path)[:-len(".log")]
-    return EngineLog(header["configuration_hash"], header["strategy_version"], run, last + 1)
+            sequence, last_hash = rec["sequence"], rec["record_hash"]
+            group.append((n, rec["envelope"]))
+            continue
+        commit = line["commit"]
+        if (not isinstance(commit, dict) or tuple(sorted(commit)) != LOG_COMMIT_FIELDS or not group
+                or commit["sequence"] != sequence or commit["record_hash"] != last_hash):
+            raise _log_error(path, n, "it is not the commit of the group before it")
+        if configuration is None:
+            configuration = _logged_configuration(path, header, *group[0])
+        group = []
+    if configuration is None:
+        raise Refused("the engine's durable log {} holds no committed configuration input: start the engine "
+                      "first".format(path))
+    return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration)
+
+
+def _logged_configuration(path, header, n, envelope):
+    """The Boost configuration the run's first input carries (cmd/engine
+    composeTargetWeight: id "configuration:<hash>", the header's identity)."""
+    if (envelope.get("type") != CONFIGURATION_TYPE
+            or envelope.get("id") != "configuration:" + header["configuration_hash"]
+            or envelope.get("configuration_hash") != header["configuration_hash"]
+            or envelope.get("strategy_version") != header["strategy_version"]):
+        raise _log_error(path, n, "the run's first input is not its configuration")
+    try:
+        return _boost(envelope.get("payload"))
+    except Refused as e:
+        raise _log_error(path, n, "its configuration input: {}".format(e)) from None
+
+
+def _boost(cfg):
+    """The Boost fields of a configuration object; Refused if it is not one."""
+    try:
+        boost = cfg["boost"]
+        out = Boost(boost["instrument_id"], dt.date.fromisoformat(boost["warm_up_start"]), int(boost["trend_days"]),
+                    int(boost["exit_sma"]), int(boost["rsi_period"]))
+    except (ValueError, KeyError, TypeError) as e:
+        raise Refused("it is not a Boost configuration: {!r}".format(e)) from None
+    if cfg.get("strategy_id") != ENGINE or not isinstance(out.instrument, str) or not out.instrument:
+        raise Refused("it is not a Boost configuration")
+    return out
 
 
 def read_config(path):
-    """The Boost configuration's instrument, warm-up start and the history its
-    indicators need (internal/event BoostConfiguration)."""
+    """The Boost configuration's fields the stream depends on, and the
+    history its indicators need (internal/event BoostConfiguration)."""
     try:
         with open(path) as f:
             cfg = json.load(f)
-        boost = cfg["boost"]
-        start = dt.date.fromisoformat(boost["warm_up_start"])
-        need = max(int(boost["trend_days"]), int(boost["exit_sma"]), int(boost["rsi_period"]) + 1)
-        instrument = boost["instrument_id"]
-    except (OSError, ValueError, KeyError, TypeError) as e:
+    except (OSError, ValueError) as e:
         raise Refused("cannot read the Boost configuration {}: {}".format(path, e)) from None
-    if cfg.get("strategy_id") != ENGINE or not isinstance(instrument, str) or not instrument:
-        raise Refused("{} is not a Boost configuration".format(path))
-    if not nyse_calendar.is_trading_day(start):
-        raise Refused("warm_up_start {} in {} is not an NYSE session".format(start, path))
-    return Boost(instrument, start, need)
+    try:
+        boost = _boost(cfg)
+    except Refused as e:
+        raise Refused("{}: {}".format(path, e)) from None
+    if not nyse_calendar.is_trading_day(boost.warm_up_start):
+        raise Refused("warm_up_start {} in {} is not an NYSE session".format(boost.warm_up_start, path))
+    return boost
 
 
 def _streams(directory):
@@ -186,23 +260,34 @@ def _streams(directory):
     return sorted(out)
 
 
-def _first_sequence(path):
-    with open(path) as f:
-        return json.loads(f.readline())["sequence"]
-
-
-def _last_sequence(path):
-    with open(path) as f:
-        return json.loads(f.read().splitlines()[-1])["sequence"]
-
-
 def _bytes(envelopes):
     return "".join(json.dumps(e, separators=(",", ":"), allow_nan=False) + "\n" for e in envelopes).encode()
 
 
-def _encode(data, first, last, cfg, identity, first_sequence):
+def _encode(data, first, last, cfg, identity):
+    """One stream file's envelopes, numbered from 1 (the file contract above)."""
     return encode.encode(data, first, last, identity, required=[cfg.instrument], base=cfg.warm_up_start,
-                         engine=ENGINE, first_sequence=first_sequence)
+                         engine=ENGINE, first_sequence=1)
+
+
+def _verify(existing, data, cfg, identity, engine_log):
+    """Refuses unless every written stream, oldest first, re-encodes byte for
+    byte; each file's first session follows the one before it."""
+    previous = None
+    for last, path in existing:
+        first = cfg.warm_up_start if previous is None else nyse_calendar.sessions_after(previous, 1)[0]
+        try:
+            again = _bytes(_encode(data, first, last, cfg, identity))
+        except Exception as e:   # a recording missing, a gap or a conflict: the file cannot be re-derived
+            raise Refused("{} cannot be encoded again from its recordings ({}: {}); this stops the job for a "
+                          "person".format(path, type(e).__name__, e)) from None
+        with open(path, "rb") as f:
+            if f.read() != again:
+                raise Refused("{} differs from the stream its recordings and the engine log {} give now; the "
+                              "engine has already read it, so it is not rewritten and nothing more is written "
+                              "for the run: this stops the job for a person (docs/manual/market-data.md, "
+                              "\"A file already written differs\")".format(path, engine_log))
+        previous = last
 
 
 def _actions_reach(data, start):
@@ -220,7 +305,7 @@ def _actions_reach(data, start):
     return min(reach)
 
 
-def run(data, streams, config, engine_log, secrets_file, now, settle, session=None, backfill_from=None,
+def run(data, streams, config, engine_log, key, now, settle, session=None, backfill_from=None,
         client_factory=massive.Client):
     """Runs the job once (see above) and returns the stream's path."""
     cfg = read_config(config)
@@ -234,20 +319,18 @@ def run(data, streams, config, engine_log, secrets_file, now, settle, session=No
     if session < cfg.warm_up_start:
         raise Refused("session {} precedes the warm-up start {}".format(session, cfg.warm_up_start))
     log = read_engine_log(engine_log)
+    if log.boost != cfg:
+        raise Refused("the Boost configuration {} is not the one the engine's durable log {} holds ({} there, {} "
+                      "here): the stream would carry the run's configuration hash over another history".format(
+                          config, engine_log, log.boost, cfg))
     identity = encode.Identity(log.configuration_hash, log.strategy_version, log.run_id)
     directory = os.path.join(streams, ENGINE, log.run_id)
     existing = _streams(directory)
-    previous = None
     for last, path in existing:
         if session <= last:
-            first = cfg.warm_up_start if previous is None else nyse_calendar.sessions_after(previous, 1)[0]
-            again = _bytes(_encode(data, first, last, cfg, identity, _first_sequence(path)))
-            with open(path, "rb") as f:
-                if f.read() != again:
-                    raise Refused("{} differs from the stream its recordings and the engine log {} give; it is "
-                                  "not rewritten: find out why before the adapter reads it".format(path, engine_log))
+            _verify(existing, data, cfg, identity, engine_log)
             return path
-        previous = last
+    previous = existing[-1][0] if existing else None
     if previous is None and backfill_from is None:
         raise Refused("run {} has no stream yet: run the warm-up once first, ti-data --backfill-from {}".format(
             log.run_id, cfg.warm_up_start))
@@ -256,7 +339,7 @@ def run(data, streams, config, engine_log, secrets_file, now, settle, session=No
     if previous is None and len(span) < cfg.min_sessions:
         raise Refused("the history {}..{} holds {} sessions; the indicators need {}".format(
             first, session, len(span), cfg.min_sessions))
-    client = client_factory(read_key(secrets_file))
+    client = client_factory(key)
     history.backfill(client, data, session, len(span), now=now, settle=settle)
     start = cfg.warm_up_start + dt.timedelta(days=1)
     window = min(_actions_reach(data, start) + dt.timedelta(days=1), session - ACTION_OVERLAP)
@@ -264,8 +347,10 @@ def run(data, streams, config, engine_log, secrets_file, now, settle, session=No
         history.record_actions(client, max(window, start), session, data, now=now, settle=settle)
     except record.AlreadyRecorded:
         pass
-    sequence = log.next_sequence if previous is None else _last_sequence(existing[-1][1]) + 1
-    envelopes = _encode(data, first, session, cfg, identity, sequence)
+    # After the actions are recorded, so one published late against a file
+    # already delivered stops the job here.
+    _verify(existing, data, cfg, identity, engine_log)
+    envelopes = _encode(data, first, session, cfg, identity)
     os.makedirs(directory, exist_ok=True)
     return encode.write_stream(os.path.join(directory, "boost-{}.jsonl".format(session)), envelopes)
 
@@ -275,6 +360,7 @@ def parse(argv):
         "The daily data job: record SPY's settled session from Massive and write the Boost engine's stream "
         "to STREAMS/boost/<run>/boost-<session>.jsonl. Exit 1, with nothing written for the session, on any "
         "refusal."))
+    ap.add_argument("--version", action="version", version="ti-data " + STAMP)
     ap.add_argument("--data", default=os.environ.get("TI_DATA_DIR"), help="the recordings folder (TI_DATA_DIR)")
     ap.add_argument("--streams", help="the streams folder (default DATA/streams)")
     ap.add_argument("--config", required=True, help="the Boost engine's configuration")
@@ -300,12 +386,18 @@ def parse(argv):
 
 def main(argv, now=steps._now, client_factory=massive.Client):
     args = parse(argv)
+    print("ti-data " + STAMP, file=sys.stderr)
+    key = None   # held here, so every message printed below can have it replaced
     try:
-        path = run(args.data, args.streams, args.config, args.engine_log, args.secrets_file, now,
+        key = read_key(args.secrets_file)
+        path = run(args.data, args.streams, args.config, args.engine_log, key, now,
                    dt.timedelta(minutes=args.settle_minutes), session=args.session,
                    backfill_from=args.backfill_from, client_factory=client_factory)
     except Exception as e:   # every refusal, including MissingData, Gap, NotSettled and NotDurable
-        print("ti-data refused: {}: {}".format(type(e).__name__, e), file=sys.stderr)
+        text = "{}: {}".format(type(e).__name__, e)
+        if key:
+            text = text.replace(key, KEY_MASK)
+        print("ti-data refused: " + text, file=sys.stderr)
         return 1
     print(path)
     return 0

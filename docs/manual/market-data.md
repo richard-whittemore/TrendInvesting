@@ -297,14 +297,18 @@ On the server, one job does all of the above for the Boost engine every
 weekday, with no one at the keyboard: `ti-data` (`adapter/marketdata/tidata.py`,
 installed as `/opt/trend-investing/bin/ti-data` and run by `ti-data.service`).
 
-**When it runs.** At 17:05 New York time, Monday to Friday
-(`ti-data.timer`). The market closes at 4 p.m. (1 p.m. on an early close),
-and a session is not recorded until an hour after its close, so its prices
-are final; 17:05 is after that hour on every trading day, and a test checks
-the timer and the service's `--settle-minutes 60` agree for every session of
-2026 and 2027. On a holiday it finds the last session already written and
-does nothing. If the server was off at 17:05, the run happens when it starts
-again, and catches up every session it missed in one file.
+**When it runs.** At 17:05, 18:05 and 20:05 New York time, Monday to
+Friday (`ti-data.timer`). The market closes at 4 p.m. (1 p.m. on an early
+close), and a session is not recorded until an hour after its close, so its
+prices are final; 17:05 is after that hour on every trading day, and a test
+checks every firing of the timer against the service's `--settle-minutes 60`
+for every session of 2026 and 2027. The 18:05 and 20:05 firings are retries:
+if 17:05 failed (Massive down, too many requests), the same evening tries
+again; once the day's file exists they find it and fetch nothing. On a
+holiday it finds the last session already written and does nothing. If the
+server was off, the run happens when it starts again, and catches up every
+session it missed in one file. A run that hangs is stopped after an hour
+(`TimeoutStartSec=1h`) and shows as failed, like any other refusal.
 
 **What it does, in order.**
 
@@ -312,16 +316,34 @@ again, and catches up every session it missed in one file.
 2. Reads the Boost engine's durable log (the `-log` file of the run named by
    `TI_RUN` in the engine's `run.env`) for the run's configuration hash and
    strategy version, and uses the run's name as the stream's correlation id,
-   so the stream carries exactly the identity the engine expects.
+   so the stream carries exactly the identity the engine expects. The log's
+   first input is the configuration the engine started with; the job refuses
+   if `/etc/trend-investing/engines/boost.config` no longer agrees with it on
+   the instrument, `warm_up_start` or an indicator length, since the stream
+   would then carry the run's hash over a history built for another
+   configuration.
 3. Fetches from Massive, once, the whole-market bars of each session since
    the last stream it wrote (one request a session, about 13 seconds each at
    the free plan's 5 a minute) and the splits and dividends of the last two
    weeks, and records them.
-4. Writes the engine's input for those sessions: SPY's bar, then the session
-   close, for each session, to
+4. Checks every file it has already written for the run: each must still come
+   out byte for byte the same from the recordings. If one does not, it stops
+   (see "A file already written differs" below) and writes nothing.
+5. Writes the engine's input for the new sessions: SPY's bar, then the
+   session close, for each session, to
    `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<YYYY-MM-DD>.jsonl`,
    named by the last session it holds. Each file follows on from the one
    before it, and the adapter reads them in date order.
+
+**The file format.** One event per line, in the order they are to be
+delivered. The `sequence` on each line is its position in that file (1, 2,
+3, ...), not the engine's own input number. The engine numbers every input
+of a run in one series, whatever it came from (the configuration, the Run
+approval, fills, account snapshots, these files), so only the program that
+delivers the files, which sends one input at a time and reads the engine's
+answer, knows the next number: it replaces each line's `sequence` with it as
+it sends the line, and sends everything else as written. A file therefore
+never claims a number another input could already have taken.
 
 **The one-time warm-up.** The engine's 200-day average and its RSI need
 history before the first decision. Before a run's first paper day, after the
@@ -341,16 +363,32 @@ It records every session from that date (resumable: a second try fetches
 only what is missing), checks there is no missing day and at least as many
 sessions as the longest indicator window (200 for the trend average), and
 writes the run's first file, holding the whole history. Any other date is
-refused, because the indicators are seeded from the configured one. Massive's
-free plan reaches back two years only, so `warm_up_start` must lie within
-the last two years. A new engine run (a fresh `TI_RUN`) starts with no
-files and needs the warm-up again; the recordings are already on disk, so it
-fetches only the days since.
+refused, because the indicators are seeded from the configured one.
 
-**What you see.** Each run prints the path of the file it wrote, or of the
-file that already held the session; `journalctl -u ti-data` shows it. A
+Massive's free plan reaches back two years only, so the paper Boost
+configuration's `warm_up_start` must lie within the last two years. The
+shipped dry-run file says 2024-01-02, which is already outside that window.
+In your paper copy (`docs/runbooks/first-paper-order.md`, A5) set
+`"warm_up_start": "2025-01-02"`, the recommended value: it is a session, it
+is within the window, and it leaves well over the 200 sessions the trend
+average needs before the first paper day. The choice is yours; any session
+inside the window with at least 200 sessions before the first paper day
+works. 2025-01-02 stays inside the window until 2 January 2027; a warm-up
+run after that needs a later date. It changes the paper configuration's hash only (the paper run is a
+new run anyway); the shipped dry-run file and its runs are unchanged.
+
+A new engine run (a fresh `TI_RUN`) starts with no files and needs the
+warm-up again; the recordings are already on disk, so it fetches only the
+days since.
+
+**What you see.** Each run prints the build it is (`ti-data <commit>`), then
+the path of the file it wrote, or of the file that already held the session;
+`journalctl -u ti-data` shows it. `ti-data --version` prints the build too. A
 refusal prints `ti-data refused:` and the reason, exits 1, and the unit
-shows as failed, which the alerting (plan.md section 7) is to watch.
+shows as failed, which the alerting (plan.md section 7) is to watch. The unit
+is never skipped: before the job is installed, or before the Boost engine has
+been started once (no `run.env`), each firing fails with a message saying
+which.
 
 **What can go wrong.** In every case no file is written for the session,
 so the engine never reads half a day. Recordings already made are kept, and
@@ -359,21 +397,57 @@ carries on from them.
 
 - **No Massive key**: the line `MASSIVE_API_KEY=` in
   `/etc/trend-investing/secrets.env` is empty or missing. The key is never
-  printed.
+  printed, even when an error from Massive would contain it: it is replaced
+  by `[MASSIVE_API_KEY]`.
 - **The session has not settled**: only when a session is named with
   `--session` before its close plus an hour.
 - **No warm-up yet** for the engine's run: the message gives the warm-up
   command's date.
-- **The engine's durable log cannot be read**, or the engine has not been
-  started yet (the unit is skipped until its `run.env` exists).
+- **The engine has not been started yet** (no `run.env`: the unit fails
+  before the job runs, naming the file), or **its durable log cannot be
+  read**, or its first input is not a Boost configuration.
+- **The configuration file and the engine's log disagree**: the file was
+  edited after the engine started. Put the file back as the engine started
+  with it; an edited configuration is a new run.
 - **Massive returns nothing for a trading day**, or a recording from an
   earlier day is missing: the run names the day. A missing earlier day means
   a recording was removed; restore it from the backup.
 - **A history shorter than the indicators need** at the warm-up.
-- **A file already written differs** from what its recordings now give (a
-  recording changed, or the engine was restarted under the same run name
-  with another configuration). The file is not rewritten; find out why
-  before the adapter reads it.
+- **A file already written differs** from what its recordings now give.
+  Every run checks every earlier file, so this stops the job the day it
+  happens, naming the file. The causes: Massive published a split or
+  dividend late, dated inside a file already written; the engine's log
+  header changed (the engine was restarted under the same run name with
+  another build or configuration); or a file was edited or removed. The job
+  never rewrites a file and writes nothing more for the run, because the
+  engine has already read the old one: a vendor's revision after delivery is
+  your decision, not the job's. What to do: read the message, and for a late
+  action check it against the fund's own notice. If it is real, the run's
+  history is wrong from that date on: stop the engine, and start a new run
+  (a fresh `TI_RUN`, `docs/runbooks/durable-log.md`) with its own warm-up,
+  which builds the whole history with the action in it. If a file was edited
+  or removed, restore it from the backup, unchanged. Never edit a file or a
+  recording to make them agree.
+- **Two recordings give different figures for one dividend** (or split):
+  the refusal reads `ConflictingActions: dividends <id> differs between
+  recordings`. Massive changed its figure between two fetches whose windows
+  overlap, and the job will not choose. What to do:
+  1. Find the two recordings:
+     `grep -l '"<id>"' /var/lib/trend-investing/data/dividends_*.json`, and
+     compare their `cash_amount` (and ex-date).
+  2. Check the true figure against the fund's own published distribution
+     notice.
+  3. Move the recording with the wrong figure, unchanged, into
+     `/var/lib/trend-investing/data/quarantine/` (create it, owned by
+     `ti-trader`). The job reads only the data folder itself, never
+     `quarantine`, and never deletes or edits a recording. If the correct
+     figure is in neither recording, quarantine both.
+  4. Run `sudo systemctl start ti-data`. The window the quarantined file
+     covered is now missing, so the job fetches it again from Massive. If
+     Massive still gives the wrong figure, stop: the job can record only what
+     Massive publishes, and the paper run waits while you decide.
+  5. If the corrected figure falls inside a file already written, the run
+     then stops at "A file already written differs" (above): start a new run.
 
 ## What can go wrong, and what the step does
 
@@ -442,9 +516,14 @@ for the scheduler to alert on.
   split dated on a non-trading day just before an ex-date),
   `test_history.py`, `test_marketdata.py`, `test_nyse_calendar.py`,
   `test_sectors.py` and `test_tidata.py` (the daily job: warm-up, daily and
-  catch-up streams the Go validators accept, every refusal above, the
-  byte-identical second run, the settle time against the timer, and the
-  packed file). All use made-up data.
+  catch-up streams the Go validators accept, files numbered from 1, every
+  refusal above including a late dividend inside a delivered file, the
+  byte-identical second run, the key never printed, every timer firing
+  against the settle time, the unit's timeout and checks, a durable log the
+  Go engine wrote (`tests/testdata/boost-fixture.log`, written by
+  `cmd/engine/data_job_log_fixture_test.go`), and the packed file: refused
+  from a dirty tree, the same bytes for one commit, stamped with it). All use
+  made-up data.
 - `adapter/marketdata/tests/testdata/envelope_contract.go` decodes the encoded
   stream with the Go engine's own validators, refusing unknown fields, so a
   stream the engines would refuse fails the Python tests first.

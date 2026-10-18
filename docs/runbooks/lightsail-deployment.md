@@ -13,13 +13,13 @@ Provisioning for the live server in `docs/live-trading/plan.md` section 3: one U
 | Users | `ti-gateway` (Gateway and IBC), `ti-trader` (data step, engines, reporter, dashboard) | System users, no login shell. Engines never run as the user that can see the IBKR login. |
 | IBKR login | `/etc/trend-investing/ibkr-login.env`, root:root 0600 | Outside the repository. Handed to `ti-gateway.service` only, through systemd `LoadCredential`. IBC's `config.ini` is rendered from it into a tmpfs on each start, so the password is never on disk beside the code, never in the journal, never committed. |
 | Other secrets | `/etc/trend-investing/secrets.env`, root:root 0600 | Account numbers, ntfy and Healthchecks URLs. Names only in `deploy/etc/secrets.env.example`. |
-| Engine settings | `/etc/trend-investing/engines/<account>.env` | Client IDs only: data step 10, `boost` 11, `trad-ira` 12, `roth-ira` 13. Each must stay unique. |
+| Engine settings | `/etc/trend-investing/engines/<account>.env` | Client IDs only: `boost` 11, `trad-ira` 12, `roth-ira` 13. Each must stay unique. The data step uses Massive, not IB Gateway, and has none. |
 | Gateway, IBC | `/var/lib/ti-gateway/Jts/ibgateway/1050`, `/opt/ibc` | Pinned and checksummed in `deploy/versions.env`. |
 | State | `/var/lib/trend-investing/{data,engines/<account>,reports}` | One journal and state directory per engine. |
 | Firewall | `ufw`: deny inbound, allow only `tailscale0` | Lightsail's own firewall should also close port 22 once Tailscale works. |
 | Updates | `unattended-upgrades`, security pocket only | No automatic reboot (a reboot logs the Gateway out). |
 
-Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:45 PM and does a full re-login every Sunday at 09:00 (`deploy/provision.sh` writes both to `/etc/trend-investing/gateway.env`). The data step runs weekdays 17:05, after the close plus its 60 settle minutes; the reporter 17:30. ADR 0025 point 5 requires the nightly restart to fall after the day's reconciliation and outside trading hours: **confirm 11:45 PM against the real reconciliation time when the engines exist**, then change `TI_GATEWAY_RESTART_TIME`.
+Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:45 PM and does a full re-login every Sunday at 09:00 (`deploy/provision.sh` writes both to `/etc/trend-investing/gateway.env`). The data step runs weekdays 17:05, after the close plus its 60 settle minutes, and again at 18:05 and 20:05 (a no-op once the day is written); the reporter 17:30. ADR 0025 point 5 requires the nightly restart to fall after the day's reconciliation and outside trading hours: **confirm 11:45 PM against the real reconciliation time when the engines exist**, then change `TI_GATEWAY_RESTART_TIME`.
 
 ## Setup
 
@@ -42,7 +42,7 @@ Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:
 8. **[OWNER] Start the Gateway and approve 2FA:** `sudo systemctl start ti-gateway`. Approve the IBKR Mobile prompt on your phone within 3 minutes. Check `journalctl -u ti-gateway -n 50` shows a login and no credential.
 9. Publish the dashboard to the tailnet only, once its binary is installed: `sudo tailscale serve --bg 8080` (**[OWNER]**, tailnet configuration).
 
-**The data step.** Build it on the Mac with `deploy/build-data.sh` (one Python file, `dist/ti-data`, standard library only), copy it to the server as `dist/ti-data` beside the `deploy/` folder, and run `sudo deploy/provision.sh services`, which installs it as `/opt/trend-investing/bin/ti-data`. Put the Massive key on the `MASSIVE_API_KEY=` line of `/etc/trend-investing/secrets.env` (`sudo -e`; a file created by an earlier provisioner has no such line: add it). The unit is skipped until the Boost engine's `run.env` exists; then run the warm-up once (`docs/manual/market-data.md`, "The daily data job") before the timer's first run.
+**The data step.** Build it on the Mac from a clean checkout with `deploy/build-data.sh` (one Python file, `dist/ti-data`, standard library only; it refuses a dirty tree, is byte for byte the same for one commit, and `ti-data --version` prints the commit stamp), copy it to the server as `dist/ti-data` beside the `deploy/` folder, and run `sudo deploy/provision.sh services`, which installs it as `/opt/trend-investing/bin/ti-data`. Put the Massive key on the `MASSIVE_API_KEY=` line of `/etc/trend-investing/secrets.env` (`sudo -e`; a file created by an earlier provisioner has no such line: add it). Until the Boost engine's `run.env` exists the unit fails at each firing with a message naming it (never a silent skip); once it exists, run the warm-up once (`docs/manual/market-data.md`, "The daily data job") before the timer's first run.
 
 When the reporter or the dashboard binary exists, install it at the path in its unit, `sudo systemctl daemon-reload`, and start it. Check each with `systemctl status`.
 

@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,7 +20,9 @@ from marketdata import nyse_calendar, record, tidata
 D = dt.date
 UTC = dt.timezone.utc
 REPO = Path(__file__).resolve().parents[3]
-KEY = "synthetic-key-0123456789"
+# A made-up value standing in for the Massive key: synthetic test data, not a
+# credential (the repository is public and holds none).
+SYNTHETIC_VALUE = "synthetic-value-0123456789"
 BASE = D(2026, 3, 2)                 # a Monday: the configured warm-up start
 WARM = D(2026, 3, 13)                # the warm-up's last session (10 sessions)
 RUN = "run-2026-03-13"
@@ -40,7 +43,7 @@ class FakeMassive:
     """Massive's three endpoints the job uses, answered from synthetic rows."""
 
     def __init__(self, empty=()):
-        self.calls, self.empty = [], set(empty)
+        self.calls, self.empty, self.dividends = [], set(empty), []
 
     def grouped(self, day):
         self.calls.append(("grouped", day))
@@ -54,23 +57,36 @@ class FakeMassive:
 
     def all_dividends(self, first, last):
         self.calls.append(("dividends", first, last))
-        return [{"results": []}]
+        return [{"results": list(self.dividends)}]
 
 
-def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/test", inputs=1):
-    """A durable log as the engine writes one: a header, then one committed
-    group per input (here inputs only, no decisions)."""
+def shipped_config():
+    return json.loads((REPO / "deploy/etc/engines/boost.config").read_text())
+
+
+def _digest(text):
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/test", inputs=1, config=None):
+    """A durable log in the engine's shape (testdata/boost-fixture.log is one
+    the engine wrote): a header, then one committed group per input, the
+    first the configuration input carrying ``config`` (default the shipped
+    Boost configuration), the others inputs only, no decisions."""
     lines = [json.dumps({"chain_algorithm": CHAIN, "configuration_hash": configuration_hash, "log_version": 1,
                          "strategy_version": strategy_version}, sort_keys=True, separators=(",", ":"))]
     for n in range(1, inputs + 1):
-        payload = json.dumps({"n": n}, separators=(",", ":"))
-        envelope = {"id": "configuration:" + configuration_hash if n == 1 else "input-{}".format(n),
-                    "type": "x", "envelope_version": 1, "schema_version": 1,
+        if n == 1:
+            ident, kind, payload = "configuration:" + configuration_hash, tidata.CONFIGURATION_TYPE, config or shipped_config()
+        else:
+            ident, kind, payload = "input-{}".format(n), "x", {"n": n}
+        raw = json.dumps(payload, separators=(",", ":"))
+        envelope = {"id": ident, "type": kind, "envelope_version": 1, "schema_version": 1,
                     "event_time": "2026-03-13T21:00:00Z", "recorded_at": "2026-03-13T21:00:00Z", "sequence": n,
                     "source": "engine", "strategy_version": strategy_version,
                     "configuration_hash": configuration_hash,
-                    "payload_hash": hashlib.sha256(payload.encode()).hexdigest(), "payload": json.loads(payload)}
-        digest = "sha256:" + hashlib.sha256(str(n).encode()).hexdigest()
+                    "payload_hash": hashlib.sha256(raw.encode()).hexdigest(), "payload": payload}
+        digest = _digest(str(n))
         lines.append(json.dumps({"record": {"sequence": n, "kind": "input", "envelope": envelope,
                                             "record_hash": digest}}, separators=(",", ":")))
         lines.append(json.dumps({"commit": {"sequence": n, "record_hash": digest}}, separators=(",", ":")))
@@ -80,31 +96,34 @@ def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/
 class Job:
     """A temporary server layout: data folder, config, engine log, secrets."""
 
-    def __init__(self, root, trend_days=5, warm_up_start=BASE, secrets="MASSIVE_API_KEY=" + KEY + "\n"):
+    def __init__(self, root, trend_days=5, warm_up_start=BASE, env_text="MASSIVE_API_KEY=" + SYNTHETIC_VALUE + "\n"):
         self.root = Path(root)
         self.data = self.root / "data"
         self.streams = self.data / "streams"
         self.config = self.root / "boost.config"
-        cfg = json.loads((REPO / "deploy/etc/engines/boost.config").read_text())
-        cfg["boost"].update(trend_days=trend_days, warm_up_start=warm_up_start.isoformat())
-        self.config.write_text(json.dumps(cfg))
+        self.cfg = shipped_config()
+        self.cfg["boost"].update(trend_days=trend_days, warm_up_start=warm_up_start.isoformat())
+        self.config.write_text(json.dumps(self.cfg))
         self.log = self.root / (RUN + ".log")
-        write_log(self.log)
-        self.secrets = self.root / "secrets"
-        if secrets is not None:
-            self.secrets.write_text(secrets)
+        self.write_log()
+        self.env_file = self.root / "env"
+        if env_text is not None:
+            self.env_file.write_text(env_text)
         self.client = FakeMassive()
         self.made = 0
 
-    def factory(self, key):
-        if key != KEY:
+    def write_log(self, **kw):
+        write_log(self.log, config=self.cfg, **kw)
+
+    def factory(self, value):
+        if value != SYNTHETIC_VALUE:
             raise AssertionError("the job built a client with the wrong key")
         self.made += 1
         return self.client
 
     def argv(self, *extra):
         return ["--data", str(self.data), "--streams", str(self.streams), "--config", str(self.config),
-                "--engine-log", str(self.log), "--secrets-file", str(self.secrets)] + list(extra)
+                "--engine-log", str(self.log), "--secrets-file", str(self.env_file)] + list(extra)
 
     def main(self, now, *extra, factory=None):
         out, err = io.StringIO(), io.StringIO()
@@ -162,24 +181,66 @@ class TimerAgreementTest(unittest.TestCase):
     def test_the_timer_fires_after_each_session_settles(self):
         timer = (REPO / "deploy/systemd/ti-data.timer").read_text()
         service = (REPO / "deploy/systemd/ti-data.service").read_text()
-        when = re.search(r"^OnCalendar=Mon\.\.Fri (\d\d):(\d\d) America/New_York$", timer, re.M)
-        self.assertIsNotNone(when, "the timer must fire Mon..Fri at a New York time")
+        # systemd's calendar form: a list of hours, one minute (17,18,20:05).
+        when = re.search(r"^OnCalendar=Mon\.\.Fri ([0-9,]+):(\d\d) America/New_York$", timer, re.M)
+        self.assertIsNotNone(when, "the timer must fire Mon..Fri at New York times")
         self.assertRegex(timer, r"(?m)^Persistent=true$")
         minutes = re.search(r"--settle-minutes (\d+)", service)
         self.assertIsNotNone(minutes, "ExecStart must pass --settle-minutes")
         settle = dt.timedelta(minutes=int(minutes.group(1)))
-        hour, minute = int(when.group(1)), int(when.group(2))
-        for day in nyse_calendar.sessions(D(2026, 1, 1), D(2027, 12, 31)):
-            fire = dt.datetime(day.year, day.month, day.day, hour, minute, tzinfo=nyse_calendar.NEW_YORK)
-            self.assertEqual(tidata.settled_session(fire, settle), day, day)
+        times = [(int(h), int(when.group(2))) for h in when.group(1).split(",")]
+        for hour, minute in times:
+            for day in nyse_calendar.sessions(D(2026, 1, 1), D(2027, 12, 31)):
+                fire = dt.datetime(day.year, day.month, day.day, hour, minute, tzinfo=nyse_calendar.NEW_YORK)
+                self.assertEqual(tidata.settled_session(fire, settle), day, (day, hour, minute))
+
+    def test_the_timer_fires_three_times_an_evening(self):
+        # A firing that fails (a Massive outage, a 429 streak) is retried the
+        # same evening; a later firing after a success finds the file and
+        # fetches nothing.
+        timer = (REPO / "deploy/systemd/ti-data.timer").read_text()
+        self.assertRegex(timer, r"(?m)^OnCalendar=Mon\.\.Fri 17,18,20:05 America/New_York$")
+
+
+class UnitTest(unittest.TestCase):
+    """ti-data.service fails loudly, never skips silently, and never hangs."""
+
+    def setUp(self):
+        self.service = (REPO / "deploy/systemd/ti-data.service").read_text()
+
+    def test_a_hung_run_times_out_as_a_failed_unit(self):
+        self.assertRegex(self.service, r"(?m)^TimeoutStartSec=1h$")
+
+    def test_nothing_skips_the_unit(self):
+        self.assertNotRegex(self.service, r"(?m)^Condition")
+
+    def test_a_missing_run_env_fails_the_unit_with_a_message(self):
+        self.assertRegex(self.service, r"(?m)^EnvironmentFile=-/var/lib/trend-investing/engines/boost/run\.env$")
+        pre = re.search(r"(?m)^ExecStartPre=(.*)$", self.service)
+        self.assertIsNotNone(pre, "the unit checks run.env itself")
+        with tempfile.TemporaryDirectory() as d:
+            command = pre.group(1).replace("/var/lib/trend-investing/engines/boost/run.env", str(Path(d, "run.env")))
+            argv = command.split(" ", 2)
+            self.assertEqual(argv[:2], ["/bin/sh", "-c"])
+            script = argv[2]
+            self.assertTrue(script.startswith("'") and script.endswith("'"), script)
+            result = subprocess.run(["/bin/sh", "-c", script[1:-1]], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("run.env", result.stderr)
+            self.assertIn("start the Boost engine", result.stderr)
+            Path(d, "run.env").write_text("TI_RUN=run-1\n")
+            self.assertEqual(subprocess.run(["/bin/sh", "-c", script[1:-1]]).returncode, 0)
+
+    def test_the_unit_holds_no_ib_gateway_client_id(self):
+        self.assertNotIn("TI_ADAPTER_CLIENT_ID", self.service)
 
 
 class SecretsTest(unittest.TestCase):
     def test_the_key_is_read_from_the_secrets_file(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d, "s")
-            p.write_text("# comment\nIBKR_ACCOUNT_BOOST=\nMASSIVE_API_KEY= {} \nNTFY_URL=\n".format(KEY))
-            self.assertEqual(tidata.read_key(str(p)), KEY)
+            p.write_text("# comment\nIBKR_ACCOUNT_BOOST=\nMASSIVE_API_KEY= {} \nNTFY_URL=\n".format(SYNTHETIC_VALUE))
+            self.assertEqual(tidata.read_key(str(p)), SYNTHETIC_VALUE)
 
     def test_a_missing_or_empty_key_is_refused_without_naming_a_value(self):
         with tempfile.TemporaryDirectory() as d:
@@ -195,20 +256,82 @@ class SecretsTest(unittest.TestCase):
 
 
 class EngineLogTest(unittest.TestCase):
-    def test_identity_and_next_sequence_come_from_the_durable_log(self):
+    def test_identity_and_configuration_come_from_the_durable_log(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d, RUN + ".log")
             write_log(p, inputs=2)
             got = tidata.read_engine_log(str(p))
-            self.assertEqual(got, tidata.EngineLog("hash-boost", "boost/r1/test", RUN, 3))
+            boost = tidata.read_config(str(REPO / "deploy/etc/engines/boost.config"))
+            self.assertEqual(got, tidata.EngineLog("hash-boost", "boost/r1/test", RUN, boost))
 
-    def test_a_group_not_yet_committed_holds_no_input(self):
+    def test_a_log_the_engine_wrote_gives_its_identity(self):
+        # testdata/boost-fixture.log was written by cmd/engine's own LogWriter
+        # from the shipped Boost configuration (data_job_log_fixture_test.go).
+        path = REPO / "adapter/marketdata/tests/testdata/boost-fixture.log"
+        lines = path.read_text().splitlines()
+        header, envelope = json.loads(lines[0]), json.loads(lines[1])["record"]["envelope"]
+        got = tidata.read_engine_log(str(path))
+        self.assertEqual(got.configuration_hash, header["configuration_hash"])
+        self.assertEqual(got.configuration_hash, envelope["configuration_hash"])
+        self.assertEqual(got.strategy_version, header["strategy_version"])
+        self.assertTrue(got.strategy_version.startswith("boost/"), got.strategy_version)
+        self.assertEqual(got.run_id, "boost-fixture")
+        self.assertEqual(got.boost, tidata.read_config(str(REPO / "deploy/etc/engines/boost.config")))
+
+    def test_a_log_whose_configuration_input_is_not_committed_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d, RUN + ".log")
-            write_log(p, inputs=2)
+            write_log(p)
             lines = p.read_text().splitlines()
-            p.write_text("\n".join(lines[:-1]) + "\n")   # the second input's commit is missing
-            self.assertEqual(tidata.read_engine_log(str(p)).next_sequence, 2)
+            p.write_text("\n".join(lines[:-1]) + "\n")   # the configuration's commit is missing
+            with self.assertRaises(tidata.Refused):
+                tidata.read_engine_log(str(p))
+
+    def test_a_first_input_that_is_not_the_runs_configuration_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, RUN + ".log")
+            for old, new in (('"type":"strategy.target-weight.configuration"', '"type":"x"'),
+                             ('"id":"configuration:hash-boost"', '"id":"configuration:hash-other"'),
+                             ('"strategy_id":"boost"', '"strategy_id":"momentum"')):
+                write_log(p)
+                p.write_text(p.read_text().replace(old, new, 1))
+                with self.assertRaises(tidata.Refused, msg=new):
+                    tidata.read_engine_log(str(p))
+
+    def test_a_damaged_commit_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, RUN + ".log")
+            for damage in (lambda c: c.pop("record_hash"), lambda c: c.update(record_hash=_digest("other")),
+                           lambda c: c.update(extra=1)):
+                write_log(p)
+                lines = p.read_text().splitlines()
+                commit = json.loads(lines[2])
+                damage(commit["commit"])
+                lines[2] = json.dumps(commit, separators=(",", ":"))
+                p.write_text("\n".join(lines) + "\n")
+                with self.assertRaises(tidata.Refused):
+                    tidata.read_engine_log(str(p))
+
+    def test_a_record_not_as_the_engine_writes_one_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, RUN + ".log")
+            for damage in (lambda r: r.pop("record_hash"), lambda r: r.update(record_hash="sha256:short"),
+                           lambda r: r.update(extra=1)):
+                write_log(p)
+                lines = p.read_text().splitlines()
+                rec = json.loads(lines[1])
+                damage(rec["record"])
+                lines[1] = json.dumps(rec, separators=(",", ":"))
+                p.write_text("\n".join(lines) + "\n")
+                with self.assertRaises(tidata.Refused):
+                    tidata.read_engine_log(str(p))
+
+    def test_a_log_with_no_run_name_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, ".log")
+            write_log(p)
+            with self.assertRaises(tidata.Refused):
+                tidata.read_engine_log(str(p))
 
     def test_an_unreadable_log_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -252,14 +375,16 @@ class WarmUpTest(unittest.TestCase):
             self.assertEqual([e["payload"]["instrument_id"] for e in bars], ["SPY"] * len(sessions))
             self.assertEqual(len(closes), len(sessions))
             self.assertEqual({e["type"] for e in stream}, {"market.bar.completed", "market.session.closed"})
-            self.assertEqual([e["sequence"] for e in stream], list(range(2, 2 + len(stream))))
+            # A stream file numbers its envelopes from 1: the position in the file, not the engine's
+            # sequence, which the deliverer assigns at send time.
+            self.assertEqual([e["sequence"] for e in stream], list(range(1, 1 + len(stream))))
             self.assertEqual({(e["configuration_hash"], e["strategy_version"], e["correlation_id"])
                               for e in stream}, {("hash-boost", "boost/r1/test", RUN)})
             self.assertEqual({e["payload"]["adjusted_base"] for e in bars}, {BASE.isoformat()})
-            self.assertNotIn(KEY, out + err)
+            self.assertNotIn(SYNTHETIC_VALUE, out + err)
             for p in job.root.rglob("*"):
-                if p.is_file() and p != job.secrets:
-                    self.assertNotIn(KEY, p.read_text())
+                if p.is_file() and p != job.env_file:
+                    self.assertNotIn(SYNTHETIC_VALUE, p.read_text())
 
     def test_the_stream_satisfies_the_go_validators(self):
         with tempfile.TemporaryDirectory() as root:
@@ -315,18 +440,30 @@ class DailyTest(unittest.TestCase):
         job.client.calls.clear()
         return job
 
-    def test_the_next_session_is_its_own_stream_continuing_the_sequence(self):
+    def test_the_next_session_is_its_own_stream_numbered_from_one(self):
         with tempfile.TemporaryDirectory() as root:
             job = self.warmed(root)
-            last = job.envelopes(WARM)[-1]["sequence"]
             status, out, err = job.main(after_settle(D(2026, 3, 16)))
             self.assertEqual(status, 0, err)
             self.assertEqual(out.strip(), str(job.stream_dir() / "boost-2026-03-16.jsonl"))
             self.assertEqual([c for c in job.client.calls if c[0] == "grouped"], [("grouped", D(2026, 3, 16))])
             stream = job.envelopes(D(2026, 3, 16))
             self.assertEqual([e["type"] for e in stream], ["market.bar.completed", "market.session.closed"])
-            self.assertEqual([e["sequence"] for e in stream], [last + 1, last + 2])
+            self.assertEqual([e["sequence"] for e in stream], [1, 2])
             self.assertEqual(stream[0]["payload"]["raw"]["close"], spy(D(2026, 3, 16))["c"])
+
+    def test_inputs_the_engine_commits_between_two_files_do_not_change_the_next(self):
+        # The engine's sequence is global across sources (the Run approval,
+        # fills, snapshots): a file never claims one, so another source's
+        # input committed between two files cannot collide with it.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
+            job = self.warmed(root)
+            alone = self.warmed(other)
+            job.write_log(inputs=7)
+            self.assertEqual(job.main(after_settle(D(2026, 3, 16)))[0], 0)
+            self.assertEqual(alone.main(after_settle(D(2026, 3, 16)))[0], 0)
+            self.assertEqual((job.stream_dir() / "boost-2026-03-16.jsonl").read_bytes(),
+                             (alone.stream_dir() / "boost-2026-03-16.jsonl").read_bytes())
 
     def test_missed_sessions_are_caught_up_in_one_stream(self):
         with tempfile.TemporaryDirectory() as root:
@@ -360,7 +497,7 @@ class DailyTest(unittest.TestCase):
             job = self.warmed(root)
             path = job.stream_dir() / "boost-{}.jsonl".format(WARM)
             before = path.read_bytes()
-            write_log(job.log, inputs=3)   # the engine has taken inputs since; the file is unchanged
+            job.write_log(inputs=3)   # the engine has taken inputs since; the file is unchanged
             refuse = mock.Mock(side_effect=AssertionError("fetched"))
             status, _, err = job.main(after_settle(WARM), "--backfill-from", BASE.isoformat(), factory=refuse)
             self.assertEqual(status, 0, err)
@@ -380,7 +517,7 @@ class DailyTest(unittest.TestCase):
     def test_a_new_engine_identity_against_an_old_stream_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
             job = self.warmed(root)
-            write_log(job.log, configuration_hash="hash-other")
+            job.write_log(configuration_hash="hash-other")
             status, _, err = job.main(after_settle(WARM))
             self.assertEqual(status, 1)
             self.assertIn("differs", err)
@@ -396,9 +533,9 @@ class DailyTest(unittest.TestCase):
             self.assertEqual(job.files(), files)
 
     def test_a_missing_key_is_refused_and_nothing_is_written(self):
-        for secrets in (None, "", "MASSIVE_API_KEY=\n", "NTFY_URL=x\n"):
+        for env_text in (None, "", "MASSIVE_API_KEY=\n", "NTFY_URL=x\n"):
             with tempfile.TemporaryDirectory() as root:
-                job = Job(root, secrets=secrets)
+                job = Job(root, env_text=env_text)
                 status, out, err = job.main(after_settle(WARM), "--backfill-from", BASE.isoformat())
                 self.assertEqual(status, 1)
                 self.assertIn("MASSIVE_API_KEY", err)
@@ -434,6 +571,97 @@ class DailyTest(unittest.TestCase):
             self.assertEqual(last, D(2026, 3, 16))
             self.assertLessEqual(first, WARM + dt.timedelta(days=1))
             self.assertGreater(first, BASE)
+
+
+class ReverifyTest(unittest.TestCase):
+    """Before a new file is written, every file already written for the run
+    must still re-encode byte for byte; otherwise nothing is written."""
+
+    def daily(self, root):
+        job = Job(root)
+        self.assertEqual(job.main(after_settle(WARM), "--backfill-from", BASE.isoformat())[0], 0)
+        self.assertEqual(job.main(after_settle(D(2026, 3, 16)))[0], 0)
+        job.client.calls.clear()
+        return job
+
+    def assert_refused_naming(self, job, now, path):
+        files = sorted(os.listdir(job.stream_dir()))
+        status, out, err = job.main(now)
+        self.assertEqual(status, 1, out)
+        self.assertIn(str(path), err)
+        self.assertIn("a person", err)
+        self.assertEqual(sorted(os.listdir(job.stream_dir())), files)
+
+    def test_a_dividend_recorded_late_inside_a_written_file_stops_the_job(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            job.client.dividends = [{"id": "DIV1", "ticker": "SPY", "ex_dividend_date": "2026-03-10",
+                                     "cash_amount": 1.0}]
+            self.assert_refused_naming(job, after_settle(D(2026, 3, 17)), job.stream_dir() / "boost-{}.jsonl".format(WARM))
+            self.assertIn(("dividends", D(2026, 3, 3), D(2026, 3, 17)), job.client.calls)
+
+    def test_an_earlier_file_changed_on_disk_stops_the_job(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            path = job.stream_dir() / "boost-{}.jsonl".format(WARM)
+            path.write_text(path.read_text().replace('"source":"marketdata"', '"source":"other"', 1))
+            self.assert_refused_naming(job, after_settle(D(2026, 3, 17)), path)
+
+    def test_a_removed_file_between_two_others_stops_the_job(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            self.assertEqual(job.main(after_settle(D(2026, 3, 17)))[0], 0)
+            os.remove(job.stream_dir() / "boost-2026-03-16.jsonl")
+            self.assert_refused_naming(job, after_settle(D(2026, 3, 18)), job.stream_dir() / "boost-2026-03-17.jsonl")
+
+    def test_an_engine_log_header_changed_after_delivery_stops_the_job(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.daily(root)
+            job.write_log(strategy_version="boost/r2/test")
+            self.assert_refused_naming(job, after_settle(D(2026, 3, 17)), job.stream_dir() / "boost-{}.jsonl".format(WARM))
+
+    def test_a_configuration_the_engine_did_not_log_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Job(root)
+            edited = json.loads(job.config.read_text())
+            edited["boost"]["warm_up_start"] = "2026-03-03"
+            job.config.write_text(json.dumps(edited))
+            status, _, err = job.main(after_settle(WARM), "--backfill-from", "2026-03-03")
+            self.assertEqual(status, 1)
+            self.assertIn("the engine's durable log", err)
+            self.assertEqual(job.made, 0)
+            self.assertFalse(job.data.exists())
+
+
+class KeyScrubTest(unittest.TestCase):
+    def test_an_error_that_carries_the_key_never_prints_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Job(root)
+
+            class Leaky(FakeMassive):
+                def grouped(self, day):
+                    raise RuntimeError("401 for token " + SYNTHETIC_VALUE + " at " + SYNTHETIC_VALUE[:4])
+
+            def factory(value):
+                job.made += 1
+                return Leaky()
+
+            status, out, err = job.main(after_settle(WARM), "--backfill-from", BASE.isoformat(), factory=factory)
+            self.assertEqual(status, 1)
+            self.assertNotIn(SYNTHETIC_VALUE, out + err)
+            self.assertIn("401 for token [MASSIVE_API_KEY] at", err)
+
+    def test_a_factory_that_fails_with_the_key_never_prints_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Job(root)
+
+            def factory(value):
+                raise ValueError("bad key {!r}".format(value))
+
+            status, out, err = job.main(after_settle(WARM), "--backfill-from", BASE.isoformat(), factory=factory)
+            self.assertEqual(status, 1)
+            self.assertNotIn(SYNTHETIC_VALUE, out + err)
+            self.assertIn("[MASSIVE_API_KEY]", err)
 
 
 class RetryAndInputTest(unittest.TestCase):
@@ -474,6 +702,14 @@ class RetryAndInputTest(unittest.TestCase):
                 self.assertIn(str(job.config), err)
             self.assertFalse(job.data.exists())
 
+    def test_a_configuration_file_missing_or_not_json_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(tidata.Refused):
+                tidata.read_config(str(Path(d, "absent.config")))
+            Path(d, "bad.config").write_text("{not json")
+            with self.assertRaises(tidata.Refused):
+                tidata.read_config(str(Path(d, "bad.config")))
+
     def test_a_session_before_the_warm_up_start_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
             job = Job(root)
@@ -506,13 +742,39 @@ class RetryAndInputTest(unittest.TestCase):
                              "/run/creds/secrets")
 
 
+def git(cwd, *args):
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                           *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
 class PackageTest(unittest.TestCase):
-    """deploy/build-data.sh packs the job as one executable file."""
+    """deploy/build-data.sh packs the job as one executable file, from a clean
+    tree only, byte for byte the same for one commit, stamped with it."""
+
+    def checkout(self, d):
+        """A clean git checkout of what build-data.sh reads, so the test does
+        not depend on the state of the working tree it runs in."""
+        root = Path(d, "repo")
+        for rel in ["deploy/build-data.sh", "scripts/build-stamp.sh"] + [
+                str(p.relative_to(REPO)) for p in (REPO / "adapter/marketdata").glob("*.py")]:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes((REPO / rel).read_bytes())
+            (root / rel).chmod((REPO / rel).stat().st_mode)
+        git(root, "init", "-q")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "fixture")
+        return root
+
+    def build(self, root, out, **env):
+        return subprocess.run([str(root / "deploy/build-data.sh"), str(out)], cwd=root, capture_output=True, text=True,
+                              env=dict(os.environ, **env))
 
     def test_the_built_file_runs_the_job(self):
         with tempfile.TemporaryDirectory() as d:
+            root = self.checkout(d)
             out = Path(d, "ti-data")
-            subprocess.run(["deploy/build-data.sh", str(out)], cwd=REPO, check=True, capture_output=True)
+            result = self.build(root, out)
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(os.access(out, os.X_OK))
             result = subprocess.run([sys.executable, str(out), "--help"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -522,6 +784,44 @@ class PackageTest(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 1)
             self.assertIn("ti-data refused", result.stderr)
+
+    def test_the_built_file_carries_the_commit_it_was_built_from(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self.checkout(d)
+            out = Path(d, "ti-data")
+            self.assertEqual(self.build(root, out).returncode, 0)
+            stamp = git(root, "describe", "--always", "--dirty")
+            result = subprocess.run([sys.executable, str(out), "--version"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "ti-data " + stamp)
+            result = subprocess.run([sys.executable, str(out), "--data", d, "--config", "x", "--engine-log", "x.log",
+                                     "--secrets-file", str(Path(d, "none"))], capture_output=True, text=True)
+            self.assertIn("ti-data " + stamp, result.stderr)
+
+    def test_two_builds_of_one_commit_are_byte_for_byte_the_same(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self.checkout(d)
+            first, second = Path(d, "a"), Path(d, "b")
+            self.assertEqual(self.build(root, first).returncode, 0)
+            os.utime(root / "adapter/marketdata/tidata.py", (1, 1))   # a later checkout's mtimes
+            time.sleep(2.1)   # past the zip format's two-second time resolution
+            self.assertEqual(self.build(root, second).returncode, 0)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_a_dirty_tree_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self.checkout(d)
+            out = Path(d, "ti-data")
+            with open(root / "adapter/marketdata/tidata.py", "a") as f:
+                f.write("# an uncommitted edit\n")
+            result = self.build(root, out)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("dirty", result.stderr)
+            self.assertFalse(out.exists())
+            git(root, "checkout", "--", ".")
+            Path(root, "adapter/marketdata/untracked.py").write_text("")
+            self.assertEqual(self.build(root, out).returncode, 1)
+            self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":
