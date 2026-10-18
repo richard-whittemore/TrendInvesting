@@ -205,6 +205,10 @@ LATE_FILL_FIELDS = ("after", "at", "exec_id", "reason")
 # its committed fills, and the client order IDs of the orders a committed
 # lifecycle input ended.
 JournalledReports = namedtuple("JournalledReports", ("fills", "ended"))
+# One committed input in the engine's durable log, and the log as the adapter
+# reads it (read_engine_log).
+CommittedInput = namedtuple("CommittedInput", ("id", "event_type", "schema_version", "sequence", "payload"))
+EngineLog = namedtuple("EngineLog", ("configuration_hash", "strategy_version", "inputs", "next_sequence"))
 
 
 class EngineUnavailable(Exception):
@@ -817,6 +821,42 @@ def journalled_reports(path):
     as holding no fills. The record chain is the engine's own to verify
     (engine -resume, journal-query); this reads the shape and each payload.
     """
+    fills = set()
+    ended = set()
+    for group in _committed_groups(path)[1]:
+        for at, kind, envelope in group:
+            if envelope["type"] == FILL_TYPE:
+                fills.add(_fill_id(path, at, kind, envelope))
+            elif envelope["type"] == LIFECYCLE_TYPE:
+                client_order_id, status = _lifecycle(path, at, kind, envelope)
+                if status in LIFECYCLE_TERMINAL:
+                    ended.add(client_order_id)
+    return JournalledReports(fills, ended)
+
+
+def read_engine_log(path):
+    """The run's identity and every committed input in the engine's durable log at path, read as journalled_reports reads it.
+
+    An EngineLog: the header's configuration hash and strategy version,
+    which every input the adapter sends carries (ADR 0016), and each
+    committed group's input in log order. next_sequence is the sequence the
+    engine expects of its next input: one past the last committed input's
+    (1 for a log with none). A group not yet committed holds no input. A log
+    that cannot be read as the engine writes it raises ResolveRefused, never
+    read as holding no inputs.
+    """
+    header, groups = _committed_groups(path)
+    inputs = []
+    for group in groups:
+        envelope = group[0][2]
+        inputs.append(CommittedInput(envelope["id"], envelope["type"], envelope["schema_version"],
+                                     envelope["sequence"], envelope["payload"]))
+    last = max((i.sequence for i in inputs), default=0)
+    return EngineLog(header["configuration_hash"], header["strategy_version"], tuple(inputs), last + 1)
+
+
+def _committed_groups(path):
+    """(header, committed groups) of the durable log at path; each group a list of (line number, kind, envelope)."""
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -836,8 +876,7 @@ def journalled_reports(path):
             or header["chain_algorithm"] != LOG_CHAIN_ALGORITHM or not _is_text(header["configuration_hash"])
             or not _is_text(header["strategy_version"])):
         raise _unreadable(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
-    fills = set()
-    ended = set()
+    groups = []
     group = []
     sequence = 0
     last_hash = None
@@ -863,15 +902,9 @@ def journalled_reports(path):
         if (not isinstance(commit, dict) or tuple(sorted(commit)) != LOG_COMMIT_FIELDS or not group
                 or commit["sequence"] != sequence or commit["record_hash"] != last_hash):
             raise _unreadable(path, n, "it is not the commit of the group before it")
-        for at, kind, envelope in group:
-            if envelope["type"] == FILL_TYPE:
-                fills.add(_fill_id(path, at, kind, envelope))
-            elif envelope["type"] == LIFECYCLE_TYPE:
-                client_order_id, status = _lifecycle(path, at, kind, envelope)
-                if status in LIFECYCLE_TERMINAL:
-                    ended.add(client_order_id)
+        groups.append(group)
         group = []
-    return JournalledReports(fills, ended)
+    return header, groups
 
 
 def _unreadable(path, n, why):

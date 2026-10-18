@@ -34,11 +34,14 @@ class TWSApi:
     ibapi's names (contract: conId, symbol, secType, currency, exchange;
     order: orderRef, account, action, totalQuantity, orderType, lmtPrice,
     tif, transmit). The real client builds ibapi.contract.Contract and
-    ibapi.order.Order from them; every other Order field then takes ibapi's
-    default, and the paper-account test must confirm the ones that change
-    what is sent: outsideRth false, no parent, OCA group or conditions,
-    whatIf false, and an auxPrice of ibapi's unset value. IBKR answers on
-    the Inbox.
+    ibapi.order.Order from them (real_client.ibapi_contract and
+    ibapi_order), and sets every other Order field that changes what is
+    sent to its plain value (real_client.ORDER_FIELDS_SET: outsideRth
+    false, no parent, OCA group or conditions, whatIf false, an auxPrice of
+    ibapi's unset value, and more); the fields it leaves at ibapi's default
+    are listed in real_client.DEFAULTS_TO_CONFIRM, for the paper-account
+    test to confirm from IBKR's own view of the order. IBKR answers on the
+    Inbox.
     """
 
     def connect(self, host, port, client_id, callbacks, timeout):

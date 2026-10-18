@@ -3,21 +3,25 @@
 *For the owner. What the program sends in paper trading, what it never
 sends, what you will see, and what it does when something goes wrong.*
 
-**Where this stands.** The sending path is built and tested against a
-stand-in for IB Gateway (a "fake gateway" that answers like IBKR, with
-invented accounts and prices). It has not yet sent an order to IBKR's real
-paper servers: that test waits for your paper account. Until it is run and
-reviewed, the program's real IBKR client still refuses to place any order.
-The adapter's main loop (the part that keeps reading IB Gateway's messages
-and passing them on) is not in this build either. Until it is, the stop
-after `commission_wait` below happens only when the next message about one
-of this engine's orders arrives, not on a timer.
+**Where this stands.** The sending path, the adapter's main loop and its
+start command are built and tested against a stand-in for IB Gateway (a
+"fake gateway" that answers like IBKR, with invented accounts and prices)
+and a stand-in for the engine. No order has yet been sent to IBKR's real
+paper servers: that is the hand-run test in
+`docs/runbooks/first-paper-order.md`, and it is yours to run. The real IBKR
+client places an order only when the adapter's configuration switches
+sending on (`"paper_sending_enabled": true`, below); it ships switched off.
+One piece is still missing before the engine can release an order in
+paper: nothing yet sends the engine each session's inputs (the day's bar,
+the broker snapshot, the mark and the session's close). Until that is
+built, the adapter passes IBKR's reports to the engine but the engine has
+nothing to decide on.
 
 ## What sends
 
 Only an engine and an adapter both started in **paper** mode, on a **paper
 account**, send anything. IBKR's paper account numbers begin `DU`; live
-account numbers never do. The check is made in three places, and any one of
+account numbers never do. The check is made in four places, and any one of
 them stops the order:
 
 1. **The engine** refuses to start if the mode you start it with is not the
@@ -31,6 +35,12 @@ them stops the order:
    to says it manages that account (IBKR sends that list as each session
    starts). If the login does not manage it, the adapter also refuses to
    treat the link as matched to IBKR, so nothing is sent at all.
+4. **The real IBKR client** places an order only while the adapter's
+   configuration is paper, on a `DU` account, has
+   `"paper_sending_enabled": true`, and this session's IBKR login has named
+   that account. Left out, the switch is off. It must be written exactly
+   `true` (not `1` or `"yes"`), and a configuration that sets it in any mode
+   but paper is refused before anything starts.
 
 When those all agree, one order goes out like this:
 
@@ -40,7 +50,7 @@ When those all agree, one order goes out like this:
 2. The adapter checks the order is one it can send right now: the link to IB
    Gateway is up, IBKR's open orders, trades and balances have been matched
    since the link last came up, the IBKR client in use is allowed to place
-   orders (the real one is not, until the paper-account test), and the order
+   orders (the real one only with `paper_sending_enabled` on), and the order
    is a whole-share limit order for the session (a DAY order) on a stock it
    knows IBKR's contract number for, released in **today's** session (New
    York date). If any of that fails, it sends nothing and records nothing
@@ -62,6 +72,115 @@ When those all agree, one order goes out like this:
 
    Each report describes the order as IBKR holds it, not as the adapter
    meant it, so the engine can see if the two differ and refuse the report.
+
+## Starting the adapter
+
+Start the **engine first**: the adapter reads the engine's durable log (the
+file the engine was given as `-log`) for the run it belongs to, and refuses
+to start without it. Then start the adapter. On the server that is
+`sudo systemctl start ti-adapter-boost` after `sudo systemctl start
+ti-engine@boost`; like the engine, the adapter is never started or
+restarted by systemd on its own, and every start is yours. Stop it with
+`sudo systemctl stop ti-adapter-boost`. Why it stopped is in its log:
+`journalctl -u ti-adapter-boost`. Account numbers are never written there
+(a stop message shows `<account>` instead).
+
+The command the unit runs, which you can also run by hand from the
+directory that holds the adapter's code (`/opt/trend-investing/adapter` on
+the server, the repository checkout on the Mac):
+
+```sh
+python3 -m adapter.ibkr run \
+  --config /etc/trend-investing/adapters/boost.json \
+  --secrets <secrets file> --account-key IBKR_ACCOUNT_BOOST \
+  --pending /var/lib/trend-investing/adapters/boost/pending.json \
+  --engine-log /var/lib/trend-investing/engines/boost/<TI_RUN>.log \
+  --socket /run/ti-engine-boost/engine.sock \
+  --ibapi-record /opt/trend-investing/twsapi/INSTALLED \
+  --versions /opt/trend-investing/adapter/versions.env
+```
+
+`python3 -m adapter.ibkr run --help` lists every option. What each names:
+
+| Option | What it is |
+| --- | --- |
+| `--config` | The adapter's configuration, `/etc/trend-investing/adapters/boost.json` on the server, created once from `deploy/etc/adapters/boost.json.example` and never overwritten. It ships in **dry-run with sending off** and with no contract numbers (`"con_ids": {}`). For the paper test set `"mode": "paper"`, `"paper_sending_enabled": true`, and `"con_ids": {"SPY": <SPY's contract number from IBKR's contract search>}`. It holds no account number |
+| `--secrets`, `--account-key` | Where the account number comes from: the `IBKR_ACCOUNT_BOOST=` line of `/etc/trend-investing/secrets.env` (the unit hands the adapter a private copy). The account is named in exactly one place: either here, or as `account_id` in the configuration (then leave both options out); both, or neither, is refused |
+| `--pending` | **The pending file**, `/var/lib/trend-investing/adapters/boost/pending.json` on the server. This is the `PENDING_FILE` every `relay.py` command in this manual and in [re-delivery](redelivery.md) takes. The adapter's other files sit beside it, named after it: `.handover` (the "about to send" and "sent" marks), `.handover.decisions` (your decisions), `.refused`, `.corrections`, `.late-fills`, `.lock`, `.outbox` (inputs recorded for the engine and not yet sent) and `.held` (a cancellation waiting for a fill's commission). Never edit them |
+| `--engine-log` | **The engine's durable log**, `/var/lib/trend-investing/engines/boost/<TI_RUN>.log`, the `ENGINE_LOG` the acknowledgement commands take. The unit fills `<TI_RUN>` in from the same `run.env` the engine starts from |
+| `--socket` | The engine's socket, `/run/ti-engine-boost/engine.sock` |
+| `--ibapi-record`, `--versions` | The adapter starts only if IBKR's `ibapi` installed by `provision.sh twsapi` is the build pinned in `versions.env` (below) |
+
+What the adapter does, in order:
+
+1. Checks the configuration, the account number and the `ibapi` build;
+   refuses to start on any of them.
+2. Connects to IB Gateway with the engine's own client ID, reads the
+   account (positions, cash, net liquidation, excess liquidity and every
+   open order) and IBKR's open orders and today's executions, and only then
+   treats the link as matched ("reconciled" in its log). If any of that
+   could not be read, it stops ("could not be read in full") rather than
+   send anything on a partial picture. It does the same after every
+   reconnect.
+3. Asks the engine again for the reply to any input it was waiting on when
+   it last stopped, before anything new.
+4. Then, until you stop it: reads IB Gateway's messages one at a time,
+   checks after each one whether a trade's commission report is overdue
+   (`commission_wait`; it stops on time, not only when IBKR next writes),
+   and sends the engine each report it records, oldest first. A released
+   order marked to send goes out then, once.
+
+### Installing IBKR's `ibapi` on the server
+
+```sh
+sudo deploy/provision.sh twsapi    # fetch, verify, install ibapi, record it
+sudo deploy/provision.sh adapter   # install the adapter's code and its pin file
+sudo deploy/provision.sh services  # the unit, the adapter's directory and configuration
+```
+
+`twsapi` downloads IBKR's TWS API 10.51.01 installer, refuses it unless its
+SHA-256 matches `deploy/versions.env`, installs it, installs its Python
+client into the adapter's own environment (`/opt/trend-investing/adapter-venv`,
+offline), checks that it imports, and only then writes
+`/opt/trend-investing/twsapi/INSTALLED`. Run `adapter` again after every
+pull you mean to run. If the pin in the adapter's code ever differs from
+what was installed, the adapter refuses to start ("install the pinned build
+with `sudo deploy/provision.sh twsapi`"). Neither step has been run on the
+server yet; if `twsapi` stops with "has not exactly one
+source/pythonclient", IBKR changed the installer's layout: stop and report
+it, do not install `ibapi` by hand.
+
+### The rehearsal: run it before the first real order
+
+```sh
+deploy/rehearse-paper.sh --account
+```
+
+From a checkout, on the machine that will run the test. It asks for your
+paper account at a hidden prompt (leave `--account` off for a synthetic
+one), then runs the adapter's own start command against the fake gateway
+and a stand-in engine, with sending switched on, and prints a `PASS` line
+for each of: the account read before the order; one SPY whole-share DAY
+limit order for your account, tagged with its client order ID; IBKR's
+acceptance and two fills reaching the engine; a dropped link reconnected
+and matched again without sending the order again; and a restart that
+sends and records nothing twice. It ends "rehearsal passed: nothing was
+sent to IBKR", or exits with `FAIL:` and the reason. Nothing reaches IBKR
+and your account number is never printed.
+
+### Turning sending on, and off again
+
+The order reaches IBKR only when all of these hold: the configuration is
+paper with `"paper_sending_enabled": true`, the engine runs in paper, and
+IB Gateway's **Read-Only API is off**. Turn Read-Only off just before the
+first order and back on afterwards, as the runbook says. To stop sending
+without stopping the engine: stop the adapter, set
+`"paper_sending_enabled": false`, and start it again. An order released
+while sending is off is refused before "about to send" is written ("does
+not place orders"), and the adapter stops on it at every start: switch
+sending back on and start the adapter the same day, and it goes out; on a
+later day it is stale (the row "The link stayed down past the end of the
+order's day" below).
 
 ## What never sends
 
@@ -107,6 +226,11 @@ When those all agree, one order goes out like this:
 | IBKR cancels or refuses an order while one of its trades still waits for its commission, and the adapter stops before the commission arrives | The cancellation is held until every trade of that order reported before it is recorded, and the hold is written to the file ending `.held` beside the journal before it is accepted; a further trade IBKR reports on that order while the cancellation is held is added to the file before it is accepted. On restart IBKR repeats the trades and their commissions (not the cancelled order's status); the adapter records the fills, then the cancellation, once each. If writing the cancellation fails, the adapter stops with the cause and keeps the hold for the next start. Only the adapter holding the lock on `PENDING_FILE.lock` reads or writes the `.held` file: a second adapter started beside it is refused before it reads it. | Nothing, unless it stops with "has not replayed that execution" (IBKR did not repeat the trade within `commission_wait` seconds of the link being up and matched): then check the order and its trades in IBKR and reconcile before starting again. Leave the `.held` file alone: it is read strictly, and a hand edit stops the adapter. |
 | IBKR reports a trade, or another status, on an order after the adapter recorded it cancelled or refused (or while that cancellation is held, any status but the cancellation itself) | The adapter stops ("after the order was recorded as", "after reporting it"): the engine reads nothing on an order that has ended, so a fill after a cancellation is a contradiction it does not record. For a trade, IBKR repeats the day's trades every time the adapter starts, so it stops again at every start that day until you acknowledge the trade; a restart alone does not get past it. The engine refuses a fill on an order already ended, so the trade's shares never reach the engine as a fill: it holds the position without them. The next start's reconciliation (each start and reconnect matches IBKR's positions and cash before any order is accepted, ADR 0025) reports those shares as an unexplained difference, and the engine goes Degraded then (no new buys, ADR 0019); the morning reconciliation shows it too. That Degraded is this trade, not a new fault. | Check the order and its trades in IBKR. For a trade, with the adapter stopped, acknowledge it: `python3 adapter/ibkr/relay.py acknowledge-late-fill PENDING_FILE --journal ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason "what IBKR shows"` (the execution ID and client order ID are in the stop message; `ENGINE_LOG` is the engine's `-log` file, as for `acknowledge-correction`). It refuses a log it cannot read, a trade the log holds as a fill ("is recorded as a fill"), and an order recorded as cancelled or refused neither in the log nor as the input awaiting its reply in `PENDING_FILE` ("neither in the engine's durable log nor as the input awaiting its reply"; the cancellation the adapter recorded just before it stopped counts, though the engine has not committed it yet). If it refuses that way, check `--after` is the order the stop message names; if it is, the adapter and the engine disagree on the order: leave the adapter stopped and reconcile by hand ([reconciliation](../runbooks/reconciliation.md)). It keeps your acknowledgement and reason in `PENDING_FILE.late-fills`, which is the record of the trade for reconciliation; the adapter then passes over that trade at every start. Then start the adapter: its start reconciliation reports the position difference (that trade's shares) and the engine goes Degraded. Follow the recovery in [reconciliation](../runbooks/reconciliation.md) (ADR 0019) to settle it and clear Degraded. Any other trade on that order, or a correction of this one, stops it again. For a status, there is nothing to acknowledge: IBKR does not repeat the status of an order no longer open when the adapter starts, so a start goes on; but IBKR showed an ended order changing, which is a fault to investigate and reconcile before starting again. |
 | A trade's commission report never arrives | After `commission_wait` seconds the adapter stops ("has waited ... for IBKR's commission report"): the trade happened at IBKR but cannot be recorded without its commission. | Check the trade in IBKR, then reconcile the account before starting again. |
+| The adapter refuses to start: "refused: ..." | Nothing was started or sent. It names the reason: the configuration (unknown key, a value of the wrong kind, `paper_sending_enabled` on outside paper), the account (named in both places or in neither, or the secrets line empty), or the installed `ibapi` ("install the pinned build"). | Correct what it names. For `ibapi`, run `sudo deploy/provision.sh twsapi` and `sudo deploy/provision.sh adapter` from the same checkout. |
+| The adapter stops at start: "durable log ... cannot be read" | The engine is not running yet, or `--engine-log` names another run's file. Nothing was sent. | Start the engine first, check `TI_RUN` in `run.env`, then start the adapter. |
+| The adapter stops: "could not be read in full" | IBKR did not answer every part of the account read (positions, balances, open orders) in time, at start or after a reconnect. Nothing is sent on a partial picture. | Check IB Gateway is logged in and connected (the runbook's A4 check), then start the adapter again. |
+| The adapter stops: "EngineUnavailable" or "the engine refused the input" | The engine stopped, or refused an input. The input stays in the pending file; nothing is lost and nothing is sent. | For a stopped engine, follow `docs/runbooks/durable-log.md` ("Restarting an engine") to resume it, then start the adapter: it asks for that input again first. A refusal is a fault to investigate before starting again. |
+| IB Gateway's Read-Only API is still on when an order goes out | Not yet observed. IBKR refuses API orders while Read-Only is on; the adapter has written "sent" by then, so it never sends it again, and IBKR reports nothing on it. Expect the reporter's "order ... not acknowledged" alert. | Stop the adapter. Confirm in IBKR that no order carries that client order ID. Then treat it as an order that never reached IBKR: [re-delivery](redelivery.md), "What can go wrong". Turn Read-Only off before the next order. |
 | You start the engine or adapter in live mode | It refuses to start and says the limited-live gate has not been passed. | Use paper. |
 | A paper configuration names an account not beginning `DU` | It refuses to start. | Correct the account number in the configuration (a new configuration and a new run). |
 
@@ -185,5 +309,40 @@ When those all agree, one order goes out like this:
   that release, with no report at all, stays working until the owner's
   clearance names it.
 
-Not yet tested: sending to IBKR's real paper servers. That is the second
-half of this work and is run by hand once your paper account is open.
+- `adapter/ibkr/tests/test_config.py`,
+  `test_paper_sending_is_off_unless_the_configuration_switches_it_on`.
+- `adapter/ibkr/tests/test_real_client.py`, with a stand-in `ibapi`:
+  `OrderMappingTests` (the request onto ibapi's `Contract` and `Order`,
+  field by field; every field that changes what is sent set to its plain
+  value whatever ibapi's default; the defaults left to ibapi listed; an
+  ibapi without a field, or any other request, refused) and
+  `PlacingOrdersTests` (an order placed only with mode, `DU` account,
+  managed account and switch all in place, on the current session).
+- `adapter/ibkr/tests/test_ibapi_pin.py`: the adapter starts only on the
+  pinned, recorded `ibapi`.
+- `adapter/ibkr/tests/test_engine_client.py`: the engine socket's replies
+  are used only when they answer the input sent, byte for byte.
+- `adapter/ibkr/tests/test_engine_log.py`: the run's identity and the
+  committed inputs, read from the engine's durable log.
+- `adapter/ibkr/tests/test_loop.py`, the main loop against the fake: one
+  order sent once and its status and fills reaching the engine as
+  `tests/testdata/paper_reports.json`; nothing sent before the account is
+  read and matched; a partial read and an unmanaged account stop it; a
+  missing commission stops it on time; a reconnect and a restart send and
+  record nothing twice; an input awaiting its reply is asked for again
+  first, byte for byte; an input the engine already holds is never sent
+  again; a dry run sends nothing.
+- `adapter/ibkr/tests/test_cli.py`: the start command, its refusals, the
+  account read from one place and never shown, and the server's unit and
+  shipped configuration checked against it.
+- `adapter/ibkr/tests/test_rehearsal.py`: `deploy/rehearse-paper.sh`'s
+  rehearsal passes, and fails when the adapter stops.
+
+Not yet tested: sending to IBKR's real paper servers, installing `ibapi`
+on the server, and Gateway 10.50.1f with API 10.51.01. They are the
+hand-run test in `docs/runbooks/first-paper-order.md`. When you run it,
+also confirm from IBKR's own view of the order (its order window in Client
+Portal) that it is a plain DAY limit order: no display size (iceberg),
+minimum quantity, percent offset, discretion, sweep, block, "not held" or
+cash quantity. Those are the order fields the adapter leaves at `ibapi`'s
+own defaults.

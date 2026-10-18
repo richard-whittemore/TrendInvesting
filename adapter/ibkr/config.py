@@ -14,8 +14,12 @@ _FIELDS = (
     "connect_timeout", "request_timeout",
     "heartbeat_interval", "heartbeat_timeout", "restore_timeout",
     "backoff_initial", "backoff_max", "max_connect_attempts", "commission_wait",
-    "con_ids",
+    "con_ids", "paper_sending_enabled",
 )
+# The keys a configuration may leave out, with the value an omission means.
+# paper_sending_enabled is the switch that lets the real IBKR client place
+# an order (real_client.IbapiClient.can_place_orders): left out, it is off.
+_OPTIONAL = {"paper_sending_enabled": False}
 
 # Any key containing one of these is refused outright. The adapter never
 # handles the IBKR password: IBC holds it on the server (ADR 0025 point 6).
@@ -41,7 +45,10 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
     engine's instrument ID to IBKR's contract ID (conId), the only way the
     adapter names a contract (sender.release_to_request), never a lookup by
     name; no two instruments may share a contract ID; it is kept as a
-    read-only copy.
+    read-only copy. paper_sending_enabled is the switch that lets the real
+    IBKR client place an order (AGENTS.md rule 5; real_client.IbapiClient.
+    can_place_orders): optional, off when left out, strictly a bool, and
+    refused on any mode but paper.
 
     Invariant: holds no credential. from_mapping refuses any credential-like
     key and never echoes a refused value, so neither this object's repr nor
@@ -60,10 +67,10 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
         unknown = sorted(set(values) - set(_FIELDS))
         if unknown:
             raise ConfigError("unknown keys: {}".format(", ".join(map(str, unknown))))
-        missing = [f for f in _FIELDS if f not in values]
+        missing = [f for f in _FIELDS if f not in values and f not in _OPTIONAL]
         if missing:
             raise ConfigError("missing required keys: {}".format(", ".join(missing)))
-        fields = {f: values[f] for f in _FIELDS}
+        fields = {f: values.get(f, _OPTIONAL.get(f)) for f in _FIELDS}
         fields["con_ids"] = _contract_map(values["con_ids"])
         cfg = cls(**fields)
         cfg._validate()
@@ -103,6 +110,12 @@ class AdapterConfig(namedtuple("AdapterConfig", _FIELDS)):
             raise ConfigError("backoff_max must be at least backoff_initial")
         if not _is_int(self.max_connect_attempts) or self.max_connect_attempts < 1:
             raise ConfigError("max_connect_attempts must be a positive integer")
+        # Strictly a JSON true or false: a 1 or "yes" is a typo, not a decision.
+        if not isinstance(self.paper_sending_enabled, bool):
+            raise ConfigError("paper_sending_enabled must be true or false")
+        if self.paper_sending_enabled and self.mode != "paper":
+            raise ConfigError("paper_sending_enabled is set on a {} configuration; only paper "
+                              "sends".format(self.mode))
 
 
 def _contract_map(value):

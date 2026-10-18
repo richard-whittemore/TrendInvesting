@@ -4,7 +4,9 @@
 #
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
 #   sudo deploy/provision.sh gateway    IBC and IB Gateway (pinned, checksummed)
-#   sudo deploy/provision.sh twsapi     IBKR's TWS API, fetched and verified (not part of all)
+#   sudo deploy/provision.sh twsapi     IBKR's TWS API: fetched, verified, its ibapi installed into the
+#                                       adapter's environment (not part of all)
+#   sudo deploy/provision.sh adapter    the IBKR adapter's code and pin file (not part of all)
 #   sudo deploy/provision.sh services   systemd units, directories, config stubs
 #   sudo deploy/provision.sh firewall   close everything except Tailscale
 #   sudo deploy/provision.sh all        base, gateway, services, then firewall
@@ -152,14 +154,75 @@ step_gateway() {
 
 # IBKR's TWS API (the adapter's ibapi), fetched and verified against its
 # pinned checksum (ADR 0025 point 4, amended 2026-10-16); a mismatch stops
-# the step. Its own step, run with the paper-account test and not by `all`:
-# the pin is IBKR's moving "latest" link, so once IBKR replaces the file the
-# checksum fails, and that must not block the Gateway or the services. It is
-# not yet installed into the adapter's environment: that step is written and
-# run with the paper-account test, the first use of the real client.
+# the step before anything is installed. Its own step, run with the
+# paper-account test and not by `all`: the pin is IBKR's moving "latest"
+# link, so once IBKR replaces the file the checksum fails, and that must not
+# block the Gateway or the services.
+#
+# Installs the verified installer's tree under $twsapi_root/<version>, then
+# the Python client it bundles (source/pythonclient) into the adapter's own
+# environment, $adapter_venv, offline (--no-index, --no-deps: ibapi has no
+# dependencies), and only then writes the install record the adapter checks
+# at start against the pin installed with its code (adapter/ibkr/ibapi_pin.py):
+# a different or missing record and the adapter refuses to start.
+twsapi_root=/opt/trend-investing/twsapi
+adapter_venv=/opt/trend-investing/adapter-venv
+adapter_root=/opt/trend-investing/adapter
 step_twsapi() {
-  log "TWS API ${TWSAPI_VERSION} (fetched and verified, not installed)"
-  fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
+  log "TWS API ${TWSAPI_VERSION}"
+  local installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
+  fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
+  if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
+    log "rehearsal: checksum verified, installer not executed (not x86_64)"
+    return 0
+  fi
+  log "the adapter's Python environment"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y -qq --no-install-recommends python3-venv python3-setuptools python3-wheel >/dev/null
+  local target="$twsapi_root/$TWSAPI_VERSION"
+  rm -rf "$target" "$twsapi_root/INSTALLED"
+  install -d -m 0755 "$twsapi_root"
+  # -q: unattended; -dir: where to put the tree. The install4j installer
+  # writes under HOME, so it gets a scratch one.
+  local home
+  home=$(mktemp -d)
+  HOME=$home sh "$installer" -q -dir "$target" >/dev/null
+  rm -rf "$home"
+  local client
+  client=$(find "$target" -type d -name pythonclient -path '*/source/*' | head -n 2)
+  test "$(printf '%s\n' "$client" | grep -c .)" = 1 || die "the TWS API ${TWSAPI_VERSION} tree under $target has not exactly one source/pythonclient; not installing"
+  test -f "$client/setup.py" || test -f "$client/pyproject.toml" || die "$client has no setup.py or pyproject.toml; not installing"
+  # A fresh environment each time: nothing of an earlier ibapi remains. The
+  # system site packages give pip the setuptools and wheel it builds with,
+  # offline.
+  rm -rf "$adapter_venv"
+  python3 -m venv --system-site-packages "$adapter_venv"
+  "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
+  "$adapter_venv/bin/python3" -c 'import ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
+    || die "ibapi did not import from $adapter_venv after installing it; not recording it"
+  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\n' "$TWSAPI_VERSION" "$TWSAPI_SHA256" >"$twsapi_root/INSTALLED.tmp"
+  chmod 0644 "$twsapi_root/INSTALLED.tmp"
+  mv "$twsapi_root/INSTALLED.tmp" "$twsapi_root/INSTALLED"
+  log "ibapi from TWS API ${TWSAPI_VERSION} installed into $adapter_venv; recorded in $twsapi_root/INSTALLED"
+}
+
+# The IBKR adapter's code (adapter/ibkr, without its tests) and the pin file
+# it checks the installed ibapi against, from this checkout, under
+# $adapter_root, which the adapter's unit runs from (python3 -m adapter.ibkr).
+# Replaced whole, so no file of an earlier version remains. Its own step,
+# not run by `all`: install the code you mean to run, then start the unit.
+step_adapter() {
+  local src="$here/../adapter/ibkr"
+  test -f "$src/cli.py" || die "no adapter code at $src; run this from a checkout of the repository"
+  local checkout
+  checkout=$(cd "$here/.." && pwd)
+  log "IBKR adapter code from $(git -c safe.directory="$checkout" -C "$checkout" describe --always --dirty 2>/dev/null || echo 'an unversioned tree')"
+  rm -rf "$adapter_root.new"
+  install -d -m 0755 "$adapter_root.new/adapter/ibkr"
+  install -m 0644 "$src"/*.py "$adapter_root.new/adapter/ibkr/"
+  install -m 0644 "$here/versions.env" "$adapter_root.new/versions.env"
+  rm -rf "$adapter_root"
+  mv "$adapter_root.new" "$adapter_root"
 }
 
 # write_stub PATH TEMPLATE: root-only, empty, created once and never
@@ -194,7 +257,16 @@ CONF
   local a
   for a in boost trad-ira roth-ira; do
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a"
+    install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
   done
+  # The adapter's configuration carries no secret (the account number comes
+  # from secrets.env): created once from the example, never overwritten, so
+  # the owner's paper settings survive a re-run.
+  install -d -m 0755 "$etc/adapters"
+  if ! test -e "$etc/adapters/boost.json"; then
+    install -m 0644 "$here/etc/adapters/boost.json.example" "$etc/adapters/boost.json"
+    log "created $etc/adapters/boost.json (owner step: set paper mode before the paper test)"
+  fi
 
   log "systemd units"
   install -m 0644 "$here"/systemd/*.service "$here"/systemd/*.timer /etc/systemd/system/
@@ -207,6 +279,8 @@ CONF
     # links outlive it, so each instance is disabled too (ADR 0027, the
     # restart model). Disabling stops nothing that is running.
     systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
+    # The adapter is started by the owner too, after its engine; never enabled.
+    systemctl disable ti-adapter-boost.service
     # The gateway starts only once the owner has filled
     # the login file; the unit's own check refuses an empty one. The data
     # step, reporter and dashboard are skipped (a unit condition) until their
@@ -242,10 +316,11 @@ main() {
     base) step_base ;;
     gateway) step_gateway ;;
     twsapi) step_twsapi ;;
+    adapter) step_adapter ;;
     services) step_services ;;
     firewall) step_firewall ;;
     all) step_base; step_gateway; step_services; step_firewall ;;
-    *) die "usage: provision.sh base|gateway|twsapi|services|firewall|all" ;;
+    *) die "usage: provision.sh base|gateway|twsapi|adapter|services|firewall|all" ;;
   esac
   log "done: ${1}"
 }

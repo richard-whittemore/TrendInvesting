@@ -205,16 +205,26 @@ class PaperSender:
         config = self._conn.config
         order_id = self._conn.next_order_id
         self._conn.next_order_id = order_id + 1
-        contract = SimpleNamespace(conId=request.con_id, symbol=request.symbol, secType=SEC_TYPE,
-                                   currency=CURRENCY, exchange=EXCHANGE)
-        order = SimpleNamespace(orderRef=request.client_order_id, account=request.account_id,
-                                action=request.action, totalQuantity=request.quantity,
-                                orderType=request.order_type, lmtPrice=float(request.limit_price),
-                                tif=request.tif, transmit=True)
-        self._conn.api.place_order(order_id, contract, order)
+        self._conn.api.place_order(order_id, *request_shape(request))
         record = SentRecord(request=request, send=True, client_id=config.client_id, broker_order_id=order_id)
         self._journal(record)
         return record
+
+
+def request_shape(request):
+    """The (contract, order) a request is handed to TWSApi.place_order as: plain objects with ibapi's attribute names.
+
+    Exactly the attributes tws.TWSApi.place_order promises, which the real
+    client maps onto ibapi's Contract and Order (real_client.ibapi_contract,
+    real_client.ibapi_order).
+    """
+    contract = SimpleNamespace(conId=request.con_id, symbol=request.symbol, secType=SEC_TYPE,
+                               currency=CURRENCY, exchange=EXCHANGE)
+    order = SimpleNamespace(orderRef=request.client_order_id, account=request.account_id,
+                            action=request.action, totalQuantity=request.quantity,
+                            orderType=request.order_type, lmtPrice=float(request.limit_price),
+                            tif=request.tif, transmit=True)
+    return contract, order
 
 
 def release_to_request(order, mode, con_ids, session=None):

@@ -113,12 +113,15 @@ pass "an empty login stops the gateway with 78, which the unit does not restart 
 for b in ti-data ti-engine ti-reporter ti-dashboard; do
   install -m 0755 /dev/null "/opt/trend-investing/bin/$b"
 done
+# The adapter's environment and code (provision.sh twsapi and adapter).
+install -d /opt/trend-investing/adapter-venv/bin /opt/trend-investing/adapter
+install -m 0755 /dev/null /opt/trend-investing/adapter-venv/bin/python3
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter.service ti-reporter.timer ti-dashboard.service >"$verify_log" 2>&1 || verify_status=$?
+  ti-reporter.service ti-reporter.timer ti-dashboard.service ti-adapter-boost.service >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"
 # Every line is a finding: no warning is expected in this container (the
 # rehearsal of 2026-10-16 printed none), so nothing is filtered out, and a
@@ -145,4 +148,9 @@ ids=$(grep -h '^TI_ADAPTER_CLIENT_ID=' /etc/trend-investing/engines/*.env | sort
 test "$(echo "$ids" | uniq | wc -l)" -eq 3 || fail "engine client IDs not unique"
 echo "$ids" | grep -qx 'TI_ADAPTER_CLIENT_ID=10' && fail "an engine uses the data step's client ID"
 pass "three distinct engine client IDs, none equal to the data step's 10"
+
+# The adapter's state directory and its configuration, created once and kept.
+test "$(stat -c %U:%a /var/lib/trend-investing/adapters/boost)" = ti-trader:750 || fail "adapter state directory not ti-trader 0750"
+grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.json || fail "adapter configuration not created from the example"
+pass "adapter state directory and configuration in place, sending off"
 echo "REHEARSAL COMPLETE"

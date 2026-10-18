@@ -1,0 +1,193 @@
+"""The adapter's start command: `python3 -m adapter.ibkr run ...` (docs/manual/paper-trading.md).
+
+Everything is read and checked before anything connects: the configuration
+(config.AdapterConfig, strict), the account number from exactly one place
+(the configuration file, or one named line of the machine's secrets file,
+never echoed: the repository is public), the installed ibapi against the
+pin (ibapi_pin), and the engine's durable log (read at start by the loop).
+Then the loop runs (loop.AdapterLoop) until SIGTERM or SIGINT, or until it
+stops for a person. Exit status: 0 for a requested stop, 1 for a refusal or
+a stop for a person (the reason is written to standard error), 2 for a
+usage error.
+"""
+import argparse
+import json
+import logging
+import re
+import signal
+import sys
+
+from config import AdapterConfig, ConfigError
+from ibapi_pin import IbapiNotPinned, check_installed
+from loop import AdapterLoop
+
+# How long one exchange with the engine may take (seconds): the engine
+# flushes the input's decisions to its durable log before it replies.
+ENGINE_TIMEOUT = 30.0
+# How long one step of the loop waits for IB Gateway's next callback (seconds).
+POLL = 1.0
+
+DESCRIPTION = """\
+Run one engine's IBKR adapter: connect to IB Gateway with the configured
+client ID, read and match IBKR's account, open orders and executions, then
+pass IBKR's reports to the engine and hand each released order marked send
+to IB Gateway once. Start the engine first: its durable log (--engine-log)
+must exist.
+
+An order is sent only when the configuration is mode "paper", names a paper
+account (DU...) that the IBKR login manages, and sets
+"paper_sending_enabled": true. Left out, the switch is off and nothing is
+sent. Gateway's Read-Only API must also be off for IBKR to accept an order.
+"""
+
+
+# An IBKR account number: one or two capital letters and digits (U1234567,
+# DU1234567).
+ACCOUNT_NUMBER = re.compile(r"\b[A-Z]{1,2}[0-9]{5,9}\b")
+
+
+def mask_accounts(text, account_id):
+    """text with the configured account and anything shaped like an IBKR account number replaced by <account>.
+
+    A stop message is pasted into tickets and chats, and the repository is
+    public: no account number leaves the machine that way.
+    """
+    if account_id:
+        text = text.replace(account_id, "<account>")
+    return ACCOUNT_NUMBER.sub("<account>", text)
+
+
+class Refused(Exception):
+    """The command's inputs are unusable; nothing was started."""
+
+
+def _parser():
+    parser = argparse.ArgumentParser(prog="python3 -m adapter.ibkr", description=DESCRIPTION,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", help="run the adapter until stopped", description=DESCRIPTION,
+                              formatter_class=argparse.RawDescriptionHelpFormatter)
+    run.add_argument("--config", required=True, metavar="FILE",
+                     help="the adapter's configuration, a JSON object (config.py): host, port, client_id, mode, "
+                          "the timing values, con_ids, and paper_sending_enabled (true to send in paper; "
+                          "left out means false)")
+    run.add_argument("--pending", required=True, metavar="FILE",
+                     help="the adapter's pending-input file; its other files sit beside it with suffixes "
+                          "(.handover, .refused, .outbox, .held, ...). On the server: "
+                          "/var/lib/trend-investing/adapters/<account>/pending.json")
+    run.add_argument("--engine-log", required=True, metavar="FILE",
+                     help="the engine's durable log, the file given to the engine as -log")
+    run.add_argument("--socket", required=True, metavar="PATH", help="the engine's socket, as given to it as -socket")
+    run.add_argument("--secrets", metavar="FILE",
+                     help="a KEY=VALUE file holding the account number (with --account-key), when the "
+                          "configuration does not name account_id")
+    run.add_argument("--account-key", metavar="NAME", help="the line of --secrets naming the account, e.g. "
+                                                           "IBKR_ACCOUNT_BOOST")
+    run.add_argument("--ibapi-record", required=True, metavar="FILE",
+                     help="the install record provision.sh twsapi writes (/opt/trend-investing/twsapi/INSTALLED)")
+    run.add_argument("--versions", required=True, metavar="FILE",
+                     help="the pin file installed with the adapter's code (deploy/versions.env)")
+    return parser
+
+
+def _read_config(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            values = json.load(f)
+    except OSError as err:
+        raise Refused("cannot read the configuration {}: {}".format(path, err.strerror or err)) from None
+    except ValueError:
+        raise Refused("the configuration {} is not JSON".format(path)) from None
+    if not isinstance(values, dict):
+        raise Refused("the configuration {} is not a JSON object".format(path))
+    return values
+
+
+def _read_secret(path, key):
+    """The value of key's line in a KEY=VALUE file, never echoed in an error."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as err:
+        raise Refused("cannot read the secrets file {}: {}".format(path, err.strerror or err)) from None
+    found = [line.split("=", 1)[1] for line in lines if line.split("=", 1)[0] == key and "=" in line]
+    if len(found) != 1 or not found[0]:
+        raise Refused("the secrets file {} does not hold exactly one filled-in {} line".format(path, key))
+    return found[0]
+
+
+def load_config(args):
+    """The AdapterConfig the arguments name, with the account from exactly one place; Refused otherwise."""
+    values = _read_config(args.config)
+    from_secrets = args.secrets is not None or args.account_key is not None
+    if from_secrets:
+        if args.secrets is None or args.account_key is None:
+            raise Refused("--secrets and --account-key go together")
+        if "account_id" in values:
+            raise Refused("the account is named in one place only: the configuration's account_id or the secrets "
+                          "file, not both")
+        values["account_id"] = _read_secret(args.secrets, args.account_key)
+    elif "account_id" not in values:
+        raise Refused("no account: name account_id in the configuration or give --secrets and --account-key")
+    try:
+        return AdapterConfig.from_mapping(values)
+    except ConfigError as err:
+        message = str(err)
+        # A refusal may quote the account; it is masked (mask_accounts).
+        account = values.get("account_id")
+        message = mask_accounts(message, account if isinstance(account, str) else "")
+        raise Refused("the configuration {} is refused: {}".format(args.config, message)) from None
+
+
+def _real_api(cfg):
+    from real_client import IbapiClient
+    return IbapiClient(config=cfg)
+
+
+def _engine_connect(path, timeout):
+    from engine_client import connector
+    return connector(path, timeout)
+
+
+def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL):
+    """Run the command; returns the process exit status.
+
+    api_factory, engine_connect and should_stop replace the real IBKR
+    client, the engine's socket and the signal handlers (for the tests and
+    the rehearsal); poll is how long one step waits for a callback.
+    """
+    err = err or sys.stderr
+    args = _parser().parse_args(argv)
+    try:
+        cfg = load_config(args)
+        version = check_installed(args.ibapi_record, args.versions)
+    except (Refused, IbapiNotPinned) as refusal:
+        print("refused: {}".format(refusal), file=err)
+        return 1
+    handler = logging.StreamHandler(err)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger = logging.getLogger("ibkr")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    stop = {"requested": False}
+    if should_stop is None:
+        def request_stop(signum, frame):
+            stop["requested"] = True
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+        should_stop = lambda: stop["requested"]  # noqa: E731
+    try:
+        logger.info("ibkr adapter starting mode=%s client_id=%d sending=%s ibapi=%s", cfg.mode, cfg.client_id,
+                    "on" if cfg.paper_sending_enabled else "off", version)
+        loop = AdapterLoop(cfg, (api_factory or _real_api)(cfg),
+                           (engine_connect or _engine_connect)(args.socket, ENGINE_TIMEOUT), args.pending,
+                           args.engine_log, poll=poll)
+        loop.run(should_stop)
+        logger.info("ibkr adapter stopped on request")
+    except Exception as stopped:  # every stop is reported, never swallowed
+        print("adapter stopped: {}: {}".format(type(stopped).__name__, mask_accounts(str(stopped), cfg.account_id)),
+              file=err)
+        return 1
+    finally:
+        logger.removeHandler(handler)
+    return 0
