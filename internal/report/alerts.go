@@ -281,6 +281,10 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			if w := p.Boost.ReplanWithheld; w.Cause != "" {
 				out = append(out, rejectionAlert(account, e, w))
 			}
+			for i, r := range p.Boost.RejectedWhileStopped {
+				nth := p.Boost.RejectionsWhileStopped - len(p.Boost.RejectedWhileStopped) + i + 1
+				out = append(out, stoppedRejectionAlert(account, e, r, nth))
+			}
 			if p.Outcome != event.TargetsOutcomeWithheld {
 				runReason = ""
 				continue
@@ -447,20 +451,57 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
-// rejectionAlert states an order the venue rejected once two or more of
-// the account's Boost orders have been rejected in a row, whatever their
-// targets (ADR 0026, point 2, "Boost", amended 2026-10-18): the program
-// sends no more buys for the account until the owner finds the reason and
-// approves a fresh run, while its sells, Boost's exit and the margin
-// alarm's sale back to 98%, still go (ADR 0026, point 4), so the owner
-// checks IBKR's open orders before any sale by hand.
+// handSaleSteps is the hand-sale procedure while a program sale may be
+// working (docs/manual/states-and-kill-switch.md): the program plans
+// Boost's exit again at each decided session while it is due, and a hand
+// sale placed after the last IBKR snapshot is not counted until a snapshot
+// lists it, so the owner stops new orders before selling by hand.
+const handSaleSteps = "Before you sell anything by hand, stop the program sending new orders: engage the kill switch (operator kill-switch -state engaged) where the engine was started with -operator, otherwise stop the engine (sudo systemctl stop ti-engine@<account>). Then cancel any working sale of the program's in IBKR's app, confirm that no working, pending or cancel-pending sell remains, and only then sell."
+
+// rejectionAlert states the rejection that brought the account's run of
+// Boost orders rejected in a row to two, whatever their targets (ADR 0026,
+// point 2, "Boost", amended 2026-10-18): the program sends no more buys for
+// the account until the owner finds the reason and approves a fresh run,
+// while its sells, Boost's exit and the margin alarm's sale back to 98%,
+// still go (ADR 0026, point 4), so a sale by hand follows the hand-sale
+// procedure.
 func rejectionAlert(account string, e event.Envelope, w event.BoostReplan) Alert {
 	return Alert{
 		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost buys stopped", account, w.ClientOrderID),
-		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. So check IBKR's open orders before you sell anything by hand. Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			w.ClientOrderID, w.Filled, w.Released),
+		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
+			w.ClientOrderID, w.Filled, w.Released, handSaleSteps),
 	}
+}
+
+// stoppedRejectionAlert states an order the venue rejected after the stop,
+// the nth since it: a sell sent while buys are stopped, which is planned
+// again at each decided session while it is due, or an order released
+// before the stop (ADR 0026, points 2, "Boost", amended 2026-10-18, and 4).
+func stoppedRejectionAlert(account string, e event.Envelope, r event.BoostReplan, nth int) Alert {
+	return Alert{
+		Key: "rejected-while-stopped:" + r.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
+		Title: fmt.Sprintf("%s: order %s rejected: another rejection while Boost's buys are stopped (%s since the stop)", account, r.ClientOrderID, ordinal(nth)),
+		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled): another rejection while Boost's buys are stopped, the %s since the stop. A rejected sell, such as Boost's exit, is planned again at the next decided session while it is due; the program still sends no buy for this account until you start a fresh run. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
+			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), handSaleSteps),
+	}
+}
+
+// ordinal writes n as 1st, 2nd, 3rd, 4th, ..., 11th, 12th, 13th, 21st.
+func ordinal(n int) string {
+	suffix := "th"
+	switch n % 10 {
+	case 1:
+		suffix = "st"
+	case 2:
+		suffix = "nd"
+	case 3:
+		suffix = "rd"
+	}
+	if n%100 >= 11 && n%100 <= 13 {
+		suffix = "th"
+	}
+	return fmt.Sprintf("%d%s", n, suffix)
 }
 
 func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload, start time.Time) Alert {

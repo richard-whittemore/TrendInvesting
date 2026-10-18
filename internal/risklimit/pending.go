@@ -138,9 +138,10 @@ type ledgerSell struct {
 	// earliest such report's second.
 	ended bool
 	end   time.Time
-	// venueID is the sell's venue order ID, as a lifecycle report on it, or
-	// a restored sell's decision, recorded it: a listing under it with no
-	// client order ID is the sell's own (learnVenue).
+	// venueID is the sell's venue order ID, as a lifecycle report on it, a
+	// listing echoing its client order ID, or a restored sell's decision,
+	// recorded it: a listing under it with no client order ID is the sell's
+	// own (learnVenue).
 	venueID string
 }
 
@@ -206,8 +207,10 @@ func (l *sellLedger) release(client, instrumentID string, quantity int64) {
 // Any other unechoed listing is counted beside it until its identity is
 // shown by client order ID or venue order ID: a brief over-count, which
 // sells less (fail closed), ending at the first listing that echoes the
-// client order ID or the first lifecycle report naming the listing's venue
-// order ID (learnVenue; ADR 0026, point 5, amended 2026-10-18).
+// client order ID under the listing's venue order ID, or the first
+// lifecycle report naming that venue order ID; every later listing under it
+// with none echoed is then the sell's own (learnVenue; ADR 0026, point 5,
+// amended 2026-10-18).
 func (l *sellLedger) restore(client, instrumentID string, quantity int64, venueID string) *ledgerSell {
 	s := &ledgerSell{instrumentID: instrumentID, released: quantity, venueID: venueID}
 	byID := l.unknown[instrumentID]
@@ -255,6 +258,10 @@ func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 		listing := stamped{at: v.at, by: v.by, quantity: o.RemainingQuantity}
 		if s := l.sells[o.ClientOrderID]; s != nil && s.instrumentID == o.InstrumentID {
 			s.listings = append(s.listings, listing)
+			// A listing echoing the client order ID shows the sell's venue
+			// order ID too, so a later listing under it with none echoed is
+			// the sell's own (learnVenue).
+			l.learnVenue(s, o.BrokerOrderID)
 			continue
 		}
 		if s := l.byVenue(o); s != nil {
@@ -276,8 +283,9 @@ func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 	}
 }
 
-// learnVenue records venueID, the venue order ID a lifecycle report names,
-// as the released sell s's, when none is recorded: IBKR does not always echo
+// learnVenue records venueID, the venue order ID a lifecycle report or a
+// listing echoing s's client order ID names, as the released sell s's, when
+// none is recorded: IBKR does not always echo
 // a client order ID, so a listing under that ID with none, read before the
 // report or after it, is s's own and counted once (the invariant "Unknown
 // sells are counted once" above).

@@ -211,7 +211,9 @@ difference to its target after its last order did not get there: the gate
 refused it while the account stayed Normal (`refused`), it ended with
 shares unfilled (`part-filled`, or `unfilled` when none filled), or IBKR
 rejected it (`rejected`, planned once more only; two orders rejected in a
-row stop Boost's buys until a fresh run, while its sells still go). The decision records the
+row stop Boost's buys until a fresh run, while its sells still go). The
+`unfilled` re-plan, the one retry of a rejection and the stop after two
+were confirmed by the owner on 2026-10-18. The decision records the
 cause (`replan`). See
 [boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 

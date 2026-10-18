@@ -255,10 +255,53 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 	// exit and the margin alarm's sale back to 98%, still go (ADR 0026,
 	// points 2, "Boost", amended 2026-10-18, and 4), and the page says so,
 	// so the owner never sells by hand into a program sale.
-	for _, want := range []string{"tw-7", "37", "rejected", "two orders in a row", "sends no more buys", "exit", "sale back to 98%", "still go",
-		"open orders", "operator approve", "-clear-incident", "fresh run"} {
+	for _, want := range append([]string{"tw-7", "37", "rejected", "two orders in a row", "sends no more buys", "exit", "sale back to 98%", "still go",
+		"operator approve", "-clear-incident", "fresh run"}, handSale...) {
 		if !contains(a.Body, want) {
 			t.Errorf("page lacks %q: %q", want, a.Body)
+		}
+	}
+}
+
+// handSale is the hand-sale procedure a page sends the owner to while the
+// program's sells may still be working (docs/manual/states-and-kill-switch.md):
+// stop new orders first, the kill switch or the engine, cancel the working
+// sale in IBKR's app, confirm none remains, and only then sell.
+var handSale = []string{"kill switch", "stop the engine", "cancel", "IBKR's app", "confirm", "only then"}
+
+// TestARejectionWhileBuysAreStoppedPagesAsSuch: a sell the venue rejects
+// after two rejections in a row stopped Boost's buys is recorded once, with
+// the count of rejections since the stop (ADR 0026, points 2, "Boost",
+// amended 2026-10-18, and 4), and paged once per order as another rejection
+// while buys are stopped, saying which one it is, not as the stop.
+func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
+	s := newStream(t)
+	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
+		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: 3,
+				RejectionRun: []event.BoostRunOrder{{ClientOrderID: "tw-1", Verdict: event.RunVerdictRejected}, {ClientOrderID: "tw-2", Verdict: event.RunVerdictRejected}},
+				RejectedWhileStopped: []event.BoostReplan{
+					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6},
+					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-9", Released: 5},
+				}}})
+	s.decided(1, 0.98)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("kinds = %v, want one page per rejected order", kinds(got))
+	}
+	for i, c := range []struct{ id, count string }{{"tw-8", "2nd"}, {"tw-9", "3rd"}} {
+		a := got[i]
+		if a.Kind != report.KindRefusal || a.Severity != report.Urgent || contains(a.Title, "two orders in a row") {
+			t.Errorf("page %d: %s %v %q", i, a.Kind, a.Severity, a.Title)
+		}
+		for _, want := range append([]string{c.id, "another rejection while Boost's buys are stopped", c.count + " since the stop", "planned again", "fresh run"}, handSale...) {
+			if !contains(a.Title+" "+a.Body, want) {
+				t.Errorf("page %d lacks %q: %q %q", i, want, a.Title, a.Body)
+			}
 		}
 	}
 }
@@ -522,4 +565,25 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 			t.Fatal("the delivered acknowledgement still counts")
 		}
 	})
+}
+
+// TestARejectionWhileBuysAreStoppedNamesItsPlace: the page names the
+// rejection's place since the stop in plain English.
+func TestARejectionWhileBuysAreStoppedNamesItsPlace(t *testing.T) {
+	for count, want := range map[int]string{1: "1st", 4: "4th", 11: "11th", 12: "12th", 13: "13th", 21: "21st", 22: "22nd", 23: "23rd"} {
+		s := newStream(t)
+		s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
+			event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+				Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+				Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: count,
+					RejectionRun:         []event.BoostRunOrder{{ClientOrderID: "tw-1", Verdict: event.RunVerdictRejected}, {ClientOrderID: "tw-2", Verdict: event.RunVerdictRejected}},
+					RejectedWhileStopped: []event.BoostReplan{{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6}}}})
+		got, err := report.Alerts(s.out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || !contains(got[0].Body, "the "+want+" since the stop") {
+			t.Errorf("count %d: pages %+v, want the %s", count, got, want)
+		}
+	}
 }

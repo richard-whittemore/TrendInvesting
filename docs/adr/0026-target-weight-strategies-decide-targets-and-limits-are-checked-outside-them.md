@@ -932,9 +932,9 @@ target next changed; point 2 said nothing of a partial fill.
 - `part-filled`: more than none filled. This is the owner's decision on
   #488.
 - `unfilled`: none filled; the whole difference is planned. **This extends
-  the owner's part-fill decision and is put to the owner for confirmation**
-  (the orchestrator's reading): without it, one share filled of 39 would be
-  re-planned and none of 39 would not.
+  the owner's part-fill decision; confirmed by the owner on 2026-10-18**:
+  without it, one share filled of 39 would be re-planned and none of 39
+  would not.
 - `rejected`: the venue refused the order before it rested (`invalid`).
   Its reason may last (a permission, a margin requirement, a contract
   IBKR will not trade), so the re-plan is bounded: the next decided session
@@ -957,9 +957,12 @@ target next changed; point 2 said nothing of a partial fill.
   target: when the venue has rejected **2** of the account's orders in a
   row (the orders decided sessions released, in release order; the sale
   back to 98% is ADR 0019's one attempt and not counted), whatever their
-  targets, the decision of the session at whose close the second rejection
-  is read records it (`boost.replan_withheld`, the order and its shares),
-  the reporter pages it once (urgent), and **no session buys again**, a
+  targets, the decision of the session at whose close the rejection that
+  makes it two is read records it (`boost.replan_withheld`, the order and
+  its shares), whichever order it was: a late rejection of an older order
+  can complete the run while a later order is watched, working or
+  accepted, and is recorded all the same. The reporter pages it once
+  (urgent), and **no session buys again**, a
   change of target included, until the owner starts a fresh run he
   approves (`operator approve`, with `-clear-incident` when the run also
   ended in an incident; ADR 0027). The stop never blocks an order that
@@ -967,10 +970,14 @@ target next changed; point 2 said nothing of a partial fill.
   decided session plans, is still planned, checked by the gate and sent
   while the stop is in force, and an exit the gate refuses still falls
   back to ADR 0019's one sale back to 98%. Such a sell may itself be
-  rejected: each rejection is recorded (`boost.replan_withheld`) and paged
-  the same way, and the sell is planned again at every decided session
-  while it is due. Once reached, the count stays at 2 until the fresh run:
-  a sell the venue accepts does not lift the stop. Before the stop, an
+  rejected: each rejection read after the stop, of any of the account's
+  orders, is recorded once (`boost.rejected_while_stopped`, the order and
+  its shares, with the count of such rejections since the stop in
+  `boost.rejections_while_stopped`) and paged once as another rejection
+  while buys are stopped, naming which one since the stop it is, and the
+  sell is planned again at every decided session while it is due. Once
+  reached, the count stays at 2, never above it, until the fresh run: a
+  sell the venue accepts does not lift the stop. Before the stop, an
   order the venue accepted ends the run of rejections: any execution on
   it, or any lifecycle report but `submitted` (IBKR's `PreSubmitted` maps
   to `submitted` and can precede a rejection), whether or not a later
@@ -979,18 +986,32 @@ target next changed; point 2 said nothing of a partial fill.
   a later rejection, and joins it should the venue reject it after all. A
   re-planned order rejected again is always the second in a row, so this
   bound holds it too. Every decision records the rejections in a row as
-  they stand after it (`boost.venue_rejections`, omitted when none), so a
-  run restarted from the decision waits as the full run does; a fresh run
+  they stand after it (`boost.venue_rejections`, omitted when none) and the
+  orders they are counted over (`boost.rejection_run`: in release order,
+  each order's client order ID and the venue's first word on it,
+  `rejected` or `accepted`, omitted while there is none; an order with none
+  yet other than the watched one also records its side, shares and limit
+  as released and its venue order ID once a lifecycle report named it), so
+  a run restarted from the decision rebuilds the run exactly and counts as
+  the full run does: an order the venue accepted, by an execution or a
+  report, is never counted as undecided after the restart, and the venue's
+  reports on an earlier order still undecided are read, and a working sell
+  among them netted, as on an order the restarted run released. A fresh run
   starts from none. A refusal's re-plan pending at the second rejection is
   dropped, and the rejection is recorded all the same. One read during a
   restarted run's warm-up, whose sessions only feed the indicators, is
   recorded by the first decision after it. The limit, 2, is a constant of
   the target-weight module (`maxVenueRejections`), not configuration. While
   buys are stopped the page tells the owner that Boost's exit and the
-  margin alarm's sale back to 98% (ADR 0019) still go, so he checks IBKR's
-  open orders before any sale by hand. (The orchestrator's reading of review findings, put to the owner for
-  confirmation with the `unfilled` extension, the one re-plan of a
-  rejection, and the skipped session.)
+  margin alarm's sale back to 98% (ADR 0019) still go, and that before any
+  sale by hand he follows the hand-sale procedure of the operator's manual
+  (`docs/manual/states-and-kill-switch.md`): stop new orders first (the
+  kill switch where it exists, otherwise the engine), cancel the working
+  program sale in IBKR's app, confirm that none remains, and only then
+  sell, since the exit is planned again at each decided close while it is
+  due. (The orchestrator's reading of review findings, confirmed by the
+  owner on 2026-10-18 with the `unfilled` extension and the one re-plan of
+  a rejection; the skipped session remains put to the owner.)
 - An order filled in full plans nothing more, and a re-plan it set is
   cleared if the rest of its fills arrive before the session that would
   plan it: re-planning then would trade drift toward an unchanged target.
@@ -1051,8 +1072,10 @@ target next changed; point 2 said nothing of a partial fill.
   restored sell until a client order ID or venue order ID shows they are
   one order: a brief over-count, which sells less, the pending rule's
   fail-closed direction, ending at the first listing that echoes the
-  restored sell's client order ID or the first lifecycle report naming the
-  listing's venue order ID. A listing or report under another venue order
+  restored sell's client order ID under the listing's venue order ID, or
+  the first lifecycle report naming that venue order ID: either records it
+  as the sell's, so every later listing under it with no client order ID
+  echoed is the sell's own. A listing or report under another venue order
   ID keeps both counted. A run restarted from a withheld decision recovers the pending re-plan's cause; one restarted from a
   decided decision whose own order was refused recovers `refused`, or
   `rejected` when that order was a rejection's one re-plan: the decision
@@ -1080,10 +1103,11 @@ target next changed; point 2 said nothing of a partial fill.
 
 A journal holding a gap or such an order decides differently under an
 earlier build: target-weight rules version **1.18.0** (ADR 0016).
-`strategy.targets.decided` moves to schema version **6** for the five new
+`strategy.targets.decided` moves to schema version **6** for the new
 Boost fields, `replan`, `replan_withheld`, `watched` (with its
-`venue_order_id`), `venue_rejections` and `gap_sessions`, each omitted when
-unset; the refused re-plan now records its cause too. The synthetic cases are the
+`venue_order_id`), `venue_rejections` (with `rejection_run`, and
+`rejected_while_stopped` and `rejections_while_stopped` after the stop)
+and `gap_sessions`, each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
 golden cases for both rules (`TestSyntheticGoldenBoostGap`;
 `TestAPartFilledOrderIsReplannedAtTheNextDecision` and
 `TestAnExpiredUnfilledOrderIsReplannedInFull`,

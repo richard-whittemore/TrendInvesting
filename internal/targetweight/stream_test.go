@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -102,6 +103,7 @@ type account struct {
 	cash    float64
 	held    int64
 	pending []event.OrderReleasedPayload
+	all     []event.OrderReleasedPayload // every order released, in release order
 }
 
 // take queues every order released among out to fill at the next close.
@@ -112,6 +114,7 @@ func (a *account) take(t *testing.T, out []event.Envelope) {
 			var p event.OrderReleasedPayload
 			decode(t, d, &p)
 			a.pending = append(a.pending, p)
+			a.all = append(a.all, p)
 		}
 	}
 }
@@ -222,6 +225,33 @@ type options struct {
 	// hold keeps every working order working through session i: nothing
 	// executes and nothing ends.
 	hold map[int]bool
+	// invalidAt has the venue reject, at the start of session i after its
+	// acknowledgements, each order released at the sessions listed, in that
+	// order, whether or not it is still queued: a rejection delivered late.
+	invalidAt map[int][]int
+	// reports, when set, replaces the simulated venue: session i receives
+	// exactly reports[i], an earlier run's venue reports, and nothing else
+	// executes or ends (venueReports).
+	reports map[int][]event.Envelope
+}
+
+// venueReports returns the venue's fill and lifecycle reports among an
+// earlier run's inputs, by the session they were fed in, for the sessions
+// after session n.
+func venueReports(inputs []event.Envelope, n int) map[int][]event.Envelope {
+	out := map[int][]event.Envelope{}
+	session := 0
+	for _, in := range inputs {
+		switch in.Type {
+		case event.SessionClosedEventType:
+			session++
+		case event.FillEventType, event.OrderLifecycleEventType:
+			if session > n {
+				out[session] = append(out[session], in)
+			}
+		}
+	}
+	return out
 }
 
 // lateFill is a further execution of a part-filled order, reported at
@@ -323,12 +353,36 @@ func simulate(t *testing.T, opts options) run {
 		at := sessionEnd(i)
 		price := opts.closes[i]
 		acct.pending = append(acct.pending, opts.working[i]...)
+		if opts.reports != nil {
+			acct.pending = nil
+			for _, e := range opts.reports[i] {
+				fed := e
+				s.sequence++
+				fed.Sequence = s.sequence
+				fed.CausationID, fed.CorrelationID = "", ""
+				apply(fed)
+			}
+		}
 		for _, o := range acct.pending {
 			ack := event.LimitOrderLifecyclePayload{
 				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
 				Side: o.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at.Add(-3 * time.Hour),
 			}
 			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+o.ClientOrderID, ack.OccurredAt, ack))
+		}
+		for _, j := range opts.invalidAt[i] {
+			for _, o := range acct.all {
+				if o.Tag != decisionTag(j) {
+					continue
+				}
+				invalid := event.LimitOrderLifecyclePayload{
+					AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					Side: o.Side, Status: event.OrderLifecycleStatusInvalid, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+					OccurredAt: at.Add(-160 * time.Minute), Message: "rejected by the venue",
+				}
+				apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "reject:"+o.ClientOrderID, invalid.OccurredAt, invalid))
+				acct.pending = slices.DeleteFunc(acct.pending, func(p event.OrderReleasedPayload) bool { return p.ClientOrderID == o.ClientOrderID })
+			}
 		}
 		if opts.reject[i] {
 			for _, o := range acct.pending {

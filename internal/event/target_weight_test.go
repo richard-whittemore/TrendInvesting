@@ -647,11 +647,93 @@ func TestBoostWatchedOrderEqualAndFill(t *testing.T) {
 func TestBoostVenueRejectionsValidate(t *testing.T) {
 	v := validTargetsDecided()
 	v.Boost.VenueRejections = 2
+	v.Boost.RejectionRun = []event.BoostRunOrder{{ClientOrderID: "tw-0", Verdict: event.RunVerdictRejected}, {ClientOrderID: "tw-1", Verdict: event.RunVerdictRejected}}
 	if err := v.Validate(); err != nil {
 		t.Fatalf("two rejections in a row are valid: %v", err)
 	}
 	if (event.BoostFigures{VenueRejections: 1}).IsZero() {
 		t.Error("figures with a rejection count are not empty")
 	}
-	expectInvalid(t, "negative count", v, func(p *event.TargetsDecidedPayload) { p.Boost.VenueRejections = -1 }, "rejections")
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "negative count", v, func(p *P) { p.Boost.VenueRejections = -1 }, "rejections")
+	// Once reached, the count stays at two (ADR 0026, point 2, "Boost",
+	// amended 2026-10-18).
+	expectInvalid(t, "a count above two", v, func(p *P) {
+		p.Boost.VenueRejections = 3
+		p.Boost.RejectionRun = append(slices.Clone(p.Boost.RejectionRun), event.BoostRunOrder{ClientOrderID: "tw-2", Verdict: event.RunVerdictRejected})
+	}, "two")
+	expectInvalid(t, "a count the run does not hold", v, func(p *P) { p.Boost.RejectionRun = p.Boost.RejectionRun[:1] }, "run")
+}
+
+// TestBoostRejectionRunValidate: a Boost decision records the orders the
+// rejections in a row are counted over, in release order, each named once
+// with the venue's first word on it, rejected or accepted, or none yet; an
+// order with none yet other than the watched one carries its side, shares
+// and limit as released, so a restart reads the venue's reports on it, and
+// the watched order, when in the run, is its last (ADR 0026, points 2 and
+// 5, amended 2026-10-18).
+func TestBoostRejectionRunValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 1
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-2", Side: event.OrderSideSell, Released: 12, LimitPrice: 550}
+	v.Boost.RejectionRun = []event.BoostRunOrder{
+		{ClientOrderID: "tw-0", Verdict: event.RunVerdictRejected},
+		{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105, VenueOrderID: "ib-1"},
+		{ClientOrderID: "tw-2"},
+	}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a run of a rejection, an undecided order and the watched order is valid: %v", err)
+	}
+	if (event.BoostFigures{RejectionRun: v.Boost.RejectionRun}).IsZero() {
+		t.Error("figures with a run are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	at := func(i int, f func(*event.BoostRunOrder)) func(*P) {
+		return func(p *P) {
+			p.Boost.RejectionRun = slices.Clone(p.Boost.RejectionRun)
+			f(&p.Boost.RejectionRun[i])
+		}
+	}
+	expectInvalid(t, "unnamed", v, at(0, func(o *event.BoostRunOrder) { o.ClientOrderID = "" }), "names")
+	expectInvalid(t, "named twice", v, at(1, func(o *event.BoostRunOrder) { o.ClientOrderID = "tw-0" }), "twice")
+	expectInvalid(t, "unknown verdict", v, at(0, func(o *event.BoostRunOrder) { o.Verdict = "maybe" }), "verdict")
+	expectInvalid(t, "an undecided order without its release", v, at(1, func(o *event.BoostRunOrder) { o.Released = 0 }), "released")
+	expectInvalid(t, "an undecided order with no side", v, at(1, func(o *event.BoostRunOrder) { o.Side = "" }), "released")
+	expectInvalid(t, "an undecided order with no limit", v, at(1, func(o *event.BoostRunOrder) { o.LimitPrice = 0 }), "released")
+	expectInvalid(t, "a decided order with its release", v, at(0, func(o *event.BoostRunOrder) { o.Released = 39 }), "released")
+	expectInvalid(t, "the watched order with its release", v, at(2, func(o *event.BoostRunOrder) { o.Side = event.OrderSideSell }), "released")
+	expectInvalid(t, "the watched order before another", v, func(p *P) {
+		p.Boost.RejectionRun = []event.BoostRunOrder{{ClientOrderID: "tw-2"}, {ClientOrderID: "tw-0", Verdict: event.RunVerdictRejected}}
+	}, "last")
+}
+
+// TestBoostRejectionsWhileStoppedValidate: once two rejections in a row
+// have stopped Boost's buys, each later rejection is recorded once, cause
+// rejected, beside the count of them so far (ADR 0026, points 2, "Boost",
+// amended 2026-10-18, and 4).
+func TestBoostRejectionsWhileStoppedValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 2
+	v.Boost.RejectionRun = []event.BoostRunOrder{
+		{ClientOrderID: "tw-0", Verdict: event.RunVerdictRejected}, {ClientOrderID: "tw-1", Verdict: event.RunVerdictRejected},
+		{ClientOrderID: "tw-2", Verdict: event.RunVerdictRejected},
+	}
+	v.Boost.RejectionsWhileStopped = 1
+	v.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-2", Released: 12}}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a rejection after the stop is valid: %v", err)
+	}
+	if (event.BoostFigures{RejectionsWhileStopped: 1}).IsZero() || (event.BoostFigures{RejectedWhileStopped: v.Boost.RejectedWhileStopped}).IsZero() {
+		t.Error("figures with a rejection after the stop are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "before the stop", v, func(p *P) { p.Boost.VenueRejections = 1 }, "stopped")
+	expectInvalid(t, "more recorded than counted", v, func(p *P) { p.Boost.RejectionsWhileStopped = 0 }, "stopped")
+	expectInvalid(t, "negative count", v, func(p *P) { p.Boost.RejectionsWhileStopped = -1 }, "stopped")
+	expectInvalid(t, "not a rejection", v, func(p *P) {
+		p.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRefused}}
+	}, "rejection")
+	expectInvalid(t, "without its order", v, func(p *P) {
+		p.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRejected, Released: 12}}
+	}, "order")
 }

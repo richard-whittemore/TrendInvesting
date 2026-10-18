@@ -1237,6 +1237,9 @@ func TestARestoredSellWithNoVenueOrderIDIsCountedBesideAnUnechoedListing(t *test
 		observe(t, g, "broker:2", later(broker(127, own), -3))
 		g.ObserveAccount(account(127, -2))
 		pendingIs(t, g, 34, "the restored sell, listed under its client order ID and ib-a")
+		observe(t, g, "broker:3", later(broker(127, unechoed("ib-a", 34)), -1))
+		g.ObserveAccount(account(127, 1))
+		pendingIs(t, g, 34, "a later listing under ib-a with no client order ID, the restored sell's own")
 	})
 }
 
