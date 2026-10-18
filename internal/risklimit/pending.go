@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 )
 
 // The pending rule (ADR 0019, amended 2026-10-15, "Sized from the broker, net
@@ -402,8 +403,10 @@ func (g *Gate) reportedOrder(account, client, instrument, side string) (*release
 	return o, nil
 }
 
-// ObserveFill applies a recorded execution of a released order. A
-// redelivery of an execution already applied changes nothing.
+// ObserveFill applies a recorded execution of a released order, which is
+// also a change a reconciliation's book is bridged by. A redelivery of an
+// execution already applied changes nothing: a fill already applied can
+// never be added again to erase a difference (ADR 0019, "Explained means").
 func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
@@ -423,6 +426,7 @@ func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
 	}
 	o.reported += p.Quantity
 	g.fills[p.FillID] = p
+	g.changes = append(g.changes, reconcile.FillChange(p))
 	if s := g.ledger.sells[p.ClientOrderID]; s != nil {
 		s.fills = append(s.fills, stamped{at: p.FilledAt, quantity: p.Quantity})
 	}

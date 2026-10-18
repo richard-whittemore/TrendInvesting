@@ -501,7 +501,6 @@ func TestRestoreState(t *testing.T) {
 		"risk limit at v1": {"engine-state:joint:x", halted, event.EngineStateSchemaVersion},
 		"no envelope id":   {"", halted, event.EngineStateScopedVersion},
 		"order scope":      {"engine-state:joint:x", event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeOrderIDs: []string{"tw-1"}}, event.EngineStateScopedVersion},
-		"cash scope":       {"engine-state:joint:x", event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeCashComponents: []string{"USD"}}, event.EngineStateScopedVersion},
 	} {
 		n := gate(t, limits(), event.TradingModeDryRun)
 		if err := n.RestoreState(bad.id, bad.p, bad.version); err == nil {

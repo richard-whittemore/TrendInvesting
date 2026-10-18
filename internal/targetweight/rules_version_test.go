@@ -112,3 +112,18 @@ func TestHandlerRefusesAVersion5Configuration(t *testing.T) {
 	s := &stream{hash: h.ConfigurationHash()}
 	mustRefuse(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, 5, "configuration", closeOf("2025-01-02"), cfg), "schema version 5")
 }
+
+// TestRulesVersionDeclaresReconciliation: the handler reads
+// account.reconciliation, market.corporate-action and
+// operator.alert.acknowledged, and a reconciliation degrades or halts the
+// account, so a journal written under this build cannot replay under rules
+// 1.6.0, which refuses those inputs.
+func TestRulesVersionDeclaresReconciliation(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.6.0 once a reconciliation moves the engine state", targetweight.RulesVersion)
+		}
+	}
+}
