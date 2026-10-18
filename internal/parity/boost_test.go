@@ -51,7 +51,8 @@ func boostFailsOnly(t *testing.T, s []parity.BoostSession, name string) parity.C
 	return checkNamed(r, name)
 }
 
-// Boost's RSI and means must match exactly (#324: every session).
+// Boost's RSI and means must match exactly on every session (ADR 0026
+// point 7, item 2; docs/research/parity-2026-10.md, "Thresholds").
 
 func TestAnRSIOneBitOffFails(t *testing.T) {
 	s := syntheticBoost(400, 210)

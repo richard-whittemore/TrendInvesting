@@ -51,6 +51,19 @@ func TestAMalformedMomentumPayloadIsRefused(t *testing.T) {
 		"no month":                strings.Replace(momentumPayload, `"month":"2009-06",`, ``, 1),
 		"trailing data":           momentumPayload + "{}",
 		"a ranked row not a list": strings.Replace(momentumPayload, `["BBB",0.25,0.02,null,"-"]`, `{}`, 1),
+		"a null ticker":           strings.Replace(momentumPayload, `["AAA"`, `[null`, 1),
+		"an empty ticker":         strings.Replace(momentumPayload, `["AAA"`, `[""`, 1),
+		"a null score":            strings.Replace(momentumPayload, `["BBB",0.25`, `["BBB",null`, 1),
+		"a null volatility":       strings.Replace(momentumPayload, `0.012345678901234568`, `null`, 1),
+		"a null mark":             strings.Replace(momentumPayload, `"P"]`, `null]`, 1),
+		"a null month":            strings.Replace(momentumPayload, `"month":"2009-06"`, `"month":null`, 1),
+		"a null risk-off flag":    strings.Replace(momentumPayload, `"risk_off":false`, `"risk_off":null`, 1),
+		"a null SPY close":        strings.Replace(momentumPayload, `"spy_close":101.5`, `"spy_close":null`, 1),
+		"a null SPY mean":         strings.Replace(momentumPayload, `"spy_mean":99.25`, `"spy_mean":null`, 1),
+		"a null SPY close count":  strings.Replace(momentumPayload, `"spy_n":3`, `"spy_n":null`, 1),
+		"a null member count":     strings.Replace(momentumPayload, `"members":3`, `"members":null`, 1),
+		"a null scored count":     strings.Replace(momentumPayload, `"scored":2`, `"scored":null`, 1),
+		"no SPY mean":             strings.Replace(momentumPayload, `"spy_mean":99.25,`, ``, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parity.DecodeMomentum([]byte(payload)); err == nil {
@@ -60,8 +73,9 @@ func TestAMalformedMomentumPayloadIsRefused(t *testing.T) {
 	}
 }
 
-const boostPayload = `{"rows":[["1993-01-29",43.9375,null,null,null,null,null],` +
-	`["1993-02-01",44.25,50.0,null,44.1,0,0.98],["1993-02-02",44.34375,60.5,40.0,44.2,1,1.47]]}`
+// A synthetic payload: round made-up closes, not market data.
+const boostPayload = `{"rows":[["2001-01-02",10.0,null,null,null,null,null],` +
+	`["2001-01-03",10.5,50.0,null,10.25,0,0.98],["2001-01-04",11.0,60.5,40.0,10.75,1,1.47]]}`
 
 func TestABoostPayloadDecodesExactly(t *testing.T) {
 	s, err := parity.DecodeBoost([]byte(boostPayload))
@@ -71,10 +85,10 @@ func TestABoostPayloadDecodesExactly(t *testing.T) {
 	if len(s) != 3 {
 		t.Fatalf("sessions %+v", s)
 	}
-	if !s[0].Warmup || s[0].RSI != nil || s[0].Close != 43.9375 || s[0].Date != "1993-01-29" {
+	if !s[0].Warmup || s[0].RSI != nil || s[0].Close != 10.0 || s[0].Date != "2001-01-02" {
 		t.Errorf("warm-up session %+v", s[0])
 	}
-	if s[1].Warmup || s[1].Latched || s[1].Target != 0.98 || *s[1].RSI != 50 || s[1].TrendMean != nil || *s[1].ExitMean != 44.1 {
+	if s[1].Warmup || s[1].Latched || s[1].Target != 0.98 || *s[1].RSI != 50 || s[1].TrendMean != nil || *s[1].ExitMean != 10.25 {
 		t.Errorf("session %+v", s[1])
 	}
 	if !s[2].Latched || s[2].Target != 1.47 || *s[2].TrendMean != 40 {
@@ -85,13 +99,15 @@ func TestABoostPayloadDecodesExactly(t *testing.T) {
 func TestAMalformedBoostPayloadIsRefused(t *testing.T) {
 	for name, payload := range map[string]string{
 		"not JSON":               "[",
-		"a short row":            strings.Replace(boostPayload, `44.25,50.0,null,44.1,0,0.98]`, `44.25,50.0,null,44.1,0]`, 1),
-		"a state of 2":           strings.Replace(boostPayload, `44.1,0,0.98`, `44.1,2,0.98`, 1),
-		"a state with no target": strings.Replace(boostPayload, `44.1,0,0.98`, `44.1,0,null`, 1),
-		"a text close":           strings.Replace(boostPayload, `43.9375`, `"x"`, 1),
-		"a numeric date":         strings.Replace(boostPayload, `"1993-01-29"`, `19930129`, 1),
+		"a short row":            strings.Replace(boostPayload, `10.5,50.0,null,10.25,0,0.98]`, `10.5,50.0,null,10.25,0]`, 1),
+		"a state of 2":           strings.Replace(boostPayload, `10.25,0,0.98`, `10.25,2,0.98`, 1),
+		"a state with no target": strings.Replace(boostPayload, `10.25,0,0.98`, `10.25,0,null`, 1),
+		"a text close":           strings.Replace(boostPayload, `10.0,null`, `"x",null`, 1),
+		"a numeric date":         strings.Replace(boostPayload, `"2001-01-02"`, `20010102`, 1),
+		"a null date":            strings.Replace(boostPayload, `"2001-01-02"`, `null`, 1),
+		"a null close":           strings.Replace(boostPayload, `10.0,null`, `null,null`, 1),
 		"a text RSI":             strings.Replace(boostPayload, `50.0`, `"x"`, 1),
-		"a text state":           strings.Replace(boostPayload, `44.1,0,`, `44.1,"0",`, 1),
+		"a text state":           strings.Replace(boostPayload, `10.25,0,`, `10.25,"0",`, 1),
 		"a text target":          strings.Replace(boostPayload, `0.98]`, `"x"]`, 1),
 		"an unknown field":       strings.Replace(boostPayload, `"rows"`, `"rowz"`, 1),
 		"no rows":                `{"rows":[]}`,

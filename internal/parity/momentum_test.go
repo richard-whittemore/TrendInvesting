@@ -167,9 +167,12 @@ func TestAMalformedExportFailsIntegrity(t *testing.T) {
 			delete(m.Weights, m.Ranked[0].Ticker)
 		},
 		"a scored count that is not the ranked list's length": func(m *parity.MomentumMonth) { m.Scored++ },
-		"a name ranked twice": func(m *parity.MomentumMonth) { m.Ranked[39].Ticker = m.Ranked[38].Ticker },
-		"no trend closes":     func(m *parity.MomentumMonth) { delete(m.Closes, "SPY") },
-		"no close index":      func(m *parity.MomentumMonth) { m.Index = nil },
+		"a name ranked twice":                          func(m *parity.MomentumMonth) { m.Ranked[39].Ticker = m.Ranked[38].Ticker },
+		"no trend closes":                              func(m *parity.MomentumMonth) { delete(m.Closes, "SPY") },
+		"no close index":                               func(m *parity.MomentumMonth) { m.Index = nil },
+		"an index row repeated":                        func(m *parity.MomentumMonth) { m.Index[5] = m.Index[4] },
+		"an index out of order":                        func(m *parity.MomentumMonth) { m.Index[4], m.Index[5] = m.Index[5], m.Index[4] },
+		"a member count that is not ranked plus short": func(m *parity.MomentumMonth) { m.Members++ },
 		"a non-positive trend close": func(m *parity.MomentumMonth) {
 			zero := 0.0
 			m.Closes["SPY"][100] = &zero
@@ -362,4 +365,111 @@ func TestANoSectorNameOutsideTheBookLeavesTheWeightsCompared(t *testing.T) {
 	if d := onlyDifference(t, r); d.Kind != parity.KindNoSector {
 		t.Errorf("difference %+v", d)
 	}
+}
+
+// tieBeyondTheBook gives the last two names of the second month one score,
+// in the order Go would not choose: a listed difference beyond the book.
+func tieBeyondTheBook(ms []parity.MomentumMonth) {
+	m := &ms[1]
+	a, b := m.Ranked[38], m.Ranked[39]
+	b.Score = a.Score
+	if a.Ticker < b.Ticker {
+		a, b = b, a
+	}
+	m.Ranked[38], m.Ranked[39] = a, b
+	delete(m.Closes, m.Ranked[38].Ticker)
+	delete(m.Closes, m.Ranked[39].Ticker)
+}
+
+// A listed cause excuses only what can follow from it: a cap mark at or
+// after a cause inside QuantConnect's book, and the weights only when the
+// picked set differs. Anything else is still compared and fails.
+
+func TestATieBeyondTheBookDoesNotExcuseAChangedCapMark(t *testing.T) {
+	ms := months()
+	tieBeyondTheBook(ms)
+	for i := range ms[1].Ranked {
+		if ms[1].Ranked[i].Mark == parity.MarkCapped {
+			ms[1].Ranked[i].Mark = parity.MarkBeyond
+			break
+		}
+	}
+	failsOnly(t, compare(ms), parity.CheckCapMarks)
+}
+
+func TestATieBeyondTheBookDoesNotExcuseAWeightOffByMoreThanTheTolerance(t *testing.T) {
+	ms := months()
+	tieBeyondTheBook(ms)
+	ms[1].Weights[ms[1].Ranked[0].Ticker] += 2e-12
+	failsOnly(t, compare(ms), parity.CheckWeights)
+}
+
+func TestANoSectorNameBeyondTheBookDoesNotExcuseAWeightOffByMoreThanTheTolerance(t *testing.T) {
+	ms := months()
+	m := &ms[1]
+	m.Ranked[39].Sector = ""
+	markAndWeigh(m)
+	m.Weights[m.Ranked[0].Ticker] += 2e-12
+	r := compare(ms)
+	if c := checkNamed(r, parity.CheckWeights); c.Pass() || c.Attributed != 0 {
+		t.Errorf("the picked set is the same on both sides, so the weight must be compared and fail: %+v", c)
+	}
+}
+
+func TestANoSectorNameBeyondTheBookDoesNotExcuseALaterChangedMark(t *testing.T) {
+	ms := months()
+	m := &ms[1]
+	m.Ranked[37].Sector = "" // beyond the book on both sides
+	markAndWeigh(m)
+	if m.Ranked[37].Mark != parity.MarkBeyond || m.Ranked[39].Mark != parity.MarkBeyond {
+		t.Fatal("fixture: ranks 38 and 40 must be beyond the book")
+	}
+	m.Ranked[39].Mark = parity.MarkCapped // Go has it beyond the book
+	r := compare(ms)
+	if c := checkNamed(r, parity.CheckCapMarks); c.Pass() {
+		t.Errorf("a mark after a cause outside the book must be compared and fail: %+v", c)
+	}
+}
+
+func TestANoSectorPickExcusesTheMarksAfterItButNotBeforeIt(t *testing.T) {
+	ms := months()
+	m := &ms[1]
+	m.Ranked[10].Sector = "" // a pick in QuantConnect's book
+	markAndWeigh(m)
+	if m.Ranked[10].Mark != parity.MarkPicked || m.Ranked[4].Mark != parity.MarkCapped {
+		t.Fatal("fixture: rank 11 must be a pick and rank 5 capped")
+	}
+	r := compare(ms)
+	if c := checkNamed(r, parity.CheckCapMarks); !c.Pass() || c.Attributed == 0 {
+		t.Fatalf("the marks after a no-sector pick follow from it: %+v", c)
+	}
+	if c := checkNamed(r, parity.CheckWeights); c.Attributed == 0 || c.Compared != 26 {
+		t.Errorf("the picked set differs, so that month's weights follow from it: %+v", c)
+	}
+	m.Ranked[4].Mark = parity.MarkBeyond // before the no-sector pick; Go caps it
+	if c := checkNamed(compare(ms), parity.CheckCapMarks); c.Pass() {
+		t.Errorf("a mark before the cause must be compared and fail: %+v", c)
+	}
+}
+
+func TestAttributedItemsAreCountedApartFromComparedOnes(t *testing.T) {
+	ms := months()
+	tieBeyondTheBook(ms)
+	r := compare(ms)
+	if c := checkNamed(r, parity.CheckRankedOrder); c.Compared != 78 || c.Attributed != 2 || !c.Pass() {
+		t.Errorf("two reordered tied names are attributed, the other 78 compared: %+v", c)
+	}
+	if c := checkNamed(r, parity.CheckWeights); c.Compared != 51 || c.Attributed != 0 {
+		t.Errorf("the book is the same, so every weight is compared: %+v", c)
+	}
+}
+
+func TestTooFewTrendClosesThatQuantConnectDidNotCountFails(t *testing.T) {
+	ms := months()
+	m := &ms[1]
+	for i := 0; i < 100; i++ {
+		m.Closes["SPY"][i] = nil
+	}
+	// QuantConnect counted 260 closes, so it was not short of history.
+	failsOnly(t, compare(ms), parity.CheckRiskOff)
 }

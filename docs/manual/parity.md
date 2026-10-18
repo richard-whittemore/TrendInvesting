@@ -47,7 +47,17 @@ fails, including a difference the code makes on purpose that is not on that
 list (for example a stock with no sector label: the backtest left it
 uncapped, live leaves it out).
 
-A check that had nothing to compare fails too: it proves nothing.
+Such a difference excuses only what can follow from it, and only when
+QuantConnect's own data shows it (a SPY price count under 200, a missing
+price in the window, a volatility of exactly zero, no sector label). A
+stock left out changes the marks of the stocks ranked after it, but only if
+QuantConnect's book held it (picked or capped); and it changes the weights
+only in a month where the two sides picked different stocks. Every other
+mark and weight is still compared, and a mismatch there fails.
+
+A check that had nothing to compare fails too: it proves nothing. The
+items put down to a difference are counted apart (the `Attributed` column)
+and do not count as compared.
 
 ## Where the inputs come from
 
@@ -62,7 +72,11 @@ order at 1% of SPY's price and cancels it at once, which never fills; the
 run's `Parity` statistic counts how often that happened.
 
 The logging versions are the recorded strategy files with lines added and
-none removed (a test checks this), so they trade as the recorded runs did.
+none removed (a test checks this). They are meant to trade as the recorded
+runs did, but the test does not prove that an added line changes nothing,
+and the 2026-10 momentum runs were not checked against a same-day re-run of
+the recorded strategy, so that identity is not verified
+(`docs/research/parity-2026-10.md`, "Runs").
 The months to log were chosen before any run (`PARITY_MONTHS_IS` and
 `PARITY_MONTHS_OOS` in `research/edge-search/build_variants.py`): at least 24
 in each window plus every month the golden-case runs logged.
@@ -89,7 +103,9 @@ The exact command used for the recorded result, with every month, is in
 
 A line per input saying how many months or sessions it found, then a table
 with one row per check and run: what was compared, the threshold, how many
-comparisons, how many failed, the largest difference seen and PASS or FAIL.
+comparisons, how many items were put down to a named difference instead of
+compared (`Attributed`), how many comparisons failed, the largest difference
+seen and PASS or FAIL.
 Then the overall result, the first failure of each failing check, and a
 table of the differences, each marked as on ADR 0026 point 8's list or not.
 
@@ -103,8 +119,12 @@ valid, a run with no planned months).
   rebalance that month, or the tag was lost. Check the run's `Parity`
   statistic, which counts the months it exported.
 - **`export` fails**: the export is malformed (a price column of the wrong
-  length, a picked stock with no weight, a stock ranked twice). Nothing in
-  that month is compared further.
+  length, dates out of order or repeated, a picked stock with no weight, a
+  stock ranked twice, a member count that is not the ranked plus the too
+  short); nothing in that month is compared further. It also fails when
+  Go gave a stock a status the tool has no backtest mark for. A required field that is
+  missing or null, or an empty ticker, stops the tool before any
+  comparison (exit status 2).
 - **A check fails**: the Go code and the backtest disagree. The first failure
   line says where. This is a result, not a tool fault: record it, open an
   issue for it, and do not change a threshold after seeing it.

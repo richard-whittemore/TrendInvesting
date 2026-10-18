@@ -88,14 +88,18 @@ func (k Kind) Listed() bool {
 }
 
 // Check is one row of the report: what was compared, against which
-// threshold, how many comparisons failed and the largest difference seen.
+// threshold, how many items were attributed to a named difference instead
+// of compared, how many comparisons failed and the largest difference seen.
 type Check struct {
 	Run       string
 	Name      string
 	Threshold string
 	Compared  int
-	Failures  int
-	MaxDiff   float64
+	// Attributed counts the items put down to a difference ADR 0026 point
+	// 8 lists, or to a no-sector name, instead of compared.
+	Attributed int
+	Failures   int
+	MaxDiff    float64
 	// First describes the first failure, for the record.
 	First string
 	// MayBeEmpty marks a check that passes with nothing to compare (the
@@ -104,7 +108,8 @@ type Check struct {
 }
 
 // Pass reports whether the check held. A check that compared nothing
-// proves nothing and fails, unless MayBeEmpty.
+// proves nothing and fails, unless MayBeEmpty; attributed items are not
+// comparisons.
 func (c Check) Pass() bool {
 	return c.Failures == 0 && (c.Compared > 0 || c.MayBeEmpty)
 }
@@ -168,8 +173,8 @@ func Merge(reports ...Report) Report {
 // first failure of each failing check, and the differences table.
 func (r Report) Markdown() string {
 	var b strings.Builder
-	b.WriteString("| Run | Check | Threshold | Compared | Failures | Max difference | Result |\n")
-	b.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
+	b.WriteString("| Run | Check | Threshold | Compared | Attributed | Failures | Max difference | Result |\n")
+	b.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
 	var failing []Check
 	for _, c := range r.Checks {
 		result := "PASS"
@@ -177,8 +182,8 @@ func (r Report) Markdown() string {
 			result = "FAIL"
 			failing = append(failing, c)
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %s | %s |\n",
-			c.Run, c.Name, c.Threshold, c.Compared, c.Failures, formatDiff(c.MaxDiff), result)
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %d | %s | %s |\n",
+			c.Run, c.Name, c.Threshold, c.Compared, c.Attributed, c.Failures, formatDiff(c.MaxDiff), result)
 	}
 	overall := "PASS"
 	if !r.Pass() {
