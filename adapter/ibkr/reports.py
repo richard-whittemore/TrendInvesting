@@ -55,8 +55,9 @@ every restart that day; the owner's acknowledgement of it (relay.py
 acknowledge-late-fill) names the execution and the order it followed, and a
 journal given that acknowledgement passes over it. It is never journalled:
 the engine's OrderReports refuses a fill on an order already terminal, so
-the trade is left to reconciliation (ADR 0019), where the morning
-reconciliation shows its shares as a position difference. The held reports file
+the trade is left to reconciliation: the next start's reconciliation (ADR
+0025 point 5) shows its shares as a position difference and the engine
+goes Degraded then (ADR 0019). The held reports file
 is this adapter's alone: it is read and written only while the adapter
 holds its exclusive lock (owns_lock; relay.Relay.holds), so a second
 adapter started beside the first journals nothing. A restarted journal

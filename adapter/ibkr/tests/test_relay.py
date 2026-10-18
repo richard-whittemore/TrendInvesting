@@ -1042,7 +1042,7 @@ class RelayTests(unittest.TestCase):
 
     def test_a_trade_after_an_order_ended_is_acknowledged_only_as_the_engines_log_records_it(self):
         ended, fills = frozenset({"tw-1"}), frozenset({"e.1.01"})
-        refusals = (("e.5.01", "tw-2", "an order the engine never recorded ended", "never recorded"),
+        refusals = (("e.5.01", "tw-2", "an order the engine never recorded ended", "neither in the engine"),
                     ("e.1.01", "tw-1", "a trade the engine holds as a fill", "is recorded as a fill"),
                     ("e.5.01", "tw-1", " ", "reason"),
                     ("nodots", "tw-1", "no base", "base"),
@@ -1063,6 +1063,36 @@ class RelayTests(unittest.TestCase):
             acknowledge_late_fill(self.pending, "e.6.01", "tw-1", "while the adapter runs", fills=fills, ended=ended)
         running.close()
         self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-1"})
+
+    def test_a_trade_after_the_cancellation_awaiting_its_reply_is_acknowledged(self):
+        # The adapter journalled order tw-2's cancellation and stopped before
+        # the engine committed it, so it is the input awaiting its reply and
+        # not yet in the engine's log; the adapter's journal holds the order
+        # ended, so a late trade on it stops every start, and the command
+        # must clear that stop rather than refuse it.
+        ended, fills = frozenset({"tw-1"}), frozenset()
+
+        def waiting(client_order_id, status, event_type="execution.order.lifecycle", schema_version=2):
+            self.pending.save({"id": "lifecycle:{}".format(client_order_id), "type": event_type,
+                               "schema_version": schema_version,
+                               "payload": lifecycle_payload(client_order_id, status)})
+
+        for name, args in (("a working order's status", ("tw-3", "submitted")),
+                           ("another type", ("tw-3", "canceled", "market.session.closed")),
+                           ("another schema", ("tw-3", "canceled", "execution.order.lifecycle", 1))):
+            with self.subTest(name), self.assertRaises(ResolveRefused) as raised:
+                waiting(*args)
+                acknowledge_late_fill(self.pending, "e.7.01", "tw-3", "IBKR shows a trade", fills=fills, ended=ended)
+            self.assertIn("awaiting its reply", str(raised.exception))
+            self.assertIn("docs/runbooks/reconciliation.md", str(raised.exception))
+        waiting("tw-2", "canceled")
+        acknowledge_late_fill(self.pending, "e.5.01", "tw-2", "IBKR shows 4 SPY bought after the cancel",
+                              fills=fills, ended=ended)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-2"})
+        journal = write_ended_journal(Path(self.dir.name) / "journal.jsonl", [], [("tw-1", "canceled")])
+        self.assertEqual(main(["acknowledge-late-fill", self.pending.path, "--journal", journal, "e.6.01",
+                               "--after", "tw-2", "--reason", "x"]), 0)
+        self.assertEqual(self.pending.acknowledged_late_fills(), {"e.5.01": "tw-2", "e.6.01": "tw-2"})
 
     def test_a_late_fills_file_not_as_acknowledge_late_fill_writes_it_is_refused(self):
         good = {"exec_id": "e.5.01", "after": "tw-1", "reason": "r", "at": "2026-10-17T14:00:00+00:00"}

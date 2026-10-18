@@ -96,11 +96,14 @@ ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason TEXT`, under the same
 lock, into a sidecar file read strictly at start
 (PendingInput.acknowledged_late_fills). Only a trade the engine's durable
 log does not hold as a fill, after an order it holds a committed
-cancellation or refusal of, is acknowledged. The engine refuses a fill on an
-order already ended (internal/event OrderReports), so the trade is never
-journalled: the acknowledgement is its record for reconciliation (ADR
-0019), and the morning reconciliation shows its shares as a position
-difference.
+cancellation or refusal of, or the input awaiting its reply cancels or
+refuses (the journal holds that input among its own, so both judge "ended"
+alike), is acknowledged. The engine refuses a fill on an order already
+ended (internal/event OrderReports), so the trade is never journalled: the
+acknowledgement is its record for reconciliation. The next start's
+reconciliation (ADR 0025 point 5) reports its shares as an unexplained
+position difference and the engine goes Degraded then (ADR 0019) until the
+reconciliation runbook's recovery settles it.
 """
 from collections import namedtuple
 import argparse
@@ -1005,12 +1008,17 @@ def acknowledge_late_fill(pending, exec_id, after, reason, fills, ended):
     adapter holds the pending file, an empty reason, an execId without the
     base and last segment IBKR's have or an empty order
     (reports.check_late_fills), a trade the log holds as a fill, an order
-    the log does not hold a committed cancellation or refusal of, and a
-    trade already acknowledged as after another order. The journal then
-    passes over that trade on every start. The engine refuses a fill on an
-    order already ended (internal/event OrderReports), so it is never a
-    fill: this record and the morning reconciliation, which shows its shares
-    as a position difference, are how it is settled (ADR 0019).
+    neither the log holds a committed cancellation or refusal of nor the
+    input awaiting its reply in pending cancels or refuses (the journal
+    seeds its ended orders from that input too, so a stop before the engine
+    commits it is still cleared here), and a trade already acknowledged as
+    after another order. The journal then passes over that trade on every
+    start. The engine refuses a fill on an order already ended
+    (internal/event OrderReports), so it is never a fill: the next start's
+    reconciliation (ADR 0025 point 5) reports its shares as a position
+    difference, the engine goes Degraded then, and the reconciliation
+    runbook's recovery settles it (ADR 0019), with this record as the
+    trade's evidence.
     """
     from reports import check_late_fills
     if not reason or not reason.strip():
@@ -1022,15 +1030,17 @@ def acknowledge_late_fill(pending, exec_id, after, reason, fills, ended):
     if exec_id in fills:
         raise ResolveRefused("execution {} is recorded as a fill in the engine's durable log: it is not a trade "
                              "after its order ended, so there is nothing to acknowledge".format(exec_id))
-    if after not in ended:
-        raise ResolveRefused(
-            "order {} was never recorded as cancelled or refused in the engine's durable log, so execution {} is "
-            "not a trade after it ended: check the order's trades in IBKR (docs/manual/paper-trading.md)".format(
-                after, exec_id))
     held = _lock(pending.lock_path)
     if held is None:
         raise ResolveRefused("the adapter holds the pending file {}; stop it first".format(pending.path))
     try:
+        if after not in ended and not _ends(pending.load(), after):
+            raise ResolveRefused(
+                "order {0} is recorded as cancelled or refused neither in the engine's durable log nor as the input "
+                "awaiting its reply in {1}, so execution {2} is not a trade after it ended and is not acknowledged. "
+                "Give --after the order the adapter's stop names; if it is that order, the adapter and the engine "
+                "disagree on it: leave the adapter stopped, check order {0}'s trades in IBKR and reconcile the "
+                "account by hand (docs/runbooks/reconciliation.md)".format(after, pending.path, exec_id))
         known = pending.acknowledged_late_fills().get(exec_id)
         if known is not None and known != after:
             raise ResolveRefused("execution {} is already acknowledged as a trade after order {}".format(
@@ -1039,6 +1049,21 @@ def acknowledge_late_fill(pending, exec_id, after, reason, fills, ended):
                                   "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     finally:
         os.close(held)
+
+
+def _ends(envelope, client_order_id):
+    """Whether envelope, the input awaiting its reply, is a lifecycle input cancelling or refusing client_order_id.
+
+    The adapter's journal seeds its ended orders from every input it
+    journalled, the one awaiting its reply among them, while the engine's
+    log holds that one only once it is committed; reading it here keeps the
+    command's judgement of "ended" the same as the journal's.
+    """
+    if not isinstance(envelope, dict) or envelope.get("type") != LIFECYCLE_TYPE:
+        return False
+    payload = envelope.get("payload")
+    return (envelope.get("schema_version") == LIFECYCLE_VERSION and isinstance(payload, dict)
+            and payload.get("client_order_id") == client_order_id and payload.get("status") in LIFECYCLE_TERMINAL)
 
 
 def _session_date(envelope):
