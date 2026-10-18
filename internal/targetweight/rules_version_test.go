@@ -63,3 +63,18 @@ func TestRulesVersionDeclaresMinimumLot(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheVersion5ConfigurationBreak: the configuration
+// schema moved to version 5 (the margin-cushion thresholds and
+// MaxSnapshotAge) and the gate gained the kill switch, the broker-sized sells
+// and the sale back to 98%, so a journal written under rules 1.4.0 cannot
+// replay under this build.
+func TestRulesVersionDeclaresTheVersion5ConfigurationBreak(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.4.0 once the configuration schema moved to version 5", targetweight.RulesVersion)
+		}
+	}
+}

@@ -209,7 +209,7 @@ func TestMomentumMissingMarkRefusesAndDegrades(t *testing.T) {
 	if p.Reason != event.RefusedMissingMark || p.InstrumentID != "CCC" {
 		t.Errorf("refusal: %+v", p)
 	}
-	if states[0].SchemaVersion != event.EngineStateScopedVersion || !strings.HasPrefix(states[0].ID, "engine-state:tw-") {
+	if states[0].SchemaVersion != event.EngineStateScopedVersion || !strings.HasPrefix(states[0].ID, "engine-state:"+iraAccount+":tw-") {
 		t.Errorf("state %s at schema %d", states[0].ID, states[0].SchemaVersion)
 	}
 }

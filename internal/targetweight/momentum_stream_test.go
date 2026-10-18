@@ -39,7 +39,7 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			BondFunds:          []event.BondFund{{InstrumentID: "IEF", Fraction: 0.5}, {InstrumentID: "SHY", Fraction: 0.5}},
 			Birth:              "1995-06",
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 10, MaxOrderFraction: 0.9, PriceBand: 0.05},
 	}
 }
@@ -157,13 +157,13 @@ type momentumOptions struct {
 	noBar        map[string]string
 	noMark       map[string]string // session -> instrument without a mark
 	noUniverse   bool
-	silentVenue  bool   // the venue never reports on a released order
-	decideFrom   string // first session decided, when not the first session
-	stopAfter    string // last session fed
-	beforeClose  func(session string) []event.Envelope
-	neverClosed  map[string]bool    // calendar sessions with no bar and no close
-	withdraw     map[string]float64 // session -> settled cash withdrawn after its close, in a snapshot an hour later
-	withdrawFill map[string]float64 // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
+	silentVenue  bool                                             // the venue never reports on a released order
+	decideFrom   string                                           // first session decided, when not the first session
+	stopAfter    string                                           // last session fed
+	beforeClose  func(s *stream, session string) []event.Envelope // inputs fed just before the session closes
+	neverClosed  map[string]bool                                  // calendar sessions with no bar and no close
+	withdraw     map[string]float64                               // session -> settled cash withdrawn after its close, in a snapshot an hour later
+	withdrawFill map[string]float64                               // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
 	// riskOffJanuary makes SPY fall over January's last six sessions too.
 	riskOffJanuary bool
 	// rawScale multiplies an instrument's raw close, leaving its adjusted
@@ -342,7 +342,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		}
 		slices.Sort(ids)
 		if opts.beforeClose != nil {
-			for _, e := range opts.beforeClose(session) {
+			for _, e := range opts.beforeClose(s, session) {
 				apply(e)
 			}
 		}

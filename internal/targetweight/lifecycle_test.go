@@ -57,3 +57,32 @@ func TestBoostRecordsAReportOnlyForAnOrderItReleased(t *testing.T) {
 		}
 	}
 }
+
+// TestBoostRecordsAReportOnTheSaleBackTo98: the sale back to 98% is an order
+// Boost released like any other, so the venue's report about it is recorded
+// (ADR 0022; ADR 0019, "The sale back to 98%").
+func TestBoostRecordsAReportOnTheSaleBackTo98(t *testing.T) {
+	r := simulate(t, options{brokers: true, kill: map[int]bool{19: true}})
+	sold := sales(t, r.decisions)
+	if len(sold) != 1 {
+		t.Fatalf("one sale back to 98%%: %+v", sold)
+	}
+	var sale event.OrderReleasedPayload
+	for _, e := range ofType(r.decisions, event.OrderReleasedEventType) {
+		var p event.OrderReleasedPayload
+		decode(t, e, &p)
+		if p.ClientOrderID == sold[0].ClientOrderID {
+			sale = p
+		}
+	}
+	if sale.ClientOrderID == "" {
+		t.Fatalf("the sale %s was not released", sold[0].ClientOrderID)
+	}
+	s := &stream{hash: r.hash, sequence: uint64(len(r.inputs))}
+	at := sessionEnd(len(syntheticCloses())).Add(time.Hour)
+	report := event.LimitOrderLifecyclePayload{AccountID: sale.AccountID, ClientOrderID: sale.ClientOrderID, OrderID: "8", InstrumentID: sale.InstrumentID,
+		Side: sale.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: sale.Quantity, LimitPrice: sale.LimitPrice, OccurredAt: at}
+	if out, err := r.recorder.Apply(context.Background(), s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "lifecycle:sale", at, report)); err != nil || len(out) != 0 {
+		t.Fatalf("the report about the released sale: %v, %d decisions; want it recorded, deciding nothing", err, len(out))
+	}
+}

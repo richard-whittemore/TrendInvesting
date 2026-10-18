@@ -895,7 +895,7 @@
       "function": "(*Handler).applyApproval",
       "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
       "category": "unreachable-by-construction",
-      "reason": "risklimit.Gate.RestoreSaleAttempt refuses only an empty incident ID or a second restore of one incident; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules)."
+      "reason": "risklimit.Gate.RestoreSaleAttempt refuses three calls: an empty incident ID; a second restore of one incident; and an incident that already has its attempt record, which Sale writes into the same attempts record when this run has already attempted that incident's sale. OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules). And no attempt record can exist when the approval reaches it: Apply refuses an approval read after any input but the configuration (TestAnApprovalIsTheFirstInputAfterTheConfiguration), so the gate is the one New built, with no attempt record, since only Sale writes one and Sale runs only from a session close or a broker snapshot, both of which come after the approval."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -903,7 +903,7 @@
       "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
       "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because an approval comes before any recorded state or decision and only once (TestApprovalInputRules)."
+      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because Apply refuses an approval read after any input but the configuration, so no recorded state can precede it (TestAnApprovalIsTheFirstInputAfterTheConfiguration), and a second approval (TestApprovalInputRules)."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -919,7 +919,7 @@
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
       "occurrence": 3,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.NewGate refuses only an empty account, invalid limits or an unknown mode; TargetWeightConfigurationPayload.Validate, called above, refuses all three with the same MarginLimits rules."
+      "reason": "risklimit.NewGate refuses only an empty account, invalid limits, limits without the margin-cushion thresholds, an unknown mode or a maximum snapshot age that is not positive; TargetWeightConfigurationPayload.Validate, called above, refuses all five (the age by requiring execution.max_snapshot_age_minutes from 1 to one session) for a boost configuration with the same MarginLimits rules."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -936,12 +936,33 @@
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; the payload passed Validate immediately before json.Marshal."
     },
     {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyLifecycle",
+      "statement": "return fmt.Errorf(\"targetweight: %s %s: %w\", in.Type, in.ID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.ObserveLifecycle refuses an invalid report, one for another account, one naming an order the gate never released, and one whose instrument, side, quantity or limit (event.SameLimitPrice) is not the order's. decodeInput above validated the report; h.released holds exactly the orders the gate released (emissions.order records each Released outcome, TestBoostRecordsAReportOnTheSaleBackTo98), each released for this gate's account at its planned figures (risklimit.Gate.Check); and Describes, checked first, refuses every report naming one of them with another account, instrument, side, quantity or limit by the same SameLimitPrice (TestBoostRecordsAReportOnlyForAnOrderItReleased)."
+    },
+    {
       "file": "internal/targetweight/momentum_run.go",
       "function": "newMomentum",
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
       "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.NewIRAGate refuses only an empty account, invalid limits, an unknown mode, a max exposure above 1 or a negative or non-finite fee allowance; New calls TargetWeightConfigurationPayload.Validate first, which refuses each of those for a momentum configuration (TestMomentumConfigurationValidate)."
+      "reason": "risklimit.NewIRAGate refuses only an empty account, invalid limits, an unknown mode, a max exposure above 1, margin-cushion thresholds, a negative or non-finite fee allowance or a maximum snapshot age that is not positive; New calls TargetWeightConfigurationPayload.Validate first, which refuses each of those for a momentum configuration (the age by requiring execution.max_snapshot_age_minutes from 1 to one session; TestMomentumConfigurationValidate, TestOnlyAMarginAccountHasACushion)."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "(*momentumRun).applyLifecycle",
+      "statement": "return nil, fmt.Errorf(\"targetweight: lifecycle %s: %w\", in.ID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.ObserveLifecycle refuses an invalid report, one for another account, one naming an order the gate never released, and one whose instrument, side, quantity or limit (event.SameLimitPrice) is not the order's. decodeInput above validated the report, forAccount refused another account, and event.OrderReports.Lifecycle, read first, refuses a report on an order it was not given by Release, which check calls for exactly the gate's Released outcomes at their planned figures, and one that does not describe the order by the same SameLimitPrice (LimitOrderLifecyclePayload.Describes; TestMomentumVenueReportRules)."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "(*momentumRun).applyFill",
+      "statement": "return nil, fmt.Errorf(\"targetweight: fill %s: %w\", in.ID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.ObserveFill refuses an invalid fill, a fill id reused for a different execution, a fill for another account, naming an order the gate never released or with another instrument or side, and one taking the order past its shares. decodeInput above validated the fill and forAccount refused another account; event.OrderReports.Fill, read first, returns before the gate for a redelivery and refuses every other fill id it has read, so it reads exactly the fills the gate has read; it was given by Release exactly the gate's Released orders (check), refuses another instrument or side, and refuses a fill past what remains of the same quantity those same fills have taken (TestMomentumVenueReportRules)."
     },
     {
       "file": "internal/nysecalendar/calendar.go",

@@ -130,6 +130,16 @@ _Avoid_: reservation (the act, not the record), margin, buying power (the broker
 **Drawdown Step**:
 A 20 % reduction of the Notional Account, triggered each time actual equity falls 10 % below the figure the Notional Account was last measured against.
 
+**Risk-reducing order**:
+A target-weight sell that moves the account's exposure toward 98% of net liquidation or lower, sized within the broker-reported holding net of every working or pending sell (with no readable broker snapshot, within the account snapshot's holding it was sized from). No buy is one. It is exempt from the order count, order size and price band, and is all a Degraded account still sends on instruments its discrepancy does not name (ADR 0026, point 4).
+
+**Sale back to 98%**:
+One sell-only order that brings a margin account's exposure toward 98% of net liquidation and never below it, sized from one broker snapshot's holding, net liquidation, mark and open orders. While Halted, Degraded on the instrument, or under the Kill switch, it is ADR 0019's one sale, attempted once per incident; in Normal and Degraded elsewhere, an urgent Excess Liquidity alarm makes the same sale (ADR 0019, amended 2026-10-15, 2026-10-16 and 2026-10-17; ADR 0026, point 4). Never for an IRA.
+_Avoid_: flatten (it keeps 98%, it does not close the position), D6 sale (the decision's name, not the order's).
+
+**Kill switch**:
+A recorded operator input that refuses every order, routine sells included, except a margin account's Sale back to 98%. It changes no engine state (ADR 0026, point 3).
+
 **Strength**:
 The mechanical ranking measure applied when several instruments signal at once: an instrument's price change over the preceding 63 completed bars, divided by its N.
 

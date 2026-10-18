@@ -2,6 +2,7 @@ package risklimit_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
@@ -10,12 +11,15 @@ import (
 const tag = "targets-decided:joint:2025-03-04"
 
 func limits() event.MarginLimits {
-	return event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 0.5, PriceBand: 0.05}
+	return event.MarginLimits{
+		MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 0.5, PriceBand: 0.05,
+		ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30,
+	}
 }
 
 func gate(t *testing.T, l event.MarginLimits, mode string) *risklimit.Gate {
 	t.Helper()
-	g, err := risklimit.NewGate("joint", l, mode)
+	g, err := risklimit.NewGate("joint", l, mode, 30*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +44,7 @@ func order(side string, quantity, held int64) risklimit.Order {
 // bookOf is the book the orders were planned against: each order's held
 // quantity of its instrument at its reference price, and nothing else held.
 func bookOf(plan ...risklimit.Order) risklimit.Book {
-	book := risklimit.Book{Holdings: map[string]int64{}, Prices: map[string]float64{}}
+	book := risklimit.Book{Holdings: map[string]int64{}, Prices: map[string]float64{}, At: at}
 	for _, o := range plan {
 		if o.Planned.HeldQuantity != 0 {
 			book.Holdings[o.Planned.InstrumentID] = o.Planned.HeldQuantity
@@ -57,7 +61,9 @@ func holding(id string, n int64) risklimit.Book {
 
 func check(t *testing.T, g *risklimit.Gate, plan ...risklimit.Order) []risklimit.Outcome {
 	t.Helper()
-	outcomes, err := g.Check(bookOf(plan...), plan)
+	book := bookOf(plan...)
+	book.At = now(g)
+	outcomes, err := g.Check(book, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,13 +237,20 @@ func TestDegradedAllowsNoBuyAndFreezesItsScope(t *testing.T) {
 	refusedFor(t, check(t, g, order(event.OrderSideSell, 1, 10))[0], event.RefusedEngineDegraded)
 	other := order(event.OrderSideSell, 1, 10)
 	other.Planned.InstrumentID = "IEF"
+	// A sell elsewhere continues, sized within the broker's holding (ADR
+	// 0019, amended 2026-09-24): first with no broker snapshot to size it
+	// from, then with one.
+	refusedFor(t, check(t, g, other)[0], event.RefusedBrokerHolding)
+	ief := broker(0)
+	ief.Positions = []event.BrokerPosition{{InstrumentID: "IEF", Quantity: 10, Mark: 1, MarkSet: true}}
+	observe(t, g, "broker:1", ief)
 	released(t, check(t, g, other)[0])
-	// A sell beyond its holding would open a short: nothing that opens a
-	// position goes while not Normal (ADR 0019, amended 2026-09-24,
-	// "Risk-reducing management").
+	// A sell beyond the broker's holding would open a short: refused, not
+	// resized (ADR 0019, amendment of 2026-10-17: a sell above the broker
+	// quantity is refused, not resized), and IEF is frozen.
 	otherShort := order(event.OrderSideSell, 11, 10)
 	otherShort.Planned.InstrumentID = "IEF"
-	refusedFor(t, check(t, g, otherShort)[0], event.RefusedEngineDegraded)
+	refusedFor(t, check(t, g, otherShort)[0], event.RefusedBrokerHolding)
 	otherBuy := order(event.OrderSideBuy, 1, 10)
 	otherBuy.Planned.InstrumentID = "IEF"
 	refusedFor(t, check(t, g, otherBuy)[0], event.RefusedEngineDegraded)
@@ -245,12 +258,16 @@ func TestDegradedAllowsNoBuyAndFreezesItsScope(t *testing.T) {
 
 // TestDegradedKeepsManagingInstrumentsItDoesNotName: while Degraded,
 // "risk-reducing sells continue for instruments the discrepancy does not
-// name" (ADR 0026, point 4, lines 204-205), and they stay exempt from the
-// mark, band and size checks (point 3, lines 188-191), so a late mark on one
-// of them neither refuses it nor widens the scope.
+// name" (ADR 0026, point 4), sized within the broker's holding (ADR 0019,
+// amended 2026-09-24), and they stay exempt from the mark, band and size
+// checks (point 3), so a late mark on one of them neither refuses it nor
+// widens the scope.
 func TestDegradedKeepsManagingInstrumentsItDoesNotName(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	check(t, g, order(event.OrderSideBuy, 5001, 0))
+	ief := broker(0)
+	ief.Positions = []event.BrokerPosition{{InstrumentID: "IEF", Quantity: 100, Mark: 1, MarkSet: true}}
+	observe(t, g, "broker:1", ief)
 	o := order(event.OrderSideSell, 60, 100)
 	o.Planned.InstrumentID = "IEF"
 	o.MarkSet, o.Mark = false, 0
@@ -259,8 +276,42 @@ func TestDegradedKeepsManagingInstrumentsItDoesNotName(t *testing.T) {
 	if got.State != nil || g.State() != risklimit.StateDegraded {
 		t.Errorf("a released sell changes no state: %+v, gate %s", got.State, g.State())
 	}
+	// A snapshot recorded after the release shows the sell filled; the next
+	// sell is sized within what it shows.
+	ief.AsOf = ief.AsOf.Add(time.Minute)
+	ief.Positions[0].Quantity = 40
+	observe(t, g, "broker:2", ief)
+	o.Planned.Quantity, o.Planned.HeldQuantity = 40, 40
 	o.MarkSet, o.Mark = true, 2
 	released(t, check(t, g, o)[0])
+}
+
+// TestDegradedSellAboveTheBrokerHoldingIsRefusedNotResized: a Degraded sell
+// above the broker quantity is refused (broker-holding) and the account
+// degrades further, naming the instrument; the gate never resizes it (ADR
+// 0019, amendment of 2026-10-17: the planner, not the gate, chooses
+// quantities).
+func TestDegradedSellAboveTheBrokerHoldingIsRefusedNotResized(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	check(t, g, order(event.OrderSideBuy, 5001, 0))
+	ief := broker(0)
+	ief.Positions = []event.BrokerPosition{{InstrumentID: "IEF", Quantity: 5, Mark: 1, MarkSet: true}}
+	observe(t, g, "broker:1", ief)
+	o := order(event.OrderSideSell, 10, 100)
+	o.Planned.InstrumentID = "IEF"
+	got := check(t, g, o)[0]
+	refusedFor(t, got, event.RefusedBrokerHolding)
+	if got.Refused.Quantity != 10 {
+		t.Errorf("refused quantity %d, want the planned 10", got.Refused.Quantity)
+	}
+	if got.State == nil || len(got.State.ScopeInstrumentIDs) != 2 {
+		t.Fatalf("scope should name IEF and SPY: %+v", got.State)
+	}
+	again := check(t, g, o)[0]
+	refusedFor(t, again, event.RefusedEngineDegraded)
+	if again.State != nil {
+		t.Error("a frozen instrument's refusal does not restate the scope")
+	}
 }
 
 func TestDryRunReleasesWithoutSending(t *testing.T) {
@@ -279,14 +330,19 @@ func TestDryRunReleasesWithoutSending(t *testing.T) {
 }
 
 func TestGateRefusesBadConstructionAndInput(t *testing.T) {
-	if _, err := risklimit.NewGate("joint", event.MarginLimits{}, event.TradingModeDryRun); err == nil {
+	invalid := limits()
+	invalid.MaxExposure = 0
+	if _, err := risklimit.NewGate("joint", invalid, event.TradingModeDryRun, 30*time.Minute); err == nil {
 		t.Error("invalid limits accepted")
 	}
-	if _, err := risklimit.NewGate("joint", limits(), "yolo"); err == nil {
+	if _, err := risklimit.NewGate("joint", limits(), "yolo", 30*time.Minute); err == nil {
 		t.Error("invalid mode accepted")
 	}
-	if _, err := risklimit.NewGate("", limits(), event.TradingModeDryRun); err == nil {
+	if _, err := risklimit.NewGate("", limits(), event.TradingModeDryRun, 30*time.Minute); err == nil {
 		t.Error("missing account accepted")
+	}
+	if _, err := risklimit.NewGate("joint", limits(), event.TradingModeDryRun, 0); err == nil {
+		t.Error("a margin gate without a maximum broker snapshot age")
 	}
 	g := gate(t, limits(), event.TradingModeDryRun)
 	bad := order(event.OrderSideBuy, 0, 0)
@@ -406,7 +462,7 @@ func TestRestoreState(t *testing.T) {
 	halted := event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "recorded"}
 
 	g := gate(t, limits(), event.TradingModeDryRun)
-	if err := g.RestoreState(degraded("SPY"), event.EngineStateScopedVersion); err != nil {
+	if err := g.RestoreState("engine-state:joint:a", degraded("SPY"), event.EngineStateScopedVersion); err != nil {
 		t.Fatal(err)
 	}
 	if g.State() != risklimit.StateDegraded {
@@ -416,68 +472,66 @@ func TestRestoreState(t *testing.T) {
 	refusedFor(t, check(t, g, order(event.OrderSideBuy, 1, 0))[0], event.RefusedEngineDegraded)
 	other := order(event.OrderSideSell, 1, 10)
 	other.Planned.InstrumentID = "IEF"
+	ief := broker(0)
+	ief.Positions = []event.BrokerPosition{{InstrumentID: "IEF", Quantity: 10, Mark: 1, MarkSet: true}}
+	observe(t, g, "broker:1", ief)
 	released(t, check(t, g, other)[0])
 	// A later record naming only IEF keeps SPY frozen.
-	if err := g.RestoreState(degraded("IEF"), event.EngineStateScopedVersion); err != nil {
+	if err := g.RestoreState("engine-state:joint:b", degraded("IEF"), event.EngineStateScopedVersion); err != nil {
 		t.Fatal(err)
 	}
 	refusedFor(t, check(t, g, sellFrom147())[0], event.RefusedEngineDegraded)
 	refusedFor(t, check(t, g, other)[0], event.RefusedEngineDegraded)
 
-	if err := g.RestoreState(halted, event.EngineStateScopedVersion); err != nil {
+	if err := g.RestoreState("engine-state:joint:c", halted, event.EngineStateScopedVersion); err != nil {
 		t.Fatal(err)
 	}
 	refusedFor(t, check(t, g, other)[0], event.RefusedEngineHalted)
-	if err := g.RestoreState(degraded("SPY"), event.EngineStateScopedVersion); err == nil || g.State() != risklimit.StateHalted {
+	if err := g.RestoreState("engine-state:joint:d", degraded("SPY"), event.EngineStateScopedVersion); err == nil || g.State() != risklimit.StateHalted {
 		t.Errorf("a Degraded record after a Halted one must be refused: %v, %s", err, g.State())
 	}
 
 	for name, bad := range map[string]struct {
+		id      string
 		p       event.EngineStatePayload
 		version uint32
 	}{
-		"invalid":          {event.EngineStatePayload{State: "dazed"}, event.EngineStateScopedVersion},
-		"degraded at v1":   {degraded("SPY"), event.EngineStateSchemaVersion},
-		"risk limit at v1": {halted, event.EngineStateSchemaVersion},
-		"order scope":      {event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeOrderIDs: []string{"tw-1"}}, event.EngineStateScopedVersion},
-		"cash scope":       {event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeCashComponents: []string{"USD"}}, event.EngineStateScopedVersion},
+		"invalid":          {"engine-state:joint:x", event.EngineStatePayload{State: "dazed"}, event.EngineStateScopedVersion},
+		"degraded at v1":   {"engine-state:joint:x", degraded("SPY"), event.EngineStateSchemaVersion},
+		"risk limit at v1": {"engine-state:joint:x", halted, event.EngineStateSchemaVersion},
+		"no envelope id":   {"", halted, event.EngineStateScopedVersion},
+		"order scope":      {"engine-state:joint:x", event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeOrderIDs: []string{"tw-1"}}, event.EngineStateScopedVersion},
+		"cash scope":       {"engine-state:joint:x", event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeCashComponents: []string{"USD"}}, event.EngineStateScopedVersion},
 	} {
 		n := gate(t, limits(), event.TradingModeDryRun)
-		if err := n.RestoreState(bad.p, bad.version); err == nil {
+		if err := n.RestoreState(bad.id, bad.p, bad.version); err == nil {
 			t.Errorf("%s: restored", name)
 		}
-		if n.State() != risklimit.StateNormal {
-			t.Errorf("%s: a refused record changes no state", name)
+		if n.State() != risklimit.StateNormal || n.Incident() != "" {
+			t.Errorf("%s: a refused record changes no state and names no incident", name)
 		}
 	}
 }
 
 // TestAnIncidentsSaleIsAttemptedOnce: ADR 0019's sale back to 98% (amended
 // 2026-10-15) is attempted once per incident and never retried
-// automatically. A fresh run restores whether the previous run attempted it
-// from the owner's approval, so an attempt recorded there refuses a second
-// one, and one recorded as not attempted may go once.
+// automatically. The gate keeps one attempt record per incident: the
+// owner's approval of a fresh run restores it, and Sale consults and
+// records it. An incident's attempt is restored once, before any order is
+// checked, so a sale this run already attempted can never be restored as
+// not attempted.
 func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
-	attempted := gate(t, limits(), event.TradingModeDryRun)
-	if err := attempted.RestoreSaleAttempt("incident-1", true); err != nil {
-		t.Fatal(err)
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	halted := halt(t, g)
+	if s, ok := requestSale(t, g, event.SaleTriggerExit); !ok || s.Order == nil {
+		t.Fatalf("the incident's first sale = %+v, %v; want an order", s, ok)
 	}
-	if attempted.AttemptSale("incident-1") {
-		t.Error("a sale the approval records as attempted was attempted again")
+	if err := g.RestoreSaleAttempt(halted.StateID, false); err == nil {
+		t.Error("an incident whose sale this run attempted was restored as not attempted")
 	}
-
-	open := gate(t, limits(), event.TradingModeDryRun)
-	if err := open.RestoreSaleAttempt("incident-1", false); err != nil {
-		t.Fatal(err)
-	}
-	if !open.AttemptSale("incident-1") {
-		t.Error("a sale the approval records as not attempted was refused")
-	}
-	if open.AttemptSale("incident-1") {
-		t.Error("the incident's sale was attempted twice")
-	}
-	if !open.AttemptSale("incident-2") {
-		t.Error("another incident's sale was refused")
+	if s, ok := requestSale(t, g, event.SaleTriggerExit); ok {
+		t.Errorf("the incident's sale was attempted twice: %+v", s)
 	}
 
 	twice := gate(t, limits(), event.TradingModeDryRun)
@@ -500,20 +554,20 @@ func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
 // is refused, leaving the gate as it was.
 func TestAnApprovedIncidentRestoresItsState(t *testing.T) {
 	degraded := gate(t, limits(), event.TradingModeDryRun)
-	if err := degraded.RestoreIncidentState(event.EngineStateDegraded, []string{"SPY"}); err != nil {
+	if err := degraded.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, []string{"SPY"}); err != nil {
 		t.Fatal(err)
 	}
 	if degraded.State() != risklimit.StateDegraded {
 		t.Errorf("an approved Degraded incident leaves the gate %s", degraded.State())
 	}
 	halted := gate(t, limits(), event.TradingModeDryRun)
-	if err := halted.RestoreIncidentState(event.EngineStateHalted, nil); err != nil {
+	if err := halted.RestoreIncidentState("engine-state:joint:1", event.EngineStateHalted, nil); err != nil {
 		t.Fatal(err)
 	}
 	if halted.State() != risklimit.StateHalted {
 		t.Errorf("an approved Halted incident leaves the gate %s", halted.State())
 	}
-	if err := halted.RestoreIncidentState(event.EngineStateDegraded, []string{"SPY"}); err == nil || halted.State() != risklimit.StateHalted {
+	if err := halted.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, []string{"SPY"}); err == nil || halted.State() != risklimit.StateHalted {
 		t.Errorf("a Degraded incident loosened a Halted gate: %v, %s", err, halted.State())
 	}
 	for name, c := range map[string]struct {
@@ -525,7 +579,7 @@ func TestAnApprovedIncidentRestoresItsState(t *testing.T) {
 		"halted with a scope":    {event.EngineStateHalted, []string{"SPY"}},
 	} {
 		n := gate(t, limits(), event.TradingModeDryRun)
-		if err := n.RestoreIncidentState(c.state, c.scope); err == nil {
+		if err := n.RestoreIncidentState("engine-state:joint:1", c.state, c.scope); err == nil {
 			t.Errorf("%s: restored", name)
 		}
 		if n.State() != risklimit.StateNormal {

@@ -65,7 +65,7 @@ type Order struct {
 // the engine reads it, and only one the engine reads acknowledges an order.
 // A Boost run reads a lifecycle report (version 2) that describes the order
 // as released (event.LimitOrderLifecyclePayload's Describes). A momentum
-// run, the one run that reads fills, reads lifecycle reports and fills
+// run reads lifecycle reports and fills
 // (version 5) by event.OrderReports, the rule the engine applies: one that
 // does not describe the order, takes it past its quantity in total, reuses
 // a fill id for another execution, or arrives once the order is terminal is
@@ -80,7 +80,9 @@ type Order struct {
 // reading. A report that can be read and names no released order changes
 // nothing and raises no alert: it is reconciliation's to explain (ADR 0019).
 // A fill in a Boost run, readable or not, changes nothing and raises no
-// alert, since a Boost run does not read fills yet.
+// alert: the Boost engine reads fills by the risk gate's check
+// (risklimit.Gate.ObserveFill), not by event.OrderReports, so this reader
+// does not count them.
 func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
 	var unread []UnreadReport
@@ -186,7 +188,7 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		client, status, at = p.ClientOrderID, "fill", p.FilledAt
 		_, _, refused = reports.Fill(p)
 	default:
-		return nil // not a venue report, or a fill in a Boost run, which reads none yet
+		return nil // not a venue report, or a fill in a Boost run, which this reader does not count
 	}
 	o, ok := byID[client]
 	switch {

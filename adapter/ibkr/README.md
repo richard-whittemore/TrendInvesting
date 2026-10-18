@@ -36,7 +36,10 @@ an order (AGENTS.md rule 5).
   values. A snapshot is bracketed by two IBKR server times
   (`reqCurrentTime`), one before and one after, plus the adapter's own receipt
   time. Executions keep IBKR's time string verbatim, and `occurred_at` is its
-  UTC reading. A time with no zone is refused. IBKR answers `reqCurrentTime`
+  UTC reading. A time with no zone is refused. Every time the engine records
+  for a snapshot (`as_of`) or a fill (`filled_at`) is a whole second, as IBKR
+  stamps them: the risk gate orders snapshots and fills by the second, and
+  event validation refuses a time with a fraction of a second. IBKR answers `reqCurrentTime`
   in order, so each request's answer is found by counting. Within
   `request_timeout` of a restoration that found requests unanswered, a late
   old answer may still arrive, and a read fails closed rather than take it as

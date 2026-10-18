@@ -17,7 +17,8 @@ import (
 func paperEntries(t *testing.T, acknowledged bool) []journal.Entry {
 	t.Helper()
 	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "DU1234567", Mode: event.TradingModePaper, Adapter: event.AdapterIBKR, Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10, TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02"},
-		Limits: event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05}}
+		Limits:    event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05, ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30},
+		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30}}
 	released := event.OrderReleasedPayload{AccountID: "DU1234567", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",
 		Side: event.OrderSideBuy, Quantity: 9, LimitPrice: 101, Mode: event.TradingModePaper, Send: true,
 		Figures: event.RiskFigures{NetLiquidation: 4000, ReferencePrice: 100, ExposureBefore: 0, ExposureAfter: 0.23, OrderFraction: 0.23, OrdersInDecision: 1}}

@@ -22,8 +22,7 @@ engine does, and only a report the engine would accept counts:
   quantity, and its limit price to within half a cent (the limit is rounded
   to a cent, and IBKR's copy of it need not match to the last digit; prices
   are never compared for exact equality);
-- a fill counts only in a momentum run, since Boost does not read fills yet,
-  and only on the order's account, instrument and side, when all its fills
+- a fill counts only in a momentum run, and only on the order's account, instrument and side, when all its fills
   together come to no more than the order's quantity, and under a fill id
   no other execution has used (the same execution sent twice counts once);
 - in a momentum run, once an order is filled in full or IBKR reports it
@@ -33,8 +32,18 @@ The engine and the reporter share this rule in one place, so the reporter
 cannot count a report the engine refused.
 
 A Boost engine now records IBKR's report about an order it released and
-decides nothing from it (ADR 0022). A report about an order the run did not
-release is refused, because only reconciliation can explain it.
+decides nothing from it (ADR 0022), beyond what the risk gate's pending-sell
+count takes from it: a cancelled or invalid sell's remainder is no longer
+being sold (see
+[the one sale back to 98%](states-and-kill-switch.md#the-one-sale-back-to-98)).
+A report about an order the run did not release is refused, because only
+reconciliation can explain it.
+
+A Boost engine also reads IBKR's fills, for the same pending-sell count, but
+by the risk gate's own check rather than the shared rule above (it does not,
+for example, refuse a fill on an order already reported cancelled). So the
+reporter does not yet count a fill in a Boost run as an acknowledgement:
+there, only a lifecycle report acknowledges an order.
 
 The reporter reads these states. For every order marked to be sent that IBKR
 has not acknowledged within the allowed time of its commit, it sends one
@@ -54,8 +63,8 @@ names was known, so check IBKR for every order around the time it was
 recorded. It also covers a report about an order the run released that the
 rule above does not count. A report that can be read about an order the run
 never released raises no alert: it is reconciliation's to explain. A fill in
-a Boost run raises no alert, readable or not, because a Boost run does not
-read fills yet. The reporter's
+a Boost run raises no alert, readable or not, because the reporter does not
+yet read a Boost run's fills by the engine's rule (above). The reporter's
 other alerts keep coming: one bad report in the log does not stop the
 reporter reading the rest of it.
 
@@ -119,5 +128,7 @@ incident reach a person; an order IBKR never acknowledged is one.
 
 What this does **not** do yet: a fresh run after an approval does not know the
 previous run's orders that are still working, so IBKR's report about one of
-them stops the run. Boost does not yet read fills. Both are open issues
-linked from the slice's ticket.
+them stops the run. The reporter does not yet read a Boost run's fills, so a
+Boost fill neither acknowledges an order nor, when the engine refuses it,
+raises the "not read" alert. Both are open issues linked from the slice's
+ticket.

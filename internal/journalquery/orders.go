@@ -51,8 +51,9 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 	return t, nil
 }
 
-// Refusals lists the orders the risk gate refused and the engine-state
-// changes (degraded, halted) for the records that pass f. An engine-state
+// Refusals lists the orders the risk gate refused, the sales back to 98% it
+// withheld (a lapse included), and the engine-state changes (degraded,
+// halted) for the records that pass f. An engine-state
 // change with no instrument scope covers the whole engine, so an instrument
 // filter keeps it.
 func Refusals(journals []Journal, f Filter) (Table, error) {
@@ -74,6 +75,12 @@ func Refusals(journals []Journal, f Filter) (Table, error) {
 					continue
 				}
 				row = []string{p.InstrumentID, "refused", p.Reason, p.Detail}
+			case it.withheld != nil:
+				p := it.withheld
+				if !f.keep(it, p.InstrumentID) {
+					continue
+				}
+				row = []string{p.InstrumentID, "sale-withheld", p.Reason, p.Detail}
 			case it.engine != nil:
 				p := it.engine
 				if !engineInScope(p.ScopeInstrumentIDs, f.Instrument) || !f.keepAccount(it) || !f.keepTime(it.at) {
