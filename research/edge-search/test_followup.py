@@ -11,6 +11,7 @@ import difflib
 import importlib.util
 import json
 import os
+import statistics
 import sys
 import tempfile
 import types
@@ -2438,6 +2439,86 @@ class MinimumLotTest(unittest.TestCase):
         algo.OnEndOfAlgorithm()
         self.assertEqual(stats["MinLot"], "mode=held skipped=5 heldSold=2 kept=3 withheld=0 noPrice=0")
         self.assertEqual(stats["RawCheck"], "rawAbove=0")
+
+    def test_with_the_rule_off_the_rebalance_orders_match_fresh_universe(self):
+        # The control run's claim: MIN_LOT None trades as fresh_universe.py
+        # does. Both templates run the same rebalance on the same stub
+        # state; minimum_lot.py is also given raw closes that would make
+        # every pick unaffordable if the rule were on.
+        class Series:
+            def __init__(self, values):
+                self.v = list(values)
+                self.iloc = self
+
+            def __getitem__(self, i):
+                return self.v[i] if isinstance(i, int) else Series(self.v[i])
+
+            def __len__(self):
+                return len(self.v)
+
+            def __iter__(self):
+                return iter(self.v)
+
+            def dropna(self):
+                return self
+
+            def mean(self):
+                return sum(self.v) / len(self.v)
+
+            def pct_change(self):
+                return Series(b / a - 1.0 for a, b in zip(self.v, self.v[1:]))
+
+        class Frame:
+            empty = False
+
+            def __init__(self, series, columns=None):
+                self.series, self.columns = series, columns or ["close"]
+
+            def __getitem__(self, name):
+                return Frame(self.series, list(self.series)) if name == "close" else self.series[name]
+
+            def unstack(self, level):
+                return self
+
+        names = ["A", "B", "C", "E", "F"]
+        growth = {"A": 1.004, "B": 1.003, "C": 1.002, "E": 1.001, "F": 1.0005, "SPY": 1.001}
+        series = {n: Series(100.0 * g ** i * (1 + 0.01 * (i % 3)) for i in range(260)) for n, g in growth.items()}
+
+        def run(template, raw_close):
+            module = _load_template(self, template, {})
+            module.Resolution = types.SimpleNamespace(Daily=1)
+            module.np = types.SimpleNamespace(std=lambda x: statistics.pstdev(list(x)))
+            algo = module.MomentumResearch()
+            algo.MODE, algo.TOP_N, algo.SECTOR_CAP, algo.INV_VOL = "mom", 3, 1, True
+            algo.RISK_OFF_FRACTION, algo.SPY_BLEND, algo.STOCK_TREND_DAYS = 0.5, 0.0, 0
+            algo.bond, algo.spy, algo.members, algo.sectors = "IEF", "SPY", names, self.SECTOR
+            algo.History = lambda symbols, n, res: Frame(series)
+            algo.MIN_LOT, algo.raw_close, algo.lot_kept = None, raw_close, set()
+            for attr in ("names_held", "rebalances", "risk_off_months", "resizes", "lot_skipped", "lot_held_sold",
+                         "lot_kept_n", "lot_withheld", "lot_noprice", "skipped"):
+                setattr(algo, attr, 0)
+            algo.resize_all, algo.pending, algo.pending_tickets = False, {}, {}
+            algo.orders = []
+
+            class Book(dict):
+                TotalPortfolioValue = 1000.0
+
+                def __iter__(self):
+                    return iter([types.SimpleNamespace(Key=k, Value=v) for k, v in dict.items(self)])
+
+                def __missing__(self, key):
+                    return types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
+
+            algo.Portfolio = Book()
+            algo.SetHoldings = lambda s, w: algo.orders.append((s, round(w, 6)))
+            algo.Liquidate = lambda s: algo.orders.append((s, 0))
+            algo._priced = lambda s: True
+            algo.Rebalance()
+            return algo.orders
+
+        base = run("momentum/fresh_universe.py", {})
+        self.assertGreater(len(base), 0)
+        self.assertEqual(run("momentum/minimum_lot.py", {n: 1e9 for n in names}), base)
 
     def test_the_template_only_adds_to_fresh_universe(self):
         _additions_only(self, "momentum/fresh_universe.py", "momentum/minimum_lot.py")

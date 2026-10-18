@@ -91,6 +91,15 @@ Known limits of the instrument, the same in both variants of each pair:
 - A kept name holds its actual holding, which is worth more than its
   target (it is at least one share above a target below one share), so the
   exception runs slightly more invested in that name than the book says.
+  *Correction, 2026-10-18 (wording only; the runs are unchanged):* "slightly"
+  was not measured and is not supported. The kept holding is at least one
+  share, and its size relative to its target was not recorded: it can exceed
+  the target by a multiple bounded only by one share's price, so a kept
+  four-figure share against a target of a few hundred dollars could be a
+  large fraction of a $30,000 account, outside the sector-cap and weight
+  bound the book states, and it lowers the equity that `SetHoldings` sizes
+  the other names from. Paper trading should record the kept holding's value
+  over net liquidation value for every kept name.
 
 ### Variants
 
@@ -175,7 +184,11 @@ fees are the backtest's `Total Fees`.
   14.50% / 43.06%, ratio 0.3367, 5,528 orders, $8,257.05 in fees, 572
   resizes, the same Fundamentals counter. So the added code is inert with
   the rule off, and the day's data state is the one the $30k runs used.
-- **Raw closes.** `RawCheck` counted 89,124 (in-sample) and 50,082
+- **Raw closes.** `RawCheck` is an instrument check, not a verdict metric.
+  It was added to the template after the plan was written (the plan's
+  metrics list `MinLot` only), because D7-L's test is only meaningful on
+  raw closes and nothing in the plan showed that the coarse `Price` is one;
+  it changes no order and no verdict. It counted 89,124 (in-sample) and 50,082
   (held-out) month-choosing rows whose coarse `Price` is more than 1% above
   their `AdjustedPrice`, so `Price` is the raw close D7-L tests, not the
   adjusted one.
@@ -215,12 +228,16 @@ was deeper by 0.11 pp against a 1.0 pp margin, and fees were not higher
 What the verdict rests on, stated plainly:
 
 - **The evidence is small.** At $30,000 the situation option 2 addresses is
-  rare. It never arose in 17 tuning years (1999-2015), when few stocks
-  traded above about $1,000 a share, the size of a typical target. It arose
-  2 or 3 times in 10.5 held-out years, when four-figure share prices were
-  common. The measurement shows the exception does no harm and saves a few
-  orders and dollars. It does not show a return benefit; none was expected
-  at this size.
+  rare. It never arose in 17 tuning years (1999-2015) and arose 2 or 3
+  times in 10.5 held-out years. A likely reason, not a finding (the runs did
+  not record share prices against targets): few stocks traded above about
+  $1,000 a share before 2016, the size of a typical target here, and
+  four-figure share prices were more common afterwards. The measurement shows no harm by the plan's margins. The
+  order, fee and drawdown differences are within path noise (one kept name
+  moves every later month's sizes), so they are not evidence of savings, and
+  there is no return benefit shown either; none was expected at this size.
+  *Wording corrected 2026-10-18; the original read "does no harm and saves a
+  few orders and dollars". The numbers in the tables are unchanged.*
 - **The only window where it fired is the held-out one.** That pair ran
   once, on the same day as the unchanged rule, and nothing was tuned on it.
   There is no setting to tune: option 2 has no parameter.

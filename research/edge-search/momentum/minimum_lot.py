@@ -149,7 +149,11 @@ def minimum_lot_book(ranked, top_n, price, nlv, held=(), bond="IEF", spy="SPY", 
     ``held`` is kept; any other is skipped for good. Passes end when one
     skips nothing new. ``targets`` is None when no pick is left and a name
     was skipped (withheld, the last book kept). A pick with no positive
-    price is counted in ``no_price`` and left in the book."""
+    price is counted in ``no_price`` and left in the book, i.e. treated as
+    affordable (the study does not model what D7-L does with such a pick).
+    That is acceptable for the study only because its verdict rule makes any
+    run with a non-zero count inconclusive; the count is 0 in every run
+    recorded in docs/research/d7l-held-name-2026-10.md."""
     skipped, no_price = [], set()
     while True:
         targets = defensive_book([n for n in ranked if n not in skipped], top_n, bond=bond, spy=spy, **book)
