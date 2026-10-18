@@ -45,11 +45,12 @@ import (
 //     (configuration schema version 6) and refuses version 5, and withholds
 //     a decision session whose ranked members sent neither their bars nor
 //     their histories, so a journal written under 1.5.0 does not replay.
-//   - 1.7.0 reads account.reconciliation, market.corporate-action and
+//   - 1.10.0 reads account.reconciliation, market.corporate-action and
 //     operator.alert.acknowledged; a reconciliation's difference degrades or
 //     halts the account (ADR 0019, amended 2026-09-24), and a Degraded scope
-//     can name cash components.
-const RulesVersion = "1.7.0"
+//     can name cash components. 1.7.0 to 1.9.0 are taken by other rule
+//     changes.
+const RulesVersion = "1.10.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -339,7 +340,7 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted); err != nil {
 			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
-		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs); err != nil {
+		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs, incident.ScopeCashComponents); err != nil {
 			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
 	}
