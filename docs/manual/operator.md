@@ -65,17 +65,21 @@ never recorded again, so moving a damaged log into `quarantine`, or
 starting a run with its log in another folder, does not replay old
 instructions. Leave the markers in place.
 
-Your instructions count in the order of the times they state. A kill-switch
+Your instructions count in the order of the times they state (ADR 0019,
+amendment of 2026-10-17, "operator instructions count in the order of the
+times they state", a rule you are asked to confirm). A kill-switch
 file stating a time earlier than the newest kill switch the engine has
 applied for its account is recorded in the log and refused, with no effect
 (and a `.refused` note naming the later one), so an old or backdated
 `released` never undoes a later `engaged`, and the log still shows it was
 tried. To change the switch, record it again with the current time.
 
-A kill switch stating a time more than five minutes after the engine's own
-clock (a slip in `-at`) is never recorded: it would put every instruction
-stating the true time before it. The engine refuses it with a `.refused`
-note; record it again with the current time.
+An instruction of either kind, kill switch or clearance, stating a time
+more than five minutes after the engine's own clock (a slip in `-at`) is
+never recorded: it would put every instruction stating the true time before
+it. The engine refuses it with a `.refused` note; record it again with the
+current time. Up to five minutes ahead is allowed, since the tool and the
+engine may run on machines whose clocks differ by that much.
 
 A file the engine cannot read (hand-edited, damaged, or holding more than
 one record) is never used.
@@ -225,7 +229,7 @@ reports ([journal-query](journal-query.md)).
 | --- | --- | --- |
 | You run the tool as yourself or as root, not `ti-trader` | Refused, nothing written: the engine could not read the file | Run it again with `sudo -u ti-trader` |
 | A kill switch backdated with `-at` before one already applied | Recorded with no effect, with a `.refused` note naming the later one | Record it again with the current time |
-| A kill switch with `-at` more than five minutes in the future | Never recorded; a `.refused` note says so | Record it again with the current time |
+| A kill switch or clearance with `-at` more than five minutes in the future | Never recorded; a `.refused` note says so | Record it again with the current time |
 | The disk fails while the engine records an instruction | No note; the run stops with the error; the file waits | Resume the run; the instruction is recorded first |
 | The log is full (the most records a run holds) when an instruction arrives | No note; the run stops with the error; the file waits | Start a fresh run; the instruction is recorded first |
 | You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |

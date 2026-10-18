@@ -382,6 +382,67 @@ func TestAKillSwitchStatingAFutureTimeIsRefused(t *testing.T) {
 	}
 }
 
+// TestAKillSwitchWithinTheClockSkewIsDelivered: a kill switch stating a
+// time ahead of the engine's clock by less than operatorClockSkew is from a
+// clock that runs slightly ahead, not a mistyped -at, so it is delivered and
+// journalled, never refused (ADR 0019, amendment of 2026-10-17, "operator
+// instructions count in the order of the times they state").
+func TestAKillSwitchWithinTheClockSkewIsDelivered(t *testing.T) {
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	stop := startEngine(t, opts)
+	ahead := writeKillSwitch(t, opts.operatorDir, "joint", time.Now().Add(operatorClockSkew-time.Minute).Truncate(time.Second), true)
+	feed := newBoostFeed(t, opts.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 1)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if inputs := operatorInputs(recoverFile(t, opts.logPath).Entries); len(inputs) != 1 || inputs[0].ID != ahead.ID {
+		t.Errorf("the log holds operator inputs %+v, want %s", inputs, ahead.ID)
+	}
+	if _, err := os.Stat(filepath.Join(opts.operatorDir, ahead.FileName()+deliveredSuffix)); err != nil {
+		t.Errorf("no delivered marker: %v", err)
+	}
+	if note, err := os.ReadFile(filepath.Join(opts.operatorDir, ahead.FileName()+refusedSuffix)); err == nil {
+		t.Errorf("refused within the clock skew: %q", note)
+	}
+}
+
+// TestAClearanceStatingAFutureTimeIsRefused: the future-time refusal holds
+// for every operator record, not the kill switch alone: a clearance stating
+// a time later than now, beyond the clock skew allowed, is never delivered,
+// and is noted (ADR 0019, amendment of 2026-10-17, "operator instructions
+// count in the order of the times they state").
+func TestAClearanceStatingAFutureTimeIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	stop := startEngine(t, opts)
+	future, err := operator.RebalanceCleared(event.RebalanceClearedPayload{
+		AccountID: "joint", AsOf: time.Now().Add(time.Hour).Truncate(time.Second), DecisionID: "targets:test",
+		ClientOrderIDs: []string{"order-1"}, Operator: "owner", Detail: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opts.operatorDir, future.FileName()), future.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feed := newBoostFeed(t, opts.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 1)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if inputs := operatorInputs(recoverFile(t, opts.logPath).Entries); len(inputs) != 0 {
+		t.Errorf("the log holds operator inputs %+v, want none", inputs)
+	}
+	note, err := os.ReadFile(filepath.Join(opts.operatorDir, future.FileName()+refusedSuffix))
+	if err != nil || !strings.Contains(string(note), "later than now") {
+		t.Errorf("note %q (%v), want it to say the time is later than now", note, err)
+	}
+}
+
 // TestARefusedRecordIsSettledUnderItsFileName: a record kept under a name
 // other than the one the operator tool gives it is refused once, its note
 // beside the file itself, whether it is refused before delivery or

@@ -538,3 +538,36 @@ here so that all eleven are in one place.
     `account.broker.snapshot` carries the observed side that
     `account.reconciliation` also needs; #227 folds one into the other or
     references it.
+
+## Amendment (2026-10-17, proposed; the owner is asked to confirm): operator instructions count in the order of the times they state
+
+This amendment adds one rule to the kill-switch readings above (readings 2
+and 7). The engine applies it now. **The owner is asked to confirm it**;
+until he does, it is the engine's proposed reading, not an owner decision.
+
+The owner records each instruction (an `operator.kill-switch`, or an
+`operator.rebalance.cleared` for an IRA) with the operator tool. The tool
+stamps the instruction with the time the owner gives with `-at`, or the time
+the tool ran. The engine delivers it before the adapter's next input.
+Because `-at` can state an earlier time than the one the instruction was
+written at, arrival order and stated order can differ. The rule:
+
+1. **Instructions count in the order of the times they state**, not the
+   order they arrive in. The engine delivers the instructions waiting in its
+   inbox in the order of their stated times.
+2. **A backdated instruction is journalled and refused.** A kill switch
+   stating a time earlier than the newest kill switch already applied for
+   its account is recorded in the durable log and refused, with no effect,
+   naming the later one. A stale `released` therefore never undoes a later
+   `engaged`, and the log still shows it was tried. One stating the same
+   time is applied, the later recorded winning.
+3. **An instruction stating a time more than five minutes ahead of the
+   engine's clock is refused before delivery.** It is never journalled: it
+   would put every instruction stating the true time before it. Five minutes
+   is the difference allowed between the tool's clock and the engine's; an
+   instruction within it is delivered. This holds for every operator
+   instruction, kill switch or clearance.
+
+Rule 2 changes what the gate decides from a journalled input, so it is a
+rules change under ADR 0016: target-weight RulesVersion 1.10.0. The owner's
+manual states the rule in [the operator chapter](../manual/operator.md).

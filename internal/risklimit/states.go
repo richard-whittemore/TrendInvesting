@@ -72,11 +72,13 @@ func (g *Gate) checkSale(o Order, f event.RiskFigures) Outcome {
 // sale it allows is still attempted once. It changes no engine state (ADR
 // 0026, point 3; owner decision 2026-10-16).
 //
-// The owner's instructions are ordered by the time they state, not the
-// order they arrive in, since the operator may backdate one: a kill switch
-// stating a time earlier than the one last applied is refused, naming it,
-// so a stale instruction never undoes a later one (ADR 0026, point 3). One
-// stating the same time is applied, the later recorded winning.
+// The owner's instructions count in the order of the times they state, not
+// the order they arrive in, since the operator may backdate one: a kill
+// switch stating a time earlier than the one last applied is refused,
+// naming it, so a stale instruction never undoes a later one (ADR 0019,
+// amendment of 2026-10-17, "operator instructions count in the order of the
+// times they state"). One stating the same time is applied, the later
+// recorded winning.
 func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)

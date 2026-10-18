@@ -26,8 +26,8 @@ const refusedSuffix = ".refused"
 // once its input is flushed to the durable log.
 const deliveredSuffix = ".delivered"
 
-// operatorClockSkew is how far after the engine's clock a kill switch may
-// state its time: the operator tool and the engine may run on machines
+// operatorClockSkew is how far after the engine's clock an operator record
+// may state its time: the operator tool and the engine may run on machines
 // whose clocks differ by this much. A later time is a mistyped -at.
 const operatorClockSkew = 5 * time.Minute
 
@@ -49,16 +49,18 @@ const operatorClockSkew = 5 * time.Minute
 // no delivered marker (deliveredSuffix) beside it, which is written once its
 // input is flushed to the log, so a log later moved out of the directory
 // (quarantined, or a run started with -log elsewhere) cannot cause a second
-// delivery. The owner's instructions are ordered by the time they state: a
-// kill switch stating a time earlier than the newest one the gate applied
-// for its account is refused by the gate (risklimit.Gate.SetKillSwitch), so
-// a stale instruction never undoes a later one, and its refusal is
-// journalled. A kill switch stating a time later than the engine's clock,
-// beyond operatorClockSkew, would order every truthful instruction before
-// it, so it is never delivered.
+// delivery. The owner's instructions count in the order of the times they
+// state (ADR 0019, amendment of 2026-10-17, "operator instructions count in
+// the order of the times they state"): a kill switch stating a time earlier
+// than the newest one the gate applied for its account is refused by the
+// gate (risklimit.Gate.SetKillSwitch), so a stale instruction never undoes a
+// later one, and its refusal is journalled. A record of either kind, kill
+// switch or clearance, stating a time later than the engine's clock, beyond
+// operatorClockSkew, would order every truthful instruction before it, so
+// it is never delivered.
 //
-// A record the engine cannot read, or that states a time in the future, is
-// never delivered; one the run refuses is journalled as delivered with no
+// A record the engine cannot read, or that states a time more than
+// operatorClockSkew ahead of the engine's clock, is never delivered; one the run refuses is journalled as delivered with no
 // effect. Each is noted beside it in the inbox (refusedSuffix) and on the
 // engine's output, and never delivered again. A record whose input the
 // recorder did not take (a failed write or flush, which ends the log, ADR
@@ -203,9 +205,9 @@ func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, inpu
 			return next, nil
 		default:
 		}
-		if now := time.Now(); r.Type == event.KillSwitchEventType && r.At.After(now.Add(operatorClockSkew)) {
-			b.refuse(r.name, fmt.Errorf("operator: kill switch %s states %s, later than now (%s) by more than the %s the clocks may differ; it would order every instruction stating the true time before it, so it is never delivered: record it again with the current time",
-				r.ID, r.At.Format(time.RFC3339), now.UTC().Format(time.RFC3339), operatorClockSkew))
+		if now := time.Now(); r.At.After(now.Add(operatorClockSkew)) {
+			b.refuse(r.name, fmt.Errorf("operator: %s %s states %s, later than now (%s) by more than the %s the clocks may differ; it would order every instruction stating the true time before it, so it is never delivered: record it again with the current time",
+				r.Type, r.ID, r.At.Format(time.RFC3339), now.UTC().Format(time.RFC3339), operatorClockSkew))
 			continue
 		}
 		after, failed := b.apply(ctx, engine, r, next)
