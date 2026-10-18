@@ -118,7 +118,7 @@ func TestHandlerRefusesAVersion5Configuration(t *testing.T) {
 // run reads operator.rebalance.cleared and ends a rebalance in progress (ADR
 // 0026, point 5), so the build must not claim a version a journal written
 // without that rule carries. 1.7.0 and 1.8.0 are taken by other rule
-// changes, so this one is 1.9.0.
+// changes landing in parallel, so this one is 1.9.0.
 func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
 	t.Parallel()
 

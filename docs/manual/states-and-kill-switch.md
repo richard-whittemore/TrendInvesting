@@ -328,8 +328,9 @@ refused, because working sells could not be checked.
 
 The thresholds are in the configuration. They were introduced in version 5 of
 `strategy.target-weight.configuration`, carried unchanged in the current version 6,
-and read by rules version 1.6.0 and later (a journal written under an earlier rules version
-will not replay). Only the margin account has them: an
+and read from rules version 1.5.0 on. This build (rules version 1.9.0) reads
+only configuration version 6, so a journal written under an earlier rules
+version will not replay. Only the margin account has them: an
 IRA has no margin cushion, so its configuration leaves them out and it gets no
 alarm. A change of level is recorded as
 `risk.margin.alarm`. Turning urgent fires the sale back to 98%.

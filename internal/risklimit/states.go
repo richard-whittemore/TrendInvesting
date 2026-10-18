@@ -71,6 +71,12 @@ func (g *Gate) checkSale(o Order, f event.RiskFigures) Outcome {
 // ID id. An engagement while already engaged is the same engagement, so the
 // sale it allows is still attempted once. It changes no engine state (ADR
 // 0026, point 3; owner decision 2026-10-16).
+//
+// The owner's instructions are ordered by the time they state, not the
+// order they arrive in, since the operator may backdate one: a kill switch
+// stating a time earlier than the one last applied is refused, naming it,
+// so a stale instruction never undoes a later one (ADR 0026, point 3). One
+// stating the same time is applied, the later recorded winning.
 func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
@@ -81,6 +87,11 @@ func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 	if p.AccountID != g.accountID {
 		return fmt.Errorf("risklimit: kill switch for account %q; this gate is %q", p.AccountID, g.accountID)
 	}
+	if g.lastKillSet && p.AsOf.Before(g.lastKillAt) {
+		return fmt.Errorf("risklimit: kill switch %s states %s, earlier than %s, already applied for account %s at %s; the owner's instructions are ordered by the time they state, so this one would undo a later one: record it again with the current time if it is still meant",
+			id, p.AsOf.UTC().Format(time.RFC3339), g.lastKill, p.AccountID, g.lastKillAt.UTC().Format(time.RFC3339))
+	}
+	g.lastKill, g.lastKillAt, g.lastKillSet = id, p.AsOf, true
 	switch {
 	case p.Engaged && !g.killEngaged:
 		g.killEngaged, g.killID = true, id

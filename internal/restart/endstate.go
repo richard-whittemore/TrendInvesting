@@ -30,9 +30,10 @@ type EndState struct {
 	SaleAttempted     bool
 	SaleClientOrderID string
 	// KillSwitchEngaged is whether the log's last operator.kill-switch the
-	// gate accepted, one for the log's own account that validates, engaged
-	// it; a kill switch for another account was refused and changed nothing
-	// (risklimit.Gate.SetKillSwitch). A fresh run starts with it released,
+	// gate accepted, one for the log's own account that validates and states
+	// no time before the last accepted, engaged it; a kill switch for another
+	// account, or backdated before one accepted, was refused and changed
+	// nothing (risklimit.Gate.SetKillSwitch). A fresh run starts with it released,
 	// so the operator engages it again.
 	KillSwitchEngaged bool
 }
@@ -53,6 +54,7 @@ func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState,
 	if end.SaleAttempted, end.SaleClientOrderID, err = saleAttemptAtEnd(entries, end.IncidentID, logName); err != nil {
 		return EndState{}, err
 	}
+	var lastKillAt time.Time
 	for _, entry := range entries {
 		env := entry.Envelope
 		if entry.Kind != journal.KindInput || env.Type != event.KillSwitchEventType {
@@ -62,8 +64,10 @@ func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState,
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			return EndState{}, fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
 		}
-		if p.AccountID == accountID && p.Validate() == nil {
-			end.KillSwitchEngaged = p.Engaged
+		// The gate refuses one stating a time before the last it applied
+		// (risklimit.Gate.SetKillSwitch).
+		if p.AccountID == accountID && p.Validate() == nil && !p.AsOf.Before(lastKillAt) {
+			end.KillSwitchEngaged, lastKillAt = p.Engaged, p.AsOf
 		}
 	}
 	return end, nil

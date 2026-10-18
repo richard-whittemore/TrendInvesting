@@ -44,9 +44,13 @@ import (
 //     (configuration schema version 6) and refuses version 5, and withholds
 //     a decision session whose ranked members sent neither their bars nor
 //     their histories, so a journal written under 1.5.0 does not replay.
+//   - 1.7.0 and 1.8.0 are taken by other rule changes landing in parallel
+//     with 1.9.0, so neither is defined here.
 //   - 1.9.0 reads the owner's operator.rebalance.cleared in a momentum run,
-//     which ends a rebalance in progress (ADR 0026, point 5), so a journal
-//     written under an earlier version does not replay.
+//     which ends a rebalance in progress (ADR 0026, point 5), and its gate
+//     refuses a kill switch stating a time earlier than the last one it
+//     applied (risklimit.Gate.SetKillSwitch), so a journal written under an
+//     earlier version does not replay.
 const RulesVersion = "1.9.0"
 
 // source names this handler on every envelope it emits.

@@ -54,12 +54,14 @@ type ProtocolError struct {
 	// CausationID echoes the request envelope's id whenever the server could
 	// read it, so the adapter can tell which bar was rejected.
 	CausationID string `json:"causation_id,omitempty"`
-	// Sequence, when set, is the sequence the engine recorded the request
-	// at, which differs from the one the request carried because the engine
-	// recorded inputs of its own before it (a Decider's *SequencedError).
-	// The request's refusal was recorded there, so the adapter's next input
-	// carries Sequence + 1. Zero means the request was recorded at its own
-	// sequence, or not at all.
+	// Sequence, when set, is the last sequence the engine recorded in this
+	// exchange, set because the engine recorded inputs of its own before the
+	// request (a Decider's *SequencedError): the request's own, where its
+	// refusal was recorded, or, when the request was not recorded, the last
+	// of the engine's own inputs; the message says which. Either way the
+	// adapter's next input carries Sequence + 1. Zero means the engine
+	// recorded no input of its own first: the request was recorded at its
+	// own sequence, or not at all.
 	Sequence uint64 `json:"sequence,omitempty"`
 }
 
@@ -67,10 +69,11 @@ func (e *ProtocolError) Error() string {
 	return "transport: " + e.Code + ": " + e.Message
 }
 
-// SequencedError is a Decider's error for a request it recorded at
-// Sequence rather than at the sequence the request carried; the server
-// states Sequence in the reply's ProtocolError, so the adapter can continue
-// from it without reading the message.
+// SequencedError is a Decider's error for an exchange in which it recorded
+// inputs of its own before the request: Sequence is the last sequence it
+// recorded, the request's own or, the request not recorded, its own last.
+// The server states Sequence in the reply's ProtocolError, so the adapter
+// can continue from it without reading the message.
 type SequencedError struct {
 	Sequence uint64
 	Err      error

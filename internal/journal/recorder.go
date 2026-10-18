@@ -106,6 +106,10 @@ type Recorder struct {
 	// failed is set once a durable Recorder cannot keep its log in step with
 	// its handler, and refuses every later input.
 	failed error
+	// committed is the sequence of the last input whose group was taken,
+	// and hasCommitted whether there is one (LastCommitted).
+	committed    uint64
+	hasCommitted bool
 }
 
 // NewRecorder returns a Recorder wrapping handler, which is required, holding
@@ -222,14 +226,27 @@ func (r *Recorder) record(input event.Envelope, group []Entry) error {
 		r.expected = nil
 	}
 	r.entries = append(r.entries, group...)
-	if r.log == nil {
-		return nil
+	if r.log != nil {
+		if err := r.log.Append(group); err != nil {
+			r.failed = err
+			return &DurabilityError{Input: input.ID, Err: err}
+		}
 	}
-	if err := r.log.Append(group); err != nil {
-		r.failed = err
-		return &DurabilityError{Input: input.ID, Err: err}
-	}
+	r.committed, r.hasCommitted = input.Sequence, true
 	return nil
+}
+
+// LastCommitted returns the sequence of the last input this Recorder took
+// whole: its group held for the journal and, for a durable Recorder, made
+// durable in the log (ADR 0027). ok is false until an input is taken.
+//
+// An input the wrapped handler refused is taken, its refusal recorded as an
+// input with the decisions it caused; one the Recorder refused of its own
+// (the record bound, the emission ceiling, a failed write or a divergence
+// while resuming) is not. It is how a caller tells the two apart, since
+// either way Apply returns an error.
+func (r *Recorder) LastCommitted() (sequence uint64, ok bool) {
+	return r.committed, r.hasCommitted
 }
 
 // Entries returns everything recorded, in recording order.

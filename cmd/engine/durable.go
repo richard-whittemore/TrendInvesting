@@ -40,6 +40,11 @@ func createLogFile(path string) (*os.File, error) {
 // a file cannot be made to fail a write partway through a run.
 var durableLogSink = func(file *os.File) journal.SyncWriter { return file }
 
+// durableRecordLimit is how many records a run with -log holds before its
+// recorder refuses more (ADR 0017). It is the seam a test reaches the record
+// bound through, since a run of the bound's size is too long for a test.
+var durableRecordLimit = journal.DefaultMaxRecords
+
 // recoverLogFile reads a previous process's durable log. It never opens the
 // file for writing: the log stays the evidence it is, torn tail included.
 // A log whose content cannot be recovered (ADR 0027 §5) is reported as an

@@ -124,7 +124,9 @@ type wireGuard struct {
 // same hold (operatorInbox), and input is recorded after them; decide
 // returns their decisions before input's, and input as recorded. A record
 // that could not be delivered poisons g and stops the run with its error,
-// and input is not applied.
+// and input is not applied; when records before it were delivered, the
+// error states the last sequence they were recorded at
+// (transport.SequencedError).
 func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input event.Envelope, inbox *operatorInbox) (decisions []event.Envelope, recorded event.Envelope, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -135,14 +137,25 @@ func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input eve
 	defer g.wg.Done()
 
 	if inbox != nil {
+		var sequence uint64
 		var failed error
-		if decisions, input.Sequence, failed = inbox.deliver(ctx, engine, input); failed != nil {
+		if decisions, sequence, failed = inbox.deliver(ctx, engine, input); failed != nil {
 			g.poisoned, g.stopped = failed, failed
 			if g.stop != nil {
 				g.stop(failed)
 			}
-			return nil, input, failed
+			if sequence == input.Sequence {
+				return nil, input, failed
+			}
+			// Records before the failed one were journalled: the reply
+			// states the last sequence recorded, theirs, and that input
+			// was not recorded (transport.ProtocolError.Sequence).
+			return nil, input, &transport.SequencedError{
+				Sequence: sequence - 1,
+				Err:      fmt.Errorf("%w (operator inputs were recorded through sequence %d, so %s was not recorded)", failed, sequence-1, input.ID),
+			}
 		}
+		input.Sequence = sequence
 	}
 	own, err := engine.Apply(ctx, input)
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -297,9 +310,11 @@ func newDecider(guard *wireGuard, engine *replay.Engine, strategyVersion, config
 			// decisionErrorCode maps any non-nil error here to
 			// CodeDeciderFailed, absent a deadline of its own). Nothing is
 			// fabricated in its place. When operator inputs were recorded
-			// first, the error states where the input itself was recorded,
-			// in the reply's Sequence (transport.SequencedError), so the
-			// adapter continues from it (the wire contract, engine.go).
+			// first, the error states the last sequence recorded, in the
+			// reply's Sequence (transport.SequencedError): where the input
+			// itself was recorded, or, the input not recorded, the last
+			// operator input's (decide), so the adapter continues from it
+			// (the wire contract, engine.go).
 			if recorded.Sequence != input.Sequence {
 				return event.Envelope{}, &transport.SequencedError{
 					Sequence: recorded.Sequence,

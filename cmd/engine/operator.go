@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +26,11 @@ const refusedSuffix = ".refused"
 // once its input is flushed to the durable log.
 const deliveredSuffix = ".delivered"
 
+// operatorClockSkew is how far after the engine's clock a kill switch may
+// state its time: the operator tool and the engine may run on machines
+// whose clocks differ by this much. A later time is a mistyped -at.
+const operatorClockSkew = 5 * time.Minute
+
 // operatorInbox is the folder of -operator, where the operator tool records
 // the owner's kill switch and rebalance clearances (internal/operator).
 // Before each adapter input, under the wire guard's lock, every record not
@@ -45,19 +49,26 @@ const deliveredSuffix = ".delivered"
 // input is flushed to the log, so a log later moved out of the directory
 // (quarantined, or a run started with -log elsewhere) cannot cause a second
 // delivery. The owner's instructions are ordered by the time they state: a
-// kill switch stating a time no later than the newest kill switch already
-// journalled for its account is refused, so a stale instruction never
-// undoes a later one.
+// kill switch stating a time earlier than the newest one the gate applied
+// for its account is refused by the gate (risklimit.Gate.SetKillSwitch), so
+// a stale instruction never undoes a later one, and its refusal is
+// journalled. A kill switch stating a time later than the engine's clock,
+// beyond operatorClockSkew, would order every truthful instruction before
+// it, so it is never delivered.
 //
-// A record the engine cannot read is never delivered; one the run refuses
-// is journalled as delivered with no effect. Each is noted beside it in the
-// inbox (refusedSuffix) and on the engine's output, and never delivered
-// again. A record whose input could not be made durable was not delivered:
-// it gets no note, and the run stops (ADR 0027 §3: a failed write or flush
-// ends the log), so the next start delivers it.
+// A record the engine cannot read, or that states a time in the future, is
+// never delivered; one the run refuses is journalled as delivered with no
+// effect. Each is noted beside it in the inbox (refusedSuffix) and on the
+// engine's output, and never delivered again. A record whose input the
+// recorder did not take (a failed write or flush, which ends the log, ADR
+// 0027 §3, or the recorder's record bound or emission ceiling, ADR 0017)
+// was not delivered: it gets no note, and the run stops, so the next start
+// delivers it.
 //
 // Each record is read once: what was decoded, and which names are settled,
-// is kept, so an adapter input re-reads only the inbox's listing.
+// is kept, so an adapter input re-reads only the inbox's listing. Every
+// note and marker is written beside the file the record was read from,
+// whatever its name.
 type operatorInbox struct {
 	dir string
 	// delivered holds the IDs journalled in a readable log or in this run.
@@ -67,9 +78,9 @@ type operatorInbox struct {
 	settled map[string]bool
 	// decoded holds the records read but not yet delivered, by file name.
 	decoded map[string]operator.Record
-	// latestKillSwitch is the newest kill switch journalled for each
-	// account, by the time it states.
-	latestKillSwitch  map[string]operator.Record
+	// recorder is the run's recorder, which says whether a record's input
+	// was appended to the log (journal.Recorder.LastCommitted).
+	recorder          *journal.Recorder
 	out               io.Writer
 	strategyVersion   string
 	configurationHash string
@@ -77,7 +88,7 @@ type operatorInbox struct {
 
 // openOperatorInbox checks -operator names a directory and gathers the IDs
 // of the operator inputs every log in the directory of -log records, so none
-// is delivered twice, and the newest kill switch each records.
+// is delivered twice.
 func openOperatorInbox(opts options, comp composition, out io.Writer) (*operatorInbox, error) {
 	info, err := os.Stat(opts.operatorDir)
 	if err != nil {
@@ -92,40 +103,30 @@ func openOperatorInbox(opts options, comp composition, out io.Writer) (*operator
 	}
 	inbox := &operatorInbox{
 		dir: opts.operatorDir, delivered: map[string]bool{}, settled: map[string]bool{},
-		decoded: map[string]operator.Record{}, latestKillSwitch: map[string]operator.Record{}, out: out,
+		decoded: map[string]operator.Record{}, out: out,
 		strategyVersion: comp.strategyVersion, configurationHash: comp.configurationHash,
 	}
 	for _, recovery := range recovered {
 		for _, entry := range recovery.Entries {
-			env := entry.Envelope
-			if entry.Kind != journal.KindInput || env.Source != operator.Source {
-				continue
-			}
-			inbox.delivered[env.ID] = true
-			if env.Type != event.KillSwitchEventType {
-				continue
-			}
-			var p event.KillSwitchPayload
-			if json.Unmarshal(env.Payload, &p) == nil {
-				inbox.journalledKillSwitch(operator.Record{ID: env.ID, Type: env.Type, At: env.EventTime, AccountID: p.AccountID})
+			if env := entry.Envelope; entry.Kind == journal.KindInput && env.Source == operator.Source {
+				inbox.delivered[env.ID] = true
 			}
 		}
 	}
 	return inbox, nil
 }
 
-// journalledKillSwitch keeps r as its account's newest kill switch when it
-// states a later time than the one kept.
-func (b *operatorInbox) journalledKillSwitch(r operator.Record) {
-	if latest, ok := b.latestKillSwitch[r.AccountID]; !ok || r.At.After(latest.At) {
-		b.latestKillSwitch[r.AccountID] = r
-	}
+// inboxRecord is a record and the name of the file it was read from, which
+// need not be the name the operator tool gives it (operator.Record.FileName).
+type inboxRecord struct {
+	name string
+	operator.Record
 }
 
 // pending returns the records not yet delivered, in file-name order,
 // noting each file that cannot be read as a record. A record the logs
 // already hold is marked delivered, so it is never read again.
-func (b *operatorInbox) pending() []operator.Record {
+func (b *operatorInbox) pending() []inboxRecord {
 	entries, err := os.ReadDir(b.dir)
 	if err != nil {
 		b.report("engine: list the operator inbox %s: %v; its records wait for the next input", b.dir, err)
@@ -144,7 +145,7 @@ func (b *operatorInbox) pending() []operator.Record {
 		}
 	}
 	sort.Strings(names)
-	var records []operator.Record
+	var records []inboxRecord
 	for _, name := range names {
 		if b.settled[name] {
 			continue
@@ -168,7 +169,7 @@ func (b *operatorInbox) pending() []operator.Record {
 			b.markDelivered(name, "it is journalled in an earlier log of the -log directory")
 			continue
 		}
-		records = append(records, r)
+		records = append(records, inboxRecord{name: name, Record: r})
 	}
 	return records
 }
@@ -199,10 +200,9 @@ func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, inpu
 			return decisions, next, nil
 		default:
 		}
-		name := r.FileName()
-		if latest, ok := b.latestKillSwitch[r.AccountID]; ok && r.Type == event.KillSwitchEventType && !r.At.After(latest.At) {
-			b.refuse(name, fmt.Errorf("operator: kill switch %s states %s, no later than %s, already journalled for account %s; the owner's instructions are ordered by the time they state, so this one would undo a later one: record it again with the current time if it is still meant",
-				r.ID, r.At.Format(time.RFC3339), latest.ID, r.AccountID))
+		if now := time.Now(); r.Type == event.KillSwitchEventType && r.At.After(now.Add(operatorClockSkew)) {
+			b.refuse(r.name, fmt.Errorf("operator: kill switch %s states %s, later than now (%s) by more than the %s the clocks may differ; it would order every instruction stating the true time before it, so it is never delivered: record it again with the current time",
+				r.ID, r.At.Format(time.RFC3339), now.UTC().Format(time.RFC3339), operatorClockSkew))
 			continue
 		}
 		out, after, failed := b.apply(ctx, engine, r, next)
@@ -215,22 +215,25 @@ func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, inpu
 }
 
 // apply delivers r at sequence next, returning its decisions and the
-// sequence after it. A refusal of r's own, journalled, is noted beside it;
-// any other error, where r's input was not journalled and made durable,
-// is returned as failed and leaves r pending.
-func (b *operatorInbox) apply(ctx context.Context, engine *replay.Engine, r operator.Record, next uint64) (decisions []event.Envelope, after uint64, failed error) {
-	name := r.FileName()
+// sequence after it. Whether r was delivered is the recorder's to say, not
+// the error's: the replay engine moves past next on any error, and the
+// recorder refuses an input of its own (its record bound, its emission
+// ceiling, a failed write) without appending it (ADR 0027). An input the
+// recorder took was journalled, and a refusal of it, by the handler, is
+// noted beside r; one it did not take is returned as failed and leaves r
+// pending.
+func (b *operatorInbox) apply(ctx context.Context, engine *replay.Engine, r inboxRecord, next uint64) (decisions []event.Envelope, after uint64, failed error) {
+	name := r.name
 	out, err := engine.Apply(ctx, r.Envelope(next, b.strategyVersion, b.configurationHash))
-	after, _ = engine.Next()
-	var durability *journal.DurabilityError
-	if err != nil && (after != next+1 || errors.As(err, &durability) || ctx.Err() != nil) {
-		return nil, next, fmt.Errorf("engine: operator record %s was not delivered, so it stays in the inbox and is delivered when the run is resumed: %w", name, err)
+	if committed, ok := b.recorder.LastCommitted(); !ok || committed != next {
+		if err == nil {
+			err = errors.New("the recorder did not take it")
+		}
+		return nil, next, fmt.Errorf("engine: operator record %s was not delivered, so it stays in the inbox and is delivered at the next start: %w", name, err)
 	}
+	after = next + 1
 	b.delivered[r.ID] = true
 	b.report("engine: recorded operator input %s at sequence %d", r.ID, after-1)
-	if r.Type == event.KillSwitchEventType {
-		b.journalledKillSwitch(r)
-	}
 	b.markDelivered(name, fmt.Sprintf("it is journalled at sequence %d", after-1))
 	if err != nil {
 		b.refuse(name, err)

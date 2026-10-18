@@ -36,6 +36,14 @@ func otherKillSwitchEntry(t *testing.T, id, account string, engaged bool) journa
 	})
 }
 
+// backdatedKillSwitchEntry is a kill switch for the log's account stating a
+// time before killSwitchEntry's.
+func backdatedKillSwitchEntry(t *testing.T, id string, engaged bool) journal.Entry {
+	return recorded(t, journal.KindInput, id, event.KillSwitchEventType, event.KillSwitchSchemaVersion, event.KillSwitchPayload{
+		AccountID: "joint", AsOf: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC), Engaged: engaged, Operator: "owner", Detail: "x",
+	})
+}
+
 // incidentSale is a planned sale back to 98% under the incident's tag.
 func incidentSale(t *testing.T, tag string) journal.Entry {
 	return recorded(t, journal.KindDecision, "order-planned:sale", event.OrderPlannedEventType, event.OrderPlannedSafetyVersion, event.OrderPlannedPayload{
@@ -77,6 +85,7 @@ func TestReadEndStateFindsWhatAFreshRunMustBeToldOf(t *testing.T) {
 		{"switch turned off again", []journal.Entry{killSwitchEntry(t, "k1", true), killSwitchEntry(t, "k2", false)}, restart.EndState{}},
 		{"another account's release, which the gate refused", []journal.Entry{killSwitchEntry(t, "k1", true), otherKillSwitchEntry(t, "k2", "ira", false)}, restart.EndState{KillSwitchEngaged: true}},
 		{"an engagement the gate refused", []journal.Entry{otherKillSwitchEntry(t, "k1", "ira", true)}, restart.EndState{}},
+		{"a backdated release, which the gate refused", []journal.Entry{killSwitchEntry(t, "k1", true), backdatedKillSwitchEntry(t, "k2", false)}, restart.EndState{KillSwitchEngaged: true}},
 		{"degraded, no sale", []journal.Entry{degraded}, restart.EndState{IncidentID: incidentID, State: event.EngineStateDegraded, Scope: []string{"SPY"}}},
 		{"halted, sale sent", []journal.Entry{halted, incidentSale(t, incidentID)},
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-1"}},

@@ -66,31 +66,41 @@ starting a run with its log in another folder, does not replay old
 instructions. Leave the markers in place.
 
 Your instructions count in the order of the times they state. A kill-switch
-file stating a time no later than the newest kill switch already recorded
-for its account is refused (with a `.refused` note naming the later one),
-so an old or backdated `released` never undoes a later `engaged`. To change
-the switch, record it again with the current time.
+file stating a time earlier than the newest kill switch the engine has
+applied for its account is recorded in the log and refused, with no effect
+(and a `.refused` note naming the later one), so an old or backdated
+`released` never undoes a later `engaged`, and the log still shows it was
+tried. To change the switch, record it again with the current time.
+
+A kill switch stating a time more than five minutes after the engine's own
+clock (a slip in `-at`) is never recorded: it would put every instruction
+stating the true time before it. The engine refuses it with a `.refused`
+note; record it again with the current time.
 
 A file the engine cannot read (hand-edited, damaged, or holding more than
 one record) is never used.
-One the engine refuses (for another account, or a clearance that does not
-match) is recorded with no effect. In both cases the engine writes a note
-beside the file, ending `.refused`, saying why, prints the same on its
-output (`journalctl -u ti-engine@<account>`), and never tries that file
-again.
+One the engine refuses (for another account, backdated before a later kill
+switch, or a clearance that does not match) is recorded with no effect. In
+every case the engine writes a note beside the file, under the file's own
+name, ending `.refused`, saying why, prints the same on its output
+(`journalctl -u ti-engine@<account>`), and never tries that file again.
 
 If the engine cannot write an instruction to the durable log (a disk fault
-while it is being flushed), it was not recorded: the engine writes no note,
-stops the run with the error on its output, and leaves the file as it was.
-Resume the run (see [restart](restart.md)) and the engine records it before
-the adapter's first input, so a kill switch is never lost to a disk fault.
+while it is being flushed, or a log that has reached the most records a run
+holds), it was not recorded: the engine writes no note, stops the run with
+the error on its output, and leaves the file as it was. Resume the run, or
+after a full log start a fresh one (see [restart](restart.md)), and the
+engine records it before the adapter's first input, so a kill switch is
+never lost to a disk fault or a full log.
 
 The adapter (not built yet) follows the engine's numbering: the decisions
 the engine sends back carry the number of the last input it recorded, and
 the adapter's next input carries the number after it. When the engine
 records your instructions first and then refuses the adapter's input, the
 refusal carries that number too, in its `sequence` field, and the adapter
-continues from it. After a crash resume the engine prints `the adapter's
+continues from it. When one of your instructions could not be recorded, the
+refusal's `sequence` is the number of the last instruction that was, says
+the adapter's input was not recorded, and the run stops. After a crash resume the engine prints `the adapter's
 next input carries sequence N`; a resume that also records an approval
 prints the number once, on the approval's line.
 
@@ -214,8 +224,10 @@ reports ([journal-query](journal-query.md)).
 | What happens | What the system does | What you do |
 | --- | --- | --- |
 | You run the tool as yourself or as root, not `ti-trader` | Refused, nothing written: the engine could not read the file | Run it again with `sudo -u ti-trader` |
-| A kill switch backdated with `-at` before one already recorded | Refused, with a `.refused` note naming the later one | Record it again with the current time |
+| A kill switch backdated with `-at` before one already applied | Recorded with no effect, with a `.refused` note naming the later one | Record it again with the current time |
+| A kill switch with `-at` more than five minutes in the future | Never recorded; a `.refused` note says so | Record it again with the current time |
 | The disk fails while the engine records an instruction | No note; the run stops with the error; the file waits | Resume the run; the instruction is recorded first |
+| The log is full (the most records a run holds) when an instruction arrives | No note; the run stops with the error; the file waits | Start a fresh run; the instruction is recorded first |
 | You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
 | A typing slip in `-state`, or a missing `-by` or `-detail` | Refused, nothing written | Run it again |
 | Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |

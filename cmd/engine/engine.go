@@ -35,7 +35,9 @@
 // Sequence + 1; without operator instructions that is the adapter's own
 // Sequence + 1, as before. When operator instructions were recorded and the
 // adapter's input is then refused, the refusal (transport.ProtocolError)
-// states the sequence the input was recorded at in its Sequence, and the
+// states in its Sequence the last sequence recorded: the input's own, where
+// its refusal was recorded, or, when an instruction could not be recorded
+// and the run stops, the last instruction's, the input not recorded. The
 // adapter's next input carries that Sequence + 1. A resume reports the
 // sequence the adapter's next input carries, once (with an approval, on the
 // approval's line).
@@ -261,7 +263,10 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("engine: %w", err)
 		}
-		recorder = journal.NewDurableRecorder(reducer, log, journal.DefaultMaxRecords)
+		recorder = journal.NewDurableRecorder(reducer, log, durableRecordLimit)
+	}
+	if inbox != nil {
+		inbox.recorder = recorder
 	}
 
 	// wireEngine is the ONE replay.Engine this run ever constructs, wrapping
