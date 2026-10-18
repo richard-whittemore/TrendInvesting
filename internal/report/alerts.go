@@ -70,10 +70,10 @@ type Alert struct {
 //     is a new incident too.
 //   - A run of consecutive withheld decisions with one reason is one
 //     incident; a decided outcome ends it. Reasons that name absent inputs
-//     (missing bars, stale snapshot, missing universe) and a refusal for a
-//     missing mark are missing data; every other withheld reason is a
-//     withheld decision, routine except all-unaffordable, which may rest
-//     on a bad valuation and is urgent.
+//     (missing bars, stale snapshot, missing universe, missing close
+//     histories) and a refusal for a missing mark are missing data; every
+//     other withheld reason is a withheld decision, routine except
+//     all-unaffordable, which may rest on a bad valuation and is urgent.
 func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	account, _, err := AccountOf(envelopes)
 	if err != nil {
@@ -165,7 +165,7 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload, start time.Time) Alert {
 	kind, severity := KindWithheld, Routine
 	switch p.WithheldReason {
-	case event.WithheldMissingBars, event.WithheldStaleAccountSnapshot, event.WithheldMissingUniverse:
+	case event.WithheldMissingBars, event.WithheldStaleAccountSnapshot, event.WithheldMissingUniverse, event.WithheldHistoriesMissing:
 		kind, severity = KindMissingData, Urgent
 	case event.WithheldAllUnaffordable:
 		// The valuation itself may be wrong (a bad net liquidation or bad

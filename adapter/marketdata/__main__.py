@@ -1,4 +1,4 @@
-"""python3 -m marketdata {universe|bars|backfill|actions|sectors|encode} --out DIR [--asof YYYY-MM-DD]
+"""python3 -m marketdata {universe|bars|backfill|actions|sectors|encode|retract} --out DIR [--asof YYYY-MM-DD]
     [--instruments SPY,IEF,SHY] [--sessions N] [--lookback-days N] [--settle-minutes N]
 
 --asof defaults to today's New York date. A session is refused (exit 1,
@@ -8,10 +8,14 @@ Exit status 1 with a message on stderr when data is missing (nothing is
 written), for the caller to alert on. The Massive key comes from
 MASSIVE_API_KEY, --secrets-file, or the Mac Keychain, and is never printed;
 ``sectors`` needs no key, and ``encode`` reads only the recordings in DIR,
-never the network, and writes the engines' input stream to --stream."""
+never the network, and writes the engines' input stream to --stream.
+``retract --session D --reason TEXT`` records that the exchange cancelled
+the session D (no key, no network); the encoder then writes it as a
+market.session.retracted."""
 import argparse
 import datetime as dt
 import logging
+import shlex
 import sys
 
 from . import encode, history, massive, nyse_calendar, sectors, steps
@@ -19,7 +23,7 @@ from . import encode, history, massive, nyse_calendar, sectors, steps
 
 def parse(argv, now=steps._now):
     ap = argparse.ArgumentParser(prog="marketdata")
-    ap.add_argument("what", choices=("universe", "bars", "backfill", "actions", "sectors", "encode"))
+    ap.add_argument("what", choices=("universe", "bars", "backfill", "actions", "sectors", "encode", "retract"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--asof", type=dt.date.fromisoformat, default=None)
     ap.add_argument("--instruments", default="SPY,IEF,SHY")
@@ -29,9 +33,14 @@ def parse(argv, now=steps._now):
     ap.add_argument("--settle-minutes", type=int, default=int(steps.SETTLE.total_seconds() // 60),
                     help="minutes after the close before a session may be recorded")
     ap.add_argument("--first", type=dt.date.fromisoformat, help="encode: first session written")
+    ap.add_argument("--session", type=dt.date.fromisoformat, help="retract: the session the exchange cancelled")
+    ap.add_argument("--reason", default="", help="retract: why, for the record")
     ap.add_argument("--base", type=dt.date.fromisoformat, help="encode: adjusted views' base (default --first)")
     ap.add_argument("--optional", default="", help="encode: instruments written where they traded")
-    ap.add_argument("--universe-members", action="store_true", help="encode: also every type-CS ticker with a bar")
+    ap.add_argument("--universe-members", action="store_true", help="encode: also every universe reference ticker with a bar")
+    ap.add_argument("--ranker", help="encode: the compact stream's ranker command, for example "
+                                     "'bin/universe-rank -config momentum.json': no member bars, and a close "
+                                     "history for each member it ranks at a decision session")
     ap.add_argument("--configuration-hash", help="encode: the engine's configuration hash")
     ap.add_argument("--strategy-version", help="encode: the engine's strategy version")
     ap.add_argument("--run-id", help="encode: the run's correlation id")
@@ -62,12 +71,18 @@ def main(argv):
                 encode.Identity(args.configuration_hash, args.strategy_version, args.run_id),
                 required=split(args.instruments), optional=split(args.optional),
                 universe_members=args.universe_members, base=args.base, first_sequence=args.first_sequence,
-                engine=args.engine, excluded=excluded)
+                engine=args.engine, excluded=excluded,
+                ranker=encode.go_ranker(shlex.split(args.ranker)) if args.ranker else None)
             for ticker in sorted(excluded):
                 for run in excluded[ticker]:
                     print("marketdata: excluded {} from {} to {} ({} sessions): {}".format(
                         ticker, run.first, run.last, run.sessions, run.reason), file=sys.stderr)
             print(encode.write_stream(args.stream, envelopes))
+            return 0
+        if args.what == "retract":
+            if not args.session:
+                raise ValueError("retract needs --session")
+            print(encode.record_retraction(args.out, args.session, args.reason))
             return 0
         if args.what == "sectors":
             day = args.asof

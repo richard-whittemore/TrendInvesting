@@ -22,6 +22,7 @@ func validMomentumConfiguration() event.TargetWeightConfigurationPayload {
 			InverseVolatility: true, Invested: 0.98, TrendInstrument: "SPY", TrendCloses: 200,
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "massive", SectorSources: []string{"ishares-iwv-gics", "nasdaq-screener"},
+			UniverseInput: event.UniverseInputCompact,
 		},
 		Glide:     synthGlide(),
 		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
@@ -117,6 +118,8 @@ func TestMomentumConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "risk-off fraction", v, func(p *P) { p.Momentum.RiskOffFraction = 1.5 }, "risk-off fraction")
 	expectInvalid(t, "band", v, func(p *P) { p.Momentum.RebalanceBand = 0 }, "rebalance band")
 	expectInvalid(t, "universe source", v, func(p *P) { p.Momentum.UniverseSource = "" }, "universe source")
+	expectInvalid(t, "no universe input", v, func(p *P) { p.Momentum.UniverseInput = "" }, "universe input")
+	expectInvalid(t, "unknown universe input", v, func(p *P) { p.Momentum.UniverseInput = "both" }, "universe input")
 	expectInvalid(t, "no sector sources", v, func(p *P) { p.Momentum.SectorSources = nil }, "sector sources")
 	expectInvalid(t, "repeated sector source", v, func(p *P) { p.Momentum.SectorSources = []string{"a", "a"} }, "repeated")
 	expectInvalid(t, "cash rule", v, func(p *P) { p.Execution.CashRule = "borrowed" }, "cash rule")
@@ -137,6 +140,11 @@ func TestMomentumConfigurationValidate(t *testing.T) {
 	b := validTargetWeightConfiguration()
 	expectInvalid(t, "boost with momentum", b, func(p *P) { p.Momentum.TopN = 25 }, "no momentum or execution")
 	expectInvalid(t, "boost with execution", b, func(p *P) { p.Execution.CashRule = event.CashRuleTotal }, "no momentum or execution")
+	bars := v
+	bars.Momentum.UniverseInput = event.UniverseInputBars
+	if err := bars.Validate(); err != nil {
+		t.Errorf("the bars universe input is valid: %v", err)
+	}
 	total := v
 	total.Execution.CashRule = event.CashRuleTotal
 	if err := total.Validate(); err != nil {
@@ -154,6 +162,7 @@ func TestMomentumConfigurationHashCoversItsSections(t *testing.T) {
 		"cash rule":      func(p *P) { p.Execution.CashRule = event.CashRuleTotal },
 		"fees":           func(p *P) { p.Execution.MaxFeesPerOrder = 2 },
 		"universe":       func(p *P) { p.Momentum.UniverseSource = "ibkr" },
+		"universe input": func(p *P) { p.Momentum.UniverseInput = event.UniverseInputBars },
 	} {
 		p := validMomentumConfiguration()
 		mutate(&p)
@@ -383,5 +392,16 @@ func TestALifecycleReportDescribesAnOrderAsReleased(t *testing.T) {
 		if p.Describes(o) {
 			t.Errorf("%s: %+v describes %+v", name, p, o)
 		}
+	}
+}
+
+// TestTargetWeightConfigurationSchemaVersionDeclaresTheUniverseInput pins
+// the version that adds Momentum's UniverseInput: version 5 is the
+// margin-cushion thresholds and MaxSnapshotAge, so the universe input is
+// version 6, a new hash (ADR 0016) that a reader of version 5 refuses (ADR
+// 0015).
+func TestTargetWeightConfigurationSchemaVersionDeclaresTheUniverseInput(t *testing.T) {
+	if event.TargetWeightConfigurationSchemaVersion != 6 {
+		t.Fatalf("TargetWeightConfigurationSchemaVersion = %d, want 6 (version 6 adds the universe input)", event.TargetWeightConfigurationSchemaVersion)
 	}
 }
