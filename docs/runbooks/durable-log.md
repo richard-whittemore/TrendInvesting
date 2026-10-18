@@ -68,7 +68,12 @@ The engine reads its settings from
    log, and the adapter carries on with the batch it had written down. Do
    not run the data job's warm-up for the new name, and keep the crashed
    run's log (and the first run's, if this is a resume of a resume) where
-   it is (docs/manual/market-data.md, "A crash resume").
+   it is (docs/manual/market-data.md, "A crash resume"). One exception: a
+   first run that crashed having committed only its configuration has
+   nothing to keep, and both stop ("nothing shows it is that run's crash
+   resume"), since its resume cannot be told from a second start of it;
+   start a fresh run with its approval instead ("Start a fresh run after
+   an earlier one", below, and market-data.md, "A crash resume").
 3. A refusal naming another build or configuration means this is not a
    crash restart: follow "Upgrading the build" or start a fresh run. A
    refusal naming a later log means the log you named is not the crashed

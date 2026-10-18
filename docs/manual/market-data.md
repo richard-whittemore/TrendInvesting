@@ -444,25 +444,56 @@ after an earlier one (with your approval) is a new run with its own
 identity: it never takes the earlier run's folder, and needs its own
 warm-up.
 
+Only the logs of folders in `streams/boost/` are read, and each one first
+by its first records alone (its configuration and, for a fresh run, its
+approval: the run's identity). A log whose first records name another run
+is read no further. A log whose first records cannot be read (one an older
+build wrote, or one damaged after its run ended) names no run: it is
+skipped, and the data job prints a `ti-data warning:` line (the adapter
+logs a warning) naming its folder, so an old folder never stops a later
+run. Once that run has ended, move its folder and its log out of
+`streams/boost/` together, and keep them. A log whose first records name
+this run is read whole: if it cannot be read, both stop, naming it ("names
+this run in its first records but cannot be read"); restore it from the
+backup as the engine wrote it.
+
 A run is taken for a resume of the run whose folder it finds only when its
-log begins with a whole copy of that run's committed inputs, as `-resume`
-writes it. Otherwise both stop, naming both logs ("no whole copy of that
-run's committed inputs"), and nothing is written or sent:
+log begins with that run's records, copied exactly: `-resume` writes the
+crashed run's records into the new log one for one under the same header,
+so each keeps its `record_hash`, and the earlier log's committed records
+are the first records of the new one, hash for hash, in the same order (the
+resumed run's own records follow). That run must also have committed more
+than its configuration: the hash chain cannot tell a resume of a run that
+committed only its configuration from a second start of the same run,
+whose configuration record is the same, byte for byte. Otherwise both stop,
+naming both logs ("nothing shows it is that run's crash resume"), the
+message names the three cases below with the remedy for each, and nothing
+is written or sent:
 
 - **the engine's first run started again without an approval** (same
   `run.env`, same configuration and as-of time): it has the first run's
-  identity but none of its inputs, and is never handed the first run's
-  folder, record of files sent and stream without its own warm-up. Start it
-  as a fresh run, with its approval and its warm-up ([paper
-  trading](paper-trading.md), "Never start the engine's first run again
-  without an approval");
+  identity but not its records, and is never handed the first run's
+  folder, record of files sent and stream without its own warm-up. Stop
+  it, and start it as a fresh run, with its approval and its warm-up
+  ([paper trading](paper-trading.md), "Never start the engine's first run
+  again without an approval");
 - **a first run that crashed having committed nothing but its
   configuration**: nothing in the two logs tells its resume from a second
-  start, so it is not taken for either; start a fresh run with its
-  approval;
-- **a copy still being written** (the data job ran while `-resume` was
-  copying): run the job again once the engine is listening. The adapter
-  reads the log only then, so it never meets one.
+  start, so it is not taken for either. Nothing of it needs keeping: start
+  a fresh run with its approval and its own warm-up;
+- **a log that is not a copy of that run's records**: one that repeats the
+  run's input IDs with other content, say, or a copy the engine is still
+  writing (the data job ran while `-resume` was copying). It is not that
+  run's resume: resume the crashed run's own log with `engine -resume`, or,
+  if the engine was still copying, run the job again once it is listening.
+  The check is against the first run of a chain of resumes, the one whose
+  folder it is: a copy still being written is refused until it holds all
+  of that run's records, and taken from then on, even while a later
+  resume's records are still being copied behind them. That does no harm:
+  the data job only learns which folder to write into, and writes market
+  data under the first run's name, whatever the rest of the copy holds; the
+  adapter reads the log only once the engine listens, when the copy is
+  whole.
 
 **What you see.** Each run prints the build it is (`ti-data <commit>`), then
 the path of the file it wrote, or of the file that already held the session;
@@ -741,10 +772,19 @@ which writes the sessions again from its recordings, and start the adapter
   folders, and sends nothing. Move the folder that should not
   be there out of `streams/boost/`, keep it, and start the adapter again.
 - **A run that only shares the identity of the run whose folder it finds**
-  ("no whole copy of that run's committed inputs": the engine's first run
-  started again without an approval, say: "A crash resume", above): the
-  adapter refuses to start, naming both logs, and sends nothing. Start a
-  fresh run with its approval and its own warm-up.
+  ("nothing shows it is that run's crash resume": the engine's first run
+  started again without an approval, a resume of a first run that committed
+  only its configuration, or a log that is not a copy of that run's
+  records: "A crash resume", above): the adapter refuses to start, naming
+  both logs, and sends nothing. For the first two, start a fresh run with
+  its approval and its own warm-up; for the third, resume the crashed run's
+  own log with `engine -resume`.
+- **A log beside a stream folder that cannot be read**: one whose first
+  records cannot be read is skipped with a warning naming its folder (move
+  the folder and its log out of `streams/boost/` once its run has ended);
+  one whose first records name this run but whose later records cannot be
+  read stops the adapter ("names this run in its first records but cannot
+  be read"): restore that log from the backup as the engine wrote it.
 
 ## What can go wrong, and what the step does
 

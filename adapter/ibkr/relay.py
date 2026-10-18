@@ -271,8 +271,9 @@ SettledOrders = namedtuple("SettledOrders", ("ended", "fills"))
 CommittedInput = namedtuple("CommittedInput", ("id", "event_type", "schema_version", "sequence", "payload"))
 EngineLog = namedtuple("EngineLog", ("configuration_hash", "strategy_version", "inputs", "next_sequence"))
 # The durable log as _committed_groups reads it: the header, each committed
-# group, and the record hash of the last commit (None when there is none).
-CommittedLog = namedtuple("CommittedLog", ("header", "groups", "final_hash"))
+# group, the record hash of the last commit (None when there is none), and
+# every committed record's hash in log order (its hash chain).
+CommittedLog = namedtuple("CommittedLog", ("header", "groups", "final_hash", "record_hashes"))
 
 
 class EngineUnavailable(Exception):
@@ -1220,7 +1221,7 @@ def run_identity(path):
     second is taken for a resume of the first and is asked for the first
     one's waiting input; nothing in the two logs tells them apart by
     identity (delivering market data, delivery.stream_run stops such a
-    start: its log holds no copy of the first run's inputs). Never
+    start: its log does not begin with the first run's record hash chain). Never
     start a first run again without an approval (docs/manual/paper-trading.md,
     "Starting the adapter"): a crashed first run is resumed, and any other
     restart is a fresh run with its approval. Read as journalled_reports
@@ -1228,7 +1229,11 @@ def run_identity(path):
     closed (ResolveRefused): a log with no committed input names no run,
     and is never read as any run's.
     """
-    groups = _committed_groups(path).groups
+    return _identity(path, _committed_groups(path).groups)
+
+
+def _identity(path, groups):
+    """run_identity of the log at path from its committed groups (all of them, or its first two: head_identity)."""
     for group in groups:
         _, kind, envelope = group[0]
         if kind == LOG_INPUT and envelope["type"] == RUN_APPROVED:
@@ -1239,6 +1244,51 @@ def run_identity(path):
                              "engine now running".format(path))
     first = groups[0][0][2]
     return "{}@{}".format(first["id"], first["recorded_at"])
+
+
+def head_identity(path):
+    """The run identity the first records of the durable log at path name, read no further than its second commit.
+
+    A run's identity is in its log's first two committed inputs: the
+    configuration, and a fresh run's Run approval, which cmd/engine records
+    as its second input before it listens (a resume copies both first), so
+    this is run_identity's answer for every log the engine writes, read
+    without the rest of the log. It sorts the logs beside a run's by
+    identity without reading any other run's log whole: only the first
+    lines' shape is checked, so a log the head names as the run's is then
+    read strictly (run_identity, _committed_groups). Fail closed
+    (ResolveRefused): first lines that cannot be read as the engine writes
+    them name no run.
+    """
+    groups, group = [], []
+    try:
+        with open(path, "rb") as f:
+            lines = iter(f)
+            first = next(lines, b"")
+            if not first.endswith(b"\n"):
+                raise _unreadable(path, 1, "it has no complete header line")
+            header = _log_json(path, 1, first)
+            if not isinstance(header, dict) or header.get("log_version") != LOG_VERSION:
+                raise _unreadable(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
+            for n, raw in enumerate(lines, 2):
+                if len(groups) == 2 or not raw.endswith(b"\n"):
+                    break
+                line = _log_json(path, n, raw)
+                record = line.get("record") if isinstance(line, dict) and len(line) == 1 else None
+                envelope = record.get("envelope") if isinstance(record, dict) else None
+                if (isinstance(envelope, dict) and record.get("kind") in (LOG_INPUT, LOG_DECISION)
+                        and all(_is_text(envelope.get(k)) for k in ("id", "type", "recorded_at"))):
+                    group.append((n, record["kind"], record["envelope"]))
+                elif isinstance(line, dict) and len(line) == 1 and "commit" in line and group:
+                    groups.append(group)
+                    group = []
+                else:
+                    raise _unreadable(path, n, "it is not a record or commit as the engine writes one")
+    except OSError as err:
+        raise ResolveRefused("cannot read the engine's durable log {}: {}".format(path, err)) from None
+    if groups and groups[0][0][1] != LOG_INPUT:
+        raise _unreadable(path, groups[0][0][0], "a group is one input followed by its decisions")
+    return _identity(path, groups)
 
 
 def earlier_run(pending, engine_log_path):
@@ -1599,7 +1649,7 @@ def read_engine_log(path):
     that cannot be read as the engine writes it raises ResolveRefused, never
     read as holding no inputs.
     """
-    header, groups, _ = _committed_groups(path)
+    header, groups = _committed_groups(path)[:2]
     inputs = []
     for group in groups:
         envelope = group[0][2]
@@ -1636,6 +1686,8 @@ def _committed_groups(path):
         raise _unreadable(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
     groups = []
     group = []
+    hashes = []
+    pending = []
     sequence = 0
     last_hash = None
     final_hash = None
@@ -1656,15 +1708,17 @@ def _committed_groups(path):
             _check_envelope(path, n, raw, record)
             sequence, last_hash = record["sequence"], record["record_hash"]
             group.append((n, record["kind"], record["envelope"]))
+            pending.append(last_hash)
             continue
         commit = line["commit"]
         if (not isinstance(commit, dict) or tuple(sorted(commit)) != LOG_COMMIT_FIELDS or not group
                 or commit["sequence"] != sequence or commit["record_hash"] != last_hash):
             raise _unreadable(path, n, "it is not the commit of the group before it")
         groups.append(group)
-        group = []
+        hashes.extend(pending)
+        group, pending = [], []
         final_hash = last_hash
-    return CommittedLog(header, groups, final_hash)
+    return CommittedLog(header, groups, final_hash, tuple(hashes))
 
 
 def _unreadable(path, n, why):

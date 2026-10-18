@@ -11,7 +11,9 @@ snapshot reaches the engine first and the session closes after its bars
 envelope is sent; every other field goes as written. Synthetic figures
 only; nothing here reaches IBKR.
 """
+import contextlib
 import hashlib
+import io
 import json
 import sys
 import tempfile
@@ -695,14 +697,14 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.types(), [])
         self.assertEqual(self.records(), [(RUN, "dropped"), ("run-b", "queued")])
 
-    def test_a_log_beside_a_stream_folder_that_cannot_be_read_stops_the_start(self):
-        log, _ = self.crash_resume()
+    def test_a_log_beside_another_stream_folder_that_cannot_be_read_is_skipped_with_a_warning(self):
         (self.streams / "run-x").mkdir()
         Path(self.dir.name, "run-x.log").write_text("not a durable log\n")
-        loop = self.loop(engine_log=log)
-        with self.assertRaises(StreamRefused) as caught:
+        loop = self.loop()
+        with self.assertLogs("ibkr", level="WARNING") as logs:
             loop.start()
-        self.assertIn("run-x.log", str(caught.exception))
+        self.assertEqual(loop.delivery.run, RUN)
+        self.assertIn(str(self.streams / "run-x"), "\n".join(logs.output))
 
     def test_two_stream_folders_of_one_run_stop_the_start(self):
         log, _ = self.crash_resume()
@@ -1355,6 +1357,65 @@ class StreamFolderRuleTests(unittest.TestCase):
         fresh = self.engine("run-b")
         approve(fresh, str(self.root / "run-a.log"))
         self.assertEqual(self.found(fresh), ("run-b", "run-b"))
+
+    def test_a_start_repeating_the_runs_input_ids_with_other_records_is_refused(self):
+        self.first_run()
+        again = self.engine("run-b")
+        commit(again, "input-a", payload={"input": "another payload"})
+        self.assertEqual(self.found(again), ("refused", "refused"))
+
+    def test_a_resume_of_an_approved_run_that_crashed_after_its_approval_keeps_its_folder(self):
+        first = self.engine("run-a")
+        approve(first, str(self.engine("run-0").path))
+        self.folder("run-a")
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        self.assertEqual(self.found(resumed), ("run-a", "run-a"))
+
+    def test_an_unreadable_log_of_another_runs_folder_is_skipped_with_a_warning(self):
+        self.folder("run-old")
+        (self.root / "run-old.log").write_text("written by another build\n")
+        other = LoggedEngine(str(self.root / "run-older.log"), configuration=self.cfg,
+                             started_at="2026-10-15T13:30:00Z")
+        commit(other, "input-x")
+        with open(other.path, "a", encoding="utf-8") as f:
+            f.write("a damaged tail\n")
+        self.folder("run-older")
+        fresh = self.first_run(approved=True)
+        with self.assertLogs("ibkr", level="WARNING") as logs, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.found(fresh), ("run-a", "run-a"))
+        self.assertEqual(len(logs.output), 1, logs.output)
+        self.assertIn(str(self.streams / "run-old"), logs.output[0])
+        self.assertIn(str(self.streams / "run-old"), err.getvalue())
+        self.assertNotIn("run-older", logs.output[0] + err.getvalue(),
+                         "a log whose first records name another run is never read further")
+
+    def test_a_logs_head_names_the_identity_its_whole_log_does(self):
+        from marketdata import tidata
+        from relay import ResolveRefused, head_identity, run_identity
+        plain = self.first_run()
+        approved = self.engine("run-b")
+        approve(approved, str(plain.path))
+        commit(approved, "input-b")
+        for engine in (plain, approved):
+            with self.subTest(log=engine.path.name):
+                log = str(engine.path)
+                self.assertEqual(head_identity(log), run_identity(log))
+                self.assertEqual(tidata.head_identity(log), tidata.read_engine_log(log).identity)
+        for text in ("", '{"log_version":1}', '{"log_version":1}\n', '{"log_version":1}\n{"commit":{}}\n'):
+            with self.subTest(log=text):
+                Path(self.root, "bad.log").write_text(text)
+                with self.assertRaises(ResolveRefused):
+                    head_identity(str(self.root / "bad.log"))
+                with self.assertRaises(tidata.Refused):
+                    tidata.head_identity(str(self.root / "bad.log"))
+
+    def test_an_unreadable_log_whose_first_records_name_the_run_is_refused(self):
+        first = self.first_run()
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        commit(resumed, "input-c")
+        with open(first.path, "a", encoding="utf-8") as f:
+            f.write("a damaged tail\n")
+        self.assertEqual(self.found(resumed), ("refused", "refused"))
 
 
 if __name__ == "__main__":
