@@ -14,6 +14,12 @@ prints, and what happens when something goes wrong.
 - [alerts-and-dashboard](alerts-and-dashboard.md): the reporter that sends
   alerts and a daily summary to your phone and PagerDuty, and the read-only
   dashboard; what each alert means and what counts as delivered.
+- [market-data](market-data.md): fetching, recording and encoding the
+  market data the engines read, including the compact universe stream and
+  cancelled sessions.
+- [momentum-universe](momentum-universe.md): how the IRAs' momentum engine
+  sees the market: one universe snapshot a session, price histories for the
+  500 it ranks, and what happens when the exchange cancels a session.
 - [momentum-minimum-lot](momentum-minimum-lot.md): how the IRAs buy whole
   shares only: a stock one share of which costs more than its target is
   skipped for the next-ranked one, what happens when nothing is affordable,
