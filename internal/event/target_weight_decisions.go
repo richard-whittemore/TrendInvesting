@@ -535,6 +535,26 @@ func (p OrderPlannedPayload) ValidateSchema(schemaVersion uint32) error {
 	return p.Validate()
 }
 
+// OrderPlannedVersions, OrderReleasedVersions and OrderRefusedVersions
+// return every schema version of each record this build reads: 1 to the
+// latest, since each version reads every earlier one's fields. Every reader
+// of the log reads by these lists, so none falls behind the version the
+// planner or the gate writes (ADR 0015). Each call returns a new slice.
+func OrderPlannedVersions() []uint32 {
+	return []uint32{OrderPlannedSchemaVersion, OrderPlannedSafetyVersion}
+}
+
+// OrderReleasedVersions: see OrderPlannedVersions. Version 1 checked the
+// order's own instrument's exposure, and is read as it was written.
+func OrderReleasedVersions() []uint32 {
+	return []uint32{1, OrderReleasedSchemaVersion, OrderReleasedSafetyVersion}
+}
+
+// OrderRefusedVersions: see OrderPlannedVersions.
+func OrderRefusedVersions() []uint32 {
+	return []uint32{1, OrderRefusedSchemaVersion, OrderRefusedSafetyVersion}
+}
+
 // checkSafetyVersion refuses a schema version outside 1 to latest, and one
 // below need, the earliest version that holds the payload.
 func checkSafetyVersion(eventType string, schemaVersion, need, latest uint32) error {

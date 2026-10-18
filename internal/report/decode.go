@@ -45,11 +45,14 @@ func read(e event.Envelope, versions []uint32, into interface{ Validate() error 
 	if err := json.Unmarshal(e.Payload, into); err != nil {
 		return fmt.Errorf("report: decode %s %q: %w", e.Type, e.ID, err)
 	}
-	err := into.Validate()
-	if state, ok := into.(*event.EngineStatePayload); ok {
-		err = state.ValidateSchema(e.SchemaVersion)
+	// A payload whose fields depend on its version is checked against the
+	// version it was recorded at, so a record carrying a later version's
+	// field is refused (ADR 0015).
+	validate := into.Validate
+	if v, ok := into.(interface{ ValidateSchema(uint32) error }); ok {
+		validate = func() error { return v.ValidateSchema(e.SchemaVersion) }
 	}
-	if err != nil {
+	if err := validate(); err != nil {
 		return fmt.Errorf("report: %s %q: %w", e.Type, e.ID, err)
 	}
 	return nil
@@ -66,9 +69,18 @@ var (
 	fillVersions        = []uint32{event.FillSchemaVersion}
 	engineStateVersions = []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}
 	decidedVersions     = []uint32{event.TargetsDecidedSchemaVersion}
-	plannedVersions     = []uint32{event.OrderPlannedSchemaVersion}
-	releasedVersions    = []uint32{event.OrderReleasedSchemaVersion}
-	refusedVersions     = []uint32{event.OrderRefusedSchemaVersion}
+	// The order records are read at every version the event package holds,
+	// by the list every reader of the log shares.
+	plannedVersions  = event.OrderPlannedVersions()
+	releasedVersions = event.OrderReleasedVersions()
+	refusedVersions  = event.OrderRefusedVersions()
+	// A target-weight account's orders are limit orders, reported at
+	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
+	lifecycleVersions = []uint32{event.OrderLifecycleLimitVersion}
+	// syntheticVersions: a dry-run engine's own report, a decision, never
+	// the venue's input (event.LimitOrderLifecycleVersions).
+	syntheticVersions        = []uint32{event.OrderLifecycleSyntheticVersion}
+	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }

@@ -57,6 +57,11 @@ The engine reads its settings from
 2. `sudo systemctl start ti-engine@<account>`, then
    `journalctl -u ti-engine@<account> -n 20`. Expect `resumed N record(s)`,
    and possibly a torn tail of one input, which the adapter sends again.
+   The adapter then asks again for the reply to the input it was waiting
+   on, and the engine serves the reply it recorded before the crash,
+   unchanged; an order in it is sent once (docs/manual/redelivery.md; ADR
+   0027, amendment "re-delivery on request"). Run the reporter: an "order …
+   not acknowledged" alert names any order still unaccounted for.
 3. A refusal naming another build or configuration means this is not a
    crash restart: follow "Upgrading the build" or start a fresh run. A
    refusal naming a later log means the log you named is not the crashed

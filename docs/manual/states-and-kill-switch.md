@@ -321,7 +321,7 @@ refused, because working sells could not be checked.
 
 The thresholds are in the configuration. They were introduced in version 5 of
 `strategy.target-weight.configuration`, carried unchanged in the current version 6,
-and read by rules version 1.7.0 (a journal written under an earlier rules version
+and read by rules version 1.6.0 and later (a journal written under an earlier rules version
 will not replay). Only the margin account has them: an
 IRA has no margin cushion, so its configuration leaves them out and it gets no
 alarm. A change of level is recorded as
@@ -340,7 +340,8 @@ IBKR snapshot, so the journal shows why its mark, band and size were not
 checked. A planned sale is version 2 of `strategy.order.planned`.
 Releases and refusals with broker figures or one of the new reasons are
 version 3 of `risk.order.released` and `risk.order.refused` (version 2 is the
-account-wide exposure and the IRA's cash check). The tool reads every version. See [journal-query](journal-query.md).
+account-wide exposure and the IRA's cash check). The tool, the reporter and
+the dashboard read every version. See [journal-query](journal-query.md).
 
 ## What can go wrong
 

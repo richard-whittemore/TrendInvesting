@@ -3,6 +3,7 @@ package event
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -163,6 +164,16 @@ const OrderLifecycleLimitVersion uint32 = 2
 // and holds only a synthetic report: a venue's report stays version 2.
 const OrderLifecycleSyntheticVersion uint32 = 3
 
+// LimitOrderLifecycleVersions returns the versions a target-weight limit
+// order's state change is recorded at: a venue's report (2) and a dry-run
+// engine's synthetic one (3). Every reader that shows the log reads by this
+// list, so none falls behind the version a writer records (ADR 0015). An
+// engine reading the venue's reports as inputs reads version 2 alone. Each
+// call returns a new slice.
+func LimitOrderLifecycleVersions() []uint32 {
+	return []uint32{OrderLifecycleLimitVersion, OrderLifecycleSyntheticVersion}
+}
+
 // LimitOrderLifecyclePayload records one state change of one released limit
 // order, as the venue reported it. Status is one of the OrderLifecycleStatus
 // constants except updated: a planned order is never amended. An execution is
@@ -187,6 +198,29 @@ type LimitOrderLifecyclePayload struct {
 	// Message, and is never an execution: no fill, proceeds or commission
 	// follows from it.
 	Synthetic bool `json:"synthetic,omitempty"`
+}
+
+// LimitPriceTolerance is half the cent a limit price is rounded to
+// (orderplan.LimitPrice; ADR 0026, point 2, "Order type and price"): two
+// limit prices closer than this are the same price.
+const LimitPriceTolerance = 0.005
+
+// SameLimitPrice reports whether a and b are the same limit price: within
+// LimitPriceTolerance of each other. Prices are never compared with ==
+// (.greptile/rules.md, "Numbers and money"): the venue's echo of a limit,
+// decoded from its own double, need not be bit-equal to the engine's.
+func SameLimitPrice(a, b float64) bool {
+	return math.Abs(a-b) < LimitPriceTolerance
+}
+
+// Describes reports whether p reports on the released order o as it was
+// released: the same client order ID, account, instrument, side and quantity,
+// and the same limit price (SameLimitPrice). The Boost reducer accepts a
+// report only when it does, and the reporter acknowledges an order only on
+// one, so the two read a report alike.
+func (p LimitOrderLifecyclePayload) Describes(o OrderReleasedPayload) bool {
+	return p.ClientOrderID == o.ClientOrderID && p.AccountID == o.AccountID && p.InstrumentID == o.InstrumentID &&
+		p.Side == o.Side && p.Quantity == o.Quantity && SameLimitPrice(p.LimitPrice, o.LimitPrice)
 }
 
 // Terminal reports whether the order can no longer execute: canceled or invalid.

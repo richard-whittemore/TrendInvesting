@@ -14,6 +14,12 @@ prints, and what happens when something goes wrong.
 - [alerts-and-dashboard](alerts-and-dashboard.md): the reporter that sends
   alerts and a daily summary to your phone and PagerDuty, and the read-only
   dashboard; what each alert means and what counts as delivered.
+- [redelivery](redelivery.md): how an order the engine decided reaches IBKR
+  exactly once, even when the engine or the adapter stops at the wrong
+  moment.
+- [order-lifecycle](order-lifecycle.md): reading an order's state from the
+  log (committed, released, acknowledged), and the alert for an order IBKR
+  never acknowledged.
 - [market-data](market-data.md): fetching, recording and encoding the
   market data the engines read, including the compact universe stream and
   cancelled sessions.

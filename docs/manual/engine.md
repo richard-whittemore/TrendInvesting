@@ -133,15 +133,17 @@ from the first one's log and checks the two logs are identical byte for byte.
   0019 (Degraded and Halted), 0025 (IBKR adapter), 0026 (target-weight
   strategies and the risk gate), 0027 (durable log, restart).
 - The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
-  rules version 1.7.0 (ADR 0016), so a dry-run journal written under 1.6.0
-  does not replay.
+  target-weight rules version 1.11.0 (ADR 0016), so a dry-run journal written
+  under an earlier rules version does not replay.
 - Tests of the synthetic reports, in `internal/targetweight`:
   `TestRulesVersionDeclaresTheDryRunSyntheticReports`,
   `TestADryRunRebalanceThatSellsPlansItsBuysInTheSameRun`,
   `TestOnlyADryRunRecordsSyntheticReports`,
   `TestADryRunCountsNoProceedsOrCommissionFromASyntheticReport`,
   `TestADryRunJournalReplays`; in `internal/journalquery`:
-  `TestASyntheticReportIsShownAndCountsNoFill`.
+  `TestASyntheticReportIsShownAndCountsNoFill`; in `internal/report`:
+  `TestASyntheticReportAcknowledgesNothing`; in `internal/event`:
+  `TestLimitOrderLifecycleIsReadAtBothItsVersions`.
 - Tests in `cmd/engine`: `TestADryRunEngineRunsBoostAndSendsNothing`,
   `TestTheDeclaredModeMustBeTheConfiguredMode`,
   `TestTheAccountMustMatchTheMode`,
@@ -153,5 +155,6 @@ from the first one's log and checks the two logs are identical byte for byte.
 ## Not built yet
 
 The IBKR adapter (so nothing can be sent at all yet), reconciliation against
-IBKR on every start (#394), re-delivery of released orders after a restart
-(#395), and the IRA accounts' momentum configuration.
+IBKR on every start (#394), and the IRA accounts' momentum configuration.
+Re-delivery of released orders after a restart is built: see
+[re-delivery](redelivery.md).

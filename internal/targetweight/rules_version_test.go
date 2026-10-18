@@ -100,17 +100,17 @@ func TestRulesVersionDeclaresTheDeclaredUniverseInput(t *testing.T) {
 // TestRulesVersionDeclaresTheDryRunSyntheticReports pins ADR 0016's
 // same-rules-version replay guarantee for dry-run: a dry-run momentum run
 // records a synthetic terminal report (execution.order.lifecycle version 3)
-// for each order it releases and plans its buys at the same close, where a
-// 1.6.0 build waited and withheld later months as rebalance-in-progress, so a
-// dry-run journal written under rules 1.6.0 cannot replay under this build
-// and the build must not claim 1.6.0 or earlier (ADR 0026, point 3, "Mode",
-// amended 2026-10-17).
+// for each order it releases and plans its buys at the same close, where an
+// earlier build waited and withheld later months as rebalance-in-progress, so a
+// dry-run journal written under rules 1.10.0 or earlier cannot replay under
+// this build and the build must not claim 1.10.0 or earlier (ADR 0026, point
+// 3, "Mode", amended 2026-10-17).
 func TestRulesVersionDeclaresTheDryRunSyntheticReports(t *testing.T) {
 	t.Parallel()
 
-	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"} {
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"} {
 		if targetweight.RulesVersion == earlier {
-			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.6.0 once a dry-run records synthetic terminal reports", targetweight.RulesVersion)
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.10.0 once a dry-run records synthetic terminal reports", targetweight.RulesVersion)
 		}
 	}
 }
@@ -129,4 +129,20 @@ func TestHandlerRefusesAVersion5Configuration(t *testing.T) {
 	}
 	s := &stream{hash: h.ConfigurationHash()}
 	mustRefuse(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, 5, "configuration", closeOf("2025-01-02"), cfg), "schema version 5")
+}
+
+// TestRulesVersionDeclaresTheHalfCentLimitMatch pins ADR 0016's
+// same-rules-version replay guarantee for the gate's lifecycle match: a
+// report on a released order whose limit is within half a cent of the order's
+// (event.SameLimitPrice) is read where rules 1.6.0 refused it unless the two
+// were bit-equal, so a journal holding such a report decides differently and
+// the build must not claim 1.6.0 or earlier.
+func TestRulesVersionDeclaresTheHalfCentLimitMatch(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.6.0 once the gate matches a lifecycle report's limit within half a cent", targetweight.RulesVersion)
+		}
+	}
 }

@@ -143,6 +143,7 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l2", mutated(func(p *event.LimitOrderLifecyclePayload) { p.ClientOrderID = "tw-unknown" }), "never released")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l3", mutated(func(p *event.LimitOrderLifecyclePayload) { p.Side = event.OrderSideSell }), "describes")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l4", mutated(func(p *event.LimitOrderLifecyclePayload) { p.Quantity++ }), "reports")
+	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l4b", mutated(func(p *event.LimitOrderLifecyclePayload) { p.LimitPrice = o.LimitPrice + 0.01 }), "reports")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleSchemaVersion, "l5", lifecycle, "schema version")
 	// A synthetic report is only ever the engine's own, never a venue's input.
 	synthetic := mutated(func(p *event.LimitOrderLifecyclePayload) {
@@ -150,7 +151,10 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	})
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l-synthetic", synthetic, "version 3")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion, "l-synthetic-3", synthetic, "schema version")
-	if _, err := apply(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l6", lifecycle); err != nil {
+	// The venue's echo of the limit need not be bit-equal to the engine's
+	// (.greptile/rules.md, "Numbers and money").
+	echoed := mutated(func(p *event.LimitOrderLifecyclePayload) { p.LimitPrice = o.LimitPrice + 1e-9 })
+	if _, err := apply(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l6", echoed); err != nil {
 		t.Fatal(err)
 	}
 	fill := event.TargetWeightFillPayload{
@@ -158,6 +162,9 @@ func TestMomentumVenueReportRules(t *testing.T) {
 		Quantity: o.Quantity - 1, Price: o.LimitPrice, Commission: 0.5, FilledAt: at,
 	}
 	refuse(event.FillEventType, event.FillSchemaVersion, "f0", fill, "schema version")
+	joint := fill
+	joint.AccountID = "joint"
+	refuse(event.FillEventType, event.FillTargetWeightVersion, "f-joint", joint, "this run decides")
 	over := fill
 	over.Quantity = o.Quantity + 1
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f-over", over, "past its")
