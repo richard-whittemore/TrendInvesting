@@ -2,6 +2,7 @@ package journalquery
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -42,8 +43,8 @@ func Operator(journals []Journal, f Filter) (Table, error) {
 					action += "clears incident " + p.IncidentID
 				case in != nil:
 					action += fmt.Sprintf("incident %s in force, %s", in.IncidentID, in.State)
-					if len(in.ScopeInstrumentIDs) > 0 {
-						action += " on " + strings.Join(in.ScopeInstrumentIDs, ";")
+					if scope := slices.Concat(in.ScopeInstrumentIDs, in.ScopeCashComponents); len(scope) > 0 {
+						action += " on " + strings.Join(scope, ";")
 					}
 					action += fmt.Sprintf(", sale attempted %t", *in.SaleAttempted)
 				default:

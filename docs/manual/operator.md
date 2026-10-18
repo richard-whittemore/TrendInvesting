@@ -247,6 +247,13 @@ run.log  57   2026-10-17T14:30:05Z  U1234    kill-switch        engaged         
 run.log  2    2026-10-21T13:00:00Z  U1234    run-approved       after run-1.log, latched false; no incident  owner  -
 ```
 
+An approval carrying an incident in force shows its whole scope, the
+instruments then the cash components, as in `incident engine-state:U1234:3 in
+force, degraded on SPY;total-cash, sale attempted false`, so an account
+Degraded on its cash alone reads `degraded on total-cash`. An approval an
+earlier build recorded (schema version 1, which could not state a cash scope)
+is read as it was recorded.
+
 `-account`, `-from`, `-to` and `-format csv|json` work as for the other
 reports ([journal-query](journal-query.md)).
 

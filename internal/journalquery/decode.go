@@ -122,8 +122,14 @@ func decode(j Journal) ([]item, error) {
 			err = read(env, []uint32{event.RebalanceClearedSchemaVersion}, it.cleared)
 			it.at, it.account = it.cleared.AsOf, it.cleared.AccountID
 		case event.OperatorRunApprovedEventType:
-			it.approved = new(event.OperatorRunApprovedPayload)
-			err = read(env, []uint32{event.OperatorRunApprovedSchemaVersion}, it.approved)
+			// An approval is read at the version it was recorded at, version
+			// 1 (no cash scope) included, by the rule every reader of a
+			// recorded approval applies (ADR 0015).
+			var p event.OperatorRunApprovedPayload
+			if p, err = event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion); err != nil {
+				err = fmt.Errorf("%s: %w", env.Type, err)
+			}
+			it.approved = &p
 			it.at, it.account = it.approved.ApprovedAt, it.approved.AccountID
 		case event.AccountSnapshotEventType:
 			// Version 2 (equity and cash) carries no positions and is not
