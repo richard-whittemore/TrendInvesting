@@ -109,6 +109,13 @@ never restarts it by itself; restarting is your step (`restart.md`). The
 engines are not started at boot, and the provisioner disables any engine an
 earlier version of it had set to start at boot.
 
+## Your instructions while it runs
+
+Started with `-operator <folder>`, the engine reads your kill switch and
+rebalance clearances from that folder, which `operator` writes, and records
+each in its durable log before its next input from the adapter
+([operator](operator.md)).
+
 ## What can go wrong, and what it does
 
 | What happens | What the engine does |

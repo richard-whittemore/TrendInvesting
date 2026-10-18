@@ -493,6 +493,103 @@ func TestDeciderFailureIsReportedWithoutDroppingTheSession(t *testing.T) {
 	}
 }
 
+// TestARefusalRecordedAtAnotherSequenceStatesIt: a Decider that recorded a
+// request at a later sequence than it carried, after inputs of its own,
+// says so in the reply's Sequence, so the adapter continues from it without
+// reading the message; any other refusal states none.
+func TestARefusalRecordedAtAnotherSequenceStatesIt(t *testing.T) {
+	t.Parallel()
+	failing := func(_ context.Context, bar event.Envelope) (event.Envelope, error) {
+		if bar.ID == "bar-1" {
+			return event.Envelope{}, &transport.SequencedError{Sequence: 3, Err: errors.New("refused after two inputs of the engine's own")}
+		}
+		return event.Envelope{}, errors.New("refused at its own sequence")
+	}
+	_, path := startServer(t, failing, transport.ServerConfig{})
+	client := dial(t, path, transport.ClientConfig{})
+
+	_, err := client.Decide(bounded(t), newBar(t, "bar-1", 1))
+	var protocolErr *transport.ProtocolError
+	if !errors.As(err, &protocolErr) || protocolErr.Code != transport.CodeDeciderFailed || protocolErr.Sequence != 3 {
+		t.Fatalf("err = %#v, want a decider_failed ProtocolError stating sequence 3", err)
+	}
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 4)); !errors.As(err, &protocolErr) || protocolErr.Sequence != 0 {
+		t.Fatalf("err = %#v, want a ProtocolError stating no sequence", err)
+	}
+}
+
+// TestAfterReplyRunsOnceTheReplyIsWritten: a server stopped from its
+// AfterReply hook has already written the reply that hook follows, so a
+// refusal's Sequence reaches the adapter before serving ends.
+func TestAfterReplyRunsOnceTheReplyIsWritten(t *testing.T) {
+	t.Parallel()
+	failing := func(context.Context, event.Envelope) (event.Envelope, error) {
+		return event.Envelope{}, &transport.SequencedError{Sequence: 3, Err: errors.New("refused; the engine stops")}
+	}
+	ctx, stop := context.WithCancel(t.Context())
+	defer stop()
+	path := socketPath(t)
+	server, err := transport.Listen(path, failing, transport.ServerConfig{AfterReply: stop})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeContext(ctx) }()
+	client := dial(t, path, transport.ClientConfig{})
+
+	_, err = client.Decide(bounded(t), newBar(t, "bar-1", 1))
+	var protocolErr *transport.ProtocolError
+	if !errors.As(err, &protocolErr) || protocolErr.Sequence != 3 {
+		t.Fatalf("err = %#v, want the refusal stating sequence 3", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(testTimeout):
+		t.Fatal("serving did not end after the hook stopped it")
+	}
+}
+
+// TestAfterReplyRunsWhenTheReplyCannotBeWritten: a client gone before its
+// reply is written still has the hook run, so a server stopped from it
+// stops serving.
+func TestAfterReplyRunsWhenTheReplyCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	reached, closed := make(chan struct{}), make(chan struct{})
+	gated := func(context.Context, event.Envelope) (event.Envelope, error) {
+		close(reached)
+		<-closed
+		return event.Envelope{}, errors.New("refused; the engine stops")
+	}
+	ctx, stop := context.WithCancel(t.Context())
+	defer stop()
+	path := socketPath(t)
+	server, err := transport.Listen(path, gated, transport.ServerConfig{AfterReply: stop})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeContext(ctx) }()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	frame, err := json.Marshal(newBar(t, "bar-1", 1))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := conn.Write(append(frame, '\n')); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	<-reached
+	_ = conn.Close()
+	close(closed)
+	select {
+	case <-served:
+	case <-time.After(testTimeout):
+		t.Fatal("serving did not end after a reply that could not be written")
+	}
+}
+
 func readResponse(t *testing.T, conn net.Conn) transport.Response {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(testTimeout)); err != nil {

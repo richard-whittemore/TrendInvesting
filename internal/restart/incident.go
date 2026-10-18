@@ -22,46 +22,9 @@ import (
 // (event.IncidentInForce); a log that ended Normal has none to clear and
 // none to carry in force. logName names the approved log in a refusal.
 func CheckIncidentInForce(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
-	state, scope, cash, incident := "", []string(nil), []string(nil), ""
-	widen := func(to, ids []string) []string {
-		for _, id := range ids {
-			if !slices.Contains(to, id) {
-				to = append(to, id)
-			}
-		}
-		return to
-	}
-	fold := func(id, next string, ids, cashIDs []string) {
-		if incident == "" {
-			incident = id
-		}
-		if next == event.EngineStateHalted || state == event.EngineStateHalted {
-			state, scope, cash = event.EngineStateHalted, nil, nil
-			return
-		}
-		state, scope, cash = event.EngineStateDegraded, widen(scope, ids), widen(cash, cashIDs)
-	}
-	for _, entry := range entries {
-		env := entry.Envelope
-		switch {
-		case entry.Kind == journal.KindInput && env.Type == event.OperatorRunApprovedEventType:
-			// The approved log's own approval: the incident it carried in
-			// force was restored without a strategy.engine.state decision,
-			// so it is the state the log starts in.
-			inherited, err := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion)
-			if err != nil {
-				return fmt.Errorf("engine: %s in %s: %w", env.ID, logName, err)
-			}
-			if in := inherited.IncidentInForce; in != nil {
-				fold(in.IncidentID, in.State, in.ScopeInstrumentIDs, in.ScopeCashComponents)
-			}
-		case entry.Kind == journal.KindDecision && env.Type == event.EngineStateEventType:
-			var p event.EngineStatePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				return fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
-			}
-			fold(env.ID, p.State, p.ScopeInstrumentIDs, p.ScopeCashComponents)
-		}
+	incident, state, scope, cash, err := incidentAtEnd(entries, logName)
+	if err != nil {
+		return err
 	}
 	in := approval.IncidentInForce
 	switch {
@@ -95,4 +58,52 @@ func CheckIncidentInForce(entries []journal.Entry, approval event.OperatorRunApp
 		}
 	}
 	return nil
+}
+
+// incidentAtEnd folds the incident the approved log ends in, as
+// CheckIncidentInForce describes: its ID, its state and its scope of
+// instruments and cash components, or nothing when the log ended Normal.
+func incidentAtEnd(entries []journal.Entry, logName string) (incident, state string, scope, cash []string, err error) {
+	widen := func(to, ids []string) []string {
+		for _, id := range ids {
+			if !slices.Contains(to, id) {
+				to = append(to, id)
+			}
+		}
+		return to
+	}
+	fold := func(id, next string, ids, cashIDs []string) {
+		if incident == "" {
+			incident = id
+		}
+		if next == event.EngineStateHalted || state == event.EngineStateHalted {
+			state, scope, cash = event.EngineStateHalted, nil, nil
+			return
+		}
+		state, scope, cash = event.EngineStateDegraded, widen(scope, ids), widen(cash, cashIDs)
+	}
+	for _, entry := range entries {
+		env := entry.Envelope
+		switch {
+		case entry.Kind == journal.KindInput && env.Type == event.OperatorRunApprovedEventType:
+			// The approved log's own approval: the incident it carried in
+			// force was restored without a strategy.engine.state decision,
+			// so it is the state the log starts in. It is read at the
+			// schema version it was recorded at (ADR 0015).
+			inherited, err := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion)
+			if err != nil {
+				return "", "", nil, nil, fmt.Errorf("engine: %s in %s: %w", env.ID, logName, err)
+			}
+			if in := inherited.IncidentInForce; in != nil {
+				fold(in.IncidentID, in.State, in.ScopeInstrumentIDs, in.ScopeCashComponents)
+			}
+		case entry.Kind == journal.KindDecision && env.Type == event.EngineStateEventType:
+			var p event.EngineStatePayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				return "", "", nil, nil, fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+			}
+			fold(env.ID, p.State, p.ScopeInstrumentIDs, p.ScopeCashComponents)
+		}
+	}
+	return incident, state, scope, cash, nil
 }

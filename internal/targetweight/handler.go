@@ -45,6 +45,8 @@ import (
 //     (configuration schema version 6) and refuses version 5, and withholds
 //     a decision session whose ranked members sent neither their bars nor
 //     their histories, so a journal written under 1.5.0 does not replay.
+//   - 1.7.0 was reserved for a rules change landing in parallel and never
+//     released; no journal carries it.
 //   - 1.8.0 has the gate read a venue's lifecycle report on a released order
 //     whose limit is within half a cent of the order's (event.SameLimitPrice,
 //     the cent a limit is rounded to) where 1.6.0 refused any limit not
@@ -57,7 +59,8 @@ import (
 //     version 2 (the incident in force states its cash scope) and refuses
 //     version 1, so a journal written under 1.8.0, or holding a version 1
 //     approval, does not replay.
-//   - 1.10.0 is the operator inputs' rule change; 1.7.0 was never released.
+//   - 1.10.0 was reserved for the operator inputs below, but they were
+//     released as 1.12.0 after 1.11.0 landed first.
 //   - 1.11.0 records, in a dry-run momentum run only, a synthetic terminal
 //     report (execution.order.lifecycle version 3) for each order it
 //     releases and plans the buy phase at the same close (ADR 0026, point 3,
@@ -65,7 +68,13 @@ import (
 //     earlier rules version, which waited on its unsent sells and withheld
 //     later months as rebalance-in-progress, does not replay. Paper and live
 //     decisions are unchanged.
-const RulesVersion = "1.11.0"
+//   - 1.12.0 reads the owner's operator.rebalance.cleared in a momentum run,
+//     which ends a rebalance in progress (ADR 0026, point 5), and its gate
+//     refuses a kill switch stating a time earlier than the last one it
+//     applied (risklimit.Gate.SetKillSwitch; ADR 0019, amendment of
+//     2026-10-17), so a journal written under an earlier version does not
+//     replay.
+const RulesVersion = "1.12.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

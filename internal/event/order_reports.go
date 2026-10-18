@@ -24,8 +24,8 @@ var ErrNotReleased = errors.New("which this run never released")
 // fill id names one execution across the account (TargetWeightFillPayload).
 // The same execution delivered again (SameExecution) is a redelivery and
 // changes nothing. An order becomes terminal on a lifecycle report that is
-// terminal (cancelled or invalid; LimitOrderLifecyclePayload's Terminal) or
-// on the fill that completes its quantity.
+// terminal (cancelled or invalid; LimitOrderLifecyclePayload's Terminal), on
+// the fill that completes its quantity, or on the owner's clearance (Clear).
 type OrderReports struct {
 	orders map[string]*ReportedOrder
 	fills  map[string]TargetWeightFillPayload
@@ -68,6 +68,36 @@ func (r *OrderReports) Working() []string {
 		}
 	}
 	return out
+}
+
+// Clear reads the owner's clearance of the rebalance in progress, or says
+// why it is not read: an order must be working, and the clearance must be
+// for the account of the orders working, name the rebalance they serve
+// (their Tag) and every one of them, exactly, each dealt with at the broker
+// (RebalanceClearedPayload). Once read, each order named is terminal, so a
+// later venue report on it is refused as on a terminal order (ADR 0026,
+// point 5).
+func (r *OrderReports) Clear(p RebalanceClearedPayload) error {
+	working := r.Working()
+	if len(working) == 0 {
+		return errors.New("no rebalance is in progress, every order released is terminal")
+	}
+	for _, id := range working {
+		o := r.orders[id].Released
+		switch {
+		case o.AccountID != p.AccountID:
+			return fmt.Errorf("is for account %q, but order %s is %q's", p.AccountID, id, o.AccountID)
+		case o.Tag != p.DecisionID:
+			return fmt.Errorf("names %s, but the rebalance in progress is %s", p.DecisionID, o.Tag)
+		}
+	}
+	if !slices.Equal(p.ClientOrderIDs, working) {
+		return fmt.Errorf("names orders %v, but the orders not terminal are %v: name exactly those, each dealt with at the broker", p.ClientOrderIDs, working)
+	}
+	for _, id := range working {
+		r.orders[id].Terminal = true
+	}
+	return nil
 }
 
 // Lifecycle reads a lifecycle report, or says why it is not read. The

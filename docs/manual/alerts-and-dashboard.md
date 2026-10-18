@@ -103,8 +103,9 @@ an `operator.alert.acknowledged` input naming that key, which the engine
 writes to the log like any other input; the reporter reads it there and
 stops repeating that alert. Acknowledging changes no state: the account stays
 Degraded or Halted until recovery (`docs/runbooks/reconciliation.md`). The
-tool you will use to record the acknowledgement from the server comes with
-the operator inputs and is not in this build.
+[operator](operator.md) tool records your kill switch, approvals and
+clearances, but not yet the acknowledgement: recording it from the server is
+not in this build.
 
 On PagerDuty, each repeat opens a **new incident**: the first alert's
 incident is named by the alert key, and each repeat's by the alert key with

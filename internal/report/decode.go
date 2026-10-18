@@ -81,6 +81,9 @@ var (
 	// the venue's input (event.LimitOrderLifecycleVersions).
 	syntheticVersions        = []uint32{event.OrderLifecycleSyntheticVersion}
 	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
+	// The owner's clearance of a momentum run's rebalance in progress (ADR
+	// 0026, point 5).
+	clearedVersions = []uint32{event.RebalanceClearedSchemaVersion}
 	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
 	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
 	acknowledgedVersions   = []uint32{event.AlertAcknowledgedSchemaVersion}

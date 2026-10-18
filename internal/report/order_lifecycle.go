@@ -79,6 +79,9 @@ type Order struct {
 // the log, since the log is append-only and would be refused on every later
 // reading. A report that can be read and names no released order changes
 // nothing and raises no alert: it is reconciliation's to explain (ADR 0019).
+// In a momentum run the owner's clearance (operator.rebalance.cleared) is
+// read by event.OrderReports too, as the engine reads it, so a report on an
+// order it cleared is refused as on a terminal order.
 // A dry-run momentum run's synthetic report on an order it never sent, a
 // decision, ends the order by the same rule and acknowledges nothing
 // (endSynthetic). A fill in a Boost run, readable or not, changes nothing and raises no
@@ -99,6 +102,10 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 				if o.State == LifecycleCommitted && o.committedIn != group {
 					o.State = LifecycleReleased
 				}
+			}
+			if e.Type == event.RebalanceClearedEventType && strategyID == event.TargetWeightStrategyMomentum {
+				applyClearance(e, reports)
+				continue
 			}
 			if u := acknowledge(e, strategyID, byID, reports); u != nil {
 				unread = append(unread, *u)
@@ -226,6 +233,17 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		o.State, o.AcknowledgedAt, o.Acknowledgement = LifecycleAcknowledged, at, status
 	}
 	return nil
+}
+
+// applyClearance applies the owner's clearance as the momentum engine
+// does, by event.OrderReports' Clear, so the orders it made terminal there
+// are terminal here. A clearance the engine refuses, one it cannot read
+// included, clears nothing and raises no alert: it is not a venue report.
+func applyClearance(e event.Envelope, reports *event.OrderReports) {
+	var p event.RebalanceClearedPayload
+	if read(e, clearedVersions, &p) == nil {
+		_ = reports.Clear(p)
+	}
 }
 
 // released is the order's identity as its release recorded it, for

@@ -123,6 +123,11 @@ func New(handler Handler) (*Engine, error) {
 	return &Engine{handler: handler}, nil
 }
 
+// Next reports the Sequence the next call to Apply must name, the last
+// accepted Sequence + 1, and false before Apply has accepted any input, when
+// any starting Sequence is accepted.
+func (e *Engine) Next() (uint64, bool) { return e.previous + 1, e.hasPrevious }
+
 // Apply validates envelope, checks it continues this Engine's own,
 // persistent input sequence (see Engine's own doc comment for how this
 // differs from, and does not share state with, Run), applies it to the

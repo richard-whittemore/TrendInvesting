@@ -28,6 +28,7 @@ func main() {
 
 // reports maps each report name to the query that builds it.
 var reports = map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+	"operator":  journalquery.Operator,
 	"orders":    journalquery.Orders,
 	"fills":     journalquery.Fills,
 	"refusals":  journalquery.Refusals,
@@ -38,7 +39,7 @@ var reports = map[string]func([]journalquery.Journal, journalquery.Filter) (jour
 
 func run(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: journal-query <orders|fills|refusals|totals|positions|reconcile> [flags] journal [journal ...]")
+		return errors.New("usage: journal-query <orders|fills|refusals|totals|positions|reconcile|operator> [flags] journal [journal ...]")
 	}
 	report := args[0]
 	flags := flag.NewFlagSet("journal-query "+report, flag.ContinueOnError)

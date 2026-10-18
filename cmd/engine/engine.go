@@ -6,7 +6,7 @@
 // file. It is composition only and contains no rules
 // (cmd-is-composition-only, .golangci.yml; AGENTS.md rule 7).
 //
-//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]]
+//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]] [-approval <approval.json>] [-operator <inbox>]
 //
 // # Wire contract: the adapter's first input continues the engine's own
 //
@@ -25,6 +25,36 @@
 // is not a convenience: the journal this run writes is read back as ONE
 // input stream (configuration included), and a stream in which two records
 // both claim Sequence 1 fails its own replay.
+//
+// With -operator, the owner's recorded instructions (operator.go) join the
+// same sequence: before the adapter's input, every instruction not yet
+// recorded is applied at the sequence the adapter's input names and the
+// ones after it, and the adapter's input follows them. The decisions
+// returned carry, as their Sequence, the sequence the adapter's input was
+// recorded at, so the adapter's next input always carries the returned
+// Sequence + 1; without operator instructions that is the adapter's own
+// Sequence + 1, as before. When operator instructions were recorded and the
+// adapter's input is then refused, the refusal (transport.ProtocolError)
+// states in its Sequence the last sequence recorded: the input's own, where
+// its refusal was recorded, or, when the input was not recorded (an
+// instruction could not be recorded, or the recorder refused the input of
+// its own: its record bound or emission ceiling, ADR 0017), the last
+// instruction's, and the run stops, so its durable log never misses a
+// sequence and resumes. The adapter's next input carries that Sequence + 1.
+// The recorder refusing an input no instruction moved stops the run too,
+// its sequence spent, and the refusal states no Sequence: resumed, the
+// adapter's next input carries the refused input's own Sequence. A refusal
+// that stops the run is written to the adapter before serving ends
+// (wireGuard.afterReply).
+// A resume reports the sequence the adapter's next input carries, once
+// (with an approval, on the approval's line).
+//
+// An adapter's input sent again under its ID is the request below: it may
+// carry the sequence it was recorded at or exactly the one it was sent
+// with, before operator instructions moved it, and no instruction is
+// delivered before it. After a restart, the log holding no sent sequence,
+// it may carry any sequence from the first of the instructions recorded
+// immediately before it.
 //
 // # Wire contract: an input sent again is a request for its committed reply
 //
@@ -95,7 +125,11 @@ type options struct {
 	// approvalPath names the owner's operator.run.approved file for a
 	// fresh run after an earlier one (approval.go).
 	approvalPath string
-	asOf         string
+	// operatorDir names the operator inbox (operator.go), where the
+	// operator tool records the owner's kill switch and rebalance
+	// clearances for a run that can reach a broker.
+	operatorDir string
+	asOf        string
 	// mode is required and is what the adapter on the socket does with the
 	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
 	// broker. A mode other than backtest requires logPath (ADR 0027).
@@ -154,6 +188,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	default:
 		missing = append(missing, fmt.Errorf("-mode must be one of %s, %s, %s or %s, not %q", modeBacktest, modeDryRun, modePaper, modeLive, opts.mode))
 	}
+	if opts.operatorDir != "" && opts.mode == modeBacktest {
+		missing = append(missing, errors.New("-operator applies to a run that can reach a broker; a backtest takes no operator input"))
+	}
 	if opts.resumePath != "" && opts.logPath == "" {
 		missing = append(missing, errors.New("-resume requires -log: a resumed run streams its own durable log, which begins with the records it resumes (ADR 0027)"))
 	}
@@ -209,6 +246,12 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if err := armApproval(comp.handler, approval); err != nil {
 		return err
 	}
+	var inbox *operatorInbox
+	if opts.operatorDir != "" {
+		if inbox, err = openOperatorInbox(opts, comp, out); err != nil {
+			return err
+		}
+	}
 	configurationHash, strategyVersion, configEnvelope := comp.configurationHash, comp.strategyVersion, comp.configEnvelope
 	reducer := comp.handler
 
@@ -238,11 +281,14 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 			return err
 		}
 		defer func() { _ = logFile.Close() }()
-		log, err := journal.CreateLog(logFile, logHeader)
+		log, err := journal.CreateLog(durableLogSink(logFile), logHeader)
 		if err != nil {
 			return fmt.Errorf("engine: %w", err)
 		}
-		recorder = journal.NewDurableRecorder(reducer, log, journal.DefaultMaxRecords)
+		recorder = journal.NewDurableRecorder(reducer, log, durableRecordLimit)
+	}
+	if inbox != nil {
+		inbox.recorder = recorder
 	}
 
 	// wireEngine is the ONE replay.Engine this run ever constructs, wrapping
@@ -324,7 +370,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		if err := resumeRun(ctx, wireEngine, recorder, recovery); err != nil {
 			return err
 		}
-		if err := reportResume(out, opts.resumePath, recovery); err != nil {
+		if err := reportResume(out, opts.resumePath, recovery, approval != nil); err != nil {
 			return err
 		}
 	} else if _, err := wireEngine.Apply(ctx, configEnvelope); err != nil {
@@ -356,14 +402,19 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		}
 	}
 
-	guard := &wireGuard{}
-	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, recorder, strategyVersion, configurationHash), transport.ServerConfig{
+	serveCtx, stopServing := context.WithCancelCause(ctx)
+	defer stopServing(nil)
+	guard := &wireGuard{stop: stopServing}
+	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, recorder, strategyVersion, configurationHash, inbox), transport.ServerConfig{
 		MaxFrameBytes:   opts.maxFrameBytes,
 		DecisionTimeout: opts.decisionTimeout,
 		// Decision 4: at most one connection may be open at a time (see
 		// decider.go's newDecider for why this belongs here and not inside
 		// the Decider).
 		MaxConnections: 1,
+		// A refusal that stops the run is written first, then the run
+		// stops (wireGuard.afterReply).
+		AfterReply: guard.afterReply,
 	})
 	if err != nil {
 		return fmt.Errorf("engine: %w", err)
@@ -428,7 +479,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// until Write runs. With -log, the durable log (ADR 0027) bounds that
 	// loss to the one input whose write the crash interrupted, none of whose
 	// decisions was released, and -resume rebuilds the run from it.
-	serveErr := server.ServeContext(ctx)
+	serveErr := server.ServeContext(serveCtx)
 
 	// ServeContext waits for every accepted CONNECTION's own goroutine, but
 	// not for a decision transport itself gave up waiting on
@@ -439,6 +490,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// while a decision it does not know has finished is still writing to
 	// it.
 	guard.awaitIdle()
+	if failure := guard.failure(); failure != nil {
+		serveErr = errors.Join(serveErr, failure)
+	}
 
 	header, headerErr := recorder.Header(configurationHash, strategyVersion)
 	if headerErr != nil {
