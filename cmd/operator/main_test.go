@@ -139,6 +139,26 @@ func TestTheAcknowledgementIsRecordedInTheInbox(t *testing.T) {
 	}
 }
 
+// TestTheAcknowledgementKeyIsTrimmedAndNeedsNoDetail: a key pasted with
+// surrounding whitespace or a trailing newline is recorded trimmed, and
+// -detail is optional for this command.
+func TestTheAcknowledgementKeyIsTrimmedAndNeedsNoDetail(t *testing.T) {
+	inbox := t.TempDir()
+	if _, err := invoke(t, "acknowledge", "-inbox", inbox, "-account", "joint", "-alert", "  key-1\n", "-by", "owner", "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	records := inboxRecords(t, inbox)
+	var p event.AlertAcknowledgedPayload
+	if len(records) != 1 || json.Unmarshal(records[0].Payload, &p) != nil || p.AlertKey != "key-1" || p.Detail != "" {
+		t.Errorf("recorded %+v, want key-1 with no detail", records)
+	}
+	for _, key := range []string{"a\nb", "a\r\nb", "   ", "\n"} {
+		if _, err := invoke(t, "acknowledge", "-inbox", t.TempDir(), "-account", "joint", "-alert", key, "-by", "owner", "-at", at); err == nil || !strings.Contains(err.Error(), "-alert") && !strings.Contains(err.Error(), "alert key is required") {
+			t.Errorf("key %q: %v, want a refusal naming the alert key", key, err)
+		}
+	}
+}
+
 // TestAnInputTheToolCannotRecordIsRefused: every input is validated before
 // anything is written, and a record is never overwritten, so a refusal
 // leaves the inbox as it was.

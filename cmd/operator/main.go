@@ -166,6 +166,13 @@ func acknowledge(args []string, out io.Writer) error {
 	if err := parse(flags, args); err != nil {
 		return err
 	}
+	// The key is copied from an alert; a trailing newline or a stray space
+	// would name no alert, and the acknowledgement would silently do nothing.
+	trimmed := strings.TrimSpace(*key)
+	if strings.ContainsAny(trimmed, "\r\n") {
+		return fmt.Errorf("operator: -alert must hold no newline: it is one line, the alert key exactly as the alert ends with it, not %q", *key)
+	}
+	key = &trimmed
 	at, err := when(*c.at)
 	if err != nil {
 		return err

@@ -142,6 +142,43 @@ func TestTheOperatorsKillSwitchStopsAndReleasesOrders(t *testing.T) {
 	}
 }
 
+// TestAnAlertAcknowledgementIsDeliveredAndJournalled: an acknowledgement the
+// operator tool records in the inbox is delivered as an
+// operator.alert.acknowledged input before the adapter's next input and
+// journalled, with no refusal note beside it: the engine decides nothing
+// from it (ADR 0019, amended 2026-09-24, "Alerting").
+func TestAnAlertAcknowledgementIsDeliveredAndJournalled(t *testing.T) {
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	stop := startEngine(t, opts)
+	feed := newBoostFeed(t, opts.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 1)
+	r, err := operator.AlertAcknowledged(event.AlertAcknowledgedPayload{
+		AccountID: "joint", AlertKey: "engine-state:halted:risk-limit-breached:||:2026-10-17T14:00:00Z@joint",
+		AcknowledgedBy: "owner", AcknowledgedAt: boostSession(1).Add(-time.Hour), Detail: "seen"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opts.operatorDir, r.FileName()), r.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feed.sessions(1, 2)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	inputs := operatorInputs(recoverFile(t, opts.logPath).Entries)
+	if len(inputs) != 1 || inputs[0].ID != r.ID || inputs[0].Type != event.AlertAcknowledgedEventType {
+		t.Errorf("the log holds operator inputs %+v, want the acknowledgement", inputs)
+	}
+	if note, err := os.ReadFile(filepath.Join(opts.operatorDir, r.FileName()+refusedSuffix)); err == nil {
+		t.Errorf("the acknowledgement was refused: %q", note)
+	}
+	if _, err := os.Stat(filepath.Join(opts.operatorDir, r.FileName()+deliveredSuffix)); err != nil {
+		t.Errorf("no delivered marker: %v", err)
+	}
+}
+
 // TestAnOperatorInputIsDeliveredOnce: an input recorded in an earlier log of
 // the directory, this run's resumed log included, is never delivered again,
 // though its record stays in the inbox. A resume reports the sequence the

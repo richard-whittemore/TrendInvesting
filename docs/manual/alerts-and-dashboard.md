@@ -105,8 +105,9 @@ stops repeating that alert. Acknowledging changes no state: the account stays
 Degraded or Halted until recovery (`docs/runbooks/reconciliation.md`).
 Record it on the server with `operator acknowledge`, pasting the key from
 the alert ([operator](operator.md), "Acknowledging an alert"). The engine
-writes it to its log before the adapter's next input, and the reporter's
-next run sends that alert no more.
+journals it only when it takes its next input from the adapter, so with the
+engine stopped the repeats continue until it runs; the reporter's first run
+after that sends the alert no more.
 
 On PagerDuty, each repeat opens a **new incident**: the first alert's
 incident is named by the alert key, and each repeat's by the alert key with

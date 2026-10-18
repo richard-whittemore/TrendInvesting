@@ -76,8 +76,7 @@ applied for its account is recorded in the log and refused, with no effect
 `released` never undoes a later `engaged`, and the log still shows it was
 tried. To change the switch, record it again with the current time.
 
-An instruction of any kind (kill switch, clearance or acknowledgement)
-stating a time more than five minutes after the engine's own clock (a slip in `-at`) is
+Any instruction (kill switch, clearance or acknowledgement) stating a time more than five minutes after the engine's own clock (a slip in `-at`) is
 never recorded: it would put every instruction stating the true time before
 it. The engine refuses it with a `.refused` note; record it again with the
 current time. Up to five minutes ahead is allowed, since the tool and the
@@ -215,8 +214,10 @@ recorded operator.alert.acknowledged:<account>:2026-10-17T14:30:05Z (alert engin
 ```
 
 What you see next: the engine writes the acknowledgement to its durable log
-before the adapter's next input (it decides nothing from it), and from the
-reporter's next run on, that alert is sent no more, on any channel: no more
+when it takes its next input from the adapter (it decides nothing from it).
+With the engine stopped, or with no input arriving, nothing is journalled and
+the alert keeps repeating until the engine runs again. From the reporter's
+first run after it is journalled, that alert is sent no more, on any channel: no more
 ntfy messages and no more PagerDuty incidents. Incidents already open in
 PagerDuty stay open until you resolve them there. The alert is not marked
 anywhere else, and a new alert (the account going Halted again later, say)
@@ -282,8 +283,8 @@ overwrites anything.
 
 ## Seeing what was recorded
 
-`journal-query operator <log or journal> [...]` lists every operator input:
-the time to the second, the account, which input, what it did, who recorded
+`journal-query operator <log or journal> [...]` lists the kill switches, approvals and clearances
+(not acknowledgements, below): the time to the second, the account, which input, what it did, who recorded
 it and why:
 
 ```
@@ -314,8 +315,8 @@ reports ([journal-query](journal-query.md)).
 | The disk fails while the engine records an instruction | No note; the run stops with the error; the file waits | Resume the run; the instruction is recorded first |
 | The log is full (the most records a run holds) when an instruction arrives | No note; the run stops with the error; the file waits | Start a fresh run; the instruction is recorded first |
 | You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
-| A typing slip in `-state`, or a missing `-by` or `-detail` | Refused, nothing written | Run it again |
-| An acknowledgement with no `-alert` or no `-by` | Refused, nothing written | Run it again with the key from the alert |
+| A typing slip in `-state`, or a missing `-by` or `-detail` (`-detail` is optional only for `acknowledge`) | Refused, nothing written | Run it again |
+| An acknowledgement with no `-alert` or no `-by`, or a key holding a newline (surrounding whitespace is trimmed) | Refused, nothing written | Run it again with the key from the alert |
 | An acknowledgement naming a key with a typing slip | Recorded; it acknowledges nothing, and the alert keeps repeating | Copy the key from the alert again, in single quotes |
 | Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |
 | Someone edits a file in the inbox | The engine refuses it, writes `<file>.refused` saying why, and never uses it | Record the instruction again with the tool |
@@ -370,8 +371,10 @@ the engine responds); `TestTheOwnersClearanceEndsARebalanceInProgress`,
 `TestARecordIsDeliveredAsAnOperatorInput` (`internal/operator`);
 `TestTheOperatorReportListsEveryOperatorInput` (`internal/journalquery`);
 `TestAnAcknowledgementTheOperatorToolRecordsStopsTheRepeats`
-(`cmd/reporter`, the alert's key through the tool, delivered as the engine
-delivers it, and no repeat after it on either channel);
+(`cmd/reporter`, the alert's key through the tool, the record decoded and
+enveloped by the functions the engine delivers with, and no repeat after it
+on either channel); `TestAnAlertAcknowledgementIsDeliveredAndJournalled`
+(`cmd/engine`, the engine delivering and journalling it, with no refusal);
 `TestARefusalRecordedAtAnotherSequenceStatesIt` (`transport`);
 `TestRebalanceClearedValidate` (`internal/event`).
 

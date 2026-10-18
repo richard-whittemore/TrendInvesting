@@ -29,10 +29,11 @@ func keyIn(t *testing.T, message string) string {
 // TestAnAcknowledgementTheOperatorToolRecordsStopsTheRepeats: a Halted
 // engine's alert repeats on both channels at the repeat interval until the
 // owner acknowledges it. The owner copies its key from the alert into
-// `operator acknowledge`, which records it in the engine's inbox; the engine
-// delivers that record into the journal as an input, deciding nothing
-// (internal/operator's Decode and Envelope, as cmd/engine's inbox does);
-// from then on neither channel repeats the alert (ADR 0019, amended
+// `operator acknowledge`, which records it in the engine's inbox; the journal
+// gets that record as the engine's inbox delivers it, read back by
+// operator.Decode and enveloped by Record.Envelope, the functions
+// cmd/engine applies (that the engine delivers and journals it is
+// cmd/engine's TestAnAlertAcknowledgementIsDeliveredAndJournalled); from then on neither channel repeats the alert (ADR 0019, amended
 // 2026-09-24, "Alerting": "repeats at a fixed interval until the owner
 // acknowledges it. Acknowledgement is recorded").
 func TestAnAcknowledgementTheOperatorToolRecordsStopsTheRepeats(t *testing.T) {
