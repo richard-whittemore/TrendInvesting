@@ -15,6 +15,19 @@ you about it, so you do not have to go looking.
 Neither can place, change or cancel an order, and neither talks to the broker.
 They only read.
 
+> **On the server today, neither runs.** Both programs are built, but
+> neither is installed, and their units pass none of the settings below: the
+> reporter's unit gives no `-journal`, `-state` or `-channel`, and does not
+> set the `TI_NTFY_TOPIC` or `TI_PAGERDUTY_ROUTING_KEY` the reporter reads;
+> the dashboard's gives no `-journal` and names a port (8080) the program
+> does not read. As shipped, **no alert would reach your phone.** And the
+> reporter's timer runs it **once a weekday, at 17:30**, so what this
+> chapter says about repeats "every 30 minutes" and an order unacknowledged
+> "within 10 minutes" holds only for a reporter run that often; on the
+> timer as shipped, a repeat or an unacknowledged order is noticed at the
+> next 17:30 run at the earliest ([server](server.md)). Fixing the units
+> and the timer is the reporter follow-up's work.
+
 ## What they read
 
 A run leaves one of two files, and both programs read either.
@@ -76,6 +89,22 @@ account.
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
 
+### Alerts the reporter does not send
+
+**Not built yet.** Some pages of this manual and the plan describe these,
+but the reporter does not read the records behind them, so nothing reaches
+you. Until they are built (tracked with the reporter follow-up on missing
+alerts), check them yourself with `journal-query refusals` and `grep` on
+the durable log:
+
+- the margin-cushion alarm, warning or urgent (`risk.margin.alarm`);
+- the sale back to 98% being sent, filling or failing;
+- a sale back to 98% withheld for you to act by hand
+  (`broker-values-unreadable`, or `unknown-working-sell`, CONTAINMENT
+  REQUIRED). Only a withhold that opens a stale episode alerts;
+- a withheld sale that lapsed, in the daily summary;
+- Boost's fills, in the daily summary (below).
+
 "No sign of life" is measured in NYSE sessions, not hours: the alert fires
 once `-heartbeat-sessions` sessions (default 2, minimum 2) have closed since the log
 file last changed. Weekends and exchange holidays close no session, so a
@@ -97,14 +126,18 @@ or by `-account`, or by the log file's name.
 ## Repeated until you acknowledge it
 
 A Degraded, Halted or reconciliation alert is sent again, on every channel,
-each `-repeat-interval` (default 30 minutes, your setting under ADR 0019),
-for as long as you have not acknowledged it. Every other alert is sent once.
+each `-repeat-interval` (default 30 minutes), for as long as you have not
+acknowledged it. Every other alert is sent once. ADR 0019 asks for "a fixed
+interval" and leaves its length to you; 30 minutes is the program's
+default, not a recorded decision. A repeat can only come when the reporter
+runs, so on the server's once-a-day timer it comes once a day (above).
 
 The alert's text ends with its **alert key**. You acknowledge it by recording
 an `operator.alert.acknowledged` input naming that key, which the engine
 writes to the log like any other input; the reporter reads it there and
 stops repeating that alert. Acknowledging changes no state: the account stays
-Degraded or Halted until recovery (`docs/runbooks/reconciliation.md`).
+Degraded or Halted until recovery (`docs/runbooks/halted-account.md`, and
+`docs/runbooks/reconciliation.md` for a reconciliation).
 Record it on the server with `operator acknowledge`, pasting the key from
 the alert ([operator](operator.md), "Acknowledging an alert"). The engine
 journals it only when it takes its next input from the adapter, so with the
@@ -137,6 +170,11 @@ unacknowledged alerts repeat once at the next run.
 ## Where alerts go
 
 Alerts go to real channels. You choose them with `-channel`, comma-separated.
+
+The secrets are read from the reporter's **environment**, under the names
+below. The server's `/etc/trend-investing/secrets.env` has other names
+(`NTFY_URL`, `HEALTHCHECK_URL`) that nothing reads, and no PagerDuty line
+([server](server.md), "Where the secrets live").
 
 | Channel | What it is | Secret (environment) |
 | --- | --- | --- |
@@ -198,14 +236,20 @@ the reporter has no way to listen for it.
 
 ## Running the reporter
 
-From the repository root, once per timer tick:
+From the repository root, once per timer tick. On the server, the engine's
+log is `/var/lib/trend-investing/engines/<account>/<TI_RUN>.log`, and the
+reporter's unit may write only under `/var/lib/trend-investing/reports/`, so
+its state file goes there:
 
 ```
 TI_NTFY_TOPIC=... TI_PAGERDUTY_ROUTING_KEY=... \
-  go run ./cmd/reporter -journal /var/lib/trend-investing/joint.log \
-  -state /var/lib/trend-investing/joint.reporter.json \
+  go run ./cmd/reporter -journal /var/lib/trend-investing/engines/boost/<TI_RUN>.log \
+  -state /var/lib/trend-investing/reports/boost.reporter.json \
   -channel ntfy,pagerduty -summary
 ```
+
+A new run writes a new log, so the `-journal` path changes with every
+`TI_RUN`: the reporter follows the one file it is given.
 
 Flags: `-journal` and `-state` are required; `-channel` (default `stdout`,
 which is refused on its own, so always name a real channel); `-summary`
@@ -256,5 +300,9 @@ read is answered "method not allowed". If a log does not verify the page says
   it, and names both dates, so a gap of missing days shows as a longer span.
   When the summary's day has no paired point it says "Day: not available"
   rather than showing an earlier day's change as today's.
-- The fills list stays empty until the engine records fills for target-weight
-  strategies.
+- The fills list shows the Turtle engine's fills (version 4) only. The engine
+  now records the target-weight strategies' fills (version 5), but the
+  summary does not read them yet: each Boost or IRA fill is counted under
+  "Inputs not read" and the fills list stays empty for those accounts. **Not
+  built yet** (tracked in the issue "Reporter summary counts newer snapshot
+  and fill versions as rejected inputs").

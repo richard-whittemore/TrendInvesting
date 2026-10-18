@@ -33,8 +33,10 @@ approve.
    planned and released (an order with sale figures in `journal-query
    orders`), or withheld (`sale-withheld` in `journal-query refusals`). A
    withhold with reason `broker-values-unreadable` or `unknown-working-sell`
-   counts as the attempt: the program will not try again, and the alert asks
-   you to act by hand.
+   counts as the attempt: the program will not try again, so you act by
+   hand. No alert tells you so yet
+   ([alerts-and-dashboard](../manual/alerts-and-dashboard.md), "Alerts the
+   reporter does not send").
 
 ## Find the cause
 
@@ -44,7 +46,7 @@ approve.
 | `broker-holding`, `sell-exceeds-holding` (Degraded) | a sell larger than the holding: a hand trade, a corporate action, or a fill the journal has not seen | IBKR's positions against `journal-query positions` |
 | `order-size`, `order-count`, `margin-exposure`, `ira-exposure`, `insufficient-cash` (Degraded) | an order outside a hard limit (ADR 0026, point 3) | the decision and the account snapshot it was sized from |
 | `price-band`, `missing-mark`, `unvalued-holding` (Degraded) | a price the gate cannot trust: a gap, a stale or missing mark | the bar and mark for that session |
-| reconciliation (`reconciliation.md`) | IBKR's positions or cash differ from the journal | `reconciliation.md`, *Find the cause* |
+| `reconciliation-unexplained`, `reconciliation-unverifiable` (an `engine-state` row) | IBKR's positions or cash differ from the journal, or could not be compared | `reconciliation.md`, *Find the cause* |
 
 ## Recover
 

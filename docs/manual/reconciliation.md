@@ -108,7 +108,8 @@ The scope is exactly what differs:
 
 A later difference widens the scope; it never narrows it. A later matching
 reconciliation does **not** bring the account back to Normal. Only you can,
-through the recovery procedure in `docs/runbooks/reconciliation.md`.
+through the recovery procedure in `docs/runbooks/reconciliation.md`: a
+fresh run you approve, clearing the incident by its ID.
 
 ## What you see
 
@@ -170,8 +171,11 @@ Two conservative choices, both of which can only make a sale smaller:
 - **IBKR cannot be read.** Unverifiable, Halted. The alert names what could not
   be read.
 - **A dividend, interest charge or fee the journal has not recorded.** The cash
-  differs, so the account goes Degraded on cash: buys stop until you record the
-  missing event and approve a restart. A restart that continues the incident
+  differs, so the account goes Degraded on cash: buys stop until you approve
+  a fresh run that clears the incident. **No command records the missing
+  event today**: you check it on IBKR's cash activity and then clear the
+  incident with `operator approve -clear-incident`
+  (`docs/runbooks/reconciliation.md`, *Recover*). A restart that continues the incident
   carries the cash scope in its approval (`"scope_cash_components":
   ["total-cash"]`), so buys stay refused. Margin interest on the joint account is
   not compared yet (its book carries no cash).
