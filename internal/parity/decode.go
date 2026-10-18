@@ -35,8 +35,9 @@ type momentumPayload struct {
 }
 
 // DecodeMomentum decodes one logged month, refusing an unknown field, a
-// required field missing or null, a null weight or close count, a ranked row that is not [ticker, score,
-// volatility, sector or null, mark], an empty ticker and an unknown mark.
+// required field missing or null, a null weight or close count, a short name
+// listed twice, a ranked row that is not [ticker, score, volatility, sector
+// or null, mark], an empty ticker and an unknown mark.
 func DecodeMomentum(raw []byte) (MomentumMonth, error) {
 	var p momentumPayload
 	if err := strictDecode(raw, &p); err != nil {
@@ -96,7 +97,7 @@ func (o *orderedCounts) UnmarshalJSON(raw []byte) error {
 	for dec.More() {
 		key, _ := dec.Token()
 		name := key.(string)
-		if _, seen := seen[name]; seen {
+		if _, dup := seen[name]; dup {
 			return fmt.Errorf("parity: short lists %q twice", name)
 		}
 		seen[name] = struct{}{}
