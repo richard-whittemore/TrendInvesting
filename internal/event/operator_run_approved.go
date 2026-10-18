@@ -160,6 +160,24 @@ func (p OperatorRunApprovedPayload) Validate() error {
 	return nil
 }
 
+// ValidateSchema checks p under the schema version it was recorded at (ADR
+// 0015), then validates it. Version 1 could not state an incident's cash
+// scope, so a payload naming one is refused under it; version 2 holds it
+// (that the key was stated, null included, is checked where the raw JSON is
+// read, in DecodeRecordedOperatorRunApproved); any other version is refused.
+func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
+	switch version {
+	case 1:
+		if in := p.IncidentInForce; in != nil && len(in.ScopeCashComponents) > 0 {
+			return fmt.Errorf("a schema version 1 approval cannot state incident_in_force.%s", incidentCashKey)
+		}
+	case OperatorRunApprovedSchemaVersion:
+	default:
+		return fmt.Errorf("the approval's schema version %d is not one this build reads (1 or %d; ADR 0015)", version, OperatorRunApprovedSchemaVersion)
+	}
+	return p.Validate()
+}
+
 // approvalKeys are the keys an approval file must state, null included: a
 // key left out is refused rather than read as its zero value.
 var approvalKeys = []string{"account_id", "previous_log", "previous_log_final_hash", "incident_id", "approved_by", "approved_at", "boost", "incident_in_force"}

@@ -53,8 +53,10 @@ import (
 //   - 1.9.0 reads account.reconciliation, market.corporate-action and
 //     operator.alert.acknowledged; a reconciliation's difference degrades or
 //     halts the account (ADR 0019, amended 2026-09-24), and a Degraded scope
-//     can name cash components, so a journal written under 1.8.0 does not
-//     replay.
+//     can name cash components, and it reads operator.run.approved schema
+//     version 2 (the incident in force states its cash scope) and refuses
+//     version 1, so a journal written under 1.8.0, or holding a version 1
+//     approval, does not replay.
 const RulesVersion = "1.9.0"
 
 // source names this handler on every envelope it emits.

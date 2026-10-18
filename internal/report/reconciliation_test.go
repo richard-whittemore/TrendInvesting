@@ -274,3 +274,29 @@ func TestAReconciliationAlertStatesTheAccountsActualState(t *testing.T) {
 		t.Errorf("an approval with no incident clears the earlier run's state:\n%s", got[0].Body)
 	}
 }
+
+// TestAnApprovalIsReadAtItsRecordedSchemaVersion: a version 1 approval could
+// not state an incident's cash scope, so the reporter refuses one that names
+// it rather than reading it as a version 2 approval (ADR 0015).
+func TestAnApprovalIsReadAtItsRecordedSchemaVersion(t *testing.T) {
+	payload := event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-0.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("0", 64),
+		ApprovedBy: "owner", ApprovedAt: day(0), Boost: event.BoostStateInForce{Latched: new(false)},
+		IncidentInForce: &event.IncidentInForce{
+			IncidentID: "engine-state:joint:0", State: event.EngineStateDegraded,
+			ScopeCashComponents: []string{event.ReconciliationComponentCash}, SaleAttempted: new(true),
+		},
+	}
+	v2 := newStream(t)
+	v2.add(event.OperatorRunApprovedEventType, 2, "operator-run-approved:x", day(0), payload)
+	v2.mismatchAlone(1, "reconciliation:1")
+	if _, err := report.Alerts(v2.out); err != nil {
+		t.Errorf("a version 2 approval naming a cash scope: %v", err)
+	}
+	v1 := newStream(t)
+	v1.add(event.OperatorRunApprovedEventType, 1, "operator-run-approved:x", day(0), payload)
+	v1.mismatchAlone(1, "reconciliation:1")
+	if _, err := report.Alerts(v1.out); err == nil || !strings.Contains(err.Error(), "cash") {
+		t.Errorf("a version 1 approval naming a cash scope was read: %v", err)
+	}
+}

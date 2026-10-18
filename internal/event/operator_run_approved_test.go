@@ -235,3 +235,37 @@ func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
 		t.Errorf("an approval at an unknown schema version: %v", err)
 	}
 }
+
+// TestOperatorRunApprovedValidateSchema: an approval is checked against the
+// schema version it was recorded at (ADR 0015): version 1 could not state an
+// incident's cash scope, so a payload naming one is refused under it; version
+// 2 holds it; any other version is refused.
+func TestOperatorRunApprovedValidateSchema(t *testing.T) {
+	plain := validOperatorRunApprovedInIncident()
+	withCash := validOperatorRunApproved()
+	withCash.IncidentInForce = &event.IncidentInForce{
+		IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded,
+		ScopeCashComponents: []string{event.ReconciliationComponentCash}, SaleAttempted: new(false),
+	}
+	for _, v := range []uint32{1, 2} {
+		if err := plain.ValidateSchema(v); err != nil {
+			t.Errorf("version %d, no cash scope: %v", v, err)
+		}
+	}
+	if err := withCash.ValidateSchema(2); err != nil {
+		t.Errorf("version 2 with a cash scope: %v", err)
+	}
+	if err := withCash.ValidateSchema(1); err == nil || !strings.Contains(err.Error(), "cash") {
+		t.Errorf("version 1 naming a cash scope: %v", err)
+	}
+	for _, v := range []uint32{0, 3} {
+		if err := plain.ValidateSchema(v); err == nil || !strings.Contains(err.Error(), "schema version") {
+			t.Errorf("version %d: %v", v, err)
+		}
+	}
+	bad := plain
+	bad.AccountID = ""
+	if err := bad.ValidateSchema(2); err == nil {
+		t.Error("an invalid payload passed ValidateSchema")
+	}
+}
