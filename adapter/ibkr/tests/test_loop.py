@@ -31,7 +31,7 @@ from connection import AccountNotManaged
 from engine_client import EngineRejected
 from relay import EngineUnavailable
 from loop import OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch, SOURCE
-from relay import RELEASED, PendingInput, ResolveRefused, read_engine_log
+from relay import RELEASED, EarlierRunInput, PendingInput, ResolveRefused, main as relay_main, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 
 TESTDATA = tests_dir / "testdata"
@@ -99,6 +99,22 @@ class Interposed:
             act, self.act = self.act, None
             act()
         return self.engine.decide(envelope)
+
+
+class Unanswered:
+    """The engine stops before the adapter has its reply: after committing the input when commits is true, else before."""
+
+    def __init__(self, engine, commits):
+        self.engine = engine
+        self.commits = commits
+
+    def __call__(self):
+        return self
+
+    def decide(self, envelope):
+        if self.commits:
+            self.engine.decide(envelope)
+        raise EngineUnavailable("the engine stopped before it replied")
 
 
 class LoopTests(unittest.TestCase):
@@ -263,11 +279,15 @@ class LoopTests(unittest.TestCase):
                          ["market.session.closed", LIFECYCLE_TYPE, FILL_TYPE, FILL_TYPE])
 
     def test_an_input_left_awaiting_its_reply_is_asked_for_again_first_byte_for_byte(self):
-        loop = self.loop()
+        # A crash: the engine stopped before it committed the input, and is
+        # resumed as the same run.
+        loop = self.loop(engine=Unanswered(self.engine, commits=False))
         loop.start()
         self.session_closed(loop)
-        waiting = loop._envelope(loop.outbox.load()[0], read_engine_log(self.engine_log))
-        PendingInput(self.pending).save(waiting)
+        with self.assertRaises(EngineUnavailable):
+            loop.step()
+        waiting = PendingInput(self.pending).load()
+        self.assertEqual(waiting["id"], "session:1")
         loop.close()
         restarted = self.loop()
         self.fake.on_place = self.fake.accept
@@ -476,6 +496,92 @@ class LoopTests(unittest.TestCase):
                 finally:
                     loop.close()
                 self.assertTrue(loop.conn is None or loop.conn.needs_reconciliation)
+
+    def left_waiting_by_the_first_run(self, input_id, commits):
+        """The first run (engine.log) stops before the adapter has its reply to input_id; then a fresh run is approved."""
+        loop = self.loop(engine=Unanswered(self.engine, commits=commits))
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        loop.submit("market.session.closed", 1, {"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]},
+                    SESSION_CLOSED, input_id=input_id)
+        with self.assertRaises(EngineUnavailable):
+            loop.step()
+        loop.close()
+        self.assertEqual(PendingInput(self.pending).load()["id"], input_id)
+        return self.fresh_run("engine.log", "run-2.log")
+
+    def test_an_earlier_runs_uncommitted_input_stops_a_fresh_run_for_a_person_and_is_never_sent_to_it(self):
+        self.filled_under_the_first_run()
+        placed = len(self.fake.placed)
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        loop = self.loop(engine=second, engine_log=second.path)
+        with self.assertRaises(EarlierRunInput) as caught:
+            loop.start()
+        message = str(caught.exception)
+        for part in ("session:2", "engine.log", "did not commit", "relay.py resolve --run-ended", self.pending,
+                     str(second.path)):
+            self.assertIn(part, message)
+        loop.close()
+        self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
+        self.assertEqual(len(self.fake.placed), placed)
+
+    def test_an_earlier_runs_committed_reply_with_an_unsent_order_stops_naming_it_and_settles_without_sending(self):
+        second = self.left_waiting_by_the_first_run("session:1", commits=True)
+        loop = self.loop(engine=second, engine_log=second.path)
+        with self.assertRaises(EarlierRunInput) as caught:
+            loop.start()
+        message = str(caught.exception)
+        for part in ("session:1", "engine.log", "committed", "tw-paper-1", "never sent"):
+            self.assertIn(part, message)
+        loop.close()
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        self.assertIsNone(PendingInput(self.pending).load())
+        settled = self.loop(engine=second, engine_log=second.path)
+        settled.start()
+        self.settle(settled)
+        self.assertEqual(self.fake.placed, [], "an earlier run's released order is never sent by a fresh run")
+        self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
+        self.assertEqual(settled.outbox.load(), [])
+        recorded = PendingInput(self.pending).run_ended()
+        self.assertEqual([(r["input"]["id"], r["refused"], r["unsent"]) for r in recorded],
+                         [("session:1", "run ended", ["tw-paper-1"])])
+
+    def test_run_ended_is_refused_for_an_input_of_the_current_run(self):
+        loop = self.loop(engine=Unanswered(self.engine, commits=False))
+        loop.start()
+        self.session_closed(loop)
+        with self.assertRaises(EngineUnavailable):
+            loop.step()
+        loop.close()
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                     self.engine_log, "--reason", "not a fresh run"]), 1)
+        self.assertEqual(PendingInput(self.pending).load()["id"], "session:1")
+        self.assertEqual(loop.outbox.load()[0]["id"], "session:1")
+        self.assertEqual(PendingInput(self.pending).run_ended(), [])
+
+    def test_run_ended_is_refused_for_an_input_other_than_the_one_awaiting_its_reply(self):
+        self.filled_under_the_first_run()
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:9", "--journal",
+                                     str(second.path), "--reason", "a typo"]), 1)
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--reason",
+                                     "no log named"]), 1)
+        self.assertEqual(PendingInput(self.pending).load()["id"], "session:2")
+
+    def test_after_an_earlier_runs_input_is_settled_the_fresh_runs_own_first_input_goes_through(self):
+        self.filled_under_the_first_run()
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:2", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        loop.submit("market.session.closed", 1, {"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]},
+                    SESSION_CLOSED, input_id="session:3")
+        self.settle(loop)
+        self.assertEqual([e["id"] for e in second.inputs()][1:], ["session:3"])
+        self.assertNotIn("session:2", [e["id"] for e in second.received])
+        self.assertEqual(loop.outbox.load(), [])
 
     def test_ibkr_refusing_the_order_in_read_only_mode_reaches_the_engine_as_invalid_with_its_reason(self):
         def read_only(order_id, contract_, order_):

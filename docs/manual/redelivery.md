@@ -142,6 +142,16 @@ and after a crash.
     and `test_never_sent_is_refused_when_the_relay_recorded_no_refusal_for_the_waiting_input`:
     a never-sent settlement names only the order the adapter is refusing,
     and is honoured only while IBKR shows nothing under its tag.
+  - `adapter/ibkr/tests/test_loop.py`,
+    `test_an_earlier_runs_uncommitted_input_stops_a_fresh_run_for_a_person_and_is_never_sent_to_it`
+    and `test_an_earlier_runs_committed_reply_with_an_unsent_order_stops_naming_it_and_settles_without_sending`:
+    a fresh run is never sent an earlier run's waiting input, and never sends
+    an order the earlier run released; the adapter stops naming them, and
+    after `resolve --run-ended` nothing of them is sent.
+    `test_run_ended_is_refused_for_an_input_of_the_current_run` and
+    `test_after_an_earlier_runs_input_is_settled_the_fresh_runs_own_first_input_goes_through`:
+    the settlement is refused for the running run's own input, and once it
+    is made the fresh run's own inputs go through.
   - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
     a changed copy under the waiting input's ID is refused; the original's
     reply is asked for and its order sent once.
@@ -158,6 +168,7 @@ and after a crash.
 | The adapter reports "committed with different content" | It sent a different input under an ID it had already used. That is a fault in the adapter, not the market. | Stop the adapter. Nothing was recorded for the refused input. Find why the input changed before starting again. |
 | An "order not acknowledged" alert (see [order lifecycle](order-lifecycle.md)) | The order is on disk and IBKR has not reported on it. | Follow the alert's text. Look in IBKR for an order whose `orderRef` is the alert's client order ID **before** anything is placed by hand. |
 | The engine was resumed and the adapter has no pending file | The adapter received its last reply before the crash and acted on it. | Nothing: the adapter sends its next input as usual. |
+| The adapter stops at start with "awaits its reply from an earlier engine run" | The input it was waiting on was sent to an earlier run, and the engine now running is a fresh run. Re-delivery only ever asks the same run again (a crash is resumed); a fresh run never takes the earlier run's input and never sends the orders the earlier run decided. | Follow the row with the same words in [paper trading](paper-trading.md), "What can go wrong": resume the crashed run if that was meant, or check IBKR and settle the input with `relay.py resolve --run-ended`. |
 | The engine refuses to resume | The log could not be resumed (see [restart](restart.md)). No reply can be re-delivered from a run that did not resume. | Follow `docs/runbooks/durable-log.md`. A fresh run starts from a reconciled baseline, so check IBKR's open orders first. |
 
 What this does **not** do yet: the IBKR adapter does not speak the engine's

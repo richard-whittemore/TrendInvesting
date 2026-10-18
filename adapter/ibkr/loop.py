@@ -22,7 +22,9 @@ but not matched here: that is the engine's reconciliation (ADR 0019).
 Only then is the link marked reconciled (Connection.mark_reconciled, which
 refuses an account the login does not manage). It does the same after
 every reconnect or restoration. It then settles the input left awaiting
-its reply by a stop, if any, before anything new.
+its reply by a stop, if any, before anything new: only an input of the
+run now running is asked for again, and one an earlier run left stops the
+adapter for a person (relay.EarlierRunInput) before anything is sent.
 
 Each step keeps the link up (Connection.maintain), takes one callback from
 IB Gateway (Connection.pump), checks for executions whose commission report
@@ -73,7 +75,8 @@ from datetime import datetime, timezone
 
 from connection import Connection, NotConnected
 from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect
-from relay import PendingInput, Relay, read_engine_log, released_client_order_ids, run_logs
+from relay import (EarlierRunInput, PendingInput, Relay, earlier_run, read_engine_log, released_client_order_ids,
+                   run_identity, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from snapshot import Record, read_account
@@ -85,8 +88,8 @@ log = logging.getLogger("ibkr")
 SOURCE = "ibkr"
 ENVELOPE_VERSION = 1
 # The adapter's files beside its pending file (relay.PendingInput's own
-# suffixes are .handover, .refused, .not-handed-over, .corrections,
-# .late-fills and .lock).
+# suffixes are .handover, .refused, .not-handed-over, .run, .run-ended,
+# .corrections, .late-fills and .lock).
 OUTBOX_SUFFIX = ".outbox"
 HELD_SUFFIX = ".held"
 OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
@@ -351,6 +354,8 @@ class AdapterLoop:
         """The report records this run's or an earlier run's engine holds, the outbox holds, or that await a reply: never recorded again."""
         records = [Record(i.event_type, i.schema_version, i.payload) for log_ in engine_logs for i in log_.inputs]
         records += [Record(e["event_type"], e["schema_version"], e["payload"]) for e in self.outbox.load()]
+        records += [Record(e["input"].get("type"), e["input"].get("schema_version"), e["input"].get("payload") or {})
+                    for e in self.pending.run_ended()]
         waiting = self.pending.load()
         if waiting is not None:
             records.append(Record(waiting.get("type"), waiting.get("schema_version"), waiting.get("payload") or {}))
@@ -391,10 +396,19 @@ class AdapterLoop:
                 "payload_hash": hashlib.sha256(encoded).hexdigest(), "payload": entry["payload"]}
 
     def _settle_waiting(self):
-        """Ask again, byte for byte, for the reply to the input a stop left awaiting one; strike it off the outbox."""
+        """Ask again, byte for byte, for the reply to the input a stop left awaiting one; strike it off the outbox.
+
+        Only this run's input is asked for again (ADR 0027, the restart
+        model: a crash resumes the same run; any other restart is a fresh
+        run): one an earlier run left stops the adapter for a person
+        (EarlierRunInput), and nothing of it is sent.
+        """
         waiting = self.pending.load()
         if waiting is None:
             return
+        ended = earlier_run(self.pending, self._engine_log_path)
+        if ended is not None:
+            raise EarlierRunInput(ended, self._pending_path, self._engine_log_path)
         self._exchange(waiting)
 
     def _exchange(self, envelope):
@@ -412,6 +426,10 @@ class AdapterLoop:
                 if not entries:
                     return
                 entry = entries[0]
+                if entry["id"] in {e["input"]["id"] for e in self.pending.run_ended()}:
+                    # Settled as left by an earlier run: never sent.
+                    self.outbox.strike(entry["id"])
+                    continue
                 engine_log = read_engine_log(self._engine_log_path)
                 committed = {i.id: i for i in engine_log.inputs}.get(entry["id"])
                 if committed is not None:
@@ -423,6 +441,10 @@ class AdapterLoop:
                             "(docs/manual/paper-trading.md)".format(entry["id"]))
                     self.outbox.strike(entry["id"])
                     continue
+                # Recorded before it is first sent, so a restart tells this
+                # run's input from an earlier run's.
+                self.pending.record_run(entry["id"], run_identity(self._engine_log_path),
+                                        os.path.basename(self._engine_log_path))
                 self._exchange(self._envelope(entry, engine_log))
         except (NotReconciled, NotConnected) as err:
             # The link went while an order was due: the input stays on disk
