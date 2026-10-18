@@ -148,8 +148,8 @@ The thresholds:
 | `d7l-picks`, `d7l-skipped`, `d7l-kept` | exactly the same, a withheld month included |
 | `ira-plan` | exactly the same sells and buys (shares and limit prices) and the same skips (side, reason, shares) |
 | `ira-scale` | the same shares; the scale within 1e-12 |
-| `ira-orders` | the orders the backtest placed, by stock and phase, exactly the shares Go's sells and scaled buys call for; each one filled, in its phase's direction (a buy positive, a sell negative) and in whole shares. Only quantities: the backtest sends market orders, so no limit price is checked here. An order the backtest could not place because the stock was delisted or acquired at the rebalance passes when the export records how that was detected (below); it is listed as a `delisted` departure. Every refusal and every unplaced buy is either so listed or fails. Every other order of the run is accounted for too: a never-filled export carrier is skipped, LEAN's own sale at a delisting and the buy of a stock with no reference price are listed differences, and any other order fails. The sale of a holding with no reference price must be of such a stock that was not a target |
-| `ira-sequence` | every sell filled before the first buy, and no sell of any month still working when a buy was placed; the rebalance and the buys each on a trading session; the sessions from the rebalance to the buys, counted on a trading calendar, are the delay (one session, none when no sell was placed or working), then each session at whose 8:00 the orders listing shows a sell still working, then any waited for a stock's first price |
+| `ira-orders` | the orders the backtest placed, by stock and phase, exactly the shares Go's sells and scaled buys call for; each one filled, in its phase's direction (a buy positive, a sell negative) and in whole shares. Only quantities: the backtest sends market orders, so no limit price is checked here. An order the backtest could not place because the stock was delisted or acquired at the rebalance passes when the export records how that was detected (below); it is listed as a `delisted` departure. Every refusal and every unplaced buy is either so listed or fails; an unplaced buy is listed only after five sessions waited for a price, counted on the calendar. Every other order of the run is accounted for too: an export carrier is skipped only when it was cancelled or refused and its events fill nothing (a carrier partly filled, still working, or of an unknown status fails); LEAN's own sale at a delisting is a listed difference, and so is the buy outside the planner of a stock that was a target with no reference price (`pending`), matched by its security ID; any other order fails, the buy of an unpriced holding included. The sale of a holding with no reference price must be of such a stock that was not a target |
+| `ira-sequence` | every sell filled before the first buy, and no sell of any month still working when a buy was placed; for every month, one that placed no order included, the rebalance and the buys each on a trading session; the sessions from the rebalance to the buys, counted on a trading calendar, are the delay (one session, none when no sell was placed or working), then each session at whose 8:00 the orders listing shows a sell still working, then any waited for a stock's first price |
 | `differences` (IRA) | none off ADR 0026 point 8's list: a wait for a price, a stock with no reference price (and its buy outside the planner) and LEAN's own sale of a holding at its delisting (`liquidated`) are listed and fail it, since point 8 does not list them |
 
 These thresholds are settled: the owner confirmed them as the rule on
@@ -210,8 +210,10 @@ word: `internal/nysecalendar` from 2022, and before that a list given with
 the sessions QuantConnect's own history returned in the kept momentum
 exports (`~/Desktop/Trend_Investing/data/parity/sessions_qc_history.json`,
 1998-02-17 to 2026-05-29); the tool refuses a list that disagrees with
-`internal/nysecalendar` on any day both cover. A month whose span no
-calendar covers fails `ira-sequence`.
+`internal/nysecalendar` on any day both cover. A rebalance on the list's
+first date can be checked. A month whose span no calendar covers fails
+`ira-sequence`. An orders listing whose filled, cancelled or invalid event
+has no usable time is refused, since it would end a sell before every buy.
 
 The IRA template records an order QuantConnect refused apart from the
 placed ones, with the reason it gave (`refused`), and a month whose buys
@@ -225,7 +227,15 @@ from the placeholder order ID -10, and each fails, since no reason was
 recorded. Version 3 also records which stocks with no reference price
 were targets (`pending`), which the template keeps waiting and never
 sells, so the sale of a holding with no price can be told from the sale of
-a target; an unpriced sale in an earlier export fails `ira-orders`. A
+a target; an unpriced sale in an earlier export fails `ira-orders`.
+Version 4 also records each pending stock's security ID (`pending_ids`),
+because the orders listing names a stock by its latest ticker: the buy
+outside the planner is matched by it. In an earlier export such a buy is
+matched only when the name recorded is the security ID itself; one matched
+by ticker alone fails `ira-orders`. When a sell still working holds some
+of a holding with no reference price, the template sells the rest at once
+and the shares that sell held at the first buy phase after it ended
+unfilled, so it never sells them twice and never leaves them unsold. A
 record whose carrier QuantConnect refuses is kept and sent again on a
 later carrier; the run's `IraParity` statistic counts as `lost` any that
 never went.

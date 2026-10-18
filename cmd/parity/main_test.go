@@ -249,7 +249,13 @@ type fullOrder struct {
 	Time         string            `json:"time"`
 	LastFillTime *string           `json:"lastFillTime"`
 	Tag          string            `json:"tag"`
+	Events       []map[string]any  `json:"events,omitempty"`
 }
+
+// cancelled is the events of a carrier cancelled unfilled, as
+// QuantConnect's orders listing gives them.
+var cancelled = []map[string]any{{"time": 1028206800.0, "status": "submitted", "fillQuantity": 0.0},
+	{"time": 1028235600.0, "status": "canceled", "fillQuantity": 0.0}}
 
 func writeFullOrders(t *testing.T, orders []fullOrder) string {
 	t.Helper()
@@ -282,11 +288,11 @@ func TestGlideLotAndIRAExportsAreComparedAgainstTheirPlannedMonths(t *testing.T)
 		{ID: 1, Symbol: map[string]string{"value": "AAA", "id": "AAA X"}, Quantity: 98, Status: 3,
 			Time: "2002-08-01T13:00:00Z", LastFillTime: &fill, Tag: "IRAORD1 2002-08 buy"},
 		{ID: 2, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
-			Time: "2002-08-01T13:00:00Z", Tag: glideTag},
+			Time: "2002-08-01T13:00:00Z", Tag: glideTag, Events: cancelled},
 		{ID: 3, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
-			Time: "2002-08-01T13:00:00Z", Tag: lotTag},
+			Time: "2002-08-01T13:00:00Z", Tag: lotTag, Events: cancelled},
 		{ID: 4, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
-			Time: "2002-08-01T13:00:00Z", Tag: iraTag},
+			Time: "2002-08-01T13:00:00Z", Tag: iraTag, Events: cancelled},
 	})
 	var out, errs bytes.Buffer
 	pass, err := run([]string{"-glide", "G=" + orders, "-glide-months", "G=2002-08..2002-09",
@@ -382,7 +388,7 @@ func TestTheIRASequenceCountsSessionsByTheCalendarFile(t *testing.T) {
 		{ID: 1, Symbol: map[string]string{"value": "AAA", "id": "AAA X"}, Quantity: 98, Status: 3,
 			Time: "2002-08-02T12:00:00Z", LastFillTime: &fill, Tag: "IRAORD1 2002-08 buy"},
 		{ID: 2, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
-			Time: "2002-08-02T12:00:00Z", Tag: tag},
+			Time: "2002-08-02T12:00:00Z", Tag: tag, Events: cancelled},
 	})
 	args := []string{"-ira", "I=" + orders, "-ira-months", "I=2002-08"}
 	for _, c := range []struct {

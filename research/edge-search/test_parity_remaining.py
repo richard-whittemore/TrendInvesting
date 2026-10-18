@@ -262,6 +262,45 @@ class _Renamed:
         return self.Value
 
 
+class _Lean:
+    """LEAN's order events as the IRA template meets them: a market order
+    works until the open fills it; CancelOpenOrders makes each open order of
+    a symbol cancel-pending, still working (it may yet fill) until LEAN
+    confirms the cancel."""
+
+    def __init__(self, algo):
+        self.algo, self.orders = algo, []
+        algo.Transactions, algo.MarketOrder = self, self.market_order
+
+    def market_order(self, sym, qty, tag=""):
+        t = types.SimpleNamespace(OrderId=500 + len(self.orders), Symbol=sym, Quantity=qty, QuantityFilled=0, Tag=tag,
+                                  status="submitted")
+        self.orders.append(t)
+        return t
+
+    def GetOpenOrderTickets(self):
+        return [t for t in self.orders if t.status in ("submitted", "cancelPending")]
+
+    def CancelOpenOrders(self, sym):
+        for t in self.GetOpenOrderTickets():
+            if t.Symbol == sym:
+                t.status = "cancelPending"
+
+    def confirm_cancels(self):
+        for t in self.orders:
+            if t.status == "cancelPending":
+                t.status = "canceled"
+
+    def fill(self, t):
+        self.algo.Portfolio[t.Symbol].Quantity += t.Quantity
+        t.QuantityFilled, t.status = t.Quantity, "filled"
+
+    def open_fills(self):
+        for t in self.GetOpenOrderTickets():
+            if t.status == "submitted":
+                self.fill(t)
+
+
 class IRATemplateTest(unittest.TestCase):
     """momentum/ira_parity_log.py: fresh_universe.py with the month's book
     traded by the ported IRA planner, the buys EXEC_DELAY sessions after the
@@ -324,7 +363,7 @@ class IRATemplateTest(unittest.TestCase):
         self.assertEqual((rec["scale"], rec["kept"]), (scale, [[b[0], b[1]] for b in algo.market[1:]]))
         self.assertEqual((rec["skipped"], rec["scaled_skipped"], rec["unpriced"], rec["working"]), ([], [], [], {}))
         self.assertEqual((rec["for_sells"], rec["for_price"], rec["unplaced"]), (0, 0, []))
-        self.assertEqual((rec["v"], rec["refused"], rec["unfinished"], rec["pending"]), (3, [], False, []))
+        self.assertEqual((rec["v"], rec["refused"], rec["unfinished"], rec["pending"]), (4, [], False, []))
         # The orders by ID, since the orders listing names a stock by its
         # latest ticker, which a renamed stock no longer shares.
         self.assertEqual(rec["placed"], [["CCC", "sell", 101], ["AAA", "buy", 102], ["BBB", "buy", 103],
@@ -396,7 +435,7 @@ class IRATemplateTest(unittest.TestCase):
         self.module.ira_rebalance(algo, {"AAA": 0.5}, self.closes())
         april = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
         self.assertEqual((april["month"], april["unfinished"], april["v"], april["buy_session"]),
-                         ("2020-04", True, 3, "2020-05-01"))
+                         ("2020-04", True, 4, "2020-05-01"))
         self.assertEqual((april["waited"], april["for_sells"], april["kept"], april["scale"], april["budget"]),
                          (2, 2, [], 0.0, 0.0))
         self.assertEqual(april["placed"], [["CCC", "sell", 101]])
@@ -464,6 +503,61 @@ class IRATemplateTest(unittest.TestCase):
             self.assertEqual(algo.market[1:], sale, working)
 
 
+    def _reserved(self, working):
+        """An unpriced holding of 7 NEW, ``working`` of them held by an
+        earlier month's sell still working at the rebalance."""
+        algo = self._algo({}, cash=1000.0)
+        algo.Portfolio = _Book({"NEW": 7}, {"NEW": 0.0}, 1000.0)
+        lean = _Lean(algo)
+        old = lean.market_order("NEW", -working, tag="IRAORD1 2020-03 sell")
+        self.module.ira_rebalance(algo, {"AAA": 0.49}, self.closes())
+        return algo, lean, old
+
+    def _sales(self, lean):
+        return [(t.Quantity, t.status) for t in lean.orders if t.Tag == "IRAORD1 2020-04 unpriced"]
+
+    def test_shares_held_by_a_cancel_not_yet_confirmed_are_sold_once_it_is(self):
+        algo, lean, _ = self._reserved(7)
+        self.assertEqual(self._sales(lean), [])                            # all 7 held by the working sell
+        lean.confirm_cancels()
+        algo.Time = _dt.datetime(2020, 4, 2, 8)
+        self.module.ira_buy_phase(algo)
+        # The 7 the cancelled sell held are sold now; the buys wait for it.
+        self.assertEqual(self._sales(lean), [(-7, "submitted")])
+        self.assertEqual([t for t in lean.orders if t.Symbol == "AAA"], [])
+        lean.open_fills()
+        algo.Time = _dt.datetime(2020, 4, 3, 8)
+        self.module.ira_buy_phase(algo)
+        self.assertEqual([(t.Symbol, t.Quantity) for t in lean.orders if t.Tag == "IRAORD1 2020-04 buy"], [("AAA", 9)])
+        self.assertEqual(algo.Portfolio["NEW"].Quantity, 0)
+        rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
+        sale = [t.OrderId for t in lean.orders if t.Tag == "IRAORD1 2020-04 unpriced"][0]
+        self.assertIn(["NEW", "unpriced", sale], rec["placed"])
+        self.assertEqual((rec["waited"], rec["for_sells"], rec["for_price"]), (2, 1, 0))
+
+    def test_shares_a_sell_still_works_on_are_sold_once_it_is_cancelled_and_the_rest_at_once(self):
+        algo, lean, _ = self._reserved(3)
+        self.assertEqual(self._sales(lean), [(-4, "submitted")])           # the 4 no sell holds
+        lean.confirm_cancels()
+        lean.open_fills()
+        algo.Time = _dt.datetime(2020, 4, 2, 8)
+        self.module.ira_buy_phase(algo)
+        self.assertEqual(self._sales(lean), [(-4, "filled"), (-3, "submitted")])
+        lean.open_fills()
+        for day in (3, 6):
+            algo.Time = _dt.datetime(2020, 4, day, 8)
+            self.module.ira_buy_phase(algo)
+        self.assertEqual((algo.Portfolio["NEW"].Quantity, len(self._sales(lean))), (0, 2))
+
+    def test_shares_a_sell_filled_before_its_cancel_are_never_sold_again(self):
+        algo, lean, old = self._reserved(7)
+        lean.fill(old)                                                     # the cancel came too late
+        lean.confirm_cancels()
+        for day in (2, 3):
+            algo.Time = _dt.datetime(2020, 4, day, 8)
+            self.module.ira_buy_phase(algo)
+        self.assertEqual((self._sales(lean), algo.Portfolio["NEW"].Quantity), ([], 0))
+
     def test_a_refused_order_is_recorded_apart_with_its_reason(self):
         algo = self._algo({}, cash=1000.0)
         def market(sym, qty, tag=""):
@@ -476,7 +570,7 @@ class IRATemplateTest(unittest.TestCase):
         rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
         self.assertEqual(rec["placed"], [["AAA", "buy", 7]])
         self.assertEqual(rec["refused"], [["BBB", "buy", ""], ["IEF", "buy", "Security price is zero"]])
-        self.assertEqual((rec["v"], rec["unfinished"]), (3, False))
+        self.assertEqual((rec["v"], rec["unfinished"]), (4, False))
 
     def test_buys_wait_for_a_security_with_no_price_yet(self):
         # NEW joined the universe at the rebalance: the plan sizes it from
@@ -509,6 +603,14 @@ class IRATemplateTest(unittest.TestCase):
         self.assertEqual(algo.pending, {"NEW": 0.49})
         rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
         self.assertEqual((rec["unpriced"], sorted(rec["targets"]), rec["pending"]), (["NEW"], ["AAA"], ["NEW"]))
+        # The pending target's security ID, by which its buy outside the
+        # planner is matched whatever ticker the stock later takes.
+        self.assertEqual(rec["pending_ids"], {"NEW": "NEW"})
+        algo = self._algo({}, cash=1000.0)
+        new = _Renamed("NEW", "NEW X1")
+        algo.Securities[new] = types.SimpleNamespace(Price=0.0, HasData=False)
+        self.module.ira_rebalance(algo, {"AAA": 0.49, new: 0.49}, self.closes())
+        self.assertEqual(_decode(algo.limits[0]["tag"], "IRAPARITY1 ")["pending_ids"], {"NEW": "NEW X1"})
 
     def test_the_reference_price_is_the_last_close_of_the_rebalances_history(self):
         algo = self._algo({}, cash=1000.0)

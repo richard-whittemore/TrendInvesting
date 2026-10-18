@@ -27,7 +27,12 @@ func TestASessionListCountsTheSessionsItCovers(t *testing.T) {
 			t.Errorf("(%s, %s]: %v, %v; want %v", c.after, c.through, got, err, c.want)
 		}
 	}
-	for _, span := range [][2]string{{"2020-04-07", "2020-04-09"}, {"2020-04-13", "2020-04-15"}} {
+	// From the day before the first listed date no day of the span is
+	// outside the list; from any earlier date one is.
+	if got, err := s("2020-04-07", "2020-04-09"); err != nil || !reflect.DeepEqual(got, []string{"2020-04-08", "2020-04-09"}) {
+		t.Errorf("from the day before the list: %v, %v", got, err)
+	}
+	for _, span := range [][2]string{{"2020-04-06", "2020-04-09"}, {"2020-04-13", "2020-04-15"}} {
 		if _, err := s(span[0], span[1]); !errors.Is(err, parity.ErrNoSessions) {
 			t.Errorf("%v: %v", span, err)
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -110,6 +111,10 @@ type IRAMonth struct {
 	// not pending is a holding, sold by the month's unpriced sale. Exports
 	// before version 3 do not record it.
 	Pending []string
+	// PendingIDs is each pending name's security ID, by which its buy
+	// outside the planner is matched, whatever ticker the stock later
+	// took. Exports before version 4 do not record it.
+	PendingIDs map[string]string
 }
 
 // IRARefusal is an order QuantConnect refused, so it has no order ID of
@@ -133,6 +138,11 @@ type Order struct {
 	// it was still working when the listing was taken.
 	Terminal string
 	Tag      string
+	// FilledQuantity is the shares the order's events filled, and
+	// FillsKnown whether the listing gave events, each with its fill
+	// quantity, to count them from.
+	FilledQuantity float64
+	FillsKnown     bool
 }
 
 // The phases of an IRAORD1 tag: the rebalance's sells, its buys, and the
@@ -186,20 +196,23 @@ type sellOrder struct {
 // working), then each session a sell was working at 8:00, as the orders
 // listing shows, then each session waited for a price. Those extra
 // sessions are the sequence's measured difference; the rebalance and the
-// buys must each be on a session. A wait for a price and a name with no
+// buys must each be on a session. They are counted for every month, one
+// that placed no order included. A wait for a price and a name with no
 // reference price are listed as differences; ADR 0026 point 8 lists
 // neither, so the differences check fails on them.
 //
 // Every refusal and every unplaced buy is either listed under ADR 0026
 // point 8's delisted cause or fails ira-orders: a refusal QuantConnect gave
 // as non-tradable, or a buy unplaced after the IRAPriceWait sessions the
-// export records, of an order Go planned and the backtest did not fill.
+// export records and the calendar counts, of an order Go planned and the
+// backtest did not fill.
 // A placeholder order ID records only that QuantConnect refused, not why.
 // Every order of the run is accounted for: an IRAORD1 order is compared;
-// a never-filled export carrier is skipped; LEAN's sale of a holding at its
-// delisting, and the buy of a name the last rebalance had no reference
-// price for, are listed as differences (point 8 lists neither); any other
-// order fails ira-orders.
+// an export carrier is skipped when cancelled or refused with events that
+// fill nothing; LEAN's sale of a holding at its delisting, and the buy of a
+// pending target of the last rebalance, matched by security ID, are listed
+// as differences (point 8 lists neither); any other order fails
+// ira-orders.
 //
 // Every planned month must be exported once; every month the run logged
 // is compared. A failed result is recorded, never rewritten (AGENTS.md
@@ -262,9 +275,15 @@ func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order,
 
 // outside accounts for an order not tagged IRAORD1 (see CompareIRA).
 func (r *iraRun) outside(o Order, months []IRAMonth) {
+	why := "not an order of the IRA plan"
 	for _, p := range exportPrefixes {
-		if strings.HasPrefix(o.Tag, p) && o.Status != OrderFilled {
-			return
+		if strings.HasPrefix(o.Tag, p) {
+			// A carrier is skipped only when it is shown never to have filled:
+			// cancelled or refused, with events that fill nothing.
+			if (o.Status == OrderCanceled || o.Status == OrderInvalid) && o.FillsKnown && o.FilledQuantity == 0 && o.LastFillTime == "" {
+				return
+			}
+			why = "an export carrier not shown never to have filled"
 		}
 	}
 	at, err := time.Parse(time.RFC3339, o.Time)
@@ -284,17 +303,45 @@ func (r *iraRun) outside(o Order, months []IRAMonth) {
 			}
 		}
 		if last != nil {
-			for _, n := range last.Unpriced {
-				if n == o.Ticker || n == o.SecurityID {
-					r.diffs = append(r.diffs, Difference{Run: r.run, Where: last.Month + " " + n, Kind: KindUnpriced,
-						Size: fmt.Sprintf("order %d: %v shares bought outside the planner", o.ID, o.Quantity)})
-					return
-				}
+			var n string
+			if n, why = pendingBuy(o, last); why == "" {
+				r.diffs = append(r.diffs, Difference{Run: r.run, Where: last.Month + " " + n, Kind: KindUnpriced,
+					Size: fmt.Sprintf("order %d: %v shares bought outside the planner", o.ID, o.Quantity)})
+				return
 			}
 		}
 	}
-	r.checks[CheckIRAOrders].compare(false, 0, fmt.Sprintf("order %d (%s, %v shares, status %d) tagged %q: not an order of the IRA plan",
-		o.ID, o.Ticker, o.Quantity, o.Status, o.Tag))
+	r.checks[CheckIRAOrders].compare(false, 0, fmt.Sprintf("order %d (%s, %v shares, status %d) tagged %q: %s",
+		o.ID, o.Ticker, o.Quantity, o.Status, o.Tag, why))
+}
+
+// pendingBuy names the pending target of the month that an untagged buy is,
+// or says why it is none. The template buys outside the planner only its
+// pending targets (an unpriced holding it sells), and the orders listing
+// names a stock by its latest ticker, so the buy is matched by security
+// ID: the one a version 4 export records for each pending name, or the
+// name itself when it is a security ID.
+func pendingBuy(o Order, m *IRAMonth) (name, why string) {
+	for _, n := range m.Pending {
+		if id, ok := m.PendingIDs[n]; (ok && id == o.SecurityID) || n == o.SecurityID {
+			return n, ""
+		}
+	}
+	for _, n := range m.Unpriced {
+		if n != o.Ticker && n != o.SecurityID {
+			continue
+		}
+		switch {
+		case m.Version < 3:
+			return "", fmt.Sprintf("an export of version %d does not record which unpriced names were targets", m.Version)
+		case !slices.Contains(m.Pending, n):
+			return "", fmt.Sprintf("%s of %s was an unpriced holding, which the template sells, not a pending target", n, m.Month)
+		case m.Version < 4:
+			return "", fmt.Sprintf("an export of version %d does not record the security ID of %s, matched by ticker only", m.Version, n)
+		}
+		return "", fmt.Sprintf("security %s is not the %s pending in %s", o.SecurityID, n, m.Month)
+	}
+	return "", "not an order of the IRA plan"
 }
 
 func readSell(o Order) sellOrder {
@@ -428,13 +475,21 @@ func (r *iraRun) month(m *IRAMonth) {
 		o.compare(false, 0, fmt.Sprintf("%s %s %s: refused by QuantConnect: %s; only a non-tradable refusal of a planned order the backtest did not fill is listed",
 			m.Month, f.Phase, f.Ticker, reason))
 	}
+	// The sessions waited are counted on the calendar for every month,
+	// whether it placed an order or not: an unplaced buy is listed only on
+	// the five sessions so counted.
+	waited, uncounted := r.calendar(m, len(plan.Sells) > 0)
 	for _, n := range m.Unplaced {
-		if m.ForPrice == IRAPriceWait && excuses(PhaseBuy, n) {
+		if uncounted == "" && m.ForPrice == IRAPriceWait && excuses(PhaseBuy, n) {
 			listed[n+" "+PhaseBuy] = "no price within five sessions (unplaced)"
 			continue
 		}
-		o.compare(false, 0, fmt.Sprintf("%s buy %s: unplaced, with %d sessions waited for a price (listed only after %d) or no planned buy left unfilled",
-			m.Month, n, m.ForPrice, IRAPriceWait))
+		why := ""
+		if uncounted != "" {
+			why = "; " + uncounted
+		}
+		o.compare(false, 0, fmt.Sprintf("%s buy %s: unplaced, with %d sessions waited for a price (listed only after %d counted on the calendar) or no planned buy left unfilled%s",
+			m.Month, n, m.ForPrice, IRAPriceWait, why))
 	}
 	for n := range goBuys {
 		if m.Unfinished {
@@ -472,7 +527,7 @@ func (r *iraRun) month(m *IRAMonth) {
 	if m.ForPrice > 0 {
 		r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month, Kind: KindPriceWait, Size: fmt.Sprintf("%d sessions", m.ForPrice)})
 	}
-	r.sequence(m, len(plan.Sells) > 0, placed)
+	r.sequence(m, placed, waited, uncounted)
 }
 
 // scale checks ScaleBuys against the month's scaling and returns Go's kept
@@ -507,12 +562,11 @@ func (r *iraRun) scale(m *IRAMonth, plan orderplan.IRAPlan) map[string]int64 {
 }
 
 // sequence checks the order of the month's phases (ADR 0026, point 2, "IRA
-// execution"), for a month that placed an order or never finished.
-func (r *iraRun) sequence(m *IRAMonth, plannedSells bool, placed map[string][]Order) {
+// execution"), then reports the month's calendar count: the sessions
+// waited past the delay, or why the export's counters are not the
+// calendar's.
+func (r *iraRun) sequence(m *IRAMonth, placed map[string][]Order, waited int, uncounted string) {
 	c := r.checks[CheckIRASequence]
-	if len(placed[PhaseSell])+len(placed[PhaseBuy])+len(placed[PhaseUnpriced]) == 0 && !m.Unfinished {
-		return
-	}
 	fail := func(format string, args ...any) {
 		c.compare(false, 0, m.Month+": "+fmt.Sprintf(format, args...))
 	}
@@ -552,26 +606,36 @@ func (r *iraRun) sequence(m *IRAMonth, plannedSells bool, placed map[string][]Or
 			}
 		}
 	}
-	// The sessions from the rebalance's day through the buys': the first
-	// must be the rebalance, the last the buys, each a trading session.
+	if uncounted != "" {
+		fail("%s", uncounted)
+		return
+	}
+	c.compare(true, float64(waited), "")
+}
+
+// calendar counts the sessions from the rebalance through the buys on the
+// calendar, never taking them from the export (see CompareIRA): the
+// rebalance and the buys each on a session, then the delay, the sessions a
+// sell was working at 8:00 and those waited for a price. It returns the
+// sessions waited past the delay, or why the export's counters are not the
+// calendar's.
+func (r *iraRun) calendar(m *IRAMonth, plannedSells bool) (waited int, uncounted string) {
+	// The span from the day before the rebalance: its first session must
+	// be the rebalance, its last the buys.
 	decided, _ := time.Parse(time.DateOnly, m.Decision)
 	span, err := r.between(decided.AddDate(0, 0, -1).Format(time.DateOnly), m.BuySession)
 	switch {
 	case err != nil:
-		fail("%v", err)
-		return
+		return 0, err.Error()
 	case len(span) == 0 || span[0] != m.Decision:
-		fail("the rebalance's day %s is not a trading session", m.Decision)
-		return
+		return 0, fmt.Sprintf("the rebalance's day %s is not a trading session", m.Decision)
 	case span[len(span)-1] != m.BuySession:
-		fail("the buys' day %s is not a trading session", m.BuySession)
-		return
+		return 0, fmt.Sprintf("the buys' day %s is not a trading session", m.BuySession)
 	}
 	sessions := span[1:]
 	if len(sessions) != m.Waited {
-		fail("the export records %d sessions waited; the calendar has %d after %s through %s", m.Waited, len(sessions),
+		return 0, fmt.Sprintf("the export records %d sessions waited; the calendar has %d after %s through %s", m.Waited, len(sessions),
 			m.Decision, m.BuySession)
-		return
 	}
 	required := 0
 	if plannedSells || r.sellWorking(at8(m.Decision)) {
@@ -580,9 +644,8 @@ func (r *iraRun) sequence(m *IRAMonth, plannedSells bool, placed map[string][]Or
 	// Each counter is bounded by the sessions counted before any sum, so no
 	// sum of decoded counters can overflow.
 	if required > m.Waited || m.ForSells > m.Waited-required || m.ForPrice != m.Waited-required-m.ForSells {
-		fail("the buys waited %d sessions: not the delay %d plus %d for sells and %d for a price", m.Waited, required,
+		return 0, fmt.Sprintf("the buys waited %d sessions: not the delay %d plus %d for sells and %d for a price", m.Waited, required,
 			m.ForSells, m.ForPrice)
-		return
 	}
 	// The sessions waited after the delay, the rebalance's own first when
 	// there is none: a sell working at 8:00 makes it a session waited for
@@ -595,10 +658,9 @@ func (r *iraRun) sequence(m *IRAMonth, plannedSells bool, placed map[string][]Or
 		}
 	}
 	if forSells != m.ForSells {
-		fail("the export records %d sessions waiting for a sell; the orders show a sell working at 8:00 on %d", m.ForSells, forSells)
-		return
+		return 0, fmt.Sprintf("the export records %d sessions waiting for a sell; the orders show a sell working at 8:00 on %d", m.ForSells, forSells)
 	}
-	c.compare(true, float64(m.Waited-required), "")
+	return m.Waited - required, ""
 }
 
 func (r *iraRun) between(after, through string) ([]string, error) {
@@ -778,19 +840,22 @@ type iraPayload struct {
 	Refused       [][]json.RawMessage `json:"refused"`
 	Unfinished    *bool               `json:"unfinished"`
 	Pending       []string            `json:"pending"`
+	PendingIDs    map[string]string   `json:"pending_ids"`
 }
 
 // IRAVersion is the export version the IRA template writes. Version 1, the
 // first runs', had no version field, recorded a refused order among the
 // placed ones under QuantConnect's placeholder ID, and had neither refused
-// nor unfinished; version 2 had no pending.
-const IRAVersion = 3
+// nor unfinished; version 2 had no pending; version 3 no pending_ids.
+const IRAVersion = 4
 
-// DecodeIRA decodes one IRAPARITY1 payload of either version, refusing an
-// unknown field or version, a required field missing or null, a null map
-// value, a row of the wrong shape, a placed or refused order of an unknown
-// phase, a pending name that is not unpriced, and a row repeated: a name
-// twice in a list, an order ID placed twice.
+// DecodeIRA decodes one IRAPARITY1 payload of any version from 1 through
+// IRAVersion, refusing an unknown field or version, a required field
+// missing or null, a null map value, a row of the wrong shape, a placed or
+// refused order of an unknown phase, a pending name that is not unpriced,
+// pending security IDs that are not one non-empty ID for each pending
+// name, and a row repeated: a name twice in a list, an order ID placed
+// twice.
 func DecodeIRA(raw []byte) (IRAMonth, error) {
 	var p iraPayload
 	if err := strictDecode(raw, &p); err != nil {
@@ -814,8 +879,12 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 		return IRAMonth{}, fmt.Errorf("parity: %s: unfinished missing or null", *p.Month)
 	case version < 3 && p.Pending != nil:
 		return IRAMonth{}, fmt.Errorf("parity: %s: pending in a version %d export", *p.Month, version)
-	case version == 3 && p.Pending == nil:
+	case version >= 3 && p.Pending == nil:
 		return IRAMonth{}, fmt.Errorf("parity: %s: pending missing or null", *p.Month)
+	case version < 4 && p.PendingIDs != nil:
+		return IRAMonth{}, fmt.Errorf("parity: %s: pending_ids in a version %d export", *p.Month, version)
+	case version >= 4 && p.PendingIDs == nil:
+		return IRAMonth{}, fmt.Errorf("parity: %s: pending_ids missing or null", *p.Month)
 	}
 	for _, f := range []struct {
 		name    string
@@ -837,7 +906,8 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 	m := IRAMonth{Month: *p.Month, Decision: *p.Decision, BuySession: *p.BuySession, Delay: *p.Delay, Waited: *p.Waited,
 		NLV: *p.NLV, Band: *p.Band, PriceBand: *p.PriceBand, MaxFees: *p.MaxFees, Budget: *p.Budget, Scale: *p.Scale,
 		Unpriced: p.Unpriced, ForSells: *p.ForSells, ForPrice: *p.ForPrice, Unplaced: p.Unplaced,
-		Placed: map[int]string{}, Unfinished: p.Unfinished != nil && *p.Unfinished, Version: version, Pending: p.Pending}
+		Placed: map[int]string{}, Unfinished: p.Unfinished != nil && *p.Unfinished, Version: version, Pending: p.Pending,
+		PendingIDs: p.PendingIDs}
 	var err error
 	if m.Targets, err = required(m.Month, "targets", p.Targets); err != nil {
 		return IRAMonth{}, err
@@ -871,6 +941,12 @@ func DecodeIRA(raw []byte) (IRAMonth, error) {
 		if !unpriced[n] {
 			return IRAMonth{}, fmt.Errorf("parity: %s pending: %s is not unpriced", m.Month, n)
 		}
+		if version >= 4 && m.PendingIDs[n] == "" {
+			return IRAMonth{}, fmt.Errorf("parity: %s pending_ids: no security ID for %s", m.Month, n)
+		}
+	}
+	if len(m.PendingIDs) > len(m.Pending) {
+		return IRAMonth{}, fmt.Errorf("parity: %s pending_ids: a name not pending", m.Month)
 	}
 	for _, rows := range []struct {
 		name string
@@ -997,16 +1073,25 @@ type orderPayload struct {
 	LastFillTime *string `json:"lastFillTime"`
 	Tag          string  `json:"tag"`
 	Events       []struct {
-		Time   float64 `json:"time"`
-		Status string  `json:"status"`
+		Time         *float64 `json:"time"`
+		Status       string   `json:"status"`
+		FillQuantity *float64 `json:"fillQuantity"`
 	} `json:"events"`
 }
+
+// maxEventTime bounds an event's time, in seconds of the Unix epoch: the
+// end of the year 9999, well inside what a time in microseconds can hold.
+const maxEventTime = 253402300800
 
 // DecodeOrders decodes a run's orders listing, QuantConnect's order objects,
 // keeping what the IRA comparison reads. An order's Terminal time is its
 // last filled, canceled or invalid event, to the microsecond (the listing's
 // fractional seconds, so that a sell is never taken as ended before it
-// did), else, for a filled order, its last fill.
+// did), else, for a filled order, its last fill. A terminal event with no
+// time, or one not after the epoch and before the year 10000, is refused:
+// it would end a sell before every buy. An order's FilledQuantity is the
+// shares its events filled, known only when it has events and each gives
+// its fill quantity.
 func DecodeOrders(raw []byte) ([]Order, error) {
 	var ps []orderPayload
 	if err := json.Unmarshal(raw, &ps); err != nil {
@@ -1015,13 +1100,21 @@ func DecodeOrders(raw []byte) ([]Order, error) {
 	out := make([]Order, len(ps))
 	for i, p := range ps {
 		out[i] = Order{ID: p.ID, Ticker: p.Symbol.Value, SecurityID: p.Symbol.ID, Quantity: p.Quantity, Status: p.Status,
-			Time: p.Time, Tag: p.Tag}
+			Time: p.Time, Tag: p.Tag, FillsKnown: len(p.Events) > 0}
 		if p.LastFillTime != nil {
 			out[i].LastFillTime = *p.LastFillTime
 		}
 		for _, e := range p.Events {
+			if e.FillQuantity == nil {
+				out[i].FillsKnown = false
+			} else {
+				out[i].FilledQuantity += math.Abs(*e.FillQuantity)
+			}
 			if e.Status == "filled" || e.Status == "canceled" || e.Status == "invalid" {
-				out[i].Terminal = time.UnixMicro(int64(math.Round(e.Time * 1e6))).UTC().Format(time.RFC3339Nano)
+				if e.Time == nil || !(*e.Time > 0 && *e.Time < maxEventTime) {
+					return nil, fmt.Errorf("parity: orders: order %d: a %s event with no usable time", p.ID, e.Status)
+				}
+				out[i].Terminal = time.UnixMicro(int64(math.Round(*e.Time * 1e6))).UTC().Format(time.RFC3339Nano)
 			}
 		}
 		if out[i].Terminal == "" && p.Status == OrderFilled {

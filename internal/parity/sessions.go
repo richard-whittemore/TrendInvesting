@@ -38,7 +38,8 @@ func span(after, through string) (a, t time.Time, empty bool, err error) {
 }
 
 // SessionList is the calendar of dates: every session from the first date
-// to the last, strictly increasing. Where internal/nysecalendar covers a
+// to the last, strictly increasing. It covers any span after the day
+// before the first date and through the last. Where internal/nysecalendar covers a
 // year the list must agree with it day for day, so that a list drawn from
 // a backtest's own history is checked against the exchange's rules
 // wherever they are written down.
@@ -58,6 +59,9 @@ func SessionList(dates []string) (Sessions, error) {
 	}
 	first, _ := day(dates[0])
 	last, _ := day(dates[len(dates)-1])
+	// A span may start on the day before the first date: no day of it then
+	// lies outside the list, so the first date can itself be counted.
+	before := first.AddDate(0, 0, -1).Format(time.DateOnly)
 	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
 		trading, err := nysecalendar.IsTradingDay(d)
 		if err == nil && trading != listed[d.Format(time.DateOnly)] {
@@ -71,7 +75,7 @@ func SessionList(dates []string) (Sessions, error) {
 			return nil, err
 		case empty:
 			return nil, nil
-		case after < dates[0] || through > dates[len(dates)-1]:
+		case after < before || through > dates[len(dates)-1]:
 			return nil, fmt.Errorf("%w: (%s, %s] beyond the list's %s to %s", ErrNoSessions, after, through, dates[0], dates[len(dates)-1])
 		}
 		i := sort.SearchStrings(dates, after)

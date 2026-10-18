@@ -15,7 +15,8 @@
 # wait for every sell still working, of any month. A target with no price
 # at all waits in PENDING outside the plan; a holding with none is sold, net
 # of any sell still working on it, by an order tagged IRAORD1 <month>
-# unpriced.
+# unpriced, and the shares such a sell held are sold the same way at the
+# first buy phase after it has ended unfilled.
 #
 # This is momentum/fresh_universe.py with additions only (a test checks
 # that every code line of it is kept); with IRA_EXEC False it trades as

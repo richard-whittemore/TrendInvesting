@@ -24,8 +24,9 @@ IRA_ORDER_PREFIX = "IRAORD1 "
 #: The IRAPARITY1 export's version (internal/parity.IRAVersion). Version 1
 #: put a refused order among the placed ones under QuantConnect's
 #: placeholder ID and recorded no unfinished month; version 2 did not record
-#: which unpriced names were targets (pending).
-IRA_VERSION = 3
+#: which unpriced names were targets (pending), version 3 not their security
+#: IDs (pending_ids).
+IRA_VERSION = 4
 #: Tags attach never overwrites: an export, whose only copy it is, and a
 #: working IRA order's, whose month and phase the comparison reads.
 _KEPT_TAGS = (PARITY_PREFIX, GLIDE_PREFIX, LOT_PREFIX, IRA_PREFIX, IRA_ORDER_PREFIX)
@@ -375,19 +376,12 @@ def ira_rebalance(algo, targets, closes):
     sells, buys, skipped = ira_plan(plan_targets, plan_held, plan_prices, nlv, algo.REBALANCE_BAND,
                                     algo.PRICE_BAND, working)
     algo.pending, algo.pending_tickets = {s: targets[s] for s in unpriced if s in targets}, {}
-    placed, refused = [], []
+    placed, refused, reserved = [], [], []
     for s in unpriced:
         if s not in targets:
-            # Only the shares no sell still working holds once the name's
-            # orders are cancelled: a cancel not yet confirmed never sells
-            # the holding twice (CONTEXT.md, a sell sized net of every
-            # working or pending sell).
             algo.Transactions.CancelOpenOrders(s)
-            free = held[s] - sum(int(-(float(t.Quantity) - float(t.QuantityFilled)))
-                                 for t in _open_sells(algo) if t.Symbol == s)
-            if free > 0:
-                _place(placed, refused, algo.MarketOrder(s, -free, tag=IRA_ORDER_PREFIX + month + " unpriced"),
-                       name(s), "unpriced")
+            reserved.append(s)
+    _sell_unpriced(algo, reserved, month, name, placed, refused)
     sym_of = {name(s): s for s in syms}
     for inst, q, _ in sells:
         _place(placed, refused, algo.MarketOrder(sym_of[inst], -q, tag=IRA_ORDER_PREFIX + month + " sell"), inst,
@@ -398,12 +392,30 @@ def ira_rebalance(algo, targets, closes):
                 "unpriced": [name(s) for s in unpriced], "pending": [name(s) for s in unpriced if s in targets],
                 "sells": sells, "buys": buys, "skipped": skipped,
                 "sym_of": sym_of, "wait": algo.EXEC_DELAY if waiting else 0, "waited": 0, "for_sells": 0,
-                "for_price": 0, "placed": placed, "refused": refused, "done": False}
+                "for_price": 0, "placed": placed, "refused": refused, "done": False, "reserved": reserved,
+                "name": name, "pending_ids": {name(s): str(getattr(s, "ID", s)) for s in unpriced if s in targets}}
     if not waiting:
         if all(_priced(algo, sym_of[b[0]]) for b in buys):
             _ira_buys(algo)
         else:
             algo.ira["for_price"] = 1             # the next session's buy phase sends them
+
+
+def _sell_unpriced(algo, reserved, month, name, placed, refused):
+    """Sell each unpriced holding in ``reserved`` (its orders cancelled) in
+    the shares no sell still working on it holds, so that a cancel not yet
+    confirmed never sells it twice (CONTEXT.md, a sell sized net of every
+    working or pending sell; ADR 0026 point 5). A name stays reserved while
+    a sell still works on it, and the shares that sell held are sold once
+    it has ended unfilled."""
+    for s in list(reserved):
+        working = sum(int(-(float(t.Quantity) - float(t.QuantityFilled))) for t in _open_sells(algo) if t.Symbol == s)
+        free = int(algo.Portfolio[s].Quantity) - working
+        if free > 0:
+            _place(placed, refused, algo.MarketOrder(s, -free, tag=IRA_ORDER_PREFIX + month + " unpriced"), name(s),
+                   "unpriced")
+        if not working:
+            reserved.remove(s)
 
 
 def _place(placed, refused, ticket, inst, phase):
@@ -433,6 +445,7 @@ def ira_buy_phase(algo):
     if not q or q["done"] or algo.Time.date() == q["day"]:
         return
     q["waited"] += 1
+    _sell_unpriced(algo, q["reserved"], q["month"], q["name"], q["placed"], q["refused"])
     if q["waited"] < q["wait"]:
         return
     if _open_sells(algo):
@@ -447,7 +460,7 @@ def ira_buy_phase(algo):
 def _record(algo, q):
     record = {k: q[k] for k in ("month", "decision", "nlv", "targets", "held", "prices", "working", "unpriced",
                                 "sells", "buys", "skipped", "waited", "for_sells", "for_price", "placed",
-                                "refused", "pending")}
+                                "refused", "pending", "pending_ids")}
     record.update({"v": IRA_VERSION, "buy_session": algo.Time.strftime("%Y-%m-%d"), "delay": algo.EXEC_DELAY,
                    "band": algo.REBALANCE_BAND, "price_band": algo.PRICE_BAND, "max_fees": algo.MAX_FEES})
     return record
