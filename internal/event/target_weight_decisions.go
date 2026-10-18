@@ -181,21 +181,23 @@ type BoostFigures struct {
 	// amended 2026-10-18). Omitted when empty.
 	GapSessions []string `json:"gap_sessions,omitempty"`
 	// ReplanWithheld is the second of the account's orders the venue
-	// rejected in a row, whatever their targets, after which no session
-	// orders until the owner starts a fresh run (ADR 0026, point 2, "Boost",
-	// amended 2026-10-18): cause rejected, with its client order ID and its
-	// filled and released shares. It is recorded once, on the decision of the
-	// session at whose close the second rejection was read or, when that
+	// rejected in a row, whatever their targets, after which no session buys
+	// until the owner starts a fresh run, or a sell rejected after it, which
+	// is re-planned while due (ADR 0026, points 2, "Boost", amended
+	// 2026-10-18, and 4): cause rejected, with its client order ID and its
+	// filled and released shares. Each such rejection is recorded once, on
+	// the decision of the session at whose close it was read or, when that
 	// session only fed the indicators (a restarted run's warm-up), on the
 	// first decision after it, and omitted otherwise.
 	ReplanWithheld BoostReplan       `json:"replan_withheld,omitzero"`
 	Watched        BoostWatchedOrder `json:"watched,omitzero"`
 	// VenueRejections counts, as they stand after this decision, the orders
 	// decided sessions released that the venue rejected (invalid) in a row,
-	// whatever their targets: an order that filled in full or was canceled
-	// ends the run. At two, no session orders until the owner starts a fresh
-	// run (ADR 0026, point 2, "Boost", amended 2026-10-18), and a restart
-	// from the decision recovers it (ADR 0026, point 5). Omitted when none.
+	// whatever their targets: an order the venue accepted (an execution, or
+	// any lifecycle report but submitted) ends the run. At two, no session
+	// buys until the owner starts a fresh run, and the count stays at two
+	// (ADR 0026, point 2, "Boost", amended 2026-10-18), and a restart from
+	// the decision recovers it (ADR 0026, point 5). Omitted when none.
 	VenueRejections int `json:"venue_rejections,omitempty"`
 }
 

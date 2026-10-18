@@ -484,9 +484,11 @@ func TestARunRecoveredFromARefusedRejectionReplanStillBoundsIt(t *testing.T) {
 // Boost's entry at session 16 changes the target to 147%. The order to the
 // new target is a new order, but the venue rejects it too: two of the
 // account's orders in a row rejected, whatever their targets, so session 17
-// records it withheld (paged once) and no session orders again, the exit at
-// session 20 included, until the owner starts a fresh run (ADR 0026, point
-// 2, "Boost", amended 2026-10-18: the bound of two rejections in a row).
+// records it withheld (paged once) and no session buys again until the
+// owner starts a fresh run (ADR 0026, point 2, "Boost", amended 2026-10-18:
+// the bound of two rejections in a row). The account holds less than 98%,
+// so the exit at session 20 plans a buy back toward it, which waits too;
+// an exit that sells still goes (TestTwoRejectionsInARowStillSendBoostsExit).
 // Every decision from session 17 records the two rejections.
 func TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange(t *testing.T) {
 	r := simulate(t, options{partFill: map[int]int64{1: 30}, reject: map[int]bool{2: true, 17: true}, kill: map[int]bool{2: true, 16: false}})
@@ -516,6 +518,86 @@ func TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange(t *testing.T) {
 		if n > 17 && decided[n].Boost.ReplanWithheld != (event.BoostReplan{}) {
 			t.Errorf("session %d records the withheld order again", n)
 		}
+	}
+}
+
+// TestTwoRejectionsInARowStillSendBoostsExit: the entry released at
+// session 16 fills 5 shares and expires; the venue rejects its re-plan and
+// that re-plan's one re-plan, so session 19 records the second rejection in
+// a row and Boost's buys stop. The stop never blocks an order that reduces
+// exposure (ADR 0026, point 4's exemption; point 2, "Boost", amended
+// 2026-10-18): Boost's exit at session 20 is still planned and released, a
+// sell down to 98%, and no buy is released from session 19 on. When the
+// venue rejects the exit too, session 21 records that rejection (paged as
+// the stop's are) and, the exit still being due, plans and releases it
+// again.
+func TestTwoRejectionsInARowStillSendBoostsExit(t *testing.T) {
+	for name, exitRejected := range map[string]bool{"the exit accepted": false, "the exit rejected once": true} {
+		t.Run(name, func(t *testing.T) {
+			reject := map[int]bool{18: true, 19: true}
+			if exitRejected {
+				reject[21] = true
+			}
+			r := simulate(t, options{partFill: map[int]int64{17: 5}, reject: reject})
+			decided := targets(t, r.decisions)
+			if d := decided[19]; d.Boost.VenueRejections != 2 || d.Boost.ReplanWithheld.Cause != event.ReplanCauseRejected {
+				t.Fatalf("session 19: rejections %d withheld %+v, want the second rejection in a row recorded", d.Boost.VenueRejections, d.Boost.ReplanWithheld)
+			}
+			if d := decided[20]; d.Targets[0].Weight != 0.98 || d.Boost.TargetInForce != 1.47 {
+				t.Fatalf("session 20 decides %v from %v, want Boost's exit", d.Targets[0].Weight, d.Boost.TargetInForce)
+			}
+			exit := releasedBy(t, r.decisions, 20)
+			if len(exit) != 1 || exit[0].Side != event.OrderSideSell {
+				t.Fatalf("session 20 releases %+v, want Boost's exit sold while buys are stopped", exit)
+			}
+			for n := 19; n < len(decided); n++ {
+				for _, o := range releasedBy(t, r.decisions, n) {
+					if o.Side == event.OrderSideBuy {
+						t.Errorf("session %d releases a buy %+v while buys are stopped", n, o)
+					}
+				}
+			}
+			if !exitRejected {
+				return
+			}
+			want := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: exit[0].ClientOrderID, Released: exit[0].Quantity}
+			if d := decided[21]; d.Boost.ReplanWithheld != want {
+				t.Errorf("session 21 records %+v, want the exit's rejection %+v", d.Boost.ReplanWithheld, want)
+			}
+			again := releasedBy(t, r.decisions, 21)
+			// Re-planned from the account at session 21's close, so sized afresh.
+			if len(again) != 1 || again[0].Side != event.OrderSideSell {
+				t.Errorf("session 21 releases %+v, want the exit sent again", again)
+			}
+		})
+	}
+}
+
+// TestAnAcceptedOrderReplacedBeforeItsEndStillEndsTheRunOfRejections: the
+// entry released at session 16 fills 5 shares and expires, and the venue
+// rejects its re-plan (one rejection). That re-plan's one re-plan, released
+// at session 18, rests unfilled until it expires at session 20, its cancel
+// delivered only at session 21. Boost's exit at session 20 replaces it as
+// the watched order before that cancel is read, and the venue rejects the
+// exit. The order between the two rejections rested and was not rejected
+// (ADR 0026, point 2, "Boost", amended 2026-10-18: an order the venue
+// accepts ends the run of rejections), so the exit's rejection is the first
+// in a row: session 21 re-plans it once and withholds nothing.
+func TestAnAcceptedOrderReplacedBeforeItsEndStillEndsTheRunOfRejections(t *testing.T) {
+	r := simulate(t, options{partFill: map[int]int64{17: 5, 20: 0}, reject: map[int]bool{18: true, 21: true},
+		hold: map[int]bool{19: true}, cancelAt: map[int]int{20: 21}})
+	exit := releasedBy(t, r.decisions, 20)
+	if len(exit) != 1 || exit[0].Side != event.OrderSideSell {
+		t.Fatalf("session 20 releases %+v, want Boost's exit", exit)
+	}
+	d := targets(t, r.decisions)[21]
+	want := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: exit[0].ClientOrderID, Released: exit[0].Quantity}
+	if d.Boost.ReplanWithheld != (event.BoostReplan{}) || d.Boost.VenueRejections != 1 || d.Boost.Replan != want {
+		t.Errorf("session 21: withheld %+v rejections %d re-plan %+v, want nothing withheld, one rejection, %+v re-planned",
+			d.Boost.ReplanWithheld, d.Boost.VenueRejections, d.Boost.Replan, want)
+	}
+	if got := releasedBy(t, r.decisions, 21); len(got) != 1 || got[0].Side != event.OrderSideSell {
+		t.Errorf("session 21 releases %+v, want the exit's one re-plan", got)
 	}
 }
 

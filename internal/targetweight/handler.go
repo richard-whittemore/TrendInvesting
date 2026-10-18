@@ -126,8 +126,10 @@ import (
 //     rejected by the venue (invalid), which is re-planned once; a gate
 //     refusal of that one re-plan does not reset the bound. Two of the
 //     account's orders rejected in a row, whatever their targets, are
-//     withheld and paged once, and no session orders again until the owner
-//     starts a fresh run. The order is watched until it fills in full or a
+//     withheld and paged once, and no session buys again until the owner
+//     starts a fresh run, while a sell, which reduces exposure, still goes;
+//     an order the venue accepted, though a later order replaced it as the
+//     watched one, ends the run. The order is watched until it fills in full or a
 //     decided session plans after its end; only a later decided session's
 //     released order replaces it, and each decision records it with its
 //     executions, its end and its venue order ID, so a restart watches it
@@ -158,11 +160,12 @@ const source = "target-weight"
 const idTime = "2006-01-02T15:04:05Z07:00"
 
 // maxVenueRejections is how many of the account's orders the venue may
-// reject (invalid) in a row, whatever their targets, before Boost orders
+// reject (invalid) in a row, whatever their targets, before Boost buys
 // nothing more until the owner starts a fresh run: a target that changes at
-// each session would otherwise give every rejected order its own re-plan
-// (ADR 0026, point 2, "Boost", amended 2026-10-18; the orchestrator's
-// reading, put to the owner for confirmation).
+// each session would otherwise give every rejected order its own re-plan.
+// A sell, which reduces exposure, is never stopped (ADR 0026, points 2,
+// "Boost", amended 2026-10-18, and 4; the orchestrator's reading, put to
+// the owner for confirmation).
 const maxVenueRejections = 2
 
 // Options are run-level facts, recorded beside the configuration hash rather
@@ -273,11 +276,15 @@ type Handler struct {
 	// released order replaces it, since that order was sized from the
 	// account as it stood (settleWatch).
 	watch *watched
-	// rejections counts the watched orders the venue rejected in a row,
-	// whatever their targets; one that filled in full or was canceled ends
-	// the run (BoostFigures.VenueRejections). At maxVenueRejections no
-	// session orders until the owner starts a fresh run.
+	// rejections counts the orders decided sessions released that the venue
+	// rejected in a row, whatever their targets; one it accepted ends the
+	// run (BoostFigures.VenueRejections; countRejections). At
+	// maxVenueRejections no session buys until the owner starts a fresh
+	// run, and the count stays there.
 	rejections int
+	// run is the orders decided sessions released, in release order, with
+	// what the venue has shown of each, from which rejections is counted.
+	run []runOrder
 	// withheld is the second order rejected in a row, read at a close
 	// and held until the next decision, decided or withheld, records it
 	// (BoostFigures.ReplanWithheld): a session that only feeds the
@@ -507,6 +514,15 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		h.release(o)
 		h.watch = &watched{order: o, status: w.Status, endedAt: w.EndedAt, afterRejection: w.AfterRejection, venueID: w.VenueOrderID}
 	}
+	// The recovered count is a run of that many rejections, each already
+	// read, so no report is matched to them again; a watched order still
+	// working follows it, its outcome unknown.
+	for range h.rejections {
+		h.run = append(h.run, runOrder{rejected: true})
+	}
+	if w := p.Boost.Watched; !w.IsZero() && w.Status == "" {
+		h.run = append(h.run, runOrder{id: w.ClientOrderID})
+	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
 }
@@ -698,16 +714,6 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	h.inForce, h.inForceSet = decided.Targets[0].Weight, true
 	h.gate.RecordDecision(decisionID)
 
-	// Two of the account's orders rejected in a row, whatever their targets,
-	// wait for the owner: no session orders until a fresh run, started from
-	// the owner's approval, which carries no count (ADR 0026, point 2,
-	// "Boost", amended 2026-10-18; ADR 0027). The decision records the
-	// count, so a restart from it waits too.
-	if h.rejections >= maxVenueRejections {
-		b.settleReplan(at, decided)
-		return b.result()
-	}
-
 	// The planner and the gate cannot refuse what this handler has validated
 	// (the decision just built, a validated snapshot, the bar's raw close and
 	// the configured band and limits), so an error from either is a defect.
@@ -718,6 +724,15 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		Replan:       h.replan,
 	})
 	b.fail(err)
+	// Two of the account's orders rejected in a row, whatever their targets,
+	// stop Boost's buys until a fresh run, started from the owner's approval,
+	// which carries no count (ADR 0026, point 2, "Boost", amended 2026-10-18;
+	// ADR 0027). A sell reduces exposure, so it still goes: Boost's exit, and
+	// a re-plan of one (ADR 0026, point 4's exemption). The decision records
+	// the count, so a restart from it stops too.
+	if ok && h.rejections >= maxVenueRejections && order.Side != event.OrderSideSell {
+		ok = false
+	}
 	// A rejection's one re-plan is marked on the order it releases. The mark
 	// holds only while the target is unchanged: an order to a new target is
 	// a new order, not the rejection's re-plan, though a rejection of it is
@@ -766,6 +781,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	}
 	if outcome.Released != nil {
 		h.watch = &watched{order: *outcome.Released, afterRejection: afterRejection}
+		h.run = append(h.run, runOrder{id: outcome.Released.ClientOrderID})
 	}
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
@@ -795,6 +811,8 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	if err := h.gate.ObserveFill(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	// An execution shows the venue accepted the order.
+	h.observeOutcome(p.ClientOrderID, false)
 	return nil
 }
 
@@ -903,15 +921,74 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	}
 	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && p.Terminal() && w.status == "" {
 		w.status, w.endedAt = p.Status, p.OccurredAt.UTC()
-		// A rejection extends the account's run of rejections; an order the
-		// venue accepted and then canceled ends it.
-		if p.Status == event.OrderLifecycleStatusInvalid {
-			h.rejections++
-		} else {
-			h.rejections = 0
-		}
+	}
+	// A rejection extends the account's run of rejections. Any report but
+	// submitted shows the venue accepted the order, whether or not it is
+	// still the watched one: submitted is not enough, as IBKR's PreSubmitted
+	// maps to it and can precede a rejection.
+	switch p.Status {
+	case event.OrderLifecycleStatusInvalid:
+		h.observeOutcome(p.ClientOrderID, true)
+	case event.OrderLifecycleStatusSubmitted:
+	default:
+		h.observeOutcome(p.ClientOrderID, false)
 	}
 	return nil
+}
+
+// runOrder is an order a decided session released, by client order ID
+// (empty for a rejection a recovered count stands for), and what the venue
+// has shown of it: rejected, accepted, or neither yet.
+type runOrder struct {
+	id                 string
+	rejected, accepted bool
+}
+
+// observeOutcome records the venue's first word on order id, a rejection
+// or an acceptance, when a decided session released it, and counts the
+// rejections in a row again.
+func (h *Handler) observeOutcome(id string, rejected bool) {
+	for i := range h.run {
+		if r := &h.run[i]; r.id == id {
+			if !r.rejected && !r.accepted {
+				r.rejected, r.accepted = rejected, !rejected
+				h.countRejections()
+			}
+			return
+		}
+	}
+}
+
+// countRejections counts the run of rejections (ADR 0026, point 2, "Boost",
+// amended 2026-10-18): the orders the venue rejected, in release order,
+// back from the latest one rejected to the first that was not, or none
+// when an order released after that latest one was accepted. An order the
+// venue has shown neither accepted nor rejected ends the run back from a
+// later rejection, as the venue would have ruled on it first; should it
+// prove rejected after all, the count takes it in then. Once the count has
+// reached maxVenueRejections it stays, so the stop holds until a fresh run.
+// The orders up to the latest accepted are dropped: no run reaches past it.
+func (h *Handler) countRejections() {
+	if h.rejections >= maxVenueRejections {
+		return
+	}
+	for i := len(h.run) - 1; i >= 0; i-- {
+		if h.run[i].accepted {
+			h.run = h.run[i+1:]
+			break
+		}
+	}
+	last := -1
+	for i, r := range h.run {
+		if r.rejected {
+			last = i
+		}
+	}
+	n := 0
+	for i := last; i >= 0 && h.run[i].rejected; i-- {
+		n++
+	}
+	h.rejections = n
 }
 
 // watched is the order the latest decided session released, and its
@@ -939,14 +1016,16 @@ type watched struct {
 //
 // An order the venue rejected (invalid) may have been refused for a reason
 // that lasts, so it is re-planned once, cause rejected, as a refusal is.
-// When the venue has rejected maxVenueRejections of the account's watched
-// orders in a row, whatever their targets (that re-planned order, or an
-// order to a new target), nothing is planned again: the rejection is held
+// When the venue has rejected maxVenueRejections of the account's orders
+// in a row, whatever their targets (that re-planned order, or an order to a
+// new target), a rejected buy is not planned again: the rejection is held
 // until a decision records it and the reporter pages it, the next session
-// that decides or is withheld after any warm-up, and no session orders
-// until the owner starts a fresh run. A refusal's re-plan already pending
-// is dropped and does not hide that rejection: it is recorded all the
-// same.
+// that decides or is withheld after any warm-up, and no session buys until
+// the owner starts a fresh run. A refusal's re-plan already pending is
+// dropped and does not hide that rejection: it is recorded all the same. A
+// rejected sell reduces exposure, so it is recorded and paged the same way
+// and re-planned at every decided session while it is due (ADR 0026, point
+// 4's exemption).
 func (h *Handler) settleWatch() {
 	w := h.watch
 	if w == nil {
@@ -960,7 +1039,6 @@ func (h *Handler) settleWatch() {
 		if own {
 			h.replan, h.replanCause = false, event.BoostReplan{}
 		}
-		h.rejections = 0
 		h.watch = nil
 	case w.status == event.OrderLifecycleStatusInvalid && h.rejections >= maxVenueRejections:
 		// A rejection's one re-plan is always the second rejection in a row,
@@ -968,6 +1046,9 @@ func (h *Handler) settleWatch() {
 		h.watch = nil
 		h.replan, h.replanCause = false, event.BoostReplan{}
 		h.withheld = event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: id, Filled: filled, Released: released}
+		if w.order.Side == event.OrderSideSell {
+			h.replan, h.replanCause = true, h.withheld
+		}
 	case w.status == "", h.replan && !own:
 	default:
 		cause := event.ReplanCausePartFilled

@@ -134,7 +134,8 @@ Amended 2026-10-18 (owner): after a refusal that leaves the engine Normal,
 the next decision also plans the difference to the target in force (see the
 amendment of that date); and after its last order ends with shares
 unfilled, or is rejected by the venue, once, and two of its orders
-rejected in a row stop its orders until the owner starts a fresh run (see
+rejected in a row stop its buys, never a sell, until the owner starts a
+fresh run (see
 "Amendment (2026-10-18, owner decision, #487 and #488)").
 
 **D7, whole shares, open: both options specified.** The choice is
@@ -949,20 +950,33 @@ target next changed; point 2 said nothing of a partial fill.
   target changes does not mark the order to the new target, and a restart
   from a decision recording it reads it the same way, by the target in
   force before that decision and the target it decided.
-- **Two rejections in a row stop Boost's orders.** A target that changes
+- **Two rejections in a row stop Boost's buys.** A target that changes
   at each session (the latch flipping) would give every order its own one
   re-plan, so a venue that rejects for a lasting reason would be sent an
   order at every session. The bound is therefore also independent of the
   target: when the venue has rejected **2** of the account's orders in a
-  row (the watched orders, those decided sessions released; the sale back
-  to 98% is ADR 0019's one attempt and not counted), whatever their
+  row (the orders decided sessions released, in release order; the sale
+  back to 98% is ADR 0019's one attempt and not counted), whatever their
   targets, the decision of the session at whose close the second rejection
   is read records it (`boost.replan_withheld`, the order and its shares),
-  the reporter pages it once (urgent), and **no session orders again**, a
+  the reporter pages it once (urgent), and **no session buys again**, a
   change of target included, until the owner starts a fresh run he
   approves (`operator approve`, with `-clear-incident` when the run also
-  ended in an incident; ADR 0027). A watched order that fills in full or
-  that the venue accepts and then cancels ends the run of rejections. A
+  ended in an incident; ADR 0027). The stop never blocks an order that
+  reduces exposure (point 4's exemption): Boost's exit, and any sell a
+  decided session plans, is still planned, checked by the gate and sent
+  while the stop is in force, and an exit the gate refuses still falls
+  back to ADR 0019's one sale back to 98%. Such a sell may itself be
+  rejected: each rejection is recorded (`boost.replan_withheld`) and paged
+  the same way, and the sell is planned again at every decided session
+  while it is due. Once reached, the count stays at 2 until the fresh run:
+  a sell the venue accepts does not lift the stop. Before the stop, an
+  order the venue accepted ends the run of rejections: any execution on
+  it, or any lifecycle report but `submitted` (IBKR's `PreSubmitted` maps
+  to `submitted` and can precede a rejection), whether or not a later
+  decided session's order has replaced it as the watched order. An order
+  the venue has shown neither accepted nor rejected ends the run back from
+  a later rejection, and joins it should the venue reject it after all. A
   re-planned order rejected again is always the second in a row, so this
   bound holds it too. Every decision records the rejections in a row as
   they stand after it (`boost.venue_rejections`, omitted when none), so a
@@ -972,9 +986,9 @@ target next changed; point 2 said nothing of a partial fill.
   restarted run's warm-up, whose sessions only feed the indicators, is
   recorded by the first decision after it. The limit, 2, is a constant of
   the target-weight module (`maxVenueRejections`), not configuration. While
-  the orders are stopped an exit is not ordered either: the page asks the
-  owner to act, and the margin alarm's sale back to 98% (ADR 0019) still
-  runs. (The orchestrator's reading of review findings, put to the owner for
+  buys are stopped the page tells the owner that Boost's exit and the
+  margin alarm's sale back to 98% (ADR 0019) still go, so he checks IBKR's
+  open orders before any sale by hand. (The orchestrator's reading of review findings, put to the owner for
   confirmation with the `unfilled` extension, the one re-plan of a
   rejection, and the skipped session.)
 - An order filled in full plans nothing more, and a re-plan it set is
@@ -1031,34 +1045,15 @@ target next changed; point 2 said nothing of a partial fill.
      no client order ID is its own. This needs the producer to write the
      same IBKR identifier (the `permId`) as a lifecycle report's `order_id`
      and a listing's `broker_order_id`; where they differ, nothing matches
-     and the sell is counted twice, which sells less, never more;
-  3. failing both, when the decision recorded no venue order ID (the
-     earlier run saw no lifecycle report on the order), the first unknown
-     listing, by venue order ID, with no client order ID and exactly the
-     restored sell's remaining shares (released less the executions the
-     decision holds) is taken to be it: it is not counted while the restored
-     sell has not ended, the restored sell being counted once in its place,
-     and so are its later listings. A listing of the restored sell under its
-     client order ID beside it, or a lifecycle report naming another venue
-     order ID, ends the pairing, and both are counted. A listing of another
-     size is never paired.
-  **Failure mode of 3.** If the paired listing was in fact a hand sell of
-  identical size, and the restored sell had not yet reached IBKR, the hand
-  sell's shares are not counted until a snapshot or report tells the two
-  apart, or either sell ends or fills. That is the one case where the
-  pending rule counts fewer working shares than are truly working, so a
-  sell sized meanwhile (an exit, the sale back to 98%) can be that hand
-  sell's size larger than the free shares: it is **not** the fail-closed
-  direction for sizing a sale, which is to count a working sell twice
-  rather than miss one. It is accepted because the alternative, counting
-  the restored sell twice for its whole life whenever IBKR omits the client
-  order ID, under-sells the sale back to 98% in a margin emergency, and
-  because a hand sell placed in the same instrument, of the same size, in
-  the window between the earlier run's release and the restart is the
-  owner's own action, which reconciliation explains (ADR 0019). (The
-  orchestrator's reading of a review finding, put to the owner.) A run
-  restarted from a withheld
-  decision recovers the pending re-plan's cause; one restarted from a
+     and the sell is counted twice, which sells less, never more.
+
+  Any other listing with no client order ID is counted beside the
+  restored sell until a client order ID or venue order ID shows they are
+  one order: a brief over-count, which sells less, the pending rule's
+  fail-closed direction, ending at the first listing that echoes the
+  restored sell's client order ID or the first lifecycle report naming the
+  listing's venue order ID. A listing or report under another venue order
+  ID keeps both counted. A run restarted from a withheld decision recovers the pending re-plan's cause; one restarted from a
   decided decision whose own order was refused recovers `refused`, or
   `rejected` when that order was a rejection's one re-plan: the decision
   entered with `rejected` and decided the target in force before it

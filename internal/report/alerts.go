@@ -447,15 +447,18 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
-// rejectionAlert states the second of the account's Boost orders the venue
-// rejected in a row, whatever their targets (ADR 0026, point 2, "Boost",
-// amended 2026-10-18): the program sends no more orders for the account
-// until the owner finds the reason and approves a fresh run.
+// rejectionAlert states an order the venue rejected once two or more of
+// the account's Boost orders have been rejected in a row, whatever their
+// targets (ADR 0026, point 2, "Boost", amended 2026-10-18): the program
+// sends no more buys for the account until the owner finds the reason and
+// approves a fresh run, while its sells, Boost's exit and the margin
+// alarm's sale back to 98%, still go (ADR 0026, point 4), so the owner
+// checks IBKR's open orders before any sale by hand.
 func rejectionAlert(account string, e event.Envelope, w event.BoostReplan) Alert {
 	return Alert{
 		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
-		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost orders stopped", account, w.ClientOrderID),
-		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), the second of this account's orders it has rejected, two orders in a row. The program sends no more orders for this account, whatever the target does, until you start a fresh run: find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve).",
+		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost buys stopped", account, w.ClientOrderID),
+		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. So check IBKR's open orders before you sell anything by hand. Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
 			w.ClientOrderID, w.Filled, w.Released),
 	}
 }

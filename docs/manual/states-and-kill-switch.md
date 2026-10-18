@@ -61,6 +61,12 @@ Degraded sell needs a broker snapshot to size from. Without one it is refused
 (`broker-holding`). A sell larger than the broker's holding is refused, not cut
 down, and the instrument is added to the scope.
 
+The same holds when IBKR has rejected two of Boost's orders in a row: the
+program stops its buys until you start a fresh run, but Boost's exit and
+the sale back to 98% still go. Check IBKR's open orders before you sell
+anything by hand, so you never sell into a program sale
+([boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan)).
+
 ## The kill switch
 
 The kill switch is your own input, recorded in the journal as

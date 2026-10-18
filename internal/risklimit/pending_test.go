@@ -1178,36 +1178,66 @@ func TestARestoredSellListedWithoutItsClientOrderIDIsMatchedByItsVenueOrderID(t 
 	pendingIs(t, other, 68, "the restored sell's 34 and a hand sell of 34 under another venue order ID")
 }
 
-// TestARestoredSellWithNoVenueOrderIDIsPreferredOverAListingOfItsSize: the
+// TestARestoredSellWithNoVenueOrderIDIsCountedBesideAnUnechoedListing: the
 // decision recorded no venue order ID, and a broker snapshot read before
 // the restore lists, with no client order ID, a sell of exactly the shares
-// the restored sell still has to sell. The restored sell is counted, once,
-// in its place, as is every later listing under that venue order ID, while
-// the restored sell works. A listing of another size is not its own. The
-// pairing ends when a snapshot lists the restored sell under its client
-// order ID beside that listing: two sells, both counted.
-func TestARestoredSellWithNoVenueOrderIDIsPreferredOverAListingOfItsSize(t *testing.T) {
-	g := gate(t, limits(), event.TradingModeDryRun)
-	observe(t, g, "broker:1", later(broker(127, unechoed("ib-a", 34)), -5))
-	if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, ""); err != nil {
-		t.Fatal(err)
+// the restored sell still has to sell. Nothing proves the two are one
+// order, so both are counted, 34 and 34: a brief over-count, which sells
+// less, the pending rule's fail-closed direction (ADR 0019, amended
+// 2026-10-15; ADR 0026, point 5, amended 2026-10-18). A later listing or
+// lifecycle report under another venue order ID keeps both counted. The
+// double count ends when the restored sell's own identity is shown: a
+// lifecycle report on it naming the listing's venue order ID, or a listing
+// of it under its client order ID with that venue order ID.
+func TestARestoredSellWithNoVenueOrderIDIsCountedBesideAnUnechoedListing(t *testing.T) {
+	restored := func(t *testing.T) *risklimit.Gate {
+		t.Helper()
+		g := gate(t, limits(), event.TradingModeDryRun)
+		observe(t, g, "broker:1", later(broker(127, unechoed("ib-a", 34)), -5))
+		if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, ""); err != nil {
+			t.Fatal(err)
+		}
+		g.ObserveAccount(account(127, -4))
+		pendingIs(t, g, 68, "the restored sell's 34 and the unechoed listing's 34, both counted")
+		return g
 	}
-	g.ObserveAccount(account(127, -4))
-	pendingIs(t, g, 34, "the restored sell in place of the unechoed listing of its 34 shares")
-	observe(t, g, "broker:2", later(broker(127, unechoed("ib-a", 34)), -3))
-	g.ObserveAccount(account(127, -2))
-	pendingIs(t, g, 34, "the restored sell in place of the same listing after its restore")
-	observe(t, g, "broker:3", later(broker(127, unechoed("ib-a", 34), listed("tw-old", event.BrokerOrderWorking, 34)), -1))
-	g.ObserveAccount(account(127, 1))
-	pendingIs(t, g, 68, "the restored sell, listed under its client order ID, beside the other listing")
+	report := func(t *testing.T, g *risklimit.Gate, venueID string, minutes int) {
+		t.Helper()
+		if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+			AccountID: "joint", ClientOrderID: "tw-old", OrderID: venueID, InstrumentID: "SPY", Side: event.OrderSideSell,
+			Status: event.OrderLifecycleStatusSubmitted, Quantity: 54, LimitPrice: 1, OccurredAt: at.Add(time.Duration(minutes) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	sized := gate(t, limits(), event.TradingModeDryRun)
-	observe(t, sized, "broker:1", later(broker(127, unechoed("ib-a", 20)), -5))
-	if err := sized.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, ""); err != nil {
-		t.Fatal(err)
-	}
-	sized.ObserveAccount(account(127, -1))
-	pendingIs(t, sized, 54, "the restored sell's 34 and a listing of 20, not its size")
+	t.Run("another venue order ID keeps both counted", func(t *testing.T) {
+		g := restored(t)
+		observe(t, g, "broker:2", later(broker(127, unechoed("ib-a", 34), listed("tw-old", event.BrokerOrderWorking, 34)), -3))
+		g.ObserveAccount(account(127, -2))
+		pendingIs(t, g, 68, "the restored sell listed under ib-tw-old beside the listing under ib-a")
+		report(t, g, "ib-b", -1)
+		observe(t, g, "broker:3", later(broker(127, unechoed("ib-a", 34)), 0))
+		g.ObserveAccount(account(127, 1))
+		pendingIs(t, g, 68, "a report naming ib-b, and the listing under ib-a again")
+	})
+	t.Run("a report naming the listing's venue order ID ends the double count", func(t *testing.T) {
+		g := restored(t)
+		report(t, g, "ib-a", -3)
+		g.ObserveAccount(account(127, -2))
+		pendingIs(t, g, 34, "the restored sell, once its report names ib-a")
+		observe(t, g, "broker:2", later(broker(127, unechoed("ib-a", 34)), -1))
+		g.ObserveAccount(account(127, 1))
+		pendingIs(t, g, 34, "a later listing under ib-a, the restored sell's own")
+	})
+	t.Run("its own listing under that venue order ID ends the double count", func(t *testing.T) {
+		g := restored(t)
+		own := listed("tw-old", event.BrokerOrderWorking, 34)
+		own.BrokerOrderID = "ib-a"
+		observe(t, g, "broker:2", later(broker(127, own), -3))
+		g.ObserveAccount(account(127, -2))
+		pendingIs(t, g, 34, "the restored sell, listed under its client order ID and ib-a")
+	})
 }
 
 // TestAReleasedSellListedWithoutItsClientOrderIDIsMatchedByItsVenueOrderID:
