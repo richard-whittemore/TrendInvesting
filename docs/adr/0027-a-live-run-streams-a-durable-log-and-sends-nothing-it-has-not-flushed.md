@@ -360,9 +360,9 @@ owner decided (#365, above); it changes no owner decision. The sentence
   folder in that directory. The engine reads only the directory's root, so
   it never reads the quarantine folder.
 
-## Amendment (2026-10-17, proposed: re-delivery on request, and an order's lifecycle state)
+## Amendment (2026-10-17, accepted by the owner 2026-10-18: re-delivery on request, and an order's lifecycle state)
 
-*Proposed for the owner's acceptance. It adds to §4 and §6 and changes no
+*Accepted by the owner on 2026-10-18. It adds to §4 and §6 and changes no
 owner decision: the engine still never resends anything on its own.*
 
 - **The adapter asks for a committed reply by sending the input again.** An

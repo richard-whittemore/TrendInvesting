@@ -69,7 +69,7 @@ instructions. Leave the markers in place.
 
 Your instructions count in the order of the times they state (ADR 0019,
 amendment of 2026-10-17, "operator instructions count in the order of the
-times they state", a rule you are asked to confirm). A kill-switch
+times they state", a rule the owner accepted on 2026-10-18). A kill-switch
 file stating a time earlier than the newest kill switch the engine has
 applied for its account is recorded in the log and refused, with no effect
 (and a `.refused` note naming the later one), so an old or backdated

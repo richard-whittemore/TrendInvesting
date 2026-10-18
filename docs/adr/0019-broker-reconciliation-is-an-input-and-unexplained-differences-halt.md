@@ -539,11 +539,11 @@ here so that all eleven are in one place.
     `account.reconciliation` also needs; #227 folds one into the other or
     references it.
 
-## Amendment (2026-10-17, proposed; the owner is asked to confirm): operator instructions count in the order of the times they state
+## Amendment (2026-10-17, accepted by the owner 2026-10-18): operator instructions count in the order of the times they state
 
 This amendment adds one rule to the kill-switch readings above (readings 2
-and 7). The engine applies it now. **The owner is asked to confirm it**;
-until he does, it is the engine's proposed reading, not an owner decision.
+and 7). The engine applies it now. **The owner accepted it on 2026-10-18**; it is
+an owner decision.
 
 The owner records each instruction (an `operator.kill-switch`, or an
 `operator.rebalance.cleared` for an IRA) with the operator tool. The tool
