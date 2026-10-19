@@ -122,19 +122,31 @@ blocks every sell until the clock is right. A drifting clock therefore shows
 up first as a withheld sale, so the server is set up to keep its clock right
 from the start.
 
-`sudo deploy/provision.sh clock` (also part of `all`) turns on the system's
-time syncing (`systemd-timesyncd`) and then runs the check, and it refuses to
-finish if the check fails. On a server of its own the clock must be reported
+`sudo deploy/provision.sh clock` (also part of `all`) makes sure a time
+service is running and then runs the check, and it refuses to finish if the
+check fails. A time service that is already running (chrony, ntp, ntpsec or
+`systemd-timesyncd`) is kept; only when none is running is `systemd-timesyncd`
+installed and turned on. On a server of its own the clock must be reported
 synchronised by `timedatectl`. Inside the Mac mini's container the Mac keeps
 time and the container usually shows no time service of its own, so there the
 check compares the clock with the time an outside website reports, and fails
-if they differ by more than 2 seconds (it measures to the second; the limit
-can be changed with `TI_CLOCK_TOLERANCE_SECONDS`). If the container cannot
+if they differ by more than 2 seconds. It reads the local clock before and
+after the request and compares the website's time with the midpoint, so a slow
+connection does not count against the clock; a request that takes longer than
+2 seconds (`TI_CLOCK_MAX_ROUNDTRIP_SECONDS`) is thrown away and the next
+website tried. Only HTTPS websites are used. The limit can be changed with
+`TI_CLOCK_TOLERANCE_SECONDS`. If the container cannot
 reach any reference, that also fails, because a clock that could not be
 checked is not a checked clock. On the Mac mini, a failure means the Mac's own
 "Set time and date automatically" is off or wrong.
 
-Run the check yourself at any time, and after any sale is withheld with the
+When the server reports "synchronised" inside a container, that is the
+Mac's own report, which the container shares because it uses the Mac's clock;
+it is accepted. To check that claim against an outside website too, run the
+check with `TI_CLOCK_VERIFY=1` in front of it.
+
+The `clock` step installs the check before it runs it, so you can run it
+yourself at any time after that step (even if the step failed), and after any sale is withheld with the
 reason `stale-broker-snapshot`:
 
 ```

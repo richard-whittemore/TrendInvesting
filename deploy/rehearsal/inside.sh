@@ -32,7 +32,8 @@ cat >"$stubs/curl" <<'STUB'
 printf 'HTTP/2 200\r\nDate: %s\r\n\r\n' "$(date -u -d '+1 hour' '+%a, %d %b %Y %H:%M:%S GMT')"
 STUB
 chmod +x "$stubs/curl"
-if PATH="$stubs:$PATH" "$p" clock >/dev/null 2>&1; then fail "a clock an hour off was accepted"; fi
+if PATH="$stubs:$PATH" "$p" clock >/dev/null 2>"$stubs/err"; then fail "a clock an hour off was accepted"; fi
+grep -q 'skew of -3600s' "$stubs/err" || fail "the clock step failed for another reason: $(cat "$stubs/err")"
 rm -rf "$stubs"
 pass "the clock step passes on this host's clock and refuses a skewed one"
 

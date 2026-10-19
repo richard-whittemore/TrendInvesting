@@ -118,22 +118,19 @@ CONF
 }
 
 # The clock (ADR 0019: a clock behind IBKR's makes every snapshot stale and
-# withholds every sell). Where systemd runs, systemd-timesyncd is installed
-# and enabled and given a minute to synchronise; the check
+# withholds every sell). The check is installed first, so the owner can run it
+# from /usr/local/libexec/trend-investing after this step even if it fails.
+# Where systemd runs, libexec/time-sync.sh keeps a running time daemon or
+# installs systemd-timesyncd, and waits for a first sync; the check
 # (libexec/clock-check.sh) then refuses unless timedatectl reports the clock
 # synchronised or, in a container, unless the clock is within tolerance of an
 # outside reference. Re-run safe.
 step_clock() {
+  install -d -m 0755 /usr/local/libexec/trend-investing
+  install -m 0755 "$here"/libexec/clock-check.sh /usr/local/libexec/trend-investing/
   if test "$rehearsal" != 1 && test -d /run/systemd/system; then
-    log "time syncing (systemd-timesyncd)"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y -qq --no-install-recommends systemd-timesyncd >/dev/null
-    systemctl enable systemd-timesyncd.service
-    systemctl start systemd-timesyncd.service || log "systemd-timesyncd did not start (normal in a container: the host keeps time)"
-    for _ in $(seq 1 30); do
-      test "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" = yes && break
-      sleep 2
-    done
+    log "time syncing"
+    "$here/libexec/time-sync.sh"
   fi
   log "checking the clock"
   "$here/libexec/clock-check.sh" || die "the clock is not good; fix it and run 'provision.sh clock' again"
