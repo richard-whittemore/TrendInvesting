@@ -326,9 +326,11 @@ func simulate(t *testing.T, opts options) run {
 			case opts.readTime:
 				b.AsOf = at.Add(readLag)
 				b.ReadAt, b.NotAsOfClose = b.AsOf, "IBKR reports 1 execution in the account since the close"
+				b.ReadNetLiquidation = b.NetLiquidation
 				version = event.BrokerSnapshotReadAtVersion
 			case opts.postClose:
 				b.ReadAt, b.AsOfClose = b.AsOf.Add(readLag), true
+				b.ReadNetLiquidation = b.NetLiquidation
 				version = event.BrokerSnapshotReadAtVersion
 			}
 			out := apply(s.envelope(t, event.BrokerSnapshotEventType, version, fmt.Sprintf("broker:%d", i), b.AsOf, b))

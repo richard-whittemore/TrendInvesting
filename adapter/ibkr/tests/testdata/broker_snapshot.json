@@ -33,5 +33,7 @@
   ],
   "read_at": "2027-01-15T08:00:00Z",
   "as_of_close": false,
-  "not_as_of_close": "the reading is not on the session's own New York date"
+  "not_as_of_close": "the reading is not on the session's own New York date",
+  "read_net_liquidation": 8530.0,
+  "cash_drift": 0
 }

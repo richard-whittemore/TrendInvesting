@@ -179,12 +179,15 @@ Liquidity**: warning below 40% of net liquidation, urgent below 20% (or no
 reading for 30 minutes while the market is open), which fires the sale
 back to 98%.
 
-**Mark.** An instrument's recorded price at a close (`market.mark.recorded`),
-which the **price band** compares an order's reference price with; also each
-holding's price in the **broker snapshot**. Both are the delivered bar's
-official close, the price the backtest marks at; IBKR's last traded price is
-recorded beside the mark as evidence only (`broker_last`), so no decision
-needs IBKR market-data permissions. See [market data](market-data.md).
+**Mark.** An instrument's recorded price at a close (`market.mark.recorded`):
+the delivered bar's official close, the price the backtest marks at, with
+IBKR's last traded price beside it (`broker_last`). The **price band**
+compares an order's reference price with IBKR's last price when there is one,
+else with the official close, and the order says which (`mark_source`); no
+decision needs IBKR market-data permissions. Each holding's price in the
+**broker snapshot** is on that snapshot's own basis: the official close for a
+snapshot as of the close, IBKR's last price for one stamped at its read time.
+See [market data](market-data.md).
 
 **MaxSnapshotAge.** How old IBKR's latest **broker snapshot** may be when a
 sell is checked against it (30 minutes for Boost).

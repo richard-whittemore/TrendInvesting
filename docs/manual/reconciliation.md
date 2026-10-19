@@ -10,12 +10,17 @@ and what it does not"). Every decision the
 engine makes rests on what it believes you hold, so a difference it cannot
 explain is a reason to stop taking on new risk (ADR 0019).
 
-At every start of the IBKR adapter, at every reconnect, and at a run's
-first delivery of market data (right behind the first account snapshot,
-which is the engine's first book), the adapter reads the account's positions
-and cash from IBKR and records them in the journal. Before the engine holds
-any account snapshot there is no book to compare, so the adapter sends none
-then. The engine compares them with its own book and decides one of four
+At every start of the IBKR adapter, at every reconnect, and with every
+delivery of market data, the adapter reads the account's positions and cash
+from IBKR and records them in the journal. A delivery's goes ahead of that
+day's account snapshot, so the engine compares IBKR's holdings with the book
+it holds before the new snapshot replaces it: shares no fill explains are
+found, never taken over. A run's first delivery carries it right behind the
+first account snapshot, which is the engine's first book. A start's or a
+reconnect's is read only once every trade IBKR replayed has its commission
+and its fill has reached the engine. Before the engine holds any account
+snapshot there is no book to compare, so the adapter sends none at a start
+or reconnect then. The engine compares them with its own book and decides one of four
 things:
 
 | Result | What it means | What happens |
@@ -202,7 +207,7 @@ Two conservative choices, both of which can only make a sale smaller:
 ## What is not built yet
 
 - The reconciliations ADR 0019 also asks for after every fill, before every
-  order and on a timer (the start, reconnect and first-delivery ones are
+  order and on a timer (the start, reconnect and daily-delivery ones are
   sent); until they exist, a difference that
   arises during a session (a lost fill report among them) is not caught. Also
   the comparison of open orders; the joint account's cash; matching each cash

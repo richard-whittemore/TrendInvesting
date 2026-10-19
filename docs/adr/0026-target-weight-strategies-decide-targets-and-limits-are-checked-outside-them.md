@@ -946,23 +946,39 @@ fixes, 2026-10-18").
 
 ## Amendment (2026-10-18, owner decision): the account snapshot as of the close, and the mark
 
-To point 1 ("Inputs only": the account snapshot) and point 2 (orders valued
-at the previous close). The owner decided on 2026-10-18 that the account
-snapshot a session is decided from may be the IBKR adapter's one reading
-taken after that close: the account changes between the close and the next
-open only through an order still working or an execution, so a reading taken
-after the close, on its own New York date, with no order working or pending
-at IBKR for the account and no execution since the close, is the account as
-of that close, and the adapter stamps its `account.snapshot` with the close
-(the broker snapshot carries the true read time beside it, ADR 0019,
-amended 2026-10-18). When that condition fails the adapter stamps the true
-read time, and the strategy withholds the session as
-`stale-account-snapshot`, as this point already requires of a snapshot taken
-after the close: no rule changes. The `market.mark.recorded` the gate checks
-a buy's price band against (point 3) is the delivered bar's official close,
-the price the backtest marks at, at schema version 2 with IBKR's last price
-beside it as evidence only; nothing is decided from IBKR's price, so no
-decision needs IBKR market-data permissions. Target-weight rules version
-1.18.0 reads the new versions of the broker snapshot and the mark, so a
-journal holding either does not replay under 1.17.0; decisions are
-otherwise unchanged.
+To point 1 ("Inputs only": the account snapshot), point 2 (orders valued at
+the previous close) and point 3 (the price band). The owner decided on
+2026-10-18 that the account snapshot a session is decided from may be the
+IBKR adapter's one reading taken after that close, when ADR 0019's
+conditions (amended 2026-10-18) hold: read after the close on its own New
+York date, no order working or pending at IBKR for the account, no
+execution since the close, and the holdings and cash those of the previous
+account snapshot adjusted by the run's fills since (the cash within 0.5% of
+net liquidation, recorded as `cash_drift`), which catches a corporate action,
+a cash posting or another client's trade that no list shows. The adapter
+then stamps its `account.snapshot` with the close (the broker snapshot
+carries the true read time beside it) and values it at the close: its net
+liquidation is the total cash plus each holding times the delivered bar's
+official close, the same basis as the previous close the planner prices
+from, so Boost's `want × V / p − q`, the 150% exposure limit and the order
+size limit take one price basis; IBKR's own net liquidation at the read is
+recorded beside it on the broker snapshot (`read_net_liquidation`). When a
+condition fails the adapter stamps the true read time, IBKR's own reading,
+and the strategy withholds the session as `stale-account-snapshot`, as this
+point already requires of a snapshot taken after the close.
+
+The `market.mark.recorded` is the delivered bar's official close, the price
+the backtest marks at, at schema version 2 with IBKR's last price beside it
+(`broker_last`). **The price band (point 3) compares a checked order's
+reference price with IBKR's last price when IBKR gave one, and with the
+official close otherwise**, and the order's figures record which
+(`mark_source`: `broker-last` or `official-close`). The reference price is
+the same official close, so without IBKR's price the band compares the close
+with itself and can refuse nothing: the band has teeth only when IBKR
+provides a price, and then the limit price is not the only bound on the
+fill. This is the orchestrator's reading of the owner's decision, put to the
+owner. Nothing is sized from IBKR's price, so no decision needs IBKR
+market-data permissions. Target-weight rules version 1.18.0 reads the new
+versions of the broker snapshot and the mark, so a journal holding either
+does not replay under 1.17.0; with a version 2 mark the band compares as
+above, and decisions are otherwise unchanged.

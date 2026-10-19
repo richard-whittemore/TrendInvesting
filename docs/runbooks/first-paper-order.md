@@ -140,6 +140,7 @@ know they are right):
 | Read-Only API | **on (leave it on) for now** | A read-only API refuses every order, which is what you want until the moment of the first order. On the server this is `TWS_READONLY_API=yes` in `ibkr-login.env`, the shipped value. You turn it off in B4, immediately before the first order, and back on afterwards (C) |
 | Trusted IPs | `127.0.0.1` only | The adapter runs on the same machine as the Gateway. Do not add another address, and do not open the port in any firewall: the server's firewall already allows inbound traffic on the Tailscale interface only |
 | Allow connections from localhost only | on | Same reason |
+| Master API client ID | **11** (Boost's client ID) | IBKR shows an API client the executions of other clients, of TWS and of IBKR's own app only when its client ID is the Master API client ID. The adapter asks for every client's executions to check that nothing executed since the close (`docs/manual/paper-trading.md`, "A paper day"); with this set, its list has them all. On the server, set it once in Gateway's own settings as for the others (IBC does not set it); the adapter's check of the holdings and cash since the previous close does not depend on it |
 
 Check that the Gateway is listening on 4002 and only on this machine. On the
 server run `ss -ltn | grep 4002`; you should see one line whose local address
@@ -315,9 +316,10 @@ Order of starting, each on the server, each an explicit step of yours:
    Neither is started or restarted by systemd on its own; every start is
    yours.
    **IBKR market data is not needed.** SPY's mark is the day's official
-   close from the data job; IBKR's last price is recorded beside it as
-   evidence only. If the paper login has no market data for SPY, nothing
-   changes but that evidence.
+   close from the data job; IBKR's last price is recorded beside it, and
+   the price band compares a buy with it when it is there. If the paper
+   login has no market data for SPY, the band compares the close with
+   itself and always passes, and nothing else changes.
 5. Confirm the engine's log begins with the paper configuration, and that the
    adapter says it connected on 4002, read the account's balances in full
    and matched IBKR's open orders and today's trades to the orders the
@@ -669,12 +671,17 @@ commands below are on `main` now **[NOW]**.
   was stamped at its read time and the engine decided nothing for that
   session. The reasons: IBKR showed an order still working for the account
   (from any client), IBKR reported an execution in the account since the
-  close, the reading was on a later date than the close (the adapter was
-  not running that evening), or the engine already held a snapshot stamped
-  at or after that close. Nothing was ordered; the target in force is
-  unchanged.
-- **What to do:** check the account in IBKR for the order or trade the
-  reason names. A trade you placed by hand is reported again at the next
+  close, a holding had no official close in the day's file, the holdings
+  were not the previous close's plus or minus the run's own fills (a trade
+  IBKR did not show the adapter, a transfer, a split), the cash moved by
+  more than 0.5% of net liquidation beyond those fills, the reading was on
+  a later date than the close (the adapter was not running that evening),
+  or the engine already held a snapshot stamped at or after that close.
+  Nothing was ordered; the target in force is unchanged.
+- **What to do:** check the account in IBKR for the order, trade, holding
+  or cash the reason names. Holdings the run's fills do not explain also
+  reach the engine in that day's reconciliation, which takes the account
+  out of Normal: settle them as `docs/runbooks/reconciliation.md` says. A trade you placed by hand is reported again at the next
   start's reconciliation; settle it as `docs/runbooks/reconciliation.md`
   says. Otherwise nothing: the next session whose reading passes decides as
   usual. Keep the adapter running through the evening so the reading is
@@ -690,8 +697,10 @@ commands below are on `main` now **[NOW]**.
   sent for the engine to reconcile.
 - ADR 0019, ADR 0025 point 5 and ADR 0026 point 1, amended 2026-10-18 (your
   decision): one reading after the close, with nothing working at IBKR and
-  no execution since, is the account as of that close; the mark is the
-  official close, IBKR's last price evidence only. Point 4, amended: IBKR's `ibapi` is
+  no execution since, and holdings and cash the previous close's adjusted
+  by the run's fills, is the account as of that close, valued at the
+  close; the mark is the official close, and the price band compares
+  IBKR's last price with the reference price when IBKR gives one. Point 4, amended: IBKR's `ibapi` is
   pinned by checksum, fetched and verified, never committed. Point 6: IB
   Gateway runs under IBC, credentials only on the server.
 - ADR 0027 and `docs/manual/redelivery.md`: journal before send, each order

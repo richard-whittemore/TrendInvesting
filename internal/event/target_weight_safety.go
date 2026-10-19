@@ -89,7 +89,10 @@ const BrokerSnapshotSchemaVersion uint32 = 1
 // close and before the next open, with no order working or pending at IBKR
 // for the account and no execution since the close, is the account as of
 // that close: AsOf is then the close and ReadAt the true read time beside it
-// as evidence. Otherwise AsOf is the read time and NotAsOfClose says which
+// as evidence, and the snapshot is valued at the close (NetLiquidation and
+// each mark), IBKR's own net liquidation at the read beside it
+// (ReadNetLiquidation) with the cash drift the adapter accepted
+// (CashDrift). Otherwise AsOf is the read time and NotAsOfClose says which
 // condition failed, so the engine finds the reading stale for that close and
 // withholds (ADR 0019's snapshot rule).
 const BrokerSnapshotReadAtVersion uint32 = 2
@@ -170,6 +173,19 @@ type BrokerSnapshotPayload struct {
 	// NotAsOfClose, from version 2, says why a reading stamped at its read
 	// time could not stand for the close: the condition that failed.
 	NotAsOfClose string `json:"not_as_of_close,omitempty"`
+	// ReadNetLiquidation, from version 2, is IBKR's own net liquidation at
+	// ReadAt. A snapshot as of the close values NetLiquidation at the
+	// official close (its cash plus each holding times the bar's close, the
+	// basis of the sale back to 98%) and records IBKR's figure here as
+	// evidence and as the margin alarm's basis, beside Excess Liquidity read
+	// with it; a snapshot at its read time states IBKR's figure in both (ADR
+	// 0019, amended 2026-10-18: one price basis per rule).
+	ReadNetLiquidation float64 `json:"read_net_liquidation,omitzero"`
+	// CashDrift, from version 2 and only as of the close, is IBKR's total
+	// cash at the read less the previous close's and this run's fills since
+	// it: the drift, within its bound, the adapter accepted when it stamped
+	// the reading as of the close.
+	CashDrift float64 `json:"cash_drift,omitzero"`
 }
 
 // UnmarshalJSON decodes the snapshot and requires market_open to be stated as
@@ -193,6 +209,18 @@ func (p *BrokerSnapshotPayload) UnmarshalJSON(raw []byte) error {
 	*p = BrokerSnapshotPayload(stated.plain)
 	p.MarketOpen = *stated.MarketOpen
 	return nil
+}
+
+// AlarmNetLiquidation is the net liquidation the margin alarm divides
+// Excess Liquidity by: IBKR's own at the read, the basis Excess Liquidity
+// was read on. For a snapshot as of the close that is ReadNetLiquidation,
+// NetLiquidation being valued at the official close; otherwise
+// NetLiquidation (ADR 0019, amended 2026-10-18: one price basis per rule).
+func (p BrokerSnapshotPayload) AlarmNetLiquidation() float64 {
+	if p.AsOfClose {
+		return p.ReadNetLiquidation
+	}
+	return p.NetLiquidation
 }
 
 // Readable reports whether component was read.
@@ -274,7 +302,16 @@ func (p BrokerSnapshotPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("positions must be strictly ascending by instrument; %q follows %q", position.InstrumentID, p.Positions[i-1].InstrumentID))
 		}
 	}
-	if !p.ReadAt.IsZero() || p.AsOfClose || p.NotAsOfClose != "" {
+	switch {
+	case !isFinite(p.ReadNetLiquidation):
+		errs = append(errs, errors.New("net liquidation at the read must be finite"))
+	case !p.Readable(BrokerComponentNetLiquidation) && p.ReadNetLiquidation != 0:
+		errs = append(errs, errors.New("an unreadable net liquidation carries no value at the read either"))
+	}
+	if !isFinite(p.CashDrift) {
+		errs = append(errs, errors.New("cash drift must be finite"))
+	}
+	if !p.ReadAt.IsZero() || p.AsOfClose || p.NotAsOfClose != "" || p.ReadNetLiquidation != 0 || p.CashDrift != 0 {
 		errs = append(errs, p.readAtErrors()...)
 	}
 	for i, o := range p.OpenOrders {
@@ -313,8 +350,8 @@ func (p BrokerSnapshotPayload) ValidateSchema(version uint32) error {
 	}
 	switch version {
 	case BrokerSnapshotSchemaVersion:
-		if !p.ReadAt.IsZero() || p.AsOfClose || p.NotAsOfClose != "" {
-			return errors.New("invalid broker snapshot payload: version 1 carries no read time, close stamp or reason; those are version 2's")
+		if !p.ReadAt.IsZero() || p.AsOfClose || p.NotAsOfClose != "" || p.ReadNetLiquidation != 0 || p.CashDrift != 0 {
+			return errors.New("invalid broker snapshot payload: version 1 carries no read time, close stamp, reason, net liquidation at the read or cash drift; those are version 2's")
 		}
 	case BrokerSnapshotReadAtVersion:
 		if err := errors.Join(p.readAtErrors()...); err != nil {
@@ -344,6 +381,10 @@ func (p BrokerSnapshotPayload) readAtErrors() []error {
 		return []error{errors.New("a snapshot stamped at its read time states why it is not as of the close")}
 	case !p.AsOfClose && !p.ReadAt.Equal(p.AsOf):
 		return []error{errors.New("a snapshot not as of the close is stamped at its read time: as of must equal read at")}
+	case !p.AsOfClose && p.ReadNetLiquidation != p.NetLiquidation:
+		return []error{errors.New("a snapshot at its read time states IBKR's own net liquidation, so the figure at the read must equal it")}
+	case !p.AsOfClose && p.CashDrift != 0:
+		return []error{errors.New("a snapshot at its read time accepted no cash drift; only one as of the close states one")}
 	}
 	return nil
 }

@@ -19,10 +19,13 @@ up the files of its run it has not delivered, oldest session first, reads
 each strictly (read_stream), takes one account reading for the batch's last
 session (loop.AdapterLoop._post_close_reading, given that session's close
 and each of its bars' official close, last_session) and records, in the
-outbox in one write (relay.Outbox.extend, _entries): the engine's
-account.snapshot, the broker snapshot, in a run's first batch the
-start-of-run reconciliation (the engine holds no book before it; ADR 0025
-point 5), then every envelope of those files, with each mark
+outbox in one write (relay.Outbox.extend, _entries): the reconciliation
+of the same reading, for the engine to classify against the book it holds
+before the batch's snapshots replace it (ADR 0019: a holding no fill
+explains is unexplained, never adopted), then the engine's account.snapshot
+and the broker snapshot; in a run's first batch, when the engine holds no
+book, the start-of-run reconciliation goes behind the snapshots instead
+(ADR 0025 point 5); then every envelope of those files, with each mark
 (market.mark.recorded, the bar's official close) just before the last
 session's close. The engine therefore journals the account snapshot before
 the bars, the mark before the close, and each session's bars before its
@@ -733,20 +736,25 @@ def _derived(snapshot_id, event_type, instrument=""):
 def _entries(run, snapshot_id, reading, streams, book):
     """The outbox entries of one batch, each naming the run it was read for (see the module).
 
-    The engine's account.snapshot, the broker snapshot and, when the engine
-    holds no book yet (book false), the start-of-run reconciliation from the
-    same read; then every envelope of each file in order, with each mark
-    just before the last session's close, so the engine reads the account
-    snapshot, the bar, the mark, then the close that decides.
+    The reconciliation of the same read, then the engine's account.snapshot
+    and the broker snapshot, when the engine holds a book (book true): the
+    engine classifies the reading against the book it holds and this run's
+    fills since before the new snapshot replaces it, so holdings no fill
+    explains are unexplained (ADR 0019's Degraded or Halted path), never
+    adopted. With no book yet, the account.snapshot, the broker snapshot,
+    then the start-of-run reconciliation (ADR 0025 point 5). Then every
+    envelope of each file in order, with each mark just before the last
+    session's close, so the engine reads the account snapshot, the bar, the
+    mark, then the close that decides.
     """
     def adapter_entry(record, input_id):
         return {"id": input_id, "event_type": record.event_type, "schema_version": record.schema_version,
                 "event_time": record.payload["as_of"], "payload": record.payload, "run": run}
+    reconciliation_id = _derived(snapshot_id, RECONCILIATION_TYPE)
+    reconciliation = adapter_entry(reconciliation_record(reading.reading, reconciliation_id), reconciliation_id)
     entries = [adapter_entry(reading.account, _derived(snapshot_id, ACCOUNT_SNAPSHOT_TYPE)),
                adapter_entry(reading.broker, snapshot_id)]
-    if not book:
-        reconciliation_id = _derived(snapshot_id, RECONCILIATION_TYPE)
-        entries.append(adapter_entry(reconciliation_record(reading.reading, reconciliation_id), reconciliation_id))
+    entries = [reconciliation] + entries if book else entries + [reconciliation]
     last_close = streams[-1].envelopes[-1]["id"]
     # A retraction a later file repeats (_repeats) is recorded once, as the
     # first file wrote it.

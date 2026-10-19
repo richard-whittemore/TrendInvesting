@@ -45,8 +45,8 @@ class RehearsalTests(unittest.TestCase):
                      "(read after it), its bar, its mark from the bar's official close, then its close",
                      "PASS: the engine decided the day and its durable log shows one buy released to be sent",
                      "PASS: the order went out once, only after the day's close released it, as released",
-                     "PASS: the reconnect and a restart reconciled the account again, the engine matched both, and "
-                     "nothing was sent twice",
+                     "PASS: the reconnect and a restart reconciled the account again, the engine matched every "
+                     "reconciliation (each batch's too), and nothing was sent twice",
                      "PASS: with an execution since the close, the reading was stamped at its read time with the "
                      "reason, and the engine withheld the session as stale-account-snapshot, ordering nothing",
                      "PASS: after a crash resume under a new run name, the next day's stream went from the run's own "

@@ -583,27 +583,85 @@ in [the operator chapter](../manual/operator.md).
 
 The owner decided on 2026-10-18 that one IBKR account reading taken after a
 session's close and before the next open stands for the account **as of that
-close**, when, at the read, no order is working or pending at IBKR for the
-account (from any client, cancel-pending included) and no execution has
-reached the account since the close. Why it equals the close: between the
-close and the next open the account's positions, cash and open orders change
-only through an order that is still working or an execution, so when there is
-neither, the account read later is the account the close left. The IBKR
-adapter checks both from IBKR's own lists (its open orders, and its
-executions, which reach back only to midnight: so the read must also be on
-the close's own New York date), and the engine must hold no snapshot already
-stamped at or after that close. Then the adapter stamps the
-`account.broker.snapshot` (schema version 2) with the close as its as-of time
-and records the true read time beside it (`read_at`) as evidence, so this
-ADR's snapshot rule (reading 1's age, measured at the trigger's journalled
-time) finds it fresh for the sell planned at that close. If the condition
-fails, the adapter stamps the true read time and states why
-(`not_as_of_close`); the snapshot is then later than the close, which the
-rule counts as stale (a negative age), and the engine's own account snapshot,
-stamped the same way, withholds the session (`stale-account-snapshot`): fail
-closed, and the reporter pages the owner once with the reason. The
-start-of-run reconciliation the adapter now sends (ADR 0025 point 5) is
-stamped with its true read time, never earlier than the book it is compared
-with. No rule of the engine changes; it reads the new schema version
-(target-weight rules version 1.18.0, so a journal holding one does not
-replay under 1.17.0).
+close**, when the conditions below hold. Why it can equal the close: between
+the close and the next open the account's positions and open orders change
+only through an order that is still working, an execution or a corporate
+action IBKR books overnight (a split, a spin-off), and its cash also through
+postings that need no order at all (interest, a fee, a dividend). An order
+or an execution shows in IBKR's lists, but only to a client that can see it:
+IBKR shows other clients' and TWS's executions only to the Gateway's Master
+API client ID. A corporate action or a posting shows in neither. So the
+adapter checks both kinds of change, the second without relying on any
+client ID:
+
+1. **IBKR's lists.** No order is working or pending at IBKR for the account
+   (from any client, cancel-pending included), in either account read or in
+   the last open-order list IBKR returns, which the reading's cutoff covers:
+   an order report or an execution arriving during that last list makes the
+   adapter read again. No execution has reached the account since the close
+   (IBKR's executions, asked for every client, reach back only to midnight,
+   so the read must also be on the close's own New York date).
+2. **The previous close, with no client ID.** The holdings read are the
+   previous account snapshot's adjusted by this run's journalled fills since
+   it, share for share, and the total cash is the previous reading's (the
+   reconciliation recorded with that snapshot) adjusted by those fills'
+   values and commissions, within a bound: 0.5% of the net liquidation at
+   the close, room for a posting such as a day's interest. The difference is
+   recorded on the broker snapshot as `cash_drift`. Any difference in
+   holdings, or cash beyond the bound, fails the condition. This catches a
+   trade another client made that IBKR did not show this client, a transfer,
+   a split booked overnight and a large cash posting; a run's first batch has
+   no previous snapshot to compare, and is the book's start.
+3. **A valuation at the close.** Every holding has an official close in the
+   batch (below), and the engine holds no snapshot already stamped at or
+   after that close.
+
+Then the adapter stamps the `account.broker.snapshot` (schema version 2) with
+the close as its as-of time and records the true read time beside it
+(`read_at`) as evidence, so this ADR's snapshot rule (reading 1's age,
+measured at the trigger's journalled time) finds it fresh for the sell
+planned at that close.
+
+**One price basis per rule.** A snapshot as of the close is valued at the
+close: each holding is marked at the delivered bar's official close, and its
+net liquidation, in both the broker snapshot and the engine's
+`account.snapshot`, is the total cash plus each holding times that close.
+This keeps "One price basis" (amendment of 2026-10-15) for the sale back to
+98%, which takes net liquidation and mark together, and for Boost's sizing
+and limits, which take the account snapshot's net liquidation with the
+previous close as the reference price. IBKR's own net liquidation at the
+read is recorded beside it (`read_net_liquidation`) as evidence. Excess
+Liquidity stays IBKR's reading at the read, recorded as such: only the
+margin alarm uses it, and the alarm divides it by IBKR's own net liquidation
+at the same read (`read_net_liquidation`), never by the close's. A snapshot
+stamped at its read time is IBKR's own reading throughout: net liquidation
+IBKR's, each holding marked at IBKR's last price at the read (no mark when
+IBKR gives none, so the sale back to 98% is withheld and the owner acts by
+hand).
+
+If a condition fails, the adapter stamps the true read time and states every
+reason (`not_as_of_close`); the snapshot is then later than the close, which
+the rule counts as stale (a negative age), and the engine's own account
+snapshot, stamped the same way, withholds the session
+(`stale-account-snapshot`): fail closed, and the reporter pages the owner
+once with the reason.
+
+**Reconciliation with every reading.** The adapter sends an
+`account.reconciliation` from the same reading with every daily batch, ahead
+of the batch's account snapshot once the engine holds a book: the engine
+classifies IBKR's positions against the book it holds and the fills
+journalled since, before the new snapshot replaces that book, so holdings no
+fill explains are unexplained (Degraded on the instrument, or Halted when
+unverifiable), never adopted by the next snapshot. A run's first batch,
+before which the engine holds no book, carries it behind its snapshots, as
+the start-of-run reconciliation (ADR 0025 point 5). The reconciliation of a
+start or a reconnect is read only once every execution IBKR replayed has its
+commission and its fill is recorded, and goes to the engine before any
+stream input, so no fill reaches the engine after a reconciliation that
+already shows its shares. Every reconciliation is stamped with its true read
+time, never earlier than the book it is compared with.
+
+Target-weight rules version 1.18.0 reads the new schema versions, and with
+them the margin alarm's basis above and the price band's comparison (ADR
+0026, point 3, amended 2026-10-18), so a journal holding one does not replay
+under 1.17.0.

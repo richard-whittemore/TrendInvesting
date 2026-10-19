@@ -865,6 +865,13 @@ const (
 // Exposure is account-wide: every holding at its reference price over net
 // liquidation. CashChecked is true for an IRA's buy, whose worst-case BuyCost
 // was checked against CashAvailable; otherwise both are 0.
+// The prices a price band compares an order's reference price with
+// (RiskFigures.MarkSource).
+const (
+	MarkSourceBrokerLast    = "broker-last"
+	MarkSourceOfficialClose = "official-close"
+)
+
 type RiskFigures struct {
 	NetLiquidation   float64 `json:"net_liquidation"`
 	ReferencePrice   float64 `json:"reference_price"`
@@ -884,6 +891,13 @@ type RiskFigures struct {
 	// the account snapshot's holding it was sized from. It is exempt from
 	// the order count, size and price band.
 	RiskReducing bool `json:"risk_reducing,omitempty"`
+	// MarkSource names the price the band compared the reference price with,
+	// for a mark at MarkRecordedEvidenceVersion: IBKR's last price when the
+	// mark carries one (MarkSourceBrokerLast), else the delivered bar's
+	// official close (MarkSourceOfficialClose; ADR 0026 point 3, amended
+	// 2026-10-18). Omitted for an earlier mark, so its figures keep their
+	// bytes.
+	MarkSource string `json:"mark_source,omitempty"`
 	// The latest broker snapshot's holding and working sells for the
 	// instrument, when the gate had one (BrokerSet). WorkingSells also counts
 	// the sells the gate released after that snapshot, which it cannot yet
@@ -918,6 +932,12 @@ func (f RiskFigures) validate(side string) []error {
 		errs = append(errs, errors.New("figures mark must be positive when set"))
 	case !f.MarkSet && (f.Mark != 0 || f.MarkDeviation != 0):
 		errs = append(errs, errors.New("figures mark carries a value but none is set"))
+	}
+	switch {
+	case f.MarkSource != "" && f.MarkSource != MarkSourceBrokerLast && f.MarkSource != MarkSourceOfficialClose:
+		errs = append(errs, fmt.Errorf("figures mark source %q is not %s or %s", f.MarkSource, MarkSourceBrokerLast, MarkSourceOfficialClose))
+	case f.MarkSource != "" && !f.MarkSet:
+		errs = append(errs, errors.New("figures mark source names a price but no mark is set"))
 	}
 	if f.OrdersInDecision < 0 {
 		errs = append(errs, errors.New("figures orders in decision must not be negative"))

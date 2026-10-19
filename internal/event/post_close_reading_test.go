@@ -16,8 +16,8 @@ import (
 // of that close. The broker snapshot then states the close as its as-of
 // time and the true read time beside it; otherwise it states the read time
 // and why the reading could not stand for the close. The mark is the
-// delivered bar's official close, with IBKR's last price beside it as
-// evidence only.
+// delivered bar's official close, with IBKR's last price beside it, which
+// the gate's price band compares with when it is set.
 
 // postCloseSnapshot is a version-2 broker snapshot stamped as of the close,
 // read 70 minutes after it.
@@ -36,6 +36,7 @@ func readTimeSnapshot() event.BrokerSnapshotPayload {
 	p := validBrokerSnapshot()
 	p.AsOf = twSession.Add(70 * time.Minute)
 	p.ReadAt = p.AsOf
+	p.ReadNetLiquidation = p.NetLiquidation
 	p.NotAsOfClose = "IBKR shows 1 open order for the account"
 	return p
 }
@@ -160,5 +161,84 @@ func TestMarkVersion2CarriesIBKRsLastPriceAsEvidence(t *testing.T) {
 	}
 	if got := event.MarkRecordedVersions(); len(got) != 2 || got[0] != 1 || got[1] != 2 {
 		t.Errorf("MarkRecordedVersions = %v, want [1 2]", got)
+	}
+}
+
+// TestBrokerSnapshotVersion2StatesIBKRsNetLiquidationAndTheCashDrift: a
+// snapshot as of the close values its net liquidation at the official close
+// and states IBKR's own at the read beside it, with the cash drift since the
+// previous close the adapter allowed; a snapshot at its read time is IBKR's
+// own reading, so the two figures agree and it carries no drift (ADR 0019,
+// amended 2026-10-18).
+func TestBrokerSnapshotVersion2StatesIBKRsNetLiquidationAndTheCashDrift(t *testing.T) {
+	type P = event.BrokerSnapshotPayload
+	atClose := postCloseSnapshot()
+	atClose.ReadNetLiquidation, atClose.CashDrift = 8411.7, -3.25
+	read := readTimeSnapshot()
+	for name, p := range map[string]P{"as of the close": atClose, "at its read time": read} {
+		if err := p.ValidateSchema(event.BrokerSnapshotReadAtVersion); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, c := range map[string]struct {
+		base   P
+		mutate func(*P)
+		want   string
+	}{
+		"read net liquidation not finite": {atClose, func(p *P) { p.ReadNetLiquidation = math.Inf(1) }, "net liquidation at the read must be finite"},
+		"cash drift not finite":           {atClose, func(p *P) { p.CashDrift = math.NaN() }, "cash drift must be finite"},
+		"read time, two figures":          {read, func(p *P) { p.ReadNetLiquidation = p.NetLiquidation + 1 }, "IBKR's own"},
+		"read time with a drift":          {read, func(p *P) { p.CashDrift = 1 }, "cash drift"},
+		"unreadable with a value": {atClose, func(p *P) {
+			p.Unreadable, p.NetLiquidation = []string{event.BrokerComponentNetLiquidation}, 0
+		}, "unreadable net liquidation"},
+	} {
+		p := c.base
+		c.mutate(&p)
+		if err := p.ValidateSchema(event.BrokerSnapshotReadAtVersion); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, c.want)
+		}
+	}
+	if got := atClose.AlarmNetLiquidation(); got != 8411.7 {
+		t.Errorf("as of the close, the alarm's net liquidation = %v, want IBKR's own at the read", got)
+	}
+	if got := read.AlarmNetLiquidation(); got != read.NetLiquidation {
+		t.Errorf("at its read time, the alarm's net liquidation = %v, want the snapshot's", got)
+	}
+	v1 := validBrokerSnapshot()
+	v1.ReadNetLiquidation = v1.NetLiquidation
+	if err := v1.ValidateSchema(event.BrokerSnapshotSchemaVersion); err == nil {
+		t.Errorf("version 1 with IBKR's net liquidation beside it: err = %v, want refused", err)
+	}
+	raw, err := json.Marshal(atClose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back P
+	if err := json.Unmarshal(raw, &back); err != nil || back.ReadNetLiquidation != 8411.7 || back.CashDrift != -3.25 {
+		t.Errorf("round trip = %+v (%v) from %s", back, err, raw)
+	}
+}
+
+// TestRiskFiguresNameTheBandsPriceOnlyWhenAMarkIsSet: an order's figures name
+// which price the band compared, IBKR's last price or the official close,
+// and only beside a mark (ADR 0026 point 3, amended 2026-10-18).
+func TestRiskFiguresNameTheBandsPriceOnlyWhenAMarkIsSet(t *testing.T) {
+	for _, source := range []string{"", event.MarkSourceBrokerLast, event.MarkSourceOfficialClose} {
+		p := validOrderReleased()
+		p.Figures.MarkSource = source
+		if err := p.Validate(); err != nil {
+			t.Errorf("mark source %q: %v", source, err)
+		}
+	}
+	p := validOrderReleased()
+	p.Figures.MarkSource = "quote"
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "mark source") {
+		t.Errorf("an unknown mark source: err = %v", err)
+	}
+	p = validOrderReleased()
+	p.Figures.Mark, p.Figures.MarkSet, p.Figures.MarkDeviation, p.Figures.MarkSource = 0, false, 0, event.MarkSourceOfficialClose
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "mark source") {
+		t.Errorf("a mark source with no mark: err = %v", err)
 	}
 }

@@ -455,12 +455,16 @@ def rehearse(work, account):
         run(restart, run_log)
         after = inputs(run_log)
         added = [i["type"] for i in after if i["id"] not in before_restart]
+        # Five so far: the warm-up's start-of-run reconciliation, the day
+        # adapter's start, the day's own batch (every later batch reconciles
+        # the reading against the book before its snapshot replaces it), the
+        # reconnect and the restart.
         results = [d["payload"]["action"] for i in of(run_log, RECONCILIATION_TYPE)
                    for d in decisions(run_log, i["id"]) if d["type"] == RESULT]
         check(len(gateway.called("connect")) == connects + 1 and placed() == 1 and added == [RECONCILIATION_TYPE]
-              and results == ["continue"] * 4 and len({i["id"] for i in after}) == len(after),
-              "the reconnect and a restart reconciled the account again, the engine matched both, and nothing was "
-              "sent twice")
+              and results == ["continue"] * 5 and len({i["id"] for i in after}) == len(after),
+              "the reconnect and a restart reconciled the account again, the engine matched every reconciliation "
+              "(each batch's too), and nothing was sent twice")
 
         # -- 5. the next day: a fill after the close ------------------------
         quantity = released["quantity"]
@@ -512,9 +516,9 @@ def rehearse(work, account):
         new = inputs(resumed_log)[copied:]
         resumed_decided = [d["payload"] for d in decisions(resumed_log, third_close) if d["type"] == DECIDED]
         check(nxt == streams / RUN / "boost-{}.jsonl".format(third) and sorted(os.listdir(streams)) == [RUN]
-              and [i["type"] for i in new] == [RECONCILIATION_TYPE, ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, BAR,
-                                               MARK_TYPE, CLOSED]
-              and new[1]["payload"]["as_of"] == stamp(nyse_calendar.session_close(third))
+              and [i["type"] for i in new] == [RECONCILIATION_TYPE, RECONCILIATION_TYPE, ACCOUNT_SNAPSHOT_TYPE,
+                                               BROKER_SNAPSHOT_TYPE, BAR, MARK_TYPE, CLOSED]
+              and new[2]["payload"]["as_of"] == stamp(nyse_calendar.session_close(third))
               and resumed_decided and resumed_decided[0]["outcome"] == "decided"
               and len({i["id"] for i in inputs(resumed_log)}) == len(inputs(resumed_log)),
               "after a crash resume under a new run name, the next day's stream went from the run's own folder "

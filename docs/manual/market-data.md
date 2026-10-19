@@ -646,18 +646,26 @@ days), it takes them all, oldest first.
    **As of the close, when it can stand for it** (your decision of
    2026-10-18; ADR 0019, ADR 0025 point 5, ADR 0026 point 1). The engine
    decides a session from the account at that session's close. Between the
-   close and the next open nothing in the account changes unless an order
-   is working or something executes, so when the reading is taken after the
-   close of the file's last session, on that session's own New York date,
-   with no open order for the account at IBKR (working, pending or
-   cancel-pending, from any client) and no execution in the account since
-   the close (IBKR's own list, read right after the account; it reaches
-   back only to midnight, which is why the date must be the close's), and
-   the engine holds no snapshot already stamped at or after that close,
-   both snapshots are stamped **as of the close**, and the broker snapshot
-   records the real read time beside it (`read_at`) as evidence. If any of
-   that fails, both are stamped with the real read time and the broker
-   snapshot says which failed (`not_as_of_close`). The engine then has no
+   close and the next open the account changes only through an order still
+   working, an execution, a corporate action IBKR books overnight or a cash
+   posting (interest, a fee), so when the reading is taken after the close
+   of the file's last session, on that session's own New York date, with no
+   open order for the account at IBKR (working, pending or cancel-pending,
+   from any client; in either read of the account and in the last list of
+   open orders, read after both), no execution in the account since the
+   close (IBKR's own list, asked for every client and read last; it reaches
+   back only to midnight, which is why the date must be the close's), every
+   holding with an official close in the file, the holdings exactly the
+   previous account snapshot's plus or minus the run's fills since, and the
+   cash the previous reading's adjusted by those fills within 0.5% of net
+   liquidation (`cash_drift` records the difference; this check needs no
+   client ID, so it catches a trade the adapter is not shown, a split or a
+   transfer), and the engine holds no snapshot already stamped at or after
+   that close, both snapshots are stamped **as of the close**, and the
+   broker snapshot records the real read time beside it (`read_at`) as
+   evidence. If any of that fails, both are stamped with the real read time
+   and the broker snapshot says every condition that failed
+   (`not_as_of_close`). The engine then has no
    account snapshot as of the close, so it withholds the session
    (`stale-account-snapshot`) and orders nothing, and the reporter pages
    you with the reason. A batch of several files (the adapter was stopped
@@ -665,14 +673,21 @@ days), it takes them all, oldest first.
    that last session can be decided; the earlier ones are withheld the same
    way.
 
-   **The mark is the bar's official close.** Each holding's mark in the
-   broker snapshot is the closing price of that instrument's bar in the
-   file's last session: the number the backtest marks at. IBKR's last
-   traded price is not decided from; it is recorded as evidence beside the
-   mark (below). A holding with no bar in the file (anything but SPY) is
-   listed with no mark ("mark set false"), and the engine then cannot size
-   the joint account's emergency sale back to 98% from that snapshot, holds
-   that sale back and asks you to act by hand.
+   **One price basis: a reading as of the close is valued at the close**
+   (ADR 0019, amended 2026-10-18). Each holding's mark in the broker
+   snapshot is the closing price of that instrument's bar in the file's
+   last session, the number the backtest marks at, and the net liquidation
+   of both snapshots is the account's cash plus each holding times that
+   close; IBKR's own net liquidation at the read goes beside it
+   (`read_net_liquidation`), and the margin alarm compares Excess Liquidity
+   (IBKR's, at the read) with that figure, never with the close's. A
+   holding with no bar in the file (anything but SPY) cannot be valued at
+   the close, so the reading is stamped at its read time. A reading stamped
+   at its read time is IBKR's own reading throughout: IBKR's net
+   liquidation, each holding marked at IBKR's last price, or with no mark
+   ("mark set false") when IBKR gave none, and then the engine cannot size
+   the joint account's emergency sale back to 98% from that snapshot,
+   holds that sale back and asks you to act by hand.
 
    The account read and IBKR's last prices are one reading. The adapter first
    applies every report IBKR has already sent, so a fill or a cancellation
@@ -685,7 +700,11 @@ days), it takes them all, oldest first.
    you placed in IBKR's own app, which IBKR reports to that app only, still
    shows there), or if any part of the account could not be read (IBKR
    timed out on the balances, say), it reads the whole account again, up
-   to three times. The snapshots are the second read, with its IBKR time.
+   to three times; IBKR's open orders and executions, read after the
+   second read, are inside the same check, so an execution arriving while
+   they are read reads again too (each execution counted once, by its ID,
+   so a replay of the day's list is no change). The snapshots are the
+   second read, with its IBKR time.
    IBKR's answers for the positions and the open orders carry no request
    number, so if IBKR does not finish either list in time, or Gateway
    loses IBKR's servers part-way through (it restores them on the same
@@ -697,19 +716,30 @@ days), it takes them all, oldest first.
    broker snapshot read_at=... as_of=... cutoff: ...` names the read time,
    the stamp, the last report recorded before each snapshot and, when the
    stamp is the read time, why.
-2. **A run's first file only: the start-of-run reconciliation.** From the
-   same reading, IBKR's positions and cash, for the engine to compare
-   against the book it has just recorded (ADR 0025 point 5, ADR 0019). At
-   every later start of the adapter, and every reconnect, the adapter sends
-   one too, from the reading that reconciles the link.
+2. **The reconciliation, with every file.** From the same reading, IBKR's
+   positions and cash, for the engine to compare against its book (ADR
+   0025 point 5, ADR 0019). Once the engine holds a book it goes **first,
+   before the two snapshots**: the engine compares IBKR's holdings with the
+   book it holds and the fills recorded since, before the new snapshot
+   replaces that book, so shares no fill explains are found (Degraded on
+   the instrument), never quietly taken over. A run's first file, before
+   which the engine holds no book, carries it behind the snapshots, against
+   the book just recorded. At every later start of the adapter, and every
+   reconnect, the adapter sends one too, read once every trade IBKR
+   replayed has its commission and its fill has reached the engine, and
+   before any of the file's lines.
 3. **The file, line by line, as written**: each session's SPY bar, then that
    session's close, and, between the last session's bar and its close,
    **SPY's mark** (`market.mark.recorded`): the bar's official close, which
    the engine checks a buy's price against (a buy with no mark is refused,
-   `missing-mark`), with IBKR's last price beside it (`broker_last`) as
-   evidence. Without IBKR market-data permissions on the paper login there
-   is no last price; the evidence is left empty and nothing else changes:
-   **no decision needs IBKR market data**. The engine therefore records the
+   `missing-mark`), with IBKR's last price beside it (`broker_last`). The
+   price band compares the buy's reference price with IBKR's last price when
+   there is one, and with the official close otherwise (then it always
+   passes: the band has teeth only when IBKR provides a price; ADR 0026
+   point 3, amended 2026-10-18), and the order records which
+   (`mark_source`). Without IBKR market-data permissions on the paper login
+   there is no last price, and nothing else changes: **no decision needs
+   IBKR market data**. The engine therefore records the
    account snapshot before the bars, the mark before the close, and each
    session closes only after its bar, before anything for that day is
    decided (ADR 0019, ADR 0021). Each line goes with the engine's next

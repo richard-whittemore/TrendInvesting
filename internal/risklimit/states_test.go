@@ -1362,3 +1362,29 @@ func TestASaleWithheldUnderBothTriggersLapsesOnce(t *testing.T) {
 		t.Errorf("already lapsed: %+v", l)
 	}
 }
+
+// TestAPostCloseSnapshotsAlarmIsOnIBKRsOwnReading: a broker snapshot as of
+// the close values its net liquidation at the official close, the basis of
+// the sale back to 98%; the margin alarm divides IBKR's Excess Liquidity at
+// the read by IBKR's net liquidation at the same read, so each rule has one
+// price basis (ADR 0019, amended 2026-10-18).
+func TestAPostCloseSnapshotsAlarmIsOnIBKRsOwnReading(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	s := broker(14700)
+	s.MarketOpen = false
+	s.ReadAt, s.AsOfClose = s.AsOf.Add(70*time.Minute), true
+	// 30% of the close's 10000 would warn; it is 60% of IBKR's 5000 at the read.
+	s.ExcessLiquidity, s.ReadNetLiquidation = 3000, 5000
+	if obs := observe(t, g, "broker:1", s); obs.Alarm != nil {
+		t.Fatalf("alarm %+v: the ratio was taken on the close's net liquidation", obs.Alarm)
+	}
+	later := s
+	later.AsOf, later.ReadAt = s.AsOf.Add(24*time.Hour), s.ReadAt.Add(24*time.Hour)
+	later.ExcessLiquidity = 1500 // 15% of IBKR's 10000 at the read below: urgent
+	later.ReadNetLiquidation = 10000
+	later.NetLiquidation = 3000 // 50% of the close's: clear on the wrong basis
+	obs := observe(t, g, "broker:2", later)
+	if obs.Alarm == nil || obs.Alarm.Level != event.MarginAlarmUrgent || obs.Alarm.NetLiquidation != 10000 {
+		t.Fatalf("alarm %+v, want urgent on IBKR's net liquidation at the read", obs.Alarm)
+	}
+}

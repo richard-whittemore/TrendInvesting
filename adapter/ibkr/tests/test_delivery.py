@@ -62,6 +62,9 @@ RECONCILIATION = "account.reconciliation"
 # decision of 2026-10-18; delivery.py).
 HEAD = [ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE]
 FIRST = HEAD + [RECONCILIATION]
+# A later batch: the reading's reconciliation against the engine's book
+# first, then the snapshots that replace it (ADR 0019).
+LATER = [RECONCILIATION] + HEAD
 DAY = [BAR, MARK, CLOSED]
 SPY_CON_ID = 756733
 # The fake's server time is 2027-01-15 08:00 UTC, before the open in New York.
@@ -180,9 +183,12 @@ class DeliveryTests(unittest.TestCase):
                              "sent as written")
         snapshot = self.brokers()[0]["payload"]
         self.assertEqual(snapshot["account_id"], ACCOUNT)
-        # The holding's mark is the delivered bar's official close (the
-        # owner's decision of 2026-10-18), not IBKR's last price.
-        self.assertEqual(snapshot["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 400.5,
+        # Read on a later New York date, the snapshot is stamped at its read
+        # time and is IBKR's own reading: the holding is marked at IBKR's
+        # last price, the basis of its net liquidation (ADR 0019, amended
+        # 2026-10-18: one price basis per rule).
+        self.assertFalse(snapshot["as_of_close"])
+        self.assertEqual(snapshot["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 401.17,
                                                   "mark_set": True}])
         self.assertIs(snapshot["market_open"], False, "08:00 UTC is before the open")
         self.assertEqual(snapshot["unreadable"], [])
@@ -200,8 +206,9 @@ class DeliveryTests(unittest.TestCase):
                          [(SPY_CON_ID, "SPY", "STK", "USD", "SMART")])
 
     def test_a_holding_ibkr_gives_no_last_price_for_is_still_marked_at_the_official_close(self):
-        # No decision needs IBKR market-data permissions (the owner's
-        # decision of 2026-10-18): IBKR's last price is evidence only.
+        # A reading as of the close needs no IBKR market-data permission (the
+        # owner's decision of 2026-10-18): it is marked at the official close.
+        self.fake.server_time = int(datetime(2027, 1, 14, 22, 5, tzinfo=timezone.utc).timestamp())
         self.fake.marks = {}
         self.fake.mark_errors = {SPY_CON_ID: (354, "synthetic: requested market data is not subscribed")}
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -247,7 +254,7 @@ class DeliveryTests(unittest.TestCase):
         self.fake.server_time += 3600
         write_stream(self.folder, third, [dict(e, sequence=n) for n, e in enumerate(envelopes[4:], 1)])
         self.settle(again)
-        self.assertEqual(self.types()[9:], HEAD + DAY)
+        self.assertEqual(self.types()[9:], LATER + DAY)
         snapshots = self.engine.inputs(BROKER_SNAPSHOT_TYPE)
         self.assertLess(snapshots[0]["payload"]["as_of"], snapshots[1]["payload"]["as_of"])
 
@@ -723,7 +730,7 @@ class DeliveryTests(unittest.TestCase):
         # The next day's file goes to the resumed run from the same folder.
         write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
         self.settle(resumed)
-        self.assertEqual([e["type"] for e in engine.inputs()], [RECONCILIATION] + HEAD + DAY)
+        self.assertEqual([e["type"] for e in engine.inputs()], [RECONCILIATION] + LATER + DAY)
         self.assertEqual(self.records(), [(RUN, "queued"), (RUN, "queued")])
 
     def test_a_fresh_run_drops_the_earlier_runs_batch_and_needs_its_own_warm_up_folder(self):
@@ -908,7 +915,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.types().count(BROKER_SNAPSHOT_TYPE), 1, "no snapshot overtaken by a fill is sent")
         self.assertEqual(self.types().count(FILL_TYPE), 3)
         self.settle(loop)
-        self.assertEqual(self.types()[-5:], HEAD + DAY)
+        self.assertEqual(self.types()[-6:], LATER + DAY)
 
     def test_no_snapshot_is_taken_while_an_execution_awaits_its_commission(self):
         self.place_the_days_order()
@@ -925,7 +932,7 @@ class DeliveryTests(unittest.TestCase):
         self.settle(loop)
         types = self.types()
         self.assertLess(types.index(FILL_TYPE), len(types) - 5)
-        self.assertEqual(types[-5:], HEAD + DAY)
+        self.assertEqual(types[-6:], LATER + DAY)
 
     def test_a_file_naming_an_input_the_outbox_already_holds_is_refused(self):
         path = write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -1070,8 +1077,9 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 2)
         self.assertEqual(fake.reads, 4, "read, confirm, then read and confirm again: the reads differed")
         self.assertEqual(snapshots[1]["payload"]["positions"],
-                         [{"instrument_id": "SPY", "quantity": 156, "mark": 400.5, "mark_set": True}],
-                         "the snapshot is the second attempt's, holding the trade, marked at the official close")
+                         [{"instrument_id": "SPY", "quantity": 156, "mark": 402.5, "mark_set": True}],
+                         "the snapshot is the second attempt's, holding the trade; stamped at its read time, it is "
+                         "marked at IBKR's last price of that attempt")
         self.assertEqual(self.engine.inputs(MARK)[1]["payload"]["broker_last"], 402.5,
                          "IBKR's last price beside the mark is the second attempt's")
 

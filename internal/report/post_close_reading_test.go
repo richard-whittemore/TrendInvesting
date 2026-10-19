@@ -20,10 +20,10 @@ func (s *stream) broker(n int, reason string, v1 bool) {
 	case v1:
 		version = event.BrokerSnapshotSchemaVersion
 	case reason == "":
-		p.ReadAt, p.AsOfClose = day(n).Add(70*time.Minute), true
+		p.ReadAt, p.AsOfClose, p.ReadNetLiquidation = day(n).Add(70*time.Minute), true, p.NetLiquidation
 	default:
 		p.AsOf = day(n).Add(70 * time.Minute)
-		p.ReadAt, p.NotAsOfClose = p.AsOf, reason
+		p.ReadAt, p.NotAsOfClose, p.ReadNetLiquidation = p.AsOf, reason, p.NetLiquidation
 	}
 	s.add(event.BrokerSnapshotEventType, version, fmt.Sprintf("broker:%d", n), p.AsOf, p)
 }

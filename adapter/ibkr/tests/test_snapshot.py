@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 
 from snapshot import (ACCOUNT_SNAPSHOT_TYPE, ACCOUNT_SNAPSHOT_VERSION, BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION,
                       LAST_PRICE_TICK, MARK_TYPE, MARK_VERSION, RECONCILIATION_TYPE, RECONCILIATION_VERSION,
-                      account_snapshot_record, broker_snapshot_record, mark_record, read_account, read_marks,
-                      reconciliation_record)
+                      account_snapshot_record, broker_snapshot_record, close_valuation, mark_record, read_account,
+                      read_marks, reconciliation_record)
 
 TESTDATA = tests_dir / "testdata"
 # The close of the session 2027-01-14, which the scripted read (IBKR's clock
@@ -218,7 +218,8 @@ class PostCloseReadingTests(unittest.TestCase):
     def test_a_snapshot_as_of_the_close_states_its_read_time_beside_it(self):
         h = scripted()
         reading = read_account(h.conn)
-        record = broker_snapshot_record(reading, market_open=False, marks={"SPY": Decimal("90")}, close=CLOSE)
+        record = broker_snapshot_record(reading, market_open=False, marks={"SPY": Decimal("90")}, close=CLOSE,
+                                        net_liquidation=close_valuation(reading, {"SPY": Decimal("90")}))
         self.assertEqual((record.event_type, record.schema_version), (BROKER_SNAPSHOT_TYPE, 2))
         payload = record.payload
         self.assertEqual((payload["as_of"], payload["read_at"], payload["as_of_close"], payload["not_as_of_close"]),
@@ -226,6 +227,46 @@ class PostCloseReadingTests(unittest.TestCase):
         # The contract with the engine: internal/event's test validates this
         # file at version 2.
         self.assertEqual(payload, fixture("broker_snapshot_close.json"))
+
+    def test_a_snapshot_as_of_the_close_is_valued_at_the_official_close(self):
+        # ADR 0019, amended 2026-10-18: one price basis per rule. ADR 0019's
+        # worked example, 147 SPY and $4,700 borrowed, read after SPY traded
+        # below its $90 close: IBKR's own net liquidation is $8,397.70 at
+        # the read, the close's $8,530.
+        h = scripted()
+        h.fake.summary = [(a, t, "8397.70" if t == "NetLiquidation" else v, c) for a, t, v, c in h.fake.summary]
+        reading = read_account(h.conn)
+        at_close = close_valuation(reading, {"SPY": 90})
+        self.assertEqual(at_close, Decimal("8530.00"), "cash plus each holding times its official close")
+        payload = broker_snapshot_record(reading, market_open=False, marks={"SPY": Decimal("90")}, close=CLOSE,
+                                         net_liquidation=at_close, cash_drift=Decimal("-0.25")).payload
+        self.assertEqual((payload["net_liquidation"], payload["read_net_liquidation"], payload["excess_liquidity"],
+                          payload["cash_drift"]), (8530.0, 8397.7, 5222.5, -0.25))
+        account = account_snapshot_record(reading, CLOSE, net_liquidation=at_close).payload
+        self.assertEqual(account["net_liquidation"], 8530.0)
+
+    def test_a_snapshot_at_its_read_time_is_ibkrs_own_valuation(self):
+        h = scripted()
+        h.fake.summary = [(a, t, "8397.70" if t == "NetLiquidation" else v, c) for a, t, v, c in h.fake.summary]
+        reading = read_account(h.conn)
+        payload = broker_snapshot_record(reading, market_open=True, why=WHY).payload
+        self.assertEqual((payload["net_liquidation"], payload["read_net_liquidation"], payload["cash_drift"]),
+                         (8397.7, 8397.7, 0))
+        for kwargs in ({"net_liquidation": Decimal("8530")}, {"cash_drift": Decimal("1")}):
+            with self.assertRaises(ValueError, msg=kwargs):
+                broker_snapshot_record(reading, market_open=True, why=WHY, **kwargs)
+        with self.assertRaises(ValueError, msg="as of the close, its valuation is stated"):
+            broker_snapshot_record(reading, market_open=False, close=CLOSE)
+
+    def test_a_holding_with_no_official_close_cannot_be_valued_at_the_close(self):
+        h = scripted()
+        reading = read_account(h.conn)
+        with self.assertRaises(ValueError):
+            close_valuation(reading, {})
+        h = scripted()
+        h.fake.summary = [row for row in h.fake.summary if row[1] != "TotalCashValue"]
+        with self.assertRaises(ValueError):
+            close_valuation(read_account(h.conn), {"SPY": 90})
 
     def test_a_snapshot_at_its_read_time_says_why(self):
         h = scripted()

@@ -126,10 +126,14 @@ import (
 //     under the owner's decision of 2026-10-18 that one reading after the
 //     close, with nothing working at IBKR and no execution since, is the
 //     account as of that close (ADR 0019, ADR 0025 point 5, ADR 0026 point
-//     1, amended 2026-10-18). Every decision is made as before: the mark is
-//     the delivered bar's official close and IBKR's last price is never
-//     read. A journal holding either version 2 input does not replay under
-//     1.17.0, which refuses it.
+//     1, amended 2026-10-18). The mark is the delivered bar's official
+//     close; the price band compares a checked order's reference price with
+//     IBKR's last price beside it when IBKR gave one, else with that close,
+//     and records which (RiskFigures.MarkSource). A broker snapshot as of
+//     the close values its net liquidation at the official close, and the
+//     margin alarm divides Excess Liquidity by IBKR's own net liquidation at
+//     the read beside it (one price basis per rule). A journal holding either
+//     version 2 input does not replay under 1.17.0, which refuses it.
 const RulesVersion = "1.18.0"
 
 // source names this handler on every envelope it emits.
@@ -239,6 +243,7 @@ type Handler struct {
 	base       string // the adjusted view's base, fixed by the first bar
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
+	markV2     bool // mark arrived at MarkRecordedEvidenceVersion
 	gate       *risklimit.Gate
 	// released holds every order this run released, by client order ID,
 	// so a venue's report about one can be checked against it.
@@ -546,6 +551,7 @@ func (h *Handler) applyMark(in event.Envelope) error {
 		return fmt.Errorf("targetweight: mark as of %s does not follow the last, %s", p.AsOf, h.mark.AsOf)
 	}
 	h.mark = &p
+	h.markV2 = in.SchemaVersion == event.MarkRecordedEvidenceVersion
 	return nil
 }
 
@@ -637,6 +643,15 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	gateOrder := risklimit.Order{Planned: order}
 	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
 		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
+		// ADR 0026 point 3, amended 2026-10-18: the band compares IBKR's
+		// last price when IBKR gave one, so it checks the reference price
+		// against a price of its own; else the official close.
+		if h.markV2 {
+			gateOrder.MarkSource = event.MarkSourceOfficialClose
+			if h.mark.BrokerLastSet {
+				gateOrder.Mark, gateOrder.MarkSource = h.mark.BrokerLast, event.MarkSourceBrokerLast
+			}
+		}
 	}
 	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}, At: b.at}
 	outcome := b.order(gateOrder, book)
