@@ -143,7 +143,15 @@ import (
 //     echoes no client order ID. Each decision records the rejections in a
 //     row, the orders they name (at the stop, the two that stopped buys) and
 //     every released order the venue has not yet ruled on, so a restart
-//     counts as the full run does, and the
+//     counts as the full run does. An acceptance ends the run only when the
+//     order accepted was released after the latest rejection counted, so a
+//     late acceptance of an older order does not give a re-planned order a
+//     second re-plan; the decision records how many undecided orders are
+//     older than that rejection. An order leaves the undecided orders at the
+//     venue's first word on it, or when the owner settles it as never sent
+//     (operator.rebalance.cleared, which Boost reads for that alone); a
+//     dry-run lists none, since no venue receives its orders, and each of
+//     its decisions records why (no_venue). The
 //     cause of the re-plan it planned or carries (refused,
 //     part-filled, unfilled or rejected, with the order and its filled and
 //     released shares; targets.decided schema version 6). The part-fill
@@ -219,6 +227,10 @@ type Options struct {
 //     2026-10-18); one about an order neither this run released nor the
 //     recovered decision watches, or that does not describe it as released,
 //     is refused: it is reconciliation's to explain (ADR 0019);
+//   - after an order's release: the owner's operator.rebalance.cleared
+//     naming the decision that released it and that order, which settles an
+//     order the adapter never sent: no venue will rule on it, so it is no
+//     longer awaited (applyClearance);
 //   - at any time after the configuration: market.corporate-action, which a
 //     reconciliation's book is bridged by; account.reconciliation, which
 //     classifies IBKR's positions and cash against the latest account
@@ -296,8 +308,17 @@ type Handler struct {
 	inARow []event.BoostRejectedOrder
 	// undecided are the orders decided sessions released that the venue has
 	// not yet ruled on, in release order, so a late verdict on any of them
-	// is counted (BoostFigures.UndecidedOrders).
+	// is counted (BoostFigures.UndecidedOrders). An order leaves it at the
+	// venue's first word on it, or when the owner settles it as never sent
+	// (applyClearance); a dry-run's orders, which no venue receives, never
+	// join it.
 	undecided []undecidedOrder
+	// olderThanRejection counts the first of undecided, in release order,
+	// that were released before the latest released of the orders inARow
+	// names: an acceptance of one of them is older than the run of
+	// rejections and does not end it (BoostFigures.UndecidedBeforeRejection;
+	// observeOutcome).
+	olderThanRejection int
 	// withheld is the rejection that brought the count to
 	// maxVenueRejections, whichever order it was, held until the next
 	// decision, decided or withheld, records it (BoostFigures.ReplanWithheld):
@@ -422,6 +443,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyCorporateAction(in)
 	case event.AlertAcknowledgedEventType:
 		return nil, h.applyAcknowledgement(in)
+	case event.RebalanceClearedEventType:
+		return nil, h.applyClearance(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -496,6 +519,7 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	h.replan = p.Boost.ReplanPending
 	h.rejections = p.Boost.VenueRejections
 	h.inARow = slices.Clone(p.Boost.RejectedInARow)
+	h.olderThanRejection = p.Boost.UndecidedBeforeRejection
 	h.rejectionsWhileStopped = p.Boost.RejectionsWhileStopped
 	// A withheld decision carries the pending re-plan's cause forward. A
 	// decided one left a re-plan pending only by its own order's refusal:
@@ -821,7 +845,12 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	}
 	if outcome.Released != nil {
 		h.watch = &watched{order: *outcome.Released, afterRejection: afterRejection}
-		h.undecided = append(h.undecided, undecidedOrder{id: outcome.Released.ClientOrderID})
+		// No venue receives a dry-run's order, so none will ever rule on it:
+		// it is never listed as awaiting a verdict, and the decision records
+		// why (BoostFigures.NoVenue; ADR 0026, point 3, "Mode").
+		if h.cfg.Mode != event.TradingModeDryRun {
+			h.undecided = append(h.undecided, undecidedOrder{id: outcome.Released.ClientOrderID})
+		}
 	}
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
@@ -992,23 +1021,27 @@ type undecidedOrder struct {
 // an acceptance, when a decided session released it and the venue had not
 // yet ruled on it; any later word, and a word on any other order, changes
 // nothing (ADR 0026, point 2, "Boost", amended 2026-10-18). Before the stop
-// an acceptance sets the rejections in a row back to none and a rejection
-// counts one more, however late it is read: the rejection that brings the
-// count to maxVenueRejections is held for the next decision to record and
-// the reporter to page, whichever order it was and whether or not it is
-// still watched. Once buys are stopped the count stays there, and each
-// rejection read is held so too, and counted as one while stopped.
+// an acceptance of an order released after every rejection the run counts
+// sets the rejections in a row back to none; an acceptance of an older one,
+// read late, does not, since the rejections came after it in release
+// order, so a re-planned order rejected again is always the second in a
+// row. A rejection counts one more, however late it is read: the rejection
+// that brings the count to maxVenueRejections is held for the next decision
+// to record and the reporter to page, whichever order it was and whether
+// or not it is still watched. Once buys are stopped the count stays there,
+// and each rejection read is held so too, and counted as one while
+// stopped.
 func (h *Handler) observeOutcome(id string, rejected bool) {
 	i := slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id })
 	if i < 0 {
 		return
 	}
 	o := h.undecided[i]
-	h.undecided = slices.Delete(h.undecided, i, i+1)
+	older := h.leaveUndecided(i)
 	stopped := h.rejections >= maxVenueRejections
 	if !rejected {
-		if !stopped {
-			h.rejections, h.inARow = 0, nil
+		if !stopped && !older {
+			h.rejections, h.inARow, h.olderThanRejection = 0, nil, 0
 		}
 		return
 	}
@@ -1020,9 +1053,59 @@ func (h *Handler) observeOutcome(id string, rejected bool) {
 	}
 	h.rejections++
 	h.inARow = append(h.inARow, event.BoostRejectedOrder{ClientOrderID: id, VenueOrderID: o.venueID})
+	if !older {
+		// The latest released rejection the run counts: every order still
+		// undecided before it in release order is older.
+		h.olderThanRejection = i
+	}
 	if h.rejections >= maxVenueRejections {
 		h.withheld = record
 	}
+}
+
+// leaveUndecided takes the i-th undecided order off the list and reports
+// whether it was released before the latest released rejection the run
+// counts (olderThanRejection), which then counts one fewer.
+func (h *Handler) leaveUndecided(i int) bool {
+	h.undecided = slices.Delete(h.undecided, i, i+1)
+	older := i < h.olderThanRejection
+	if older {
+		h.olderThanRejection--
+	}
+	return older
+}
+
+// applyClearance reads the owner's settlement of a Boost order the adapter
+// never sent (operator.rebalance.cleared, recorded after relay.py resolve
+// --never-sent): no venue received it, so none will ever rule on it, and it
+// leaves the orders awaiting the venue's word, counted neither accepted nor
+// rejected (ADR 0026, point 2, "Boost", amended 2026-10-18). It must name
+// the decided session's decision and its one order released, still
+// undecided, else it is refused, so a clearance never means more than the
+// owner said (fail closed). Nothing else changes: the order stays released
+// in the gate, so a never-sent sell still counts as being sold and a
+// never-sent buy is not planned again, until the fresh run the owner starts
+// after reconciling.
+func (h *Handler) applyClearance(in event.Envelope) error {
+	p, err := decodeInput[event.RebalanceClearedPayload](in, event.RebalanceClearedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if p.AccountID != h.cfg.AccountID {
+		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
+	}
+	for _, id := range p.ClientOrderIDs {
+		if !slices.ContainsFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id }) {
+			return fmt.Errorf("targetweight: clearance %s names order %s, which is not an order this run released that the venue has not ruled on; Boost clears only an order the adapter never sent", in.ID, id)
+		}
+		if orderplan.ClientOrderID(p.DecisionID, h.cfg.Boost.InstrumentID, h.released[id].Side) != id {
+			return fmt.Errorf("targetweight: clearance %s names order %s, which decision %s did not release", in.ID, id, p.DecisionID)
+		}
+	}
+	for _, id := range p.ClientOrderIDs {
+		h.leaveUndecided(slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id }))
+	}
+	return nil
 }
 
 // recordRejections moves the rejections held for the next decision into
@@ -1121,8 +1204,17 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
 		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(),
 		VenueRejections: h.rejections, RejectedInARow: slices.Clone(h.inARow), UndecidedOrders: h.undecidedFigures(),
-		RejectionsWhileStopped: h.rejectionsWhileStopped,
+		UndecidedBeforeRejection: h.olderThanRejection, RejectionsWhileStopped: h.rejectionsWhileStopped, NoVenue: h.noVenue(),
 	}
+}
+
+// noVenue is the run's mode when no venue receives its orders, dry-run, so
+// none is listed as awaiting a verdict; empty otherwise.
+func (h *Handler) noVenue() string {
+	if h.cfg.Mode == event.TradingModeDryRun {
+		return h.cfg.Mode
+	}
+	return ""
 }
 
 // undecidedFigures are the orders the venue has not yet ruled on as a

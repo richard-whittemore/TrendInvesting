@@ -13,7 +13,7 @@ import (
 )
 
 func TestBoostRunDecidesEnterAndExit(t *testing.T) {
-	r := simulate(t, options{})
+	r := simulate(t, options{mutate: boostDryRun})
 	decided := targets(t, r.decisions)
 	if len(decided) != len(syntheticCloses()) {
 		t.Fatalf("%d decisions for %d sessions", len(decided), len(syntheticCloses()))

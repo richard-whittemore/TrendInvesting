@@ -189,7 +189,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Broker holding (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is no more than the latest broker snapshot's holding, when that snapshot is readable and fresh; with no readable latest snapshot, a Normal account releases the sell against the journal's account book, only an account Degraded on another instrument reaches this refusal, and every other state has already refused the sell under ADR 0019 reading 7 (checked first) and the exit has fired; an older readable snapshot is never used | refuse (`risk.order.refused`, reason `broker-holding`); alert; **Degraded** on the instrument when the sell is above a fresh snapshot's holding |
 | Broker snapshot freshness (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is checked against the latest broker snapshot, which is stale: older than `MaxSnapshotAge`, or stamped later than the sell's journalled time (point 6) | refuse (`risk.order.refused`, reason `stale-broker-snapshot`); one urgent alert per stale episode, carried by the episode's first `stale-broker-snapshot` refusal or withhold and cleared by whichever comes first: the first journalled `account.broker.snapshot` fresh by its own journalled time, or the first gate check whose latest snapshot is fresh as measured from that check's triggering event (ADR 0019 reading 10); a stale check opens an episode when no episode is open for the account and either no episode has yet closed or the check's triggering event comes after (by journal sequence) the event that closed the most recent episode; a stale check whose triggering event precedes that close belongs to the closed episode and opens none; state unchanged; the sell is re-planned at the next decision |
 | Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
-| Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent. Amended 2026-10-17 (owner): since no venue ever reports on an unsent order, a dry-run momentum run records, at the release, its own **synthetic** terminal report for each order it releases: `execution.order.lifecycle` version 3, `synthetic: true`, status `canceled`, no venue order ID, a message saying it was never sent (target-weight rules version 1.11.0, ADR 0016). It is a decision, never an input (a version-3 report arriving as an input is refused), and it counts no execution: no fill, proceeds, commission or position change follows from it. It ends the order as a venue's cancellation would, so the buy phase (point 2, "IRA execution") is planned at the same close and the next rebalance is not withheld as `rebalance-in-progress`. Paper and live never record one. Boost records none: a dry-run Boost sell stays pending in the gate, so a later exit in the same dry-run is sized net of it, and so are the broker-holding check and ADR 0019's sale back to 98%. Rules version 1.11.0 leaves Boost as it was | not a breach |
+| Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent. Amended 2026-10-17 (owner): since no venue ever reports on an unsent order, a dry-run momentum run records, at the release, its own **synthetic** terminal report for each order it releases: `execution.order.lifecycle` version 3, `synthetic: true`, status `canceled`, no venue order ID, a message saying it was never sent (target-weight rules version 1.11.0, ADR 0016). It is a decision, never an input (a version-3 report arriving as an input is refused), and it counts no execution: no fill, proceeds, commission or position change follows from it. It ends the order as a venue's cancellation would, so the buy phase (point 2, "IRA execution") is planned at the same close and the next rebalance is not withheld as `rebalance-in-progress`. Paper and live never record one. Boost records none: a dry-run Boost sell stays pending in the gate, so a later exit in the same dry-run is sized net of it, and so are the broker-holding check and ADR 0019's sale back to 98%. Rules version 1.11.0 leaves Boost as it was. Rules version 1.18.0: no dry-run Boost order is listed as awaiting the venue's word (`boost.undecided_orders`), since none will come; each dry-run Boost decision records `boost.no_venue: "dry-run"` instead (point 2, "Boost", amended 2026-10-18) | not a breach |
 
 Degraded and Halted are emitted through the existing `strategy.engine.state`.
 A new reason, `risk-limit-breached`, joins its closed set, as
@@ -986,9 +986,14 @@ target next changed; point 2 said nothing of a partial fill.
   the venue has shown neither accepted nor rejected counts nothing until
   it does: a late rejection is one more in a row, or, once buys are
   stopped, one more while stopped; a late acceptance sets the count back
-  to none before the stop and changes nothing after it. A re-planned
-  order rejected again is always the second in a row, so this bound holds
-  it too. Every decision records the state the rule needs, as it stands
+  to none before the stop, but only when the order accepted was released
+  after the latest released of the rejections counted, and changes nothing
+  after the stop. An acceptance of an order released before those
+  rejections, read late, is older than the run in release order and does
+  not end it: otherwise an older order's expiry read between a rejection
+  and its re-plan's rejection would give the rejected order a third send.
+  So a re-planned order rejected again is always the second in a row, and
+  this bound holds it too. Every decision records the state the rule needs, as it stands
   after the decision, and nothing beyond it, so nothing is trimmed: the
   rejections in a row (`boost.venue_rejections`, omitted when none); the
   orders they name (`boost.rejected_in_a_row`, each client order ID and,
@@ -998,16 +1003,31 @@ target next changed; point 2 said nothing of a partial fill.
   every order decided sessions released that the venue has not yet ruled
   on (`boost.undecided_orders`, in release order, each but the watched one
   with its side, shares and limit as released and its venue order ID once
-  a lifecycle report named it). A run restarted from the decision restores
+  a lifecycle report named it), and how many of those were released before
+  the latest rejection counted (`boost.undecided_before_rejection`, omitted
+  when none), which an acceptance is compared with. A run restarted from the decision restores
   these exactly and counts as the full run does: a late verdict on any
   order released before the restart is read against the orders not yet
   ruled on, an order the venue has ruled on is never counted again, the
   venue's reports on an order still undecided are read, and a working sell
-  among them netted, as on an order the restarted run released. Neither
-  the gate nor the planner bounds how many released orders may await the
-  venue's word (Boost releases at most one order per decided session, and
-  a DAY order's end is a word on it), so the list is as long as the orders
-  still awaiting it. A fresh run
+  among them netted, as on an order the restarted run released. Which
+  orders stay listed, and when they leave: an order the venue received
+  leaves at its first word on it, and a DAY order always gets one (an
+  execution, its expiry or cancellation, or a rejection), so in paper and
+  live the list holds only orders still working or whose word is late. An
+  order the adapter never sent gets no word: it stays listed, in every
+  decision, until the owner settles it. The owner settles it with `relay.py
+  resolve --never-sent` and then records `operator rebalance-cleared` naming
+  the decision that released it and the order; Boost reads that clearance
+  for this alone, refuses one that names anything but an undecided order of
+  that decision, and takes the order off the list, counting it neither
+  accepted nor rejected. The clearance changes nothing else: the order stays
+  released in the gate, so a never-sent sell still counts as being sold and
+  a never-sent buy is not planned again, until the fresh run the owner
+  starts after reconciling. A dry-run's orders reach no venue, so none is
+  ever listed: each dry-run Boost decision records `boost.no_venue:
+  "dry-run"` in place of the list and counts no verdict, and the clearance
+  is refused there, there being nothing to clear. A fresh run
   starts from none. A refusal's re-plan pending at the second rejection is
   dropped, and the rejection is recorded all the same. One read during a
   restarted run's warm-up, whose sessions only feed the indicators, is

@@ -721,6 +721,59 @@ func TestBoostUndecidedOrdersValidate(t *testing.T) {
 	}, "ruled")
 }
 
+// TestBoostUndecidedBeforeRejectionValidate: a Boost decision counts how
+// many of the undecided orders were released before the latest rejection it
+// counts, never below none, never more than are listed, never the watched
+// order, the latest released, and only beside a rejection counted (ADR
+// 0026, point 2, "Boost", amended 2026-10-18).
+func TestBoostUndecidedBeforeRejectionValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 1
+	v.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}}
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-2", Side: event.OrderSideSell, Released: 12, LimitPrice: 550}
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105},
+		{ClientOrderID: "tw-2"},
+	}
+	v.Boost.UndecidedBeforeRejection = 1
+	if err := v.Validate(); err != nil {
+		t.Fatalf("an undecided order released before the rejection is valid: %v", err)
+	}
+	if (event.BoostFigures{UndecidedBeforeRejection: 1}).IsZero() {
+		t.Error("figures counting an order older than the rejection are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "negative", v, func(p *P) { p.Boost.UndecidedBeforeRejection = -1 }, "before")
+	expectInvalid(t, "the watched order", v, func(p *P) { p.Boost.UndecidedBeforeRejection = 2 }, "before")
+	expectInvalid(t, "more than listed", v, func(p *P) {
+		p.Boost.Watched, p.Boost.UndecidedOrders = event.BoostWatchedOrder{}, p.Boost.UndecidedOrders[:1]
+		p.Boost.UndecidedBeforeRejection = 2
+	}, "before")
+	expectInvalid(t, "with no rejection counted", v, func(p *P) { p.Boost.VenueRejections, p.Boost.RejectedInARow = 0, nil }, "before")
+}
+
+// TestBoostNoVenueValidate: a dry-run Boost decision records that no venue
+// receives its orders, and so lists none undecided and counts no verdict;
+// no other mode is recorded so (ADR 0026, point 3, "Mode").
+func TestBoostNoVenueValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.NoVenue = event.TradingModeDryRun
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a dry-run decision is valid: %v", err)
+	}
+	if (event.BoostFigures{NoVenue: event.TradingModeDryRun}).IsZero() {
+		t.Error("figures recording a dry-run are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "another mode", v, func(p *P) { p.Boost.NoVenue = event.TradingModePaper }, "dry-run")
+	expectInvalid(t, "an undecided order", v, func(p *P) {
+		p.Boost.UndecidedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105}}
+	}, "dry-run")
+	expectInvalid(t, "a rejection counted", v, func(p *P) {
+		p.Boost.VenueRejections, p.Boost.RejectedInARow = 1, []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}}
+	}, "dry-run")
+}
+
 // TestBoostRejectionsWhileStoppedValidate: once two rejections in a row
 // have stopped Boost's buys, each later rejection is recorded once, cause
 // rejected, beside the count of them so far (ADR 0026, points 2, "Boost",

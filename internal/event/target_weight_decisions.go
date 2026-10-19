@@ -56,7 +56,10 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     BoostFigures.VenueRejections, the rejections in a row,
 //     BoostFigures.RejectedInARow, the orders it counts, and
 //     BoostFigures.UndecidedOrders, the released orders the venue has not
-//     yet ruled on;
+//     yet ruled on, and BoostFigures.UndecidedBeforeRejection, how many of
+//     them were released before the latest rejection counted;
+//     BoostFigures.NoVenue, dry-run, when no venue receives the orders, so
+//     none is listed;
 //     BoostFigures.RejectedWhileStopped and RejectionsWhileStopped, the
 //     rejections read after that stop and their count;
 //     BoostFigures.Watched, the order watched for an unfilled remainder with
@@ -236,6 +239,19 @@ type BoostFigures struct {
 	// stand after this decision, so a page can say which one it is and a
 	// restart from the decision counts on from it. Omitted when none.
 	RejectionsWhileStopped int `json:"rejections_while_stopped,omitempty"`
+	// UndecidedBeforeRejection counts the first of UndecidedOrders, in
+	// release order, that were released before the latest released of the
+	// orders RejectedInARow names: the venue's acceptance of one of them,
+	// read late, is older than the run of rejections and does not end it,
+	// so a re-planned order rejected again is always the second in a row
+	// (ADR 0026, point 2, "Boost", amended 2026-10-18). A restart from the
+	// decision recovers it (ADR 0026, point 5). Omitted when none.
+	UndecidedBeforeRejection int `json:"undecided_before_rejection,omitempty"`
+	// NoVenue is the run's mode, dry-run, when no venue receives the orders
+	// it releases: none will ever be ruled on, so none is listed in
+	// UndecidedOrders and no verdict is counted (ADR 0026, point 3, "Mode",
+	// and point 2, "Boost", amended 2026-10-18). Omitted in paper and live.
+	NoVenue string `json:"no_venue,omitempty"`
 }
 
 // BoostVenueRejectionLimit is how many of the account's orders the venue
@@ -338,7 +354,8 @@ func (b BoostFigures) IsZero() bool {
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
 		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
 		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero() && b.VenueRejections == 0 &&
-		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0
+		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
+		b.UndecidedBeforeRejection == 0 && b.NoVenue == ""
 }
 
 // validateGaps checks the gap sessions against the decided session's date:
@@ -961,6 +978,27 @@ func (b BoostFigures) validateRejections() []error {
 			errs = append(errs, fmt.Errorf("undecided boost order %s, not the watched one, records its side, released shares and positive limit; got %q %d at %v",
 				o.ClientOrderID, o.Side, o.Released, o.LimitPrice))
 		}
+	}
+	// The orders released before the latest rejection counted are the first
+	// of those listed; the watched order, the latest released, is never one.
+	older := len(b.UndecidedOrders)
+	if older > 0 && b.UndecidedOrders[older-1].ClientOrderID == b.Watched.ClientOrderID {
+		older--
+	}
+	switch k := b.UndecidedBeforeRejection; {
+	case k < 0 || k > older:
+		errs = append(errs, fmt.Errorf("boost counts %d undecided orders released before the latest rejection; between none and %d are listed before the watched order", k, older))
+	case k > 0 && b.VenueRejections == 0:
+		errs = append(errs, fmt.Errorf("boost counts %d undecided orders released before the latest rejection, but counts no rejection", k))
+	}
+	// A dry-run's orders reach no venue, so none awaits a verdict and none
+	// is counted (ADR 0026, point 3, "Mode").
+	switch {
+	case b.NoVenue == "":
+	case b.NoVenue != TradingModeDryRun:
+		errs = append(errs, fmt.Errorf("boost records no venue only for a dry-run, not %q", b.NoVenue))
+	case len(b.UndecidedOrders) > 0 || b.VenueRejections > 0:
+		errs = append(errs, errors.New("a dry-run boost decision lists no undecided order and counts no rejection: no venue receives its orders"))
 	}
 	return errs
 }

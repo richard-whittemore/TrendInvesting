@@ -900,7 +900,7 @@ func assertRecoveredAsTheFullRun(t *testing.T, opts options, n int) {
 	full := simulate(t, opts)
 	decisions := ofType(full.decisions, event.TargetsDecidedEventType)
 	recovery := decisions[n]
-	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reports: venueReports(full.inputs, n), kill: opts.kill, closes: opts.closes})
+	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reports: venueReports(full.inputs, n), kill: opts.kill, closes: opts.closes, mutate: opts.mutate})
 	got, want := ofType(r.decisions, event.TargetsDecidedEventType), decisions[n+1:]
 	if len(got) != len(want) {
 		t.Fatalf("the recovered run records %d decisions, the full run %d after session %d", len(got), len(want), n)
@@ -1230,5 +1230,182 @@ func TestTheStopNamesTheTwoRejectionsThatMadeIt(t *testing.T) {
 		if got := stoppedBy(decided[n].Boost); !slices.Equal(got, want) {
 			t.Fatalf("session %d names %v as the stop, want %v", n, got, want)
 		}
+	}
+}
+
+// wholeBoostInOneOrder lets one order buy the whole boosted target from
+// cash, as the entry does when the first purchase never filled.
+func wholeBoostInOneOrder(cfg *event.TargetWeightConfigurationPayload) {
+	cfg.Limits.MaxOrderFraction = 1.5
+}
+
+// TestALateAcceptanceOfAnOlderOrderDoesNotEndTheRunOfRejections: the first
+// purchase, released at session 0, works unfilled; the entry, released at
+// session 16, is rejected at session 17 (one rejection) and planned once
+// more, and the first purchase's expiry is read at session 18, after that
+// rejection; the venue then rejects the entry's one re-plan at session 19.
+// An acceptance ends the run of rejections only when the order accepted was
+// released after the rejections it would end: the first purchase was
+// released before the entry, so its late word changes nothing, the re-plan's
+// rejection is the second in a row and buys stop (ADR 0026, point 2,
+// "Boost", amended 2026-10-18: a re-planned order rejected again is always
+// the second in a row). A run restarted from the decisions of sessions 16,
+// 17 and 18 counts as the full run does.
+func TestALateAcceptanceOfAnOlderOrderDoesNotEndTheRunOfRejections(t *testing.T) {
+	hold := map[int]bool{18: true, 19: true}
+	for i := 1; i <= 16; i++ {
+		hold[i] = true
+	}
+	opts := options{hold: hold, invalidAt: map[int][]int{17: {16}, 19: {17}}, partFill: map[int]int64{17: 0}, cancelAt: map[int]int{17: 18},
+		mutate: wholeBoostInOneOrder}
+	r := simulate(t, opts)
+	entry, again := releasedBy(t, r.decisions, 16), releasedBy(t, r.decisions, 17)
+	if len(entry) != 1 || entry[0].Side != event.OrderSideBuy || len(again) != 1 || again[0].Side != event.OrderSideBuy {
+		t.Fatalf("setup: sessions 16 and 17 release %+v and %+v, want the entry and its one re-plan", entry, again)
+	}
+	decided := targets(t, r.decisions)
+	if d := decided[18].Boost; d.VenueRejections != 1 {
+		t.Fatalf("session 18: rejections %d, want the entry's rejection still counted after the older order's expiry", d.VenueRejections)
+	}
+	want := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: again[0].ClientOrderID, Released: again[0].Quantity}
+	if d := decided[19].Boost; d.VenueRejections != 2 || d.ReplanWithheld != want {
+		t.Errorf("session 19: rejections %d withheld %+v, want two and %+v recorded", d.VenueRejections, d.ReplanWithheld, want)
+	}
+	for n := 19; n < len(decided); n++ {
+		for _, o := range releasedBy(t, r.decisions, n) {
+			if o.Side == event.OrderSideBuy {
+				t.Errorf("session %d releases a buy %+v while buys are stopped", n, o)
+			}
+		}
+	}
+	for _, n := range []int{16, 17, 18} {
+		assertRecoveredAsTheFullRun(t, opts, n)
+	}
+}
+
+// TestALaterOrdersAcceptanceStillEndsTheRunOfRejections: as above, but the
+// first purchase is rejected at session 17 and the entry, released after
+// it, expires unfilled at session 18: an order released after the
+// rejection, accepted, ends the run (ADR 0026, point 2, "Boost", amended
+// 2026-10-18), and the run restarted from session 17 counts the same.
+func TestALaterOrdersAcceptanceStillEndsTheRunOfRejections(t *testing.T) {
+	hold := map[int]bool{18: true}
+	for i := 1; i <= 16; i++ {
+		hold[i] = true
+	}
+	opts := options{hold: hold, invalidAt: map[int][]int{17: {0}}, partFill: map[int]int64{17: 0}, cancelAt: map[int]int{17: 18},
+		mutate: wholeBoostInOneOrder}
+	r := simulate(t, opts)
+	decided := targets(t, r.decisions)
+	if d := decided[17].Boost; d.VenueRejections != 1 {
+		t.Fatalf("session 17: rejections %d, want the first purchase's rejection", d.VenueRejections)
+	}
+	if d := decided[18].Boost; d.VenueRejections != 0 || len(d.RejectedInARow) != 0 {
+		t.Errorf("session 18: rejections %d named %+v, want none once the later entry is accepted", d.VenueRejections, d.RejectedInARow)
+	}
+	assertRecoveredAsTheFullRun(t, opts, 17)
+}
+
+// TestADryRunListsNoUndecidedOrder: no venue receives a dry-run's orders,
+// so none will ever be ruled on; a dry-run Boost run lists none as
+// undecided and records why on every decision (`no_venue`, dry-run), so
+// nothing grows with the orders it releases (ADR 0026, point 3, "Mode",
+// and point 2, "Boost", amended 2026-10-18). The same run in live lists
+// them and records no such mark.
+func TestADryRunListsNoUndecidedOrder(t *testing.T) {
+	opts := options{closes: flippingCloses(), hold: heldFrom(2)}
+	live := targets(t, simulate(t, opts).decisions)
+	if d := live[45].Boost; len(d.UndecidedOrders) < 8 || d.NoVenue != "" {
+		t.Fatalf("setup: the live run's session 45 lists %d undecided, no venue %q; want the orders the venue said nothing of", len(d.UndecidedOrders), d.NoVenue)
+	}
+	opts.mutate = boostDryRun
+	r := simulate(t, opts)
+	if len(released(t, r.decisions)) < 10 {
+		t.Fatalf("setup: the dry-run releases %d orders", len(released(t, r.decisions)))
+	}
+	for n, d := range targets(t, r.decisions) {
+		if len(d.Boost.UndecidedOrders) != 0 || d.Boost.NoVenue != event.TradingModeDryRun {
+			t.Errorf("session %d: undecided %+v, no venue %q; want none listed and dry-run recorded", n, d.Boost.UndecidedOrders, d.Boost.NoVenue)
+		}
+	}
+}
+
+// TestAClearedNeverSentOrderIsNoLongerUndecided: the venue says nothing of
+// the orders released from session 16 on; at session 20 the owner settles
+// session 16's buy as never sent (operator.rebalance.cleared, naming its
+// decision and the order). No venue will ever rule on it, so it leaves the
+// undecided orders when the clearance is read, and a run restarted from
+// session 19's decision or session 20's does the same (ADR 0026, point 2,
+// "Boost", amended 2026-10-18, and point 5).
+func TestAClearedNeverSentOrderIsNoLongerUndecided(t *testing.T) {
+	opts := options{closes: flippingCloses(), hold: heldFrom(2), clear: map[int][]int{20: {16}}}
+	r := simulate(t, opts)
+	entry := releasedBy(t, r.decisions, 16)
+	if len(entry) != 1 {
+		t.Fatalf("setup: session 16 releases %+v", entry)
+	}
+	listed := func(d event.BoostFigures) bool {
+		return slices.ContainsFunc(d.UndecidedOrders, func(o event.BoostUndecidedOrder) bool { return o.ClientOrderID == entry[0].ClientOrderID })
+	}
+	decided := targets(t, r.decisions)
+	if !listed(decided[19].Boost) {
+		t.Fatalf("session 19 lists %+v, want the entry undecided before the clearance", decided[19].Boost.UndecidedOrders)
+	}
+	for n := 20; n < len(decided); n++ {
+		if listed(decided[n].Boost) {
+			t.Errorf("session %d still lists the cleared entry %s undecided", n, entry[0].ClientOrderID)
+		}
+	}
+	assertRecoveredAsTheFullRun(t, opts, 19)
+	assertRecoveredAsTheFullRun(t, opts, 20)
+}
+
+// TestAClearanceOfNoUndecidedBoostOrderIsRefused: Boost reads the owner's
+// clearance only for an order of its own account that a decided session
+// released, under the decision it names, and that the venue has not ruled
+// on; anything else is refused, so a clearance never means more than the
+// owner said (fail closed, AGENTS.md). A dry-run lists no order undecided,
+// so it refuses every clearance.
+func TestAClearanceOfNoUndecidedBoostOrderIsRefused(t *testing.T) {
+	closes := flippingCloses()[:20]
+	opts := options{closes: closes, hold: heldFrom(2)}
+	at := sessionEnd(len(closes) - 1).Add(time.Hour)
+	first := func(r run, n int) event.OrderReleasedPayload {
+		t.Helper()
+		o := releasedBy(t, r.decisions, n)
+		if len(o) != 1 {
+			t.Fatalf("setup: session %d releases %+v", n, o)
+		}
+		return o[0]
+	}
+	for name, c := range map[string]struct {
+		mode   func(*event.TargetWeightConfigurationPayload)
+		change func(r run, p *event.RebalanceClearedPayload)
+	}{
+		"naming no order":       {change: func(_ run, p *event.RebalanceClearedPayload) { p.ClientOrderIDs = nil }},
+		"another account":       {change: func(_ run, p *event.RebalanceClearedPayload) { p.AccountID = "ira" }},
+		"another decision":      {change: func(_ run, p *event.RebalanceClearedPayload) { p.DecisionID = decisionTag(17) }},
+		"an order not released": {change: func(_ run, p *event.RebalanceClearedPayload) { p.ClientOrderIDs = []string{"tw-nothing"} }},
+		"an order the venue ruled on": {change: func(r run, p *event.RebalanceClearedPayload) {
+			o := first(r, 0) // the first purchase, filled at session 1
+			p.DecisionID, p.ClientOrderIDs = o.Tag, []string{o.ClientOrderID}
+		}},
+		"a dry-run's order": {mode: boostDryRun},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := opts
+			o.mutate = c.mode
+			r := simulate(t, o)
+			p := event.RebalanceClearedPayload{AccountID: "joint", AsOf: at, DecisionID: decisionTag(16),
+				ClientOrderIDs: []string{first(r, 16).ClientOrderID}, Operator: "owner", Detail: "never sent"}
+			if c.change != nil {
+				c.change(r, &p)
+			}
+			s := &stream{hash: r.hash, sequence: uint64(len(r.inputs))}
+			in := s.envelope(t, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared", at, p)
+			if _, err := r.recorder.Apply(context.Background(), in); err == nil {
+				t.Errorf("the clearance %+v was read, want it refused", p)
+			}
+		})
 	}
 }

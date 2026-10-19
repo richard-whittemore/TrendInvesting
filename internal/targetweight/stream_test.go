@@ -17,10 +17,12 @@ const strategyVersion = "boost/1.0.0+test"
 
 // testConfiguration is Boost with short indicators and RSI_ENTRY 30, so a
 // synthetic series of a few dozen sessions enters and exits. It is a test
-// configuration, never the backtested one.
+// configuration, never the backtested one. Its mode is live, since the
+// simulated venue (simulate) reports on every order it releases, as only
+// a venue that receives them does; boostDryRun makes it a dry-run.
 func testConfiguration() event.TargetWeightConfigurationPayload {
 	return event.TargetWeightConfigurationPayload{
-		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
+		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeLive, Adapter: event.AdapterIBKR,
 		Boost: event.BoostConfiguration{
 			InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 30,
 			TrendDays: 10, ExitSMA: 3, WarmUpStart: "2025-01-02",
@@ -32,6 +34,9 @@ func testConfiguration() event.TargetWeightConfigurationPayload {
 		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30},
 	}
 }
+
+// boostDryRun makes cfg a dry-run, whose released orders no venue receives.
+func boostDryRun(cfg *event.TargetWeightConfigurationPayload) { cfg.Mode = event.TradingModeDryRun }
 
 // syntheticCloses is an invented series: a steady rise, a pullback that
 // enters at session 16 (RSI 28.6 above the 10-session mean), a close below
@@ -233,11 +238,24 @@ type options struct {
 	// exactly reports[i], an earlier run's venue reports, and nothing else
 	// executes or ends (venueReports).
 	reports map[int][]event.Envelope
+	// clear records, at the start of session i after the venue's reports,
+	// the owner's operator.rebalance.cleared for the order released at each
+	// session listed: an order the adapter never sent, settled as such.
+	clear map[int][]int
 }
 
-// venueReports returns the venue's fill and lifecycle reports among an
-// earlier run's inputs, by the session they were fed in, for the sessions
-// after session n.
+// neverSent is the owner's operator.rebalance.cleared, at at, settling o as
+// an order the adapter never sent.
+func neverSent(t *testing.T, s *stream, o event.OrderReleasedPayload, at time.Time) event.Envelope {
+	t.Helper()
+	return s.envelope(t, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:"+o.ClientOrderID, at,
+		event.RebalanceClearedPayload{AccountID: o.AccountID, AsOf: at, DecisionID: o.Tag, ClientOrderIDs: []string{o.ClientOrderID},
+			Operator: "owner", Detail: "never sent: refused as stale by the adapter, settled with relay.py resolve --never-sent"})
+}
+
+// venueReports returns the venue's fill and lifecycle reports, and the
+// owner's clearances, among an earlier run's inputs, by the session they
+// were fed in, for the sessions after session n.
 func venueReports(inputs []event.Envelope, n int) map[int][]event.Envelope {
 	out := map[int][]event.Envelope{}
 	session := 0
@@ -245,7 +263,7 @@ func venueReports(inputs []event.Envelope, n int) map[int][]event.Envelope {
 		switch in.Type {
 		case event.SessionClosedEventType:
 			session++
-		case event.FillEventType, event.OrderLifecycleEventType:
+		case event.FillEventType, event.OrderLifecycleEventType, event.RebalanceClearedEventType:
 			if session > n {
 				out[session] = append(out[session], in)
 			}
@@ -426,6 +444,14 @@ func simulate(t *testing.T, opts options) run {
 		delete(rests, i)
 		for _, f := range opts.fills[i] {
 			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+		}
+		for _, j := range opts.clear[i] {
+			for _, o := range acct.all {
+				if o.Tag == decisionTag(j) {
+					apply(neverSent(t, s, o, at.Add(-70*time.Minute)))
+					acct.pending = slices.DeleteFunc(acct.pending, func(p event.OrderReleasedPayload) bool { return p.ClientOrderID == o.ClientOrderID })
+				}
+			}
 		}
 		if engaged, ok := opts.kill[i]; ok {
 			apply(s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion, fmt.Sprintf("kill:%d", i), at.Add(-time.Hour),

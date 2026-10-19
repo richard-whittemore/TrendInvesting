@@ -303,7 +303,10 @@ middle of a write. A resume leaves it out; nothing from it was released.
 **Undecided order.** An order Boost released that IBKR has neither
 accepted nor rejected yet: no fill, and no report but "submitted". Each
 decision lists them (`undecided_orders`), so IBKR's late word on any of
-them counts after a restart as it would have without one. See
+them counts after a restart as it would have without one. An order leaves
+the list at IBKR's first word on it, or, if the adapter never sent it,
+when you record `operator rebalance-cleared` for it; a dry-run lists none
+(`no_venue: "dry-run"`), since no order reaches IBKR. See
 [boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Universe.** For momentum, the 500 US common stocks with the highest
