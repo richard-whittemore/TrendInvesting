@@ -12,7 +12,9 @@
 # SPY limit order; a record whose carrier QuantConnect refuses is sent again
 # on a later one), and a month whose buys never went (a sell still working
 # at the next rebalance or the end) is recorded as unfinished. The buys
-# wait for every sell still working, of any month. A target with no price
+# wait for every sell still working, of any month, but a sell with no price
+# for five sessions, which cannot complete, is set aside and holds them no
+# longer (the owner's decision of 2026-10-18). A target with no price
 # at all waits in PENDING outside the plan; a holding with none is sold, net
 # of any sell still working on it, by an order tagged IRAORD1 <month>
 # unpriced, and the shares such a sell held are sold the same way at the

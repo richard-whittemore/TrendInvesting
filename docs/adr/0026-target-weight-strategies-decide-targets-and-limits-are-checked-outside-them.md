@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8)
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8)
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -414,6 +414,7 @@ the module's own rules version and decision corpus (ADR 0016;
 | The owner's birth date enters the journal through the configuration, though it stays out of the repository | **decided 2026-10-16:** only the birth year and month, as a configured value (point 6) |
 | Backtest behaviours live trading will not copy: keeping the last book on short data, SPY treated as risk-on with fewer than 200 closes, a lookback window that shifts across a gap (`defensive_v2.py:269-291`); ties in the ranking (323); a zero volatility weighted as 1 (76); RSI(2)'s dependence on its warm-up seed (`template.py:54-55`) | measured by the parity tests, which report each difference; none is copied into live code without a decision |
 | A name with no sector label, which the backtest ranked and left uncapped (`defensive_v2.py:69-74`) and live trading had left out (`plan.md` section 4, "Sectors", "Chosen") | **decided 2026-10-18 by the owner ("I want parity"): live trading copies the backtest.** The name is ranked and can be picked, counted toward the book's 25 but toward no sector's cap of 3; it is not excluded and has no status of its own. Target-weight rules version 1.13.0. It is not a listed difference: the parity tests require the live book to equal the backtest's here |
+| Three more backtest behaviours of the IRA runs: a buy held back for a newly added stock's first price; a name with no reference price, traded outside the planner; LEAN's own sale of a holding at the stock's delisting | **decided 2026-10-18 by the owner: listed, each only with its recorded evidence and bound.** `price-wait`: a newly added stock bought on the first session it had a price, within five sessions, the wait recorded in the export and verified on the calendar. `unpriced`: only an instrument before its listing date (IEF before July 2002): the export records no price for it that month, and the month comes before the first month any export records a price for it. `liquidated`: LEAN's own "Liquidate from delisting" sale, recorded as such in the orders listing, of a stock Go held (a holding at the last rebalance or a buy it kept). Anything outside those bounds is reported `unexplained` and fails the differences check (`docs/research/parity-2026-10.md`, "Round 4") |
 | Excess Liquidity thresholds: `plan.md` says "their own hash"; this ADR puts them in the account configuration's one hash | corrected in `plan.md` on acceptance (2026-10-16): part of the account configuration's one hash |
 
 ## Alternatives rejected
@@ -864,7 +865,7 @@ kept exports and its three reports are byte-identical to the
 The parity runs of the glide path, D7-L and the IRA execution
 (`docs/research/parity-2026-10.md`, "Remaining scope", and "Review fixes
 and re-runs, 2026-10-18") failed only on IRA orders the backtest could not
-place. The owner decided four things on 2026-10-18. The recorded failures
+place. The owner decided four things on 2026-10-18, and a fifth, on a sell that cannot complete, later that day. The recorded failures
 stand as recorded (AGENTS.md rule 6).
 
 - **Point 8: a stock delisted or acquired at the rebalance.** The list of
@@ -895,10 +896,24 @@ stand as recorded (AGENTS.md rule 6).
   parity tool and the IRA template apply it: a buy waits until every sell
   of the run is terminal, of any month or tag, not only the rebalance's
   own; the delay applies when a sell is placed or still working at the
-  rebalance. What should happen when a sell can never complete, as in the
-  held-out run, where one sell never filled and no later month's buys were
-  placed, is an owner decision still open; this amendment does not decide
-  it.)*
+  rebalance.)*
+- **A sell that cannot complete (decided by the owner, 2026-10-18).** The
+  held-out run had a sell that never filled (CBAY, 2024-04), and no later
+  month's buys were placed. A sell that cannot complete is either refused
+  as non-tradable or left without a price for five sessions. The owner
+  decided that such a sell is set aside as `unfinished` and does not
+  block that rebalance's buys. The buys are scaled to the cash actually
+  available, never counting the stuck sell's proceeds. The stuck holding is
+  reported, and live trading pages the owner (built separately, with the
+  live alerts). *(As the IRA template and the parity tool apply it: a
+  refused sell never works, so it holds nothing; a market sell still
+  working at 8:00 on the fifth session after the day it was placed had no
+  price at any of those opens, and from then on it holds no buy. It stays
+  netted from the holding, since it may still execute (point 5). The tool
+  finds it from the orders listing and the calendar, never from the
+  export, and reports it as `set-aside` when it never filled. One that
+  later fills in full is an ordinary sell, filled after buys it no longer
+  held; one left partly filled fails `ira-orders`.)*
 - **D7-F is dropped from the parity scope.** Point 7, item 2's "repeat
   with each D7 option" reads D7-L only: D7-F, fractional shares, is not
   built (point 2, "D7-L", the owner's choice of 2026-10-16). Point 8's D7

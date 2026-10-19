@@ -86,10 +86,13 @@ const (
 	KindRSISeed Kind = "rsi-seed"
 
 	// KindPriceWait: buys the backtest held back for a stock's first price,
-	// which live trading, sizing from the previous close, does not.
+	// which live trading, sizing from the previous close, does not. Listed
+	// (ADR 0026 point 8, owner, 2026-10-18) only within five sessions
+	// counted on the calendar; any other wait is reported unexplained.
 	KindPriceWait Kind = "price-wait"
 	// KindUnpriced: a name with no reference price, traded outside the
-	// planner.
+	// planner. Listed (ADR 0026 point 8, owner, 2026-10-18) only for a
+	// month before its first recorded price, an instrument not yet listed.
 	KindUnpriced Kind = "unpriced"
 	// KindDelisted: a stock delisted or acquired at the rebalance, which
 	// the backtest could not trade (ADR 0026 point 8, amended 2026-10-18),
@@ -98,18 +101,27 @@ const (
 	KindDelisted Kind = "delisted"
 
 	// KindLiquidated: a holding LEAN sold itself at the stock's delisting,
-	// outside the plan. ADR 0026 point 8 does not list it.
+	// outside the plan. Listed (ADR 0026 point 8, owner, 2026-10-18) only for
+	// a stock Go held.
 	KindLiquidated Kind = "liquidated"
+
+	// KindSetAside: a sell with no price for five sessions, set aside so
+	// that it holds no buy, and never filled: the stuck holding.
+	KindSetAside Kind = "set-aside"
 
 	// KindUnexplained: a live departure from the backtest-compatible result
 	// that no rule above produces. Never listed.
 	KindUnexplained Kind = "unexplained"
 )
 
-// Listed reports whether ADR 0026 point 8 lists the kind.
+// Listed reports whether ADR 0026 point 8 lists the kind, or, for
+// KindSetAside, the owner's decision on a sell that cannot complete makes
+// it the rule both live trading and the backtest follow (ADR 0026,
+// amendment of 2026-10-18): reported, not failed.
 func (k Kind) Listed() bool {
 	switch k {
-	case KindShortData, KindTrendHistory, KindGap, KindTie, KindZeroVolatility, KindRSISeed, KindDelisted:
+	case KindShortData, KindTrendHistory, KindGap, KindTie, KindZeroVolatility, KindRSISeed, KindDelisted, KindSetAside,
+		KindPriceWait, KindUnpriced, KindLiquidated:
 		return true
 	}
 	return false

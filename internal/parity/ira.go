@@ -153,10 +153,12 @@ const (
 	PhaseUnpriced = "unpriced"
 )
 
-// QuantConnect's terminal order statuses besides OrderFilled.
+// QuantConnect's terminal order statuses besides OrderFilled, and
+// OrderCancelPending, an order whose cancel is not yet confirmed.
 const (
-	OrderCanceled = 5
-	OrderInvalid  = 7
+	OrderCanceled      = 5
+	OrderInvalid       = 7
+	OrderCancelPending = 8
 )
 
 // maxShares bounds an order's quantity: beyond it a float64 no longer
@@ -170,14 +172,27 @@ type iraRun struct {
 	sessions Sessions
 	diffs    []Difference
 	run      string
+	// aside is each sell set aside, by order ID: the session it was.
+	aside map[int]string
+	// lastID and latest are the run's highest order ID and latest order
+	// time.
+	lastID int
+	latest time.Time
+	// firstPriced is the first month an export records a price for each
+	// name.
+	firstPriced map[string]string
+	// named is each security ID's names in the exports: those the run's
+	// IRAORD1 orders of it were placed under, by order ID.
+	named map[string][]string
 }
 
 // sellOrder is a sell of the run with its times read: placed at at, and
-// terminal at end unless it was still working when the listing was taken.
+// terminal at end unless it was still working when the listing was taken;
+// set aside from aside on, when it was.
 type sellOrder struct {
 	Order
-	at, end time.Time
-	ended   bool
+	at, end, aside  time.Time
+	ended, setAside bool
 }
 
 // CompareIRA checks each logged rebalance of an IRA run against the Go
@@ -189,17 +204,23 @@ type sellOrder struct {
 // filled, in its phase's direction, in whole shares) against Go's sells and
 // scaled buys exactly; and the sequence (ADR 0026 point 2, "IRA
 // execution"): every sell placed at the rebalance and filled before any
-// buy, no sell of the run, whatever its tag, still working when a buy was
-// placed, and the buys on the session the export names. The sessions
+// buy, no sell of the run, whatever its tag, still holding the buys when
+// one was placed, and the buys on the session the export names. A sell
+// that cannot complete, still working at 8:00 on the IRAPriceWait-th
+// session after its day, is set aside from then on and holds no buy (ADR
+// 0026, amendment of 2026-10-18, the owner's decision); never filled, it is
+// reported as set-aside, not failed. The sessions
 // between the rebalance and the buys are counted by sessions, never taken
 // from the export: they must be the delay (none when no sell is placed or
-// working), then each session a sell was working at 8:00, as the orders
+// working), then each session a sell held the buys at 8:00, as the orders
 // listing shows, then each session waited for a price. Those extra
 // sessions are the sequence's measured difference; the rebalance and the
 // buys must each be on a session. They are counted for every month, one
 // that placed no order included. A wait for a price and a name with no
-// reference price are listed as differences; ADR 0026 point 8 lists
-// neither, so the differences check fails on them.
+// reference price are listed as differences, which ADR 0026 point 8 lists
+// only within their bounds (owner, 2026-10-18): a wait of at most
+// IRAPriceWait sessions counted on the calendar, and a month before the
+// name's first recorded price. Outside them each is unexplained.
 //
 // Every refusal and every unplaced buy is either listed under ADR 0026
 // point 8's delisted cause or fails ira-orders: a refusal QuantConnect gave
@@ -209,9 +230,11 @@ type sellOrder struct {
 // A placeholder order ID records only that QuantConnect refused, not why.
 // Every order of the run is accounted for: an IRAORD1 order is compared;
 // an export carrier is skipped when cancelled or refused with events that
-// fill nothing; LEAN's sale of a holding at its delisting, and the buy of a
-// pending target of the last rebalance, matched by security ID, are listed
-// as differences (point 8 lists neither); any other order fails
+// fill nothing, or, the run's last order, left cancel-pending by its end
+// and filling nothing; LEAN's sale of a holding at its delisting, and the
+// buy of a pending target of the last rebalance, matched by security ID,
+// are listed as differences (point 8 lists the first only for a stock Go
+// held, the second as the name's unpriced trade); any other order fails
 // ira-orders.
 //
 // Every planned month must be exported once; every month the run logged
@@ -233,9 +256,14 @@ func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order,
 	}
 	plannedMonths(r.checks[CheckIRAMonths], planned, monthsOf(months, func(m IRAMonth) string { return m.Month }))
 	var outside []Order
+	r.aside = map[int]string{}
 	for _, o := range orders {
+		r.lastID = max(r.lastID, o.ID)
+		if at, err := time.Parse(time.RFC3339, o.Time); err == nil && at.After(r.latest) {
+			r.latest = at
+		}
 		if o.Quantity < 0 {
-			r.sells = append(r.sells, readSell(o))
+			r.sells = append(r.sells, r.setAside(readSell(o)))
 		}
 		rest, ok := strings.CutPrefix(o.Tag, IRAOrderPrefix)
 		if !ok {
@@ -251,6 +279,26 @@ func CompareIRA(run string, planned []string, months []IRAMonth, orders []Order,
 			r.orders[month] = map[string][]Order{}
 		}
 		r.orders[month][phase] = append(r.orders[month][phase], o)
+	}
+	r.firstPriced = map[string]string{}
+	for _, m := range months {
+		for n := range m.Prices {
+			if f, ok := r.firstPriced[n]; !ok || m.Month < f {
+				r.firstPriced[n] = m.Month
+			}
+		}
+	}
+	r.named = map[string][]string{}
+	sids := map[int]string{}
+	for _, o := range orders {
+		sids[o.ID] = o.SecurityID
+	}
+	for _, m := range months {
+		for id, n := range m.Placed {
+			if sid := sids[id]; sid != "" {
+				r.named[sid] = append(r.named[sid], n)
+			}
+		}
 	}
 	exported := map[string]bool{}
 	for i := range months {
@@ -280,7 +328,8 @@ func (r *iraRun) outside(o Order, months []IRAMonth) {
 		if strings.HasPrefix(o.Tag, p) {
 			// A carrier is skipped only when it is shown never to have filled:
 			// cancelled or refused, with events that fill nothing.
-			if (o.Status == OrderCanceled || o.Status == OrderInvalid) && o.FillsKnown && o.FilledQuantity == 0 && o.LastFillTime == "" {
+			ended := o.Status == OrderCanceled || o.Status == OrderInvalid
+			if (ended || r.endCarrier(o)) && o.FillsKnown && o.FilledQuantity == 0 && o.LastFillTime == "" {
 				return
 			}
 			why = "an export carrier not shown never to have filled"
@@ -291,28 +340,63 @@ func (r *iraRun) outside(o Order, months []IRAMonth) {
 	switch {
 	case err != nil || o.Status != OrderFilled:
 	case o.Tag == LEANDelistingTag && o.Quantity < 0:
-		r.diffs = append(r.diffs, Difference{Run: r.run, Where: day + " " + o.Ticker, Kind: KindLiquidated,
-			Size: fmt.Sprintf("order %d: %v shares", o.ID, o.Quantity)})
+		d := Difference{Run: r.run, Where: day + " " + o.Ticker, Kind: KindLiquidated, Size: fmt.Sprintf("order %d: %v shares", o.ID, o.Quantity)}
+		if last := lastRebalance(months, day); last == nil || !goHeld(append([]string{o.Ticker, o.SecurityID}, r.named[o.SecurityID]...), last) {
+			d.Kind, d.Size = KindUnexplained, d.Size+": liquidated, of a stock Go did not hold"
+		}
+		r.diffs = append(r.diffs, d)
 		return
 	case o.Tag == "" && o.Quantity > 0:
-		// The last rebalance on or before the buy.
-		var last *IRAMonth
-		for i := range months {
-			if months[i].Decision <= day && (last == nil || months[i].Decision > last.Decision) {
-				last = &months[i]
-			}
-		}
-		if last != nil {
+		if last := lastRebalance(months, day); last != nil {
 			var n string
 			if n, why = pendingBuy(o, last); why == "" {
-				r.diffs = append(r.diffs, Difference{Run: r.run, Where: last.Month + " " + n, Kind: KindUnpriced,
-					Size: fmt.Sprintf("order %d: %v shares bought outside the planner", o.ID, o.Quantity)})
+				r.diffs = append(r.diffs, r.unpriced(last.Month, n, fmt.Sprintf("order %d: %v shares bought outside the planner", o.ID, o.Quantity)))
 				return
 			}
 		}
 	}
 	r.checks[CheckIRAOrders].compare(false, 0, fmt.Sprintf("order %d (%s, %v shares, status %d) tagged %q: %s",
 		o.ID, o.Ticker, o.Quantity, o.Status, o.Tag, why))
+}
+
+// lastRebalance is the last rebalance on or before day, nil when none.
+func lastRebalance(months []IRAMonth, day string) *IRAMonth {
+	var last *IRAMonth
+	for i := range months {
+		if months[i].Decision <= day && (last == nil || months[i].Decision > last.Decision) {
+			last = &months[i]
+		}
+	}
+	return last
+}
+
+// goHeld reports whether Go held the stock after the rebalance m, under
+// any of its names (its ticker, its security ID, or a name the exports
+// placed an order of it under): a holding at it, or a buy it kept.
+func goHeld(names []string, m *IRAMonth) bool {
+	for _, n := range names {
+		if _, ok := m.Held[n]; ok {
+			return true
+		}
+		for _, k := range m.Kept {
+			if k.Ticker == n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// unpriced is the difference of a name with no reference price in month:
+// listed only when the month comes before the first month any export
+// records a price for it, an instrument not yet listed (ADR 0026 point 8,
+// owner, 2026-10-18).
+func (r *iraRun) unpriced(month, name, size string) Difference {
+	d := Difference{Run: r.run, Where: month + " " + name, Kind: KindUnpriced, Size: size}
+	if first, ok := r.firstPriced[name]; !ok || month >= first {
+		d.Kind, d.Size = KindUnexplained, size+": unpriced, not before its first recorded price"
+	}
+	return d
 }
 
 // pendingBuy names the pending target of the month that an untagged buy is,
@@ -342,6 +426,42 @@ func pendingBuy(o Order, m *IRAMonth) (name, why string) {
 		return "", fmt.Sprintf("security %s is not the %s pending in %s", o.SecurityID, n, m.Month)
 	}
 	return "", "not an order of the IRA plan"
+}
+
+// endCarrier reports whether o is a carrier the run's end left
+// cancel-pending: the template's own housekeeping order, placed at the
+// run's final step (the highest order ID, nothing placed after it), whose
+// cancel the run ended before confirming. Unfilled, it is never filled.
+func (r *iraRun) endCarrier(o Order) bool {
+	at, err := time.Parse(time.RFC3339, o.Time)
+	return o.Status == OrderCancelPending && o.ID == r.lastID && err == nil && !r.latest.After(at)
+}
+
+// setAside marks a sell that cannot complete: still working at 8:00 on the
+// IRAPriceWait-th session after the day it was placed, a market order
+// with no price at any of those sessions' opens. From then on it holds no
+// buy (ADR 0026, amendment of 2026-10-18, a sell that cannot complete).
+// The sessions are the calendar's; with none to count them, it is never
+// set aside.
+func (r *iraRun) setAside(s sellOrder) sellOrder {
+	day := s.at.In(nysecalendar.NewYork)
+	after := day.Format(time.DateOnly)
+	sessions, err := r.between(after, day.AddDate(0, 0, 3*IRAPriceWait).Format(time.DateOnly))
+	if err != nil || len(sessions) < IRAPriceWait {
+		return s
+	}
+	s.aside = at8(sessions[IRAPriceWait-1])
+	if s.working(s.aside) {
+		s.setAside = true
+		r.aside[s.ID] = sessions[IRAPriceWait-1]
+	}
+	return s
+}
+
+// holds reports whether the sell held the buys at t: working, and not yet
+// set aside.
+func (s sellOrder) holds(t time.Time) bool {
+	return s.working(t) && (!s.setAside || t.Before(s.aside))
 }
 
 func readSell(o Order) sellOrder {
@@ -374,10 +494,10 @@ func at8(day string) time.Time {
 	return time.Date(d.Year(), d.Month(), d.Day(), 8, 0, 0, 0, nysecalendar.NewYork)
 }
 
-// sellWorking reports whether any sell of the run was working at t.
+// sellWorking reports whether any sell of the run held the buys at t.
 func (r *iraRun) sellWorking(t time.Time) bool {
 	for _, s := range r.sells {
-		if s.working(t) {
+		if s.holds(t) {
 			return true
 		}
 	}
@@ -446,8 +566,16 @@ func (r *iraRun) month(m *IRAMonth) {
 	o := r.checks[CheckIRAOrders]
 	goBy := map[string]map[string]int64{PhaseSell: goSells, PhaseBuy: goBuys}
 	qcBy := map[string]map[string]int64{}
+	why, listed := map[string]string{}, map[string]string{}
+	// A sell set aside, never filled, is no sell made: it is reported, as
+	// the owner decided (ADR 0026, amendment of 2026-10-18).
+	aside := map[string]string{}
 	for _, phase := range []string{PhaseSell, PhaseBuy} {
-		qcBy[phase] = r.orderShares(o, m.Month, phase, placed[phase], names, m.Placed)
+		var a map[string]string
+		qcBy[phase], a = r.orderShares(o, m.Month, phase, placed[phase], names, m.Placed)
+		for n, size := range a {
+			aside[n+" "+phase], listed[n+" "+phase] = size, size
+		}
 	}
 	// excuses reports whether a recorded detection names an order Go
 	// planned and the backtest has none of: only such an order can be a
@@ -457,7 +585,6 @@ func (r *iraRun) month(m *IRAMonth) {
 		_, filled := qcBy[phase][name]
 		return planned && !filled
 	}
-	why, listed := map[string]string{}, map[string]string{}
 	for _, f := range m.Refused {
 		k := f.Ticker + " " + f.Phase
 		if strings.Contains(f.Reason, "non-tradable") && excuses(f.Phase, f.Ticker) {
@@ -498,20 +625,23 @@ func (r *iraRun) month(m *IRAMonth) {
 	}
 	for _, phase := range []string{PhaseSell, PhaseBuy} {
 		for _, n := range compareShares(o, m.Month+" "+phase+" orders", goBy[phase], qcBy[phase], why, listed, phase) {
-			r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month + " " + phase + " " + n, Kind: KindDelisted,
+			kind := KindDelisted
+			if _, ok := aside[n+" "+phase]; ok {
+				kind = KindSetAside
+			}
+			r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month + " " + phase + " " + n, Kind: kind,
 				Size: listed[n+" "+phase]})
 		}
 	}
 	unpriced, pending := map[string]bool{}, map[string]bool{}
 	for _, n := range m.Unpriced {
 		unpriced[n] = true
-		r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month + " " + n, Kind: KindUnpriced,
-			Size: "no reference price: traded outside the planner"})
+		r.diffs = append(r.diffs, r.unpriced(m.Month, n, "no reference price: traded outside the planner"))
 	}
 	for _, n := range m.Pending {
 		pending[n] = true
 	}
-	sales := r.orderShares(o, m.Month, PhaseUnpriced, placed[PhaseUnpriced], names, m.Placed)
+	sales, _ := r.orderShares(o, m.Month, PhaseUnpriced, placed[PhaseUnpriced], names, m.Placed)
 	for _, n := range unionKeys(sales, nil) {
 		what := ""
 		switch {
@@ -525,7 +655,13 @@ func (r *iraRun) month(m *IRAMonth) {
 		o.compare(what == "", 0, fmt.Sprintf("%s unpriced sale of %s: %s", m.Month, n, what))
 	}
 	if m.ForPrice > 0 {
-		r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month, Kind: KindPriceWait, Size: fmt.Sprintf("%d sessions", m.ForPrice)})
+		// Listed only within the five sessions, as the calendar counts them.
+		d := Difference{Run: r.run, Where: m.Month, Kind: KindPriceWait, Size: fmt.Sprintf("%d sessions", m.ForPrice)}
+		if m.ForPrice > IRAPriceWait || uncounted != "" {
+			d.Kind = KindUnexplained
+			d.Size = fmt.Sprintf("price-wait of %d sessions, outside its bound of %d counted on the calendar", m.ForPrice, IRAPriceWait)
+		}
+		r.diffs = append(r.diffs, d)
 	}
 	r.sequence(m, placed, waited, uncounted)
 }
@@ -582,6 +718,9 @@ func (r *iraRun) sequence(m *IRAMonth, placed map[string][]Order, waited int, un
 		case err != nil || at.Format(time.DateOnly) != m.Decision:
 			fail("sell %d placed %q, not on the rebalance session %s", o.ID, o.Time, m.Decision)
 			return
+		case r.aside[o.ID] != "":
+			// Set aside, it holds no buy once it is (sellWorking), filled
+			// later or never.
 		case o.Status != OrderFilled || ferr != nil:
 			fail("sell %d not filled (status %d)", o.ID, o.Status)
 			return
@@ -600,7 +739,7 @@ func (r *iraRun) sequence(m *IRAMonth, placed map[string][]Order, waited int, un
 			return
 		}
 		for _, s := range r.sells {
-			if s.ID < o.ID && s.working(at) {
+			if s.ID < o.ID && s.holds(at) {
 				fail("buy %d placed %s while sell %d (%s) was still working", o.ID, o.Time, s.ID, s.Ticker)
 				return
 			}
@@ -720,8 +859,8 @@ func compareShares(c *Check, where string, goShares, qcShares map[string]int64, 
 // phase's direction (a buy positive, a sell or unpriced sale negative) of
 // whole shares is summed; any other fails c and is left out, so that no
 // order of the wrong kind can make up a total.
-func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, names map[string]bool, byID map[int]string) map[string]int64 {
-	out := map[string]int64{}
+func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, names map[string]bool, byID map[int]string) (out map[string]int64, aside map[string]string) {
+	out, aside = map[string]int64{}, map[string]string{}
 	for _, o := range orders {
 		name, ok := byID[o.ID]
 		switch {
@@ -733,6 +872,10 @@ func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, name
 		}
 		bad := ""
 		switch {
+		case r.aside[o.ID] != "" && o.Status != OrderFilled && o.FillsKnown && o.FilledQuantity == 0:
+			aside[name] = fmt.Sprintf("order %d: %v shares never sold, set aside on %s with no price for %d sessions",
+				o.ID, -o.Quantity, r.aside[o.ID], IRAPriceWait)
+			continue
 		case o.Status != OrderFilled:
 			bad = fmt.Sprintf("status %d, not filled", o.Status)
 		case phase == PhaseBuy && !(o.Quantity > 0), phase != PhaseBuy && !(o.Quantity < 0):
@@ -746,7 +889,7 @@ func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, name
 		}
 		out[name] += int64(o.Quantity)
 	}
-	return out
+	return out, aside
 }
 
 func unionKeys[V any](a, b map[string]V) []string {

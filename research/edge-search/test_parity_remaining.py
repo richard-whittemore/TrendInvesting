@@ -558,6 +558,30 @@ class IRATemplateTest(unittest.TestCase):
             self.module.ira_buy_phase(algo)
         self.assertEqual((self._sales(lean), algo.Portfolio["NEW"].Quantity), ([], 0))
 
+    def test_a_sell_with_no_price_for_five_sessions_is_set_aside_and_holds_no_buy(self):
+        # The sale of CCC never fills: no price at any open. At 8:00 on the
+        # fifth session after its day it is set aside (ADR 0026, amendment
+        # of 2026-10-18): the buys go, scaled to the cash on hand, its
+        # proceeds never counted.
+        algo = self._algo({"CCC": 40}, cash=1000.0)
+        lean = _Lean(algo)
+        self.module.ira_rebalance(algo, {"AAA": 0.49}, self.closes())
+        self.assertEqual([(t.Symbol, t.Quantity) for t in lean.orders], [("CCC", -40)])
+        for day in (2, 3, 6, 7):
+            algo.Time = _dt.datetime(2020, 4, day, 8)
+            self.module.ira_buy_phase(algo)
+        self.assertEqual(len(lean.orders), 1)                              # still held
+        algo.Time = _dt.datetime(2020, 4, 8, 8)
+        self.module.ira_buy_phase(algo)
+        self.assertEqual([(t.Symbol, t.Quantity, t.Tag) for t in lean.orders[1:]], [("AAA", 17, "IRAORD1 2020-04 buy")])   # 0.49 x 1,800 / 50
+        rec = _decode(algo.limits[0]["tag"], "IRAPARITY1 ")
+        self.assertEqual((rec["waited"], rec["for_sells"], rec["for_price"], rec["budget"], rec["unfinished"]),
+                         (5, 4, 0, 1000.0, False))
+        # It stays set aside: May's rebalance nets it and buys at once.
+        algo.Time = _dt.datetime(2020, 5, 1, 8)
+        self.module.ira_rebalance(algo, {"AAA": 0.49, "BBB": 0.2}, self.closes())
+        self.assertEqual((algo.ira["working"], algo.ira["sells"], algo.ira["wait"], algo.ira["done"]), ({"CCC": 40}, [], 0, True))
+
     def test_a_refused_order_is_recorded_apart_with_its_reason(self):
         algo = self._algo({}, cash=1000.0)
         def market(sym, qty, tag=""):

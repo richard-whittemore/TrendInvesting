@@ -337,10 +337,34 @@ def _priced(algo, sym):
 
 
 def _open_sells(algo):
-    """Every sell still working, whatever its tag or month: the buys wait for
-    each to be terminal (ADR 0026 point 2, "IRA execution")."""
+    """Every sell still working, whatever its tag or month: each is netted
+    from the holding it sells, and each holds the buys until it is terminal
+    or set aside (_holding_sells; ADR 0026 point 2, "IRA execution")."""
     return [t for t in algo.Transactions.GetOpenOrderTickets()
             if float(t.Quantity) < 0 and float(t.Quantity) - float(t.QuantityFilled) < 0]
+
+
+def _age_sells(algo):
+    """Once a session, at 8:00: count each sell still working. A market
+    order working at 8:00 on the PRICE_WAIT-th session after its day had no
+    price at any of those opens."""
+    today = algo.Time.date()
+    if getattr(algo, "sells_aged", None) == today:
+        return
+    algo.sells_aged = today
+    ages = algo.sell_ages = getattr(algo, "sell_ages", {})
+    for t in _open_sells(algo):
+        ages[t.OrderId] = ages.get(t.OrderId, 0) + 1
+
+
+def _holding_sells(algo):
+    """The sells that hold the buys: every sell still working, but one with
+    no price for PRICE_WAIT sessions, which cannot complete, is set aside
+    and holds none; the buys are scaled to the cash on hand, so its proceeds
+    are never counted (ADR 0026, amendment of 2026-10-18, the owner's
+    decision on a sell that cannot complete)."""
+    ages = getattr(algo, "sell_ages", {})
+    return [t for t in _open_sells(algo) if ages.get(t.OrderId, 0) < PRICE_WAIT]
 
 
 def ira_rebalance(algo, targets, closes):
@@ -352,6 +376,7 @@ def ira_rebalance(algo, targets, closes):
     a holding with none is sold by an order tagged as the month's unpriced
     sale. A month whose buys were never sent is recorded as unfinished
     first, its sells left working, which this month's plan nets."""
+    _age_sells(algo)
     ira_unfinished(algo)
     month = _month(algo)
     held = _canonical({kvp.Key: int(kvp.Value.Quantity) for kvp in algo.Portfolio
@@ -386,7 +411,7 @@ def ira_rebalance(algo, targets, closes):
     for inst, q, _ in sells:
         _place(placed, refused, algo.MarketOrder(sym_of[inst], -q, tag=IRA_ORDER_PREFIX + month + " sell"), inst,
                "sell")
-    waiting = bool(sells) or any(p[1] == "unpriced" for p in placed) or bool(_open_sells(algo))
+    waiting = bool(sells) or any(p[1] == "unpriced" for p in placed) or bool(_holding_sells(algo))
     algo.ira = {"month": month, "day": algo.Time.date(), "decision": algo.Time.strftime("%Y-%m-%d"), "nlv": nlv,
                 "targets": plan_targets, "held": plan_held, "prices": plan_prices, "working": working,
                 "unpriced": [name(s) for s in unpriced], "pending": [name(s) for s in unpriced if s in targets],
@@ -435,10 +460,11 @@ def _place(placed, refused, ticket, inst, phase):
 
 def ira_buy_phase(algo):
     """Each session at 8:00: once EXEC_DELAY sessions have passed since the
-    rebalance (none when it had no sell), no sell of any month is still
-    working and every bought security has a price (for at most PRICE_WAIT
+    rebalance (none when it had no sell), no sell of any month still holds
+    them (_holding_sells) and every bought security has a price (for at most PRICE_WAIT
     sessions), budget and send its buys. The sessions waited for each
     reason are counted, so that waited = the delay + for_sells + for_price."""
+    _age_sells(algo)
     if getattr(algo, "ira_backlog", None):
         ira_export(algo, None)
     q = getattr(algo, "ira", None)
@@ -448,7 +474,7 @@ def ira_buy_phase(algo):
     _sell_unpriced(algo, q["reserved"], q["month"], q["name"], q["placed"], q["refused"])
     if q["waited"] < q["wait"]:
         return
-    if _open_sells(algo):
+    if _holding_sells(algo):
         q["for_sells"] += 1
         return
     if q["for_price"] < PRICE_WAIT and not all(_priced(algo, q["sym_of"][b[0]]) for b in q["buys"]):

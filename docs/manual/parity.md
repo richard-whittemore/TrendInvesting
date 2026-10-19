@@ -148,9 +148,9 @@ The thresholds:
 | `d7l-picks`, `d7l-skipped`, `d7l-kept` | exactly the same, a withheld month included |
 | `ira-plan` | exactly the same sells and buys (shares and limit prices) and the same skips (side, reason, shares) |
 | `ira-scale` | the same shares; the scale within 1e-12 |
-| `ira-orders` | the orders the backtest placed, by stock and phase, exactly the shares Go's sells and scaled buys call for; each one filled, in its phase's direction (a buy positive, a sell negative) and in whole shares. Only quantities: the backtest sends market orders, so no limit price is checked here. An order the backtest could not place because the stock was delisted or acquired at the rebalance passes when the export records how that was detected (below); it is listed as a `delisted` departure. Every refusal and every unplaced buy is either so listed or fails; an unplaced buy is listed only after five sessions waited for a price, counted on the calendar. Every other order of the run is accounted for too: an export carrier is skipped only when it was cancelled or refused and its events fill nothing (a carrier partly filled, still working, or of an unknown status fails); LEAN's own sale at a delisting is a listed difference, and so is the buy outside the planner of a stock that was a target with no reference price (`pending`), matched by its security ID; any other order fails, the buy of an unpriced holding included. The sale of a holding with no reference price must be of such a stock that was not a target |
-| `ira-sequence` | every sell filled before the first buy, and no sell of any month still working when a buy was placed; for every month, one that placed no order included, the rebalance and the buys each on a trading session; the sessions from the rebalance to the buys, counted on a trading calendar, are the delay (one session, none when no sell was placed or working), then each session at whose 8:00 the orders listing shows a sell still working, then any waited for a stock's first price |
-| `differences` (IRA) | none off ADR 0026 point 8's list: a wait for a price, a stock with no reference price (and its buy outside the planner) and LEAN's own sale of a holding at its delisting (`liquidated`) are listed and fail it, since point 8 does not list them |
+| `ira-orders` | the orders the backtest placed, by stock and phase, exactly the shares Go's sells and scaled buys call for; each one filled, in its phase's direction (a buy positive, a sell negative) and in whole shares. Only quantities: the backtest sends market orders, so no limit price is checked here. An order the backtest could not place because the stock was delisted or acquired at the rebalance passes when the export records how that was detected (below); it is listed as a `delisted` departure. Every refusal and every unplaced buy is either so listed or fails; an unplaced buy is listed only after five sessions waited for a price, counted on the calendar. Every other order of the run is accounted for too: an export carrier is skipped only when it was cancelled or refused and its events fill nothing (a carrier partly filled, still working, or of an unknown status fails), or when it is the run's very last order, left cancel-pending because the run ended before the cancel was confirmed, and filled nothing: it is the template's own record-keeping order, not a trade; a sell set aside (below) that never filled is reported as `set-aside`, not failed; LEAN's own sale at a delisting is a listed difference, and so is the buy outside the planner of a stock that was a target with no reference price (`pending`), matched by its security ID; any other order fails, the buy of an unpriced holding included. The sale of a holding with no reference price must be of such a stock that was not a target |
+| `ira-sequence` | every sell filled before the first buy, and no sell of any month still holding the buys when one was placed; a sell still working at 8:00 on the fifth session after its day had no price at any of those opens and cannot complete, so it is set aside and holds no buy from then on (the owner's decision of 2026-10-18, ADR 0026); for every month, one that placed no order included, the rebalance and the buys each on a trading session; the sessions from the rebalance to the buys, counted on a trading calendar, are the delay (one session, none when no sell was placed or working), then each session at whose 8:00 the orders listing shows a sell still holding them, then any waited for a stock's first price |
+| `differences` (IRA) | none off ADR 0026 point 8's list. Since the owner's decision of 2026-10-18 the list includes three IRA causes, each only within its bound: a wait for a newly added stock's first price (`price-wait`) of at most five sessions, counted on the calendar; a stock with no reference price, and its buy outside the planner (`unpriced`), only in a month before the first month any export records a price for it (an instrument not yet listed, such as IEF before July 2002); and LEAN's own sale at a delisting (`liquidated`) of a stock Go held. A stock set aside (a sell that cannot complete) is reported as `set-aside`. Anything outside those bounds is reported `unexplained` and fails |
 
 These thresholds are settled: the owner confirmed them as the rule on
 2026-10-18 (ADR 0026, amendment of that date, "the remaining parity
@@ -221,7 +221,13 @@ were never placed because a sell was still working at the next rebalance
 as `unfinished`. A refusal given as non-tradable, of a planned order the
 backtest did not fill, is listed as `delisted` and passes `ira-orders`;
 every other refusal fails it. An unfinished month fails `ira-orders` on
-every planned buy, and fails `ira-sequence`. Exports made before
+every planned buy, and fails `ira-sequence`. A sell that cannot complete
+no longer causes one: as the owner decided on 2026-10-18, a sell refused
+as non-tradable, or one still working on the fifth session after its day
+(no price at any of those opens), is set aside and the month's buys go
+ahead, scaled to the cash actually on hand, so its proceeds are never
+counted. The holding it was meant to sell stays held and is reported
+(`set-aside` in the report; live trading pages the owner). Exports made before
 2026-10-18 (version 1) have neither field; the tool reads their refusals
 from the placeholder order ID -10, and each fails, since no reason was
 recorded. Version 3 also records which stocks with no reference price
@@ -328,7 +334,9 @@ valid, a run with no planned months).
   the month is `unfinished` (a sell still working at the next rebalance),
   before suspecting the planner. In the held-out 2026-10 runs one sell
   never filled (CBAY, 2024-04), and every later month's buys waited for
-  it; with the fixed template each of those months is `unfinished`.
+  it; with that template each of those months is `unfinished`. Since the
+  owner's decision of 2026-10-18 such a sell is set aside after five
+  sessions and the buys go ahead; look for it as `set-aside`.
 - **A planned month is missing** (`months` fails): the backtest did not
   rebalance that month, or the tag was lost. Check the run's `Parity`
   statistic, which counts the months it exported.
