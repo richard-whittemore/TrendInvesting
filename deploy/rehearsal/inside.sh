@@ -24,7 +24,8 @@ p=/root/deploy/provision.sh
 pass "first full pass"
 
 # The clock check passed above against this container's host. With a reference
-# clock an hour off, the step must refuse (this container has no NTP service
+# clock an hour off (the skew is measured to about a second, so -3598 to -3602
+# all count), the step must refuse (this container has no NTP service
 # of its own, so the reference decides).
 stubs=$(mktemp -d)
 cat >"$stubs/curl" <<'STUB'
@@ -33,7 +34,7 @@ printf 'HTTP/2 200\r\nDate: %s\r\n\r\n' "$(date -u -d '+1 hour' '+%a, %d %b %Y %
 STUB
 chmod +x "$stubs/curl"
 if PATH="$stubs:$PATH" "$p" clock >/dev/null 2>"$stubs/err"; then fail "a clock an hour off was accepted"; fi
-grep -q 'skew of -3600s' "$stubs/err" || fail "the clock step failed for another reason: $(cat "$stubs/err")"
+grep -Eq 'skew of -(359[89]|360[012])s' "$stubs/err" || fail "the clock step failed for another reason: $(cat "$stubs/err")"
 rm -rf "$stubs"
 pass "the clock step passes on this host's clock and refuses a skewed one"
 
