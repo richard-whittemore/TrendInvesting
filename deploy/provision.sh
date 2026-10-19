@@ -80,6 +80,14 @@ step_base() {
   log "service users (non-root, no login shell)"
   ensure_user ti-gateway /var/lib/ti-gateway
   ensure_user ti-trader /var/lib/trend-investing
+  # The user that writes the owner's instructions into the operator inboxes
+  # (ADR 0026, kill-switch amendment): not the engine's user, and no unit runs
+  # as it, so no network-facing unit can write an instruction. Its group is
+  # the engine's, so it reaches the engines' state directories (0750), and
+  # the engine reads its records through that group.
+  if ! id ti-operator >/dev/null 2>&1; then
+    useradd --system --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator
+  fi
 
   log "automatic security updates"
   install -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'CONF'
@@ -287,9 +295,10 @@ CONF
   # The reporter, the dashboard and the owner's two tools, built for the
   # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
   # and copied to dist/ beside deploy/. A missing one is named here, and its
-  # unit fails when it runs, so the gap is seen. The owner runs the tools as
-  # `sudo -u ti-trader operator ...` and `sudo -u ti-trader journal-query ...`:
-  # sudo's PATH includes /usr/local/bin, where each is linked.
+  # unit fails when it runs, so the gap is seen. The owner records instructions
+  # as `sudo -u ti-operator operator ...` and runs `sudo -u ti-trader
+  # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
+  # PATH includes /usr/local/bin, where each is linked.
   local dist=${TI_DIST:-$here/../dist} b
   for b in ti-reporter ti-dashboard operator journal-query; do
     if test -f "$dist/$b"; then
@@ -316,9 +325,10 @@ CONF
   for a in boost trad-ira roth-ira; do
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a"
     # The operator inbox (ti-engine@.service passes it as -operator). The owner
-    # records into it as ti-trader, the engine's user, so one owner serves both;
-    # 0750 lets no other user write an instruction.
-    install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
+    # records into it as ti-operator (sudo -u ti-operator operator ...); the
+    # engine reads it through its group and cannot write it, and no other user
+    # can (ADR 0026, kill-switch amendment; docs/manual/operator.md).
+    install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
   done
   # The adapter's configuration carries no secret (the account number comes

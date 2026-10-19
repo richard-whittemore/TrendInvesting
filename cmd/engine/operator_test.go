@@ -68,15 +68,49 @@ func refusalReasons(t *testing.T, entries []journal.Entry) []string {
 }
 
 // inboxOptions is a dry-run Boost invocation in dir reading the operator
-// inbox dir/operator.
+// inbox dir/operator, made as the provisioner makes it (operatorInbox).
 func inboxOptions(t *testing.T, dir string) options {
 	t.Helper()
 	opts := boostOptions(t, dir)
 	opts.operatorDir = filepath.Join(dir, "operator")
-	if err := os.Mkdir(opts.operatorDir, 0o700); err != nil {
+	makeOperatorInbox(t, opts.operatorDir)
+	return opts
+}
+
+// operatorUID stands for ti-operator, the user that writes the owner's
+// instructions, which the engine does not run as.
+const operatorUID = 4242
+
+// makeOperatorInbox creates the folder path, mode 0750, as the operator's:
+// the test runs as the one user that creates it, so the file system's word
+// on its owner is replaced (fileOwner) by operatorUID and the engine's own
+// group, as provision.sh creates it (ti-operator:ti-trader).
+func makeOperatorInbox(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Mkdir(path, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	return opts
+	ownAs(t, path, operatorUID, os.Getegid())
+}
+
+// ownAs makes fileOwner report uid and gid for the folder path, and every
+// other path's owner as before.
+func ownAs(t *testing.T, path string, uid, gid int) {
+	t.Helper()
+	before := fileOwner
+	t.Cleanup(func() { fileOwner = before })
+	fileOwner = func(p string, info os.FileInfo) (int, int, bool) {
+		if filepath.Clean(p) == filepath.Clean(path) {
+			return uid, gid, true
+		}
+		return before(p, info)
+	}
+}
+
+// noteFor is where the engine notes, for the inbox record named name, that
+// it was delivered or refused: its own folder beside the inbox.
+func noteFor(inbox, name, suffix string) string {
+	return filepath.Join(operatorNotesDir(inbox), name+suffix)
 }
 
 // TestTheOperatorsKillSwitchStopsAndReleasesOrders: the operator's kill
@@ -182,10 +216,10 @@ func TestAnAlertAcknowledgementIsDeliveredAndJournalled(t *testing.T) {
 	if len(inputs) != 1 || inputs[0].ID != r.ID || inputs[0].Type != event.AlertAcknowledgedEventType {
 		t.Errorf("the log holds operator inputs %+v, want the acknowledgement", inputs)
 	}
-	if note, err := os.ReadFile(filepath.Join(opts.operatorDir, r.FileName()+refusedSuffix)); err == nil {
+	if note, err := os.ReadFile(noteFor(opts.operatorDir, r.FileName(), refusedSuffix)); err == nil {
 		t.Errorf("the acknowledgement was refused: %q", note)
 	}
-	if _, err := os.Stat(filepath.Join(opts.operatorDir, r.FileName()+deliveredSuffix)); err != nil {
+	if _, err := os.Stat(noteFor(opts.operatorDir, r.FileName(), deliveredSuffix)); err != nil {
 		t.Errorf("no delivered marker: %v", err)
 	}
 }
@@ -249,7 +283,7 @@ func TestAnOperatorRecordTheEngineRefusesIsNoted(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, want := range map[string]string{damaged: "decode the operator record", filepath.Join(opts.operatorDir, other.FileName()): "kill switch for account"} {
-		note, err := os.ReadFile(path + refusedSuffix)
+		note, err := os.ReadFile(noteFor(opts.operatorDir, filepath.Base(path), refusedSuffix))
 		if err != nil || !strings.Contains(string(note), want) {
 			t.Errorf("%s: note %q (%v), want it to say %q", path, note, err, want)
 		}
@@ -282,24 +316,22 @@ func TestTheOperatorInboxIsForARunThatCanReachABroker(t *testing.T) {
 }
 
 // TestTheOperatorInboxMustNotBeWritableByOthers: an instruction is the
-// owner's, so an inbox another user can write to is refused at start, as is
-// one the engine's own user cannot read, write and list. The modes the
-// provisioner creates (0750) and 0700 start.
+// owner's, so an inbox its group or others can write to is refused at start,
+// as is one the engine's user cannot list and read through its group. The
+// mode the provisioner creates (0750) starts.
 func TestTheOperatorInboxMustNotBeWritableByOthers(t *testing.T) {
 	for _, tc := range []struct {
 		mode os.FileMode
 		want string // "" starts
 	}{
-		{0o750, ""}, {0o700, ""},
-		{0o770, "writable by others"}, {0o702, "writable by others"}, {0o777, "writable by others"},
-		{0o500, "owner"}, {0o600, "owner"},
+		{0o750, ""}, {0o755, ""},
+		{0o770, "writable by its group or by others"}, {0o752, "writable by its group or by others"}, {0o777, "writable by its group or by others"},
+		{0o700, "cannot list and read"}, {0o740, "cannot list and read"},
 	} {
 		dir := t.TempDir()
 		opts := boostOptions(t, dir)
 		opts.operatorDir = filepath.Join(dir, "operator")
-		if err := os.Mkdir(opts.operatorDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+		makeOperatorInbox(t, opts.operatorDir)
 		if err := os.Chmod(opts.operatorDir, tc.mode); err != nil {
 			t.Fatal(err)
 		}
@@ -310,6 +342,135 @@ func TestTheOperatorInboxMustNotBeWritableByOthers(t *testing.T) {
 		if _, err := openOperatorInbox(opts, composition{}, io.Discard); err != nil {
 			t.Errorf("mode %o refused: %v", tc.mode, err)
 		}
+	}
+}
+
+// TestTheOperatorInboxBelongsToAUserTheEngineDoesNotRunAs: the instruction's
+// writer is an identity of its own (ADR 0026, kill-switch amendment;
+// docs/manual/operator.md, "Who can write an instruction"), so the engine
+// refuses an inbox it could write to itself: one owned by its own user or by
+// root, or any inbox when it runs as root. It refuses one it cannot read,
+// whatever its mode says: owned by a group it is not in, or whose listing
+// fails, so a kill switch is never left unread while it decides.
+func TestTheOperatorInboxBelongsToAUserTheEngineDoesNotRunAs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, inbox string)
+		want  string
+	}{
+		{"owned by the engine's own user", func(t *testing.T, inbox string) { ownAs(t, inbox, os.Geteuid(), os.Getegid()) }, "the engine's own user"},
+		{"owned by root", func(t *testing.T, inbox string) { ownAs(t, inbox, 0, os.Getegid()) }, "owned by root"},
+		{"in a group the engine is not in", func(t *testing.T, inbox string) { ownAs(t, inbox, operatorUID, notOneOfMyGroups(t)) }, "cannot list and read"},
+		{"an owner the file system does not say", func(t *testing.T, inbox string) {
+			before := fileOwner
+			t.Cleanup(func() { fileOwner = before })
+			fileOwner = func(string, os.FileInfo) (int, int, bool) { return 0, 0, false }
+		}, "cannot tell who owns"},
+		{"the engine runs as root", func(t *testing.T, inbox string) {
+			before := engineUser
+			t.Cleanup(func() { engineUser = before })
+			engineUser = func() int { return 0 }
+		}, "runs as root"},
+		{"a listing the engine is denied", func(t *testing.T, inbox string) {
+			// The test's own user owns the folder, so mode 0050 denies it
+			// the listing while the reported owner's group may list it.
+			if err := os.Chmod(inbox, 0o050); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(inbox, 0o750) })
+		}, "cannot list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := boostOptions(t, dir)
+			opts.operatorDir = filepath.Join(dir, "operator")
+			makeOperatorInbox(t, opts.operatorDir)
+			tc.setup(t, opts.operatorDir)
+			refuse(t, tc.name, opts, tc.want)
+		})
+	}
+}
+
+// notOneOfMyGroups returns a group ID the test's user is not in.
+func notOneOfMyGroups(t *testing.T) int {
+	t.Helper()
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for gid := 4343; ; gid++ {
+		if gid != os.Getegid() && !slices.Contains(groups, gid) {
+			return gid
+		}
+	}
+}
+
+// TestTheEngineWritesNothingIntoTheOperatorInbox: the engine reads the inbox
+// through its group and cannot write it, so what it notes about a record
+// (delivered, or refused and why) is written in its own folder beside the
+// inbox, which it creates, and the inbox holds only what the owner wrote.
+func TestTheEngineWritesNothingIntoTheOperatorInbox(t *testing.T) {
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	engaged := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
+	other := writeKillSwitch(t, opts.operatorDir, "ira", boostSession(0).Add(-90*time.Minute), true)
+	// Read and list only, as the engine's group may.
+	if err := os.Chmod(opts.operatorDir, 0o550); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(opts.operatorDir, 0o750) })
+	out := &strings.Builder{}
+	stop := startEngineInvocation(t, func(ctx context.Context, w io.Writer) error { return run(ctx, opts, io.MultiWriter(w, out)) })
+	feed := newBoostFeed(t, opts.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 1)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{noteFor(opts.operatorDir, engaged.FileName(), deliveredSuffix), noteFor(opts.operatorDir, other.FileName(), refusedSuffix)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("no note %s: %v\n%s", path, err, out.String())
+		}
+	}
+	entries, err := os.ReadDir(opts.operatorDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("the inbox holds %d files, want only the owner's 2 records", len(entries))
+	}
+	info, err := os.Stat(operatorNotesDir(opts.operatorDir))
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("the engine's notes folder: %v (%v), want mode 0700", info, err)
+	}
+}
+
+// TestTheEnginesNotesFolderIsItsOwn: a note settles a record for good, so a
+// notes folder others can write to, or another user's, could silence the
+// owner's kill switch; the engine refuses to start with one.
+func TestTheEnginesNotesFolderIsItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, notes string)
+		want  string
+	}{
+		{"writable by others", func(t *testing.T, notes string) {
+			if err := os.Chmod(notes, 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}, "writable by its group or by others"},
+		{"another user's", func(t *testing.T, notes string) { ownAs(t, notes, operatorUID, os.Getegid()) }, "not the engine's own"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := inboxOptions(t, dir)
+			notes := operatorNotesDir(opts.operatorDir)
+			if err := os.Mkdir(notes, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, notes)
+			refuse(t, tc.name, opts, tc.want)
+		})
 	}
 }
 
@@ -355,7 +516,7 @@ func TestALogFailureWhileDeliveringAnOperatorRecordLeavesItForTheNextStart(t *te
 	if err == nil || !strings.Contains(err.Error(), engaged.ID) || !strings.Contains(err.Error(), "not durable") {
 		t.Fatalf("the run ended with %v, want it stopped by the operator record %s that is not durable", err, engaged.ID)
 	}
-	if _, err := os.Stat(filepath.Join(first.operatorDir, engaged.FileName()+refusedSuffix)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(noteFor(first.operatorDir, engaged.FileName(), refusedSuffix)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a refusal note was written beside a record the log failed under: %v", err)
 	}
 
@@ -390,7 +551,7 @@ func TestADeliveredRecordIsMarkedSoAMovedLogCannotRedeliverIt(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(first.operatorDir, engaged.FileName()+deliveredSuffix)); err != nil {
+	if _, err := os.Stat(noteFor(first.operatorDir, engaged.FileName(), deliveredSuffix)); err != nil {
 		t.Errorf("the delivered record is not marked: %v", err)
 	}
 
@@ -431,7 +592,7 @@ func TestAKillSwitchOlderThanTheOneInForceIsRefused(t *testing.T) {
 	if inputs := operatorInputs(entries); len(inputs) != 2 || inputs[0].ID != engaged.ID || inputs[1].ID != stale.ID {
 		t.Errorf("the log holds operator inputs %+v, want the engagement and the refused release", inputs)
 	}
-	note, err := os.ReadFile(filepath.Join(opts.operatorDir, stale.FileName()+refusedSuffix))
+	note, err := os.ReadFile(noteFor(opts.operatorDir, stale.FileName(), refusedSuffix))
 	if err != nil || !strings.Contains(string(note), engaged.ID) {
 		t.Errorf("note %q (%v), want it to name the later instruction %s", note, err, engaged.ID)
 	}
@@ -458,7 +619,7 @@ func TestAKillSwitchStatingAFutureTimeIsRefused(t *testing.T) {
 	if inputs := operatorInputs(recoverFile(t, opts.logPath).Entries); len(inputs) != 0 {
 		t.Errorf("the log holds operator inputs %+v, want none", inputs)
 	}
-	note, err := os.ReadFile(filepath.Join(opts.operatorDir, future.FileName()+refusedSuffix))
+	note, err := os.ReadFile(noteFor(opts.operatorDir, future.FileName(), refusedSuffix))
 	if err != nil || !strings.Contains(string(note), "later than now") {
 		t.Errorf("note %q (%v), want it to say the time is later than now", note, err)
 	}
@@ -483,10 +644,10 @@ func TestAKillSwitchWithinTheClockSkewIsDelivered(t *testing.T) {
 	if inputs := operatorInputs(recoverFile(t, opts.logPath).Entries); len(inputs) != 1 || inputs[0].ID != ahead.ID {
 		t.Errorf("the log holds operator inputs %+v, want %s", inputs, ahead.ID)
 	}
-	if _, err := os.Stat(filepath.Join(opts.operatorDir, ahead.FileName()+deliveredSuffix)); err != nil {
+	if _, err := os.Stat(noteFor(opts.operatorDir, ahead.FileName(), deliveredSuffix)); err != nil {
 		t.Errorf("no delivered marker: %v", err)
 	}
-	if note, err := os.ReadFile(filepath.Join(opts.operatorDir, ahead.FileName()+refusedSuffix)); err == nil {
+	if note, err := os.ReadFile(noteFor(opts.operatorDir, ahead.FileName(), refusedSuffix)); err == nil {
 		t.Errorf("refused within the clock skew: %q", note)
 	}
 }
@@ -519,7 +680,7 @@ func TestAClearanceStatingAFutureTimeIsRefused(t *testing.T) {
 	if inputs := operatorInputs(recoverFile(t, opts.logPath).Entries); len(inputs) != 0 {
 		t.Errorf("the log holds operator inputs %+v, want none", inputs)
 	}
-	note, err := os.ReadFile(filepath.Join(opts.operatorDir, future.FileName()+refusedSuffix))
+	note, err := os.ReadFile(noteFor(opts.operatorDir, future.FileName(), refusedSuffix))
 	if err != nil || !strings.Contains(string(note), "later than now") {
 		t.Errorf("note %q (%v), want it to say the time is later than now", note, err)
 	}
@@ -561,11 +722,11 @@ func TestARefusedRecordIsSettledUnderItsFileName(t *testing.T) {
 			if got := strings.Count(out.String(), "refused operator record"); got != 1 {
 				t.Errorf("the record was refused %d times, want once:\n%s", got, out.String())
 			}
-			if _, err := os.Stat(copied + refusedSuffix); err != nil {
+			if _, err := os.Stat(noteFor(opts.operatorDir, filepath.Base(copied), refusedSuffix)); err != nil {
 				t.Errorf("no note beside the record itself: %v", err)
 			}
 			for _, suffix := range []string{refusedSuffix, deliveredSuffix} {
-				if _, err := os.Stat(filepath.Join(opts.operatorDir, r.FileName()+suffix)); !errors.Is(err, os.ErrNotExist) {
+				if _, err := os.Stat(noteFor(opts.operatorDir, r.FileName(), suffix)); !errors.Is(err, os.ErrNotExist) {
 					t.Errorf("a %s file beside a name that is no file: %v", suffix, err)
 				}
 			}
@@ -590,7 +751,7 @@ func TestADeliveredRecordIsNotReadAgain(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(opts.operatorDir, engaged.FileName()+refusedSuffix)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(noteFor(opts.operatorDir, engaged.FileName(), refusedSuffix)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a delivered record was read again: %v", err)
 	}
 }
@@ -704,7 +865,7 @@ func TestARecordTheLogRefusesIsLeftForTheNextStart(t *testing.T) {
 		t.Fatalf("the run ended with %v, want it stopped by the operator record %s", err, engaged.ID)
 	}
 	for _, suffix := range []string{deliveredSuffix, refusedSuffix} {
-		if _, err := os.Stat(filepath.Join(first.operatorDir, engaged.FileName()+suffix)); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(noteFor(first.operatorDir, engaged.FileName(), suffix)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("a %s file was written beside a record the log never took: %v", suffix, err)
 		}
 	}
@@ -756,7 +917,7 @@ func TestAFailedDeliveryStatesTheLastSequenceRecorded(t *testing.T) {
 		}
 	}
 	inbox := &operatorInbox{
-		dir: dir, delivered: map[string]bool{}, settled: map[string]bool{}, decoded: map[string]operator.Record{},
+		dir: dir, notes: t.TempDir(), delivered: map[string]bool{}, settled: map[string]bool{}, decoded: map[string]operator.Record{},
 		recorder: recorder, out: io.Discard, strategyVersion: "test", configurationHash: hash,
 	}
 	adapter := record(at.Add(3*time.Hour)).Envelope(2, "test", hash)
@@ -812,7 +973,7 @@ func TestAnInputMovedByAnOperatorInputIsAnsweredAgain(t *testing.T) {
 func directInbox(t *testing.T, recorder *journal.Recorder, hash string) *operatorInbox {
 	t.Helper()
 	return &operatorInbox{
-		dir: t.TempDir(), delivered: map[string]bool{}, settled: map[string]bool{}, decoded: map[string]operator.Record{},
+		dir: t.TempDir(), notes: t.TempDir(), delivered: map[string]bool{}, settled: map[string]bool{}, decoded: map[string]operator.Record{},
 		recorder: recorder, out: io.Discard, strategyVersion: "test", configurationHash: hash,
 	}
 }

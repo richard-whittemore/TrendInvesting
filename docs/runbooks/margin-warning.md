@@ -33,7 +33,7 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    higher house requirement. If the requirement rose, the boost is riskier
    than the backtest assumed: where the operator inbox exists and the engine
    was started with `-operator`, you may engage the kill switch to stop the
-   next boost buy (`sudo -u ti-trader operator kill-switch ... -state engaged`),
+   next boost buy (`sudo -u ti-operator operator kill-switch ... -state engaged`),
    which still lets the sale back to 98% go. Until the inbox exists, stop the
    engine instead (`sudo systemctl stop ti-engine@<account>`). Selling by hand
    is your call; if you do, stop new orders first in the same way, so the

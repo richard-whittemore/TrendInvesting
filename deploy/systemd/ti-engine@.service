@@ -28,10 +28,14 @@ LoadCredential=secrets:/etc/trend-investing/secrets.env
 # which transport.Listen requires of a socket's parent (ADR 0014).
 RuntimeDirectory=ti-engine-%i
 RuntimeDirectoryMode=0700
-# The account's operator inbox, created by the provisioner (ti-trader, 0750)
-# inside the state directory this unit may write: the owner's kill switch and
+# The account's operator inbox, created by the provisioner inside the state
+# directory, owned by ti-operator, the user that writes the owner's
+# instructions, in the engine's group, mode 0750: the owner's kill switch and
 # alert acknowledgements are read from it (ADR 0026, kill-switch amendment).
-# The engine refuses to start if it is missing or writable by others.
+# The engine refuses to start if it is missing, if it could write it itself,
+# or if it cannot read it (docs/manual/operator.md, "Who can write an
+# instruction"); what it notes about each record goes in operator-notes/
+# beside it, its own.
 # Every setting is explicit. $TI_RESTART_ARGS is empty for a first run,
 # "-approval <file>" for a fresh run after an earlier one, or
 # "-resume <log>" after a crash; it expands to zero or more arguments.
@@ -46,6 +50,8 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/trend-investing/engines/%i
 ReadOnlyPaths=/var/lib/trend-investing/data
+# The engine only reads its inbox, whatever its mode says.
+ReadOnlyPaths=-/var/lib/trend-investing/engines/%i/operator
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

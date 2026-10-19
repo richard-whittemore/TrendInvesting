@@ -42,7 +42,7 @@ stops ordering, not an order resting at the broker.
    bring the account back to Normal. Only a fresh run you approve does
    ([Recover](#recover)).
 3. **Acknowledge the alert** so it stops repeating:
-   `sudo -u ti-trader operator acknowledge -inbox <inbox> -account <account> -alert '<alert key>' -by owner`
+   `sudo -u ti-operator operator acknowledge -inbox <inbox> -account <account> -alert '<alert key>' -by owner`
    ([operator](../manual/operator.md), "Acknowledging an alert").
    Acknowledging changes nothing else. *Today the `operator` tool is not
    installed on the server ([server](../manual/server.md)), so this step
