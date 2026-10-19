@@ -110,9 +110,11 @@ Is a sell of the program's still working?
 `orders` cannot say on its own. It lists what the program planned
 (`planned`), released (`released`, with `send=true` when it was to be
 sent) and refused (`refused`), and each report IBKR sent back on an order
-(`lifecycle-` and IBKR's status: `lifecycle-submitted`, `lifecycle-updated`,
-`lifecycle-cancel-pending`, `lifecycle-canceled`, `lifecycle-invalid`). It
-prints no `working` or `pending` value, and it never shows an order you
+(`lifecycle-` and one of the four statuses of
+[order lifecycle](order-lifecycle.md): `lifecycle-submitted`,
+`lifecycle-cancel-pending`, `lifecycle-canceled` or `lifecycle-invalid`), and
+a dry-run engine's own report on an order it never sent
+(`synthetic-lifecycle-canceled`, below). It prints no `working` or `pending` value, and it never shows an order you
 placed by hand. A released sell has ended only once it has a
 `lifecycle-canceled` or `lifecycle-invalid` row, or `fills` shows it filled
 in full; `lifecycle-cancel-pending` may still fill. And with the adapter

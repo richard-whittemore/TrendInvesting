@@ -420,14 +420,23 @@ refuses fires that sale. So before any sale by hand in the margin account:
    of the program's still working?").
 5. **Sell by hand**, the number the alert gives or back to 98% of net
    liquidation (`docs/runbooks/margin-warning.md`).
-6. **Start again only once your sale has filled or been cancelled.** You
-   stopped the engine, so it starts as a fresh run you approve
-   ([restart](restart.md)); the approval carries the incident and whether its
-   sale was attempted. If the program can still sell (each row of "The sale
-   back to 98%" below says), the new run sizes that sale from its first
-   readable, fresh IBKR snapshot, which shows your sale in the holding, so
-   it sells at most what is still above 98%. A hand sale still open then
-   is an unknown working sell, and an incident's sale is withheld for it
+6. **Start again only once your sale has filled or been cancelled, as a
+   fresh run you approve** ([restart](restart.md)). **Never resume the
+   stopped run** (`-resume`): a resumed engine hands the adapter the reply it
+   had committed, so an order it released that was never sent goes to the
+   adapter again, and the adapter sends it beside your sale
+   ([redelivery](redelivery.md)). A fresh run's adapter never sends an
+   earlier run's order (step 2). The approval carries the incident and
+   whether its sale was attempted. If it carries the incident in force,
+   state its sale attempted (`"sale_attempted": true` in the approval file):
+   an approval saying attempted is always accepted, since you sold by hand
+   ([operator](operator.md), "An approval"), and it is the one recorded
+   safeguard that stops the new run making that sale at all. Otherwise, if
+   the program can still sell (each row of "The sale back to 98%" below
+   says), the new run sizes that sale from its first readable, fresh IBKR
+   snapshot, which shows your sale in the holding once it has filled, so it
+   sells at most what is still above 98%. A hand sale still open then is an
+   unknown working sell, and an incident's sale is withheld for it
    (CONTAINMENT REQUIRED).
 
 Whether the program can still sell after a withheld or failed sale depends
@@ -440,9 +449,21 @@ and `nothing-to-sell` do not: the sale is decided again at the next
 readable, positive snapshot while what fired it is in force, and `lapsed`
 leaves the attempt unspent too (ADR 0019, amendment of 2026-10-17, reading
 1; `event.SaleWithheldPayload.Attempted`). Even a spent attempt holds only
-for its own incident, engagement or alarm: while the account is Normal, a
-new urgent margin alarm, or a new engagement of the kill switch, is a new
-sale. Stopping the engine and the adapter stops those too.
+for the incident, engagement or alarm the sale belongs to, which the
+program picks afresh each time the sale fires, in this order:
+
+- while the account is Halted, or Degraded with the instrument in its
+  scope, the sale is the incident's: once per incident;
+- otherwise, while the kill switch is engaged, it is the engagement's: once
+  per engagement, whether Boost's refused exit or an urgent margin alarm
+  fired it (an alarm turning urgent again under the same engagement is not
+  a new sale);
+- otherwise, with the switch off, a margin alarm turning urgent fires that
+  alarm's sale: once per alarm.
+
+So a new incident, a new engagement of the kill switch, or, with neither in
+force, a new urgent alarm is a new sale. Stopping the engine and the adapter
+stops those too.
 
 An IRA makes no sale back to 98%, so there the kill switch, once its inbox
 is set up ([operator](operator.md)), stops the program's new orders; without
@@ -488,8 +509,8 @@ account's name; an IRA's alerts carry its own.
 | `missing-mark`. Alerts: `joint: order refused (missing-mark)`, `<account>: no recorded mark for <instrument>` and the Degraded alert | No mark was recorded for the instrument at or after the session's close, so the price band could not be checked. Refused; the instrument is frozen. A risk-reducing sell needs no mark and is never refused for this | Check the adapter is receiving prices (`journalctl -u ti-adapter-boost`); then the runbook |
 | `unvalued-holding`. Alerts: `joint: order refused (unvalued-holding)` and the Degraded alert | An order that adds exposure, while a holding has no price, so the account's exposure cannot be worked out. Refused; the instrument is frozen | Check the holding named in the detail has prices; then the runbook |
 | `sell-exceeds-holding`. Alerts: `joint: order refused (sell-exceeds-holding)` and the Degraded alert | A sell larger than the account's recorded holding, net of the sells already working. Refused, never cut down; the instrument is frozen | Compare the holding at IBKR with `journal-query positions`; then the runbook |
-| `broker-holding`. Alert: `joint: order refused (broker-holding)` | Three cases. (1) A sell larger than IBKR's latest holding net of working sells: refused, and the instrument is frozen (Degraded alert too). (2) While Degraded, a sell with no readable IBKR snapshot to size it from: refused, no state change. (3) The sale back to 98% itself, larger than IBKR's holding when checked: refused, no state change, and its one attempt is spent, so the program cannot make that sale again in this incident | (1) and (2): check IBKR is connected and its positions match; then the runbook. (3): check the account at IBKR and, if it is still above 98%, sell back to 98% by hand, following "Selling by hand safely" (stop the engine and the adapter first) |
-| `sale-attempted`. Alert: `joint: order refused (sale-attempted)` | The incident's one sale back to 98% came to the gate a second time. Refused: the attempt is spent, so the program cannot make that sale again in this incident. No state change | Check `journal-query orders` for the first attempt and what IBKR did with it; if the account is still above 98%, sell the rest by hand, following "Selling by hand safely" |
+| `broker-holding`. Alert: `joint: order refused (broker-holding)` | Three cases. (1) A sell larger than IBKR's latest holding net of working sells: refused, and the instrument is frozen (Degraded alert too). (2) While Degraded, a sell with no readable IBKR snapshot to size it from: refused, no state change. (3) The sale back to 98% itself, larger than IBKR's holding when checked: refused, no state change, and its one attempt is spent, so the program cannot make that sale again in this incident, engagement or alarm | (1) and (2): check IBKR is connected and its positions match; then the runbook. (3): check the account at IBKR and, if it is still above 98%, sell back to 98% by hand, following "Selling by hand safely" (stop the engine and the adapter first) |
+| `sale-attempted`. Alert: `joint: order refused (sale-attempted)` | The one sale back to 98% of this incident, engagement or alarm came to the gate a second time. Refused: the attempt is spent, so the program cannot make that sale again in this incident, engagement or alarm. No state change | Check `journal-query orders` for the first attempt and what IBKR did with it; if the account is still above 98%, sell the rest by hand, following "Selling by hand safely" |
 | `stale-broker-snapshot` (a refused sell). Alert: `joint: order refused (stale-broker-snapshot)`, once per outage | A sell checked against an IBKR snapshot older than `MaxSnapshotAge` (30 minutes for Boost), or taken after the sell was planned. Refused, no state change; planned again at the next decision. A fresh snapshot ends the outage | Check the Gateway and the adapter ([gateway-login runbook](../runbooks/gateway-login.md)). If snapshots come back, nothing more |
 | A refusal for exposure above the margin account's limit, or for an IRA's exposure or cash | Refused, and the instrument frozen, as above | See [boost](boost.md) and [momentum](momentum.md), "What can go wrong", which own these reasons |
 
@@ -509,18 +530,18 @@ account's name; an IRA's alerts carry its own.
 | What you see | What the program does | What you do |
 | --- | --- | --- |
 | `<account>: sale back to 98% sent (<instrument>)`, routine | The sale was released to be sent in paper or live. The log is written before the send, so this means "send requested" | Check IBKR for the order whose order reference is the client order ID in the alert. Do not trade that instrument by hand while it works |
-| `<account>: sale back to 98% released, not sent (<mode>)`, routine | In dry-run (the server's mode today) the sale is recorded, never sent. Nothing reaches IBKR. The release spent the attempt, so the program cannot make that sale again in this incident | If the account really is borrowed and needs it, sell back to 98% by hand at IBKR, following "Selling by hand safely" |
+| `<account>: sale back to 98% released, not sent (<mode>)`, routine | In dry-run (the server's mode today) the sale is recorded, never sent. Nothing reaches IBKR. The release spent the attempt, so the program cannot make that sale again in this incident, engagement or alarm | If the account really is borrowed and needs it, sell back to 98% by hand at IBKR, following "Selling by hand safely" |
 | `<account>: sale back to 98% filled <filled> of <wanted> (<instrument>)`, routine, one per fill | Records each fill; the body says how many are still to fill | Nothing, unless it stops partway (next row) |
-| `<account>: sale back to 98% failed (<status>, <instrument>)`, urgent | IBKR ended the sale (`canceled` or `invalid`, a rejection) before it filled in full. The body says how many filled of how many, and the number left to sell. The attempt is spent, so the program cannot make that sale again in this incident; the account stays in its state | Check the account at IBKR. If it is still above 98%, sell by hand the number the body gives, following "Selling by hand safely": stop the engine and the adapter (the kill switch does not stop the sale back to 98%), cancel anything working in IBKR's app, confirm in IBKR's app that nothing is working, then sell (`docs/runbooks/margin-warning.md`) |
+| `<account>: sale back to 98% failed (<status>, <instrument>)`, urgent | IBKR ended the sale (`canceled` or `invalid`, a rejection) before it filled in full. The body says how many filled of how many, and the number left to sell. The attempt is spent, so the program cannot make that sale again in this incident, engagement or alarm; the account stays in its state | Check the account at IBKR. If it is still above 98%, sell by hand the number the body gives, following "Selling by hand safely": stop the engine and the adapter (the kill switch does not stop the sale back to 98%), cancel anything working in IBKR's app, confirm in IBKR's app that nothing is working, then sell (`docs/runbooks/margin-warning.md`) |
 | `<account>: sale of <instrument> withheld, sell by hand (<reason>)`, urgent | The sale was withheld for a reason that counts as its one attempt (the two rows below). The attempt is spent, so the program cannot make that sale again in this incident, engagement or alarm | Act by hand at IBKR now: sell back to 98% of net liquidation, following "Selling by hand safely" (`docs/runbooks/margin-warning.md`) |
-| `broker-values-unreadable`. Alert: `joint: sale of SPY withheld, sell by hand (broker-values-unreadable)` | IBKR's holding, net liquidation, open orders or mark could not be read, or no IBKR snapshot is recorded yet. Nothing is guessed; the attempt is spent, so the program cannot make that sale again in this incident. Degraded sells are refused too | Check the Gateway ([gateway-login runbook](../runbooks/gateway-login.md)). Sell back to 98% by hand if still needed, following "Selling by hand safely" |
-| `unknown-working-sell`. Alert: `joint: sale of SPY withheld, sell by hand (unknown-working-sell)`; the body says CONTAINMENT REQUIRED | A sell is working at IBKR that this program did not release (one you placed by hand, say). The attempt is spent, so the program cannot make that sale again in this incident | Follow "Selling by hand safely": stop the engine and the adapter, cancel or settle that order and anything else working at IBKR, confirm nothing is working, then sell back to 98% by hand if still needed; then recover |
+| `broker-values-unreadable`. Alert: `joint: sale of SPY withheld, sell by hand (broker-values-unreadable)` | IBKR's holding, net liquidation, open orders or mark could not be read, or no IBKR snapshot is recorded yet. Nothing is guessed; the attempt is spent, so the program cannot make that sale again in this incident, engagement or alarm. Degraded sells are refused too | Check the Gateway ([gateway-login runbook](../runbooks/gateway-login.md)). Sell back to 98% by hand if still needed, following "Selling by hand safely" |
+| `unknown-working-sell`. Alert: `joint: sale of SPY withheld, sell by hand (unknown-working-sell)`; the body says CONTAINMENT REQUIRED | A sell is working at IBKR that this program did not release (one you placed by hand, say). The attempt is spent, so the program cannot make that sale again in this incident, engagement or alarm | Follow "Selling by hand safely": stop the engine and the adapter, cancel or settle that order and anything else working at IBKR, confirm nothing is working, then sell back to 98% by hand if still needed; then recover |
 | `stale-broker-snapshot` (a withheld sale). Alert: `<account>: sale of <instrument> withheld (<reason>)`, urgent, for the first withheld sale of an outage only, its reason always `stale-broker-snapshot` (for example `joint: sale of SPY withheld (stale-broker-snapshot)`) | The latest IBKR snapshot was too old to size the sale. Not an attempt: no state change, and **the program can still sell**: the sale is decided again from the next readable, positive snapshot while what fired it is still in force; otherwise it lapses | Check the Gateway and the adapter. If snapshots stay old and you must sell by hand, follow "Selling by hand safely" first: stop the engine and the adapter, or the sale decided from the next good snapshot can go out beside yours |
 | `non-positive-broker-values`. No alert of its own (the state or margin alert that fired the sale has already come); listed in `journal-query refusals` and the daily summary | IBKR reported a net liquidation or mark of zero or less, so the shares to keep cannot be worked out. Not an attempt, so **the program can still sell**: the sale is decided again from the next positive snapshot. Other sells are not affected | Check the account at IBKR. If the next snapshots stay wrong and you must sell by hand, follow "Selling by hand safely" first: stop the engine and the adapter |
 | `nothing-to-sell`. No alert; listed in `journal-query refusals` and the daily summary | The account is already at or below 98%, net of working sells. Nothing is sent | Nothing |
 | `lapsed`. No urgent alert; listed in the daily summary and `journal-query refusals` | What needed a withheld sale has ended (the exit no longer refused or planned, or the alarm no longer urgent), so it will not be decided again. The attempt stays unspent | Nothing, unless the account is still borrowed above Boost's target: then check why with `journal-query` |
-| You sold by hand after the "sell by hand" alert (IBKR's values unreadable, or an unknown working sell), or after the sale failed, was refused at the gate or was released in dry-run | The attempt is spent: the program never makes that sale again in that incident, engagement or alarm. A new one (while Normal, a new urgent alarm or a new engagement of the kill switch) is a new sale | Start the engine again only once your sale has filled or been cancelled ("Selling by hand safely", step 6) |
-| You sold by hand after a sale withheld for a stale IBKR snapshot, for values that are not positive or with nothing to sell, or one that lapsed | The attempt is unspent: the sale is decided again from the next readable, fresh, positive IBKR snapshot while what fired it is in force. If your sale is not yet in that snapshot, the program can sell the same shares again | If you stopped the engine and the adapter first, as "Selling by hand safely" says, start them again only once your sale has filled or been cancelled: the new run sizes the sale from a snapshot that shows it. If the engine is still running, stop the engine and the adapter now, and check IBKR for a sale of the program's |
+| You sold by hand after the "sell by hand" alert (IBKR's values unreadable, or an unknown working sell), or after the sale failed, was refused at the gate or was released in dry-run | The attempt is spent: the program never makes that sale again in that incident, engagement or alarm. A new incident, a new engagement of the kill switch, or, with neither in force, a new urgent alarm is a new sale ("Selling by hand safely" has the rule) | Start the engine again only once your sale has filled or been cancelled ("Selling by hand safely", step 6) |
+| You sold by hand after a sale withheld for a stale IBKR snapshot, for values that are not positive or with nothing to sell, or one that lapsed | The attempt is unspent: the sale is decided again from the next readable, fresh, positive IBKR snapshot while what fired it is in force. If your sale is not yet in that snapshot, the program can sell the same shares again | If you stopped the engine and the adapter first, as "Selling by hand safely" says, start them again only once your sale has filled or been cancelled, as a fresh run, never a resume. If the approval carries the incident in force, state its sale attempted (always accepted, since you sold by hand), so the new run never makes that sale; otherwise the new run sizes the sale from a snapshot that shows yours. If the engine is still running, stop the engine and the adapter now, and check IBKR for a sale of the program's |
 | The kill switch is on and the margin alarm turns urgent | The sale still goes. That is intended: the switch never keeps you borrowed | Watch for the sale's alerts |
 
 ### The margin-cushion alarm

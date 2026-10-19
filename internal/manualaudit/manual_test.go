@@ -8,7 +8,9 @@
 // what the owner does. A reason or alert the manual does not explain is one
 // the owner meets for the first time when it matters; one explained in two
 // places is one whose two explanations can drift apart. A mention in another
-// cell, such as a cross-reference, explains nothing.
+// cell, such as a cross-reference, explains nothing. A value two sets share
+// means a different thing in each, so it has one row per set, each saying
+// which set it explains (reasonRowProblems has the rule).
 //
 // The reasons are read from internal/event's closed sets and the titles from
 // every way internal/report sets an alert's Title, so a new reason or alert
@@ -257,8 +259,11 @@ func hasNotAReasonSuffix(name string) bool {
 // package, from each Title field or assignment, whether it is set from a
 // string literal, a constant, fmt.Sprintf with a literal or constant format,
 // or a call to one of the package's own functions whose every return is one
-// of these; and a problem, naming its position, for every Title set any
-// other way, so a title the reader cannot see fails the audit.
+// of these, and whether it is a keyed field, an assignment or the Title's
+// place in an Alert literal that lists its fields by position; and a
+// problem, naming its position, for every Title set any other way and every
+// positional Alert literal whose Title it cannot place, so a title the reader
+// cannot see fails the audit.
 func titlesIn(src source) (titles, problems []string) {
 	consts := src.consts()
 	funcs := map[string]*ast.FuncDecl{}
@@ -326,9 +331,90 @@ func titlesIn(src source) (titles, problems []string) {
 			}
 		}
 	}
+	// titleField is Title's index among the fields of the package's Alert
+	// struct, for reading a positional literal; -1 when the package declares
+	// no Alert with a Title field.
+	titleField := -1
+	for _, f := range src.files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != "Alert" {
+				return true
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				return false
+			}
+			i := 0
+			for _, field := range st.Fields.List {
+				if len(field.Names) == 0 {
+					i++
+					continue
+				}
+				for _, name := range field.Names {
+					if name.Name == "Title" {
+						titleField = i
+					}
+					i++
+				}
+			}
+			return false
+		})
+	}
+	isAlert := func(e ast.Expr) bool {
+		if st, ok := e.(*ast.StarExpr); ok {
+			e = st.X
+		}
+		switch e := e.(type) {
+		case *ast.Ident:
+			return e.Name == "Alert"
+		case *ast.SelectorExpr:
+			return e.Sel.Name == "Alert"
+		}
+		return false
+	}
+	// positional reads the Title of an Alert literal that lists its fields
+	// by position; a keyed literal's Title is read as a KeyValueExpr.
+	positional := func(lit *ast.CompositeLit) {
+		if len(lit.Elts) == 0 {
+			return
+		}
+		if _, keyed := lit.Elts[0].(*ast.KeyValueExpr); keyed {
+			return
+		}
+		if titleField < 0 || titleField >= len(lit.Elts) {
+			problems = append(problems, fmt.Sprintf("%s: an Alert literal listing its fields by position, whose Title this audit cannot place; key its fields", src.fset.Position(lit.Pos())))
+			return
+		}
+		add(lit.Elts[titleField])
+	}
 	for _, f := range src.files {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
+			case *ast.CompositeLit:
+				var elem ast.Expr
+				switch t := n.Type.(type) {
+				case *ast.ArrayType:
+					elem = t.Elt
+				case *ast.MapType:
+					elem = t.Value
+				}
+				if isAlert(n.Type) {
+					positional(n)
+				}
+				if elem != nil && isAlert(elem) {
+					for _, e := range n.Elts {
+						if kv, ok := e.(*ast.KeyValueExpr); ok {
+							e = kv.Value
+						}
+						if u, ok := e.(*ast.UnaryExpr); ok {
+							e = u.X
+						}
+						if lit, ok := e.(*ast.CompositeLit); ok && lit.Type == nil {
+							positional(lit)
+						}
+					}
+				}
 			case *ast.KeyValueExpr:
 				if id, ok := n.Key.(*ast.Ident); ok && id.Name == "Title" {
 					add(n.Value)
@@ -560,15 +646,67 @@ func TestEveryReasonIsExplainedInExactlyOneRow(t *testing.T) {
 	}
 	sort.Strings(values)
 	for _, v := range values {
-		// A value two sets share (a refused sell and a withheld sale, both
-		// stale-broker-snapshot) means a different thing in each, so each
-		// set's meaning has its own row.
-		want := len(reasons[v])
-		if rows := rowsMatching(chapters, reasonCell(v)); len(rows) != want {
-			t.Errorf("reason `%s` (%s) begins %d \"What can go wrong\" rows %v; want %d, one for each set that records it",
-				v, strings.Join(reasons[v], ", "), len(rows), rows, want)
+		for _, p := range reasonRowProblems(chapters, v, reasons[v]) {
+			t.Error(p)
 		}
 	}
+}
+
+// reasonSet returns the closed set a reason constant belongs to: the longest
+// reason prefix its name begins with.
+func reasonSet(name string) string {
+	set := ""
+	for _, p := range reasonPrefixes {
+		if strings.HasPrefix(name, p) && len(p) > len(set) {
+			set = p
+		}
+	}
+	return set
+}
+
+// setQualifiers are what a row's first cell writes straight after a reason
+// value two or more sets share, to say which set's meaning the row explains:
+// "`stale-broker-snapshot` (a refused sell)" and "`stale-broker-snapshot` (a
+// withheld sale)". A value only one set records needs no qualifier.
+var setQualifiers = map[string]string{
+	"Refused":           "(a refused ",
+	"Withheld":          "(a withheld decision",
+	"SaleWithheld":      "(a withheld sale",
+	"OrderSkipped":      "(a skipped trade",
+	"EngineStateReason": "(a change of state",
+}
+
+// reasonRowProblems holds reason value v to the rule: it begins exactly one
+// "What can go wrong" row for each set whose constants carry it. Sets are
+// counted, not constants, so an alias constant in one set demands no second
+// row. A value one set records needs one row naming it. A value two or more
+// sets record needs, for each set, exactly one row whose first cell names
+// the value followed by that set's qualifier, and no other row naming it, so
+// each row is tied to the meaning it explains.
+func reasonRowProblems(chapters []chapter, v string, names []string) []string {
+	var sets []string
+	for _, n := range names {
+		if s := reasonSet(n); !slices.Contains(sets, s) {
+			sets = append(sets, s)
+		}
+	}
+	sort.Strings(sets)
+	var problems []string
+	if rows := rowsMatching(chapters, reasonCell(v)); len(rows) != len(sets) {
+		problems = append(problems, fmt.Sprintf("reason %#q (%s) begins %d \"What can go wrong\" rows %v; want %d, one for each set that records it (%s)",
+			v, strings.Join(names, ", "), len(rows), rows, len(sets), strings.Join(sets, ", ")))
+	}
+	if len(sets) < 2 {
+		return problems
+	}
+	for _, s := range sets {
+		code := "`" + v + "` " + setQualifiers[s]
+		if rows := rowsMatching(chapters, func(row string) bool { return strings.Contains(firstCell(row), code) }); len(rows) != 1 {
+			problems = append(problems, fmt.Sprintf("reason %#q, which more than one set records, begins %d rows %v written %q; want exactly one, explaining the %s set's meaning",
+				v, len(rows), rows, code+"…)", s))
+		}
+	}
+	return problems
 }
 
 func TestEveryAlertTitleIsExplainedInExactlyOneRow(t *testing.T) {
@@ -815,5 +953,81 @@ func TestOwnerReasonsFailsOnAConstantItCannotClassify(t *testing.T) {
 		")\n"
 	if _, problems := reasonsIn(parseSource(t, src)); len(problems) != 4 {
 		t.Errorf("problems %q; want one each for RefusedUpper, RefusedNumber, WithheldA and WithheldB", problems)
+	}
+}
+
+func TestAnAliasInOneSetNeedsOneRow(t *testing.T) {
+	c := chapter{name: "states-and-kill-switch.md", rows: []string{"| `plain-reason` | x | y |"}}
+	if got := reasonRowProblems([]chapter{c}, "plain-reason", []string{"RefusedAlias", "RefusedPlain"}); len(got) != 0 {
+		t.Errorf("two constants of one set carrying one value demand one row: %q", got)
+	}
+	c.rows = append(c.rows, "| `plain-reason` again | x | y |")
+	if got := reasonRowProblems([]chapter{c}, "plain-reason", []string{"RefusedAlias", "RefusedPlain"}); len(got) == 0 {
+		t.Error("a second row for one set's value passed")
+	}
+}
+
+func TestASharedValueNeedsOneQualifiedRowPerSet(t *testing.T) {
+	names := []string{"RefusedStale", "SaleWithheldStale"}
+	both := chapter{name: "states-and-kill-switch.md", rows: []string{
+		"| `shared` (a refused sell). Alert: x | x | y |",
+		"| `shared` (a withheld sale). Alert: x | x | y |",
+	}}
+	if got := reasonRowProblems([]chapter{both}, "shared", names); len(got) != 0 {
+		t.Errorf("one qualified row per set: %q", got)
+	}
+	twice := chapter{name: "states-and-kill-switch.md", rows: []string{
+		"| `shared` (a refused sell) | x | y |",
+		"| `shared` (a refused order) | x | y |",
+	}}
+	if got := reasonRowProblems([]chapter{twice}, "shared", names); len(got) == 0 {
+		t.Error("two rows both explaining the refusal passed with the withheld sale unexplained")
+	}
+	bare := chapter{name: "states-and-kill-switch.md", rows: []string{
+		"| `shared` (a refused sell) | x | y |",
+		"| `shared` | x | y |",
+	}}
+	if got := reasonRowProblems([]chapter{bare}, "shared", names); len(got) == 0 {
+		t.Error("a row that names no set passed as the withheld sale's row")
+	}
+}
+
+func TestAlertTitlesReadsAPositionalLiteral(t *testing.T) {
+	src := `package report
+
+import "fmt"
+
+type Alert struct {
+	Key   string
+	Title string
+	Body  string
+}
+
+func alerts(account string) []Alert {
+	a := Alert{"k", fmt.Sprintf("%s: positional", account), "body"}
+	b := &Alert{"k", "%s: by pointer", "body"}
+	return []Alert{a, *b, {"k", "%s: elided", "body"}}
+}
+`
+	titles, problems := titlesIn(parseSource(t, src))
+	if len(problems) != 0 {
+		t.Fatalf("problems %q", problems)
+	}
+	want := []string{"%s: by pointer", "%s: elided", "%s: positional"}
+	sort.Strings(titles)
+	if !slices.Equal(titles, want) {
+		t.Errorf("titles %q; want %q", titles, want)
+	}
+}
+
+func TestAlertTitlesFailsOnAPositionalLiteralItCannotPlace(t *testing.T) {
+	src := `package report
+
+func alerts(account string) Alert {
+	return Alert{"k", account, "body"}
+}
+`
+	if _, problems := titlesIn(parseSource(t, src)); len(problems) != 1 || !strings.Contains(problems[0], "x.go:4") {
+		t.Errorf("problems %q; want one naming the literal's position", problems)
 	}
 }

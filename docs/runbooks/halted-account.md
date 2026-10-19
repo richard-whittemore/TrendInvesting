@@ -37,9 +37,10 @@ approve.
    orders`), or withheld (`sale-withheld` in `journal-query refusals`). A
    withhold with reason `broker-values-unreadable` or `unknown-working-sell`
    counts as the attempt: the program will not try again, so you act by
-   hand. No alert tells you so yet
-   ([alerts-and-dashboard](../manual/alerts-and-dashboard.md), "Alerts the
-   reporter does not send").
+   hand. The reporter tells you so with the urgent alert
+   `<account>: sale of <instrument> withheld, sell by hand (<reason>)`
+   ([states and kill switch](../manual/states-and-kill-switch.md), "The sale
+   back to 98%"); sell as "Selling by hand safely" in that chapter says.
 
 ## Find the cause
 
