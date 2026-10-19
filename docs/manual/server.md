@@ -113,6 +113,72 @@ backup" (for a recording or a data file), that is what it means today. The
 gap is tracked in the issue "Review L10: server secrets per unit, IBC
 trusted IPs, UMask, backups".
 
+## The clock
+
+The program compares the server's clock with IBKR's. If the server's clock
+runs behind IBKR's, the account reading looks as if it comes from the future,
+the engine treats it as stale (ADR 0019 allows no tolerance for that), and it
+blocks every sell until the clock is right. A drifting clock therefore shows
+up first as a withheld sale, so the server is set up to keep its clock right
+from the start.
+
+`sudo deploy/provision.sh clock` (also part of `all`) makes sure a time
+service is running and then runs the check, and it refuses to finish if the
+check fails. A time service the server already has (chrony, ntp, ntpsec, openntpd or
+`systemd-timesyncd`) is kept, turned on for the next boot and, if it was
+installed but stopped, started; if it will not start the step refuses and names
+it, so you can start or remove it yourself. The one exception is
+`systemd-timesyncd` inside a container: there a failure to start is logged and
+the outside check below decides, while any other daemon that will not start
+still refuses (on a server of its own, `systemd-timesyncd` refuses too). Only when none is installed is
+`systemd-timesyncd` installed and turned on. On a server of its own the clock must be reported
+synchronised by `timedatectl`. Inside the Mac mini's container the Mac keeps
+time and the container usually shows no time service of its own, so there the
+check compares the clock with the time an outside website reports, and fails
+if they differ by more than 2 seconds. It reads the local clock before and
+after the request and compares the website's time with the midpoint, so a slow
+connection does not count against the clock; a request that takes longer than
+2 seconds (`TI_CLOCK_MAX_ROUNDTRIP_SECONDS`) is thrown away and the next
+website tried. Only HTTPS websites are used. If a website's cache says its
+time is old (an `Age` header, common behind a CDN), that many seconds are added
+back, but only when `Age` is a whole number up to an hour; any other `Age`
+makes that website unusable. A fresh answer has no `Age`, or an `Age` of 0, and
+nothing is added. The limit can be changed with
+`TI_CLOCK_TOLERANCE_SECONDS`. On a slow home link every website may take more
+than 2 seconds; `sudo` drops environment variables, so raise the limit in the
+file `/etc/trend-investing/clock.conf`, which the check reads (the clock step
+creates the folder `/etc/trend-investing`, owned by root, if it is missing, so
+this works on a fresh server; the file should be owned by root and readable by
+all, which `tee` gives you):
+`echo TI_CLOCK_MAX_ROUNDTRIP_SECONDS=5 | sudo tee -a /etc/trend-investing/clock.conf`.
+`tee -a` appends, so lines already in the file are kept; if a key is written
+twice, the last line for it wins.
+The tolerance can be set there too, as `TI_CLOCK_TOLERANCE_SECONDS`, but only
+to a whole number of seconds from 1 to 60; anything else is refused. A value set in the
+environment of a run by hand overrides the file, and a value that is not a
+positive number is refused. If the container cannot
+reach any reference, that also fails, because a clock that could not be
+checked is not a checked clock. On the Mac mini, a failure means the Mac's own
+"Set time and date automatically" is off or wrong.
+
+When the server reports "synchronised" inside a container, that is the
+report of the kernel the container runs on. On a Mac that is the Linux virtual
+machine that Docker runs, not macOS itself, so the report says nothing
+about the Mac's own clock; it is accepted because the container shares that
+virtual machine's clock. To check that claim against an outside website too, run the
+check with `TI_CLOCK_VERIFY=1` in front of it.
+
+The `clock` step installs the check before it runs it, so you can run it
+yourself at any time after that step (even if the step failed), and after any sale is withheld with the
+reason `stale-broker-snapshot`:
+
+```
+/usr/local/libexec/trend-investing/clock-check.sh
+```
+
+It prints `clock: ok ...` or says what is wrong and exits with an error. The
+reporter does not report the clock; this check is the way to see it.
+
 ## What you start by hand
 
 - **Once:** create the instance, join Tailscale (`sudo tailscale up --ssh`),
@@ -170,6 +236,7 @@ already at IBKR in IBKR's own app.
 | The data job fails | The unit shows failed; `journalctl -u ti-data` says why; no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)) |
 | The machine dies, or the reporter never runs | **Nothing outside the server tells you.** The outside heartbeat (Healthchecks.io in plan section 7) is not built, and a reporter on the machine cannot notice the machine dying | Check the dashboard or the server yourself until it exists (tracked in the issue "External heartbeat and a recorded clock input for the margin alarm's 30-minute rule") |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing | Free space, then resume or start as `docs/runbooks/durable-log.md` says |
+| The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |
 | `provision.sh services` is run again after paper edits | The dry-run files come back; the paper engine refuses to start | Redo the paper edits |
 | A disk is lost | Only a Lightsail snapshot, if any, can restore it | `docs/runbooks/durable-log.md`, "A log that cannot be read" |
 

@@ -715,7 +715,13 @@ days), it takes them all, oldest first.
    decided (ADR 0019, ADR 0021). Each line goes with the engine's next
    input number in place of the file's own (the file format, above), and
    with the time it is sent as its "recorded" time, as every input the
-   adapter sends; nothing else in it changes. A fill or a cancellation IBKR
+   adapter sends; nothing else in it changes. ADR 0019 measures the broker
+   snapshot's age at the close's recorded time, from the snapshot's stamp,
+   and counts a negative age as stale: a sale withheld or a sell refused
+   with `stale-broker-snapshot` at every close means the snapshot was not
+   stamped as of the close (its `not_as_of_close` says why) or the server's
+   clock is behind IBKR's: check the clock too (run `clock-check.sh`; [the
+   server](server.md), "The clock"). A fill or a cancellation IBKR
    reports while the engine works through the file goes to the engine
    before the file's next line, so no session is decided on an account
    behind a report already received. A trade IBKR has reported but whose
