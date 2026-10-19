@@ -45,6 +45,7 @@ rather than keep their own. As of `main` on 2026-10-18:
 | Reporter and dashboard | Both programs, installed on the server; the reporter checks every 5 minutes, around the clock | The outside heartbeat |
 | Operator tool and journal-query | Both programs, installed on the server | The engine's operator inbox in its service file |
 | Server | Provisioning, the Gateway unit, the firewall, pinned downloads | Backups; a real server run |
+| Mac mini | The container (`deploy/mac-mini/up.sh`): systemd running, four volumes that survive a restart and a re-creation, the Gateway unit masked, refusals of a Desktop or iCloud checkout | The arm64 programs and the adapter in it; the dashboard reachable from the Mac; the `ti` command; backups; the owner's session ([mac-mini](mac-mini.md), "What is not built yet") |
 | Day-trade counter for the joint account | — | Counted by hand ([margin warning](../runbooks/margin-warning.md)) |
 
 **Current versions** (each chapter's "since version x" is history; these
@@ -109,6 +110,9 @@ are what this build runs):
    - [journal-query](journal-query.md): asking a run's log what happened.
 7. **The server.** [server](server.md): what runs where, the units and
    timers, configuration and secrets, backups, what you start by hand.
+   [mac-mini](mac-mini.md): the Mac mini, where the first paper runs
+   happen: the Gateway app, the one container and its four volumes, why
+   the checkout is not on the Desktop, what a restart does.
 8. **Trust.** [parity](parity.md): the check that the Go code decides what
    the backtests decided.
 9. **Runbooks**, for when something has happened (in `docs/runbooks/`):
@@ -126,6 +130,8 @@ are what this build runs):
      log in;
    - [lightsail-deployment](../runbooks/lightsail-deployment.md): setting up
      the server, and the restart and reconnect drills;
+   - [mac-mini](../runbooks/mac-mini.md): creating the Mac mini's container,
+     or re-attaching to it;
    - last, [first-paper-order](../runbooks/first-paper-order.md): the
      checklist for the first order the program sends to IBKR's paper
      servers.

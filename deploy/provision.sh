@@ -1,6 +1,7 @@
 #!/bin/bash
 # Idempotent provisioning for the Trend Investing server (Ubuntu 24.04 LTS,
-# x86_64, a Lightsail VM). Safe to run again after any partial failure.
+# x86_64, a Lightsail VM), or for the Mac mini's container (TI_TARGET below).
+# Safe to run again after any partial failure.
 #
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
 #   sudo deploy/provision.sh clock      enable time syncing and refuse to finish unless the clock is good
@@ -19,6 +20,16 @@
 #
 # TI_REHEARSAL=1 (container rehearsal only): skip steps that need a running
 # systemd, a kernel firewall or a network identity.
+#
+# TI_TARGET selects the machine: lightsail (the default) or mac-mini, the
+# long-running arm64 Ubuntu 24.04 container under Docker Desktop that
+# deploy/mac-mini/up.sh creates (the owner's approval of the Mac mini plan,
+# option A, 2026-10-18: Mac_Mini_Paper_Deployment_Plan_2026-10-18.md, section
+# 5, item 1). On the Mac mini, IB Gateway is IBKR's macOS app outside the
+# container and nothing listens beyond the Mac's loopback, so the target
+# accepts arm64, installs no Tailscale, firewall or Linux Gateway, masks the
+# Gateway unit, makes systemd's journal persistent, and checks the clock
+# against a reference instead of syncing it. Every other step is the same.
 set -euo pipefail
 set +x
 
@@ -27,7 +38,9 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/versions.env"
 
 rehearsal=${TI_REHEARSAL:-0}
+target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
+unit_dir=/etc/systemd/system
 dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
 
 log() { printf 'provision: %s\n' "$*"; }
@@ -35,12 +48,35 @@ die() { printf 'provision: %s\n' "$*" >&2; exit 1; }
 
 need_root() { test "$(id -u)" -eq 0 || die "run as root (sudo)"; }
 
-check_platform() {
-  # TI_REHEARSAL_ANY_ARCH=1 lets the rehearsal run on an arm64 Docker host,
-  # where the x86_64 installer cannot be executed (see TI_REHEARSAL_SKIP_INSTALLER).
-  test "$(uname -m)" = x86_64 || test "${TI_REHEARSAL_ANY_ARCH:-0}" = 1 || die "IB Gateway's Linux installer is x86_64 only; this is $(uname -m)"
+# The distribution's ID and VERSION_ID, read into the caller's shell.
+read_os_release() {
   # shellcheck disable=SC1091
   . /etc/os-release
+}
+
+# Whether systemd is the running init (it creates this directory at boot).
+systemd_running() { test -d /run/systemd/system; }
+
+mac_mini() { test "$target" = mac-mini; }
+
+check_target() {
+  case $target in
+    lightsail | mac-mini) ;;
+    *) die "TI_TARGET must be lightsail (the default) or mac-mini, not '$target'" ;;
+  esac
+}
+
+check_platform() {
+  if mac_mini; then
+    # The Mac mini is Apple silicon: its container is arm64, and runs no x86_64
+    # installer (the Gateway is the Mac app).
+    test "$(uname -m)" = aarch64 || die "the Mac mini target is an arm64 (aarch64) container; this is $(uname -m)"
+  else
+    # TI_REHEARSAL_ANY_ARCH=1 lets the rehearsal run on an arm64 Docker host,
+    # where the x86_64 installer cannot be executed (see TI_REHEARSAL_SKIP_INSTALLER).
+    test "$(uname -m)" = x86_64 || test "${TI_REHEARSAL_ANY_ARCH:-0}" = 1 || die "IB Gateway's Linux installer is x86_64 only; this is $(uname -m)"
+  fi
+  read_os_release
   test "${ID:-}" = ubuntu || die "Ubuntu LTS only (found ${ID:-unknown})"
   case ${VERSION_ID:-} in 24.04) ;; *) die "pinned and rehearsed on Ubuntu 24.04 only (found ${VERSION_ID:-unknown})" ;; esac
 }
@@ -74,9 +110,17 @@ step_base() {
   log "packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq --no-install-recommends \
-    ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
-    libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata iptables >/dev/null
+  if mac_mini; then
+    # No Gateway, firewall or X display in the container; sudo for running
+    # the owner's tools as ti-trader, and nano for editing the configuration
+    # and secret files in place.
+    apt-get install -y -qq --no-install-recommends \
+      ca-certificates curl unzip unattended-upgrades python3 tzdata sudo nano >/dev/null
+  else
+    apt-get install -y -qq --no-install-recommends \
+      ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
+      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata iptables >/dev/null
+  fi
 
   log "service users (non-root, no login shell)"
   ensure_user ti-gateway /var/lib/ti-gateway
@@ -100,6 +144,12 @@ Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 CONF
 
+  if mac_mini; then
+    step_journal
+    log "Mac mini: no Tailscale (nothing listens beyond the Mac's loopback)"
+    return 0
+  fi
+
   log "tailscale ${TAILSCALE_VERSION}"
   local tgz="$dl_cache/tailscale_${TAILSCALE_VERSION}_amd64.tgz"
   fetch "$TAILSCALE_URL" "$TAILSCALE_SHA256" "$tgz"
@@ -117,6 +167,23 @@ CONF
   rm -rf "$tmp"
 }
 
+# systemd's journal kept on disk, in /var/log/journal (a volume of its own on
+# the Mac mini), so the reason a unit stopped survives a restart of the
+# container and its removal and re-creation (Mac mini plan, section 5, item 1).
+step_journal() {
+  log "persistent journal"
+  install -d -m 0755 /etc/systemd/journald.conf.d
+  install -m 0644 /dev/stdin /etc/systemd/journald.conf.d/50-trend-investing.conf <<'CONF'
+[Journal]
+Storage=persistent
+CONF
+  install -d -m 2755 /var/log/journal
+  systemd-tmpfiles --create --prefix /var/log/journal
+  if test "$rehearsal" != 1 && systemd_running; then
+    systemctl restart systemd-journald.service
+  fi
+}
+
 # The clock (ADR 0019: a clock behind IBKR's makes every snapshot stale and
 # withholds every sell). The check is installed first, so the owner can run it
 # from /usr/local/libexec/trend-investing after this step even if it fails.
@@ -129,7 +196,16 @@ step_clock() {
   install -d -m 0755 /usr/local/libexec/trend-investing
   install -d -m 0755 /etc/trend-investing # holds clock.conf, which the check reads
   install -m 0755 "$here"/libexec/clock-check.sh /usr/local/libexec/trend-investing/
-  if test "$rehearsal" != 1 && test -d /run/systemd/system; then
+  if mac_mini; then
+    # The Mac keeps the time and the container shares it, so no time daemon
+    # runs here even though systemd does; the check always compares the clock
+    # with an outside reference (TI_CLOCK_VERIFY=1), since "synchronised"
+    # inside the container would describe Docker's Linux VM, not the Mac.
+    log "Mac mini: the Mac keeps the time; checking the clock against a reference"
+    TI_CLOCK_VERIFY=1 "$here/libexec/clock-check.sh" || die "the clock is not good: turn on the Mac's automatic date and time, then run 'provision.sh clock' again"
+    return 0
+  fi
+  if test "$rehearsal" != 1 && systemd_running; then
     log "time syncing"
     "$here/libexec/time-sync.sh"
   fi
@@ -138,6 +214,10 @@ step_clock() {
 }
 
 step_gateway() {
+  if mac_mini; then
+    log "Mac mini: no Linux Gateway (the Gateway is IBKR's macOS app, logged in by hand)"
+    return 0
+  fi
   log "IBC ${IBC_VERSION}"
   local zip="$dl_cache/IBCLinux-${IBC_VERSION}.zip"
   fetch "$IBC_URL" "$IBC_SHA256" "$zip"
@@ -341,9 +421,17 @@ CONF
   # The adapter's configuration carries no secret (the account number comes
   # from accounts/boost.env): created once from the example, never overwritten, so
   # the owner's paper settings survive a re-run.
+  # On the Mac mini the Gateway listens on the Mac, which the container
+  # reaches as host.docker.internal; the adapter accepts any host name.
   install -d -m 0755 "$etc/adapters"
   if ! test -e "$etc/adapters/boost.json"; then
-    install -m 0644 "$here/etc/adapters/boost.json.example" "$etc/adapters/boost.json"
+    if mac_mini; then
+      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$here/etc/adapters/boost.json.example" >"$etc/adapters/boost.json.new"
+    else
+      cat "$here/etc/adapters/boost.json.example" >"$etc/adapters/boost.json.new"
+    fi
+    chmod 0644 "$etc/adapters/boost.json.new"
+    mv "$etc/adapters/boost.json.new" "$etc/adapters/boost.json"
     log "created $etc/adapters/boost.json (owner step: set paper mode before the paper test)"
   fi
 
@@ -361,13 +449,22 @@ CONF
     # report as active, so the service is stopped unconditionally; stopping a
     # unit that is not loaded fails, which must not trip set -e.
     systemctl stop ti-reporter.service || true
-    if test -e /etc/systemd/system/ti-reporter.timer; then
+    if test -e "$unit_dir/ti-reporter.timer"; then
       systemctl disable ti-reporter.timer
     fi
   fi
   rm -f /etc/systemd/system/ti-reporter.service /etc/systemd/system/ti-reporter.timer \
     /etc/systemd/system/timers.target.wants/ti-reporter.timer
-  install -m 0644 "$here"/systemd/*.service "$here"/systemd/*.timer /etc/systemd/system/
+  # On the Mac mini the Gateway's unit file is not installed: masking puts a
+  # link to /dev/null in its place, which a real file there would block.
+  local unit
+  for unit in "$here"/systemd/*.service "$here"/systemd/*.timer; do
+    if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
+    install -m 0644 "$unit" "$unit_dir/"
+  done
+  if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
+    rm -f "$unit_dir/ti-gateway.service"
+  fi
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
     # The Boost account's reporter only: the IRA engines have no
@@ -379,7 +476,13 @@ CONF
     # build just installed; the reporter picks a new build up at its next
     # firing. Until the Boost engine's run.env exists the dashboard fails,
     # naming it, and restarts by itself; that is logged here, not fatal.
-    systemctl enable ti-gateway.service
+    if mac_mini; then
+      # The Gateway is the Mac app; masked, nothing can start this unit (an
+      # engine's or the adapter's Wants= on it is then ignored).
+      systemctl mask ti-gateway.service
+    else
+      systemctl enable ti-gateway.service
+    fi
     systemctl enable --now ti-data.timer ti-reporter@boost.timer
     systemctl enable ti-dashboard.service
     if ! systemctl restart ti-dashboard.service; then
@@ -398,7 +501,11 @@ CONF
     # step, the reporter and the dashboard fail, each with a message, until
     # their files are installed and the Boost engine's run.env exists; the
     # reporter also until secrets.env holds its channel secrets.
-    log "enabled; started ti-data.timer, ti-reporter@boost.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
+    if mac_mini; then
+      log "enabled; started ti-data.timer, ti-reporter@boost.timer and ti-dashboard; ti-gateway is masked (the Gateway is the Mac app)"
+    else
+      log "enabled; started ti-data.timer, ti-reporter@boost.timer and ti-dashboard; start the gateway with: systemctl start ti-gateway (after the owner enters the IBKR login)"
+    fi
   fi
 }
 
@@ -407,6 +514,10 @@ CONF
 # applied. Re-add a manual rule after each run, or add it here.
 step_firewall() {
   if test "$rehearsal" = 1; then log "rehearsal: skipping firewall"; return 0; fi
+  if mac_mini; then
+    log "Mac mini: no firewall in the container (the dashboard is published on the Mac's loopback only)"
+    return 0
+  fi
   # Refuse to close the public SSH door before the Tailscale door works, or
   # the server locks the owner out.
   if ! ip link show tailscale0 >/dev/null 2>&1 || ! tailscale ip -4 >/dev/null 2>&1; then
@@ -423,6 +534,7 @@ step_firewall() {
 }
 
 main() {
+  check_target
   need_root
   check_platform
   case ${1:-} in
@@ -439,4 +551,8 @@ main() {
   log "done: ${1}"
 }
 
-main "$@"
+# Run as a program; sourced (by deploy/rehearsal/test-target.sh), it only
+# defines the steps.
+if test "${BASH_SOURCE[0]}" = "$0"; then
+  main "$@"
+fi
