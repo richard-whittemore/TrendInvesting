@@ -263,7 +263,12 @@ expect "container, chrony that will not start is still fatal" 1 \
 
 # The clock step creates /etc/trend-investing before the check reads clock.conf.
 grep -q 'install -d -m 0755 /etc/trend-investing' "$here/../provision.sh" || expect "step_clock creates /etc/trend-investing" yes no
-awk '/^step_clock\(\)/,/^}/' "$here/../provision.sh" | grep -q 'install -d -m 0755 /etc/trend-investing' || expect "the directory is created inside step_clock" yes no
+clock_body=$(awk '/^step_clock\(\)/,/^}/' "$here/../provision.sh")
+dir_line=$(printf '%s\n' "$clock_body" | grep -nF 'install -d -m 0755 /etc/trend-investing' | head -1 | cut -d: -f1)
+check_line=$(printf '%s\n' "$clock_body" | grep -nF 'clock-check.sh" ||' | head -1 | cut -d: -f1)
+order=no
+if test -n "$dir_line" && test -n "$check_line" && test "$dir_line" -lt "$check_line"; then order=yes; fi
+expect "inside step_clock the directory is created before the clock check" yes "$order"
 
 test "$failures" -eq 0 || exit 1
 echo "clock tests ok"

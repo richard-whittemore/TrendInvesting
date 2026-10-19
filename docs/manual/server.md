@@ -127,7 +127,10 @@ service is running and then runs the check, and it refuses to finish if the
 check fails. A time service the server already has (chrony, ntp, ntpsec, openntpd or
 `systemd-timesyncd`) is kept, turned on for the next boot and, if it was
 installed but stopped, started; if it will not start the step refuses and names
-it, so you can start or remove it yourself. Only when none is installed is
+it, so you can start or remove it yourself. The one exception is
+`systemd-timesyncd` inside a container: there a failure to start is logged and
+the outside check below decides, while any other daemon that will not start
+still refuses (on a server of its own, `systemd-timesyncd` refuses too). Only when none is installed is
 `systemd-timesyncd` installed and turned on. On a server of its own the clock must be reported
 synchronised by `timedatectl`. Inside the Mac mini's container the Mac keeps
 time and the container usually shows no time service of its own, so there the
@@ -147,7 +150,9 @@ file `/etc/trend-investing/clock.conf`, which the check reads (the clock step
 creates the folder `/etc/trend-investing`, owned by root, if it is missing, so
 this works on a fresh server; the file should be owned by root and readable by
 all, which `tee` gives you):
-`echo TI_CLOCK_MAX_ROUNDTRIP_SECONDS=5 | sudo tee /etc/trend-investing/clock.conf`.
+`echo TI_CLOCK_MAX_ROUNDTRIP_SECONDS=5 | sudo tee -a /etc/trend-investing/clock.conf`.
+`tee -a` appends, so lines already in the file are kept; if a key is written
+twice, the last line for it wins.
 The tolerance can be set there too, as `TI_CLOCK_TOLERANCE_SECONDS`, but only
 to a whole number of seconds from 1 to 60; anything else is refused. A value set in the
 environment of a run by hand overrides the file, and a value that is not a
