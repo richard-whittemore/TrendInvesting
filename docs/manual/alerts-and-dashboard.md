@@ -420,7 +420,7 @@ and whether the alert is urgent:
 | `labels-missing` | urgent | [momentum universe](momentum-universe.md) |
 | `all-unaffordable` | urgent | [momentum minimum lot](momentum-minimum-lot.md) |
 | `no-eligible-names`, `insufficient-trend-history` | routine | [momentum](momentum.md) |
-| `rebalance-in-progress` | routine | [paper trading](paper-trading.md) |
+| `rebalance-in-progress` | routine | [momentum](momentum.md) |
 
 **Reasons that come in other titles, or in no alert:**
 
@@ -450,7 +450,7 @@ and whether the alert is urgent:
 | --- | --- | --- |
 | `<account>: order refused (<reason>)` | The risk gate refused one order before anything was sent to IBKR. The reporter sends this urgent alert once per refused order (once per kill-switch engagement, and once per stale-snapshot episode). It is not repeated. The body names the order, its side, size, limit price and the gate's detail | Look the reason up in "Which chapter explains each alert", above; that chapter's table says what to do |
 | `<account>: decision withheld (<reason>)` | The engine decided no new targets for that session. Positions and orders already in place are unchanged. One alert per run of the same reason; a decided session ends the run, and the reason coming back later is a new alert. Urgent when an input is missing, no stock is affordable or sector labels are missing; routine otherwise | Look the reason up in the table above; that chapter says what to do |
-| `<account>: no engine heartbeat` | The log has not changed while `-heartbeat-sessions` NYSE sessions (default 2) closed. One urgent alert per silence; a later silence is another. Stops and orders already at IBKR are unaffected | `systemctl status ti-engine@<account>` and `journalctl -u ti-engine@<account>`. If it crashed, resume it; otherwise start a fresh run you approve ([restart](restart.md); runbook `docs/runbooks/durable-log.md`, "Restarting an engine") |
+| `<account>: no engine heartbeat` | The log has not changed while `-heartbeat-sessions` NYSE sessions (default 2) closed. One urgent alert per silence; a later silence is another. Orders already at IBKR are unaffected | `systemctl status ti-engine@<account>` and `journalctl -u ti-engine@<account>`. If it crashed, resume it; otherwise start a fresh run you approve ([restart](restart.md); runbook `docs/runbooks/durable-log.md`, "Restarting an engine") |
 | `<account>: the reporter cannot read the journal` | The log does not verify, mixes runs, is missing, or holds a decision record that fails its checks. No other alert from that log is sent and no summary; the heartbeat is still checked unless the body says "The heartbeat is NOT checked" and why. Once per account and problem; the run exits with the error | Check the file with `sudo -u ti-trader journal-query` ([journal-query](journal-query.md)); never edit it. Runbook `docs/runbooks/durable-log.md`, "A log that cannot be read". Until it reads, nothing in it reaches you: watch the account in IBKR's app |
 | `<account>: the reporter cannot check the heartbeat` | The NYSE calendar does not cover the span (it covers 2022 to 2030), so a silent engine would go unreported. Once per problem; the run exits with the error | Install a build whose calendar covers the year. Until then check the engine yourself each trading day |
 

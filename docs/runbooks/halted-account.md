@@ -13,8 +13,11 @@ approve.
 ## First, in every case
 
 1. **Do not trade by hand while a sale of the program's is working.** If you
-   must act at IBKR first, record the kill switch so the program sends
-   nothing new but the sale back to 98%:
+   must sell at IBKR, stop the engine and the adapter first, as the manual's
+   "Selling by hand safely" says (`docs/manual/states-and-kill-switch.md`):
+   the kill switch does not stop the sale back to 98%. To investigate
+   without trading, record the kill switch so the program sends nothing new
+   but the sale back to 98%:
    `sudo -u ti-trader operator kill-switch -inbox <inbox> -account <account> -state engaged -by owner -detail "halted: investigating"`
    (always run the tool as `ti-trader`, the engine's user, so the engine
    can read what it writes).

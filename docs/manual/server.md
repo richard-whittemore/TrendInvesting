@@ -162,10 +162,15 @@ engine's start ([operator](operator.md), "The operator inbox"),
 `operator kill-switch` and `operator acknowledge` write files nothing reads.
 **Until then there is no recorded kill switch on the server:** to stop the
 program trading, stop the adapter (`sudo systemctl stop ti-adapter-boost`)
-and the engine (`sudo systemctl stop ti-engine@<account>`). An order that
-must not go is then settled `--never-sent` with the relay's `resolve`
-command, run on the server (`docs/runbooks/first-paper-order.md` shows it).
-Cancel anything already at IBKR in IBKR's own app.
+and the engine (`sudo systemctl stop ti-engine@<account>`). An order the
+engine released that the adapter has not sent is never sent by the fresh
+run you start next: its adapter stops at start naming the order, and you
+settle it with the relay's `resolve --run-ended` command
+([paper trading](paper-trading.md), "What can go wrong"). One the adapter
+refuses for good (released for an earlier session) is settled `--never-sent`
+with the same command, run on the server
+(`docs/runbooks/first-paper-order.md` shows it). Cancel anything already at
+IBKR in IBKR's own app.
   Do not treat stopping the Gateway (`sudo systemctl stop ti-gateway`) as a
   kill switch: it only delays. An order the engine has released waits in the
   adapter and goes out once the Gateway is back the same day, and an order already at IBKR keeps

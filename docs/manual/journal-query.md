@@ -105,6 +105,32 @@ orders.jsonl 5    2026-03-02  A1       BBB         refused       order-size     
 orders.jsonl 6    2026-03-02  A1       BBB         engine-state  degraded:risk-limit-breached    breach
 ```
 
+Is a sell of the program's still working?
+
+`orders` cannot say on its own. It lists what the program planned
+(`planned`), released (`released`, with `send=true` when it was to be
+sent) and refused (`refused`), and each report IBKR sent back on an order
+(`lifecycle-` and IBKR's status: `lifecycle-submitted`, `lifecycle-updated`,
+`lifecycle-cancel-pending`, `lifecycle-canceled`, `lifecycle-invalid`). It
+prints no `working` or `pending` value, and it never shows an order you
+placed by hand. A released sell has ended only once it has a
+`lifecycle-canceled` or `lifecycle-invalid` row, or `fills` shows it filled
+in full; `lifecycle-cancel-pending` may still fill. And with the adapter
+stopped, nothing IBKR does reaches the journal. So the check before any sale
+by hand is IBKR's own list of open orders, in its app; use `orders` to see
+which sells the program released and what IBKR last said of them
+([states-and-kill-switch](states-and-kill-switch.md), "Selling by hand
+safely").
+
+```
+$ journal-query orders -instrument SPY boost.log
+journal   seq  time        account  instrument  event                     side  quantity  price  note
+boost.log 41   2026-03-02  joint    SPY         planned                   sell  54        85.50  incident-1
+boost.log 42   2026-03-02  joint    SPY         released                  sell  54        85.50  mode=live,send=true
+boost.log 43   2026-03-02  joint    SPY         lifecycle-submitted       sell  54        85.50  tw-1f2e3d4c5b6a79880a1b2c3d
+boost.log 47   2026-03-02  joint    SPY         lifecycle-canceled        sell  54        85.50  tw-1f2e3d4c5b6a79880a1b2c3d
+```
+
 Do my fills explain the positions the broker reported?
 
 ```

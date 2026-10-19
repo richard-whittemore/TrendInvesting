@@ -35,9 +35,12 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    was started with `-operator`, you may engage the kill switch to stop the
    next boost buy (`sudo -u ti-trader operator kill-switch ... -state engaged`),
    which still lets the sale back to 98% go. Until the inbox exists, stop the
-   engine instead (`sudo systemctl stop ti-engine@<account>`). Selling by hand
-   is your call; if you do, stop new orders first in the same way, so the
-   program sends nothing new while your order works.
+   engine and the adapter instead
+   (`sudo systemctl stop ti-engine@<account> ti-adapter-boost`). Selling by
+   hand is your call; if you do, stop the engine and the adapter first, as
+   the manual's "Selling by hand safely" says
+   (`docs/manual/states-and-kill-switch.md`): the kill switch does not stop
+   the sale back to 98%, so the program could sell beside you.
 
 ## An urgent alarm
 
@@ -50,15 +53,19 @@ reporter checks every 5 minutes, around the clock, seven days a week).
 2. **If the sale was withheld** (`sale-withheld` in `journal-query
    refusals`):
    - `broker-values-unreadable` or `unknown-working-sell`: the program will
-     not try again, and the urgent "sale withheld, sell by hand" alert says
-     so. **Act by hand at IBKR now**: sell back to 98% of net liquidation,
-     after checking no other sell is working.
+     not try again for this alarm, and the urgent "sale withheld, sell by
+     hand" alert says so. **Act by hand at IBKR now**: sell back to 98% of
+     net liquidation, following the manual's "Selling by hand safely" (stop
+     the engine and the adapter, cancel and confirm nothing is working in
+     IBKR's app, then sell).
    - `stale-broker-snapshot` or `non-positive-broker-values`: the program
      decides it again from the next good snapshot while the alarm is urgent.
      The first stale one of an outage alerts (once per stale episode); a
      non-positive one sends no alert, so look for it here.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
-     by hand.
+     by hand, but stop the engine and the adapter first ("Selling by hand
+     safely"): the attempt is unspent, so the program can still sell from
+     the next good snapshot, beside your sale.
 3. **No reading** (the cause says `no-reading`): the adapter has had no
    Excess Liquidity for the stale period. Check the gateway first
    (`gateway-login.md`).

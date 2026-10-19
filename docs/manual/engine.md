@@ -165,9 +165,16 @@ adapter ([operator](operator.md)).
 server, what you record with `operator kill-switch`, `operator acknowledge`
 or `operator rebalance-cleared` stays in the folder and never reaches the
 engine. Until the unit passes it, the kill switch does not work on the
-server: to stop the program ordering, stop the engine
-(`sudo systemctl stop ti-engine@<account>`) or act in IBKR's own app
-(`docs/runbooks/durable-log.md` names the same gap).
+server: to stop the program ordering, stop the adapter and the engine
+(`sudo systemctl stop ti-adapter-boost ti-engine@<account>`), then cancel
+anything already at IBKR in IBKR's own app. Stopping the engine alone is not
+enough: an order it has released waits in the adapter, and goes out once the
+Gateway is back the same day. A fresh run's adapter never sends an earlier
+run's order: it stops naming it, and you settle it with `relay.py resolve
+--run-ended` ([paper trading](paper-trading.md), "What can go wrong"); one
+the adapter refuses for good is settled `--never-sent` ([server](server.md),
+"Reading the logs and the kill switch on the server";
+`docs/runbooks/durable-log.md` names the same gap).
 
 ## What can go wrong, and what the program does then
 
@@ -213,7 +220,7 @@ Read them with `journalctl -u ti-engine@<account> -n 20`.
 | The process crashes | Stays stopped; nothing restarts it. | Resume it from its log ([restart](restart.md)). |
 | The server reboots | A normal shutdown sends SIGTERM, so the engine stops cleanly and writes its journal; it is not started at boot. A power cut or hard reset is a crash instead: no journal is written. | After a normal reboot, a fresh run you approve. After a power cut (`systemctl status` shows it was killed, no journal), resume ([restart](restart.md)). |
 | The configuration file is changed while it runs | Nothing changes for the running run: it decides under the configuration it recorded first. The next resume is refused (`the durable log was recorded by run ... not this run`, or `... opens with a different configuration input ...`). The data job refuses too (`the Boost configuration ... is not the one the engine's durable log ... holds`) when the instrument, `warm_up_start` or an indicator length changed. Note that `provision.sh` overwrites the configuration with the repository's. | Change a configuration only in the repository, as a new run: stop at the end of a session, provision, approve a fresh run ([restart](restart.md)). |
-| You recorded a kill switch, acknowledgement or clearance and nothing changed | The server's engine is started without `-operator`, so it never reads them (above). | Stop the engine, or act in IBKR's app. |
+| You recorded a kill switch, acknowledgement or clearance and nothing changed | The server's engine is started without `-operator`, so it never reads them (above). | To stop the program ordering, stop the adapter and the engine and cancel anything at IBKR in IBKR's app, as "Your instructions while it runs" says; then settle any order the engine had released as [server](server.md) says. |
 
 The reporter's own alerts about a silent engine are in
 [alerts-and-dashboard](alerts-and-dashboard.md).
