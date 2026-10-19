@@ -111,6 +111,22 @@ tests) and `versions.env` under `/opt/trend-investing/adapter`. The adapter
 refuses to start unless the install record equals that pin and the `ibapi`
 it imports is that version (`ibapi_pin.py`). Neither step has yet been run on a server.
 
+On arm64 (the Mac mini's container) the x86_64-only installer cannot run, so
+the step fetches the same release's Mac/Unix archive instead, pinned beside
+it as `TWSAPI_ARCHIVE_URL` and `TWSAPI_ARCHIVE_SHA256`, verifies it the same
+way and unpacks only its `source/pythonclient` (`deploy/twsapi-archive.py`).
+The record then names the archive's SHA-256; the adapter accepts a record
+naming either pinned file of `TWSAPI_VERSION`. The pinned release states its
+version as `{"major": 1051, "minor": 1}`, which `ibapi_pin.py` reads as
+10.51.01.
+
+**Not yet installable on either architecture:** TWS API 10.51.01's `ibapi`
+imports `google.protobuf` and its generated modules require protobuf 5.29.5
+(`setup.py`: `install_requires=["protobuf==5.29.5"]`). The step installs
+offline with `--no-deps`, Ubuntu 24.04's own `python3-protobuf` is 3.21 (no
+`runtime_version`), so the import check fails and the step records nothing.
+A pinned protobuf is a new runtime dependency and needs its own decision.
+
 ## Running it
 
 On the server the unit `deploy/systemd/ti-adapter-boost.service` runs, as

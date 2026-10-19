@@ -17,6 +17,9 @@ for p in (str(tests_dir), str(adapter_dir)):
 from ibapi_pin import IbapiNotPinned, check_installed, read_pin
 
 SHA = "152af944be28bcfaf2733aec907e7724f6dda092cb3148848e84d2a0bb866c0a"
+# The same release's Mac/Unix archive, which provision.sh twsapi installs
+# from on arm64 (the Linux installer is x86_64 only).
+ARCHIVE_SHA = "50a459ed09f0030df25125a177e57b69bdf576ec3a89fcb1f81fdff95bbf6316"
 # The adapter's environment as the tests see it: a venv over a system Python.
 VENV = "/opt/trend-investing/adapter-venv"
 SYSTEM = "/usr"
@@ -58,6 +61,49 @@ class PinTests(unittest.TestCase):
         version, sha = read_pin(str(repo / "deploy" / "versions.env"))
         self.assertRegex(version, r"^[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertRegex(sha, r"^[0-9a-f]{64}$")
+
+    def test_the_shipped_pin_names_the_same_release_s_mac_unix_archive(self):
+        text = (repo / "deploy" / "versions.env").read_text()
+        version, _ = read_pin(str(repo / "deploy" / "versions.env"))
+        self.assertIn("\nTWSAPI_ARCHIVE_SHA256=", text)
+        self.assertRegex(text, r"\nTWSAPI_ARCHIVE_URL=https://\S+\.{}\.zip\n".format(
+            version.replace(".", "", 1).replace(".", r"\.")))
+
+    def test_the_mac_unix_archive_recorded_as_installed_is_the_pinned_build(self):
+        # On arm64 the record names the archive's SHA-256, the file that was
+        # verified and installed; it passes only while the pin file pins it.
+        self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(ARCHIVE_SHA))
+        with self.assertRaises(IbapiNotPinned):
+            check_installed(str(self.record), str(self.versions), installed_version=lambda: (10, 51, 1))
+        with self.versions.open("a") as f:
+            f.write("TWSAPI_ARCHIVE_URL=https://example.invalid/x.1051.01.zip\nTWSAPI_ARCHIVE_SHA256={}\n".format(ARCHIVE_SHA))
+        self.assertEqual(check_installed(str(self.record), str(self.versions), installed_version=lambda: (10, 51, 1)),
+                         "10.51.01")
+        self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format("0" * 64))
+        with self.assertRaises(IbapiNotPinned):
+            check_installed(str(self.record), str(self.versions), installed_version=lambda: (10, 51, 1))
+
+    def test_a_malformed_archive_pin_is_refused(self):
+        self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
+        with self.versions.open("a") as f:
+            f.write("TWSAPI_ARCHIVE_SHA256=not-a-checksum\n")
+        with self.assertRaises(IbapiNotPinned):
+            check_installed(str(self.record), str(self.versions), installed_version=lambda: (10, 51, 1))
+
+    def test_the_pinned_release_s_own_version_shape_is_read(self):
+        # TWS API 10.51.01's ibapi/__init__.py states VERSION = {"major": 1051,
+        # "minor": 1} (API_VersionNum.txt: API_Version=10.51.01): major is the
+        # release's first two parts run together, minor its third.
+        self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
+        stub = ibapi_stub(None, VENV_IBAPI)
+        stub.VERSION = {"major": 1051, "minor": 1}
+        with in_venv(stub):
+            self.assertEqual(check_installed(str(self.record), str(self.versions)), "10.51.01")
+        for version in ({"major": 1051, "minor": 2}, {"major": 1050, "minor": 1}, {"major": 10511, "minor": 1},
+                        {"major": 99, "minor": 1}, {"major": 1051, "minor": 1, "micro": 1}, {"major": True, "minor": 1}):
+            stub.VERSION = version
+            with self.subTest(version=version), in_venv(stub), self.assertRaises(IbapiNotPinned):
+                check_installed(str(self.record), str(self.versions))
 
     def test_the_build_recorded_as_installed_is_the_pinned_build(self):
         self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))

@@ -122,6 +122,7 @@ research-test:
 deploy-test:
 	./deploy/rehearsal/test-platform.sh
 	./deploy/rehearsal/test-build.sh
+	cd deploy/rehearsal && python3 -m unittest test_twsapi_archive
 	./deploy/rehearsal/test-clock.sh
 
 check: deps lint coverage vuln build adapter-test research-test deploy-test

@@ -74,9 +74,12 @@ step_base() {
   log "packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
+  # tzdata-legacy: IBKR states execution times in "US/Eastern", a name
+  # Ubuntu 24.04 moved out of tzdata; without it the adapter cannot read an
+  # execution report and stops (adapter/ibkr/orders.py, parse_execution_time).
   apt-get install -y -qq --no-install-recommends \
     ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
-    libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata iptables >/dev/null
+    libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata tzdata-legacy iptables >/dev/null
 
   log "service users (non-root, no login shell)"
   ensure_user ti-gateway /var/lib/ti-gateway
@@ -180,21 +183,40 @@ step_gateway() {
 # link, so once IBKR replaces the file the checksum fails, and that must not
 # block the Gateway or the services.
 #
-# Runs the verified installer unprivileged, installs the Python client it
-# bundles (source/pythonclient) as root under $twsapi_root/<version>, then
+# On x86_64 it runs the verified installer unprivileged; on arm64 (the Mac
+# mini's container), where that installer cannot run (it starts its own
+# x86_64 Java), it fetches the same release's pinned Mac/Unix archive
+# instead and unpacks it with twsapi-archive.py (owner decision 2026-10-18:
+# no emulation). Either way it installs the Python client
+# (source/pythonclient) as root under $twsapi_root/<version>, then
 # into the adapter's own
-# environment, $adapter_venv, offline (--no-index, --no-deps: ibapi has no
-# dependencies), and only then writes the install record the adapter checks
+# environment, $adapter_venv, offline (--no-index, --no-deps), checks that
+# ibapi imports there, and only then writes the install record, naming the
+# pinned file it installed from, that the adapter checks
 # at start against the pin installed with its code (adapter/ibkr/ibapi_pin.py):
-# a different or missing record and the adapter refuses to start.
+# a different or missing record and the adapter refuses to start. TWS API
+# 10.51.01's ibapi imports protobuf (5.29.5), which nothing installs yet, so
+# today the import check fails and nothing is recorded (adapter/ibkr/README.md).
 twsapi_root=/opt/trend-investing/twsapi
 adapter_venv=/opt/trend-investing/adapter-venv
 adapter_root=/opt/trend-investing/adapter
 step_twsapi() {
   log "TWS API ${TWSAPI_VERSION}"
-  local installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
-  fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
-  if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
+  local arch installer pinned_sha=$TWSAPI_SHA256
+  arch=$(uname -m)
+  case $arch in
+    x86_64)
+      installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
+      fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
+      ;;
+    aarch64)
+      installer="$dl_cache/twsapi-macunix-${TWSAPI_VERSION}.zip"
+      pinned_sha=$TWSAPI_ARCHIVE_SHA256
+      fetch "$TWSAPI_ARCHIVE_URL" "$TWSAPI_ARCHIVE_SHA256" "$installer"
+      ;;
+    *) die "no TWS API pin for $arch; not installing" ;;
+  esac
+  if test "$arch" = x86_64 && test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
     log "rehearsal: checksum verified, installer not executed (not x86_64)"
     return 0
   fi
@@ -204,22 +226,29 @@ step_twsapi() {
   local target="$twsapi_root/$TWSAPI_VERSION"
   rm -rf "$target" "$twsapi_root/INSTALLED"
   install -d -m 0755 "$twsapi_root"
-  # The vendor installer runs unprivileged (as nobody), into a scratch
-  # directory it owns, as step_gateway runs the Gateway's installer as its
-  # service user; only the Python client it unpacks is then installed, as
-  # root, under $target. -q: unattended; -dir: where to put the tree. The
-  # install4j installer writes under HOME, so it gets a scratch one.
-  local scratch
-  scratch=$(mktemp -d)
-  chmod 0755 "$scratch"
-  install -d -o nobody -g nogroup -m 0700 "$scratch/home" "$scratch/tree"
-  install -m 0644 "$installer" "$scratch/installer.sh"
-  runuser -u nobody -- env HOME="$scratch/home" sh "$scratch/installer.sh" -q -dir "$scratch/tree" >/dev/null
-  local unpacked
-  unpacked=$(find "$scratch/tree" -type d -name pythonclient -path '*/source/*' | head -n 2)
-  if test "$(printf '%s\n' "$unpacked" | grep -c .)" != 1; then
-    rm -rf "$scratch"
-    die "the TWS API ${TWSAPI_VERSION} tree has not exactly one source/pythonclient; not installing"
+  if test "$arch" = aarch64; then
+    # Verifies the archive against its pin again, then unpacks only its one
+    # source/pythonclient, as $target/pythonclient; refuses with nothing
+    # written otherwise.
+    python3 -I "$here/twsapi-archive.py" "$installer" "$pinned_sha" "$target" \
+      || die "the TWS API ${TWSAPI_VERSION} archive was refused; not installing"
+  else
+    # The vendor installer runs unprivileged (as nobody), into a scratch
+    # directory it owns, as step_gateway runs the Gateway's installer as its
+    # service user; only the Python client it unpacks is then installed, as
+    # root, under $target. -q: unattended; -dir: where to put the tree. The
+    # install4j installer writes under HOME, so it gets a scratch one.
+    local scratch
+    scratch=$(mktemp -d)
+    chmod 0755 "$scratch"
+    install -d -o nobody -g nogroup -m 0700 "$scratch/home" "$scratch/tree"
+    install -m 0644 "$installer" "$scratch/installer.sh"
+    runuser -u nobody -- env HOME="$scratch/home" sh "$scratch/installer.sh" -q -dir "$scratch/tree" >/dev/null
+    local unpacked
+    unpacked=$(find "$scratch/tree" -type d -name pythonclient -path '*/source/*' | head -n 2)
+    if test "$(printf '%s\n' "$unpacked" | grep -c .)" != 1; then
+      rm -rf "$scratch"
+      die "the TWS API ${TWSAPI_VERSION} tree has not exactly one source/pythonclient; not installing"
   fi
   if ! test -f "$unpacked/setup.py" && ! test -f "$unpacked/pyproject.toml"; then
     rm -rf "$scratch"
@@ -230,6 +259,7 @@ step_twsapi() {
   chown -R root:root "$target"
   chmod -R u=rwX,go=rX "$target"
   rm -rf "$scratch"
+  fi
   local client="$target/pythonclient"
   # A fresh environment each time: nothing of an earlier ibapi remains. The
   # system site packages give pip the setuptools and wheel it builds with,
@@ -239,7 +269,7 @@ step_twsapi() {
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
   "$adapter_venv/bin/python3" -c 'import ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
     || die "ibapi did not import from $adapter_venv after installing it; not recording it"
-  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\n' "$TWSAPI_VERSION" "$TWSAPI_SHA256" >"$twsapi_root/INSTALLED.tmp"
+  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\n' "$TWSAPI_VERSION" "$pinned_sha" >"$twsapi_root/INSTALLED.tmp"
   chmod 0644 "$twsapi_root/INSTALLED.tmp"
   mv "$twsapi_root/INSTALLED.tmp" "$twsapi_root/INSTALLED"
   log "ibapi from TWS API ${TWSAPI_VERSION} installed into $adapter_venv; recorded in $twsapi_root/INSTALLED"
