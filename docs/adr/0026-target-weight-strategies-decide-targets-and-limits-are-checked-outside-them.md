@@ -912,8 +912,10 @@ stand as recorded (AGENTS.md rule 6).
   of those opens, and from then on it holds no buy. It stays
   netted from the holding, since it may still execute (point 5). The tool
   finds it from the orders listing and the calendar, never from the
-  export, and reports it as `set-aside` when it never filled and is Go's
-  planned sell in shares; any other set-aside sell fails. One that
+  export, and reports it as `set-aside` when it never filled and either is Go's
+  planned sell of exactly its shares, or is an unpriced sale of a holding
+  with no reference price that was not a pending target; any other
+  set-aside sell fails. One that
   later fills in full is an ordinary sell, filled after buys it no longer
   held; one left partly filled fails `ira-orders`.)*
 - **D7-F is dropped from the parity scope.** Point 7, item 2's "repeat
