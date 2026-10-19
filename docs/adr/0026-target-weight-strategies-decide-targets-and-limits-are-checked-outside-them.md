@@ -991,7 +991,12 @@ target next changed; point 2 said nothing of a partial fill.
   each order's client order ID and the venue's first word on it,
   `rejected` or `accepted`, omitted while there is none; an order with none
   yet other than the watched one also records its side, shares and limit
-  as released and its venue order ID once a lifecycle report named it), so
+  as released and its venue order ID once a lifecycle report named it; the
+  list is bounded, from the order after the last one the venue accepted,
+  and once buys are stopped to the two rejections that stopped them and
+  the orders not yet ruled on, at most eight in all, the oldest beyond
+  that dropped unseen, as in a dry-run, which never hears a verdict, and
+  counted in `boost.rejection_run_dropped`), so
   a run restarted from the decision rebuilds the run exactly and counts as
   the full run does: an order the venue accepted, by an execution or a
   report, is never counted as undecided after the restart, and the venue's
@@ -1105,7 +1110,8 @@ A journal holding a gap or such an order decides differently under an
 earlier build: target-weight rules version **1.18.0** (ADR 0016).
 `strategy.targets.decided` moves to schema version **6** for the new
 Boost fields, `replan`, `replan_withheld`, `watched` (with its
-`venue_order_id`), `venue_rejections` (with `rejection_run`, and
+`venue_order_id`), `venue_rejections` (with `rejection_run` and
+`rejection_run_dropped`, and
 `rejected_while_stopped` and `rejections_while_stopped` after the stop)
 and `gap_sessions`, each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
 golden cases for both rules (`TestSyntheticGoldenBoostGap`;

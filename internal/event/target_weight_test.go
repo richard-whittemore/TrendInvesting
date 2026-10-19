@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -736,4 +737,29 @@ func TestBoostRejectionsWhileStoppedValidate(t *testing.T) {
 	expectInvalid(t, "without its order", v, func(p *P) {
 		p.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRejected, Released: 12}}
 	}, "order")
+}
+
+// TestBoostRejectionRunIsBounded: a decision records at most BoostRunLimit
+// orders of the run of rejections, and a count of the orders the bound has
+// dropped, never negative (ADR 0026, point 5).
+func TestBoostRejectionRunIsBounded(t *testing.T) {
+	type P = event.TargetsDecidedPayload
+	undecided := func(n int) []event.BoostRunOrder {
+		var run []event.BoostRunOrder
+		for i := range n {
+			run = append(run, event.BoostRunOrder{ClientOrderID: "tw-" + strconv.Itoa(i), Side: event.OrderSideBuy, Released: 10, LimitPrice: 100})
+		}
+		return run
+	}
+	v := validTargetsDecided()
+	v.Boost.RejectionRun = undecided(event.BoostRunLimit)
+	v.Boost.RejectionRunDropped = 3
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a run at the limit with orders dropped is valid: %v", err)
+	}
+	if (event.BoostFigures{RejectionRunDropped: 1}).IsZero() {
+		t.Error("figures with dropped orders are not empty")
+	}
+	expectInvalid(t, "a run over the limit", v, func(p *P) { p.Boost.RejectionRun = undecided(event.BoostRunLimit + 1) }, "at most")
+	expectInvalid(t, "a negative drop count", v, func(p *P) { p.Boost.RejectionRunDropped = -1 }, "dropped")
 }

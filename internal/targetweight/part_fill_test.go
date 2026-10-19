@@ -893,7 +893,7 @@ func assertRecoveredAsTheFullRun(t *testing.T, opts options, n int) {
 	full := simulate(t, opts)
 	decisions := ofType(full.decisions, event.TargetsDecidedEventType)
 	recovery := decisions[n]
-	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reports: venueReports(full.inputs, n), kill: opts.kill})
+	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reports: venueReports(full.inputs, n), kill: opts.kill, closes: opts.closes})
 	got, want := ofType(r.decisions, event.TargetsDecidedEventType), decisions[n+1:]
 	if len(got) != len(want) {
 		t.Fatalf("the recovered run records %d decisions, the full run %d after session %d", len(got), len(want), n)
@@ -1031,4 +1031,42 @@ func TestAnExitPartFilledWhileBuysAreStoppedIsReplannedNotPaged(t *testing.T) {
 	if got := releasedBy(t, r.decisions, 21); len(got) != 1 || got[0].Side != event.OrderSideSell {
 		t.Errorf("session 21 releases %+v, want the rest of the exit sold", got)
 	}
+}
+
+// TestTheRunOfRejectionsStaysBoundedWhileBuysAreStopped: the venue rejects
+// the re-plan and its one re-plan (the stop, session 19), then rejects
+// Boost's exit at every session, which is planned and released again each
+// time (ADR 0026, point 2, "Boost"). Each decision records the run of
+// rejections (point 5) and it must not grow with the sessions since the
+// stop: it holds the rejections that made the stop and at most the
+// undecided orders the bound allows (BoostRunLimit).
+func TestTheRunOfRejectionsStaysBoundedWhileBuysAreStopped(t *testing.T) {
+	closes := syntheticCloses()
+	for i := range 40 {
+		closes = append(closes, 146+float64(float64(i%3)*0.1))
+	}
+	reject := map[int]bool{18: true, 19: true}
+	for i := 21; i < len(closes); i++ {
+		reject[i] = true
+	}
+	opts := options{closes: closes, partFill: map[int]int64{17: 5}, reject: reject}
+	r := simulate(t, opts)
+	decided := targets(t, r.decisions)
+	if len(decided) < 60 {
+		t.Fatalf("setup: %d decisions, want a long stop", len(decided))
+	}
+	for n := 19; n < len(decided); n++ {
+		d := decided[n].Boost
+		rejected := 0
+		for _, o := range d.RejectionRun {
+			if o.Verdict == event.RunVerdictRejected {
+				rejected++
+			}
+		}
+		if d.VenueRejections != 2 || len(d.RejectionRun) > event.BoostRunLimit || rejected < 2 {
+			t.Fatalf("session %d: %d rejections, a run of %d with %d rejected, want two and a run of at most %d holding them",
+				n, d.VenueRejections, len(d.RejectionRun), rejected, event.BoostRunLimit)
+		}
+	}
+	assertRecoveredAsTheFullRun(t, opts, 40)
 }

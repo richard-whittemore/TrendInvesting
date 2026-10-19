@@ -291,6 +291,9 @@ type Handler struct {
 	// what the venue has shown of each, from which rejections is counted;
 	// every decision records it (BoostFigures.RejectionRun).
 	run []runOrder
+	// runDropped counts the orders the bound on run has dropped unseen
+	// (BoostFigures.RejectionRunDropped).
+	runDropped int
 	// withheld is the rejection that brought the count to
 	// maxVenueRejections, whichever order it was, held until the next
 	// decision, decided or withheld, records it (BoostFigures.ReplanWithheld):
@@ -489,6 +492,7 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	h.replan = p.Boost.ReplanPending
 	h.rejections = p.Boost.VenueRejections
 	h.rejectionsWhileStopped = p.Boost.RejectionsWhileStopped
+	h.runDropped = p.Boost.RejectionRunDropped
 	// A withheld decision carries the pending re-plan's cause forward. A
 	// decided one left a re-plan pending only by its own order's refusal:
 	// refused, unless the order refused was a rejection's one re-plan, which
@@ -814,6 +818,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	if outcome.Released != nil {
 		h.watch = &watched{order: *outcome.Released, afterRejection: afterRejection}
 		h.run = append(h.run, runOrder{id: outcome.Released.ClientOrderID})
+		h.countRejections()
 	}
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
@@ -995,7 +1000,7 @@ func (h *Handler) observeOutcome(id string, rejected bool) {
 		if r.id != id {
 			continue
 		}
-		if r.rejected || r.accepted {
+		if r.rejected {
 			return
 		}
 		r.rejected, r.accepted = rejected, !rejected
@@ -1031,17 +1036,12 @@ func (h *Handler) recordRejections(figures *event.BoostFigures) {
 // later rejection, as the venue would have ruled on it first; should it
 // prove rejected after all, the count takes it in then. Once the count has
 // reached maxVenueRejections it stays there, never above it, so the stop
-// holds until a fresh run. The orders up to the latest accepted are
-// dropped: no run reaches past it.
+// holds until a fresh run. The run is trimmed first (trimRun), whether or
+// not the count is already there.
 func (h *Handler) countRejections() {
+	h.trimRun()
 	if h.rejections >= maxVenueRejections {
 		return
-	}
-	for i := len(h.run) - 1; i >= 0; i-- {
-		if h.run[i].accepted {
-			h.run = h.run[i+1:]
-			break
-		}
 	}
 	last := -1
 	for i, r := range h.run {
@@ -1054,6 +1054,53 @@ func (h *Handler) countRejections() {
 		n++
 	}
 	h.rejections = min(n, maxVenueRejections)
+}
+
+// trimRun bounds the run to what the count and the stop need, so a decision
+// records a list of at most event.BoostRunLimit orders (ADR 0026, point 2,
+// "Boost", amended 2026-10-18, and point 5). Before the stop the run starts
+// after the latest accepted order, since no run reaches past it. At the stop
+// the count is held at maxVenueRejections, so the run keeps the newest
+// rejections that made it and the undecided orders, which a late verdict
+// may still concern, and drops every order the venue has otherwise ruled on.
+// An order with no verdict yet is kept only to event.BoostRunUndecidedLimit
+// in the stop, and the run to event.BoostRunLimit before it: a dry-run sends
+// nothing, so no verdict ever arrives, and the oldest are dropped unseen,
+// counted in runDropped and recorded (BoostFigures.RejectionRunDropped).
+func (h *Handler) trimRun() {
+	if h.rejections < maxVenueRejections {
+		for i := len(h.run) - 1; i >= 0; i-- {
+			if h.run[i].accepted {
+				h.run = h.run[i+1:]
+				break
+			}
+		}
+		if over := len(h.run) - event.BoostRunLimit; over > 0 {
+			h.run, h.runDropped = h.run[over:], h.runDropped+over
+		}
+		return
+	}
+	keptRejected, keptUndecided := 0, 0
+	kept := make([]runOrder, 0, len(h.run))
+	for i := len(h.run) - 1; i >= 0; i-- {
+		switch r := h.run[i]; {
+		case r.accepted:
+		case r.rejected:
+			keptRejected++
+			if keptRejected <= maxVenueRejections {
+				kept = append(kept, r)
+			}
+		default:
+			keptUndecided++
+			if keptUndecided > event.BoostRunUndecidedLimit {
+				h.runDropped++
+				continue
+			}
+			kept = append(kept, r)
+		}
+	}
+	slices.Reverse(kept)
+	h.run = kept
 }
 
 // watched is the order the latest decided session released, and its
@@ -1144,7 +1191,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
 		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(),
-		VenueRejections: h.rejections, RejectionRun: h.rejectionRun(), RejectionsWhileStopped: h.rejectionsWhileStopped,
+		VenueRejections: h.rejections, RejectionRun: h.rejectionRun(), RejectionRunDropped: h.runDropped, RejectionsWhileStopped: h.rejectionsWhileStopped,
 	}
 }
 
@@ -1159,8 +1206,6 @@ func (h *Handler) rejectionRun() []event.BoostRunOrder {
 		switch {
 		case r.rejected:
 			o.Verdict = event.RunVerdictRejected
-		case r.accepted:
-			o.Verdict = event.RunVerdictAccepted
 		case h.watch == nil || h.watch.order.ClientOrderID != r.id:
 			released := h.released[r.id]
 			o.Side, o.Released, o.LimitPrice, o.VenueOrderID = released.Side, released.Quantity, released.LimitPrice, r.venueID

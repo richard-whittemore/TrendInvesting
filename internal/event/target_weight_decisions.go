@@ -212,6 +212,12 @@ type BoostFigures struct {
 	// recovered, never recomputed), and reads the venue's reports on each
 	// order with none yet. Omitted when empty.
 	RejectionRun []BoostRunOrder `json:"rejection_run,omitempty"`
+	// RejectionRunDropped counts the orders the bound on RejectionRun
+	// (BoostRunLimit, BoostRunUndecidedLimit) has dropped from the run
+	// unseen, oldest first: orders the venue never ruled on, as in a dry-run,
+	// where no verdict ever arrives. It is recorded so the cap shows in the
+	// log; a restart from the decision counts on from it. Omitted when none.
+	RejectionRunDropped int `json:"rejection_run_dropped,omitempty"`
 	// RejectedWhileStopped are the account's orders the venue rejected after
 	// two rejections in a row stopped Boost's buys, read since the last
 	// decision: a sell sent while the stop is in force, or an order released
@@ -229,6 +235,19 @@ type BoostFigures struct {
 // may reject in a row before Boost buys nothing more until the owner starts
 // a fresh run (ADR 0026, point 2, "Boost", amended 2026-10-18).
 const BoostVenueRejectionLimit = 2
+
+// BoostRunUndecidedLimit is how many orders with no word from the venue yet
+// a decision records in the run of rejections once buys are stopped: the
+// newest. Before the stop the whole run is bounded by BoostRunLimit. A
+// dry-run sends nothing, so no verdict ever arrives and the undecided tail
+// would grow with every order released (ADR 0026, point 5).
+const BoostRunUndecidedLimit = 6
+
+// BoostRunLimit is the most orders BoostFigures.RejectionRun holds: the
+// newest rejections that stopped buys (BoostVenueRejectionLimit) and the
+// newest undecided orders (BoostRunUndecidedLimit). Acceptance ends the run,
+// so nothing older than the latest accepted order is kept.
+const BoostRunLimit = BoostVenueRejectionLimit + BoostRunUndecidedLimit
 
 // The venue's first word on an order of a Boost run of rejections
 // (BoostRunOrder.Verdict); none yet is the empty verdict.
@@ -334,7 +353,7 @@ func (b BoostFigures) IsZero() bool {
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
 		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
 		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero() && b.VenueRejections == 0 &&
-		len(b.RejectionRun) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0
+		len(b.RejectionRun) == 0 && b.RejectionRunDropped == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0
 }
 
 // validateGaps checks the gap sessions against the decided session's date:
@@ -912,10 +931,14 @@ func (b BoostFigures) validate() []error {
 // validateRun checks the run of rejections: each order named once, its
 // verdict rejected, accepted or none; an order with none yet other than the
 // watched one records its release, no other does; the watched order, when
-// in the run, is its last, being the latest released; and the run holds at
-// least the rejections counted.
+// in the run, is its last, being the latest released; the run holds at least
+// the rejections counted and at most BoostRunLimit orders.
 func (b BoostFigures) validateRun() []error {
 	var errs []error
+	if len(b.RejectionRun) > BoostRunLimit || b.RejectionRunDropped < 0 {
+		errs = append(errs, fmt.Errorf("the boost run of rejections holds at most %d orders and drops a count of them, never fewer than none; got %d, %d dropped",
+			BoostRunLimit, len(b.RejectionRun), b.RejectionRunDropped))
+	}
 	seen := map[string]bool{}
 	rejected := 0
 	for i, o := range b.RejectionRun {

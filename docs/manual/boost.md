@@ -150,9 +150,12 @@ ended in an incident). An order IBKR accepts ends the run of rejections:
 one with any fill, or any report from IBKR but "submitted", even after a
 later order replaced it. "Submitted" is not enough, because IBKR reports
 it before some rejections. An order IBKR has said nothing about yet
-neither breaks nor joins the run until it does: if IBKR rejects an older
-order late, after a newer one, that late rejection can be the one that
-makes two, and that session's decision records it (`replan_withheld`)
+does not count, and a rejection read before IBKR rules on it counts back
+only to it (a rejection, that order, a rejection is one in a row, not
+two); should IBKR reject that order after all, it joins the run then. So
+if IBKR rejects an older order late, after a newer one, that late
+rejection can be the one that makes two, and that session's decision
+records it (`replan_withheld`)
 and pages you, whichever order it was and even if the order now watched
 was accepted (`TestALateRejectionThatStopsBuysIsRecordedAndPaged`). The
 count stops at two. Without this stop, a boost that turns on and off at
@@ -160,8 +163,15 @@ each session would send IBKR a rejected order every session. Each
 decision records the rejections in a row (`venue_rejections`) and the
 orders they are counted over, with what IBKR has said of each
 (`rejection_run`), so a restart from it counts exactly as the run before
-it did; the fresh run starts from none
-(`TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange`,
+it did. The list stays short: it starts after the last order IBKR
+accepted, and once buys are stopped it keeps only the two rejections that
+stopped them and the orders IBKR has not ruled on, at most eight orders in
+all; in a dry run, which sends nothing and so never hears from IBKR, only
+the newest eight orders are kept and `rejection_run_dropped` counts the
+older ones; the fresh run starts from none
+(`TestTheRunOfRejectionsStaysBoundedWhileBuysAreStopped`,
+`TestADryRunsUndecidedOrdersAreBoundedAndTheCapIsRecorded`,
+`TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange`,
 `TestAnAcceptedOrderReplacedBeforeItsEndStillEndsTheRunOfRejections`,
 `TestARunRecoveredBehindAnUndecidedOrderCountsAsTheFullRun`).
 
