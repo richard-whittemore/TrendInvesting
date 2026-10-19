@@ -856,6 +856,16 @@ func TestBoostWorkingOrdersValidate(t *testing.T) {
 	}), "working")
 	expectInvalid(t, "fully filled", v, at(0, func(o *event.BoostWatchedOrder) { o.Filled, o.Fills = 39, nil }), "filled")
 	expectInvalid(t, "without its release", v, at(1, func(o *event.BoostWatchedOrder) { o.Released = 0 }), "released")
+	expectInvalid(t, "naming nothing", v, func(p *P) {
+		p.Boost.WorkingOrders = append(slices.Clone(p.Boost.WorkingOrders), event.BoostWatchedOrder{})
+	}, "client order ID")
+	early := event.BoostWatchedFill{FillID: "f1", Quantity: 1, Price: 550, FilledAt: twSession.Add(-2 * time.Hour)}
+	expectInvalid(t, "a fill of another working order", v, at(1, func(o *event.BoostWatchedOrder) {
+		o.Filled, o.Fills = 1, []event.BoostWatchedFill{early}
+	}), "two orders")
+	expectInvalid(t, "a fill of the watched order", v, func(p *P) {
+		p.Boost.Watched.Filled, p.Boost.Watched.Fills, p.Boost.UndecidedOrders = 1, []event.BoostWatchedFill{early}, nil
+	}, "two orders")
 }
 
 // TestBoostRejectionsWhileStoppedValidate: once two rejections in a row

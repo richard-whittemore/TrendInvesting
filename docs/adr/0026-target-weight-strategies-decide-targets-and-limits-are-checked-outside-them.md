@@ -1001,13 +1001,15 @@ target next changed; point 2 said nothing of a partial fill.
   after the decision, and nothing beyond it, so nothing is trimmed: the
   rejections in a row (`boost.venue_rejections`, omitted when none); the
   orders they name (`boost.rejected_in_a_row`, each client order ID and,
-  when a lifecycle report named it, the venue order ID, exactly as many
+  when a lifecycle report or a broker snapshot's open-order listing named
+  it, the venue order ID, exactly as many
   as the count, so at the stop the two rejections that stopped buys,
   which stay named until the fresh run and are named in the page); and
   every order decided sessions released that the venue has not yet ruled
   on (`boost.undecided_orders`, in release order, each but the watched one
   with its side, shares and limit as released and its venue order ID once
-  a lifecycle report named it), and how many of those were released before
+  a lifecycle report or a broker snapshot's open-order listing under its
+  client order ID named it), and how many of those were released before
   the latest rejection counted (`boost.undecided_before_rejection`, omitted
   when none), which an acceptance is compared with. A run restarted from the decision restores
   these exactly and counts as the full run does: a late verdict on any
@@ -1048,6 +1050,15 @@ target next changed; point 2 said nothing of a partial fill.
   `boost.working_orders` (omitted when none), so a run restarted from the
   decision reads the venue's later fills and cancel of it and nets a
   working sell as on an order it released; a dry-run decision lists none.
+  Its venue order ID is recorded once a lifecycle report or a broker
+  snapshot's open-order listing names it, even when the venue's first word
+  on it was an execution, so the restarted run matches IBKR's listing of a
+  working sell with no client order ID echoed. A run restarted from a
+  decision whose watched order the venue accepted and has not ended (it
+  is neither undecided nor cleared) restores it as working too, so once a
+  later order replaces it the decision records it as the full run's does;
+  an order replaced as the watched one is listed after the other working
+  orders.
   A fresh run starts from none. A refusal's re-plan pending at the second rejection is
   dropped, and the rejection is recorded all the same. One read during a
   restarted run's warm-up, whose sessions only feed the indicators, is
@@ -1091,8 +1102,9 @@ target next changed; point 2 said nothing of a partial fill.
   filled so far and each execution (`fills`: fill ID, shares, price,
   commission, time), its terminal status once reported and when it
   occurred (`ended_at`), whether it is a rejection's one re-plan, and its
-  venue order ID (`venue_order_id`, from the first lifecycle report on it,
-  omitted before one)). A
+  venue order ID (`venue_order_id`, from the first lifecycle report or
+  broker snapshot's open-order listing that names it, omitted before
+  one)). A
   run restarted from that decision watches the order still and reads the
   venue's fill and lifecycle reports on it as on an order it released,
   adding it to any order a broker snapshot read before the recovery

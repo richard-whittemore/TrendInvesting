@@ -227,7 +227,8 @@ type BoostFigures struct {
 	// late verdict on any of them counts as it would have when it came
 	// (ADR 0026, point 2, "Boost", amended 2026-10-18). Each but the watched
 	// order records its side, shares and limit as released and its venue
-	// order ID once a lifecycle report named it, so a run restarted from the
+	// order ID once a lifecycle report or a broker snapshot's open-order
+	// listing named it, so a run restarted from the
 	// decision reads the venue's reports on it, and nets a working sell, as
 	// on an order it released (ADR 0026, point 5; ADR 0019, amended
 	// 2026-10-15); the watched order's own are in Watched. Omitted when none.
@@ -285,8 +286,9 @@ type BoostFigures struct {
 const BoostVenueRejectionLimit = 2
 
 // BoostRejectedOrder is one of the orders BoostFigures.VenueRejections
-// counts: its client order ID and, when a lifecycle report named it, the
-// venue's own ID for it, so the record and the page can name it.
+// counts: its client order ID and, when a lifecycle report or a broker
+// snapshot's open-order listing named it, the venue's own ID for it, so the
+// record and the page can name it.
 type BoostRejectedOrder struct {
 	ClientOrderID string `json:"client_order_id"`
 	VenueOrderID  string `json:"venue_order_id,omitempty"`
@@ -295,7 +297,8 @@ type BoostRejectedOrder struct {
 // BoostUndecidedOrder is an order a decided session released that the
 // venue has not yet ruled on (BoostFigures.UndecidedOrders): its client
 // order ID and, unless it is the watched order, its side, shares and limit
-// as released and its venue order ID once a lifecycle report named it.
+// as released and its venue order ID once a lifecycle report or a broker
+// snapshot's open-order listing named it.
 type BoostUndecidedOrder struct {
 	ClientOrderID string  `json:"client_order_id"`
 	Side          string  `json:"side,omitempty"`
@@ -332,7 +335,8 @@ type BoostWatchedOrder struct {
 	EndedAt        time.Time          `json:"ended_at,omitzero"`
 	AfterRejection bool               `json:"after_rejection,omitempty"`
 	// VenueOrderID is the venue's own ID for the order, from the first
-	// lifecycle report on it, omitted before one: a run restarted from the
+	// lifecycle report or broker snapshot's open-order listing that names
+	// it, omitted before one: a run restarted from the
 	// decision matches IBKR's listing of the order by it when IBKR echoes no
 	// client order ID (ADR 0026, point 5, amended 2026-10-18).
 	VenueOrderID string `json:"venue_order_id,omitempty"`
@@ -1048,11 +1052,26 @@ func (b BoostFigures) validateRejections() []error {
 		errs = append(errs, errors.New("a dry-run boost decision lists no undecided, cleared or working order and counts no rejection: no venue receives its orders, so there is nothing to rule on or clear"))
 	}
 	// A working order is an accepted one that works besides the watched
-	// order: still working, named once, and in no other list.
+	// order: named, still working, named once, and in no other list. An
+	// execution is of one order, so no fill id is recorded under two of
+	// them, the watched order and the working ones (ADR 0019, "Explained
+	// means"; fail closed, AGENTS.md).
 	working := map[string]bool{}
+	fillOf := map[string]string{}
+	for _, f := range b.Watched.Fills {
+		fillOf[f.FillID] = b.Watched.ClientOrderID
+	}
 	for _, o := range b.WorkingOrders {
 		errs = append(errs, o.validate()...)
+		for _, f := range o.Fills {
+			if other, ok := fillOf[f.FillID]; ok && other != o.ClientOrderID {
+				errs = append(errs, fmt.Errorf("boost records fill id %s on two orders, %s and %s", f.FillID, other, o.ClientOrderID))
+			}
+			fillOf[f.FillID] = o.ClientOrderID
+		}
 		switch {
+		case o.ClientOrderID == "":
+			errs = append(errs, errors.New("a working boost order names its client order ID"))
 		case o.Status != "":
 			errs = append(errs, fmt.Errorf("working boost order %s has ended; a working order has not", o.ClientOrderID))
 		case o.ClientOrderID == b.Watched.ClientOrderID:

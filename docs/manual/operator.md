@@ -407,7 +407,10 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
 `TestTheOwnersClearanceEndsARebalanceInProgress`,
-`TestAClearanceMustNameTheRebalanceInProgress`, `TestBoostReadsNoClearance`
+`TestAClearanceMustNameTheRebalanceInProgress`,
+`TestBoostRefusesAClearanceOfAnOrderItNeverReleased`,
+`TestAClearedNeverSentOrderIsNoLongerUndecided`,
+`TestAClearanceOfNoUndecidedBoostOrderIsRefused`
 (`internal/targetweight`); `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`,
 `TestAnApprovalNeverUnderstatesTheSaleAttempt`,
 `TestProposeApprovalStatesTheEndStateOrClearsTheIncident`

@@ -1493,8 +1493,7 @@ func applyAfter(t *testing.T, r run, typ string, version uint32, id string, at t
 // an open order under its client order ID shows the order reached IBKR,
 // whether or not a lifecycle report has named it yet, so the clearance of
 // it as never sent is refused (ADR 0026, point 2, "Boost", amended
-// 2026-10-18; fail closed, AGENTS.md). A listing recorded before the
-// restart is recovered with the decision.
+// 2026-10-18; fail closed, AGENTS.md).
 func TestAClearanceOfAnOrderIBKRListsIsRefused(t *testing.T) {
 	for _, session := range []int{16, 17, 18} { // 18 is the watched order
 		closes := flippingCloses()[:20]
@@ -1561,5 +1560,109 @@ func TestARunRecoveredBehindAWorkingOrderTheVenueAcceptedCountsAsTheFullRun(t *t
 	}
 	for _, n := range []int{17, 18, 24} {
 		assertRecoveredAsTheFullRun(t, opts, n)
+	}
+}
+
+// TestARunRecoveredWatchingAnOrderTheVenueAcceptedCountsAsTheFullRun: the
+// entry released at session 16 part-fills 5 shares, so the venue accepted
+// it, and works on until its cancel at session 21; Boost's exit at session
+// 20 replaces it as the watched order. A run restarted from a decision taken
+// while the entry was still the watched order restores it as accepted and
+// still working, so once the exit replaces it the decision records it among
+// the working orders, as the full run's does (ADR 0026, point 5: recovered,
+// never recomputed).
+func TestARunRecoveredWatchingAnOrderTheVenueAcceptedCountsAsTheFullRun(t *testing.T) {
+	opts := options{partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 21}}
+	full := simulate(t, opts)
+	if w := targets(t, full.decisions)[20].Boost.WorkingOrders; len(w) != 1 || w[0].Filled != 5 {
+		t.Fatalf("setup: session 20 records working orders %+v, want the entry with its 5 filled", w)
+	}
+	for _, n := range []int{17, 18, 19} {
+		assertRecoveredAsTheFullRun(t, opts, n)
+	}
+}
+
+// TestARunRecoveredBehindAWorkingSellMatchesItsListingByVenueOrderID:
+// Boost's exit, a sell released at session 17, executes 5 shares at session
+// 18 before any lifecycle report names it, so the venue accepted it with no
+// venue order ID known; the entry released at session 18 replaces it as
+// the watched order. IBKR's listing at session 19 names the exit under its
+// client order ID, so its venue order ID is known from then on, and the
+// decision records it with the working order. At session 21 the margin
+// alarm turns urgent and IBKR lists the exit with no client order ID
+// echoed: the full run, and a run restarted from session 20's decision,
+// both match the listing to the exit by that ID and net the exit once in
+// the sale back to 98%, never twice (ADR 0019, amended
+// 2026-10-15, "net of every working sell"; ADR 0026, point 5).
+func TestARunRecoveredBehindAWorkingSellMatchesItsListingByVenueOrderID(t *testing.T) {
+	base := options{closes: flippingCloses()[:23], brokers: true, hold: heldFrom(18), unsent: []int{17}}
+	exit := releasedBy(t, simulate(t, base).decisions, 17)
+	if len(exit) != 1 || exit[0].Side != event.OrderSideSell {
+		t.Fatalf("setup: session 17 releases %+v, want the exit", exit)
+	}
+	o := exit[0]
+	venueID := "ib-" + o.ClientOrderID
+	opts := base
+	opts.fills = map[int][]event.TargetWeightFillPayload{18: {{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:early", InstrumentID: o.InstrumentID,
+		Side: o.Side, Quantity: 5, Price: o.LimitPrice, FilledAt: sessionEnd(18).Add(-2 * time.Hour)}}}
+	opts.brokerMutate = map[int]func(*event.BrokerSnapshotPayload){
+		19: func(b *event.BrokerSnapshotPayload) {
+			b.OpenOrders = []event.BrokerOrder{{BrokerOrderID: venueID, ClientOrderID: o.ClientOrderID, InstrumentID: "SPY", Side: event.OrderSideSell,
+				Status: event.BrokerOrderWorking, RemainingQuantity: o.Quantity - 5}}
+		},
+		21: func(b *event.BrokerSnapshotPayload) {
+			b.NetLiquidation *= 0.8
+			b.ExcessLiquidity = 0.1 * b.NetLiquidation
+			b.OpenOrders = []event.BrokerOrder{{BrokerOrderID: venueID, InstrumentID: "SPY", Side: event.OrderSideSell,
+				Status: event.BrokerOrderWorking, RemainingQuantity: o.Quantity - 5}}
+		},
+	}
+	full := simulate(t, opts)
+	if w := targets(t, full.decisions)[20].Boost.WorkingOrders; len(w) != 1 || w[0].ClientOrderID != o.ClientOrderID || w[0].VenueOrderID != venueID {
+		t.Fatalf("session 20 records working orders %+v, want the exit with the venue order ID %s its listing named", w, venueID)
+	}
+	want := sales(t, full.decisions)
+	if len(want) != 1 || want[0].Sale.WorkingSells == 0 || want[0].Sale.WorkingSells > o.Quantity {
+		t.Fatalf("the full run's sale back to 98%%: %+v, want one netting the exit's %d shares once", want, o.Quantity)
+	}
+	// The restarted run knows the session-19 listing only from the decision.
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[20]
+	inputs := slices.DeleteFunc(slices.Clone(full.inputs), func(e event.Envelope) bool { return e.ID == "broker:19" })
+	r := simulate(t, options{closes: opts.closes, brokers: true, recovery: &recovery, snapshots: inputs, hold: opts.hold})
+	got := sales(t, r.decisions)
+	if len(got) != 1 || got[0].Quantity != want[0].Quantity || got[0].Sale != want[0].Sale {
+		t.Errorf("the recovered run's sale back to 98%%: %+v, want the full run's %+v", got, want)
+	}
+}
+
+// TestARecoveredWorkingOrderStatingAnExecutionAlreadyReadIsRefused: a
+// broker snapshot read before the recovered decision releases the sale back
+// to 98%, and its execution is read. A decision whose working order states
+// that execution as its own is refused, and the run stops: an execution is
+// of one order, and counting it on two would net a sell twice (ADR 0019,
+// "Explained means"; fail closed, AGENTS.md).
+func TestARecoveredWorkingOrderStatingAnExecutionAlreadyReadIsRefused(t *testing.T) {
+	at := sessionEnd(0)
+	h, s := configured(t)
+	held := &account{cash: -2000, held: 60}
+	urgent := held.broker(at.Add(-2*time.Hour), 100)
+	urgent.ExcessLiquidity = 0.1 * urgent.NetLiquidation
+	sale := released(t, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k", urgent.AsOf, urgent)))
+	if len(sale) != 1 {
+		t.Fatalf("the urgent broker snapshot released %+v, want the sale back to 98%%", sale)
+	}
+	fill := held.fill(sale[0], "fill:sale", 1, sale[0].LimitPrice, at.Add(-time.Hour))
+	mustApply(t, h, s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, fill.FillID, fill.FilledAt, fill))
+	opts := options{closes: flippingCloses(), hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}}
+	recovery := ofType(simulate(t, opts).decisions, event.TargetsDecidedEventType)[17]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	if len(p.Boost.WorkingOrders) != 1 || len(p.Boost.WorkingOrders[0].Fills) != 1 {
+		t.Fatalf("setup: session 17 records working orders %+v, want one with one execution", p.Boost.WorkingOrders)
+	}
+	p.Boost.WorkingOrders[0].Fills[0].FillID = fill.FillID
+	_, err := h.Apply(context.Background(), s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, at, p))
+	if err == nil || !strings.Contains(err.Error(), "already applied") {
+		t.Errorf("the recovered decision restoring the sale's execution on its working order was read, err %v; want it refused", err)
 	}
 }

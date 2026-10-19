@@ -634,6 +634,16 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	for _, w := range p.Boost.WorkingOrders {
 		h.working = append(h.working, undecidedOrder{id: w.ClientOrderID, venueID: w.VenueOrderID})
 	}
+	// A watched order the venue accepted and has not ended, neither awaiting
+	// its verdict nor cleared, works as it does in the full run, where the
+	// acceptance put it among the working orders: it is recorded among them
+	// once a later release replaces it as the watched order (ADR 0026, point
+	// 5: recovered, never recomputed). No venue receives a dry-run's order.
+	if w := p.Boost.Watched; !w.IsZero() && w.Status == "" && p.Boost.NoVenue == "" &&
+		!slices.ContainsFunc(p.Boost.UndecidedOrders, func(r event.BoostUndecidedOrder) bool { return r.ClientOrderID == w.ClientOrderID }) &&
+		!slices.ContainsFunc(p.Boost.ClearedOrders, func(r event.BoostUndecidedOrder) bool { return r.ClientOrderID == w.ClientOrderID }) {
+		h.working = append(h.working, undecidedOrder{id: w.ClientOrderID, venueID: w.VenueOrderID})
+	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
 }
@@ -891,6 +901,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
 	}
 	if outcome.Released != nil {
+		h.unwatch()
 		h.watch = &watched{order: *outcome.Released, afterRejection: afterRejection}
 		// No venue receives a dry-run's order, so none will ever rule on it:
 		// it is never listed as awaiting a verdict, and the decision records
@@ -1015,22 +1026,36 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 }
 
 // learnListings reads the open orders IBKR lists: one listed under the
-// client order ID of an order the venue has not yet ruled on reached IBKR,
-// as a lifecycle report naming it would show, so its broker order ID is
-// its venue order ID, and the owner's clearance of it as never sent is
-// refused (applyClearance).
+// client order ID of an order this run released reached IBKR, as a
+// lifecycle report naming it would show, so its broker order ID is its
+// venue order ID (learnVenueID), and the owner's clearance of it as never
+// sent is refused (applyClearance).
 func (h *Handler) learnListings(listed []event.BrokerOrder) {
 	for _, l := range listed {
 		o, ok := h.released[l.ClientOrderID]
 		if !ok || l.ClientOrderID == "" || o.InstrumentID != l.InstrumentID {
 			continue
 		}
-		if w := h.watch; w != nil && w.order.ClientOrderID == l.ClientOrderID && w.venueID == "" {
-			w.venueID = l.BrokerOrderID
-		}
-		for i := range h.undecided {
-			if r := &h.undecided[i]; r.id == l.ClientOrderID && r.venueID == "" {
-				r.venueID = l.BrokerOrderID
+		h.learnVenueID(l.ClientOrderID, l.BrokerOrderID)
+	}
+}
+
+// learnVenueID records venueID as the venue order ID of order id, once a
+// lifecycle report or a broker snapshot's open-order listing names it, on
+// every list the order is on that does not know one yet: the watched
+// order, the orders awaiting the venue's verdict and the working orders.
+// An order accepted before any report named it, by an execution, so
+// records the ID once it is known, and a run restarted from the decision
+// matches IBKR's listing of it with no client order ID echoed by that ID
+// (ADR 0026, point 5, amended 2026-10-18).
+func (h *Handler) learnVenueID(id, venueID string) {
+	if w := h.watch; w != nil && w.order.ClientOrderID == id && w.venueID == "" {
+		w.venueID = venueID
+	}
+	for _, list := range [][]undecidedOrder{h.undecided, h.working} {
+		for i := range list {
+			if r := &list[i]; r.id == id && r.venueID == "" {
+				r.venueID = venueID
 			}
 		}
 	}
@@ -1061,14 +1086,7 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
-	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && w.venueID == "" {
-		w.venueID = p.OrderID
-	}
-	for i := range h.undecided {
-		if r := &h.undecided[i]; r.id == p.ClientOrderID && r.venueID == "" {
-			r.venueID = p.OrderID
-		}
-	}
+	h.learnVenueID(p.ClientOrderID, p.OrderID)
 	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && p.Terminal() && w.status == "" {
 		w.status, w.endedAt = p.Status, p.OccurredAt.UTC()
 	}
@@ -1100,8 +1118,9 @@ func (h *Handler) contradictsClearance(in event.Envelope, id string) error {
 }
 
 // undecidedOrder is an order a decided session released that the venue has
-// not yet ruled on, by client order ID, and its venue order ID once a
-// lifecycle report named it.
+// not yet ruled on, or one the venue accepted that still works, by client
+// order ID, and its venue order ID once a lifecycle report or a broker
+// snapshot's open-order listing named it (learnVenueID).
 type undecidedOrder struct {
 	id, venueID string
 }
@@ -1215,11 +1234,29 @@ func (h *Handler) recordRejections(figures *event.BoostFigures) {
 	figures.RejectedWhileStopped, h.stoppedRejections = h.stoppedRejections, nil
 }
 
+// unwatch moves the watched order, replaced by a later release, to the end
+// of the working orders when the venue accepted it and it still works, so
+// the working orders a decision records are in the same order whether the
+// run accepted it itself or restored it as accepted from a decision (ADR
+// 0026, point 5: recovered, never recomputed).
+func (h *Handler) unwatch() {
+	if h.watch == nil {
+		return
+	}
+	i := slices.IndexFunc(h.working, func(o undecidedOrder) bool { return o.id == h.watch.order.ClientOrderID })
+	if i < 0 {
+		return
+	}
+	o := h.working[i]
+	h.working = append(slices.Delete(h.working, i, i+1), o)
+}
+
 // watched is the order the latest decided session released, and its
 // status once the venue ended it, canceled (a DAY order's expiry included)
 // or invalid, and when that end occurred; empty while it may still execute.
 // afterRejection marks the one re-plan of an order the venue rejected;
-// venueID is the venue's own ID for it, from the first lifecycle report.
+// venueID is the venue's own ID for it, from the first lifecycle report or
+// broker snapshot's open-order listing that names it (learnVenueID).
 type watched struct {
 	order          event.OrderReleasedPayload
 	status         string

@@ -207,6 +207,17 @@ Which orders stay on `undecided_orders`, and when they leave:
   under `working_orders`, with its fills, so a run restarted from the
   decision still reads IBKR's later fills and cancellation of it
   (`TestARunRecoveredBehindAWorkingOrderTheVenueAcceptedCountsAsTheFullRun`).
+  That holds too when the restart is from a decision taken while the order
+  was still the watched one
+  (`TestARunRecoveredWatchingAnOrderTheVenueAcceptedCountsAsTheFullRun`).
+  The entry carries IBKR's own order ID once a status report or an
+  open-order listing names it, even when IBKR's first word on the order
+  was a fill, so after a restart a listing of a working sell that does not
+  echo Boost's order ID is still counted once, not as a second sell
+  (`TestARunRecoveredBehindAWorkingSellMatchesItsListingByVenueOrderID`).
+  A record that lists an unnamed working order, or the same fill under two
+  orders, is refused (`TestBoostWorkingOrdersValidate`,
+  `TestARecoveredWorkingOrderStatingAnExecutionAlreadyReadIsRefused`).
 - In **dry-run** no order reaches IBKR, so none is ever listed: each
   decision records `no_venue: "dry-run"` instead, and nothing is counted as
   accepted or rejected (`TestADryRunListsNoUndecidedOrder`). A dry-run
