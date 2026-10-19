@@ -233,6 +233,14 @@ compare IBKR's positions, cash and open orders with the journal yourself
 meets a state that stops it (`risk.order.refused`, with a reason). A
 refused order is never sent.
 
+**Rejections in a row.** Boost's count of its orders IBKR rejected since
+the last one IBKR accepted, each counted when IBKR's first word on it
+arrives, however late (`venue_rejections`). At two Boost's buys stop until
+a fresh run, while its sells still go; each decision names the orders
+counted (`rejected_in_a_row`), so at the stop the two that stopped buys,
+and the page names them too. See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
+
 **Release, released.** The risk gate's answer to an order that passes
 (`risk.order.released`). In the order's lifecycle, **released** also means
 a later input proves the adapter received it.
@@ -291,6 +299,12 @@ is not held back. It is never an execution. See [engine](engine.md).
 
 **Torn tail.** A partial group at the end of a log, left by a crash in the
 middle of a write. A resume leaves it out; nothing from it was released.
+
+**Undecided order.** An order Boost released that IBKR has neither
+accepted nor rejected yet: no fill, and no report but "submitted". Each
+decision lists them (`undecided_orders`), so IBKR's late word on any of
+them counts after a restart as it would have without one. See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Universe.** For momentum, the 500 US common stocks with the highest
 dollar volume (at $5 or more) on the decision session. See

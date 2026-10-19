@@ -236,7 +236,8 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
 		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
 			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
-			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100,
+			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2,
+				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-6"}, {ClientOrderID: "tw-7"}},
 				ReplanWithheld: event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-7", Released: 37}}})
 	s.decided(1, 0.98)
 	got, err := report.Alerts(s.out)
@@ -255,7 +256,9 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 	// exit and the margin alarm's sale back to 98%, still go (ADR 0026,
 	// points 2, "Boost", amended 2026-10-18, and 4), and the page says so,
 	// so the owner never sells by hand into a program sale.
-	for _, want := range append([]string{"tw-7", "37", "rejected", "two orders in a row", "sends no more buys", "exit", "sale back to 98%", "still go",
+	// It names both rejections that stopped the buys, the other by its
+	// venue order ID too, so the owner finds both in IBKR's order log.
+	for _, want := range append([]string{"tw-7", "37", "rejected", "two orders in a row", "after order tw-6 (IBKR order ib-6)", "sends no more buys", "exit", "sale back to 98%", "still go",
 		"operator approve", "-clear-incident", "fresh run"}, handSale...) {
 		if !contains(a.Body, want) {
 			t.Errorf("page lacks %q: %q", want, a.Body)
@@ -280,7 +283,7 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
 			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
 			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: 3,
-				RejectionRun: []event.BoostRunOrder{{ClientOrderID: "tw-1", Verdict: event.RunVerdictRejected}, {ClientOrderID: "tw-2", Verdict: event.RunVerdictRejected}},
+				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-1"}, {ClientOrderID: "tw-2", VenueOrderID: "ib-2"}},
 				RejectedWhileStopped: []event.BoostReplan{
 					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6},
 					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-9", Released: 5},
@@ -298,7 +301,8 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 		if a.Kind != report.KindRefusal || a.Severity != report.Urgent || contains(a.Title, "two orders in a row") {
 			t.Errorf("page %d: %s %v %q", i, a.Kind, a.Severity, a.Title)
 		}
-		for _, want := range append([]string{c.id, "another rejection while Boost's buys are stopped", c.count + " since the stop", "planned again", "fresh run"}, handSale...) {
+		for _, want := range append([]string{c.id, "another rejection while Boost's buys are stopped", c.count + " since the stop", "planned again", "fresh run",
+			"stopped by the rejections of orders tw-1 and tw-2 (IBKR order ib-2)"}, handSale...) {
 			if !contains(a.Title+" "+a.Body, want) {
 				t.Errorf("page %d lacks %q: %q %q", i, want, a.Title, a.Body)
 			}
@@ -576,7 +580,7 @@ func TestARejectionWhileBuysAreStoppedNamesItsPlace(t *testing.T) {
 			event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
 				Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
 				Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: count,
-					RejectionRun:         []event.BoostRunOrder{{ClientOrderID: "tw-1", Verdict: event.RunVerdictRejected}, {ClientOrderID: "tw-2", Verdict: event.RunVerdictRejected}},
+					RejectedInARow:       []event.BoostRejectedOrder{{ClientOrderID: "tw-1"}, {ClientOrderID: "tw-2"}},
 					RejectedWhileStopped: []event.BoostReplan{{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6}}}})
 		got, err := report.Alerts(s.out)
 		if err != nil {

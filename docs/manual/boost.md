@@ -146,31 +146,33 @@ more buys for the account: that session's decision records the second
 rejection (`replan_withheld`), you get **one** urgent page, and no session
 buys again, not even at a change of target, until you start a fresh run
 you approve (`operator approve`, adding `-clear-incident` if the run also
-ended in an incident). An order IBKR accepts ends the run of rejections:
-one with any fill, or any report from IBKR but "submitted", even after a
-later order replaced it. "Submitted" is not enough, because IBKR reports
-it before some rejections. An order IBKR has said nothing about yet
-does not count, and a rejection read before IBKR rules on it counts back
-only to it (a rejection, that order, a rejection is one in a row, not
-two); should IBKR reject that order after all, it joins the run then. So
-if IBKR rejects an older order late, after a newer one, that late
-rejection can be the one that makes two, and that session's decision
+ended in an incident). The program counts each order when IBKR's first
+word on it arrives, however late. A rejection is one more in a row. An
+order IBKR accepts sets the count back to none: one with any fill, or any
+report from IBKR but "submitted", even after a later order replaced it.
+"Submitted" is not enough, because IBKR reports it before some
+rejections. An order IBKR has said nothing about yet does not count until
+it does. So if IBKR rejects an older order late, after a newer one, that
+late rejection can be the one that makes two, and that session's decision
 records it (`replan_withheld`)
 and pages you, whichever order it was and even if the order now watched
-was accepted (`TestALateRejectionThatStopsBuysIsRecordedAndPaged`). The
-count stops at two. Without this stop, a boost that turns on and off at
-each session would send IBKR a rejected order every session. Each
-decision records the rejections in a row (`venue_rejections`) and the
-orders they are counted over, with what IBKR has said of each
-(`rejection_run`), so a restart from it counts exactly as the run before
-it did. The list stays short: it starts after the last order IBKR
-accepted, and once buys are stopped it keeps only the two rejections that
-stopped them and the orders IBKR has not ruled on, at most eight orders in
-all; in a dry run, which sends nothing and so never hears from IBKR, only
-the newest eight orders are kept and `rejection_run_dropped` counts the
-older ones; the fresh run starts from none
-(`TestTheRunOfRejectionsStaysBoundedWhileBuysAreStopped`,
-`TestADryRunsUndecidedOrdersAreBoundedAndTheCapIsRecorded`,
+was accepted (`TestALateRejectionThatStopsBuysIsRecordedAndPaged`,
+`TestALateRejectionAfterManyUndecidedOrdersStopsBuys`). An acceptance that
+arrives after the second rejection does not lift the stop. The count stops
+at two. Without this stop, a boost that turns on and off at each session
+would send IBKR a rejected order every session. Each decision records
+three things so a restart from it counts exactly as the run before it did:
+the rejections in a row (`venue_rejections`), the orders they name
+(`rejected_in_a_row`, with IBKR's ID for each when known; once buys are
+stopped, the two rejections that stopped them, until the fresh run), and
+every order IBKR has not yet ruled on (`undecided_orders`). Nothing is
+dropped from those, so a late word from IBKR on any order counts as it
+would have without a restart. The page that tells you buys stopped names
+both rejections, so you can find both in IBKR's order log. The fresh run
+starts from none
+(`TestWhatTheRejectionsRecordStaysBoundedWhileBuysAreStopped`,
+`TestTheStopNamesTheTwoRejectionsThatMadeIt`,
+`TestARunWithManyUndecidedOrdersCountsTheRejectionAndRecoversAsTheFullRun`,
 `TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange`,
 `TestAnAcceptedOrderReplacedBeforeItsEndStillEndsTheRunOfRejections`,
 `TestARunRecoveredBehindAnUndecidedOrderCountsAsTheFullRun`).
@@ -180,9 +182,13 @@ Boost's exit is still planned and sent while buys are stopped, and so is
 the margin alarm's sale back to 98%. If IBKR rejects the exit too, that
 rejection is recorded (`rejected_while_stopped`, with the count since the
 stop in `rejections_while_stopped`) and paged once as another rejection
-while buys are stopped, saying which one since the stop it is, and the
+while buys are stopped, saying which one since the stop it is and naming
+the two rejections that stopped buys, and the
 exit is tried again at each session that decides while it is due
-(`TestTwoRejectionsInARowStillSendBoostsExit`). So while stopped, a
+(`TestTwoRejectionsInARowStillSendBoostsExit`). A late rejection of an
+order released before the stop is recorded and paged the same way
+(`TestALateRejectionOfAnOrderReleasedBeforeTheStopIsRecordedWhileStopped`).
+So while stopped, a
 program sale may be working, or be sent again at the next close. Before
 you sell anything by hand, follow the hand-sale steps in
 [states](states-and-kill-switch.md#sells-that-keep-going-while-degraded):
@@ -306,8 +312,9 @@ record. For Boost it carries the close, RSI(2), both averages (and whether
 each was ready), the latch before and after, the target in force,
 whether a re-plan is pending and why (`replan`), the rejection that made
 two in a row (`replan_withheld`), the rejections in a row
-(`venue_rejections`) and the orders they are counted over
-(`rejection_run`), any rejection after the stop
+(`venue_rejections`) and the orders they name (`rejected_in_a_row`), the
+orders IBKR has not yet ruled on (`undecided_orders`), any rejection after
+the stop
 (`rejected_while_stopped`, counted in `rejections_while_stopped`), the
 order being watched
 (`watched`, with each of its fills, when it ended and IBKR's ID for it), and any sessions with no bar since the last close it read

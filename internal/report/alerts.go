@@ -279,11 +279,11 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				return nil, err
 			}
 			if w := p.Boost.ReplanWithheld; w.Cause != "" {
-				out = append(out, rejectionAlert(account, e, w))
+				out = append(out, rejectionAlert(account, e, w, p.Boost.RejectedInARow))
 			}
 			for i, r := range p.Boost.RejectedWhileStopped {
 				nth := p.Boost.RejectionsWhileStopped - len(p.Boost.RejectedWhileStopped) + i + 1
-				out = append(out, stoppedRejectionAlert(account, e, r, nth))
+				out = append(out, stoppedRejectionAlert(account, e, r, nth, p.Boost.RejectedInARow))
 			}
 			if p.Outcome != event.TargetsOutcomeWithheld {
 				runReason = ""
@@ -458,33 +458,58 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 // lists it, so the owner stops new orders before selling by hand.
 const handSaleSteps = "Before you sell anything by hand, stop the program sending new orders: engage the kill switch (operator kill-switch -state engaged) where the engine was started with -operator, otherwise stop the engine (sudo systemctl stop ti-engine@<account>). Then cancel any working sale of the program's in IBKR's app, confirm that no working, pending or cancel-pending sell remains, and only then sell."
 
-// rejectionAlert states the rejection that brought the account's run of
-// Boost orders rejected in a row to two, whatever their targets (ADR 0026,
-// point 2, "Boost", amended 2026-10-18): the program sends no more buys for
+// rejectionAlert states the rejection that brought the account's Boost
+// orders rejected in a row to two, whatever their targets, after the other
+// rejection the decision names (ADR 0026, point 2, "Boost", amended
+// 2026-10-18): the program sends no more buys for
 // the account until the owner finds the reason and approves a fresh run,
 // while its sells, Boost's exit and the margin alarm's sale back to 98%,
 // still go (ADR 0026, point 4), so a sale by hand follows the hand-sale
 // procedure.
-func rejectionAlert(account string, e event.Envelope, w event.BoostReplan) Alert {
+func rejectionAlert(account string, e event.Envelope, w event.BoostReplan, inARow []event.BoostRejectedOrder) Alert {
+	after := ""
+	for _, o := range inARow {
+		if o.ClientOrderID != w.ClientOrderID {
+			after = " after order " + orderName(o)
+		}
+	}
 	return Alert{
 		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost buys stopped", account, w.ClientOrderID),
-		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			w.ClientOrderID, w.Filled, w.Released, handSaleSteps),
+		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled)%s, and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
+			w.ClientOrderID, w.Filled, w.Released, after, handSaleSteps),
 	}
 }
 
 // stoppedRejectionAlert states an order the venue rejected after the stop,
 // the nth since it: a sell sent while buys are stopped, which is planned
 // again at each decided session while it is due, or an order released
-// before the stop (ADR 0026, points 2, "Boost", amended 2026-10-18, and 4).
-func stoppedRejectionAlert(account string, e event.Envelope, r event.BoostReplan, nth int) Alert {
+// before the stop; it names the two rejections that stopped buys (ADR 0026,
+// points 2, "Boost", amended 2026-10-18, and 4).
+func stoppedRejectionAlert(account string, e event.Envelope, r event.BoostReplan, nth int, inARow []event.BoostRejectedOrder) Alert {
+	stoppedBy := ""
+	if len(inARow) > 0 {
+		names := make([]string, len(inARow))
+		for i, o := range inARow {
+			names[i] = orderName(o)
+		}
+		stoppedBy = " Buys were stopped by the rejections of orders " + strings.Join(names, " and ") + "."
+	}
 	return Alert{
 		Key: "rejected-while-stopped:" + r.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected: another rejection while Boost's buys are stopped (%s since the stop)", account, r.ClientOrderID, ordinal(nth)),
-		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled): another rejection while Boost's buys are stopped, the %s since the stop. A rejected sell, such as Boost's exit, is planned again at the next decided session while it is due; the program still sends no buy for this account until you start a fresh run. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), handSaleSteps),
+		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled): another rejection while Boost's buys are stopped, the %s since the stop.%s A rejected sell, such as Boost's exit, is planned again at the next decided session while it is due; the program still sends no buy for this account until you start a fresh run. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
+			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), stoppedBy, handSaleSteps),
 	}
+}
+
+// orderName writes a Boost order rejected in a row by its client order ID
+// and, when known, IBKR's own ID for it, by which IBKR's order log lists it.
+func orderName(o event.BoostRejectedOrder) string {
+	if o.VenueOrderID == "" {
+		return o.ClientOrderID
+	}
+	return fmt.Sprintf("%s (IBKR order %s)", o.ClientOrderID, o.VenueOrderID)
 }
 
 // ordinal writes n as 1st, 2nd, 3rd, 4th, ..., 11th, 12th, 13th, 21st.

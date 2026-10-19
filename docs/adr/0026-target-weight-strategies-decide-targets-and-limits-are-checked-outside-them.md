@@ -955,12 +955,13 @@ target next changed; point 2 said nothing of a partial fill.
   re-plan, so a venue that rejects for a lasting reason would be sent an
   order at every session. The bound is therefore also independent of the
   target: when the venue has rejected **2** of the account's orders in a
-  row (the orders decided sessions released, in release order; the sale
+  row (the orders decided sessions released, each counted when the
+  venue's first word on it is read, however late; the sale
   back to 98% is ADR 0019's one attempt and not counted), whatever their
   targets, the decision of the session at whose close the rejection that
   makes it two is read records it (`boost.replan_withheld`, the order and
   its shares), whichever order it was: a late rejection of an older order
-  can complete the run while a later order is watched, working or
+  can make it two while a later order is watched, working or
   accepted, and is recorded all the same. The reporter pages it once
   (urgent), and **no session buys again**, a
   change of target included, until the owner starts a fresh run he
@@ -974,34 +975,39 @@ target next changed; point 2 said nothing of a partial fill.
   orders, is recorded once (`boost.rejected_while_stopped`, the order and
   its shares, with the count of such rejections since the stop in
   `boost.rejections_while_stopped`) and paged once as another rejection
-  while buys are stopped, naming which one since the stop it is, and the
-  sell is planned again at every decided session while it is due. Once
+  while buys are stopped, naming which one since the stop it is and the
+  two rejections that stopped buys, and the sell is planned again at every decided session while it is due. Once
   reached, the count stays at 2, never above it, until the fresh run: a
   sell the venue accepts does not lift the stop. Before the stop, an
-  order the venue accepted ends the run of rejections: any execution on
+  order the venue accepted sets the count back to none: any execution on
   it, or any lifecycle report but `submitted` (IBKR's `PreSubmitted` maps
   to `submitted` and can precede a rejection), whether or not a later
   decided session's order has replaced it as the watched order. An order
-  the venue has shown neither accepted nor rejected ends the run back from
-  a later rejection, and joins it should the venue reject it after all. A
-  re-planned order rejected again is always the second in a row, so this
-  bound holds it too. Every decision records the rejections in a row as
-  they stand after it (`boost.venue_rejections`, omitted when none) and the
-  orders they are counted over (`boost.rejection_run`: in release order,
-  each order's client order ID and the venue's first word on it,
-  `rejected` or `accepted`, omitted while there is none; an order with none
-  yet other than the watched one also records its side, shares and limit
-  as released and its venue order ID once a lifecycle report named it; the
-  list is bounded, from the order after the last one the venue accepted,
-  and once buys are stopped to the two rejections that stopped them and
-  the orders not yet ruled on, at most eight in all, the oldest beyond
-  that dropped unseen, as in a dry-run, which never hears a verdict, and
-  counted in `boost.rejection_run_dropped`), so
-  a run restarted from the decision rebuilds the run exactly and counts as
-  the full run does: an order the venue accepted, by an execution or a
-  report, is never counted as undecided after the restart, and the venue's
-  reports on an earlier order still undecided are read, and a working sell
-  among them netted, as on an order the restarted run released. A fresh run
+  the venue has shown neither accepted nor rejected counts nothing until
+  it does: a late rejection is one more in a row, or, once buys are
+  stopped, one more while stopped; a late acceptance sets the count back
+  to none before the stop and changes nothing after it. A re-planned
+  order rejected again is always the second in a row, so this bound holds
+  it too. Every decision records the state the rule needs, as it stands
+  after the decision, and nothing beyond it, so nothing is trimmed: the
+  rejections in a row (`boost.venue_rejections`, omitted when none); the
+  orders they name (`boost.rejected_in_a_row`, each client order ID and,
+  when a lifecycle report named it, the venue order ID, exactly as many
+  as the count, so at the stop the two rejections that stopped buys,
+  which stay named until the fresh run and are named in the page); and
+  every order decided sessions released that the venue has not yet ruled
+  on (`boost.undecided_orders`, in release order, each but the watched one
+  with its side, shares and limit as released and its venue order ID once
+  a lifecycle report named it). A run restarted from the decision restores
+  these exactly and counts as the full run does: a late verdict on any
+  order released before the restart is read against the orders not yet
+  ruled on, an order the venue has ruled on is never counted again, the
+  venue's reports on an order still undecided are read, and a working sell
+  among them netted, as on an order the restarted run released. Neither
+  the gate nor the planner bounds how many released orders may await the
+  venue's word (Boost releases at most one order per decided session, and
+  a DAY order's end is a word on it), so the list is as long as the orders
+  still awaiting it. A fresh run
   starts from none. A refusal's re-plan pending at the second rejection is
   dropped, and the rejection is recorded all the same. One read during a
   restarted run's warm-up, whose sessions only feed the indicators, is
@@ -1110,8 +1116,8 @@ A journal holding a gap or such an order decides differently under an
 earlier build: target-weight rules version **1.18.0** (ADR 0016).
 `strategy.targets.decided` moves to schema version **6** for the new
 Boost fields, `replan`, `replan_withheld`, `watched` (with its
-`venue_order_id`), `venue_rejections` (with `rejection_run` and
-`rejection_run_dropped`, and
+`venue_order_id`), `venue_rejections` (with `rejected_in_a_row`,
+`undecided_orders`, and
 `rejected_while_stopped` and `rejections_while_stopped` after the stop)
 and `gap_sessions`, each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
 golden cases for both rules (`TestSyntheticGoldenBoostGap`;
