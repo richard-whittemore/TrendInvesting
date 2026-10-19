@@ -113,6 +113,37 @@ backup" (for a recording or a data file), that is what it means today. The
 gap is tracked in the issue "Review L10: server secrets per unit, IBC
 trusted IPs, UMask, backups".
 
+## The clock
+
+The program compares the server's clock with IBKR's. If the server's clock
+runs behind IBKR's, the account reading looks as if it comes from the future,
+the engine treats it as stale (ADR 0019 allows no tolerance for that), and it
+blocks every sell until the clock is right. A drifting clock therefore shows
+up first as a withheld sale, so the server is set up to keep its clock right
+from the start.
+
+`sudo deploy/provision.sh clock` (also part of `all`) turns on the system's
+time syncing (`systemd-timesyncd`) and then runs the check, and it refuses to
+finish if the check fails. On a server of its own the clock must be reported
+synchronised by `timedatectl`. Inside the Mac mini's container the Mac keeps
+time and the container usually shows no time service of its own, so there the
+check compares the clock with the time an outside website reports, and fails
+if they differ by more than 2 seconds (it measures to the second; the limit
+can be changed with `TI_CLOCK_TOLERANCE_SECONDS`). If the container cannot
+reach any reference, that also fails, because a clock that could not be
+checked is not a checked clock. On the Mac mini, a failure means the Mac's own
+"Set time and date automatically" is off or wrong.
+
+Run the check yourself at any time, and after any sale is withheld with the
+reason `stale-broker-snapshot`:
+
+```
+/usr/local/libexec/trend-investing/clock-check.sh
+```
+
+It prints `clock: ok ...` or says what is wrong and exits with an error. The
+reporter does not report the clock; this check is the way to see it.
+
 ## What you start by hand
 
 - **Once:** create the instance, join Tailscale (`sudo tailscale up --ssh`),
@@ -170,6 +201,7 @@ already at IBKR in IBKR's own app.
 | The data job fails | The unit shows failed; `journalctl -u ti-data` says why; no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)) |
 | The machine dies, or the reporter never runs | **Nothing outside the server tells you.** The outside heartbeat (Healthchecks.io in plan section 7) is not built, and a reporter on the machine cannot notice the machine dying | Check the dashboard or the server yourself until it exists (tracked in the issue "External heartbeat and a recorded clock input for the margin alarm's 30-minute rule") |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing | Free space, then resume or start as `docs/runbooks/durable-log.md` says |
+| The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |
 | `provision.sh services` is run again after paper edits | The dry-run files come back; the paper engine refuses to start | Redo the paper edits |
 | A disk is lost | Only a Lightsail snapshot, if any, can restore it | `docs/runbooks/durable-log.md`, "A log that cannot be read" |
 

@@ -339,8 +339,9 @@ the first real paper order:
   and blocks every sell (reason `stale-broker-snapshot`), failing closed:
   the sale back to 98% is withheld (`risk.sale.withheld`) and any other
   sell is refused (`risk.order.refused`);
-  check the server's clock (`timedatectl`) against IBKR's
-  ([market data](market-data.md), "What happens to the file"). It is
+  check the server's clock (run `clock-check.sh`; [the server](server.md),
+  "The clock") and see [market data](market-data.md), "What happens to the
+  file". It is
   the account some minutes after the close, not at it: whether a reading
   taken after the close may serve a decision made at the close is ADR
   0019's rule question, and choosing when the adapter takes it (after the
