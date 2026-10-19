@@ -231,11 +231,11 @@ class DeployTests(unittest.TestCase):
             self.assertIn("--engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log", unit)
         self.assertIn("ReadOnlyPaths=/var/lib/trend-investing/engines/boost -" + read, adapter)
 
-    def test_the_adapter_is_installed_with_the_calendar_and_the_input_table_it_reads(self):
+    def test_the_adapter_is_installed_with_the_calendar_the_input_table_and_the_log_reader_it_reads(self):
         provision = (repo / "deploy" / "provision.sh").read_text()
         body = provision[provision.index("step_adapter() {"):]
         body = body[:body.index("\n}\n")]
-        for name in ("nyse_calendar.py", "kinds.py"):
+        for name in ("nyse_calendar.py", "kinds.py", "engine_log.py"):
             self.assertIn('"$here/../adapter/marketdata/{}" "$adapter_root.new/adapter/marketdata/"'.format(name), body)
 
     def test_the_adapter_is_handed_its_own_account_file_and_nothing_else(self):

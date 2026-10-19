@@ -73,14 +73,13 @@ nothing, re-verifies every stream as in step 4, and returns that stream.
 import argparse
 import datetime as dt
 import glob
-import hashlib
 import json
 import os
 import re
 import sys
 from collections import namedtuple
 
-from . import encode, history, kinds, massive, nyse_calendar, record, steps
+from . import encode, engine_log, history, kinds, massive, nyse_calendar, record, steps
 
 ENGINE = "boost"
 STREAM = re.compile(r"boost-(\d{4}-\d{2}-\d{2})\.jsonl")
@@ -91,24 +90,12 @@ KEY_NAME = "MASSIVE_API_KEY"
 CONFIGURATION_TYPE = "strategy.target-weight.configuration"
 # The owner's Run approval, which a fresh run after an earlier one records
 # (cmd/engine; ADR 0027, the restart model).
-RUN_APPROVED = "operator.run.approved"
-# The engine's durable log header (internal/journal durable_log.go, ADR 0027),
-# as adapter/ibkr's reader of the same log checks it.
-LOG_VERSION = 1
-LOG_CHAIN_ALGORITHM = ("seed=sha256(canonical_log_header_bytes); "
-                       "record=sha256(previous_record_hash||kind||canonical_envelope_bytes)")
-LOG_HEADER_FIELDS = ("chain_algorithm", "configuration_hash", "log_version", "strategy_version")
-LOG_RECORD_FIELDS = ("envelope", "kind", "record_hash", "sequence")
-LOG_COMMIT_FIELDS = ("record_hash", "sequence")
-RECORD_HASH = re.compile(r"sha256:[0-9a-f]{64}")
-# The envelope fields the chain's canonical bytes cover (internal/event
-# CanonicalEnvelopeBytes), the two left out of the envelope when empty, and
-# an RFC 3339 time's parts.
-ENVELOPE_FIELDS = ("configuration_hash", "envelope_version", "event_time", "id", "payload_hash", "recorded_at",
-                   "schema_version", "sequence", "source", "strategy_version", "type")
-ENVELOPE_OPTIONAL = ("causation_id", "correlation_id")
-TIME_PARTS = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?"
-                        r"(?:Z|([+-])([0-9]{2}):([0-9]{2}))")
+RUN_APPROVED = engine_log.RUN_APPROVED
+# The engine's durable log (internal/journal durable_log.go, ADR 0027), read
+# by the one reader the data job shares with adapter/ibkr (engine_log.py).
+LOG_VERSION = engine_log.LOG_VERSION
+LOG_CHAIN_ALGORITHM = engine_log.LOG_CHAIN_ALGORITHM
+LOG_HEADER_FIELDS = engine_log.LOG_HEADER_FIELDS
 # Stands in for the key in every message main prints.
 KEY_MASK = "[" + KEY_NAME + "]"
 
@@ -125,7 +112,7 @@ configuration, the run's identity (see read_engine_log), the IDs of its
 committed inputs in order, every committed record's hash in order, its
 hash chain (a crash resume's begin with the crashed run's), and the
 sequence of the first committed record whose stored hash is not the one
-LOG_CHAIN_ALGORITHM gives over the records before it (_chain_next), or None
+LOG_CHAIN_ALGORITHM gives over the records before it (engine_log.chain_next), or None
 when every one's is, and the count of committed delivered inputs (the data
 job's kinds and the adapter's broker snapshot, kinds.DELIVERED_KINDS), the history a fresh run's log cannot hold."""
 
@@ -174,201 +161,64 @@ def _log_error(path, n, why):
     return Refused("the engine's durable log {} cannot be read at line {}: {}".format(path, n, why))
 
 
+def _refused(err):
+    """Refused for the shared reader's engine_log.LogUnreadable."""
+    if err.line is None:
+        return Refused("cannot read the engine's durable log {}: {}".format(err.path, err.why))
+    return _log_error(err.path, err.line, err.why)
+
+
 def read_engine_log(path):
-    """The run's identity and configuration from the engine's durable log: a
-    header line, then per input a group of records closed by a commit naming
-    the group's last record and its hash; only committed groups count (the
-    tail may be a group still being written). The first committed group's
-    input must be the run's Boost configuration. A log not of that shape is
-    refused, never read as empty.
+    """The run's identity and configuration from the engine's durable log, read strictly by the reader the
+    adapter shares (engine_log.read): a header line, then per input a group of records closed by a commit naming
+    the group's last record and its hash; only committed groups count (the tail may be a group still being
+    written). The first committed group's input must be the run's Boost configuration. A log not of that shape
+    is refused, never read as empty.
 
     The run's identity is the ID of its Run approval, else its first
-    committed input's ID and recorded time, as adapter/ibkr/relay.py's
-    run_identity defines it: a crash resume's log holds a copy of the
-    crashed run's records, its approval included (ADR 0027 section 6), so
-    the resume keeps the identity, and a fresh run after an earlier one has
-    its own approval."""
+    committed input's ID and recorded time (engine_log.identity, as
+    adapter/ibkr/relay.py's run_identity): a crash resume's log holds a copy
+    of the crashed run's records, its approval included (ADR 0027 section
+    6), so the resume keeps the identity, and a fresh run after an earlier
+    one has its own approval."""
     run = os.path.basename(path)[:-len(".log")]
     if not path.endswith(".log") or not run:
         raise Refused("{} is not an engine durable log (<run>.log)".format(path))
     try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError as e:
-        raise Refused("cannot read the engine's durable log {}: {}".format(path, e.strerror)) from None
-    lines = data.split(b"\n")[:-1]
-    if not lines:
-        raise _log_error(path, 1, "it has no complete header line")
-    parsed = []
-    for n, raw in enumerate(lines, 1):
-        try:
-            parsed.append(json.loads(raw.decode("utf-8")))
-        except ValueError:
-            raise _log_error(path, n, "it is not JSON") from None
-    header = parsed[0]
-    if (not isinstance(header, dict) or tuple(sorted(header)) != LOG_HEADER_FIELDS
-            or header["log_version"] != LOG_VERSION or header["chain_algorithm"] != LOG_CHAIN_ALGORITHM
-            or not all(isinstance(header[k], str) and header[k] for k in ("configuration_hash", "strategy_version"))):
-        raise _log_error(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
-    sequence, last_hash, group, configuration, first, approved, inputs = 0, None, [], None, None, None, []
-    market = 0
-    hashes = []
-    chain, chain_break, pending_break = _chain_seed(header), None, None
-    for n, line in enumerate(parsed[1:], 2):
-        if not isinstance(line, dict) or len(line) != 1 or not set(line) <= {"record", "commit"}:
-            raise _log_error(path, n, "a line is exactly one of a record and a commit")
-        if "record" in line:
-            rec = line["record"]
-            if (not isinstance(rec, dict) or tuple(sorted(rec)) != LOG_RECORD_FIELDS
-                    or not isinstance(rec["record_hash"], str) or not RECORD_HASH.fullmatch(rec["record_hash"])
-                    or not isinstance(rec["envelope"], dict)):
-                raise _log_error(path, n, "it is not a record as the engine writes one")
-            if rec["sequence"] != sequence + 1:
-                raise _log_error(path, n, "its sequence does not follow {}".format(sequence))
-            if rec["kind"] != ("decision" if group else "input"):
-                raise _log_error(path, n, "a group is one input followed by its decisions")
-            if pending_break is None and chain_break is None:
-                chain = _chain_next(chain, rec, lines[n - 1])
-                if chain is None or "sha256:" + chain.hex() != rec["record_hash"]:
-                    pending_break = rec["sequence"]
-            sequence, last_hash = rec["sequence"], rec["record_hash"]
-            group.append((n, rec["envelope"], last_hash))
-            continue
-        commit = line["commit"]
-        if (not isinstance(commit, dict) or tuple(sorted(commit)) != LOG_COMMIT_FIELDS or not group
-                or commit["sequence"] != sequence or commit["record_hash"] != last_hash):
-            raise _log_error(path, n, "it is not the commit of the group before it")
-        if configuration is None:
-            configuration = _logged_configuration(path, header, *group[0][:2])
-            first = group[0][1]
-        if approved is None and group[0][1].get("type") == RUN_APPROVED:
-            approved = group[0][1].get("id")
-        inputs.append(group[0][1].get("id"))
-        market += (group[0][1].get("type"), group[0][1].get("schema_version")) in kinds.DELIVERED_KINDS
-        hashes.extend(h for _, _, h in group)
-        group = []
-        chain_break = chain_break if chain_break is not None else pending_break
-    if configuration is None:
+        log = engine_log.read(path)
+    except engine_log.LogUnreadable as err:
+        raise _refused(err) from None
+    if not log.groups:
         raise Refused("the engine's durable log {} holds no committed configuration input: start the engine "
                       "first".format(path))
-    identity = approved if approved else "{}@{}".format(first.get("id"), first.get("recorded_at"))
-    return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration, identity,
-                     tuple(inputs), tuple(hashes), chain_break, market)
-
-
-def _chain_seed(header):
-    """The seed of the log's record hash chain (LOG_CHAIN_ALGORITHM), as adapter/ibkr/relay.py's log_chain_seed."""
-    return hashlib.sha256(_canonical_bytes({k: header[k] for k in LOG_HEADER_FIELDS})).digest()
-
-
-def _chain_next(previous, rec, raw):
-    """The record hash, raw SHA-256 bytes, of rec (its log line raw) after previous, else None; as relay's
-    log_chain_next: sha256(previous || kind || internal/event CanonicalEnvelopeBytes), every envelope field
-    covered, both times in UTC as RFC 3339 with nanoseconds, an absent correlation or causation ID as "", and
-    the payload as its bytes exactly as stored (the writer puts it last in the envelope, the record hash last in
-    the record). None when the record cannot be rendered so: it follows no chain."""
-    envelope = rec["envelope"]
-    try:
-        marker = '"payload_hash":"{}","payload":'.format(envelope["payload_hash"]).encode()
-        suffix = '}},"record_hash":"{}"}}}}'.format(rec["record_hash"]).encode()
-        start = raw.find(marker)
-        if start < 0 or not raw.endswith(suffix) or not isinstance(rec["kind"], str):
-            return None
-        return _record_digest(previous, rec["kind"], envelope,
-                              raw[start + len(marker):len(raw) - len(suffix)].decode("utf-8"))
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
-        return None
-
-
-def _record_digest(previous, kind, envelope, payload):
-    """sha256(previous || kind || the canonical bytes of envelope with payload, its stored text): _chain_next's."""
-    fields = {k: envelope[k] for k in ENVELOPE_FIELDS}
-    fields.update((k, envelope.get(k, "")) for k in ENVELOPE_OPTIONAL)
-    fields["event_time"], fields["recorded_at"] = _utc(envelope["event_time"]), _utc(envelope["recorded_at"])
-    fields["payload"] = payload
-    return hashlib.sha256(previous + kind.encode("utf-8") + _canonical_bytes(fields)).digest()
-
-
-def _canonical_bytes(fields):
-    """fields (text and whole-number values) as internal/event canonicalJSON renders them: keys sorted, compact,
-    strings as Go's encoding/json writes them (UTF-8 kept; <, >, &, U+2028 and U+2029 escaped)."""
-    parts = []
-    for key in sorted(fields):
-        value = fields[key]
-        if isinstance(value, bool) or not isinstance(value, (int, str)):
-            raise TypeError("a canonical field is text or a whole number")
-        parts.append(_go_string(key) + ":" + (str(value) if isinstance(value, int) else _go_string(value)))
-    return ("{" + ",".join(parts) + "}").encode("utf-8")
-
-
-def _go_string(text):
-    return (json.dumps(text, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
-            .replace("&", "\\u0026").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
-
-
-def _utc(text):
-    """An RFC 3339 time as Go's Time.UTC().Format(time.RFC3339Nano) renders it: UTC, "Z", no trailing zeros."""
-    year, month, day, hour, minute, second, fraction, sign, hours, minutes = TIME_PARTS.fullmatch(text).groups()
-    at = dt.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), tzinfo=dt.timezone.utc)
-    if sign:
-        if int(hours) > 23 or int(minutes) > 59:
-            raise ValueError("a zone offset is 00:00 to 23:59")
-        offset = dt.timedelta(hours=int(hours), minutes=int(minutes))
-        at = at - offset if sign == "+" else at + offset
-    fraction = (fraction or "").rstrip("0")
-    return "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}{}Z".format(at.year, at.month, at.day, at.hour, at.minute,
-                                                              at.second, "." + fraction if fraction else "")
+    n, _, first = log.groups[0][0]
+    configuration = _logged_configuration(path, log.header, n, first)
+    inputs = [group[0][2] for group in log.groups]
+    market = sum((e.get("type"), e.get("schema_version")) in kinds.DELIVERED_KINDS for e in inputs)
+    return EngineLog(log.header["configuration_hash"], log.header["strategy_version"], run, configuration,
+                     engine_log.identity(log.groups), tuple(e.get("id") for e in inputs), log.record_hashes,
+                     log.chain_break, market)
 
 
 def head_identity(path):
     """The run identity the first records of the durable log at path name, read no further than its second commit.
 
-    As adapter/ibkr/relay.py's head_identity: a run's identity is in its
-    log's first two committed inputs (the configuration, and a fresh run's
-    Run approval, which cmd/engine records second, before it listens), so
-    this is read_engine_log's identity for every log the engine writes, read
-    without the rest of the log. Only the first lines' shape is checked; a
-    log the head names as the run's is then read strictly (read_engine_log).
+    As adapter/ibkr/relay.py's head_identity, by the same reader
+    (engine_log.head): a run's identity is in its log's first two committed
+    inputs (the configuration, and a fresh run's Run approval, which
+    cmd/engine records second, before it listens), so this is
+    read_engine_log's identity for every log the engine writes, read without
+    the rest of the log. Only the first lines' shape is checked; a log the
+    head names as the run's is then read strictly (read_engine_log).
     Refused when the first lines cannot be read as the engine writes them:
     they name no run."""
-    inputs, group = [], None
     try:
-        with open(path, "rb") as f:
-            lines = iter(f)
-            first = next(lines, b"")
-            if not first.endswith(b"\n"):
-                raise _log_error(path, 1, "it has no complete header line")
-            header = _head_json(path, 1, first)
-            if not isinstance(header, dict) or header.get("log_version") != LOG_VERSION:
-                raise _log_error(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
-            for n, raw in enumerate(lines, 2):
-                if len(inputs) == 2 or not raw.endswith(b"\n"):
-                    break
-                line = _head_json(path, n, raw)
-                record = line.get("record") if isinstance(line, dict) and len(line) == 1 else None
-                envelope = record.get("envelope") if isinstance(record, dict) else None
-                if (isinstance(envelope, dict) and record.get("kind") == ("decision" if group else "input")
-                        and all(isinstance(envelope.get(k), str) and envelope[k]
-                                for k in ("id", "type", "recorded_at"))):
-                    group = group or envelope
-                elif isinstance(line, dict) and len(line) == 1 and "commit" in line and group:
-                    inputs.append(group)
-                    group = None
-                else:
-                    raise _log_error(path, n, "it is not a record or commit as the engine writes one")
-    except OSError as e:
-        raise Refused("cannot read the engine's durable log {}: {}".format(path, e.strerror)) from None
-    if not inputs:
+        found = engine_log.identity(engine_log.head(path))
+    except engine_log.LogUnreadable as err:
+        raise _refused(err) from None
+    if found is None:
         raise Refused("the engine's durable log {} holds no committed input, so it names no run".format(path))
-    approved = [e["id"] for e in inputs if e["type"] == RUN_APPROVED]
-    return approved[0] if approved else "{}@{}".format(inputs[0]["id"], inputs[0]["recorded_at"])
-
-
-def _head_json(path, n, raw):
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except ValueError:
-        raise _log_error(path, n, "it is not JSON") from None
+    return found
 
 
 def stream_run(engine_streams, engine_log, log, warn=None):
@@ -397,7 +247,7 @@ def stream_run(engine_streams, engine_log, log, warn=None):
     first log, its head damaged, and the run is never sent to a warm-up
     under its new name. A log whose head names the run is read whole and
     strictly, and refused if it cannot be. The record hashes compared are
-    recomputed first (_chain_next), in both logs, and a log whose stored
+    recomputed first (engine_log.chain_next), in both logs, and a log whose stored
     hashes are not its chain's is refused: it was changed after the engine
     wrote it. The job is also refused (fail closed, AGENTS.md) with two
     folders of the run, its own name's among them (one run's stream is

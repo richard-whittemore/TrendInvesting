@@ -72,7 +72,6 @@ does not exist yet stops the start: its warm-up has not been written; so do
 two folders of one run (stream_run).
 """
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -81,7 +80,7 @@ from collections import namedtuple
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 
 from relay import (ENVELOPE_VERSION, LOG_INPUT, PAYLOAD_HASH, TIME, ResolveRefused, _committed_groups, _is_count, _is_text,
-                   _is_time, head_identity, read_engine_log, run_identity)
+                   _is_time, head_identity, marketdata_module, read_engine_log, run_identity)
 from snapshot import ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, RECONCILIATION_TYPE, reconciliation_record
 
 log = logging.getLogger("ibkr")
@@ -109,22 +108,10 @@ SETTLE = ("with the adapter stopped, move the file out of the run's stream folde
           "(sudo systemctl start ti-adapter-boost) (docs/manual/market-data.md, \"What happens to the file\")")
 
 
-def _marketdata(name):
-    """The data job's module adapter/marketdata/<name>.py, loaded from its file.
-
-    The adapter is installed beside it in the same layout (provision.sh
-    adapter), so both read one NYSE calendar (nyse_calendar.py) and one
-    table of the inputs the data job writes (kinds.py).
-    """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "marketdata", name + ".py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-nyse_calendar = _marketdata("nyse_calendar")
-kinds = _marketdata("kinds")
+# The data job's calendar and table of the inputs it writes, loaded by path
+# from the layout the adapter is installed in beside it (provision.sh adapter).
+nyse_calendar = marketdata_module("nyse_calendar")
+kinds = marketdata_module("kinds")
 DELIVERED_KINDS = kinds.DELIVERED_KINDS
 
 

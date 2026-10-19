@@ -1708,8 +1708,19 @@ class LogChainTests(unittest.TestCase):
              payloads[2]),
         ]
 
+    def test_both_readers_are_one_module(self):
+        # The data job and the adapter read the durable log with one reader
+        # (adapter/marketdata/engine_log.py): the adapter loads it by its
+        # path, the data job from its package.
+        import relay
+        from marketdata import tidata
+        self.assertEqual(os.path.realpath(relay.engine_log.__file__), os.path.realpath(tidata.engine_log.__file__))
+        self.assertIs(relay.log_chain_next, relay.engine_log.chain_next)
+        self.assertIs(relay.CommittedLog, relay.engine_log.CommittedLog)
+
     def assert_canonical_bytes(self, cases, wants):
-        """Both Python readers hash and render each case as wants (dicts of canonical text and sha256) say."""
+        """Both Python readers (one module, loaded by each) hash and render each case as wants (dicts of canonical
+        text and sha256) say."""
         import relay
         from marketdata import tidata
         previous = bytes(32)
@@ -1718,12 +1729,13 @@ class LogChainTests(unittest.TestCase):
             with self.subTest(envelope["id"]):
                 digest = hashlib.sha256(previous + b"input" + want["canonical"].encode("utf-8")).digest()
                 self.assertEqual(relay.log_chain_next(previous, "input", envelope, payload.encode("utf-8")), digest)
-                self.assertEqual(tidata._record_digest(previous, "input", envelope, payload), digest)
+                self.assertEqual(tidata.engine_log.chain_next(previous, "input", envelope, payload.encode("utf-8")),
+                                 digest)
                 fields = {k: envelope.get(k, "") for k in (relay.ENVELOPE_FIELDS | relay.ENVELOPE_OPTIONAL) - {"payload"}}
                 fields.update(event_time=relay._utc(envelope["event_time"]), recorded_at=relay._utc(envelope["recorded_at"]),
                               payload=payload)
                 self.assertEqual(relay._canonical_bytes(fields).decode("utf-8"), want["canonical"])
-                self.assertEqual(tidata._canonical_bytes(fields).decode("utf-8"), want["canonical"])
+                self.assertEqual(tidata.engine_log.canonical_bytes(fields).decode("utf-8"), want["canonical"])
                 self.assertEqual(hashlib.sha256(relay._canonical_bytes(fields)).hexdigest(), want["sha256"])
 
     def test_the_canonical_envelope_bytes_are_the_engines_own_output(self):
@@ -1748,7 +1760,7 @@ class LogChainTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             relay._canonical_bytes({"x": 1.5})
         with self.assertRaises(TypeError):
-            tidata._canonical_bytes({"x": True})
+            tidata.engine_log.canonical_bytes({"x": True})
 
     def test_the_canonical_envelope_bytes_match_a_vector_frozen_from_the_engine(self):
         # Printed once by adapter/ibkr/tests/testdata/canonical_vector.go (internal/event
@@ -1780,8 +1792,7 @@ class LogChainTests(unittest.TestCase):
             with self.subTest(bad):
                 envelope = dict(base, event_time=bad)
                 self.assertIsNone(relay.log_chain_next(previous, "input", envelope, b"{}"))
-                with self.assertRaises(ValueError):
-                    tidata._record_digest(previous, "input", envelope, "{}")
+                self.assertIsNone(tidata.engine_log.chain_next(previous, "input", envelope, b"{}"))
                 self.assertFalse(relay._is_time(bad, relay.TIME))
         self.assertTrue(relay._is_time("2026-10-16T13:30:00+23:59", relay.TIME))
 
@@ -1806,15 +1817,22 @@ class LogChainTests(unittest.TestCase):
             with self.subTest(name):
                 Path(engine.path).write_text(text, encoding="utf-8")
                 self.assertEqual(self.breaks(engine.path), (want, want))
-        # A time no engine writes, which the adapter refuses outright (its
-        # envelope check) and the data job, reading less, finds unchained.
+        # A time no engine writes, which both readers (one module) refuse
+        # outright: its envelope is not one the engine writes.
         from marketdata import tidata
+        from relay import ResolveRefused
         Path(engine.path).write_text(good.replace('"event_time":"2027-01-14T22:05:00Z"',
                                                   '"event_time":"2027-13-14T22:05:00Z"', 1), encoding="utf-8")
-        self.assertEqual(tidata.read_engine_log(str(engine.path)).chain_break, 2)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.read_engine_log(str(engine.path))
+        with self.assertRaises(ResolveRefused) as adapter:
+            read_engine_log(str(engine.path))
+        for refusal in (str(data.exception), str(adapter.exception)):
+            self.assertIn("its envelope is not an event envelope as the engine writes one", refusal)
 
-    def test_the_data_job_finds_no_chain_in_a_record_whose_payload_is_not_last(self):
+    def test_both_readers_refuse_a_record_whose_payload_is_not_last(self):
         from marketdata import tidata
+        from relay import ResolveRefused
         engine = LoggedEngine(str(self.root / "run-a.log"), configuration=json.loads(
             (tests_dir.parents[2] / "deploy" / "etc" / "engines" / "boost.config").read_text()))
         lines = Path(engine.path).read_text(encoding="utf-8").splitlines()
@@ -1822,7 +1840,12 @@ class LogChainTests(unittest.TestCase):
         record["record"]["envelope"] = dict(reversed(list(record["record"]["envelope"].items())))
         lines[1] = json.dumps(record, separators=(",", ":"))
         Path(engine.path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertEqual(tidata.read_engine_log(str(engine.path)).chain_break, 1)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.read_engine_log(str(engine.path))
+        with self.assertRaises(ResolveRefused) as adapter:
+            read_engine_log(str(engine.path))
+        for refusal in (str(data.exception), str(adapter.exception)):
+            self.assertIn("its payload does not match its payload hash", refusal)
 
 
 class RealEngineResumeTests(unittest.TestCase):
