@@ -348,6 +348,12 @@ a fresh run starts with the switch released, so record it again with
 engine reads that record before the fresh run's first input from the
 adapter, before any order is checked.
 
+`operator approve` has no option to state the attempt: it writes what the
+log records. After a hand sale the log does not know about, open the file it
+wrote and change `sale_attempted` inside `incident_in_force` from `false` to
+`true`; change nothing else, because the engine checks the rest of the file
+against the log.
+
 The engine checks the approval against the same log when the fresh run
 starts (see [restart](restart.md), "What the engine checks"). One more check
 is new: an approval that carries the incident in force and says its sale

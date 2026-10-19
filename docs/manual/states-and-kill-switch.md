@@ -427,11 +427,16 @@ refuses fires that sale. So before any sale by hand in the margin account:
    adapter again, and the adapter sends it beside your sale
    ([redelivery](redelivery.md)). A fresh run's adapter never sends an
    earlier run's order (step 2). The approval carries the incident and
-   whether its sale was attempted. If it carries the incident in force,
-   state its sale attempted (`"sale_attempted": true` in the approval file):
-   an approval saying attempted is always accepted, since you sold by hand
-   ([operator](operator.md), "An approval"), and it is the one recorded
-   safeguard that stops the new run making that sale at all. Otherwise, if
+   whether its sale was attempted. `operator approve` writes that from the
+   log and has no option to state it otherwise, so after a hand sale the log
+   does not know about, open the file it wrote and change
+   `incident_in_force.sale_attempted` to `true` ([operator](operator.md),
+   "An approval"); an approval saying attempted is always accepted, since you
+   sold by hand. When the sale was the incident's (the account Halted, or
+   Degraded with the instrument in its scope), that is the one recorded
+   safeguard that stops the new run making that sale at all; an engagement's
+   or an alarm's sale is a new sale in the fresh run whatever the approval
+   says, sized from its first snapshot. Otherwise, if
    the program can still sell (each row of "The sale back to 98%" below
    says), the new run sizes that sale from its first readable, fresh IBKR
    snapshot, which shows your sale in the holding once it has filled, so it
@@ -541,7 +546,7 @@ account's name; an IRA's alerts carry its own.
 | `nothing-to-sell`. No alert; listed in `journal-query refusals` and the daily summary | The account is already at or below 98%, net of working sells. Nothing is sent | Nothing |
 | `lapsed`. No urgent alert; listed in the daily summary and `journal-query refusals` | What needed a withheld sale has ended (the exit no longer refused or planned, or the alarm no longer urgent), so it will not be decided again. The attempt stays unspent | Nothing, unless the account is still borrowed above Boost's target: then check why with `journal-query` |
 | You sold by hand after the "sell by hand" alert (IBKR's values unreadable, or an unknown working sell), or after the sale failed, was refused at the gate or was released in dry-run | The attempt is spent: the program never makes that sale again in that incident, engagement or alarm. A new incident, a new engagement of the kill switch, or, with neither in force, a new urgent alarm is a new sale ("Selling by hand safely" has the rule) | Start the engine again only once your sale has filled or been cancelled ("Selling by hand safely", step 6) |
-| You sold by hand after a sale withheld for a stale IBKR snapshot, for values that are not positive or with nothing to sell, or one that lapsed | The attempt is unspent: the sale is decided again from the next readable, fresh, positive IBKR snapshot while what fired it is in force. If your sale is not yet in that snapshot, the program can sell the same shares again | If you stopped the engine and the adapter first, as "Selling by hand safely" says, start them again only once your sale has filled or been cancelled, as a fresh run, never a resume. If the approval carries the incident in force, state its sale attempted (always accepted, since you sold by hand), so the new run never makes that sale; otherwise the new run sizes the sale from a snapshot that shows yours. If the engine is still running, stop the engine and the adapter now, and check IBKR for a sale of the program's |
+| You sold by hand after a sale withheld for a stale IBKR snapshot, for values that are not positive or with nothing to sell, or one that lapsed | The attempt is unspent: the sale is decided again from the next readable, fresh, positive IBKR snapshot while what fired it is in force. If your sale is not yet in that snapshot, the program can sell the same shares again | If you stopped the engine and the adapter first, as "Selling by hand safely" says, start them again only once your sale has filled or been cancelled, as a fresh run, never a resume. If the approval carries the incident in force and the sale was the incident's (the account Halted, or Degraded with the instrument in its scope), change its `sale_attempted` to `true` (always accepted, since you sold by hand; step 6), so the new run never makes that sale; otherwise, and for an engagement's or an alarm's sale, the new run sizes the sale from a snapshot that shows yours. If the engine is still running, stop the engine and the adapter now, and check IBKR for a sale of the program's |
 | The kill switch is on and the margin alarm turns urgent | The sale still goes. That is intended: the switch never keeps you borrowed | Watch for the sale's alerts |
 
 ### The margin-cushion alarm

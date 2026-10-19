@@ -388,33 +388,85 @@ func titlesIn(src source) (titles, problems []string) {
 		}
 		add(lit.Elts[titleField])
 	}
+	// declared maps each type the package declares to what it is declared as,
+	// so a literal of a named slice or map type is read as the type it names.
+	declared := map[string]ast.Expr{}
+	for _, f := range src.files {
+		for _, decl := range f.Decls {
+			if gd, ok := decl.(*ast.GenDecl); ok {
+				for _, spec := range gd.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						declared[ts.Name.Name] = ts.Type
+					}
+				}
+			}
+		}
+	}
+	// resolve follows named types to the type they are declared as, stopping
+	// at Alert itself.
+	resolve := func(e ast.Expr) ast.Expr {
+		for range 16 {
+			if isAlert(e) {
+				return e
+			}
+			id, ok := e.(*ast.Ident)
+			if !ok || declared[id.Name] == nil {
+				return e
+			}
+			e = declared[id.Name]
+		}
+		return e
+	}
+	// placed holds the elided literals a parent literal's type has read.
+	placed := map[*ast.CompositeLit]bool{}
+	// read reads a literal of type typ: an Alert is read positionally; a slice
+	// or map of something has its elided element literals read as its element
+	// type, however deeply nested.
+	var read func(lit *ast.CompositeLit, typ ast.Expr, depth int)
+	read = func(lit *ast.CompositeLit, typ ast.Expr, depth int) {
+		typ = resolve(typ)
+		if isAlert(typ) {
+			positional(lit)
+			return
+		}
+		var elem ast.Expr
+		switch t := typ.(type) {
+		case *ast.ArrayType:
+			elem = t.Elt
+		case *ast.MapType:
+			elem = t.Value
+		default:
+			return
+		}
+		for _, e := range lit.Elts {
+			if kv, ok := e.(*ast.KeyValueExpr); ok {
+				e = kv.Value
+			}
+			if u, ok := e.(*ast.UnaryExpr); ok {
+				e = u.X
+			}
+			if inner, ok := e.(*ast.CompositeLit); ok && inner.Type == nil && depth < 16 {
+				placed[inner] = true
+				read(inner, elem, depth+1)
+			}
+		}
+	}
 	for _, f := range src.files {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CompositeLit:
-				var elem ast.Expr
-				switch t := n.Type.(type) {
-				case *ast.ArrayType:
-					elem = t.Elt
-				case *ast.MapType:
-					elem = t.Value
-				}
-				if isAlert(n.Type) {
-					positional(n)
-				}
-				if elem != nil && isAlert(elem) {
-					for _, e := range n.Elts {
-						if kv, ok := e.(*ast.KeyValueExpr); ok {
-							e = kv.Value
-						}
-						if u, ok := e.(*ast.UnaryExpr); ok {
-							e = u.X
-						}
-						if lit, ok := e.(*ast.CompositeLit); ok && lit.Type == nil {
-							positional(lit)
+				if n.Type == nil {
+					// An elided literal is read through its parent's type; one
+					// no parent placed is a literal whose type this audit
+					// cannot resolve, and may be an Alert.
+					if !placed[n] && len(n.Elts) > 0 {
+						if _, keyed := n.Elts[0].(*ast.KeyValueExpr); !keyed {
+							problems = append(problems, fmt.Sprintf("%s: a literal listing its values by position, whose type this audit cannot resolve to see whether it is an Alert; name its type", src.fset.Position(n.Pos())))
 						}
 					}
+					break
 				}
+				read(n, n.Type, 0)
 			case *ast.KeyValueExpr:
 				if id, ok := n.Key.(*ast.Ident); ok && id.Name == "Title" {
 					add(n.Value)
@@ -595,16 +647,28 @@ func titleCell(format string) func(row string) bool {
 // match reports true for. A chapter in ownTableLayout's rows are returned
 // only when no other chapter has a row that matches.
 func rowsMatching(chapters []chapter, match func(row string) bool) []string {
-	var rows, pending []string
+	var names []string
+	for _, r := range matchedRows(chapters, match) {
+		names = append(names, r.chapter)
+	}
+	return names
+}
+
+// matchedRow is a "What can go wrong" row and the chapter it is in.
+type matchedRow struct{ chapter, row string }
+
+// matchedRows is rowsMatching's rows, with their text.
+func matchedRows(chapters []chapter, match func(row string) bool) []matchedRow {
+	var rows, pending []matchedRow
 	for _, c := range chapters {
 		for _, row := range c.rows {
 			if !match(row) {
 				continue
 			}
 			if ownTableLayout[c.name] {
-				pending = append(pending, c.name)
+				pending = append(pending, matchedRow{c.name, row})
 			} else {
-				rows = append(rows, c.name)
+				rows = append(rows, matchedRow{c.name, row})
 			}
 		}
 	}
@@ -699,14 +763,54 @@ func reasonRowProblems(chapters []chapter, v string, names []string) []string {
 	if len(sets) < 2 {
 		return problems
 	}
+	// Each row that names the value must begin with exactly one set's
+	// qualified value, and carry no other set's, so the qualifier is tied to
+	// the row it explains; the sets so found must be exactly the sets.
+	found := map[string]int{}
+	unqualified := false
 	for _, s := range sets {
-		code := "`" + v + "` " + setQualifiers[s]
-		if rows := rowsMatching(chapters, func(row string) bool { return strings.Contains(firstCell(row), code) }); len(rows) != 1 {
-			problems = append(problems, fmt.Sprintf("reason %#q, which more than one set records, begins %d rows %v written %q; want exactly one, explaining the %s set's meaning",
-				v, len(rows), rows, code+"…)", s))
+		if _, ok := setQualifiers[s]; !ok {
+			unqualified = true
+			problems = append(problems, fmt.Sprintf("reason %#q is recorded by the set %q, which has no entry in setQualifiers to tell its row from the other sets'; add one", v, s))
+		}
+	}
+	if unqualified {
+		return problems
+	}
+	for _, r := range matchedRows(chapters, reasonCell(v)) {
+		cell := firstCell(r.row)
+		var carried, leading []string
+		for _, s := range sets {
+			code := "`" + v + "` " + setQualifiers[s]
+			if strings.Contains(cell, code) {
+				carried = append(carried, s)
+			}
+			if strings.HasPrefix(cell, code) {
+				leading = append(leading, s)
+			}
+		}
+		if len(leading) != 1 || len(carried) != 1 {
+			problems = append(problems, fmt.Sprintf("%s: reason %#q, which more than one set records, has a row whose first cell must begin with the value and exactly one set's qualifier (%s) and carry no other; it begins with %v and carries %v: %s",
+				r.chapter, v, qualifierList(sets), leading, carried, cell))
+			continue
+		}
+		found[leading[0]]++
+	}
+	for _, s := range sets {
+		if found[s] != 1 {
+			problems = append(problems, fmt.Sprintf("reason %#q, which more than one set records, has %d rows that begin with it written %q; want exactly one, explaining the %s set's meaning",
+				v, found[s], "`"+v+"` "+setQualifiers[s]+"…)", s))
 		}
 	}
 	return problems
+}
+
+func qualifierList(sets []string) string {
+	var out []string
+	for _, s := range sets {
+		out = append(out, fmt.Sprintf("%q", setQualifiers[s]))
+	}
+	return strings.Join(out, ", ")
 }
 
 func TestEveryAlertTitleIsExplainedInExactlyOneRow(t *testing.T) {
@@ -992,6 +1096,35 @@ func TestASharedValueNeedsOneQualifiedRowPerSet(t *testing.T) {
 	}
 }
 
+func TestAQualifierInAnotherRowDoesNotTieARowToItsSet(t *testing.T) {
+	names := []string{"RefusedStale", "SaleWithheldStale"}
+	crossReference := chapter{name: "states-and-kill-switch.md", rows: []string{
+		"| `shared` (a refused sell). Alert: x. Not `shared` (a withheld sale), below | x | y |",
+		"| `shared`. Alert: y | x | y |",
+	}}
+	if got := reasonRowProblems([]chapter{crossReference}, "shared", names); len(got) == 0 {
+		t.Error("a withheld-sale qualifier written in the refused row's cross-reference tied the unqualified row to nothing and passed")
+	}
+	twoQualifiers := chapter{name: "states-and-kill-switch.md", rows: []string{
+		"| `shared` (a refused sell) and `shared` (a withheld sale) | x | y |",
+		"| `shared` (a withheld sale) | x | y |",
+	}}
+	if got := reasonRowProblems([]chapter{twoQualifiers}, "shared", names); len(got) == 0 {
+		t.Error("a row carrying both sets' qualifiers passed")
+	}
+}
+
+func TestASetWithNoQualifierFailsTheAudit(t *testing.T) {
+	c := chapter{name: "states-and-kill-switch.md", rows: []string{
+		"| `shared` (a refused sell) | x | y |",
+		"| `shared`. Alert: x | x | y |",
+	}}
+	got := reasonRowProblems([]chapter{c}, "shared", []string{"RefusedStale", "NewSetStale"})
+	if len(got) == 0 {
+		t.Error("a set reasonPrefixes lists without a setQualifiers entry fell back to the empty qualifier and passed")
+	}
+}
+
 func TestAlertTitlesReadsAPositionalLiteral(t *testing.T) {
 	src := `package report
 
@@ -1017,6 +1150,50 @@ func alerts(account string) []Alert {
 	sort.Strings(titles)
 	if !slices.Equal(titles, want) {
 		t.Errorf("titles %q; want %q", titles, want)
+	}
+}
+
+func TestAlertTitlesReadsAPositionalLiteralInANamedOrNestedType(t *testing.T) {
+	src := `package report
+
+type Alert struct {
+	Key   string
+	Title string
+	Body  string
+}
+
+type Alerts []Alert
+
+type ByAccount map[string]Alerts
+
+func named() Alerts { return Alerts{{"k", "%s: named", "body"}} }
+
+func nested() map[string][]Alert {
+	return map[string][]Alert{"x": {{"k", "%s: nested", "body"}}}
+}
+
+func chained() ByAccount { return ByAccount{"x": {{"k", "%s: chained", "body"}}} }
+`
+	titles, problems := titlesIn(parseSource(t, src))
+	if len(problems) != 0 {
+		t.Fatalf("problems %q", problems)
+	}
+	want := []string{"%s: chained", "%s: named", "%s: nested"}
+	sort.Strings(titles)
+	if !slices.Equal(titles, want) {
+		t.Errorf("titles %q; want %q", titles, want)
+	}
+}
+
+func TestAlertTitlesFailsOnAnElidedLiteralOfAnUnresolvableType(t *testing.T) {
+	src := `package report
+
+func alerts() other.Alerts {
+	return other.Alerts{{"k", "%s: lost", "body"}}
+}
+`
+	if _, problems := titlesIn(parseSource(t, src)); len(problems) != 1 {
+		t.Errorf("problems %q; want one for the elided literal whose type cannot be resolved", problems)
 	}
 }
 
