@@ -120,5 +120,6 @@ research-test:
 # Shell tests for the deploy rehearsal (no Docker needed).
 deploy-test:
 	./deploy/rehearsal/test-platform.sh
+	./deploy/rehearsal/test-clock.sh
 
 check: deps lint coverage vuln build adapter-test research-test deploy-test

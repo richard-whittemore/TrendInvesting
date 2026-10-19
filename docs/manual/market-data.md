@@ -692,7 +692,7 @@ days), it takes them all, oldest first.
    trust it: the sale back to 98% is withheld (`risk.sale.withheld`), and
    any other sell, such as an ordinary strategy sale, is refused
    (`risk.order.refused`). Either at every close is the sign: check the
-   server's clock (`timedatectl`) against IBKR's. A fill or a cancellation IBKR reports
+   server's clock (run `clock-check.sh`; [the server](server.md), "The clock"). A fill or a cancellation IBKR reports
    while the engine works through the file goes to the engine before the
    file's next line, so no session is decided on an account behind a
    report already received. A trade IBKR has reported but whose commission
