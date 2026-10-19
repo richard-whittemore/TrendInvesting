@@ -127,6 +127,7 @@ CONF
 # outside reference. Re-run safe.
 step_clock() {
   install -d -m 0755 /usr/local/libexec/trend-investing
+  install -d -m 0755 /etc/trend-investing # holds clock.conf, which the check reads
   install -m 0755 "$here"/libexec/clock-check.sh /usr/local/libexec/trend-investing/
   if test "$rehearsal" != 1 && test -d /run/systemd/system; then
     log "time syncing"

@@ -143,8 +143,13 @@ makes that website unusable. A fresh answer has no `Age`, or an `Age` of 0, and
 nothing is added. The limit can be changed with
 `TI_CLOCK_TOLERANCE_SECONDS`. On a slow home link every website may take more
 than 2 seconds; `sudo` drops environment variables, so raise the limit in the
-file `/etc/trend-investing/clock.conf` (create it, one line:
-`TI_CLOCK_MAX_ROUNDTRIP_SECONDS=5`), which the check reads. A value set in the
+file `/etc/trend-investing/clock.conf`, which the check reads (the clock step
+creates the folder `/etc/trend-investing`, owned by root, if it is missing, so
+this works on a fresh server; the file should be owned by root and readable by
+all, which `tee` gives you):
+`echo TI_CLOCK_MAX_ROUNDTRIP_SECONDS=5 | sudo tee /etc/trend-investing/clock.conf`.
+The tolerance can be set there too, as `TI_CLOCK_TOLERANCE_SECONDS`, but only
+to a whole number of seconds from 1 to 60; anything else is refused. A value set in the
 environment of a run by hand overrides the file, and a value that is not a
 positive number is refused. If the container cannot
 reach any reference, that also fails, because a clock that could not be

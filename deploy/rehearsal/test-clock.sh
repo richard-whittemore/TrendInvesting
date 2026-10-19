@@ -136,6 +136,18 @@ expect "the environment overrides the config file" 1 \
 printf 'TI_CLOCK_MAX_ROUNDTRIP_SECONDS=oops\n' >"$work/bad.conf"
 expect "a bad value in the config file is refused" 1 "$(run FAKE_CONTAINER=1 TI_CLOCK_CONFIG="$work/bad.conf")"
 
+# The tolerance is bounded like the round-trip value: a finite positive whole
+# number of seconds, at most 60, short; and a comparison that errors fails.
+for bad in 0 61 99999999999999999999 1e3 -1 abc 0005000; do
+  expect "a tolerance of '$bad' is refused" 1 "$(run FAKE_CONTAINER=1 FAKE_OFFSET=3600 TI_CLOCK_TOLERANCE_SECONDS="$bad")"
+  grep -q 'TI_CLOCK_TOLERANCE_SECONDS' "$work/err" || expect "the refusal names the tolerance variable ('$bad')" yes no
+  grep -q 'ok, skew' "$work/out" && expect "a tolerance of '$bad' never reports ok" no yes
+done
+printf 'TI_CLOCK_TOLERANCE_SECONDS=99999999999999999999\n' >"$work/hugetol.conf"
+expect "a huge tolerance in the config file is refused, not passed" 1 \
+  "$(run FAKE_CONTAINER=1 FAKE_OFFSET=3600 TI_CLOCK_CONFIG="$work/hugetol.conf")"
+expect "a tolerance of 60 is accepted" 0 "$(run FAKE_CONTAINER=1 FAKE_OFFSET=30 TI_CLOCK_TOLERANCE_SECONDS=60)"
+
 # The Age header is checked: a non-negative whole number up to an hour.
 expect "a negative Age makes the reference unusable" 1 "$(run FAKE_CONTAINER=1 FAKE_AGE_RAW=-30)"
 expect "a non-numeric Age makes the reference unusable" 1 "$(run FAKE_CONTAINER=1 FAKE_AGE_RAW=abc)"
@@ -205,6 +217,53 @@ sync_run FAKE_ACTIVE= FAKE_SYNC_AFTER=3 >/dev/null
 expect "it waits until synchronised (4 reads)" 4 "$(cat "$work/count")"
 sync_run FAKE_ACTIVE= FAKE_SYNC_AFTER=999 TI_CLOCK_WAIT_TRIES=5 >/dev/null
 expect "it gives up after the wait (5 reads)" 5 "$(cat "$work/count")"
+
+# The unit is started by its real name (chronyd.service, ntpd.service); the
+# display name is for messages only.
+expect "chronyd running is named by its unit" chronyd "$(daemon FAKE_ACTIVE='chronyd')"
+expect "ntpd installed, stopped, is named by its unit" ntpd "$(daemon FAKE_ACTIVE='' FAKE_INSTALLED='ntpd')"
+out=$(sync_run FAKE_ACTIVE= FAKE_INSTALLED=chronyd FAKE_SYNC=yes)
+expect "only chronyd.service exists: it is started by that name" yes "$(log_has "$out" 'systemctl start chronyd.service')"
+expect "only chronyd.service exists: it is enabled by that name" yes "$(log_has "$out" 'systemctl enable chronyd.service')"
+out=$(sync_run FAKE_ACTIVE=ntpd FAKE_SYNC=yes)
+expect "ntpd.service running: it is enabled by that name" yes "$(log_has "$out" 'systemctl enable ntpd.service')"
+
+# Only exit 1 from time-daemon.sh means none is installed; any other status
+# fails closed and never installs timesyncd over a possibly installed daemon.
+stubdir="$work/lx"
+mkdir -p "$stubdir"
+cp "$here/../libexec/time-sync.sh" "$stubdir/"
+for code in 126 127 3 139; do
+  printf '#!/bin/bash\nexit %s\n' "$code" >"$stubdir/time-daemon.sh"
+  chmod +x "$stubdir/time-daemon.sh" "$stubdir/time-sync.sh"
+  : >"$work/log"; st=0
+  env PATH="$stubs:$PATH" FAKE_LOG="$work/log" TI_CLOCK_WAIT_SLEEP=0 "$stubdir/time-sync.sh" >/dev/null 2>"$work/err" || st=$?
+  expect "time-daemon.sh exiting $code fails closed" 1 "$st"
+  grep -q "$code" "$work/err" || expect "the refusal names status $code" yes no
+  expect "time-daemon.sh exiting $code installs nothing" no "$(log_has "$(cat "$work/log")" 'apt-get install')"
+done
+
+# A systemd-timesyncd that cannot start: tolerated in a container on every run
+# (the clock check decides), fatal on a VM on every run.
+sync_status() { # env assignments...; prints time-sync.sh's exit status
+  : >"$work/log"; local st=0
+  env PATH="$stubs:$PATH" FAKE_LOG="$work/log" FAKE_COUNT="$work/count" TI_CLOCK_WAIT_SLEEP=0 TI_CLOCK_WAIT_TRIES=1 TI_CLOCK_CONTAINER_MARKERS= "$@" "$here/../libexec/time-sync.sh" >/dev/null 2>"$work/err" || st=$?
+  echo "$st"
+}
+expect "container, first run, timesyncd will not start: tolerated" 0 \
+  "$(sync_status FAKE_ACTIVE= FAKE_CONTAINER=1 FAKE_START_FAIL=systemd-timesyncd)"
+expect "container, re-run, timesyncd installed but will not start: tolerated" 0 \
+  "$(sync_status FAKE_ACTIVE= FAKE_INSTALLED=systemd-timesyncd FAKE_CONTAINER=1 FAKE_START_FAIL=systemd-timesyncd)"
+expect "VM, first run, timesyncd will not start: fatal" 1 \
+  "$(sync_status FAKE_ACTIVE= FAKE_CONTAINER=0 FAKE_START_FAIL=systemd-timesyncd)"
+expect "VM, re-run, timesyncd installed but will not start: fatal" 1 \
+  "$(sync_status FAKE_ACTIVE= FAKE_INSTALLED=systemd-timesyncd FAKE_CONTAINER=0 FAKE_START_FAIL=systemd-timesyncd)"
+expect "container, chrony that will not start is still fatal" 1 \
+  "$(sync_status FAKE_ACTIVE= FAKE_INSTALLED=chrony FAKE_CONTAINER=1 FAKE_START_FAIL=chrony)"
+
+# The clock step creates /etc/trend-investing before the check reads clock.conf.
+grep -q 'install -d -m 0755 /etc/trend-investing' "$here/../provision.sh" || expect "step_clock creates /etc/trend-investing" yes no
+awk '/^step_clock\(\)/,/^}/' "$here/../provision.sh" | grep -q 'install -d -m 0755 /etc/trend-investing' || expect "the directory is created inside step_clock" yes no
 
 test "$failures" -eq 0 || exit 1
 echo "clock tests ok"

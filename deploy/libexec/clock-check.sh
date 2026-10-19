@@ -14,7 +14,7 @@
 # Run it by hand any time: /usr/local/libexec/trend-investing/clock-check.sh
 # Exit 0: the clock is good. Exit 1: it is not, and the reason is on stderr.
 #
-#   TI_CLOCK_TOLERANCE_SECONDS   container tolerance in whole seconds (default 2)
+#   TI_CLOCK_TOLERANCE_SECONDS   container tolerance in whole seconds (1 to 60, default 2)
 #   TI_CLOCK_CONTAINER_MARKERS  files whose presence means a container, besides systemd-detect-virt
 #   TI_CLOCK_MAX_ROUNDTRIP_SECONDS  longest request accepted as a measurement (default 2)
 #   TI_CLOCK_VERIFY             1: compare with a reference even when synchronised
@@ -45,7 +45,16 @@ container_markers=${TI_CLOCK_CONTAINER_MARKERS-/.dockerenv /run/.containerenv}
 
 say() { printf 'clock: %s\n' "$*"; }
 refuse() { printf 'clock: %s\n' "$*" >&2; exit 1; }
-case $tolerance in '' | *[!0-9]*) refuse "TI_CLOCK_TOLERANCE_SECONDS must be whole seconds, not '$tolerance'" ;; esac
+# Whole seconds, from 1 to 60, in at most three digits: a larger tolerance
+# would let a clock that is minutes behind pass, and a longer string could
+# overflow the comparison below.
+case $tolerance in
+  '' | *[!0-9]* | ????*) refuse "TI_CLOCK_TOLERANCE_SECONDS must be whole seconds from 1 to 60, not '${tolerance:0:20}'" ;;
+esac
+if test "$((10#$tolerance))" -lt 1 || test "$((10#$tolerance))" -gt 60; then
+  refuse "TI_CLOCK_TOLERANCE_SECONDS must be whole seconds from 1 to 60, not '$tolerance'"
+fi
+tolerance=$((10#$tolerance))
 
 max_roundtrip=$(setting TI_CLOCK_MAX_ROUNDTRIP_SECONDS 2)
 # A finite positive number: digits with an optional fraction, not zero, and short
@@ -131,7 +140,10 @@ for url in $references; do
   fi
   skew=$result
   magnitude=${skew#-}
-  if test "$magnitude" -gt "$tolerance"; then
+  # Only a clean "not greater" passes; an error in the comparison is a failure.
+  within=1
+  test "$magnitude" -le "$tolerance" 2>/dev/null && within=0
+  if test "$within" -ne 0; then
     refuse "skew of ${skew}s against $url (this clock minus the reference), more than the ${tolerance}s tolerance. The host's clock is wrong: turn on automatic date and time on the host. While it is wrong the engine may withhold every sell."
   fi
   say "ok, skew ${skew}s against $url, within ${tolerance}s"
