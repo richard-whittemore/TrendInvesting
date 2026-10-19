@@ -349,10 +349,17 @@ engine reads that record before the fresh run's first input from the
 adapter, before any order is checked.
 
 `operator approve` has no option to state the attempt: it writes what the
-log records. After a hand sale the log does not know about, open the file it
-wrote and change `sale_attempted` inside `incident_in_force` from `false` to
-`true`; change nothing else, because the engine checks the rest of the file
-against the log.
+log records. After a hand sale the log does not know about, edit the file it
+wrote (the path on its `wrote` line). Open it in a plain-text editor (TextEdit
+in plain-text mode, or any code editor; not a word processor, which swaps in
+curly quotes). Find `"sale_attempted": false` inside `incident_in_force`
+and change `false` to `true`, with no quotes around `true`. Save, and change
+nothing else: leave every comma, quote and brace as it is, because the engine
+checks the rest of the file against the log, and leave the sale's client order
+ID as the tool wrote it. If `incident_in_force` is `null` there is nothing to
+change. An edit that leaves the file malformed is refused when the engine
+starts ([restart](restart.md), "Starting a fresh run"): it starts nothing
+and changes nothing, so fix the file and start again.
 
 The engine checks the approval against the same log when the fresh run
 starts (see [restart](restart.md), "What the engine checks"). One more check

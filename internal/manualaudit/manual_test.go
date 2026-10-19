@@ -1100,10 +1100,10 @@ func TestAQualifierInAnotherRowDoesNotTieARowToItsSet(t *testing.T) {
 	names := []string{"RefusedStale", "SaleWithheldStale"}
 	crossReference := chapter{name: "states-and-kill-switch.md", rows: []string{
 		"| `shared` (a refused sell). Alert: x. Not `shared` (a withheld sale), below | x | y |",
-		"| `shared`. Alert: y | x | y |",
+		"| `shared` (a withheld sale). Alert: y | x | y |",
 	}}
 	if got := reasonRowProblems([]chapter{crossReference}, "shared", names); len(got) == 0 {
-		t.Error("a withheld-sale qualifier written in the refused row's cross-reference tied the unqualified row to nothing and passed")
+		t.Error("a withheld-sale qualifier written in the refused row's cross-reference passed")
 	}
 	twoQualifiers := chapter{name: "states-and-kill-switch.md", rows: []string{
 		"| `shared` (a refused sell) and `shared` (a withheld sale) | x | y |",
