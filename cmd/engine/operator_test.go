@@ -262,10 +262,10 @@ func TestAnOperatorInputIsDeliveredOnce(t *testing.T) {
 }
 
 // TestAnOperatorRecordTheEngineRefusesIsNoted: a record the engine cannot
-// read is never delivered, and one the run refuses (another account's) is
-// journalled as delivered with no effect; each is noted beside it in the
-// inbox with why, never retried, and the adapter's input is decided as
-// usual.
+// decode is never delivered, and one the run refuses (another account's) is
+// journalled as delivered with no effect; each is noted, with why, in the
+// engine's notes folder, never retried, and the adapter's input is decided
+// as usual.
 func TestAnOperatorRecordTheEngineRefusesIsNoted(t *testing.T) {
 	dir := t.TempDir()
 	opts := inboxOptions(t, dir)
@@ -441,18 +441,18 @@ func TestAnUnlistableNotesFolderStopsTheDelivery(t *testing.T) {
 	}
 }
 
-// TestMarkersAnEarlierBuildLeftInTheInboxStillSettleTheirRecords: an earlier
-// build wrote its delivered and refusal markers beside the record in the
-// inbox; they keep a record from being delivered again after the upgrade,
-// as the notes folder's own do.
-func TestMarkersAnEarlierBuildLeftInTheInboxStillSettleTheirRecords(t *testing.T) {
+// TestAMarkerInTheInboxDoesNotSettleARecord: the inbox's writer is the
+// operator's identity, not the engine's, so a .delivered or .refused file
+// found in the inbox (forged, or left by an earlier layout) settles nothing:
+// only the engine's own notes folder does (ADR 0026, amendment of
+// 2026-10-18, "the operator inbox has a writer of its own").
+func TestAMarkerInTheInboxDoesNotSettleARecord(t *testing.T) {
 	dir := t.TempDir()
 	opts := inboxOptions(t, dir)
-	delivered := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
-	refused := writeKillSwitch(t, opts.operatorDir, "ira", boostSession(0).Add(-time.Hour), true)
-	open := writeKillSwitch(t, opts.operatorDir, "custodial", boostSession(0).Add(-30*time.Minute), true)
-	for name, suffix := range map[string]string{delivered.FileName(): deliveredSuffix, refused.FileName(): refusedSuffix} {
-		if err := os.WriteFile(filepath.Join(opts.operatorDir, name+suffix), []byte("old\n"), 0o600); err != nil {
+	engaged := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
+	other := writeKillSwitch(t, opts.operatorDir, "ira", boostSession(0).Add(-time.Hour), true)
+	for name, suffix := range map[string]string{engaged.FileName(): deliveredSuffix, other.FileName(): refusedSuffix} {
+		if err := os.WriteFile(filepath.Join(opts.operatorDir, name+suffix), []byte("forged\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -464,8 +464,100 @@ func TestMarkersAnEarlierBuildLeftInTheInboxStillSettleTheirRecords(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 1 || records[0].ID != open.ID {
-		t.Errorf("pending() = %d records, want only the one with no marker", len(records))
+	if len(records) != 2 || records[0].ID != engaged.ID || records[1].ID != other.ID {
+		t.Errorf("pending() = %+v, want both records: a marker in the inbox settles nothing", records)
+	}
+}
+
+// TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice: an earlier layout
+// marked a delivered record beside it in the inbox, a marker the engine no
+// longer reads; the durable log's committed input is what keeps it from
+// being recorded again (ADR 0027), and the engine notes it in its own
+// folder.
+func TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice(t *testing.T) {
+	dir := t.TempDir()
+	first := inboxOptions(t, dir)
+	stop := startEngine(t, first)
+	feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 1)
+	engaged := writeKillSwitch(t, first.operatorDir, "joint", boostSession(1).Add(-time.Hour), true)
+	feed.sessions(1, 2)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	next := feed.sequence
+	// The earlier layout: its marker beside the record, no notes folder.
+	if err := os.RemoveAll(operatorNotesDir(first.operatorDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(first.operatorDir, engaged.FileName()+deliveredSuffix), []byte("delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed := first
+	resumed.resumePath, resumed.logPath, resumed.outPath = first.logPath, filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+	resumed.socketPath = filepath.Join(shortSocketDir(t), "engine.sock")
+	stop = startEngine(t, resumed)
+	feed = newBoostFeed(t, resumed.socketPath, boostConfiguration(t, boostConfigPath), "test-build", next)
+	feed.sessions(2, 4)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if inputs := operatorInputs(recoverFile(t, resumed.logPath).Entries); len(inputs) != 1 || inputs[0].ID != engaged.ID {
+		t.Errorf("the resumed log holds operator inputs %+v, want the engagement once", inputs)
+	}
+	if _, err := os.Stat(noteFor(first.operatorDir, engaged.FileName(), deliveredSuffix)); err != nil {
+		t.Errorf("the record the log holds is not noted in the engine's own folder: %v", err)
+	}
+}
+
+// TestARecordUnreadableAtRunTimeStopsTheDelivery: a record that cannot be
+// read after the start-up check (one placed by hand with another mode) may
+// be a kill switch, so the delivery stops with an error rather than deciding
+// with it unread (fail closed, ADR 0019).
+func TestARecordUnreadableAtRunTimeStopsTheDelivery(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any file")
+	}
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	inbox, err := openOperatorInbox(opts, composition{}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
+	record := filepath.Join(opts.operatorDir, r.FileName())
+	if err := os.Chmod(record, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(record, 0o600) })
+	if _, err := inbox.pending(); err == nil || !strings.Contains(err.Error(), r.FileName()) {
+		t.Errorf("pending() = %v, want an error naming the unreadable record", err)
+	}
+}
+
+// TestAnUnlistableInboxAtRunTimeStopsTheDelivery: an inbox that cannot be
+// listed after the start-up check leaves every instruction in it unread, so
+// the delivery stops with an error, as for the notes folder (fail closed,
+// ADR 0019).
+func TestAnUnlistableInboxAtRunTimeStopsTheDelivery(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists any folder")
+	}
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	inbox, err := openOperatorInbox(opts, composition{}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(opts.operatorDir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(opts.operatorDir, 0o750) })
+	if _, err := inbox.pending(); err == nil {
+		t.Error("pending() listed an unlistable inbox without an error")
 	}
 }
 

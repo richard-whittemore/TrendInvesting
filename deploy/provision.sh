@@ -68,10 +68,21 @@ fetch() {
 # the engine's, so it reaches the engines' state directories (0750), and
 # the engine reads its records through that group. The base and services
 # steps both ensure it, so a server provisioned before it existed gains it
-# on a services upgrade.
+# on a services upgrade. A ti-operator made another way, with a primary group
+# other than ti-trader, could neither reach the inboxes nor give its records
+# their group, so every instruction would be refused: its group is set, or
+# the step stops naming the mismatch.
 ensure_operator_user() {
   if ! id ti-operator >/dev/null 2>&1; then
     useradd --system --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator
+  fi
+  local group
+  group=$(id -gn ti-operator)
+  if test "$group" != ti-trader; then
+    log "ti-operator's primary group is $group; setting it to ti-trader"
+    usermod -g ti-trader ti-operator || die "ti-operator's primary group is $group, not ti-trader, and usermod -g ti-trader ti-operator failed; fix it by hand and run again"
+    group=$(id -gn ti-operator)
+    test "$group" = ti-trader || die "ti-operator's primary group is still $group, not ti-trader; fix it with usermod -g ti-trader ti-operator and run again"
   fi
 }
 

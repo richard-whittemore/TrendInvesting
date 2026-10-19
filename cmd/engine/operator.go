@@ -22,13 +22,16 @@ import (
 
 // refusedSuffix names the note the engine writes, in its notes folder under an inbox
 // record's name, when it refused the record, saying why; a record with a
-// note is never delivered again. An earlier layout wrote it beside the
-// record in the inbox, and one found there still settles the record.
+// note is never delivered again. A file of that name in the inbox itself
+// settles nothing: the inbox's writer is not the engine (ADR 0026,
+// amendment of 2026-10-18), so it could otherwise silence a kill switch.
 const refusedSuffix = ".refused"
 
 // deliveredSuffix names the marker the engine writes, in its notes folder under
 // an inbox record's name, once the record's input is flushed to the durable
-// log (found beside the record in the inbox, it settles the record too).
+// log. As for refusedSuffix, one found in the inbox settles nothing; a record
+// an earlier layout marked there is kept from a second delivery by the
+// durable log's committed input (ADR 0027).
 const deliveredSuffix = ".delivered"
 
 // operatorClockSkew is how far after the engine's clock an operator record
@@ -52,8 +55,8 @@ const operatorClockSkew = 5 * time.Minute
 // The durable log is the evidence (ADR 0027): a record is delivered once,
 // when its ID is in no earlier log of the directory of -log, this run's
 // resumed log included, and in no earlier exchange of this run, and it has
-// no delivered marker (deliveredSuffix) beside it, which is written once its
-// input is flushed to the log, so a log later moved out of the directory
+// no delivered marker (deliveredSuffix) in the engine's notes folder, which
+// is written once its input is flushed to the log, so a log later moved out of the directory
 // (quarantined, or a run started with -log elsewhere) cannot cause a second
 // delivery. The owner's instructions count in the order of the times they
 // state (ADR 0019, amendment of 2026-10-17, "operator instructions count in
@@ -64,12 +67,15 @@ const operatorClockSkew = 5 * time.Minute
 // time later than the engine's clock, beyond operatorClockSkew, would order
 // every truthful instruction before it, so it is never delivered.
 //
-// A record the engine cannot read, or that states a time more than
+// A record the engine cannot decode, or that states a time more than
 // operatorClockSkew ahead of the engine's clock, is never delivered; one
 // the run refuses is journalled as delivered with no effect. Each is noted
 // under its file name in the engine's notes folder (operatorNotesDir,
 // refusedSuffix) and on the engine's output, and
-// never delivered again. A record whose input the recorder did not take (a
+// never delivered again. An inbox the engine cannot list, or a record in it
+// the engine cannot open, may hide a kill switch, so the run stops (fail
+// closed, ADR 0019), as for a notes folder it cannot list. A record whose
+// input the recorder did not take (a
 // failed write or flush, which ends the log, ADR 0027 §3, or the recorder's
 // record bound or emission ceiling, ADR 0017) was not delivered: it gets no
 // note, and the run stops, so the next start delivers it.
@@ -143,7 +149,8 @@ type inboxRecord struct {
 }
 
 // pending returns the records not yet delivered, in file-name order,
-// noting each file that cannot be read as a record. A record the logs
+// noting each file that cannot be decoded as a record. A listing or a
+// record that cannot be read is an error, which stops the run. A record the logs
 // already hold is marked delivered, so it is never read again.
 func (b *operatorInbox) pending() ([]inboxRecord, error) {
 	noted, err := os.ReadDir(b.notes)
@@ -161,21 +168,14 @@ func (b *operatorInbox) pending() ([]inboxRecord, error) {
 	}
 	entries, err := os.ReadDir(b.dir)
 	if err != nil {
-		b.report("engine: list the operator inbox %s: %v; its records wait for the next input", b.dir, err)
-		return nil, nil
+		return nil, fmt.Errorf("engine: list the operator inbox %s, so a kill switch in it could wait unread: %w", b.dir, err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		switch {
-		case !entry.Type().IsRegular():
-		case strings.HasSuffix(name, ".json"):
+		// Only records: a marker in the inbox settles nothing (deliveredSuffix).
+		if entry.Type().IsRegular() && strings.HasSuffix(name, ".json") {
 			names = append(names, name)
-		case strings.HasSuffix(name, refusedSuffix):
-			// A marker an earlier layout wrote beside the record.
-			b.settle(strings.TrimSuffix(name, refusedSuffix))
-		case strings.HasSuffix(name, deliveredSuffix):
-			b.settle(strings.TrimSuffix(name, deliveredSuffix))
 		}
 	}
 	sort.Strings(names)
@@ -188,10 +188,10 @@ func (b *operatorInbox) pending() ([]inboxRecord, error) {
 		if !ok {
 			raw, err := os.ReadFile(filepath.Join(b.dir, name))
 			if err != nil {
-				if !errors.Is(err, fs.ErrNotExist) {
-					b.report("engine: read the operator record %s: %v; it waits for the next input", name, err)
+				if errors.Is(err, fs.ErrNotExist) {
+					continue
 				}
-				continue
+				return nil, fmt.Errorf("engine: read the operator record %s, which could be a kill switch, so the run cannot decide with it unread: %w", name, err)
 			}
 			if r, err = operator.Decode(raw); err != nil {
 				b.refuse(name, err)
@@ -280,9 +280,9 @@ func (b *operatorInbox) apply(ctx context.Context, engine *replay.Engine, r inbo
 	return after, nil
 }
 
-// markDelivered writes and flushes the marker beside the record named name
-// saying it was delivered and where, after its input is flushed to the
-// durable log, so it is never delivered again even if that log is moved. A
+// markDelivered writes and flushes the marker, in the notes folder, for the
+// record named name saying it was delivered and where, after its input is
+// flushed to the durable log, so it is never delivered again even if that log is moved. A
 // marker that cannot be written is reported; the log still holds the
 // input.
 func (b *operatorInbox) markDelivered(name, where string) {
@@ -314,7 +314,7 @@ func writeFlushed(path string, raw []byte) error {
 	return file.Close()
 }
 
-// refuse notes beside the record named name why it was refused.
+// refuse notes, in the notes folder, why the record named name was refused.
 func (b *operatorInbox) refuse(name string, why error) {
 	b.settle(name)
 	b.report("engine: refused operator record %s: %v", name, why)

@@ -274,6 +274,13 @@ test "$(id -gn ti-operator)" = ti-trader || fail "ti-operator's group is not the
 userdel ti-operator || fail "could not remove ti-operator to test the upgrade"
 "$p" services >/dev/null 2>&1 || fail "the services step fails on a server without ti-operator"
 test "$(id -gn ti-operator)" = ti-trader || fail "the services step did not create ti-operator"
+# A ti-operator made another way, in a group of its own, gets the engine's
+# group back from the services step.
+groupadd ti-other || fail "could not create a stand-in group"
+usermod -g ti-other ti-operator || fail "could not move ti-operator to the stand-in group"
+"$p" services >/dev/null 2>&1 || fail "the services step fails on a ti-operator in another group"
+test "$(id -gn ti-operator)" = ti-trader || fail "the services step left ti-operator outside ti-trader"
+groupdel ti-other || fail "could not remove the stand-in group"
 for a in boost trad-ira roth-ira; do
   inbox=/var/lib/trend-investing/engines/$a/operator
   test "$(stat -c %U:%G:%a "$inbox")" = ti-operator:ti-trader:750 || fail "the $a operator inbox is not ti-operator:ti-trader 0750"

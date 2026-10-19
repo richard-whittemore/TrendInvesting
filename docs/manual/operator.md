@@ -68,8 +68,27 @@ The engine writes nothing into the inbox. What it notes about each file
 the inbox's name followed by `-notes`
 (`/var/lib/trend-investing/engines/<account>/operator-notes` on the server),
 mode `0700`. It creates that folder at its first start, and refuses to start
-if the one there is another user's or others can write it: a note settles a
-file for good, so a forged one could silence your kill switch.
+if the one there is another user's, others can write it, or it cannot list
+it: a note settles a file for good, so a forged one could silence your kill
+switch. For the same reason a `.delivered` or `.refused` file in the inbox
+itself means nothing to the engine: whoever can write the inbox could
+otherwise withhold an instruction as well as write one. Only the notes folder
+settles a file. While it runs, an inbox the engine cannot list, or a file in
+it the engine cannot open (one you put there by hand with another mode, for
+instance), stops the run with the error: it may be a kill switch, and the
+engine does not decide with it unread.
+
+**Upgrading from a build that wrote its notes into the inbox.** An earlier
+build wrote `.delivered` and `.refused` beside each file in the inbox; this
+build ignores them. A file already recorded in a log still in the engine's
+log folder is not recorded again (the log is the evidence), and the engine
+notes it in its own folder. A file whose log you quarantined or kept
+elsewhere would be recorded again, and a file refused earlier is read again.
+So before the first start of this build, move every file that has a
+`.delivered` or `.refused` beside it out of the inbox, with its markers
+(`sudo mkdir /var/lib/trend-investing/engines/<account>/operator-old` and
+`sudo mv` them there); nothing the engine needs is lost, since the log holds
+what was recorded.
 
 ## The operator inbox
 
@@ -388,9 +407,9 @@ reports ([journal-query](journal-query.md)).
 | A clearance that names the wrong orders | Recorded with no effect; `.refused` note says which orders are open | Clear again naming exactly those |
 | The engine is restarted fresh while the switch was on | The fresh run starts with the switch off; `operator approve` warns you | Record the switch again before starting it |
 | A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
-| The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-operator:ti-trader`, `0750`) |
+| The engine cannot list the inbox, or open a file in it, while it runs (permissions) | The run stops with the error, naming the folder or the file: it may be a kill switch, so nothing is decided with it unread | Fix the folder's owner or mode (`ti-operator:ti-trader`, `0750`) or the file's (`ti-operator:ti-trader`, `0640`), then resume the run |
 | The engine is started and the inbox is missing, its group or others can write it, root or the engine's own user owns it, or the engine cannot read it | It refuses to start and says which | Create it as above, or `sudo chown ti-operator:ti-trader` and `sudo chmod 0750` it |
-| The engine's notes folder (`operator-notes`) is another user's, or others can write it | It refuses to start and says so | Move the folder aside; the engine creates it again. What stops an instruction being recorded twice is the durable log's committed input (the markers are the tool's view of it), so move aside only a folder whose records are all in a log still in the log folder; a record whose log you quarantined earlier would be recorded again, so move those records out of the inbox first |
+| The engine's notes folder (`operator-notes`) is another user's, others can write it, or the engine cannot list it | It refuses to start and says so | For a folder that is the engine's but not `0700`, `sudo chmod 0700` it. Otherwise move the folder aside; the engine creates it again. What stops an instruction being recorded twice is the durable log's committed input (the markers are the engine's view of it), so move aside only a folder whose records are all in a log still in the log folder; a record whose log you quarantined earlier would be recorded again, so move those records out of the inbox first |
 
 The kill switch stops new orders from this program only. To cancel orders
 already at IBKR, cancel them in IBKR's own app. Stopping the Gateway is not a
@@ -434,7 +453,11 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestTheOperatorInboxMustNotBeWritableByOthers`,
 `TestTheOperatorInboxBelongsToAUserTheEngineDoesNotRunAs`,
 `TestTheEngineWritesNothingIntoTheOperatorInbox`,
-`TestTheEnginesNotesFolderIsItsOwn`, `TestTheProvisionerCreatesTheOperatorInbox`,
+`TestTheEnginesNotesFolderIsItsOwn`, `TestAMarkerInTheInboxDoesNotSettleARecord`,
+`TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice`,
+`TestARecordUnreadableAtRunTimeStopsTheDelivery`,
+`TestAnUnlistableInboxAtRunTimeStopsTheDelivery`,
+`TestTheProvisionerCreatesTheOperatorInbox`,
 `TestNoNetworkFacingUnitCanWriteAnInstruction`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
@@ -452,7 +475,9 @@ enveloped by the functions the engine delivers with, and no repeat after it
 on either channel); `TestAnAlertAcknowledgementIsDeliveredAndJournalled`
 (`cmd/engine`, the engine delivering and journalling it, with no refusal);
 `TestARefusalRecordedAtAnotherSequenceStatesIt` (`transport`);
-`TestRebalanceClearedValidate` (`internal/event`).
+`TestRebalanceClearedValidate` (`internal/event`);
+`deploy/rehearsal/test-operator-user.sh` (the provisioner gives an existing
+`ti-operator` the group `ti-trader`, or stops naming the mismatch).
 
 ## Not built yet
 

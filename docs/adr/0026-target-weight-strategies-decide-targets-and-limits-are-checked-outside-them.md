@@ -966,6 +966,15 @@ decides is the failure to refuse (fail closed, ADR 0019). What the engine
 notes about a record (delivered, refused) it writes in a folder of its own
 beside the inbox, `<inbox>-notes`, mode `0700`, which it also refuses when
 others can write it, when another user owns it, or when it cannot list it.
+Only that folder settles a record. A `.delivered` or `.refused` file in the
+inbox itself settles nothing, since whoever writes the inbox could otherwise
+withhold an instruction as well as write one; the engine reads only the
+records there. A record the earlier layout delivered (it wrote its markers
+beside each record in the inbox) is kept from being recorded twice by the
+durable log's committed input (ADR 0027): its ID is in a log of the `-log`
+directory. While it runs, an inbox the engine cannot list, or a record in it
+the engine cannot open, stops the run for a person, as a notes folder it
+cannot list does: the start-up check cannot see a record placed later.
 
 No unit that reads data from outside runs as `ti-operator`. The adapter, the
 data job, the reporter and the dashboard run as `ti-trader` but cannot reach
