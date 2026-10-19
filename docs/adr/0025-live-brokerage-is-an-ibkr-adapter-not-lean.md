@@ -155,3 +155,30 @@ The version and checksum the amendment of 2026-10-16 left open are set in
 - The Gateway is pinned at 10.50.1f (stable) and the API at 10.51.01: the API
   client negotiates the server version on connect, and the paper-account
   test confirms the pair works before any account sends.
+
+## Amendment (2026-10-18, owner decision): the adapter's stamping duty after the close
+
+To point 5. The owner decided on 2026-10-18 that the adapter's one account
+reading after a session's close is the account as of that close, provided
+the reading is taken after the close and before the next open, on the
+close's own New York date (`reqExecutions` reaches back only to midnight, so
+only then does IBKR's list cover everything since the close), with no order
+working or pending at IBKR for the account and no execution in the account
+since the close, both read from IBKR's own lists as the reconciliation at a
+start reads them. The account changes between the close and the next open
+only through a working order or an execution, so with neither it is the
+account the close left. The adapter's duty is to check that condition at
+every delivery and stamp accordingly: from the one reading it sends the
+engine's `account.snapshot` and the `account.broker.snapshot` stamped as of
+the close, the broker snapshot carrying the true read time beside it, and
+the `market.mark.recorded` for each instrument the session delivers a bar
+for, from the delivered bar's official close, with IBKR's last price beside
+it as evidence and never decided from, so no decision needs IBKR
+market-data permissions. When the condition fails it stamps the true read
+time and states why, so the engine withholds (ADR 0019, amended
+2026-10-18). With an account snapshot now produced, the adapter also sends
+the reconciliation record this point calls for: in a run's first delivery,
+right behind its first account snapshot (before it the engine has no book,
+and a reconciliation would be unverifiable), and at every later start and
+reconnect from the reading that reconciles the link; a difference is
+classified as ADR 0019 sets out.

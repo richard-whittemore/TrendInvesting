@@ -578,3 +578,32 @@ Rule 2 changes what the gate decides from a journalled input, so it is a
 rules change under ADR 0016: target-weight RulesVersion 1.12.0 (1.10.0 was
 reserved for it, but 1.11.0 landed first). The owner's manual states the rule
 in [the operator chapter](../manual/operator.md).
+
+## Amendment (2026-10-18, owner decision): the reading after the close counts as the close
+
+The owner decided on 2026-10-18 that one IBKR account reading taken after a
+session's close and before the next open stands for the account **as of that
+close**, when, at the read, no order is working or pending at IBKR for the
+account (from any client, cancel-pending included) and no execution has
+reached the account since the close. Why it equals the close: between the
+close and the next open the account's positions, cash and open orders change
+only through an order that is still working or an execution, so when there is
+neither, the account read later is the account the close left. The IBKR
+adapter checks both from IBKR's own lists (its open orders, and its
+executions, which reach back only to midnight: so the read must also be on
+the close's own New York date), and the engine must hold no snapshot already
+stamped at or after that close. Then the adapter stamps the
+`account.broker.snapshot` (schema version 2) with the close as its as-of time
+and records the true read time beside it (`read_at`) as evidence, so this
+ADR's snapshot rule (reading 1's age, measured at the trigger's journalled
+time) finds it fresh for the sell planned at that close. If the condition
+fails, the adapter stamps the true read time and states why
+(`not_as_of_close`); the snapshot is then later than the close, which the
+rule counts as stale (a negative age), and the engine's own account snapshot,
+stamped the same way, withholds the session (`stale-account-snapshot`): fail
+closed, and the reporter pages the owner once with the reason. The
+start-of-run reconciliation the adapter now sends (ADR 0025 point 5) is
+stamped with its true read time, never earlier than the book it is compared
+with. No rule of the engine changes; it reads the new schema version
+(target-weight rules version 1.18.0, so a journal holding one does not
+replay under 1.17.0).

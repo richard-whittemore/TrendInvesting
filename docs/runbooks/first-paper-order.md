@@ -6,7 +6,8 @@ look at afterwards, and what to do if it stops.*
 
 The sending path has so far been tested only against a stand-in for IB
 Gateway (a "fake gateway" that answers like IBKR, with invented accounts and
-prices). This checklist is the hand-run paper-account test that ADR 0025
+prices); the whole paper day is rehearsed against it with the real engine
+deciding Boost (B3). This checklist is the hand-run paper-account test that ADR 0025
 (Consequences) calls for, and the start of the plan's Phase 4 (IBKR paper
 trading, `docs/live-trading/plan.md` section 9). Nothing here touches a live
 account or real money, and AGENTS.md rule 5 still holds: the program sends
@@ -14,19 +15,18 @@ nothing live.
 
 ## What waits for what
 
-One piece of work is not finished, and every step below is tagged with
-whether it waits for it:
+Every piece the first paper order needs is now built. Each step below is
+still tagged as it was written:
 
-- **[NOW]** Can be done today, on what is already on `main`: the paper
-  sender, the `twsapi` step of `provision.sh` and the manual chapter
+- **[NOW]** Could be done on what was first on `main`: the paper sender,
+  the `twsapi` step of `provision.sh` and the manual chapter
   `docs/manual/paper-trading.md`.
-- **[AFTER SECOND HALF]** Waits for the second half of the paper-sending
-  work: enabling the real IBKR client (today it refuses to place any order),
-  installing IBKR's `ibapi` into the adapter's environment, and the adapter's
-  main loop (the part that keeps reading IB Gateway's messages and passing
-  them on). Without it, no order can reach IBKR whatever you do. The plan's
-  Phase 4 (`docs/live-trading/plan.md` section 9) and ADR 0025 point 4
-  (amended) describe this work.
+- **[AFTER SECOND HALF]** Waited for the second half of the paper-sending
+  work: the real IBKR client, installing IBKR's `ibapi` into the adapter's
+  environment and the adapter's main loop, and then for the paper day's
+  inputs: the data job's file, its delivery, and the account and broker
+  snapshots and the mark made from one reading after each close. All of it
+  is built; these steps can be done now, after the dry-run month (D14).
 
 Do the owner steps in part A that are **[NOW]** first: they take the longest
 (IBKR's login and phone approval) and block nothing else.
@@ -233,9 +233,10 @@ Three checks, and any one stops the order (the manual's "What sends"):
 ### B3. Rehearse against the fake with the real account-ID shape [NOW]
 
 Before pointing anything at IBKR, prove the checks accept your account number
-and the adapter's suite is green on this machine. It sends nothing to IBKR.
-In a checkout (the account number is typed at a hidden prompt, so it is not
-saved in shell history or the screen):
+and the adapter's suite is green on this machine, then rehearse the paper
+days with the real engine. None of it sends anything to IBKR. In a checkout
+(the account number is typed at a hidden prompt, so it is not saved in shell
+history or the screen):
 
 ```sh
 make adapter-test
@@ -254,6 +255,21 @@ order to the fake gateway and journals its answers. The second command prints
 `True` only for an ID beginning `DU`. Do not paste the number into the
 command line or into a file in the checkout. The rehearsal's value is that a
 typo in the number is found here, not in front of IBKR.
+
+Then run the rehearsal of the paper days, which builds the real engine and
+runs it in paper mode, deciding Boost (it asks for the account at a hidden
+prompt too):
+
+```sh
+deploy/rehearse-paper.sh --account
+```
+
+It must end "rehearsal passed: nothing was sent to IBKR", with a `PASS`
+line for each step ([paper trading](../manual/paper-trading.md), "The
+rehearsal"): the warm-up, the day's reading as of the close, the engine's
+decision and its one order sent once, the reconnect and restart reconciled,
+a day withheld because a fill came after the close, a crash resume, and a
+holding no order explains found at the next start.
 
 ### B4. Start the engine and the adapter in paper mode [AFTER SECOND HALF]
 
@@ -283,23 +299,34 @@ Order of starting, each on the server, each an explicit step of yours:
    check it exists (`ls` that folder); **only then** start the adapter. The
    adapter refuses to start until the run's stream folder exists ("the
    run's stream folder ... does not exist"), and once started it delivers
-   the warm-up to the engine behind one broker snapshot. From then on the
-   timer writes each day's file at 17:05 and the adapter, left running,
-   delivers it within seconds (`docs/manual/paper-trading.md`, "A paper
-   day"). Keep the adapter running through the evening: a file delivered
-   the next morning releases an order for a session already past, which is
-   never sent.
+   the warm-up to the engine behind one account reading, with the
+   start-of-run reconciliation. **Do this the evening before the first paper
+   day, or that morning**: the first day's reading must come after the
+   warm-up's, and a warm-up delivered after the first day's 17:05 file is
+   due withholds that day. From then on the timer writes each day's file at
+   17:05 and the adapter, left running, delivers it within seconds behind
+   one reading after the close, which stands for the account as of the
+   close when nothing is working at IBKR and nothing has executed since
+   (`docs/manual/paper-trading.md`, "A paper day"). Keep the adapter
+   running through the evening: a file delivered the next morning is read
+   on a later date than its close, so that session is withheld, and an
+   order released the evening before is for a session already past, which
+   is never sent.
    Neither is started or restarted by systemd on its own; every start is
    yours.
-   **Before the first real order:** the Boost engine also needs an account
-   snapshot as of each close and a recorded mark, which nothing produces
-   yet; until they are built it withholds every session and releases no
-   order (`docs/manual/paper-trading.md`, "A paper day", "Not built yet").
+   **IBKR market data is not needed.** SPY's mark is the day's official
+   close from the data job; IBKR's last price is recorded beside it as
+   evidence only. If the paper login has no market data for SPY, nothing
+   changes but that evidence.
 5. Confirm the engine's log begins with the paper configuration, and that the
    adapter says it connected on 4002, read the account's balances in full
    and matched IBKR's open orders and today's trades to the orders the
    engine released ("[reconciled](../manual/glossary.md)", the adapter's matching) before anything else. The adapter does this on
-   every start and reconnect (ADR 0025 point 5).
+   every start and reconnect (ADR 0025 point 5), and, once the engine
+   holds an account snapshot, sends IBKR's positions and cash for the
+   engine to reconcile against its book: `ibkr reconciliation recorded for
+   the engine` in its log, and a `risk.reconciliation.result` of
+   `continue` in the engine's journal.
 
 The adapter's startup command, its options and its service unit are in
 [paper trading](../manual/paper-trading.md), "Starting the adapter".
@@ -629,13 +656,42 @@ commands below are on `main` now **[NOW]**.
 - **What to do:** finish that month before the first paper order. The
   **[NOW]** steps in part A that only set up IBKR can be done earlier.
 
+### D15. A session withheld after the close
+
+- **What you will see:** an urgent page, "decision withheld
+  (stale-account-snapshot)", adding "The adapter's reading after the close
+  could not stand for the close (broker snapshot ...)" and a reason. In the
+  engine's journal the session's `strategy.targets.decided` is `withheld`,
+  and the broker snapshot before it has `as_of_close: false` and the reason
+  in `not_as_of_close`.
+- **What it means:** the adapter's one reading after the close could not
+  stand for the account as of the close (your decision of 2026-10-18), so it
+  was stamped at its read time and the engine decided nothing for that
+  session. The reasons: IBKR showed an order still working for the account
+  (from any client), IBKR reported an execution in the account since the
+  close, the reading was on a later date than the close (the adapter was
+  not running that evening), or the engine already held a snapshot stamped
+  at or after that close. Nothing was ordered; the target in force is
+  unchanged.
+- **What to do:** check the account in IBKR for the order or trade the
+  reason names. A trade you placed by hand is reported again at the next
+  start's reconciliation; settle it as `docs/runbooks/reconciliation.md`
+  says. Otherwise nothing: the next session whose reading passes decides as
+  usual. Keep the adapter running through the evening so the reading is
+  taken on the close's own date.
+
 ## The rules and their sources
 
 - AGENTS.md rule 5: no live-order behaviour before the paper-trading and
   limited-live gates.
 - ADR 0025 point 3 and point 5: a paper configuration names a paper account;
   on every start and reconnect IBKR's orders, trades and balances are
-  matched before any order is accepted. Point 4, amended: IBKR's `ibapi` is
+  matched before any order is accepted, and IBKR's positions and cash are
+  sent for the engine to reconcile.
+- ADR 0019, ADR 0025 point 5 and ADR 0026 point 1, amended 2026-10-18 (your
+  decision): one reading after the close, with nothing working at IBKR and
+  no execution since, is the account as of that close; the mark is the
+  official close, IBKR's last price evidence only. Point 4, amended: IBKR's `ibapi` is
   pinned by checksum, fetched and verified, never committed. Point 6: IB
   Gateway runs under IBC, credentials only on the server.
 - ADR 0027 and `docs/manual/redelivery.md`: journal before send, each order

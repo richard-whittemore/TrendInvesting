@@ -858,3 +858,26 @@ which applies no minimum lot, and record no holdings, so no golden month
 changed. The parity tool knows no holdings either; it was re-run on the
 kept exports and its three reports are byte-identical to the
 `_held_gap` reports (`docs/research/parity-2026-10.md`).
+
+## Amendment (2026-10-18, owner decision): the account snapshot as of the close, and the mark
+
+To point 1 ("Inputs only": the account snapshot) and point 2 (orders valued
+at the previous close). The owner decided on 2026-10-18 that the account
+snapshot a session is decided from may be the IBKR adapter's one reading
+taken after that close: the account changes between the close and the next
+open only through an order still working or an execution, so a reading taken
+after the close, on its own New York date, with no order working or pending
+at IBKR for the account and no execution since the close, is the account as
+of that close, and the adapter stamps its `account.snapshot` with the close
+(the broker snapshot carries the true read time beside it, ADR 0019,
+amended 2026-10-18). When that condition fails the adapter stamps the true
+read time, and the strategy withholds the session as
+`stale-account-snapshot`, as this point already requires of a snapshot taken
+after the close: no rule changes. The `market.mark.recorded` the gate checks
+a buy's price band against (point 3) is the delivered bar's official close,
+the price the backtest marks at, at schema version 2 with IBKR's last price
+beside it as evidence only; nothing is decided from IBKR's price, so no
+decision needs IBKR market-data permissions. Target-weight rules version
+1.18.0 reads the new versions of the broker snapshot and the mark, so a
+journal holding either does not replay under 1.17.0; decisions are
+otherwise unchanged.
