@@ -412,6 +412,14 @@ class OrderReportJournal:
         """Remember the request an order was sent as, for a refusal IBKR reports before any openOrder."""
         self._requests[(record.client_id, record.broker_order_id)] = record.request
 
+    def awaiting_commission(self):
+        """Whether an execution of this adapter's orders awaits its commission, so its fill is not yet recorded."""
+        return bool(self._executions)
+
+    def executions_seen(self):
+        """How many executions of this adapter's orders have been seen (IBKR's replays not counted again)."""
+        return len(self._seen)
+
     def on_record(self, record):
         if isinstance(record, CommissionReport):
             self._on_commission(record)

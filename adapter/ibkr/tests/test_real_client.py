@@ -120,6 +120,14 @@ class _EClient:
     def reqExecutions(self, reqId, flt):
         self.requests.append(("reqExecutions", reqId, flt.acctCode))
 
+    def reqMktData(self, reqId, contract, genericTickList, snapshot, regulatorySnapshot, mktDataOptions):
+        self.requests.append(("reqMktData", reqId, contract.conId, contract.symbol, contract.secType,
+                              contract.currency, contract.exchange, genericTickList, snapshot, regulatorySnapshot,
+                              mktDataOptions))
+
+    def cancelMktData(self, reqId):
+        self.requests.append(("cancelMktData", reqId))
+
     def placeOrder(self, orderId, contract, order):
         self.requests.append(("placeOrder", orderId, contract, order))
         if _EClient.on_place is not None:
@@ -434,13 +442,19 @@ class ForwardingTests(unittest.TestCase):
         client.cancel_account_summary(3)
         client.req_all_open_orders()
         client.req_executions(4, "DU0000001")
+        client.req_mkt_data(5, types.SimpleNamespace(conId=756733, symbol="SPY", secType="STK", currency="USD",
+                                                     exchange="SMART"))
+        client.cancel_mkt_data(5)
         self.assertTrue(client.is_connected())
         client.disconnect()
         self.assertEqual(client._client.requests, [
             ("connect", "127.0.0.1", 4002, 11), ("reqCurrentTime",), ("reqPositions",),
             ("cancelPositions",), ("reqAccountSummary", 3, "All", "NetLiquidation"),
             ("cancelAccountSummary", 3), ("reqAllOpenOrders",), ("reqExecutions", 4, "DU0000001"),
-            ("disconnect",)])
+            # A one-off snapshot of the contract by its conId: no generic
+            # ticks (IBKR refuses them on a snapshot), not a regulatory one.
+            ("reqMktData", 5, 756733, "SPY", "STK", "USD", "SMART", "", True, False, []),
+            ("cancelMktData", 5), ("disconnect",)])
         self.assertFalse(client.is_connected())
 
     def test_without_a_configuration_the_real_client_never_places_an_order(self):
@@ -474,13 +488,15 @@ class ForwardingTests(unittest.TestCase):
                 w.execDetailsEnd(4)
                 w.commissionReport("r")
                 w.commissionAndFeesReport("r2")
+                w.tickPrice(5, 4, 401.17, "attrib")
+                w.tickSnapshotEnd(5)
                 w.connectionClosed()
                 names = [e.name for e in inbox.events()]
                 self.assertEqual(names, [
                     "next_valid_id", "managed_accounts", "error", "current_time", "position", "position_end",
                     "account_summary", "account_summary_end", "open_order", "open_order_end",
                     "order_status", "exec_details", "exec_details_end", "commission_report",
-                    "commission_report", "connection_closed"])
+                    "commission_report", "tick_price", "tick_snapshot_end", "connection_closed"])
 
 
 class OrderMappingTests(unittest.TestCase):

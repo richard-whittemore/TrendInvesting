@@ -6,6 +6,7 @@
   "paper_sending_enabled": false,
   "connect_timeout": 10,
   "request_timeout": 10,
+  "mark_timeout": 15,
   "heartbeat_interval": 30,
   "heartbeat_timeout": 10,
   "restore_timeout": 300,

@@ -1,12 +1,17 @@
 #!/bin/bash
-# The paper rehearsal: runs the IBKR adapter's start command end to end
-# against the fake gateway and an engine stand-in on a real socket, with a
-# paper configuration and sending switched on, and proves one order, its
-# status and fills reaching the engine, a reconnect that does not resend,
-# and a restart that sends and records nothing twice. Exits non-zero at the
-# first check that fails or if the adapter stops. Nothing reaches IBKR, and
-# no ibapi is needed. Run it from a checkout before the first real paper
-# order (docs/runbooks/first-paper-order.md; docs/manual/paper-trading.md).
+# The paper rehearsal: one whole synthetic paper day. The data job (ti-data)
+# writes the run's warm-up and the day's stream from synthetic Massive
+# answers; the IBKR adapter's start command, with --streams, delivers each
+# behind a broker snapshot to an engine stand-in on a real socket, with a
+# paper configuration and sending switched on; the stand-in releases one
+# order on the day's close, only if the broker snapshot ahead of it is
+# fresh at the close's recorded time, and its log shows the release, which
+# goes out once to the fake gateway, is
+# filled and journalled; a reconnect and a restart send nothing twice.
+# Exits non-zero at the first check that fails or if the adapter stops.
+# Nothing reaches Massive or IBKR, and no ibapi is needed. Run it from a
+# checkout before the first real paper order
+# (docs/runbooks/first-paper-order.md; docs/manual/paper-trading.md).
 #
 #   deploy/rehearse-paper.sh            with a synthetic paper account
 #   deploy/rehearse-paper.sh --account  asks for your paper account (DU...)

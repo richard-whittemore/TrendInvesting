@@ -1,4 +1,13 @@
-"""deploy/rehearse-paper.sh's rehearsal passes here, and fails, exiting 1, when the adapter stops."""
+"""deploy/rehearse-paper.sh's rehearsal passes here, and fails, exiting 1, when the adapter stops.
+
+The rehearsal runs a whole synthetic paper day: the data job's warm-up and
+day's stream written by ti-data from synthetic Massive answers, delivered by
+the adapter behind a broker snapshot, the engine stand-in's release of one
+order on the day's close, the order sent once, filled and journalled, a
+reconnect and a restart that send nothing twice, and a crash resume of the
+engine under a new run name that takes the next day's stream from the run's
+own folder.
+"""
 import io
 import os
 import sys
@@ -25,8 +34,17 @@ class RehearsalTests(unittest.TestCase):
     def test_the_rehearsal_passes_against_the_fake_gateway(self):
         status, out = self.run_rehearsal(TI_REHEARSAL_ACCOUNT="")
         self.assertEqual(status, 0, out)
-        self.assertEqual(out.count("PASS:"), 8)
+        self.assertEqual(out.count("PASS:"), 13)
         self.assertNotIn("FAIL", out)
+        for line in ("PASS: the data job wrote the warm-up and the day's stream for the run",
+                     "PASS: the warm-up reached the engine behind one broker snapshot, in file order",
+                     "PASS: the day's stream reached the engine as its broker snapshot, its bar, then its close",
+                     "PASS: the order went out only after the day's close, which the engine's log shows released it "
+                     "(its broker snapshot fresh at the close)",
+                     "PASS: no stream input reached the engine twice across the reconnect and the restart",
+                     "PASS: after a crash resume under a new run name, the next day's stream went from the run's own "
+                     "folder to the resumed run, once, and nothing earlier was sent again"):
+            self.assertIn(line, out)
 
     def test_an_account_not_beginning_du_fails_before_anything_runs(self):
         status, out = self.run_rehearsal(TI_REHEARSAL_ACCOUNT="U1234567")
@@ -37,6 +55,13 @@ class RehearsalTests(unittest.TestCase):
         status, out = self.run_rehearsal(TI_REHEARSAL_ACCOUNT="DU7654321")
         self.assertEqual(status, 0, out)
         self.assertNotIn("DU7654321", out)
+
+    def test_a_stream_the_adapter_refuses_fails_the_rehearsal(self):
+        with mock.patch.object(rehearse_paper, "STREAM_TAMPER", True):
+            status, out = self.run_rehearsal(TI_REHEARSAL_ACCOUNT="")
+        self.assertEqual(status, 1)
+        self.assertIn("FAIL: the adapter stopped", out)
+        self.assertIn("StreamRefused", out)
 
     def test_an_adapter_that_stops_fails_the_rehearsal(self):
         class Refusing(FakeTWS):
