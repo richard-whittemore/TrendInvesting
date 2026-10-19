@@ -239,3 +239,174 @@ func TestAReportThatCannotBeWrittenIsAnError(t *testing.T) {
 		t.Error("a failed write must be reported")
 	}
 }
+
+// fullOrder is a QuantConnect order object as the orders listing gives it.
+type fullOrder struct {
+	ID           int               `json:"id"`
+	Symbol       map[string]string `json:"symbol"`
+	Quantity     float64           `json:"quantity"`
+	Status       int               `json:"status"`
+	Time         string            `json:"time"`
+	LastFillTime *string           `json:"lastFillTime"`
+	Tag          string            `json:"tag"`
+	Events       []map[string]any  `json:"events,omitempty"`
+}
+
+// cancelled is the events of a carrier cancelled unfilled, as
+// QuantConnect's orders listing gives them.
+var cancelled = []map[string]any{{"time": 1028206800.0, "status": "submitted", "fillQuantity": 0.0},
+	{"time": 1028235600.0, "status": "canceled", "fillQuantity": 0.0}}
+
+func writeFullOrders(t *testing.T, orders []fullOrder) string {
+	t.Helper()
+	raw, err := json.Marshal(orders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "orders.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const glideTag = glidePrefix + `{"month":"2002-08","date":"2002-08-01","glide":"path","start_age":38.0,` +
+	`"measure_from":"2002-08","age":38.0,"b":0.0,"book":{"AAA":0.49,"IEF":0.49},"targets":{"AAA":0.49,"IEF":0.49}}`
+
+const lotTag = lotPrefix + `{"month":"2002-08","mode":"held","nlv":1000.0,"risk_off":false,` +
+	`"ranked":[["AAA",0.5,0.02,311]],"prices":{"AAA":10.0},"held":{},"weights":{"AAA":0.98},"skipped":[],"kept":[]}`
+
+// iraTag plans 98 shares of AAA at $10 from $1,000 of cash, bought at once.
+const iraTag = iraPrefix + `{"month":"2002-08","decision":"2002-08-01","nlv":1000.0,"targets":{"AAA":0.98},` +
+	`"held":{},"prices":{"AAA":10.0},"working":{},"unpriced":[],"sells":[],"buys":[["AAA",98,10.5]],"skipped":[],` +
+	`"waited":0,"buy_session":"2002-08-01","delay":1,"band":0.25,"price_band":0.05,"max_fees":2.0,"budget":1100.0,` +
+	`"scale":1.0,"kept":[["AAA",98]],"scaled_skipped":[],"for_sells":0,"for_price":0,"unplaced":[],"placed":[["AAA","buy",1]]}`
+
+func TestGlideLotAndIRAExportsAreComparedAgainstTheirPlannedMonths(t *testing.T) {
+	fill := "2002-08-01T20:00:00Z"
+	orders := writeFullOrders(t, []fullOrder{
+		{ID: 1, Symbol: map[string]string{"value": "AAA", "id": "AAA X"}, Quantity: 98, Status: 3,
+			Time: "2002-08-01T13:00:00Z", LastFillTime: &fill, Tag: "IRAORD1 2002-08 buy"},
+		{ID: 2, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
+			Time: "2002-08-01T13:00:00Z", Tag: glideTag, Events: cancelled},
+		{ID: 3, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
+			Time: "2002-08-01T13:00:00Z", Tag: lotTag, Events: cancelled},
+		{ID: 4, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
+			Time: "2002-08-01T13:00:00Z", Tag: iraTag, Events: cancelled},
+	})
+	var out, errs bytes.Buffer
+	pass, err := run([]string{"-glide", "G=" + orders, "-glide-months", "G=2002-08..2002-09",
+		"-lot", "L=" + orders, "-lot-months", "L=2002-08", "-ira", "I=" + orders, "-ira-months", "I=2002-08"}, &out, &errs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pass {
+		t.Error("a planned month missing from the glide export must fail")
+	}
+	for _, want := range []string{
+		"- G: 1 logged months from 1 tagged orders of 4 (planned 2)",
+		"- L: 1 logged months from 1 tagged orders of 4 (planned 1)",
+		"- I: 1 logged months from 1 tagged orders of 4 (planned 1)",
+		"| G | glide-months | every planned month exported once | 2 | 1 |", "planned month 2002-09 exported 0 times",
+		"| L | d7l-picks | exact, withheld included | 2 | 0 |", "| I | ira-orders | exact | 1 | 0 |",
+		"| I | ira-sequence |",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("report lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestMonthRangesExpandInclusivelyAcrossYears(t *testing.T) {
+	got, err := expandMonths("2015-11..2016-02,2016-05")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "2015-11,2015-12,2016-01,2016-02,2016-05" {
+		t.Errorf("expanded %v", got)
+	}
+	for _, bad := range []string{"2016-02..2015-11", "2015-13..2016-01", "2015-11..x", "2015-1", "", "2015-11,,2015-12"} {
+		if _, err := expandMonths(bad); err == nil {
+			t.Errorf("%q expanded", bad)
+		}
+	}
+}
+
+func TestTheCommandRefusesWhatItCannotCompareOfTheNewKinds(t *testing.T) {
+	good := writeOrders(t, []order{{ID: 1, Tag: glideTag}})
+	bad := writeOrders(t, []order{{ID: 1, Tag: glidePrefix + "{"}, {ID: 2, Tag: lotPrefix + "{"}, {ID: 3, Tag: iraPrefix + "{"}})
+	notOrders := writeOrders(t, []order{{ID: 1, Tag: iraTag}})
+	if err := os.WriteFile(notOrders, []byte(`[{"id":1,"quantity":"x","tag":"`+strings.ReplaceAll(iraTag, `"`, `\"`)+`"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		args []string
+		want string
+	}{
+		"glide months for no run": {[]string{"-glide", "A=" + good, "-glide-months", "A=2002-08", "-glide-months", "B=2002-08"}, "B has months but no export"},
+		"lot months for no run":   {[]string{"-lot", "A=" + good, "-lot-months", "A=2002-08", "-lot-months", "B=2002-08"}, "B has months but no export"},
+		"ira months for no run":   {[]string{"-ira", "A=" + good, "-ira-months", "A=2002-08", "-ira-months", "B=2002-08"}, "B has months but no export"},
+		"a glide run sans months": {[]string{"-glide", "A=" + good}, "A: has no planned months"},
+		"a bad month range":       {[]string{"-glide", "A=" + good, "-glide-months", "A=2002-09..2002-08"}, "A: months"},
+		"a bad momentum month":    {[]string{"-momentum", "A=" + good, "-months", "A=2002-8"}, "A: months"},
+		"a malformed glide month": {[]string{"-glide", "A=" + bad, "-glide-months", "A=2002-08"}, "order 1"},
+		"a malformed lot month":   {[]string{"-lot", "A=" + bad, "-lot-months", "A=2002-08"}, "order 2"},
+		"a malformed ira month":   {[]string{"-ira", "A=" + bad, "-ira-months", "A=2002-08"}, "order 3"},
+		"no tagged lot month":     {[]string{"-lot", "A=" + good, "-lot-months", "A=2002-08"}, "no tagged order"},
+		"ira orders unreadable":   {[]string{"-ira", "A=" + notOrders, "-ira-months", "A=2002-08"}, "A: orders"},
+		"a bad glide flag":        {[]string{"-glide", "nope"}, "NAME=VALUE"},
+		"a missing ira file":      {[]string{"-ira", "A=/nonexistent/o.json", "-ira-months", "A=2002-08"}, "no such file"},
+		"a missing calendar":      {[]string{"-ira", "A=" + good, "-ira-months", "A=2002-08", "-ira-calendar", "/nonexistent/c.json"}, "ira calendar"},
+		"a calendar not a list":   {[]string{"-ira", "A=" + good, "-ira-months", "A=2002-08", "-ira-calendar", calendar(t, `{}`)}, "ira calendar"},
+		"a calendar out of order": {[]string{"-ira", "A=" + good, "-ira-months", "A=2002-08", "-ira-calendar", calendar(t, `["2002-08-02","2002-08-01"]`)}, "does not follow"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out, errs bytes.Buffer
+			_, err := run(c.args, &out, &errs)
+			if err == nil || !strings.Contains(err.Error()+errs.String(), c.want) {
+				t.Fatalf("error %v (%s), want one mentioning %q", err, errs.String(), c.want)
+			}
+		})
+	}
+}
+
+func calendar(t *testing.T, raw string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestTheIRASequenceCountsSessionsByTheCalendarFile(t *testing.T) {
+	// Bought a session after the rebalance, waiting for a price.
+	tag := strings.NewReplacer(`"waited":0,"buy_session":"2002-08-01"`, `"waited":1,"buy_session":"2002-08-02"`,
+		`"for_price":0`, `"for_price":1`).Replace(iraTag)
+	fill := "2002-08-02T20:00:00Z"
+	orders := writeFullOrders(t, []fullOrder{
+		{ID: 1, Symbol: map[string]string{"value": "AAA", "id": "AAA X"}, Quantity: 98, Status: 3,
+			Time: "2002-08-02T12:00:00Z", LastFillTime: &fill, Tag: "IRAORD1 2002-08 buy"},
+		{ID: 2, Symbol: map[string]string{"value": "SPY", "id": "SPY X"}, Quantity: 1, Status: 5,
+			Time: "2002-08-02T12:00:00Z", Tag: tag, Events: cancelled},
+	})
+	args := []string{"-ira", "I=" + orders, "-ira-months", "I=2002-08"}
+	for _, c := range []struct {
+		extra []string
+		want  string
+	}{
+		{nil, "- I ira-sequence: 2002-08: parity: no session calendar covers the span"},
+		{[]string{"-ira-calendar", calendar(t, `["2002-07-31","2002-08-01","2002-08-02"]`)}, "| I | ira-sequence |"},
+	} {
+		var out, errs bytes.Buffer
+		if _, err := run(append(args, c.extra...), &out, &errs); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), c.want) {
+			t.Errorf("report lacks %q:\n%s", c.want, out.String())
+		}
+		if c.extra != nil && strings.Contains(out.String(), "- I ira-sequence:") {
+			t.Errorf("with a calendar the sequence failed:\n%s", out.String())
+		}
+	}
+}
