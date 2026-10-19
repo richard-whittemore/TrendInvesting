@@ -20,12 +20,15 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
 
-// refusedSuffix names the note the engine writes beside an inbox record it
-// refused, saying why; a record with a note is never delivered again.
+// refusedSuffix names the note the engine writes, in its notes folder under an inbox
+// record's name, when it refused the record, saying why; a record with a
+// note is never delivered again. An earlier layout wrote it beside the
+// record in the inbox, and one found there still settles the record.
 const refusedSuffix = ".refused"
 
-// deliveredSuffix names the marker the engine writes beside an inbox record
-// once its input is flushed to the durable log.
+// deliveredSuffix names the marker the engine writes, in its notes folder under
+// an inbox record's name, once the record's input is flushed to the durable
+// log (found beside the record in the inbox, it settles the record too).
 const deliveredSuffix = ".delivered"
 
 // operatorClockSkew is how far after the engine's clock an operator record
@@ -64,7 +67,8 @@ const operatorClockSkew = 5 * time.Minute
 // A record the engine cannot read, or that states a time more than
 // operatorClockSkew ahead of the engine's clock, is never delivered; one
 // the run refuses is journalled as delivered with no effect. Each is noted
-// beside it in the inbox (refusedSuffix) and on the engine's output, and
+// under its file name in the engine's notes folder (operatorNotesDir,
+// refusedSuffix) and on the engine's output, and
 // never delivered again. A record whose input the recorder did not take (a
 // failed write or flush, which ends the log, ADR 0027 §3, or the recorder's
 // record bound or emission ceiling, ADR 0017) was not delivered: it gets no
@@ -72,8 +76,8 @@ const operatorClockSkew = 5 * time.Minute
 //
 // Each record is read once: what was decoded, and which names are settled,
 // is kept, so an adapter input re-reads only the inbox's listing. Every
-// note and marker is written beside the file the record was read from,
-// whatever its name.
+// note and marker is written in the notes folder under the name of the
+// file the record was read from, whatever that name.
 type operatorInbox struct {
 	dir string
 	// notes is the engine's own folder beside the inbox, where it writes
@@ -141,11 +145,10 @@ type inboxRecord struct {
 // pending returns the records not yet delivered, in file-name order,
 // noting each file that cannot be read as a record. A record the logs
 // already hold is marked delivered, so it is never read again.
-func (b *operatorInbox) pending() []inboxRecord {
+func (b *operatorInbox) pending() ([]inboxRecord, error) {
 	noted, err := os.ReadDir(b.notes)
 	if err != nil {
-		b.report("engine: list the engine's operator notes %s: %v; the inbox's records wait for the next input", b.notes, err)
-		return nil
+		return nil, fmt.Errorf("engine: list the engine's operator notes %s, which say which records are settled, so the inbox cannot be read safely: %w", b.notes, err)
 	}
 	for _, entry := range noted {
 		name := entry.Name()
@@ -159,12 +162,20 @@ func (b *operatorInbox) pending() []inboxRecord {
 	entries, err := os.ReadDir(b.dir)
 	if err != nil {
 		b.report("engine: list the operator inbox %s: %v; its records wait for the next input", b.dir, err)
-		return nil
+		return nil, nil
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if name := entry.Name(); entry.Type().IsRegular() && strings.HasSuffix(name, ".json") {
+		name := entry.Name()
+		switch {
+		case !entry.Type().IsRegular():
+		case strings.HasSuffix(name, ".json"):
 			names = append(names, name)
+		case strings.HasSuffix(name, refusedSuffix):
+			// A marker an earlier layout wrote beside the record.
+			b.settle(strings.TrimSuffix(name, refusedSuffix))
+		case strings.HasSuffix(name, deliveredSuffix):
+			b.settle(strings.TrimSuffix(name, deliveredSuffix))
 		}
 	}
 	sort.Strings(names)
@@ -194,7 +205,7 @@ func (b *operatorInbox) pending() []inboxRecord {
 		}
 		records = append(records, inboxRecord{name: name, Record: r})
 	}
-	return records
+	return records, nil
 }
 
 // settle records that the file named name is never read again.
@@ -217,7 +228,11 @@ func (b *operatorInbox) deliver(ctx context.Context, engine *replay.Engine, inpu
 	if !ok || next != input.Sequence {
 		return input.Sequence, nil
 	}
-	for _, r := range b.pending() {
+	records, err := b.pending()
+	if err != nil {
+		return next, err
+	}
+	for _, r := range records {
 		select {
 		case <-ctx.Done():
 			// The wire abandoned this exchange: what remains waits, and the
@@ -346,10 +361,12 @@ var (
 // docs/manual/operator.md, "Who can write an instruction"), so the engine
 // refuses an inbox it could write to itself: one its group or others may
 // write, one owned by root or by the engine's own user, or any inbox when
-// it runs as root. It reads the inbox through its group (or, if the mode
-// allows, as anyone), and a folder it cannot list and read would leave a
-// kill switch unread while it decides, so that is refused too, whatever
-// the mode says (fail closed, ADR 0019).
+// it runs as root. It reads the inbox only through its group, since the tool
+// writes each record 0640 in that group: the engine's user must be in the
+// inbox's group, the mode must be 0750 (no access for others), and a record
+// there must open. A folder or record it cannot read would leave a kill
+// switch unread while it decides, so that is refused too (fail closed, ADR
+// 0019).
 func checkInboxIdentity(dir string, info os.FileInfo) error {
 	perm := info.Mode().Perm()
 	if perm&0o022 != 0 {
@@ -372,12 +389,25 @@ func checkInboxIdentity(dir string, info os.FileInfo) error {
 	if err != nil {
 		return fmt.Errorf("engine: the engine's groups, to check it can read the operator inbox %s: %w", dir, err)
 	}
-	throughGroup := slices.Contains(groups, gid) && perm&0o050 == 0o050
-	if !throughGroup && perm&0o005 != 0o005 {
-		return fmt.Errorf("engine: the engine's user cannot list and read the operator inbox %s (mode %o, group %d): its group must be the engine's, with read and list (0750; docs/manual/server.md)", dir, perm, gid)
+	if perm&0o007 != 0 {
+		return fmt.Errorf("engine: the operator inbox %s is mode %o, readable by others; the records are written 0640 in its group, so the engine reads them only through that group: chmod 0750 %s", dir, perm, dir)
 	}
-	if _, err := os.ReadDir(dir); err != nil {
+	if !slices.Contains(groups, gid) || perm&0o050 != 0o050 {
+		return fmt.Errorf("engine: the engine's user cannot list and read the operator inbox %s (mode %o, group %d): its group must be one the engine's user is in, with read and list (chgrp ti-trader and chmod 0750; docs/manual/server.md)", dir, perm, gid)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return fmt.Errorf("engine: the engine cannot list the operator inbox %s: %w", dir, err)
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); entry.Type().IsRegular() && strings.HasSuffix(name, ".json") {
+			file, err := os.Open(filepath.Join(dir, name)) // #nosec G304 -- the probe reads a record in the inbox the operator named with -operator.
+			if err != nil {
+				return fmt.Errorf("engine: the engine cannot read the operator record %s in %s, so a kill switch could wait unread: records are written 0640 in the inbox's group, which the engine's user must be in: %w", name, dir, err)
+			}
+			_ = file.Close()
+			break
+		}
 	}
 	return nil
 }
@@ -400,6 +430,9 @@ func openOperatorNotes(inbox string) (string, error) {
 	}
 	if perm := info.Mode().Perm(); perm&0o022 != 0 {
 		return "", fmt.Errorf("engine: the engine's operator notes %s is mode %o, writable by its group or by others; the engine creates it 0700", notes, perm)
+	}
+	if perm := info.Mode().Perm(); perm&0o700 != 0o700 {
+		return "", fmt.Errorf("engine: the engine cannot list and read its operator notes %s (mode %o); the engine creates it 0700", notes, perm)
 	}
 	if uid, _, known := fileOwner(notes, info); !known || uid != engineUser() {
 		return "", fmt.Errorf("engine: the engine's operator notes %s is not the engine's own (owner %d, the engine runs as %d); remove it and the engine creates it", notes, uid, engineUser())

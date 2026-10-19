@@ -16,8 +16,9 @@ approve.
    must act at IBKR first, record the kill switch so the program sends
    nothing new but the sale back to 98%:
    `sudo -u ti-operator operator kill-switch -inbox <inbox> -account <account> -state engaged -by owner -detail "halted: investigating"`
-   (always run the tool as `ti-trader`, the engine's user, so the engine
-   can read what it writes).
+   (run the tool as `ti-operator`, the user that writes your instructions;
+   the engine reads them through its group, docs/manual/operator.md,
+   "Who can write an instruction").
 2. **Read what happened.** On the server:
    - `journal-query refusals <durable log>`: the refusal that moved the
      account, its reason and detail, and the `engine-state` row naming the

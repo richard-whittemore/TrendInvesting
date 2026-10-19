@@ -269,6 +269,11 @@ pass "systemd-analyze verify reports an invalid LoadCredential= name"
 # it.
 test "$(getent passwd ti-operator | cut -d: -f7)" = /usr/sbin/nologin || fail "ti-operator is missing or has a login shell"
 test "$(id -gn ti-operator)" = ti-trader || fail "ti-operator's group is not the engine's, ti-trader"
+# A server provisioned before ti-operator existed gains it on a services
+# upgrade: remove the user and rerun the step.
+userdel ti-operator || fail "could not remove ti-operator to test the upgrade"
+"$p" services >/dev/null 2>&1 || fail "the services step fails on a server without ti-operator"
+test "$(id -gn ti-operator)" = ti-trader || fail "the services step did not create ti-operator"
 for a in boost trad-ira roth-ira; do
   inbox=/var/lib/trend-investing/engines/$a/operator
   test "$(stat -c %U:%G:%a "$inbox")" = ti-operator:ti-trader:750 || fail "the $a operator inbox is not ti-operator:ti-trader 0750"

@@ -227,8 +227,9 @@ nothing under `/var/lib/trend-investing/engines`, so no unit that reads data
 from outside can write an instruction ([operator](operator.md), "Who can
 write an instruction"). The engine checks the inbox's owner and mode each
 time it starts: it refuses to start if the folder is missing, if its group
-or others can write it, if root or the engine's own user owns it, or if the
-engine cannot list and read it. So a container or any other host that runs
+or others can write it, if others can read it, if root or the engine's own
+user owns it, or if the engine cannot list the folder or read a record in it
+(for instance, its group is not one the engine's user is in). So a container or any other host that runs
 the engine (the Mac mini's) must create it the same way: owned by whichever
 user that host's engine does not run as (on the server, `ti-operator`), in a
 group the engine's user is in, mode `0750`. The recorded switch only works while the engine

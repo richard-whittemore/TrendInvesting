@@ -324,7 +324,8 @@ func TestTheOperatorInboxMustNotBeWritableByOthers(t *testing.T) {
 		mode os.FileMode
 		want string // "" starts
 	}{
-		{0o750, ""}, {0o755, ""},
+		{0o750, ""},
+		{0o755, "readable by others"}, {0o754, "readable by others"}, {0o751, "readable by others"},
 		{0o770, "writable by its group or by others"}, {0o752, "writable by its group or by others"}, {0o777, "writable by its group or by others"},
 		{0o700, "cannot list and read"}, {0o740, "cannot list and read"},
 	} {
@@ -388,6 +389,83 @@ func TestTheOperatorInboxBelongsToAUserTheEngineDoesNotRunAs(t *testing.T) {
 			tc.setup(t, opts.operatorDir)
 			refuse(t, tc.name, opts, tc.want)
 		})
+	}
+}
+
+// TestTheOperatorInboxIsRefusedWhenItsRecordsCannotBeRead: the start-up check
+// reads a record, not only the listing, because the operator tool writes each
+// record 0640 in the inbox's group; an inbox the engine lists but whose
+// records it cannot open would leave a kill switch unread while it decides
+// (fail closed, ADR 0019).
+func TestTheOperatorInboxIsRefusedWhenItsRecordsCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any file")
+	}
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	r := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
+	record := filepath.Join(opts.operatorDir, r.FileName())
+	if err := os.Chmod(record, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(record, 0o600) })
+	refuse(t, "an unreadable record", opts, "cannot read")
+	if err := os.Chmod(record, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openOperatorInbox(opts, composition{}, io.Discard); err != nil {
+		t.Errorf("a 0640 record the engine can read was refused: %v", err)
+	}
+}
+
+// TestAnUnlistableNotesFolderStopsTheDelivery: the notes folder says which
+// records are settled, so a listing that fails leaves the queue unknown; the
+// delivery stops with an error rather than passing the owner's kill switch
+// by (fail closed, ADR 0019).
+func TestAnUnlistableNotesFolderStopsTheDelivery(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists any folder")
+	}
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	inbox, err := openOperatorInbox(opts, composition{}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(inbox.notes, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(inbox.notes, 0o700) })
+	if _, err := inbox.pending(); err == nil {
+		t.Error("pending() listed an unlistable notes folder without an error")
+	}
+}
+
+// TestMarkersAnEarlierBuildLeftInTheInboxStillSettleTheirRecords: an earlier
+// build wrote its delivered and refusal markers beside the record in the
+// inbox; they keep a record from being delivered again after the upgrade,
+// as the notes folder's own do.
+func TestMarkersAnEarlierBuildLeftInTheInboxStillSettleTheirRecords(t *testing.T) {
+	dir := t.TempDir()
+	opts := inboxOptions(t, dir)
+	delivered := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
+	refused := writeKillSwitch(t, opts.operatorDir, "ira", boostSession(0).Add(-time.Hour), true)
+	open := writeKillSwitch(t, opts.operatorDir, "custodial", boostSession(0).Add(-30*time.Minute), true)
+	for name, suffix := range map[string]string{delivered.FileName(): deliveredSuffix, refused.FileName(): refusedSuffix} {
+		if err := os.WriteFile(filepath.Join(opts.operatorDir, name+suffix), []byte("old\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inbox, err := openOperatorInbox(opts, composition{}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := inbox.pending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].ID != open.ID {
+		t.Errorf("pending() = %d records, want only the one with no marker", len(records))
 	}
 }
 
@@ -460,6 +538,12 @@ func TestTheEnginesNotesFolderIsItsOwn(t *testing.T) {
 			}
 		}, "writable by its group or by others"},
 		{"another user's", func(t *testing.T, notes string) { ownAs(t, notes, operatorUID, os.Getegid()) }, "not the engine's own"},
+		{"one the engine cannot list", func(t *testing.T, notes string) {
+			if err := os.Chmod(notes, 0o300); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(notes, 0o700) })
+		}, "cannot list and read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

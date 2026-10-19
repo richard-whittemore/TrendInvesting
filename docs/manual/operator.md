@@ -56,8 +56,9 @@ web request cannot write a `released` or an acknowledgement that the durable
 log would show as yours. The engine checks this each time it starts. It
 refuses an inbox its group or others can write to, one owned by root or by
 the user the engine itself runs as, any inbox when the engine runs as root,
-and one it cannot list and read (owned by a group it is not in, or a
-listing it is denied), so a kill switch is never left unread while it
+one others can read (the records are readable only through the group), and
+one it cannot list and read (owned by a group it is not in, whatever the
+mode, or a listing or a record it is denied), so a kill switch is never left unread while it
 decides. On a host other than the server (the Mac mini, a container), the
 inbox's owner is whichever user that host's engine does not run as: give the
 folder to that user, in a group the engine's user is in, mode `0750`.
@@ -389,7 +390,7 @@ reports ([journal-query](journal-query.md)).
 | A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
 | The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-operator:ti-trader`, `0750`) |
 | The engine is started and the inbox is missing, its group or others can write it, root or the engine's own user owns it, or the engine cannot read it | It refuses to start and says which | Create it as above, or `sudo chown ti-operator:ti-trader` and `sudo chmod 0750` it |
-| The engine's notes folder (`operator-notes`) is another user's, or others can write it | It refuses to start and says so | Move the folder aside; the engine creates it again, and the durable log still keeps every instruction from being recorded twice |
+| The engine's notes folder (`operator-notes`) is another user's, or others can write it | It refuses to start and says so | Move the folder aside; the engine creates it again. What stops an instruction being recorded twice is the durable log's committed input (the markers are the tool's view of it), so move aside only a folder whose records are all in a log still in the log folder; a record whose log you quarantined earlier would be recorded again, so move those records out of the inbox first |
 
 The kill switch stops new orders from this program only. To cancel orders
 already at IBKR, cancel them in IBKR's own app. Stopping the Gateway is not a

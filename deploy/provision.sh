@@ -62,6 +62,19 @@ fetch() {
   mv "$dest.part" "$dest"
 }
 
+# The user that writes the owner's instructions into the operator inboxes
+# (ADR 0026, kill-switch amendment): not the engine's user, and no unit runs
+# as it, so no network-facing unit can write an instruction. Its group is
+# the engine's, so it reaches the engines' state directories (0750), and
+# the engine reads its records through that group. The base and services
+# steps both ensure it, so a server provisioned before it existed gains it
+# on a services upgrade.
+ensure_operator_user() {
+  if ! id ti-operator >/dev/null 2>&1; then
+    useradd --system --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator
+  fi
+}
+
 ensure_user() {
   local name=$1 home=$2
   if ! id "$name" >/dev/null 2>&1; then
@@ -81,14 +94,7 @@ step_base() {
   log "service users (non-root, no login shell)"
   ensure_user ti-gateway /var/lib/ti-gateway
   ensure_user ti-trader /var/lib/trend-investing
-  # The user that writes the owner's instructions into the operator inboxes
-  # (ADR 0026, kill-switch amendment): not the engine's user, and no unit runs
-  # as it, so no network-facing unit can write an instruction. Its group is
-  # the engine's, so it reaches the engines' state directories (0750), and
-  # the engine reads its records through that group.
-  if ! id ti-operator >/dev/null 2>&1; then
-    useradd --system --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator
-  fi
+  ensure_operator_user
 
   log "automatic security updates"
   install -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'CONF'
@@ -340,6 +346,7 @@ CONF
   # adapter (ADR 0026 point 8: one engine per account).
   install -d -o root -g root -m 0700 "$etc/accounts"
   write_stub "$etc/accounts/boost.env" "$here/etc/accounts/boost.env.example"
+  ensure_operator_user
   install -d -o ti-trader -g ti-trader -m 0750 \
     /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines
   local a
