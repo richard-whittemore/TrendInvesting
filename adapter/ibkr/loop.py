@@ -63,28 +63,37 @@ stops the start (ReportRecordInvalid).
 With a streams folder (delivery.py), each step while the link is up and
 reconciled also delivers the run's market-data stream: the files of
 <streams>/<run> it has not delivered, oldest session first, behind one
-broker snapshot (the account read with IBKR's marks for its holdings), all
-recorded in the outbox in one write, so the snapshot is journalled before
-the bars and each session's bars before its close (ADR 0019's snapshot
-rule; ADR 0021). A stream entry is sent as the data job wrote it, with the
-engine's next sequence (the file's own is a file-local ordinal) and its
-send time as its recorded time, as every input the adapter sends, so the
-snapshot is never recorded after the input it serves (ADR 0019's snapshot
-rule measures its age at the trigger's recorded time, while the adapter's
-clock keeps time with IBKR's: one behind it gives a negative age, which the
-engine finds stale and fails closed on). An earlier run's batch left in
-the outbox, its snapshot and its stream entries, is marked dropped, so that
-run gets its files again if it is resumed (delivery.py), and then struck
-off unsent in one outbox write, since a run's own stream carries its whole
-history from its warm-up: a stop leaves the batch whole or wholly gone,
-never its stream entries without their snapshot.
+account reading (_post_close_reading), all recorded in the outbox in one
+write, so the account snapshot is journalled before the bars, the mark
+before the close and each session's bars before its close (ADR 0019's
+snapshot rule; ADR 0021). The owner's decision of 2026-10-18 (ADR 0019,
+ADR 0025 point 5, ADR 0026 point 1, amended): the reading is the account
+as of the batch's last close when it is taken after that close on its own
+New York date, with no open order for the account at IBKR and no execution
+in it since the close (_not_as_of_close), and both snapshots are then
+stamped as of the close; otherwise at the read time, with the reason, so
+the engine withholds the session. A stream entry is sent as the data job
+wrote it, with the engine's next sequence (the file's own is a file-local
+ordinal) and its send time as its recorded time, as every input the
+adapter sends. An earlier run's batch left in the outbox, its adapter
+entries and its stream entries, is marked dropped, so that run gets its
+files again if it is resumed (delivery.py), and then struck off unsent in
+one outbox write, since a run's own stream carries its whole history from
+its warm-up: a stop leaves the batch whole or wholly gone, never its stream
+entries without their snapshots.
 
-The broker snapshot is one consistent reading (ADR 0019: its components
+Once the engine holds an account snapshot (its book), every reconcile
+(each start and reconnect) also records IBKR's positions and cash from the
+read that reconciled the link, as account.reconciliation, for the engine to
+classify against that book (ADR 0025 point 5, ADR 0019); before it, a run's
+first batch carries one.
+
+The account reading is one consistent reading (ADR 0019: its components
 share one cutoff): every callback already received is applied first, so a
 report IBKR sent before the read is recorded ahead of it; it is not taken
 while an execution awaits its commission (its fill is not yet recorded);
-the account is read, then the marks, then the account again, and the
-snapshot is the second read. It is read again, up to SNAPSHOT_ATTEMPTS
+the account is read, then IBKR's last prices (evidence beside each mark),
+then the account again, and the snapshots are the second read. It is read again, up to SNAPSHOT_ATTEMPTS
 times, if an order report is recorded or an execution arrives (of any
 client's order in the account, not only this adapter's) between the start
 of the first read and the end of the second, if the two reads' holdings,

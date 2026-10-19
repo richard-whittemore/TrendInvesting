@@ -16,17 +16,24 @@ and sends every other field as written.
 
 While the link is up and reconciled, the adapter (Deliverer.deliver) picks
 up the files of its run it has not delivered, oldest session first, reads
-each strictly (read_stream), takes one broker snapshot (the account read,
-snapshot.read_account, with IBKR's mark for each holding, snapshot.
-read_marks, and the market's state at its time, market_open), and records
-the snapshot and then every envelope of those files in the outbox in one
-write (relay.Outbox.extend), so the engine journals the snapshot before the
-bars, and each session's bars before its close: ADR 0019's snapshot rule
-(the latest snapshot at or before the trigger, by journal sequence) and ADR
-0021 (a session closes before its entries are decided). The outbox then
-sends each once, in order (loop.AdapterLoop._drain), every input stamped
-with its send time as its recorded time, so the snapshot is never recorded
-after an input it serves. The snapshot's entry names the run it was read
+each strictly (read_stream), takes one account reading for the batch's last
+session (loop.AdapterLoop._post_close_reading, given that session's close
+and each of its bars' official close, last_session) and records, in the
+outbox in one write (relay.Outbox.extend, _entries): the engine's
+account.snapshot, the broker snapshot, in a run's first batch the
+start-of-run reconciliation (the engine holds no book before it; ADR 0025
+point 5), then every envelope of those files, with each mark
+(market.mark.recorded, the bar's official close) just before the last
+session's close. The engine therefore journals the account snapshot before
+the bars, the mark before the close, and each session's bars before its
+close: ADR 0019's snapshot rule (the latest snapshot at or before the
+trigger, by journal sequence) and ADR 0021 (a session closes before its
+entries are decided). The owner's decision of 2026-10-18 (ADR 0019, ADR
+0025 point 5, ADR 0026 point 1, amended) stamps both snapshots as of that
+close when the reading stands for it, else at the read time with the
+reason (snapshot.py). The outbox then sends each once, in order
+(loop.AdapterLoop._drain), every input stamped with its send time as its
+recorded time. Each of the adapter's own entries names the run it was read
 for, as every stream entry's envelope does, so an earlier run's batch is
 never sent to a fresh run.
 
