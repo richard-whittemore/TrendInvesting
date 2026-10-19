@@ -97,7 +97,7 @@ research-test:
 	cd research/qc-cloud-futures && python3 -m unittest discover -s . -p "test_*.py"
 	python3 -m py_compile research/qc-cloud-futures/main.py
 	cd research/edge-search/timing && python3 -m unittest discover -s . -p "test_*.py"
-	cd research/edge-search && python3 -m unittest test_followup
+	cd research/edge-search && python3 -m unittest test_followup test_parity_remaining
 	cd research/edge-search/tax && python3 -m unittest test_tax_drag test_custodial
 	cd research/edge-search/universe && python3 -m unittest test_universe
 	cd research/edge-search/portfolio && python3 -m unittest test_blend
@@ -111,7 +111,9 @@ research-test:
 		research/edge-search/momentum/universe_parity.py research/edge-search/momentum/parity_compare.py \
 		research/edge-search/momentum/glide_path.py research/edge-search/momentum/golden_log.py \
 		research/edge-search/boost/golden_log.py research/edge-search/momentum/fresh_universe.py \
-		research/edge-search/momentum/parity_log.py research/edge-search/boost/parity_log.py
+		research/edge-search/momentum/parity_log.py research/edge-search/boost/parity_log.py \
+		research/edge-search/momentum/parity_export.py research/edge-search/momentum/glide_parity_log.py \
+		research/edge-search/momentum/minimum_lot_parity_log.py research/edge-search/momentum/ira_parity_log.py
 	python3 -m py_compile research/edge-search/etf-trend/main.py research/edge-search/etf-trend/main_oos.py \
 		research/edge-search/factors/main.py research/edge-search/timing/main.py \
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py
@@ -120,5 +122,6 @@ research-test:
 # Shell tests for the deploy rehearsal (no Docker needed).
 deploy-test:
 	./deploy/rehearsal/test-platform.sh
+	./deploy/rehearsal/test-clock.sh
 
 check: deps lint coverage vuln build adapter-test research-test deploy-test

@@ -3,13 +3,14 @@
 # x86_64, a Lightsail VM). Safe to run again after any partial failure.
 #
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
+#   sudo deploy/provision.sh clock      enable time syncing and refuse to finish unless the clock is good
 #   sudo deploy/provision.sh gateway    IBC and IB Gateway (pinned, checksummed)
 #   sudo deploy/provision.sh twsapi     IBKR's TWS API: fetched, verified, its ibapi installed into the
 #                                       adapter's environment (not part of all)
 #   sudo deploy/provision.sh adapter    the IBKR adapter's code and pin file (not part of all)
 #   sudo deploy/provision.sh services   systemd units, directories, config stubs
 #   sudo deploy/provision.sh firewall   close everything except Tailscale
-#   sudo deploy/provision.sh all        base, gateway, services, then firewall
+#   sudo deploy/provision.sh all        base, clock, gateway, services, then firewall
 #                                       if Tailscale is already signed in
 #
 # Secrets: this script never reads, writes or prints a credential. It creates
@@ -122,6 +123,26 @@ CONF
     systemctl enable --now tailscaled
   fi
   rm -rf "$tmp"
+}
+
+# The clock (ADR 0019: a clock behind IBKR's makes every snapshot stale and
+# withholds every sell). The check is installed first, so the owner can run it
+# from /usr/local/libexec/trend-investing after this step even if it fails.
+# Where systemd runs, libexec/time-sync.sh keeps a running time daemon or
+# installs systemd-timesyncd, and waits for a first sync; the check
+# (libexec/clock-check.sh) then refuses unless timedatectl reports the clock
+# synchronised or, in a container, unless the clock is within tolerance of an
+# outside reference. Re-run safe.
+step_clock() {
+  install -d -m 0755 /usr/local/libexec/trend-investing
+  install -d -m 0755 /etc/trend-investing # holds clock.conf, which the check reads
+  install -m 0755 "$here"/libexec/clock-check.sh /usr/local/libexec/trend-investing/
+  if test "$rehearsal" != 1 && test -d /run/systemd/system; then
+    log "time syncing"
+    "$here/libexec/time-sync.sh"
+  fi
+  log "checking the clock"
+  "$here/libexec/clock-check.sh" || die "the clock is not good; fix it and run 'provision.sh clock' again"
 }
 
 step_gateway() {
@@ -420,13 +441,14 @@ main() {
   check_platform
   case ${1:-} in
     base) step_base ;;
+    clock) step_clock ;;
     gateway) step_gateway ;;
     twsapi) step_twsapi ;;
     adapter) step_adapter ;;
     services) step_services ;;
     firewall) step_firewall ;;
-    all) step_base; step_gateway; step_services; step_firewall ;;
-    *) die "usage: provision.sh base|gateway|twsapi|adapter|services|firewall|all" ;;
+    all) step_base; step_clock; step_gateway; step_services; step_firewall ;;
+    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all" ;;
   esac
   log "done: ${1}"
 }

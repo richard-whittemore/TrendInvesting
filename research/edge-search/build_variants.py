@@ -65,6 +65,12 @@ PARITY_MONTHS_IS = tuple(sorted(set(_every((1999, 3), (2015, 12), 8))
 PARITY_MONTHS_OOS = tuple(sorted(set(_every((2016, 1), (2026, 6), 5))
                                  | {(2016, 2), (2020, 4), (2021, 3), (2022, 6), (2024, 3)}))
 
+#: Glide-path parity (docs/research/parity-2026-10.md, "Remaining scope,
+#: plan, 2026-10-19"): the months of the tuning window's momentum export,
+#: every 6th from its first measured month plus the golden months in it.
+GLIDE_PARITY_MONTHS_IS = tuple(sorted(set(_every((2002, 8), (2015, 12), 6))
+                                      | {(2008, 11), (2009, 6), (2013, 5)}))
+
 
 #: variant -> (template, {class constant: value}), exactly as run.
 VARIANTS = {
@@ -231,6 +237,31 @@ VARIANTS = {
     "OOS_D7L_HELD_30K": ("momentum/minimum_lot.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
                                                          RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
                                                          CASH=30_000, MIN_LOT="held")),
+    # The remaining parity runs (docs/research/parity-2026-10.md, "Remaining
+    # scope, plan, 2026-10-19"): the glide-path runs, D7-L with the held-name
+    # exception, and the IRA planner with the buy delay and the buy scaling,
+    # each exporting what cmd/parity compares.
+    **{"G_{}_{}_PARITY".format(w, a): ("momentum/glide_parity_log.py", dict(
+        base, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=float(a[1:]), GLIDE_PARITY=True,
+        **({"PARITY_MONTHS": months} if a == "P38" else {})))
+       for w, base, months in (("IS", _GLIDE_IS, GLIDE_PARITY_MONTHS_IS), ("OOS", _GLIDE_OOS, PARITY_MONTHS_OOS))
+       for a in ("P38", "P53", "P65")},
+    "D7L_PARITY": ("momentum/minimum_lot_parity_log.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                          "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                          "FRESH_SELECTION": True, "CASH": 30_000,
+                                                          "MIN_LOT": "held", "LOT_PARITY_MONTHS": PARITY_MONTHS_IS}),
+    "OOS_D7L_PARITY": ("momentum/minimum_lot_parity_log.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                                  RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                                  CASH=30_000, MIN_LOT="held",
+                                                                  LOT_PARITY_MONTHS=PARITY_MONTHS_OOS)),
+    "IRA_PARITY": ("momentum/ira_parity_log.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                  "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                  "FRESH_SELECTION": True, "CASH": 30_000, "IRA_EXEC": True,
+                                                  "EXEC_DELAY": 1, "PRICE_BAND": 0.05, "MAX_FEES": 2.0}),
+    "OOS_IRA_PARITY": ("momentum/ira_parity_log.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                          RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                          CASH=30_000, IRA_EXEC=True, EXEC_DELAY=1,
+                                                          PRICE_BAND=0.05, MAX_FEES=2.0)),
     # combination books of F_HALF / F_COMBO and their held-out runs, traded
     # 1 or 3 sessions after the month's book is computed.
     "XF_HALF_D3": ("momentum/execution.py", dict(_HALF, EXEC_DELAY=3)),
@@ -391,7 +422,8 @@ def render(template_src, params, rates):
 #: Templates whose long-only modes ignore VOL_TARGET: their book comes from
 #: defensive_book, which has no volatility scaling.
 NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py",
-                 "momentum/fresh_universe.py", "momentum/parity_log.py", "momentum/minimum_lot.py")
+                 "momentum/fresh_universe.py", "momentum/parity_log.py", "momentum/minimum_lot.py",
+                 "momentum/minimum_lot_parity_log.py", "momentum/ira_parity_log.py")
 
 
 def check_variant(template, params):
