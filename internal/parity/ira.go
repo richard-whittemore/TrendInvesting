@@ -207,9 +207,12 @@ type sellOrder struct {
 // buy, no sell of the run, whatever its tag, still holding the buys when
 // one was placed, and the buys on the session the export names. A sell
 // that cannot complete, still working at 8:00 on the IRAPriceWait-th
-// session after its day, is set aside from then on and holds no buy (ADR
-// 0026, amendment of 2026-10-18, the owner's decision); never filled, it is
-// reported as set-aside, not failed. The sessions
+// session at whose 8:00 it worked (its own day the first when it was
+// placed before 8:00, as the template counts), is set aside from then on
+// and holds no buy (ADR 0026, amendment of 2026-10-18, the owner's
+// decision); never filled, it is reported as set-aside, not failed, when it
+// is Go's planned sell in full, and an unpriced sale so set aside is
+// reported too; any other fails ira-orders. The sessions
 // between the rebalance and the buys are counted by sessions, never taken
 // from the export: they must be the delay (none when no sell is placed or
 // working), then each session a sell held the buys at 8:00, as the orders
@@ -388,9 +391,12 @@ func goHeld(names []string, m *IRAMonth) bool {
 }
 
 // unpriced is the difference of a name with no reference price in month:
-// listed only when the month comes before the first month any export
-// records a price for it, an instrument not yet listed (ADR 0026 point 8,
-// owner, 2026-10-18).
+// listed only when the month comes before the first month any export of
+// the run records a price for it (every IRAPARITY1 export read, its
+// targets' and holdings' prices; a pending target has none), an instrument
+// not yet listed (ADR 0026 point 8, owner, 2026-10-18). A name no export
+// prices is unexplained. The exports cannot tell a stock not yet listed
+// from one first seen in a gap in its data and priced later.
 func (r *iraRun) unpriced(month, name, size string) Difference {
 	d := Difference{Run: r.run, Where: month + " " + name, Kind: KindUnpriced, Size: size}
 	if first, ok := r.firstPriced[name]; !ok || month >= first {
@@ -438,24 +444,55 @@ func (r *iraRun) endCarrier(o Order) bool {
 }
 
 // setAside marks a sell that cannot complete: still working at 8:00 on the
-// IRAPriceWait-th session after the day it was placed, a market order
-// with no price at any of those sessions' opens. From then on it holds no
-// buy (ADR 0026, amendment of 2026-10-18, a sell that cannot complete).
-// The sessions are the calendar's; with none to count them, it is never
-// set aside.
+// IRAPriceWait-th session it worked through, a market order with no price
+// at any of those sessions' opens. From then on it holds no buy (ADR 0026,
+// amendment of 2026-10-18, a sell that cannot complete). The sessions are
+// counted as parity_export.py's _age_sells counts them: each session at
+// whose 8:00 the sell was working, so the sell's own day is the first when
+// it was placed before 8:00 that day. The calendar is asked only as far as
+// that session; with none to count them, it is never set aside.
 func (r *iraRun) setAside(s sellOrder) sellOrder {
 	day := s.at.In(nysecalendar.NewYork)
-	after := day.Format(time.DateOnly)
-	sessions, err := r.between(after, day.AddDate(0, 0, 3*IRAPriceWait).Format(time.DateOnly))
-	if err != nil || len(sessions) < IRAPriceWait {
+	first := day
+	if s.at.Before(at8(day.Format(time.DateOnly))) {
+		first = day.AddDate(0, 0, -1)
+	}
+	fifth, ok := r.nthSession(first, IRAPriceWait)
+	if !ok {
 		return s
 	}
-	s.aside = at8(sessions[IRAPriceWait-1])
+	s.aside = at8(fifth)
 	if s.working(s.aside) {
 		s.setAside = true
-		r.aside[s.ID] = sessions[IRAPriceWait-1]
+		r.aside[s.ID] = fifth
 	}
 	return s
+}
+
+// maxSessionGap bounds the calendar days nthSession looks across for the
+// next session: a calendar naming none for longer is taken as not covering
+// the span. The longest closure in the backtests' years, after 2001-09-11,
+// left seven days between sessions.
+const maxSessionGap = 14
+
+// nthSession is the n-th session after day, asked of the calendar one day
+// at a time, so never past that session; false when the calendar does not
+// cover it.
+func (r *iraRun) nthSession(day time.Time, n int) (string, bool) {
+	for gap := 1; gap <= maxSessionGap; gap++ {
+		next := day.AddDate(0, 0, 1)
+		got, err := r.between(day.Format(time.DateOnly), next.Format(time.DateOnly))
+		switch {
+		case err != nil:
+			return "", false
+		case len(got) > 0 && n == 1:
+			return got[0], true
+		case len(got) > 0:
+			n, gap = n-1, 0
+		}
+		day = next
+	}
+	return "", false
 }
 
 // holds reports whether the sell held the buys at t: working, and not yet
@@ -568,13 +605,22 @@ func (r *iraRun) month(m *IRAMonth) {
 	qcBy := map[string]map[string]int64{}
 	why, listed := map[string]string{}, map[string]string{}
 	// A sell set aside, never filled, is no sell made: it is reported, as
-	// the owner decided (ADR 0026, amendment of 2026-10-18).
+	// the owner decided (ADR 0026, amendment of 2026-10-18), and excuses
+	// Go's planned sell only when it is that sell, of its shares and with
+	// none of them filled; any other fails.
 	aside := map[string]string{}
 	for _, phase := range []string{PhaseSell, PhaseBuy} {
-		var a map[string]string
+		var a map[string]setAsideSell
 		qcBy[phase], a = r.orderShares(o, m.Month, phase, placed[phase], names, m.Placed)
-		for n, size := range a {
-			aside[n+" "+phase], listed[n+" "+phase] = size, size
+		for _, n := range unionKeys(a, nil) {
+			g, inGo := goBy[phase][n]
+			_, filled := qcBy[phase][n]
+			if inGo && !filled && g == a[n].shares {
+				aside[n+" "+phase], listed[n+" "+phase] = a[n].size, a[n].size
+				continue
+			}
+			o.compare(false, 0, fmt.Sprintf("%s %s %s: set aside, %d shares, against Go's %d (set %v) with %d filled: %s",
+				m.Month, phase, n, a[n].shares, g, inGo, qcBy[phase][n], a[n].size))
 		}
 	}
 	// excuses reports whether a recorded detection names an order Go
@@ -641,8 +687,15 @@ func (r *iraRun) month(m *IRAMonth) {
 	for _, n := range m.Pending {
 		pending[n] = true
 	}
-	sales, _ := r.orderShares(o, m.Month, PhaseUnpriced, placed[PhaseUnpriced], names, m.Placed)
-	for _, n := range unionKeys(sales, nil) {
+	sales, salesAside := r.orderShares(o, m.Month, PhaseUnpriced, placed[PhaseUnpriced], names, m.Placed)
+	sold := map[string]bool{}
+	for n := range sales {
+		sold[n] = true
+	}
+	for n := range salesAside {
+		sold[n] = true
+	}
+	for _, n := range unionKeys(sold, nil) {
 		what := ""
 		switch {
 		case !unpriced[n]:
@@ -653,6 +706,11 @@ func (r *iraRun) month(m *IRAMonth) {
 			what = "a pending target, which the template keeps"
 		}
 		o.compare(what == "", 0, fmt.Sprintf("%s unpriced sale of %s: %s", m.Month, n, what))
+		// A sale set aside, never filled, is reported (ADR 0026, amendment
+		// of 2026-10-18): the holding is still held.
+		if a, ok := salesAside[n]; ok && what == "" {
+			r.diffs = append(r.diffs, Difference{Run: r.run, Where: m.Month + " " + PhaseUnpriced + " " + n, Kind: KindSetAside, Size: a.size})
+		}
 	}
 	if m.ForPrice > 0 {
 		// Listed only within the five sessions, as the calendar counts them.
@@ -853,14 +911,24 @@ func compareShares(c *Check, where string, goShares, qcShares map[string]int64, 
 	return departures
 }
 
+// setAsideSell is the sells of one name and phase set aside, never filled:
+// their shares, summed, and each order's report.
+type setAsideSell struct {
+	shares int64
+	size   string
+}
+
 // orderShares sums the placed orders of a phase by the name the export
 // uses: the one it records for the order's ID, else the security ID when
 // the export names one, else the ticker. Only a filled order in its
 // phase's direction (a buy positive, a sell or unpriced sale negative) of
 // whole shares is summed; any other fails c and is left out, so that no
-// order of the wrong kind can make up a total.
-func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, names map[string]bool, byID map[int]string) (out map[string]int64, aside map[string]string) {
-	out, aside = map[string]int64{}, map[string]string{}
+// order of the wrong kind can make up a total. A sell set aside and never
+// filled (setAside) must be of that direction and whole shares too; it is
+// returned apart, summed by name, so that its shares are compared with
+// Go's plan before it may excuse it.
+func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, names map[string]bool, byID map[int]string) (out map[string]int64, aside map[string]setAsideSell) {
+	out, aside = map[string]int64{}, map[string]setAsideSell{}
 	for _, o := range orders {
 		name, ok := byID[o.ID]
 		switch {
@@ -870,24 +938,31 @@ func (r *iraRun) orderShares(c *Check, month, phase string, orders []Order, name
 		default:
 			name = o.Ticker
 		}
+		setAside := r.aside[o.ID] != "" && o.Status != OrderFilled && o.FillsKnown && o.FilledQuantity == 0
 		bad := ""
 		switch {
-		case r.aside[o.ID] != "" && o.Status != OrderFilled && o.FillsKnown && o.FilledQuantity == 0:
-			aside[name] = fmt.Sprintf("order %d: %v shares never sold, set aside on %s with no price for %d sessions",
-				o.ID, -o.Quantity, r.aside[o.ID], IRAPriceWait)
-			continue
-		case o.Status != OrderFilled:
+		case o.Status != OrderFilled && !setAside:
 			bad = fmt.Sprintf("status %d, not filled", o.Status)
 		case phase == PhaseBuy && !(o.Quantity > 0), phase != PhaseBuy && !(o.Quantity < 0):
 			bad = fmt.Sprintf("quantity %v against the %s's direction", o.Quantity, phase)
 		case math.Abs(o.Quantity) > maxShares || o.Quantity != math.Trunc(o.Quantity):
 			bad = fmt.Sprintf("quantity %v is not a whole number of shares", o.Quantity)
 		}
-		if bad != "" {
+		switch {
+		case bad != "":
 			c.compare(false, 0, fmt.Sprintf("%s %s order %d (%s): %s", month, phase, o.ID, name, bad))
-			continue
+		case setAside:
+			a := aside[name]
+			if a.size != "" {
+				a.size += "; "
+			}
+			a.shares += int64(o.Quantity)
+			a.size += fmt.Sprintf("order %d: %v shares never sold, set aside on %s with no price for %d sessions",
+				o.ID, -o.Quantity, r.aside[o.ID], IRAPriceWait)
+			aside[name] = a
+		default:
+			out[name] += int64(o.Quantity)
 		}
-		out[name] += int64(o.Quantity)
 	}
 	return out, aside
 }

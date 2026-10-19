@@ -346,8 +346,10 @@ def _open_sells(algo):
 
 def _age_sells(algo):
     """Once a session, at 8:00: count each sell still working. A market
-    order working at 8:00 on the PRICE_WAIT-th session after its day had no
-    price at any of those opens."""
+    order working at 8:00 on the PRICE_WAIT-th session it worked through had
+    no price at any of those opens; each session at whose 8:00 it was
+    working counts, so its own day is the first when it was placed before
+    8:00 (LEAN's sale at a delisting) and not when this phase placed it."""
     today = algo.Time.date()
     if getattr(algo, "sells_aged", None) == today:
         return

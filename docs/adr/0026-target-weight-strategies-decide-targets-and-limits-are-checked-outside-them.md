@@ -907,11 +907,13 @@ stand as recorded (AGENTS.md rule 6).
   reported, and live trading pages the owner (built separately, with the
   live alerts). *(As the IRA template and the parity tool apply it: a
   refused sell never works, so it holds nothing; a market sell still
-  working at 8:00 on the fifth session after the day it was placed had no
-  price at any of those opens, and from then on it holds no buy. It stays
+  working at 8:00 on the fifth session at whose 8:00 it was working (its
+  own day the first when it was placed before 8:00) had no price at any
+  of those opens, and from then on it holds no buy. It stays
   netted from the holding, since it may still execute (point 5). The tool
   finds it from the orders listing and the calendar, never from the
-  export, and reports it as `set-aside` when it never filled. One that
+  export, and reports it as `set-aside` when it never filled and is Go's
+  planned sell in shares; any other set-aside sell fails. One that
   later fills in full is an ordinary sell, filled after buys it no longer
   held; one left partly filled fails `ira-orders`.)*
 - **D7-F is dropped from the parity scope.** Point 7, item 2's "repeat

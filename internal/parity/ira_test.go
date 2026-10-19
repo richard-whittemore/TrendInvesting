@@ -1221,3 +1221,118 @@ func TestACarrierCancelPendingAtTheRunsEndCountsAsNeverFilled(t *testing.T) {
 		}
 	}
 }
+
+func TestASetAsideSellExcusesOnlyGosPlannedSellOfItsSize(t *testing.T) {
+	// A set-aside sell is compared with Go's planned sell by instrument,
+	// direction, whole shares and quantity before it may excuse the plan.
+	extra := parity.Order{ID: 8, Ticker: "XYZ", Quantity: -50, Status: 1, Time: "2020-04-01T13:00:00Z",
+		Tag: "IRAORD1 2020-04 sell", FillsKnown: true}
+	for name, alter := range map[string]func([]parity.Order) []parity.Order{
+		"of a name Go planned no sell for": func(o []parity.Order) []parity.Order { return append(o, extra) },
+		"of another size":                  func(o []parity.Order) []parity.Order { o[0].Quantity = -30; return o },
+		"of a fraction of a share":         func(o []parity.Order) []parity.Order { o[0].Quantity = -39.5; return o },
+		"against the buys' direction": func(o []parity.Order) []parity.Order {
+			o[1].Quantity, o[1].Status, o[1].LastFillTime, o[1].FillsKnown = -48, 1, "", true
+			return o
+		},
+		"two summing to another size": func(o []parity.Order) []parity.Order {
+			o[0].Quantity = -20
+			second := o[0]
+			second.ID, second.Quantity = 8, -30
+			return append(o, second)
+		},
+	} {
+		ms, orders := stuckSell("2020-04-08", 5, 4)
+		r := parity.CompareIRA("I", iraPlan, ms, alter(orders), iraSessions)
+		if c := checkNamed(r, parity.CheckIRAOrders); c.Pass() {
+			t.Errorf("a set-aside sell %s passed ira-orders: %+v\n%s", name, c, r.Markdown())
+		}
+	}
+	// Two set aside that together are Go's sell are both reported.
+	ms, orders := stuckSell("2020-04-08", 5, 4)
+	orders[0].Quantity = -15
+	second := orders[0]
+	second.ID, second.Quantity = 8, -25
+	r := parity.CompareIRA("I", iraPlan, ms, append(orders, second), iraSessions)
+	want := parity.Difference{Run: "I", Where: "2020-04 sell CCC", Kind: parity.KindSetAside,
+		Size: "order 1: 15 shares never sold, set aside on 2020-04-08 with no price for 5 sessions; " +
+			"order 8: 25 shares never sold, set aside on 2020-04-08 with no price for 5 sessions"}
+	if !r.Pass() || len(r.Differences) != 1 || r.Differences[0] != want {
+		t.Errorf("two set-aside sells making Go's: %+v\n%s", r.Differences, r.Markdown())
+	}
+}
+
+// stuckUnpriced is iraRun with NEW, a holding with no reference price (one
+// recorded in 2020-05), sold by the month's unpriced sale, which never
+// fills: it holds the buys until it is set aside on 2020-04-08.
+func stuckUnpriced() ([]parity.IRAMonth, []parity.Order) {
+	ms, orders := iraRun()
+	m := &ms[0]
+	m.Version, m.Unpriced, m.BuySession, m.Waited, m.ForSells = parity.IRAVersion, []string{"NEW"}, "2020-04-08", 5, 4
+	ms[1].Prices["NEW"] = 7
+	for i := 1; i < 4; i++ {
+		orders[i].Time, orders[i].LastFillTime = "2020-04-08T13:00:00Z", "2020-04-08T20:00:00Z"
+	}
+	sale := parity.Order{ID: 8, Ticker: "NEW", Quantity: -3, Status: 1, Time: "2020-04-01T13:00:00Z",
+		Tag: "IRAORD1 2020-04 unpriced", FillsKnown: true}
+	return ms, append(orders, sale)
+}
+
+func TestAnUnpricedSaleSetAsideIsReportedNotDropped(t *testing.T) {
+	ms, orders := stuckUnpriced()
+	r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions)
+	want := parity.Difference{Run: "I", Where: "2020-04 unpriced NEW", Kind: parity.KindSetAside,
+		Size: "order 8: 3 shares never sold, set aside on 2020-04-08 with no price for 5 sessions"}
+	found := false
+	for _, d := range r.Differences {
+		found = found || d == want
+	}
+	if !r.Pass() || !found {
+		t.Errorf("an unpriced sale set aside: %+v\n%s", r.Differences, r.Markdown())
+	}
+	// Set aside, it is still the sale of an unpriced holding.
+	ms, orders = stuckUnpriced()
+	ms[0].Pending = []string{"NEW"}
+	if c := checkNamed(parity.CompareIRA("I", iraPlan, ms, orders, iraSessions), parity.CheckIRAOrders); c.Pass() {
+		t.Errorf("a pending target's sale set aside passed: %+v", c)
+	}
+}
+
+func TestTheFifthSessionIsMeasuredAsTheTemplateMeasuresIt(t *testing.T) {
+	// parity_export.py's _age_sells counts a sell at each session's 8:00
+	// while it works, so a sell placed before 8:00 on its day (07:00 New
+	// York here) counts that day as its first session: set aside on
+	// 2020-04-07, the buys go then, 3 sessions having waited for it.
+	ms, orders := stuckSell("2020-04-07", 4, 3)
+	orders[0].Time = "2020-04-01T11:00:00Z"
+	if r := parity.CompareIRA("I", iraPlan, ms, orders, iraSessions); !r.Pass() {
+		t.Errorf("a sell placed before 8:00:\n%s", r.Markdown())
+	}
+}
+
+func TestTheFifthSessionNeedsTheCalendarOnlyAsFarAsIt(t *testing.T) {
+	// A calendar that ends on the fifth session after the sell's day is
+	// enough to set it aside.
+	var dates []string
+	for d := time.Date(2020, 3, 2, 0, 0, 0, 0, time.UTC); d.Format(time.DateOnly) <= "2020-04-08"; d = d.AddDate(0, 0, 1) {
+		if d.Weekday() != time.Saturday && d.Weekday() != time.Sunday {
+			dates = append(dates, d.Format(time.DateOnly))
+		}
+	}
+	short, err := parity.SessionList(dates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, orders := stuckSell("2020-04-08", 5, 4)
+	if r := parity.CompareIRA("I", iraPlan, ms[:1], orders[:5], short); !r.Pass() {
+		t.Errorf("a calendar ending on the fifth session:\n%s", r.Markdown())
+	}
+}
+
+func TestACalendarNamingNoSessionsNeverSetsASellAside(t *testing.T) {
+	none := func(after, through string) ([]string, error) { return nil, nil }
+	ms, orders := stuckSell("2020-04-08", 5, 4)
+	if c := checkNamed(parity.CompareIRA("I", iraPlan, ms, orders, none), parity.CheckIRAOrders); c.Pass() {
+		t.Errorf("set aside on a calendar of no sessions: %+v", c)
+	}
+}
