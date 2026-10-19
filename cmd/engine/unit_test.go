@@ -162,6 +162,15 @@ func TestTheServiceFileStartsTheEngineWithExplicitSettings(t *testing.T) {
 			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)
 		}
 	}
+	// The unit passes the account's operator inbox (ADR 0026, kill-switch
+	// amendment), in the state directory, where the provisioner creates it.
+	inbox := filepath.Join(state, "operator")
+	if i := indexOf(args, "-operator"); i < 0 || i+1 >= len(args) || args[i+1] != inbox {
+		t.Fatalf("ExecStart %v does not pass -operator %s", args, inbox)
+	}
+	if err := os.Mkdir(inbox, 0o750); err != nil {
+		t.Fatal(err)
+	}
 	runtimeDir := filepath.Dir(args[indexOf(args, "-socket")+1])
 	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -248,5 +257,28 @@ func TestEverySystemctlArgumentIsAUnit(t *testing.T) {
 			}
 			t.Errorf("deploy/provision.sh:%d passes %q to systemctl %s as a unit: %q", n+1, f, fields[1], strings.TrimSpace(line))
 		}
+	}
+}
+
+// TestTheProvisionerCreatesTheOperatorInbox: each account's operator inbox
+// is created by the services step, inside the account's state directory (the
+// one path the engine unit may write), owned by the engine's user
+// ti-trader, which is also the user the owner runs the operator tool as, and
+// mode 0750 so no other user can write an instruction (ADR 0026,
+// kill-switch amendment).
+func TestTheProvisionerCreatesTheOperatorInbox(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"`
+	found := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("deploy/provision.sh's services step does not run: %s", want)
 	}
 }

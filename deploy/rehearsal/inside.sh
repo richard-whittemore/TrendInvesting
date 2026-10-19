@@ -210,9 +210,10 @@ test "$(wc -l <"$rep/posts")" = "$sent" || fail "the reporter's second run sent 
 kill "$fake"
 pass "the reporter runs as its unit runs it, as ti-trader, delivers to both channels once, and keeps its state"
 
-# Unit files. The engine's binary is installed by hand on the server; a
-# stand-in lets systemd-analyze check the rest of its unit.
-test -e /opt/trend-investing/bin/ti-engine || install -m 0755 /dev/null /opt/trend-investing/bin/ti-engine
+# Unit files. The engine's binary is installed by hand on the server; the
+# rehearsal installs the stamped engine deploy/rehearse.sh built (the
+# operator-inbox check below runs it).
+install -m 0755 /root/dist/ti-engine /opt/trend-investing/bin/ti-engine
 # The adapter's environment and code (provision.sh twsapi and adapter).
 install -d /opt/trend-investing/adapter-venv/bin /opt/trend-investing/adapter
 install -m 0755 /dev/null /opt/trend-investing/adapter-venv/bin/python3
@@ -242,6 +243,113 @@ systemd-analyze verify "$broken/ti-gateway.service" >"$verify_log" 2>&1 || true
 cat "$verify_log"
 grep -qi 'credential' "$verify_log" || fail "systemd-analyze verify is silent on an invalid LoadCredential= name"
 pass "systemd-analyze verify reports an invalid LoadCredential= name"
+
+# The operator inbox (ADR 0026, kill-switch amendment). The provisioner
+# creates one per account, owned by ti-trader (the engine's user, and the
+# user the owner runs the operator tool as) and mode 0750.
+for a in boost trad-ira roth-ira; do
+  inbox=/var/lib/trend-investing/engines/$a/operator
+  test "$(stat -c %U:%G:%a "$inbox")" = ti-trader:ti-trader:750 || fail "the $a operator inbox is not ti-trader:ti-trader 0750"
+done
+# shellcheck disable=SC2016
+grep -q -- '-operator ${TI_STATE_DIR}/operator' /etc/systemd/system/ti-engine@.service || fail "the engine unit does not pass -operator"
+pass "each account has an operator inbox, ti-trader 0750, and the engine unit passes it"
+
+# The engine, started with its unit's own command line (expanded as systemd
+# would: %i, %t and the unit's variables), as ti-trader, refuses an inbox that
+# is missing or that others can write.
+line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-engine@.service)
+line=${line//%i/boost}
+line=${line//%t//run}
+line=${line//"\${TI_MODE}"/dry-run}
+line=${line//"\${TI_CONFIG}"/\/etc\/trend-investing\/engines\/boost.config}
+line=${line//"\${TI_STATE_DIR}"/\/var\/lib\/trend-investing\/engines\/boost}
+line=${line//"\${TI_RUN}"/run-rehearsal}
+line=${line//"\${TI_AS_OF}"/$(sed -n 's/^TI_AS_OF=//p' /root/deploy/etc/engines/run.env.example)}
+# shellcheck disable=SC2016
+line=${line//'$TI_RESTART_ARGS'/}
+case $line in *'$'* | *%*) fail "the engine's ExecStart has a variable the rehearsal does not expand: $line" ;; esac
+state=/var/lib/trend-investing/engines/boost
+inbox=$state/operator
+install -d -o ti-trader -g ti-trader -m 0700 /run/ti-engine-boost
+chmod 0777 "$inbox"
+# shellcheck disable=SC2086
+if out=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York timeout 20 $line 2>&1); then
+  fail "the engine started with an inbox others can write"
+fi
+case $out in *"writable by others"*) ;; *) fail "the engine's refusal of a writable inbox does not say so: $out" ;; esac
+chmod 0750 "$inbox"
+mv "$inbox" "$inbox.away"
+# shellcheck disable=SC2086
+if out=$(sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York timeout 20 $line 2>&1); then
+  fail "the engine started with no operator inbox"
+fi
+case $out in *"operator inbox"*) ;; *) fail "the engine's refusal of a missing inbox does not say so: $out" ;; esac
+mv "$inbox.away" "$inbox"
+rm -f "$state"/run-rehearsal.*
+pass "the engine refuses an operator inbox that is missing or writable by others"
+
+# An operator kill switch and an acknowledgement, typed as the owner types
+# them (sudo -u ti-trader operator ...), are read by the real engine: each is
+# marked .delivered, the engine logs it, the kill switch is in the durable
+# log that journal-query operator reads, and a stand-in adapter's input (the
+# fixture's session close, with the run's own configuration hash and strategy
+# version) is applied after them. The strategy rejects that input for want of
+# bars; the engine's refusal says the operator inputs were recorded first.
+eng_out=$(mktemp)
+# The output file is root's on purpose; the engine writes to the inherited descriptor.
+# shellcheck disable=SC2086,SC2024
+sudo -u ti-trader env -i PATH=/usr/bin:/bin TZ=America/New_York $line >"$eng_out" 2>&1 &
+engine=$!
+for _ in $(seq 100); do
+  test -S /run/ti-engine-boost/engine.sock && break
+  sleep 0.1
+done
+test -S /run/ti-engine-boost/engine.sock || { cat "$eng_out"; fail "the engine did not listen on its socket"; }
+sudo -u ti-trader operator kill-switch -inbox "$inbox" -account joint -state engaged -by rehearsal -detail "rehearsal kill switch" >/dev/null || fail "operator kill-switch failed as ti-trader"
+sudo -u ti-trader operator acknowledge -inbox "$inbox" -account joint -alert 'engine-state:halted:rehearsal@joint' -by rehearsal -detail "rehearsal acknowledgement" >/dev/null || fail "operator acknowledge failed as ti-trader"
+adapter_in=$(mktemp -d)
+chmod 0755 "$adapter_in"
+python3 - "$state/run-rehearsal.log" "$adapter_in/input.json" <<'PY'
+import json
+import sys
+
+with open("/root/dist/boost-fixture.log") as f:
+    rows = [json.loads(line) for line in f]
+envelope = next(r["record"]["envelope"] for r in rows if "record" in r and r["record"]["envelope"]["type"] == "market.session.closed")
+with open(sys.argv[1]) as f:
+    header = json.loads(f.readline())
+envelope["configuration_hash"] = header["configuration_hash"]
+envelope["strategy_version"] = header["strategy_version"]
+with open(sys.argv[2], "w") as f:
+    json.dump(envelope, f, separators=(",", ":"))
+PY
+chmod 0644 "$adapter_in/input.json"
+reply=$(sudo -u ti-trader python3 - "$adapter_in/input.json" <<'PY'
+import socket
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    frame = f.read() + b"\n"
+sock = socket.socket(socket.AF_UNIX)
+sock.settimeout(20)
+sock.connect("/run/ti-engine-boost/engine.sock")
+sock.sendall(frame)
+print(sock.makefile().readline())
+PY
+)
+case $reply in *"operator inputs were recorded first"*) ;; *) fail "the adapter's input was not applied after the operator inputs: $reply" ;; esac
+for kind in kill-switch alert.acknowledged; do
+  marker=$(ls "$inbox"/*-operator.$kind.json.delivered 2>/dev/null || true)
+  test -n "$marker" || fail "no .delivered marker beside the operator.$kind record"
+  grep -q "recorded operator input operator.$kind:joint:" "$eng_out" || fail "the engine did not log the operator.$kind input"
+done
+kill -TERM "$engine"
+wait "$engine" || true
+query=$(sudo -u ti-trader journal-query operator "$state/run-rehearsal.log")
+case $query in *engaged*"rehearsal kill switch"*) ;; *) fail "journal-query operator does not list the kill switch: $query" ;; esac
+rm -rf "$state"/run-rehearsal.* "${inbox:?}"/* /run/ti-engine-boost "$adapter_in" "$eng_out"
+pass "an operator kill switch and acknowledgement written into the inbox are delivered by the engine, logged, and listed by journal-query operator"
 
 # Client IDs are unique. The data step uses Massive, not IB Gateway, and
 # holds none.

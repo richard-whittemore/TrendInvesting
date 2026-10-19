@@ -281,6 +281,38 @@ func TestTheOperatorInboxIsForARunThatCanReachABroker(t *testing.T) {
 	refuse(t, "a file", file, "not a directory")
 }
 
+// TestTheOperatorInboxMustNotBeWritableByOthers: an instruction is the
+// owner's, so an inbox another user can write to is refused at start, as is
+// one the engine's own user cannot read, write and list. The modes the
+// provisioner creates (0750) and 0700 start.
+func TestTheOperatorInboxMustNotBeWritableByOthers(t *testing.T) {
+	for _, tc := range []struct {
+		mode os.FileMode
+		want string // "" starts
+	}{
+		{0o750, ""}, {0o700, ""},
+		{0o770, "writable by others"}, {0o702, "writable by others"}, {0o777, "writable by others"},
+		{0o500, "owner"}, {0o600, "owner"},
+	} {
+		dir := t.TempDir()
+		opts := boostOptions(t, dir)
+		opts.operatorDir = filepath.Join(dir, "operator")
+		if err := os.Mkdir(opts.operatorDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(opts.operatorDir, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		if tc.want != "" {
+			refuse(t, fmt.Sprintf("mode %o", tc.mode), opts, tc.want)
+			continue
+		}
+		if _, err := openOperatorInbox(opts, composition{}, io.Discard); err != nil {
+			t.Errorf("mode %o refused: %v", tc.mode, err)
+		}
+	}
+}
+
 // failingSink fails every write of the durable log once fail is set, as a
 // disk fault does partway through a run.
 type failingSink struct {

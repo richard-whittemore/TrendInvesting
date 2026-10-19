@@ -100,6 +100,16 @@ func openOperatorInbox(opts options, comp composition, out io.Writer) (*operator
 	if !info.IsDir() {
 		return nil, fmt.Errorf("engine: the operator inbox %s is not a directory", opts.operatorDir)
 	}
+	// An instruction is the owner's (ADR 0026, kill-switch amendment): a
+	// folder another user can write to would let them give one, and the
+	// engine's own user must be able to list, read and mark in it.
+	perm := info.Mode().Perm()
+	if perm&0o022 != 0 {
+		return nil, fmt.Errorf("engine: the operator inbox %s is mode %o, writable by others; the provisioner creates it 0750 (docs/manual/server.md)", opts.operatorDir, perm)
+	}
+	if perm&0o700 != 0o700 {
+		return nil, fmt.Errorf("engine: the operator inbox %s is mode %o, so its owner cannot list, read and write it; the provisioner creates it 0750 (docs/manual/server.md)", opts.operatorDir, perm)
+	}
 	_, recovered, err := readLogs(opts)
 	if err != nil {
 		return nil, err

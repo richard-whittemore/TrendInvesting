@@ -28,10 +28,14 @@ LoadCredential=secrets:/etc/trend-investing/secrets.env
 # which transport.Listen requires of a socket's parent (ADR 0014).
 RuntimeDirectory=ti-engine-%i
 RuntimeDirectoryMode=0700
+# The account's operator inbox, created by the provisioner (ti-trader, 0750)
+# inside the state directory this unit may write: the owner's kill switch and
+# alert acknowledgements are read from it (ADR 0026, kill-switch amendment).
+# The engine refuses to start if it is missing or writable by others.
 # Every setting is explicit. $TI_RESTART_ARGS is empty for a first run,
 # "-approval <file>" for a fresh run after an earlier one, or
 # "-resume <log>" after a crash; it expands to zero or more arguments.
-ExecStart=/opt/trend-investing/bin/ti-engine -mode ${TI_MODE} -config ${TI_CONFIG} -socket %t/ti-engine-%i/engine.sock -log ${TI_STATE_DIR}/${TI_RUN}.log -out ${TI_STATE_DIR}/${TI_RUN}.journal -as-of ${TI_AS_OF} $TI_RESTART_ARGS
+ExecStart=/opt/trend-investing/bin/ti-engine -mode ${TI_MODE} -config ${TI_CONFIG} -socket %t/ti-engine-%i/engine.sock -log ${TI_STATE_DIR}/${TI_RUN}.log -out ${TI_STATE_DIR}/${TI_RUN}.journal -as-of ${TI_AS_OF} -operator ${TI_STATE_DIR}/operator $TI_RESTART_ARGS
 # Never restarted by systemd: a crash is resumed, and any other restart is a
 # fresh run the owner approves, both as an explicit step (owner decision
 # 2026-10-16). SIGTERM stops it cleanly and writes its journal.

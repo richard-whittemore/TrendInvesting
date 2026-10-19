@@ -315,6 +315,10 @@ CONF
   local a
   for a in boost trad-ira roth-ira; do
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a"
+    # The operator inbox (ti-engine@.service passes it as -operator). The owner
+    # records into it as ti-trader, the engine's user, so one owner serves both;
+    # 0750 lets no other user write an instruction.
+    install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
   done
   # The adapter's configuration carries no secret (the account number comes

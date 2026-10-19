@@ -40,10 +40,18 @@ It has four commands:
 ## The operator inbox
 
 Each engine is started with `-operator <folder>`, its inbox, a folder that
-must exist; a backtest takes none. The server's service file does not pass it
-yet: until it does, create `/var/lib/trend-investing/engines/<account>/operator`
-(owned by `ti-trader`) and add `-operator` with that folder to
-`TI_RESTART_ARGS` in the account's `run.env`. The tool
+must exist; a backtest takes none. On the server you do nothing to set it up:
+the provisioner creates `/var/lib/trend-investing/engines/<account>/operator`
+for each account, owned by `ti-trader` and mode `0750`, and the engine's
+service file passes it as `-operator`. `ti-trader` is both the user the
+engine runs as and the user you run the tool as (`sudo -u ti-trader operator
+...`), so you are the one who writes it. The engine refuses to start if the
+folder is missing, is not a directory, is writable by anyone but its owner, or
+its owner cannot list, read and write it. Only by hand (a host the
+provisioner did not set up, or a folder removed by mistake), create it with
+`sudo install -d -o ti-trader -g ti-trader -m 0750
+/var/lib/trend-investing/engines/<account>/operator` and pass
+`-operator` with it. The tool
 writes one small file per instruction there, named by the time and the
 kind of instruction, for example `20261017T143005Z-operator.kill-switch.json`.
 Each time the adapter sends the engine something (a price, an account
@@ -350,7 +358,8 @@ reports ([journal-query](journal-query.md)).
 | A clearance that names the wrong orders | Recorded with no effect; `.refused` note says which orders are open | Clear again naming exactly those |
 | The engine is restarted fresh while the switch was on | The fresh run starts with the switch off; `operator approve` warns you | Record the switch again before starting it |
 | A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
-| The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-trader`) |
+| The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-trader`, `0750`) |
+| The engine is started and the inbox is missing, or others can write it | It refuses to start and says which | Create it as above, or `chmod 0750` it |
 
 The kill switch stops new orders from this program only. To cancel orders
 already at IBKR, cancel them in IBKR's own app. Stopping the Gateway is not a
@@ -390,6 +399,7 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnInputSentAgainIsCheckedAgainstTheSequenceItWasSentWith`,
 `TestAResumeWithAnApprovalStatesOneNextSequence`,
 `TestTheOperatorInboxIsForARunThatCanReachABroker`,
+`TestTheOperatorInboxMustNotBeWritableByOthers`, `TestTheProvisionerCreatesTheOperatorInbox`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
 `TestTheOwnersClearanceEndsARebalanceInProgress`,
@@ -411,7 +421,7 @@ on either channel); `TestAnAlertAcknowledgementIsDeliveredAndJournalled`
 ## Not built yet
 
 The IBKR adapter, which will carry the engine's inputs and follow its
-numbering; the inbox in the server's service file and provisioner; the momentum engines in the
+numbering; the momentum engines in the
 running program; a day-trade
 counter for the margin account (counted by hand for now: see the
 [margin-warning runbook](../runbooks/margin-warning.md)).
