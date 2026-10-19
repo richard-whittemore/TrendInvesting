@@ -7,6 +7,9 @@ chapters: [momentum universe](momentum-universe.md),
 [minimum lot](momentum-minimum-lot.md) and [glide path](glide-path.md).
 This chapter puts the whole rule in one place.*
 
+Terms such as net liquidation, mark, broker snapshot, Degraded and the kill
+switch are explained in the [glossary](glossary.md).
+
 ## Where this stands
 
 The rule, the planner and the limits are built and tested in Go
@@ -14,10 +17,13 @@ The rule, the planner and the limits are built and tested in Go
 `internal/orderplan`, `internal/risklimit`), and parity with the backtest
 was checked for the rule itself ([parity](parity.md); the glide path, the
 minimum lot and the IRA buy timing are not yet compared). **The IRAs cannot run yet**: the engine
-program refuses a momentum configuration (`cmd/engine/compose.go`), there
-is no IRA configuration file in `deploy/etc/engines/`, and the daily data
-job writes only the Boost stream. So the "one IRA month" walk-through below
-stops before the engine.
+program refuses a momentum configuration (`cmd/engine/compose.go`: it
+composes the Boost target-weight strategy only), there is no IRA
+configuration file in `deploy/etc/engines/` (only the IRAs' account
+settings, `roth-ira.env` and `trad-ira.env`), there is no adapter service
+for an IRA (only `ti-adapter-boost`), and the daily data job writes only
+the Boost stream. So the "one IRA month" walk-through below stops before
+the engine.
 
 ## What it is and why
 
@@ -53,9 +59,12 @@ close 252 sessions ago, minus one. That is roughly the past year's return
 without the last month. A stock needs 253 closes; one with fewer is
 `short-history`. A stock not held with a missing session in its window is
 `gap` and is not ranked that month. A stock **you hold** with a missing
-session is scored across it, as the backtest did (owner's decision of
-2026-10-18; [momentum universe](momentum-universe.md), "A stock you hold
-with a missing day").
+session is scored across it, from its last 253 closes within the last 260
+sessions, as the backtest did (owner's decision of 2026-10-18, rules version
+1.15.0; [momentum universe](momentum-universe.md), "A stock you hold with a
+missing day"). This applies to a run fed the compact universe stream, the
+one the IRAs are meant to use; a run fed whole-market bars still leaves out
+every stock with a gap.
 
 **4. The volatility.** The population standard deviation of the stock's
 last 252 daily returns. A stock whose returns were all identical has no
@@ -99,7 +108,11 @@ target, the sum ([glide path](glide-path.md)).
 The decision record (`strategy.targets.decided`) lists every one of the
 500 with its rank, score, volatility, sector, status and weight, the
 risk-off reading, the glide figures and the minimum-lot figures, so the
-month can be read back in full ([journal-query](journal-query.md)).
+month can be read back in full from the run's journal (one JSON line per
+record). `journal-query` has no report of decisions; its `orders` and
+`refusals` reports list what followed ([journal-query](journal-query.md)).
+The dashboard shows each decision's outcome, withheld reason and targets,
+rounded to whole percent ([alerts and dashboard](alerts-and-dashboard.md)).
 
 ## From targets to orders: the order planner
 
@@ -130,7 +143,8 @@ section 5; ADR 0026, point 2):
    commission, minus anything a newer account snapshot shows has gone.
 9. **Each buy is costed at its worst case**: its shares at the limit price
    (the previous close plus the 5% band) plus a **$2.00** fee allowance per
-   order (the plan's value, pending paper trading; plan section 8). If the
+   order (`execution.max_fees_per_order`; $2.00 is the plan's value,
+   pending paper trading; plan section 8). If the
    buys do not fit the budget, every buy is scaled down by the same factor
    and rounded down again; a buy left with no share is recorded as skipped.
    This scaling is not in the backtest.
@@ -189,26 +203,35 @@ order's shape, account and mode, not these limits (`adapter/ibkr/sender.py`).
 | 2 | last session of the month | `encode --ranker` writes the compact stream: bars for the named instruments, the universe snapshot, and the 500 ranked stocks' price histories ([momentum universe](momentum-universe.md)). | Built |
 | 3 | — | **Stops here today.** An IRA engine must be started from an IRA configuration, fed that stream together with IBKR's account snapshot and marks. The engine refuses a momentum configuration, no IRA configuration exists, and nothing merges the stream with IBKR's figures. | **Not built** |
 | 4 | at the close | The engine decides the month and plans the sells, checked against the limits. | Built and tested on recorded inputs |
-| 5 | next session | The adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Engine side built; the adapter's sending is built against the stand-in gateway only, and tested with one SPY order |
+| 5 | next session | The adapter sends the sells; when every sell has finished, the engine plans and releases the buys from the cash realised. | Engine side built. The adapter's sending, its real IBKR client and its paper switch are built and run for Boost only; no IRA adapter service exists |
 | 6 | after | Fills come back; the reporter and the dashboard show the month. | As for Boost ([boost](boost.md#one-boost-day-from-the-data-to-ibkr-and-back)) |
 
 ## What can go wrong, and what the program does then
 
-Every one of these refuses or withholds rather than guess.
+Every one of these refuses or withholds rather than guess. Alerts come from
+the reporter ([alerts and dashboard](alerts-and-dashboard.md)); `<account>`
+is the account the IRA's configuration names. An **urgent** alert pages
+you; a **routine** one only informs. A withheld month sends one alert when
+a run of withheld months with the same reason starts, and its text says
+held positions and orders are unchanged. Until an IRA engine can run (see
+"Where this stands"), only the first row can happen on the server.
 
-| What happens | What the program does | What you do |
+| What you see | What the program does | What you do |
 | --- | --- | --- |
-| A held or targeted instrument has no bar in the decision session, or the session never closed | The month is withheld (`missing-bars`); nothing is ordered | Fix the feed. The next month decides as usual; there is no mid-month catch-up (`docs/runbooks/missed-rebalance.md`) |
-| No account snapshot as of the close | Withheld (`stale-account-snapshot`) | Check the adapter and the Gateway |
-| No universe snapshot, or no histories for the ranked stocks | Withheld (`missing-universe`, `histories-missing`) | Check the data step for that session |
-| More than 20% of the ranked stocks have no sector label | Withheld (`labels-missing`), book kept, urgent alert | Check the sector recordings ([momentum universe](momentum-universe.md)) |
-| Nothing affordable, or nothing eligible | Withheld (`all-unaffordable`, urgent alert; `no-eligible-names`), book kept | Check net liquidation and prices ([minimum lot](momentum-minimum-lot.md)) |
-| Fewer than 200 SPY closes | Withheld (`insufficient-trend-history`) | Give the run a longer warm-up |
-| Last month's rebalance is still working | Withheld (`rebalance-in-progress`); nothing more is sent | `docs/runbooks/missed-rebalance.md` |
-| The sells finish but the buys cannot all be afforded | The buys are scaled down to fit; a buy left with no share is recorded as skipped | Nothing; the next month decides afresh |
-| A sell fails or is cancelled part-filled | The buys wait for every sell to finish, then are budgeted from the cash actually raised; nothing is ever borrowed | Check the order at IBKR |
-| An order breaks a limit | Refused; the account goes Degraded on that instrument | `docs/runbooks/halted-account.md` |
-| A fresh run starts while a rebalance is working | The fresh run does not know the earlier run's working orders | Never start a fresh IRA run mid-rebalance (`docs/runbooks/missed-rebalance.md`) |
+| The engine will not start, saying the configuration "names strategy_id "momentum", a target-weight strategy this engine does not compose" | Today the engine program runs Boost only. Nothing is recorded | Nothing: the IRAs are not ready to run ("Where this stands") |
+| `ira-exposure`. Alert: `<account>: order refused (ira-exposure)` (urgent), its text naming the exposure after the order and the limit; then `<account>: engine degraded (risk-limit-breached)`, which repeats until you acknowledge it | The risk gate refused a buy that would have left the account's holdings, valued at the previous close, above `max_exposure` (at most 1: an IRA never borrows). Nothing was sent for it. The account is Degraded on that instrument: no buy goes, and the instrument is frozen | Compare holdings, cash and net liquidation at IBKR with the refusal's figures (`journal-query refusals`). Follow `docs/runbooks/halted-account.md`; the way out is a fresh run you approve ([restart](restart.md)) |
+| `insufficient-cash`. Alert: `<account>: order refused (insufficient-cash)` (urgent), naming the buy's worst-case cost and the cash available; then `<account>: engine degraded (risk-limit-breached)`, repeating until acknowledged | The gate refused a buy whose worst-case cost (its shares at the limit price plus the fee allowance) exceeds the cash still available after the buys released before it. The planner already scales buys to fit the budget, so this means the cash changed between the plan and the check. Degraded on that instrument | Check cash at IBKR against the last account snapshot. Follow `docs/runbooks/halted-account.md` |
+| `no-eligible-names`. Alert: `<account>: decision withheld (no-eligible-names)` (routine) | The month is withheld: no stock in the ranked 500 could be picked (every one short of history, with a gap, or without volatility), and none was skipped as unaffordable. The book is kept; nothing is ordered | Check the month's data step: the universe snapshot and the ranked stocks' price histories ([momentum universe](momentum-universe.md), [market data](market-data.md)). The next month decides as usual |
+| `insufficient-trend-history`. Alert: `<account>: decision withheld (insufficient-trend-history)` (routine), saying SPY has fewer than 200 closes | The month is withheld: the risk-off test needs 200 SPY closes. The backtest treated this as risk-on; live trading refuses to guess (ADR 0026, point 5). The book is kept | Feed the run a stream that starts at least 200 sessions before its first decision. A run already started cannot gain history it was not given: start a fresh run with a longer history ([restart](restart.md)) |
+| Alert `<account>: decision withheld (missing-bars)` (urgent): a held or targeted instrument, or SPY in its 200-close window, has no bar, or the month's last session never closed | The month is withheld; nothing is ordered. Explained in [engine](engine.md), "What can go wrong" | Fix the feed. The next month decides as usual; there is no mid-month catch-up (`docs/runbooks/missed-rebalance.md`) |
+| Alert `<account>: decision withheld (stale-account-snapshot)` (urgent) | No account snapshot as of the close: withheld. See [engine](engine.md), "What can go wrong" | Check the adapter and the Gateway (`docs/runbooks/gateway-login.md`) |
+| Alert `<account>: decision withheld (missing-universe)`, `(histories-missing)` or `(labels-missing)` (urgent) | The month is withheld, the book kept. Explained in [momentum universe](momentum-universe.md), "What can go wrong" | As that chapter says |
+| Alert `<account>: decision withheld (all-unaffordable)` (urgent), or a trade recorded as skipped | No pick could be bought in whole shares, or a trade rounded to no share. Explained in [minimum lot](momentum-minimum-lot.md), "What can go wrong" | As that chapter says |
+| Alert `<account>: decision withheld (rebalance-in-progress)` (routine): last month's rebalance is still working | Nothing more is sent until IBKR reports every order finished or you clear it. Explained in [paper trading](paper-trading.md), "What can go wrong" | `docs/runbooks/missed-rebalance.md`; [operator](operator.md), "A rebalance clearance" |
+| The sells finish but `journal-query orders` shows smaller buys than planned, or a buy recorded as skipped | The buys were scaled down to fit the cash; a buy left with no share is recorded as skipped | Nothing; the next month decides afresh |
+| `journal-query orders` shows a sell failed or was cancelled part-filled | The buys wait for every sell to finish, then are budgeted from the cash actually raised; nothing is ever borrowed | Check the order at IBKR |
+| Any other refusal: `<account>: order refused (order-count)`, `(order-size)`, `(price-band)`, `(missing-mark)`, `(sell-exceeds-holding)`, `(broker-holding)`, `(stale-broker-snapshot)`, `(undecided-order)` or `(kill-switch)` | Refused; the state that follows (Degraded, Halted or none) is in the hard-limits table above. Explained in [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong" | `docs/runbooks/halted-account.md` |
+| A fresh run started while a rebalance was working | The fresh run does not know the earlier run's working orders | Never start a fresh IRA run mid-rebalance (`docs/runbooks/missed-rebalance.md`) |
 
 ## What backs this
 

@@ -37,13 +37,42 @@ It has four commands:
 | `operator acknowledge` | your acknowledgement of one alert, by its alert key | the engine's operator inbox | before the engine's next input from the adapter; the reporter stops repeating the alert at its next run |
 | `operator approve` | your approval of a fresh run | an approval file you pass to the engine with `-approval` | when that fresh run starts, as its second input |
 
+**`-account` is the account's name in the engine's configuration**, its
+`account_id`: `joint` for Boost (`/etc/trend-investing/engines/boost.config`).
+It is not the IBKR account number, which only the adapter holds. The alerts
+use the same name (`joint: engine halted (...)`), and every alert key ends
+with `@joint`. An instruction for any other name is refused by the engine
+with no effect (see "What can go wrong" below).
+
 ## The operator inbox
 
 Each engine is started with `-operator <folder>`, its inbox, a folder that
-must exist; a backtest takes none. The server's service file does not pass it
-yet: until it does, create `/var/lib/trend-investing/engines/<account>/operator`
-(owned by `ti-trader`) and add `-operator` with that folder to
-`TI_RESTART_ARGS` in the account's `run.env`. The tool
+must exist; a backtest takes none (the engine refuses to start with both:
+`-operator applies to a run that can reach a broker`).
+
+**On the server the inbox is not set up for you.** The provisioner
+(`deploy/provision.sh`) installs the `operator` tool itself, in
+`/opt/trend-investing/bin` and linked into `/usr/local/bin`, when
+`deploy/build-engine.sh` has built it. But it does not create the inbox
+folder, and the engine's service file (`ti-engine@.service`) does not pass
+`-operator`. Until you do both, an engine on the server reads no kill
+switch, clearance or acknowledgement. Do this once per account, before
+the engine starts:
+
+```
+sudo install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/engines/boost/operator
+```
+
+and, in that account's `run.env`, put `-operator` with that folder into
+`TI_RESTART_ARGS` on every start, beside any `-approval` or `-resume`:
+
+```
+TI_RESTART_ARGS=-operator /var/lib/trend-investing/engines/boost/operator -approval /var/lib/trend-investing/engines/boost/approval-<new run>.json
+```
+
+The folder must belong to `ti-trader`: the tool refuses to write into a
+folder owned by anyone else, and an engine whose `-operator` folder is
+missing refuses to start (`engine: the operator inbox: ...`). The tool
 writes one small file per instruction there, named by the time and the
 kind of instruction, for example `20261017T143005Z-operator.kill-switch.json`.
 Each time the adapter sends the engine something (a price, an account
@@ -98,8 +127,13 @@ after a full log start a fresh one (see [restart](restart.md)), and the
 engine records it before the adapter's first input, so a kill switch is
 never lost to a disk fault or a full log.
 
-The adapter follows the engine's numbering (its link to the engine's socket
-is not built yet: [IBKR adapter](ibkr-adapter.md)): the decisions
+The adapter follows the engine's numbering: it reads the next number from
+the engine's durable log before it sends ([IBKR adapter](ibkr-adapter.md)).
+So the inbox is read only when the adapter sends something: a price, a
+broker snapshot, an order report, the day's bars and close. With the adapter
+stopped, or nothing arriving, your instruction waits in the inbox. That is
+safe for the kill switch, because every order is checked while handling
+such an input, and the inbox is read first. The decisions
 the engine sends back carry the number of the last input it recorded, and
 the adapter's next input carries the number after it. When the engine
 records your instructions first and then refuses the adapter's input, the
@@ -139,7 +173,7 @@ prints the number once, on the approval's line.
 
 ```
 operator kill-switch -inbox /var/lib/trend-investing/engines/boost/operator \
-  -account <IBKR account> -state engaged -by owner -detail "why"
+  -account joint -state engaged -by owner -detail "why"
 ```
 
 `-state` must be `engaged` or `released`; anything else is refused, so the
@@ -153,6 +187,25 @@ recorded operator.kill-switch:<account>:2026-10-17T14:30:05Z (engaged) in <inbox
 What the switch does is in [states-and-kill-switch](states-and-kill-switch.md):
 every order is refused except the margin account's one sale back to 98%,
 and the engine state does not change.
+
+**"recorded" here means written to the inbox, not yet taken by the engine.**
+To confirm the engine took it, look for any of these:
+
+- a marker beside the file, the same name ending `.delivered`, holding
+  `delivered: it is journalled at sequence <N>`:
+  `sudo -u ti-trader cat /var/lib/trend-investing/engines/boost/operator/<file>.delivered`.
+  If a `.refused` note sits beside it too, the engine recorded the
+  instruction but refused it: it had no effect, and the note says why;
+- the engine's own line, `engine: recorded operator input <id> at sequence
+  <N>`, in `journalctl -u ti-engine@boost`;
+- the switch in the log itself: `sudo -u ti-trader journal-query operator
+  /var/lib/trend-investing/engines/boost/<run>.log` lists it with its
+  sequence number. This is the evidence; the marker only points to it.
+
+No marker yet means the engine has not read the inbox since: it is stopped,
+or the adapter has sent it nothing (see "The operator inbox" above). The
+first refusal the switch makes then reaches you as an urgent alert,
+`joint: order refused (kill-switch)`.
 
 **After you release the switch, Boost tries again at its next decision.**
 Normally Boost orders only when its target changes (ADR 0026, point 2,
@@ -203,7 +256,8 @@ refusals` and `journal-query orders` show which orders are open; the
 
 The momentum engine is not composed into the running program yet (only
 Boost is), so today a clearance is read by the momentum strategy and its
-tests only. Clear only after IBKR shows the order finished. A later IBKR
+tests only. A clearance sent to the Boost engine is recorded and refused
+(`not one this handler reads`), with no effect. Clear only after IBKR shows the order finished. A later IBKR
 report on a cleared order is refused, which stops the engine until you
 reconcile. The reporter reads the clearance the same way, so that report
 also raises the urgent "venue report not read" alert.
@@ -218,7 +272,7 @@ and at weekends included, until you acknowledge it
 alert key: <key>`. Copy that key, exactly, into:
 
 ```
-operator acknowledge -inbox <inbox> -account <IBKR account> \
+operator acknowledge -inbox <inbox> -account joint \
   -alert 'engine-state:halted:risk-limit-breached:||:2026-10-17T14:00:00Z@<account>' \
   -by owner -detail "seen; reconciling at IBKR"
 ```
@@ -257,9 +311,10 @@ refused; run it again a second later.
 
 The engine refuses an acknowledgement stating a time more than five minutes
 ahead or a file it cannot read: it is never recorded, and you see a `.refused`
-note beside the file in the inbox and on the engine's output. One recorded for
-another account has no effect: the reporter does not count it and the alert
-keeps repeating. Record the acknowledgement again with the right account and
+note beside the file in the inbox and on the engine's output. One for
+another account is recorded and refused, with a `.refused` note
+(`acknowledgement ... is for account ...; this run decides "joint"`): the
+reporter does not count it and the alert keeps repeating. Record the acknowledgement again with the right account and
 the current time.
 
 ## An approval
@@ -270,7 +325,7 @@ log itself, so you do not copy hashes and states by hand:
 
 ```
 operator approve -log /var/lib/trend-investing/engines/boost/<latest run>.log \
-  -account <IBKR account> -by owner -out /var/lib/trend-investing/engines/boost/approval-<new run>.json
+  -account joint -by owner -out /var/lib/trend-investing/engines/boost/approval-<new run>.json
 ```
 
 It reads the log and states what it ends in: its file name and the
@@ -314,12 +369,12 @@ it and why:
 
 ```
 journal  seq  time                  account  input              action                                     by     detail
-run.log  57   2026-10-17T14:30:05Z  U1234    kill-switch        engaged                                    owner  news before the open
-run.log  2    2026-10-21T13:00:00Z  U1234    run-approved       after run-1.log, latched false; no incident  owner  -
+run.log  57   2026-10-17T14:30:05Z  joint    kill-switch        engaged                                    owner  news before the open
+run.log  2    2026-10-21T13:00:00Z  joint    run-approved       after run-1.log, latched false; no incident  owner  -
 ```
 
 An approval carrying an incident in force shows its whole scope, the
-instruments then the cash components, as in `incident engine-state:U1234:3 in
+instruments then the cash components, as in `incident engine-state:joint:3 in
 force, degraded on SPY;total-cash, sale attempted false`, so an account
 Degraded on its cash alone reads `degraded on total-cash`. An approval an
 earlier build recorded (schema version 1, which could not state a cash scope)
@@ -332,30 +387,61 @@ reports ([journal-query](journal-query.md)).
 
 ## What can go wrong
 
-| What happens | What the system does | What you do |
-| --- | --- | --- |
-| You run the tool as yourself or as root, not `ti-trader` | Refused, nothing written: the engine could not read the file | Run it again with `sudo -u ti-trader` |
-| A kill switch backdated with `-at` before one already applied | Recorded with no effect, with a `.refused` note naming the later one | Record it again with the current time |
-| Any instruction (kill switch, clearance or acknowledgement) with `-at` more than five minutes in the future | Never recorded; a `.refused` note says so | Record it again with the current time |
-| The disk fails while the engine records an instruction | No note; the run stops with the error; the file waits | Resume the run; the instruction is recorded first |
-| The log is full (the most records a run holds) when an instruction arrives | No note; the run stops with the error; the file waits | Start a fresh run; the instruction is recorded first |
-| You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
-| A typing slip in `-state`, or a missing `-by` or `-detail` (`-detail` is optional only for `acknowledge`) | Refused, nothing written | Run it again |
-| An acknowledgement with no `-alert` or no `-by`, or a key holding a newline (surrounding whitespace is trimmed) | Refused, nothing written | Run it again with the key from the alert |
-| An acknowledgement naming a key with a typing slip | Recorded; it acknowledges nothing, and the alert keeps repeating | Copy the key from the alert again, in single quotes |
-| An acknowledgement the engine refuses (a time more than five minutes ahead, an unreadable file) | Never recorded; a `.refused` note beside the file says why | Record it again with the current time |
-| An acknowledgement recorded for another account | Recorded with no effect; the reporter does not count it, so the alert keeps repeating | Record it again with the right account |
-| Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |
-| Someone edits a file in the inbox | The engine refuses it, writes `<file>.refused` saying why, and never uses it | Record the instruction again with the tool |
-| A clearance that names the wrong orders | Recorded with no effect; `.refused` note says which orders are open | Clear again naming exactly those |
-| The engine is restarted fresh while the switch was on | The fresh run starts with the switch off; `operator approve` warns you | Record the switch again before starting it |
-| A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
-| The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-trader`) |
+Every message below is what the tool prints, or what the engine writes in a
+`.refused` note and on its output (`journalctl -u ti-engine@<account>`).
+When the tool refuses, it writes nothing; run it again once fixed.
 
-The kill switch stops new orders from this program only. To cancel orders
-already at IBKR, cancel them in IBKR's own app. Stopping the Gateway is not a
-cancel: it only delays an order the engine has released, which goes out once
-the Gateway is back the same day.
+### When you run the tool
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| `usage: operator <kill-switch\|rebalance-cleared\|acknowledge\|approve> [flags]` or `operator: unknown command "..."` | Nothing written | Use one of the four commands |
+| `flag provided but not defined: -...`, or `operator <command>: unexpected arguments [...]` | Nothing written: a misspelt flag, or a value with spaces not in quotes | Check the spelling; quote `-detail "..."` |
+| `operator: -inbox is required: the engine's operator inbox, its -operator folder` | Nothing written | Add `-inbox /var/lib/trend-investing/engines/<account>/operator` |
+| `operator: the inbox: stat ...: no such file or directory` | Nothing written: the inbox folder does not exist | Create it as "The operator inbox" says, and start the engine with `-operator` |
+| `operator: the inbox ... belongs to user <n>, the engine's user, but this tool runs as user <m> ...` | Nothing written: you ran it as yourself or root, and the engine could not read the file | Run it as `sudo -u ti-trader operator ...`. If the folder itself belongs to root, fix its owner (`sudo chown ti-trader:ti-trader <inbox>`) |
+| `operator: write into <inbox>: ... permission denied` (or `write`, `flush`, `install`) | Nothing written | Check the folder's owner and mode; check the disk is not full |
+| `operator: <file> already holds a record, which is never overwritten (ADR 0018); record it again a second later` | Nothing written: two instructions of one kind in the same second (or the same `-at`) share a file name | Run it again a second later, or with a later `-at` |
+| `operator: flush the inbox <inbox>, so the record's name survives a power loss: ...` | The file was written, but the folder could not be flushed to disk | Check the disk. The record is in the inbox; look for its `.delivered` marker before recording it again |
+| `operator: -state must be engaged or released, not "...": the switch is stated, never assumed` | Nothing written | Run it again with `-state engaged` or `-state released` |
+| `operator: -at must be an RFC 3339 time: ...` | Nothing written | Give a time like `2026-10-17T14:30:05Z`, or leave `-at` out |
+| `operator: invalid kill switch payload: account id is required` (or `operator is required`, `detail is required`) | Nothing written: `-account`, `-by` or `-detail` missing | Add the missing flag |
+| `operator: invalid rebalance cleared payload: decision id is required ...`, `client order ids are required ...`, `client order id <n> is empty`, or `client order id must be strictly ascending; "x" follows "x"` | Nothing written: `-decision` or `-orders` missing, an empty name between commas, or an order named twice | Name the decision and each open order once (`journal-query orders`) |
+| `operator: invalid alert acknowledged payload: account id is required` (or `alert key is required`, `acknowledged by is required`) | Nothing written | Add `-account`, `-alert` or `-by` |
+| `operator: -alert must hold no newline: ...` | Nothing written (spaces around the key are trimmed, a line break inside it is refused) | Copy the key from the alert again, in single quotes, on one line |
+| `operator: -log is required: ...` or `operator: -out is required: ...` (`approve`) | Nothing written | Name the previous run's log and where to write the approval |
+| `operator: open the previous log: ...` or `operator: <log> cannot be read as a durable log (docs/runbooks/durable-log.md): ...` | Nothing written | Check the path; a damaged log follows `docs/runbooks/durable-log.md`, "A log that cannot be read" |
+| `operator: <log> holds nothing past its configuration: its start was cut short, so resume it ...` | Nothing written | Resume that run with `-resume` ([restart](restart.md)) |
+| `restart: <log> records no incident, so there is none to clear: it ended normal`, or `restart: <log> ended <state> in incident <id>, so that is the incident to clear, not <id>` | Nothing written: `-clear-incident` names an incident the log did not end in | Leave `-clear-incident` out, or copy the incident ID from the tool's own output without it |
+| `restart: the approval is refused` with `account id is required` or `approved by is required` | Nothing written | Add `-account` or `-by` |
+| `engine: decode <id> in <log>: ...` (`approve`) | Nothing written: a record the approval depends on cannot be read | Treat the log as damaged: `docs/runbooks/durable-log.md` |
+| `operator: <file> already exists; an approval is evidence and is never overwritten (ADR 0018)` | Nothing written | Choose a new `-out` name |
+| The approval prints `the kill switch was engaged when it ended; a fresh run starts with it released ...` | The approval is written; the fresh run will start with the switch off | Record `operator kill-switch -state engaged` before starting the engine |
+
+### After the tool has written it
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| No `.delivered` marker beside the file | The engine has not read the inbox since: it is stopped, was started without `-operator`, or the adapter has sent it nothing | Check the engine runs with `-operator` (`systemctl status ti-engine@<account>` shows its command line); nothing else is needed: it records the file before the adapter's next input |
+| `.delivered` marker and no `.refused` note | Recorded in the durable log at the sequence the marker states, and in force | Nothing; `journal-query operator <log>` shows it |
+| `.delivered` and a `.refused` note: `kill switch for account "..."; this gate is "joint"` | Recorded with no effect: `-account` was not the configuration's name (the IBKR number, say) | Record it again with `-account joint` and the current time |
+| `.refused`: `kill switch <id> states <time>, earlier than <id>, already applied ...` | Recorded with no effect: backdated with `-at` before a kill switch already applied | Record it again with the current time |
+| `.refused`: `... states <time>, later than now (...) by more than the 5m0s the clocks may differ ...` | Never recorded: any instruction more than five minutes ahead of the engine's clock | Record it again with the current time |
+| `.refused`: `operator: decode the operator record: ...`, `... has more after the record ...`, `... is not the record its payload makes ... edited or damaged ...`, or an unknown type or schema version | Never recorded: the file was edited or damaged, or written by another build | Record the instruction again with the tool; never edit inbox files |
+| `.refused`: `acknowledgement ... is for account "..."; this run decides "joint"` | Recorded with no effect; the alert keeps repeating | Record it again with `-account joint` |
+| The alert keeps repeating after a delivered acknowledgement with no `.refused` note | The key named no alert (a typing slip): recorded, does nothing | Copy the key from the alert again, in single quotes |
+| `.refused`: `... names orders [...], but the orders not terminal are [...]`, `names <id>, but the rebalance in progress is <id>`, or `no rebalance is in progress ...` | Recorded with no effect | Clear again naming exactly the decision and orders the note lists |
+| `.refused`: `input type "operator.rebalance.cleared" is not one this handler reads` | A clearance sent to the Boost engine: recorded with no effect | Nothing; Boost has no rebalance to clear |
+| `engine: operator record <file> was not delivered, so it stays in the inbox and is delivered at the next start: ...` on the engine's output | No note; the run stops: the disk failed, or the log is full (the most records a run holds) | Resume the run, or after a full log start a fresh one ([restart](restart.md)); the instruction is recorded first |
+| `engine: list the operator inbox ...` or `engine: read the operator record ...: ...; it waits for the next input` | Nothing recorded meanwhile; it tries again at the next input | Fix the folder's or file's owner or mode (`ti-trader`) |
+| `engine: mark <file> delivered at ...: ...` | The instruction is in the log, but its marker could not be written | Check the disk; the log entry stands, and the engine does not record it twice |
+| The engine will not start: `engine: the operator inbox: ...` or `... is not a directory` | Nothing runs | Create the folder ("The operator inbox") or correct `-operator` in `run.env` |
+| The engine will not start: `-operator applies to a run that can reach a broker; a backtest takes no operator input` | Nothing runs | Leave `-operator` out of a backtest |
+| You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
+| The engine is restarted fresh while the switch was on | The fresh run starts with the switch off; `operator approve` warns you | Record the switch again before starting it |
+| A Boost order refused under the switch, after you release it | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
+| An order is already working at IBKR when you engage the switch | The switch stops only new orders from this program; it does not cancel anything at IBKR | Cancel it in IBKR's own app. Stopping the Gateway is not a cancel: an order the engine released goes out once the Gateway is back the same day |
+| The server has no inbox yet, and you need to stop trading now | No recorded kill switch is possible | Stop the engine and the adapter (`sudo systemctl stop ti-engine@boost ti-adapter-boost`), and cancel at IBKR ([server](server.md), "Reading the logs and the kill switch on the server") |
 
 ## What backs this
 
@@ -410,8 +496,13 @@ on either channel); `TestAnAlertAcknowledgementIsDeliveredAndJournalled`
 
 ## Not built yet
 
-The IBKR adapter, which will carry the engine's inputs and follow its
-numbering; the inbox in the server's service file and provisioner; the momentum engines in the
-running program; a day-trade
-counter for the margin account (counted by hand for now: see the
-[margin-warning runbook](../runbooks/margin-warning.md)).
+- The inbox in the server's setup: `deploy/provision.sh` does not create
+  `/var/lib/trend-investing/engines/<account>/operator`, and
+  `ti-engine@.service` does not pass `-operator`. You add both by hand, as
+  "The operator inbox" says. The tool itself is built by
+  `deploy/build-engine.sh` and installed by the provisioner.
+- The momentum engines in the running program: only Boost is composed, so a
+  rebalance clearance has nothing to act on yet.
+- Acknowledgements in `journal-query operator`: use the `.delivered` marker.
+- A day-trade counter for the margin account (counted by hand for now: see
+  the [margin-warning runbook](../runbooks/margin-warning.md)).

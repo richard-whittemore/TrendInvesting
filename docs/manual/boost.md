@@ -5,6 +5,9 @@ its one order is sized and priced, what happens after an order is refused,
 what one Boost day looks like from the data to IBKR and back, and what can
 go wrong.*
 
+Words in **bold** on first use, and the terms net liquidation, mark, latch,
+broker snapshot and kill switch, are explained in the [glossary](glossary.md).
+
 ## What it is and why
 
 Boost runs the joint taxable margin account (plan section 1). It holds SPY
@@ -119,14 +122,14 @@ configuration names `warm_up_start`, the first session whose close feeds the
 readings; sessions before the run's first decision session (`-as-of`) only
 feed the readings and decide nothing, as QuantConnect's warm-up does. The
 daily data job's one-time warm-up delivers that history
-([market data](market-data.md#the-one-time-warm-up)).
+([market data](market-data.md), "The one-time warm-up").
 
-The shipped dry-run file says 2024-01-02, which is outside Massive's
-two-year window. The data job therefore refuses to fetch a warm-up for that
-file. A run fed by the data job needs a date inside the window; that is a
-different configuration, so it starts as a new run. A paper run uses a date inside Massive's
-two-year window (the first-paper-order runbook, step A5, recommends
-2025-01-02).
+The shipped dry-run file says 2024-01-02, which is outside the two years of
+history Massive's plan reaches back, so the data job cannot fetch a warm-up
+for that file. A run fed by the data job needs a date inside the window;
+that is a different configuration (a new hash), so it starts as a new run.
+A paper run uses a date inside the window
+(`docs/runbooks/first-paper-order.md`, step A5, recommends 2025-01-02).
 
 ## The hard limits for this account
 
@@ -150,22 +153,23 @@ limit once for both strategies.
 ## One Boost day, from the data to IBKR and back
 
 This is the path a normal paper day will take. **Stops here today** marks
-the first step that is not on `main` yet: up to that point the pieces run
-and are tested; from there on, they are built only in parts, or not at all.
+the first step that does not work on `main` yet: up to that point the
+pieces run and are tested; from there on, they are built but do not yet
+receive what they need, or are built only in part.
 
 | # | When (New York) | What happens | Where it is explained | Built? |
 | --- | --- | --- | --- | --- |
 | 1 | 16:00 | The market closes (13:00 on an early close). | [market data](market-data.md) | — |
 | 2 | 17:05 (retries 18:05, 20:05) | `ti-data` fetches the day's whole-market bars and recent splits and dividends from Massive, records them, and writes the engine's input for the session: SPY's bar, then "the session closed", to `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<date>.jsonl`. | [market data](market-data.md), "The daily data job" | Built |
-| 3 | after 17:05 | **Stops here today.** Something must read that file, add IBKR's account snapshot (SPY held and net liquidation, as of the close) and IBKR's latest SPY price (the mark), number each input in the engine's one series, and send them over the engine's socket. That is the adapter's job, and the adapter does not yet talk to the engine's socket, read the data files, or send account snapshots and marks. | [IBKR adapter](ibkr-adapter.md) | **Not built** |
-| 4 | at the input | The engine writes each input to its durable log, flushed to disk, then decides: updates RSI(2) and the averages, moves the latch, plans at most one order and checks it against the hard limits. A released order is written down before anything is told about it. | [engine](engine.md), this chapter, [states-and-kill-switch](states-and-kill-switch.md) | Built (tested against recorded inputs and `make demo-boost-dry-run`) |
-| 5 | same evening | The adapter writes "about to send", hands the order to IB Gateway as a DAY limit order under its client order ID, and writes "sent". | [paper trading](paper-trading.md), [re-delivery](redelivery.md) | Built against a stand-in gateway only; the real IBKR client still refuses to place orders, and the adapter's main loop is not on `main` |
-| 6 | next session | IBKR works the order. Each status change and each fill (with IBKR's commission) comes back; the adapter records them as the engine's inputs. | [paper trading](paper-trading.md), [order lifecycle](order-lifecycle.md) | Records built against the stand-in; not yet delivered to the engine |
-| 7 | every 5 minutes | The reporter reads the durable log and sends any alert, and the daily summary. | [alerts and dashboard](alerts-and-dashboard.md) | Built and installed; its alerts need your ntfy and PagerDuty entries in `secrets.env` ([server](server.md)) |
-| 8 | next morning, before the open | The adapter reads IBKR's positions and cash; the engine compares them with its book. | [reconciliation](reconciliation.md) | Engine side built; the adapter's record is not delivered |
+| 3 | after 17:05 | The adapter (`ti-adapter-boost`), while its link to IB Gateway is up and matched to IBKR's orders, picks up the file, takes one **broker snapshot** (IBKR's holdings with IBKR's price for each, net liquidation, Excess Liquidity and open orders: `account.broker.snapshot`), records the snapshot and then every line of the file in its outbox, and sends them over the engine's socket, each numbered in the engine's one series. | [IBKR adapter](ibkr-adapter.md), [paper trading](paper-trading.md) | Built |
+| 4 | at the input | The engine writes each input to its durable log, flushed to disk, updates RSI(2) and the averages and moves the latch. **Stops here today.** To decide, it also needs an **account snapshot** as of the close (`account.snapshot`: SPY held and net liquidation), and to release a buy, IBKR's price for SPY recorded at or after the close (the **mark**, `market.mark.recorded`). Nothing produces either yet: the broker snapshot of step 3 is a different record, read by the hard limits on sells, the sale back to 98% and the margin-cushion alarm. So every session is withheld for want of an account snapshot (see the first rows of "What can go wrong") and no order is planned. | [engine](engine.md), [paper trading](paper-trading.md), "Not built yet" | The decision is built and tested against recorded inputs and `make demo-boost-dry-run`; its account snapshot and mark are **not produced** |
+| 5 | same evening | With an order released, the engine hands it to the adapter. The adapter writes "about to send", hands it to IB Gateway as a DAY limit order under its client order ID, and writes "sent". The real IBKR client places it only in paper, on a `DU` account, with `"paper_sending_enabled": true` in the adapter's configuration. The shipped configurations are dry-run (every order says `send: false`). | [paper trading](paper-trading.md), [re-delivery](redelivery.md) | Built; not reached while step 4 withholds |
+| 6 | next session | IBKR works the order. Each status change and each fill (with IBKR's commission) comes back; the adapter records them and sends them to the engine as inputs. | [paper trading](paper-trading.md), [order lifecycle](order-lifecycle.md) | Built |
+| 7 | every 5 minutes | The reporter (`ti-reporter@<account>`) reads the durable log and sends any alert, and the daily summary. | [alerts and dashboard](alerts-and-dashboard.md) | Built and installed; its alerts need your ntfy and PagerDuty entries in `secrets.env` ([server](server.md)) |
+| 8 | next morning, before the open | The adapter reads IBKR's positions and cash; the engine compares them with its book. | [reconciliation](reconciliation.md) | Engine side built; the adapter builds the record but does not send it yet (with no account snapshot there is no book to compare, and the check would halt the account) |
 
-In dry-run, step 5 never sends (every order says `send: false`); see the
-[engine](engine.md), "What dry-run simulates", for what that leaves out.
+In dry-run, step 5 never sends; see the [engine](engine.md), "What dry-run
+simulates, and what it does not", for what that leaves out.
 
 ## What you see in the record
 
@@ -178,18 +182,26 @@ whether a re-plan is pending. An order adds `strategy.order.planned`, then
 
 ## What can go wrong, and what the program does then
 
-| What happens | What the program does | What you do |
+Alerts come from the reporter ([alerts and dashboard](alerts-and-dashboard.md));
+`<account>` is the account the configuration names: `joint` in the shipped
+dry-run file, your paper account (DU…) in a paper run. An **urgent**
+alert pages you; a **routine** one only informs. A withheld session sends
+one alert when a run of withheld sessions with the same reason starts, not
+one per session.
+
+| What you see | What the program does | What you do |
 | --- | --- | --- |
-| A session closes with no SPY bar | That session is withheld (`missing-bars`), and so is **every later session of the run**: the readings are never computed across a gap (plan section 2, "Boost"). The latch is not recomputed. | Find why the bar was missing. The run cannot recover by itself: stop it and start a new run (a fresh `TI_RUN`, its own warm-up and your approval: `docs/runbooks/durable-log.md`). |
-| No account snapshot as of the close, or one taken after it | The session is withheld (`stale-account-snapshot`). The latch still advances, as the backtest's does; a change of target withheld one session is ordered at the next that decides. | Check the adapter and the Gateway (`docs/runbooks/gateway-login.md`). |
-| No mark at or after the close, or the previous close is more than 5% from the mark | A buy is refused (`missing-mark` or `price-band`) and the account goes Degraded on SPY. A risk-reducing sell is not checked against the mark. | `docs/runbooks/halted-account.md`. |
-| The kill switch is on | Every order is refused except the sale back to 98%; the account stays Normal; the order is re-planned at the first decided close after you release the switch. | Nothing more, once released. Check it with `journal-query orders`. |
-| IBKR's latest snapshot is too old when a sell is checked | The sell is refused (`stale-broker-snapshot`), no state change, one urgent alert per outage, re-planned at the next decision. | Check the Gateway. |
-| The exit is refused because the account is Halted, Degraded on SPY or under the kill switch | The one sale back to 98% goes instead ([states-and-kill-switch](states-and-kill-switch.md#the-one-sale-back-to-98)). | Follow the alert; do not sell by hand while that sale is working. |
-| The DAY order expires, or IBKR cancels it, with part or all unfilled | The cancellation is recorded and ends the order. Boost does **not** order the rest by itself: it plans again only when the target changes, or after a refusal. The account stays off its target until then. | Decide whether to buy or sell the rest by hand (engage the kill switch first, so nothing of the program's is working against yours), or wait for the next change of target. A fresh run would plan to the target from scratch. |
-| An order is never sent (the adapter refused it for good and you settled it `--never-sent`) | The order stays released in the log. A never-sent **sell** keeps counting as being sold, so every later exit in the run is smaller, or nothing, as in dry-run. A never-sent **buy** is not re-planned (the target in force has not changed). | After settling it, reconcile and start a fresh run you approve: its first decision plans to the target from scratch ([IBKR adapter](ibkr-adapter.md)). |
-| The engine crashes while the boost is on | Resumed from its log, it carries on in the same latch, neither entering nor exiting by mistake (`TestARestartWhileBoostedNeitherEntersNorExits`). | Resume it (`docs/runbooks/durable-log.md`). |
-| A fresh run after a stop | The approval states the latch in force; the engine refuses an approval whose latch is not the one the previous log ended with. | `operator approve` reads it for you ([operator](operator.md)). |
+| `margin-exposure`. Alert: `<account>: order refused (margin-exposure)` (urgent), its text naming the exposure after the order and the 1.5 limit; then `<account>: engine degraded (risk-limit-breached)`, which repeats until you acknowledge it | The risk gate refused a buy that would have left SPY above 150% of net liquidation, valued at the previous close. Nothing was sent. The account is Degraded on SPY: no buy goes, and only the one sale back to 98% may still sell SPY. Because the account is no longer Normal, the buy is **not** planned again. Boost's own target, 147%, is below the limit, so this means the account's figures are not what the plan expected (for example net liquidation fell between the snapshot and the decision, or the account already held more SPY than the engine's book) | Compare SPY held and net liquidation at IBKR with the order's figures (`journal-query refusals`). Follow `docs/runbooks/halted-account.md`. The way out is a fresh run you approve ([restart](restart.md)); its first decision plans to the target from scratch |
+| Alert `<account>: decision withheld (missing-bars)` (urgent): a session closed with no SPY bar | That session is withheld, and so is **every later session of the run**: the readings are never computed across a gap (plan section 2, "Boost"). The latch is not recomputed. The reason is explained once, in [engine](engine.md), "What can go wrong" | Find why the bar was missing ([market data](market-data.md)). The run cannot recover by itself: stop it and start a new run (a fresh `TI_RUN`, its own warm-up and your approval: `docs/runbooks/durable-log.md`) |
+| Alert `<account>: decision withheld (stale-account-snapshot)` (urgent): no account snapshot as of the close, or one taken after it. **On `main` today this is every paper session**, since nothing produces the account snapshot yet (step 4 above) | The session is withheld and no order is planned. The latch still advances, as the backtest's does; a change of target withheld one session is ordered at the next that decides. See [engine](engine.md), "What can go wrong" | Today: nothing; it is a known gap ([paper trading](paper-trading.md), "Not built yet"). Once the account snapshot is built: check the adapter and the Gateway (`docs/runbooks/gateway-login.md`) |
+| Alert `<account>: order refused (missing-mark)` with `<account>: no recorded mark for SPY`, or `<account>: order refused (price-band)` (urgent) | A buy is refused: no mark at or after the close, or the previous close more than 5% from the mark. The account goes Degraded on SPY. A risk-reducing sell is not checked against the mark. Explained in [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong" | `docs/runbooks/halted-account.md` |
+| `<account>: order refused (kill-switch)` (urgent), sent for the first refusal of each engagement only | Every order is refused except the sale back to 98%; the account stays Normal; the order is planned again at the first decided close after you release the switch | Nothing more, once released. Check it with `journal-query orders`. The kill switch itself: [states-and-kill-switch](states-and-kill-switch.md), [operator](operator.md) |
+| `<account>: order refused (stale-broker-snapshot)` (urgent), once per outage; for the exit, `<account>: sale of SPY withheld (stale-broker-snapshot)` | IBKR's latest broker snapshot was older than 30 minutes (`execution.max_snapshot_age_minutes`) when a sell was checked. The sell is refused, the state does not change, and it is planned again at the next decision. Explained in [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong" | Check the Gateway and the adapter (`journalctl -u ti-adapter-boost`); if the exit matters now, sell by hand as the alert says |
+| The exit is refused because the account is Halted, Degraded on SPY or under the kill switch | The one sale back to 98% goes instead ([states-and-kill-switch](states-and-kill-switch.md), "The one sale back to 98%"), with its own sent, filled and failed alerts | Follow the alert; do not sell by hand while that sale is working |
+| `journal-query orders` shows the DAY order expired, or IBKR cancelled it, with part or all unfilled | The cancellation is recorded and ends the order. Boost does **not** order the rest by itself: it plans again only when the target changes, or after a refusal that left the account Normal. The account stays off its target until then | Decide whether to buy or sell the rest by hand (engage the kill switch first, so nothing of the program's is working against yours), or wait for the next change of target. A fresh run would plan to the target from scratch |
+| The adapter refuses an order for good and you settled it with `relay.py resolve ... --never-sent` | The order stays released in the log. A never-sent **sell** keeps counting as being sold, so every later exit in the run is smaller, or nothing, as in dry-run. A never-sent **buy** is not planned again (the target in force has not changed) | After settling it, reconcile and start a fresh run you approve: its first decision plans to the target from scratch ([re-delivery](redelivery.md), [paper trading](paper-trading.md)) |
+| The engine crashed (`systemctl status ti-engine@boost` shows it failed) while the boost was on | Resumed from its log, it carries on in the same latch, neither entering nor exiting by mistake (`TestARestartWhileBoostedNeitherEntersNorExits`) | Resume it (`docs/runbooks/durable-log.md`, "Restarting an engine") |
+| A fresh run is refused, naming the previous log's latch | The engine refuses an approval whose latch is not the one the previous log ended with, so a forgotten latch never switches the boost off | Let `operator approve` write the approval from the previous log ([operator](operator.md), [restart](restart.md)) |
 
 ## What backs this
 

@@ -10,9 +10,19 @@ and what it does not"). Every decision the
 engine makes rests on what it believes you hold, so a difference it cannot
 explain is a reason to stop taking on new risk (ADR 0019).
 
-Every morning, before the day's first decision, the IBKR adapter reads the
-account's positions and cash from IBKR and records them in the journal. The
-engine then compares them with its own book and decides one of four things:
+As designed, every morning before the day's first decision the IBKR adapter
+reads the account's positions and cash from IBKR and records them in the
+journal. The engine then compares them with its own book and decides one of
+four things. **This does not run yet**: the engine's side and the alert are
+built and tested, and the adapter can build the record, but its main loop
+does not send it (see "What is not built yet"). Until it does, no
+reconciliation happens and no reconciliation alert is ever sent.
+
+"Reconciled" also means two other things in this program: the adapter's
+own check of IBKR's open orders when it connects, and the
+`journal-query reconcile` report. The [glossary](glossary.md)
+("Reconciled, reconciliation") tells the three apart. This chapter is about
+the engine's morning reconciliation.
 
 | Result | What it means | What happens |
 | --- | --- | --- |
@@ -128,27 +138,37 @@ A replay of the same journal gives the same verdict and the same state change,
 byte for byte.
 
 The alert (see [alerts-and-dashboard](alerts-and-dashboard.md)) is one per
-mismatch, on every channel you named (PagerDuty and ntfy). It says what
+mismatch, urgent, on every channel you named (PagerDuty and ntfy). The
+engine-state change the same reconciliation causes is part of that one
+incident, not a second alert. A reconciliation that matches or is explained
+sends nothing. It says what
 differs, the state the account is now in, what it still does and what it has
 stopped doing. The state is the account's whole state, not just this
 reconciliation's: an account already Halted is told it is still Halted, and a
-Degraded account's scope includes what was already frozen. It repeats until you acknowledge it. On the public ntfy relay
-the alert names what is in doubt but carries no figure; the figures go to
-PagerDuty, your own ntfy server, the dashboard and `journal-query`. A
-reconciliation that could not be verified says only that on the public relay,
-and sends you to the private channel for the reasons, which can carry
-amounts.
+Degraded account's scope includes what was already frozen. It repeats (every 30 minutes by default) until you acknowledge it
+with `operator acknowledge` ([operator](operator.md)). On the public ntfy
+relay the alert names what is in doubt but carries no figure; the figures
+go to PagerDuty, your own ntfy server and the dashboard, which shows the
+full alert. `journal-query refusals` shows the engine-state change and its
+detail, but no `journal-query` report lists the reconciliation result's
+figures themselves ([journal-query](journal-query.md)). A reconciliation
+that could not be verified says only that on the public relay, and sends you
+to the private channel for the reasons, which can carry amounts.
 
 ## What the adapter sends
 
 The adapter reads positions, the account summary (net liquidation, total cash,
 Excess Liquidity) and every open order in one pass, then asks IBKR the time.
-From that one read it builds two records:
+From that one read it can build two records (`adapter/ibkr/snapshot.py`):
 
 - the **broker snapshot** (`account.broker.snapshot`), which the risk gate
   sizes sells and the sale back to 98% from, and the margin alarm watches;
 - the **reconciliation** (`account.reconciliation`), positions and total cash
   for the morning comparison.
+
+Today its main loop sends only the first: a broker snapshot ahead of each
+day's market data. The reconciliation record is built and tested but never
+sent, so the engine never receives one.
 
 Every field is always stated. A list with nothing in it is sent as an empty
 list. Something IBKR did not deliver, or delivered in a form the engine cannot
@@ -164,34 +184,41 @@ Two conservative choices, both of which can only make a sale smaller:
   open-order report does not carry what has filled;
 - an order IBKR holds back (`Inactive`) counts as one that may still execute.
 
-## What can go wrong
+## What can go wrong, and what the program does then
 
-- **No account snapshot yet.** With nothing to compare against, the
-  reconciliation is unverifiable and the account goes Halted.
-- **IBKR cannot be read.** Unverifiable, Halted. The alert names what could not
-  be read.
-- **A dividend, interest charge or fee the journal has not recorded.** The cash
-  differs, so the account goes Degraded on cash: buys stop until you approve
-  a fresh run that clears the incident. **No command records the missing
-  event today**: you check it on IBKR's cash activity and then clear the
-  incident with `operator approve -clear-incident`
-  (`docs/runbooks/reconciliation.md`, *Recover*). A restart that continues the incident
-  carries the cash scope in its approval (`"scope_cash_components":
-  ["total-cash"]`), so buys stay refused. Margin interest on the joint account is
-  not compared yet (its book carries no cash).
-- **A fill stamped at the moment of the read.** The account can go Degraded on
-  that instrument. The morning read is before the open precisely so that
-  nothing is filling. A fill report lost during a session is not caught by
-  the morning check at all (see "What the morning check covers").
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| Alert: `<account>: reconciliation <classification> (<id>)`, urgent, repeating until acknowledged; `<classification>` is `unexplained` or `unverifiable`, `<id>` the reconciliation's ID | Sent once per reconciliation that degrades or halts. Its text names what differs (or "evidence that could not be compared"), the account's whole state after it, what it still does and what it has stopped; on the public relay, no figures. It ends "Recovery is a person's: docs/runbooks/reconciliation.md." | Read the full text on PagerDuty or the dashboard. Follow `docs/runbooks/reconciliation.md`, "First, in every case". Acknowledge with `operator acknowledge` and the alert key the text ends with. |
+| `reconciliation-unexplained`. Alert: `<account>: reconciliation unexplained (<id>)` | A difference no journalled event accounts for. The account goes **Degraded** on exactly what differs: a holding's instrument is frozen, unexplained cash refuses every buy. A later difference widens the scope; a later match never brings it back to Normal. | `docs/runbooks/reconciliation.md`, "Find the cause", then "Recover": explain each difference at IBKR, then start a fresh run whose approval clears the incident (`operator approve -clear-incident <id>`), or carries it in force if something is still unexplained ([restart](restart.md)). |
+| `reconciliation-unverifiable`. Alert: `<account>: reconciliation unverifiable (<id>)` | The figures could not be compared, so the account goes **Halted**: no order is released, except, for the joint account, the one sale back to 98%. The private text lists why, for example `the broker's positions could not be read`, `the broker's total cash could not be read`, `no account snapshot has been recorded, so the journal has no book to compare`, `the observation as of ... precedes the book as of ...`, or `the broker's cash is in ...; the book's is in ...`. | Fix what could not be read (the adapter's link, `journalctl -u ti-adapter-boost`), then follow the runbook's "Recover". Leaving Halted is never automatic: it takes a fresh run you approve. |
+| A dividend, interest charge, fee or fill the journal has not recorded | Cash (or that instrument) differs, so the account goes Degraded: on cash, buys stop. **No command records the missing event**: `operator` has four commands (the kill switch, an approval, a rebalance clearance and an acknowledgement), and none records a market or account event. | Check the item on IBKR's activity, write down what you found, and either approve a fresh run that clears the incident (`operator approve -clear-incident <id>`) or one that carries it in force (leave `-clear-incident` out; for cash its scope is `"scope_cash_components": ["total-cash"]`, so buys stay refused) (`docs/runbooks/reconciliation.md`, "Recover"). |
+| Private text names `corporate action ... (... of ...) is not one a target-weight book can apply` | A delisting, merger or symbol change: the book can apply only fills, dividends and splits, so the reconciliation is unverifiable and the account goes Halted. | Check at IBKR what the account now holds for that stock. There is no way to record the action for the program: clear the incident in a fresh run once the holding is understood. For an IRA, the next rebalance sells what the rule no longer targets. |
+| Margin interest on the joint account | Never compared: Boost's book carries no cash, so its cash is not reconciled and the result says so. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
+| A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
+| A fill stamped in the same second as the morning read | It counts as after the read. If IBKR's figure includes it, the result is a difference and the account goes Degraded on that instrument: the safe side. | Check the fill at IBKR, then recover as for any difference. |
+| A fill report lost during a session, or a difference that arises while the market is open | Not caught by the morning check: the next close's snapshot absorbs it ("What the morning check covers"). | Compare IBKR with the journal yourself when anything looks wrong. |
+| Today: no reconciliation alert at all | Nothing runs: the adapter does not send the morning read. A difference between IBKR and the engine's book is not detected by the program. | Before every fresh run, compare IBKR's positions, cash and open orders with the journal yourself (`docs/runbooks/reconciliation.md`, "If the system itself is silent", step 3). |
 
 ## What is not built yet
 
-- The adapter's records are not yet sent over the transport, so the morning
-  reconciliation does not run on its own yet. The engine side and the alert
-  are built and tested against recorded inputs.
+- Sending the morning read: the adapter builds the `account.reconciliation`
+  record but its main loop never sends it, so the morning reconciliation
+  does not run. The engine side and the alert are built and tested against
+  recorded inputs.
+- The account snapshot the book starts from: for Boost, nothing produces
+  the account snapshot as of the close yet ([engine](engine.md)), so even
+  a delivered reconciliation would find no book and be unverifiable.
+- Delivering dividends and splits to the engine: the data job uses them to
+  adjust prices, but no program sends them to the engine as events, so a
+  posted dividend could not explain a cash difference yet.
 - The reconciliations ADR 0019 also asks for at startup, after every fill,
   before every order and on a timer; until they exist, a difference that
-  arises during a session (a lost fill report among them) is not caught. Also
-  the comparison of open orders; the joint account's cash; matching each cash
-  activity to IBKR's activity rows rather than comparing one net total; and
-  the outside heartbeat monitor. These are tracked as follow-up issues.
+  arises during a session (a lost fill report among them) is not caught.
+  Also the comparison of open orders; the joint account's cash; matching
+  each cash activity to IBKR's activity rows rather than comparing one net
+  total; any command that records a missed event; and the outside heartbeat
+  monitor.
+- `-operator` in the engine's service file on the server: without it, an
+  `operator acknowledge` does not reach the engine, so a repeating alert
+  cannot be acknowledged there ([engine](engine.md), "Your instructions
+  while it runs").

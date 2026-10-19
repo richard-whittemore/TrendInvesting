@@ -55,16 +55,26 @@ for example, refuse a fill on an order already reported cancelled). So the
 reporter does not yet count a fill in a Boost run as an acknowledgement:
 there, only a lifecycle report acknowledges an order.
 
-The reporter reads these states. For every order marked to be sent that IBKR
-has not acknowledged within the allowed time of its commit, it sends one
-urgent alert, "order … not acknowledged". The allowed time is the reporter's
-`-ack-within` setting (default 10 minutes). It is one alert per order however
-often the reporter runs. Once the acknowledgement is in the log, the alert is
-no longer raised, and if you were already paged, a routine message says
-"order … acknowledged".
+IBKR's report on an order carries one of four statuses: submitted (IBKR
+accepted it and it is working), cancel-pending (a cancel was asked for and
+the order may still fill), canceled (it no longer works) or invalid (IBKR
+refused it). A fill is a separate report. The word "reported" below means
+one of these, or a fill.
+
+The reporter (see [alerts and dashboard](alerts-and-dashboard.md)) reads
+these states each time it runs, every 5 minutes. For every order marked to
+be sent that IBKR has not acknowledged within the allowed time of its
+commit, it sends one **urgent** alert, "order … not acknowledged". The
+allowed time is the reporter's `-ack-within` setting (default 10 minutes,
+which the shipped reporter unit does not change), so the alert can arrive up
+to 5 minutes after the bound. It is one alert per order however often the
+reporter runs, and it does not repeat. Once the acknowledgement is in the
+log, the alert is no longer raised, and if you were already paged, one
+**routine** message says "order … acknowledged".
 
 A report from IBKR that the engine refused acknowledges nothing, and gets
-its own urgent alert, "venue report … not read", once. That covers any report
+its own **urgent** alert, "venue report … not read", once per report (it
+does not repeat). That covers any report
 the run would read (an order status report in either run, a fill in a
 momentum run) that cannot be read at all, at a version the run does not read
 or one that does not validate, whatever order it names: its client order ID
@@ -126,19 +136,25 @@ incident reach a person; an order IBKR never acknowledged is one.
   and `TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged`: a real
   paper engine, fed over its socket, records the order and its states.
 
-## What can go wrong
+## What can go wrong, and what the program does then
 
-| What you see | What it means | What to do |
+Alerts come from the reporter, whose urgent alerts do not repeat; see
+[alerts and dashboard](alerts-and-dashboard.md) for how they reach you.
+`<account>` is the account name in the configuration, such as `joint`
+([glossary](glossary.md), "Account names").
+
+| What you see | What the program does | What you do |
 | --- | --- | --- |
-| "order … not acknowledged", and the alert says no input followed it | The adapter may never have received the order (a crash right after the engine wrote it). | Make sure the adapter is running: on reconnect it asks for that reply again and sends the order once ([re-delivery](redelivery.md)). |
-| "order … not acknowledged", and the adapter has it | The order was sent and lost, or is still waiting at the adapter. | Look in IBKR for an order whose `orderRef` is the client order ID **before** placing anything by hand. A second order with the same tag is one reconciliation cannot explain. |
-| The engine refuses a lifecycle report naming an order "which this run did not release" | IBKR reported an order this run never released, for example one left working by the previous run. | The run stops on it. This is a reconciliation question: follow `docs/runbooks/reconciliation.md`. |
-| "venue report … not read" | The log holds a report from IBKR that the engine refused: it is at a version the run does not read, does not validate, does not describe the order it names as it was released, takes it past its quantity, reuses a fill id, or arrives after the order finished. It acknowledged nothing. | Look in IBKR at the order the alert names. If its "not acknowledged" alert is also open, treat the order as unconfirmed and follow that alert first. |
-| No alert ever fires in dry-run | Expected: nothing is sent, so nothing is acknowledged, and a synthetic report acknowledges nothing either. | Nothing. |
+| Urgent alert `<account>: order <client order ID> not acknowledged`, and its text says no input followed the order | The order is committed and no later input is on disk, so the adapter may never have received it (a crash right after the engine wrote it). The reporter alerts once, when the order has gone unacknowledged for 10 minutes (the default) from its commit. | Make sure the adapter is running: on reconnect it asks the engine for that reply again and sends the order once ([re-delivery](redelivery.md)). Look in IBKR for an order whose `orderRef` is the client order ID **before** placing anything by hand: a second order with the same tag is one reconciliation cannot explain. |
+| Urgent alert `<account>: order <client order ID> not acknowledged`, and its text says the adapter has the order | The order is released: the adapter has it, so it was sent and lost, or is still waiting at the adapter. The reporter alerts once. | The same check in IBKR first, with the same warning against placing it by hand. If IBKR shows nothing and the adapter is stopped on the order, follow the adapter's stop in [re-delivery](redelivery.md), "What can go wrong". |
+| Routine message `<account>: order <client order ID> acknowledged` | IBKR's report on the order is now in the log and was read by the engine. The earlier "not acknowledged" alert is cleared. It is sent once, and only if you were paged. | Nothing. |
+| Urgent alert `<account>: venue report <input> not read` | The log holds a report from IBKR that the engine refused: it is at a version the run does not read, does not validate, does not describe the order it names as it was released, takes it past its quantity, reuses a fill id, or arrives after the order finished. It acknowledges nothing. The reporter alerts once per report and goes on with its other alerts. The client order ID in the text may be empty. | Look in IBKR at the order the alert names, or at every order around the time it was recorded when the ID is empty. If that order's "not acknowledged" alert is also open, treat the order as unconfirmed and follow that alert first. |
+| The engine refuses a lifecycle report naming an order "which this run did not release" | IBKR reported an order this run never released, for example one left working by the previous run. The engine applies nothing from it, and the reporter raises no alert for it. It is reconciliation's to explain. | Follow [reconciliation](reconciliation.md) and `docs/runbooks/reconciliation.md`. |
+| No alert ever fires in dry-run | Expected: dry-run orders are recorded with `send` false and never sent, so none is ever waiting for IBKR, and the engine's own synthetic report acknowledges nothing. | Nothing. |
 
-What this does **not** do yet: a fresh run after an approval does not know the
-previous run's orders that are still working, so IBKR's report about one of
-them stops the run. The reporter does not yet read a Boost run's fills, so a
-Boost fill neither acknowledges an order nor, when the engine refuses it,
-raises the "not read" alert. Both are open issues linked from the slice's
-ticket.
+Two things the reporter does not do. A fresh run after an approval does not
+know the previous run's orders that are still working, so IBKR's report
+about one of them is refused by the engine and raises no "not read" alert.
+And the reporter does not read a Boost run's fills by the engine's rule, so
+a Boost fill neither acknowledges an order nor, when the engine refuses it,
+raises the "not read" alert.
