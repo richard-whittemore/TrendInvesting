@@ -16,6 +16,25 @@
 // "2026-06-30","sessions":7166}, committed before the run, which its export
 // must cover.
 //
+// The remaining parity runs (docs/research/parity-2026-10.md, "Remaining
+// scope, plan, 2026-10-19") are compared the same way, each kind with its
+// own planned months:
+//
+//	parity -glide G_IS_P38_PARITY=orders.json -glide-months G_IS_P38_PARITY=2002-08..2015-12 \
+//	       -lot D7L_PARITY=orders.json -lot-months D7L_PARITY=1999-03,1999-11 \
+//	       -ira IRA_PARITY=orders.json -ira-months IRA_PARITY=1999-03,1999-11
+//
+// The IRA sequence counts the sessions the buys waited by a calendar: the
+// list of -ira-calendar FILE, a JSON list of YYYY-MM-DD sessions (those of
+// a run's own history), where it covers the span, else internal/
+// nysecalendar in the years it covers. The list must agree with
+// internal/nysecalendar on every day both cover.
+//
+// A months list is comma separated; an item YYYY-MM..YYYY-MM is every month
+// from the first to the last, both included. Every planned month must be
+// exported; a glide, D7-L or IRA run may also export months beyond them,
+// which are compared too.
+//
 // It exits 0 when every check passes, 1 when any fails, and 2 when an
 // input cannot be read or compared at all.
 package main
@@ -29,8 +48,10 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/parity"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/glide"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
 )
 
@@ -38,6 +59,9 @@ import (
 const (
 	momentumPrefix = "PARITY1 "
 	boostPrefix    = "BPARITY1 "
+	glidePrefix    = "GLIDE1 "
+	lotPrefix      = "LOTPARITY1 "
+	iraPrefix      = "IRAPARITY1 "
 )
 
 func main() {
@@ -75,34 +99,69 @@ func (n *named) set(s string) error {
 
 func run(args []string, stdout, stderr io.Writer) (bool, error) {
 	var mom, months, bst, sess named
+	var calendarFile string
+	sessions := parity.Sessions(parity.NYSESessions)
+	kinds := []*kind{
+		{flag: "glide", what: "a glide-path run", prefix: glidePrefix, compare: compareGlide},
+		{flag: "lot", what: "a D7-L run", prefix: lotPrefix, compare: compareLot},
+		{flag: "ira", what: "an IRA run", prefix: iraPrefix,
+			compare: func(name string, raw []byte, plan []string, tags []tag) (parity.Report, int, error) {
+				return compareIRA(name, raw, plan, tags, sessions)
+			}},
+	}
 	flags := flag.NewFlagSet("parity", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Func("momentum", "NAME=FILE: a momentum run's orders (repeatable)", mom.set)
 	flags.Func("months", "NAME=YYYY-MM,...: that run's planned months (repeatable)", months.set)
 	flags.Func("boost", "NAME=FILE: a Boost run's orders (repeatable)", bst.set)
 	flags.Func("sessions", "NAME=FILE: the JSON plan file of that Boost run: first, last, sessions (repeatable)", sess.set)
+	for _, k := range kinds {
+		flags.Func(k.flag, "NAME=FILE: "+k.what+"'s orders (repeatable)", k.runs.set)
+		flags.Func(k.flag+"-months", "NAME=YYYY-MM,...: that run's planned months (repeatable)", k.months.set)
+	}
+	flags.StringVar(&calendarFile, "ira-calendar", "", "FILE: a JSON list of sessions, YYYY-MM-DD, by which the IRA sequence counts the sessions waited; internal/nysecalendar beyond it")
 	if err := flags.Parse(args); err != nil {
 		return false, err
 	}
-	if len(mom.names)+len(bst.names) == 0 {
-		return false, errors.New("nothing to compare: name a -momentum or -boost run")
-	}
-	for _, name := range months.names {
-		if _, ok := mom.values[name]; !ok {
-			return false, fmt.Errorf("%s has months but no export", name)
+	if calendarFile != "" {
+		list, err := readCalendar(calendarFile)
+		if err != nil {
+			return false, fmt.Errorf("ira calendar %s: %w", calendarFile, err)
 		}
+		sessions = parity.Either(list, parity.NYSESessions)
 	}
-	for _, name := range sess.names {
-		if _, ok := bst.values[name]; !ok {
-			return false, fmt.Errorf("%s has sessions but no export", name)
+	count := len(mom.names) + len(bst.names)
+	for _, k := range kinds {
+		count += len(k.runs.names)
+	}
+	if count == 0 {
+		return false, errors.New("nothing to compare: name a -momentum, -boost, -glide, -lot or -ira run")
+	}
+	pairs := []struct{ plans, runs *named }{{&months, &mom}, {&sess, &bst}}
+	for _, k := range kinds {
+		pairs = append(pairs, struct{ plans, runs *named }{&k.months, &k.runs})
+	}
+	for i, p := range pairs {
+		for _, name := range p.plans.names {
+			if _, ok := p.runs.values[name]; !ok {
+				what := "months"
+				if i == 1 {
+					what = "sessions"
+				}
+				return false, fmt.Errorf("%s has %s but no export", name, what)
+			}
 		}
 	}
 	var reports []parity.Report
 	var inputs []string
 	for _, name := range mom.names {
-		plan, ok := months.values[name]
+		spec, ok := months.values[name]
 		if !ok {
 			return false, fmt.Errorf("%s has no planned months", name)
+		}
+		plan, err := expandMonths(spec)
+		if err != nil {
+			return false, fmt.Errorf("%s: months: %w", name, err)
 		}
 		tags, total, err := tagged(mom.values[name], momentumPrefix)
 		if err != nil {
@@ -117,7 +176,7 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 			ms = append(ms, m)
 		}
 		inputs = append(inputs, fmt.Sprintf("- %s: %d logged months from %d tagged orders of %d", name, len(ms), len(tags), total))
-		reports = append(reports, parity.CompareMomentum(momentum.FCombo(), name, strings.Split(plan, ","), ms))
+		reports = append(reports, parity.CompareMomentum(momentum.FCombo(), name, plan, ms))
 	}
 	for _, name := range bst.names {
 		spec, ok := sess.values[name]
@@ -143,11 +202,34 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 		inputs = append(inputs, fmt.Sprintf("- %s: %d sessions from %d tagged orders of %d", name, len(sessions), len(tags), total))
 		reports = append(reports, parity.CompareBoost(parity.BacktestBoost(), name, sp, sessions))
 	}
+	for _, k := range kinds {
+		for _, name := range k.runs.names {
+			line, report, err := k.run(name)
+			if err != nil {
+				return false, fmt.Errorf("%s: %w", name, err)
+			}
+			inputs = append(inputs, line)
+			reports = append(reports, report)
+		}
+	}
 	r := parity.Merge(reports...)
 	if _, err := fmt.Fprintf(stdout, "%s\n\n%s", strings.Join(inputs, "\n"), r.Markdown()); err != nil {
 		return false, err
 	}
 	return r.Pass(), nil
+}
+
+// readCalendar reads a session list file.
+func readCalendar(path string) (parity.Sessions, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var dates []string
+	if err := json.Unmarshal(raw, &dates); err != nil {
+		return nil, err
+	}
+	return parity.SessionList(dates)
 }
 
 // readPlan reads and validates a Boost run's plan file.
@@ -172,6 +254,11 @@ func tagged(path, prefix string) ([]tag, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	return taggedIn(raw, path, prefix)
+}
+
+// taggedIn is tagged on the orders already read from path.
+func taggedIn(raw []byte, path, prefix string) ([]tag, int, error) {
 	var orders []struct {
 		ID  int    `json:"id"`
 		Tag string `json:"tag"`
@@ -190,4 +277,105 @@ func tagged(path, prefix string) ([]tag, int, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
 	return out, len(orders), nil
+}
+
+// kind is one of the remaining parity exports: its flags, its tag prefix,
+// and how its decoded months are compared.
+type kind struct {
+	flag, what, prefix string
+	runs, months       named
+	compare            func(name string, raw []byte, plan []string, payloads []tag) (parity.Report, int, error)
+}
+
+// run compares one named run of the kind and returns its input line.
+func (k *kind) run(name string) (string, parity.Report, error) {
+	spec, ok := k.months.values[name]
+	if !ok {
+		return "", parity.Report{}, errors.New("has no planned months")
+	}
+	plan, err := expandMonths(spec)
+	if err != nil {
+		return "", parity.Report{}, fmt.Errorf("months: %w", err)
+	}
+	path := k.runs.values[name]
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", parity.Report{}, err
+	}
+	tags, total, err := taggedIn(raw, path, k.prefix)
+	if err != nil {
+		return "", parity.Report{}, err
+	}
+	report, n, err := k.compare(name, raw, plan, tags)
+	if err != nil {
+		return "", parity.Report{}, err
+	}
+	line := fmt.Sprintf("- %s: %d logged months from %d tagged orders of %d (planned %d)", name, n, len(tags), total, len(plan))
+	return line, report, nil
+}
+
+// decodeAll decodes each tag's payload with decode.
+func decodeAll[T any](tags []tag, decode func([]byte) (T, error)) ([]T, error) {
+	out := make([]T, 0, len(tags))
+	for _, tg := range tags {
+		m, err := decode([]byte(tg.payload))
+		if err != nil {
+			return nil, fmt.Errorf("order %d: %w", tg.id, err)
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func compareGlide(name string, _ []byte, plan []string, tags []tag) (parity.Report, int, error) {
+	ms, err := decodeAll(tags, parity.DecodeGlide)
+	if err != nil {
+		return parity.Report{}, 0, err
+	}
+	return parity.CompareGlide(glide.DefaultAnchors(), name, plan, ms), len(ms), nil
+}
+
+func compareLot(name string, _ []byte, plan []string, tags []tag) (parity.Report, int, error) {
+	ms, err := decodeAll(tags, parity.DecodeLot)
+	if err != nil {
+		return parity.Report{}, 0, err
+	}
+	return parity.CompareMinimumLot(momentum.FCombo(), name, plan, ms), len(ms), nil
+}
+
+func compareIRA(name string, raw []byte, plan []string, tags []tag, sessions parity.Sessions) (parity.Report, int, error) {
+	ms, err := decodeAll(tags, parity.DecodeIRA)
+	if err != nil {
+		return parity.Report{}, 0, err
+	}
+	orders, err := parity.DecodeOrders(raw)
+	if err != nil {
+		return parity.Report{}, 0, fmt.Errorf("orders: %w", err)
+	}
+	return parity.CompareIRA(name, plan, ms, orders, sessions), len(ms), nil
+}
+
+// expandMonths reads a months list: YYYY-MM items, comma separated, and
+// YYYY-MM..YYYY-MM ranges, both ends included.
+func expandMonths(spec string) ([]string, error) {
+	var out []string
+	for _, item := range strings.Split(spec, ",") {
+		first, last, isRange := strings.Cut(item, "..")
+		a, err := time.Parse("2006-01", first)
+		if err != nil || a.Format("2006-01") != first {
+			return nil, fmt.Errorf("%q is not a YYYY-MM month", first)
+		}
+		if !isRange {
+			out = append(out, first)
+			continue
+		}
+		b, err := time.Parse("2006-01", last)
+		if err != nil || b.Format("2006-01") != last || b.Before(a) {
+			return nil, fmt.Errorf("%q is not a month on or after %s", last, first)
+		}
+		for m := a; !m.After(b); m = m.AddDate(0, 1, 0) {
+			out = append(out, m.Format("2006-01"))
+		}
+	}
+	return out, nil
 }
