@@ -891,8 +891,11 @@ missing bar stopped Boost until a fresh run the owner approved.
   The latch moves on its readings, and the exit can fire.
 - The decision that reads the first bar after the gap records the missing
   sessions (`boost.gap_sessions`, YYYY-MM-DD, ascending, each before the
-  decision's session). A gap during the warm-up, or before a restart's
-  recovered decision, is skipped the same way and recorded by no decision.
+  decision's session). A gap is recorded by the first decision that reads
+  a bar after it, unless a quiet session with a bar comes between them
+  (a restarted run's warm-up sessions, which only feed the indicators): a
+  gap during the warm-up, or just before a restart's recovered decision,
+  is skipped the same way and recorded by that first decision.
 - The reporter pages once per gap, however many sessions in a row are
   missing, naming the first and saying that decisions continue.
 
@@ -1023,18 +1026,29 @@ target next changed; point 2 said nothing of a partial fill.
   the decision that released it and the order; Boost reads that clearance
   for this alone, refuses one that names anything but an undecided order of
   that decision, or an order the venue has already named (a venue order ID
-  from a `submitted` report: it was sent), and takes the order off the
+  from a `submitted` report, or an open-order listing under its client
+  order ID in a broker snapshot: it was sent), and takes the order off the
   list, counting it neither accepted nor rejected. The clearance changes
   nothing else: the order stays released in the gate, so a never-sent sell
   still counts as being sold and a never-sent buy is not planned again,
-  until the fresh run the owner starts after reconciling. Each decision
+  until the fresh run the owner starts after reconciling. A venue report
+  on a cleared order (a fill, or any lifecycle report) proves the
+  clearance wrong: the report is refused, which stops the run for a person
+  to reconcile, as a later report on a cleared IRA order does (fail
+  closed). Each decision
   records the cleared orders with their release
   (`boost.cleared_orders`, omitted when none), so a run restarted from it
   restores them and counts as the full run does. A dry-run's orders reach no venue, so none is
   ever listed: each dry-run Boost decision records `boost.no_venue:
   "dry-run"` in place of the list and counts no verdict, and the clearance
-  is refused there, there being nothing to clear. A fresh run
-  starts from none. A refusal's re-plan pending at the second rejection is
+  is refused there, there being nothing to clear. An order the venue
+  accepted (an execution, or any word beyond `submitted`) that is neither
+  filled in full nor ended when a later order replaces it as the watched
+  one stays recorded, with its release, executions and venue order ID, in
+  `boost.working_orders` (omitted when none), so a run restarted from the
+  decision reads the venue's later fills and cancel of it and nets a
+  working sell as on an order it released; a dry-run decision lists none.
+  A fresh run starts from none. A refusal's re-plan pending at the second rejection is
   dropped, and the rejection is recorded all the same. One read during a
   restarted run's warm-up, whose sessions only feed the indicators, is
   recorded by the first decision after it. The limit, 2, is a constant of
@@ -1143,9 +1157,10 @@ earlier build: target-weight rules version **1.18.0** (ADR 0016).
 `strategy.targets.decided` moves to schema version **6** for the new
 Boost fields, `replan`, `replan_withheld`, `watched` (with its
 `venue_order_id`), `venue_rejections` (with `rejected_in_a_row`,
-`undecided_orders`, and
-`rejected_while_stopped` and `rejections_while_stopped` after the stop)
-and `gap_sessions`, each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
+`undecided_orders`, `undecided_before_rejection`, `cleared_orders`,
+`no_venue`, and `rejected_while_stopped` and `rejections_while_stopped`
+after the stop), `working_orders` (the accepted orders still working
+beside the watched one, each with its executions) and `gap_sessions`, each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
 golden cases for both rules (`TestSyntheticGoldenBoostGap`;
 `TestAPartFilledOrderIsReplannedAtTheNextDecision` and
 `TestAnExpiredUnfilledOrderIsReplannedInFull`,

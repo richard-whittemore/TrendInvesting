@@ -60,6 +60,10 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     them were released before the latest rejection counted;
 //     BoostFigures.NoVenue, dry-run, when no venue receives the orders, so
 //     none is listed;
+//     BoostFigures.ClearedOrders, the orders the owner settled as never sent
+//     (operator.rebalance.cleared), each with its release;
+//     BoostFigures.WorkingOrders, the orders the venue accepted that still
+//     work besides the watched one, each with its executions;
 //     BoostFigures.RejectedWhileStopped and RejectionsWhileStopped, the
 //     rejections read after that stop and their count;
 //     BoostFigures.Watched, the order watched for an unfilled remainder with
@@ -238,6 +242,17 @@ type BoostFigures struct {
 	// them (ADR 0026, point 2, "Boost", amended 2026-10-18, and point 5).
 	// Omitted when none.
 	ClearedOrders []BoostUndecidedOrder `json:"cleared_orders,omitempty"`
+	// WorkingOrders are the orders the venue accepted (an execution, or any
+	// lifecycle report but submitted) that still work, neither fully filled
+	// nor ended, besides the watched order, in the order the venue accepted
+	// them: a later
+	// order replaced them as the watched one. Each records its release, its
+	// executions and its venue order ID as Watched does, and no end, so a
+	// run restarted from the decision reads the venue's later fills and
+	// cancel of it, and nets a working sell, as on an order it released (ADR
+	// 0026, point 5; ADR 0019, amended 2026-10-15). None is also the
+	// watched, an undecided or a cleared order. Omitted when none.
+	WorkingOrders []BoostWatchedOrder `json:"working_orders,omitempty"`
 	// RejectedWhileStopped are the account's orders the venue rejected after
 	// two rejections in a row stopped Boost's buys, read since the last
 	// decision: a sell sent while the stop is in force, or an order released
@@ -364,7 +379,7 @@ func (b BoostFigures) IsZero() bool {
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
 		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
 		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero() && b.VenueRejections == 0 &&
-		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.ClearedOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
+		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.ClearedOrders) == 0 && len(b.WorkingOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
 		b.UndecidedBeforeRejection == 0 && b.NoVenue == ""
 }
 
@@ -1029,8 +1044,29 @@ func (b BoostFigures) validateRejections() []error {
 	case b.NoVenue == "":
 	case b.NoVenue != TradingModeDryRun:
 		errs = append(errs, fmt.Errorf("boost records no venue only for a dry-run, not %q", b.NoVenue))
-	case len(b.UndecidedOrders) > 0 || b.VenueRejections > 0:
-		errs = append(errs, errors.New("a dry-run boost decision lists no undecided order and counts no rejection: no venue receives its orders"))
+	case len(b.UndecidedOrders) > 0 || b.VenueRejections > 0 || len(b.ClearedOrders) > 0 || len(b.WorkingOrders) > 0:
+		errs = append(errs, errors.New("a dry-run boost decision lists no undecided, cleared or working order and counts no rejection: no venue receives its orders, so there is nothing to rule on or clear"))
+	}
+	// A working order is an accepted one that works besides the watched
+	// order: still working, named once, and in no other list.
+	working := map[string]bool{}
+	for _, o := range b.WorkingOrders {
+		errs = append(errs, o.validate()...)
+		switch {
+		case o.Status != "":
+			errs = append(errs, fmt.Errorf("working boost order %s has ended; a working order has not", o.ClientOrderID))
+		case o.ClientOrderID == b.Watched.ClientOrderID:
+			errs = append(errs, fmt.Errorf("working boost order %s is the watched order, recorded as watched", o.ClientOrderID))
+		case working[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost names working order %s twice", o.ClientOrderID))
+		case seen[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both working and undecided", o.ClientOrderID))
+		case cleared[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both working and cleared", o.ClientOrderID))
+		case rejected[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both working and rejected", o.ClientOrderID))
+		}
+		working[o.ClientOrderID] = true
 	}
 	return errs
 }

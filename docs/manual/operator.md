@@ -210,14 +210,17 @@ IRA's clearance is read by the momentum strategy and its tests only.
 
 For Boost (the joint account), a clearance means something else: it
 settles one order the adapter **never sent**, after `relay.py resolve
---never-sent`, so IBKR has nothing to show for it and there is no report
-to wait for. Name the decision that released it and that order. Boost then
+--never-sent`, so IBKR should have nothing to show for it. Name the decision that released it and that order. Boost then
 stops listing it as an order IBKR has not ruled on (`undecided_orders`),
 records it under `cleared_orders`, and nothing else changes; reconcile and
 start a fresh run ([boost](boost.md)). Boost refuses a clearance of an
 order IBKR has already named, even only as "submitted" (that order was
-sent and its verdict is still to come), a clearance that names any other
-order, and every clearance in dry-run, where no order is listed.
+sent and its verdict is still to come), one that IBKR lists among its
+open orders, a clearance that names any other order, and every clearance
+in dry-run, where no order is listed. If IBKR reports on a cleared Boost
+order after all, the clearance was wrong: Boost refuses the report, which
+stops the engine until you reconcile with IBKR and start a fresh run, as
+for an IRA.
 
 ## Acknowledging an alert
 

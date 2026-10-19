@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1368,11 +1369,24 @@ func TestAClearedNeverSentOrderIsNoLongerUndecided(t *testing.T) {
 // decision counts them as the full run does (ADR 0026, point 2, "Boost",
 // amended 2026-10-18, and point 5: recovered, never recomputed).
 func TestAClearedNeverSentSellIsRecoveredFromALaterDecision(t *testing.T) {
-	opts := options{closes: flippingCloses(), hold: heldFrom(2), clear: map[int][]int{19: {17}}}
+	opts := options{closes: flippingCloses(), clear: map[int][]int{19: {17}}}
 	r := simulate(t, opts)
 	sell := releasedBy(t, r.decisions, 17)
 	if len(sell) != 1 || sell[0].Side != event.OrderSideSell {
 		t.Fatalf("setup: session 17 releases %+v, want one sell", sell)
+	}
+	// The orders execute, so Boost sells again after the clearance, sized
+	// net of the cleared sell that the gate still counts as working.
+	later := 0
+	for n := 20; n < len(flippingCloses()); n++ {
+		for _, o := range releasedBy(t, r.decisions, n) {
+			if o.Side == event.OrderSideSell {
+				later++
+			}
+		}
+	}
+	if later == 0 {
+		t.Fatal("setup: no sell follows the clearance, so a restart could not size one")
 	}
 	decided := targets(t, r.decisions)
 	for _, n := range []int{20, 24, 40} {
@@ -1381,9 +1395,9 @@ func TestAClearedNeverSentSellIsRecoveredFromALaterDecision(t *testing.T) {
 			t.Errorf("session %d records cleared orders %+v, want the sell %+v", n, d.ClearedOrders, sell[0])
 		}
 	}
-	assertRecoveredAsTheFullRun(t, opts, 19)
-	assertRecoveredAsTheFullRun(t, opts, 20)
-	assertRecoveredAsTheFullRun(t, opts, 24)
+	for _, n := range []int{19, 20, 24} {
+		assertRecoveredAsTheFullRun(t, opts, n)
+	}
 }
 
 // TestAClearedOlderOrderCountsOneFewerBeforeTheRejection: the venue rejects
@@ -1463,5 +1477,89 @@ func TestAClearanceOfNoUndecidedBoostOrderIsRefused(t *testing.T) {
 				t.Errorf("the clearance %+v was read, want it refused", p)
 			}
 		})
+	}
+}
+
+// applyAfter feeds the run one more input, stamped at, and returns the
+// recorder's error.
+func applyAfter(t *testing.T, r run, typ string, version uint32, id string, at time.Time, payload any) error {
+	t.Helper()
+	s := &stream{hash: r.hash, sequence: uint64(len(r.inputs))}
+	_, err := r.recorder.Apply(context.Background(), s.envelope(t, typ, version, id, at, payload))
+	return err
+}
+
+// TestAClearanceOfAnOrderIBKRListsIsRefused: a broker snapshot that lists
+// an open order under its client order ID shows the order reached IBKR,
+// whether or not a lifecycle report has named it yet, so the clearance of
+// it as never sent is refused (ADR 0026, point 2, "Boost", amended
+// 2026-10-18; fail closed, AGENTS.md). A listing recorded before the
+// restart is recovered with the decision.
+func TestAClearanceOfAnOrderIBKRListsIsRefused(t *testing.T) {
+	for _, session := range []int{16, 17, 18} { // 18 is the watched order
+		closes := flippingCloses()[:20]
+		opts := options{closes: closes, hold: heldFrom(2), unsent: []int{session}}
+		r := simulate(t, opts)
+		o := releasedBy(t, r.decisions, session)
+		if len(o) != 1 {
+			t.Fatalf("setup: session %d releases %+v", session, o)
+		}
+		at := sessionEnd(len(closes) - 1).Add(time.Hour)
+		broker := (&account{cash: 4000}).broker(at, closes[len(closes)-1])
+		broker.OpenOrders = []event.BrokerOrder{{BrokerOrderID: "ib-" + o[0].ClientOrderID, ClientOrderID: o[0].ClientOrderID, InstrumentID: "SPY",
+			Side: o[0].Side, Status: event.BrokerOrderWorking, RemainingQuantity: o[0].Quantity}}
+		if err := applyAfter(t, r, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:listing", at, broker); err != nil {
+			t.Fatalf("session %d: the broker snapshot: %v", session, err)
+		}
+		cleared := event.RebalanceClearedPayload{AccountID: "joint", AsOf: at.Add(time.Minute), DecisionID: o[0].Tag,
+			ClientOrderIDs: []string{o[0].ClientOrderID}, Operator: "owner", Detail: "never sent"}
+		err := applyAfter(t, r, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:listed", at.Add(time.Minute), cleared)
+		if err == nil || !strings.Contains(err.Error(), "named") {
+			t.Errorf("session %d: the clearance of a listed %s was read, err %v; want it refused as an order IBKR named", session, o[0].Side, err)
+		}
+	}
+}
+
+// TestAVenueReportOnAClearedOrderIsRefused: the owner settled an order as
+// never sent, so no venue report on it can be true; one that arrives proves
+// the clearance wrong and is refused, which stops the run for a person
+// (ADR 0026, point 2, "Boost", amended 2026-10-18; fail closed, AGENTS.md),
+// as a later report on a cleared IRA order does.
+func TestAVenueReportOnAClearedOrderIsRefused(t *testing.T) {
+	closes := flippingCloses()[:22]
+	r := simulate(t, options{closes: closes, hold: heldFrom(2), clear: map[int][]int{19: {17}}})
+	o := releasedBy(t, r.decisions, 17)[0]
+	at := sessionEnd(len(closes) - 1).Add(time.Hour)
+	for _, status := range []string{event.OrderLifecycleStatusSubmitted, event.OrderLifecycleStatusCanceled, event.OrderLifecycleStatusInvalid} {
+		report := event.LimitOrderLifecyclePayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID,
+			InstrumentID: o.InstrumentID, Side: o.Side, Status: status, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at}
+		err := applyAfter(t, r, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "late:"+status, at, report)
+		if err == nil || !strings.Contains(err.Error(), "cleared") {
+			t.Errorf("a %s report on the cleared order was read, err %v; want it refused as contradicting the clearance", status, err)
+		}
+	}
+	fill := (&account{}).fill(o, "late-fill", 1, o.LimitPrice, at)
+	err := applyAfter(t, r, event.FillEventType, event.FillTargetWeightVersion, "late-fill", at, fill)
+	if err == nil || !strings.Contains(err.Error(), "cleared") {
+		t.Errorf("a fill of the cleared order was read, err %v; want it refused as contradicting the clearance", err)
+	}
+}
+
+// TestARunRecoveredBehindAWorkingOrderTheVenueAcceptedCountsAsTheFullRun:
+// the first entry, released at session 16, part-fills 5 shares, so the
+// venue accepted it, and works on until its cancel at session 30; the exit
+// at session 17 and the entry at session 18 replace it as the watched
+// order. A decision records an accepted order that is still working
+// besides the watched one, so a run restarted from it reads the cancel as
+// the full run does, instead of refusing it as the report of an order it
+// never released (ADR 0026, point 5: recovered, never recomputed).
+func TestARunRecoveredBehindAWorkingOrderTheVenueAcceptedCountsAsTheFullRun(t *testing.T) {
+	opts := options{closes: flippingCloses(), hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}}
+	entry := releasedBy(t, simulate(t, opts).decisions, 16)
+	if len(entry) != 1 {
+		t.Fatalf("setup: session 16 releases %+v", entry)
+	}
+	for _, n := range []int{17, 18, 24} {
+		assertRecoveredAsTheFullRun(t, opts, n)
 	}
 }

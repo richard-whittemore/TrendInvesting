@@ -268,6 +268,14 @@
       "reason": "Both propagate declineAdd's error \u2014 one per decline branch, the unrepresentable cost and the unaffordable one \u2014 and declineAdd's own two failure paths (Validate and json.Marshal) moved into the shared stampAddDecline helper, itself unreachable by construction (this list's stampAddDecline entries). The cap-check propagation (occurrence 1, declineAddCap's error) is a separate entry; the cash-check propagation (occurrence 2, cashAtPreviousClose's error) is NOT here: it is reachable and covered by TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd."
     },
     {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRecovery",
+      "statement": "return fmt.Errorf(\"targetweight: recovered decision %s: %w\", in.ID, err)",
+      "occurrence": 4,
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.RestoreReleased refuses an order for another account, an unnamed or already known order, one with no shares released, and executions that are invalid, not the order's, state a fill id twice or one already applied, or fill every share (TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart). The working order carries the configuration's own account, and each execution the order's account, client order ID, instrument and side; TargetsDecidedPayload.Validate, run by decodeInput above, refuses a working order with no client order ID, no released shares or as many filled as released, executions with no or a repeated fill id, a quantity or price not positive, a negative commission, a time not a whole second, or shares not summing to its filled, one named twice, and one that is also the watched, an undecided or a cleared order (TestBoostWorkingOrdersValidate), so none restored is one already restored. applyRecovery runs once, before any approval, bar or session, so the only order the gate can know by then is a sale back to 98% a broker snapshot released, whose client order ID derives from the sale's own tag, never from a decided session's."
+    },
+    {
       "file": "internal/strategy/delisting.go",
       "function": "(*transition).applyCorporateAction",
       "statement": "return nil, fmt.Errorf(\"strategy: corporate action kind %q is not implemented by this reducer\", payload.Kind)",

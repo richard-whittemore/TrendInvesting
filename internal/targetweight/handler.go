@@ -317,6 +317,11 @@ type Handler struct {
 	// cleared (BoostFigures.ClearedOrders): off undecided, but released in
 	// the gate still, so a decision records them for a restart to restore.
 	cleared []string
+	// working are the orders the venue accepted that were not fully filled
+	// or ended when last read, in the order the venue accepted them, whichever order is watched
+	// now (BoostFigures.WorkingOrders): a later order replaces them as the
+	// watched one, but the venue's fills and cancel of them are still read.
+	working []undecidedOrder
 	// olderThanRejection counts the first of undecided, in release order,
 	// that were released before the latest released of the orders inARow
 	// names: an acceptance of one of them is older than the run of
@@ -606,6 +611,28 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 			h.release(o)
 		}
 		h.cleared = append(h.cleared, r.ClientOrderID)
+	}
+	// An accepted order still working beside the watched one is restored
+	// with its executions, latest first so the gate keeps release order,
+	// and the venue's later reports on it are read as on an order this run
+	// released.
+	for i := len(p.Boost.WorkingOrders) - 1; i >= 0; i-- {
+		w := p.Boost.WorkingOrders[i]
+		o := event.OrderReleasedPayload{
+			AccountID: h.cfg.AccountID, ClientOrderID: w.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
+			Side: w.Side, Quantity: w.Released, LimitPrice: w.LimitPrice,
+		}
+		fills := make([]event.TargetWeightFillPayload, len(w.Fills))
+		for j, f := range w.Fills {
+			fills[j] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
+		}
+		if err := h.gate.RestoreReleased(o, fills, time.Time{}, w.VenueOrderID); err != nil {
+			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+		}
+		h.release(o)
+	}
+	for _, w := range p.Boost.WorkingOrders {
+		h.working = append(h.working, undecidedOrder{id: w.ClientOrderID, venueID: w.VenueOrderID})
 	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
@@ -897,6 +924,9 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	if err != nil {
 		return err
 	}
+	if slices.Contains(h.cleared, p.ClientOrderID) {
+		return h.contradictsClearance(in, p.ClientOrderID)
+	}
 	if err := h.gate.ObserveFill(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
@@ -967,6 +997,7 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	h.learnListings(p.OpenOrders)
 	b := &emissions{h: h, in: in, at: p.AsOf}
 	if obs.Alarm != nil {
 		b.add(obs.AlarmID, event.MarginAlarmEventType, event.MarginAlarmSchemaVersion, *obs.Alarm)
@@ -983,6 +1014,28 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	return b.result()
 }
 
+// learnListings reads the open orders IBKR lists: one listed under the
+// client order ID of an order the venue has not yet ruled on reached IBKR,
+// as a lifecycle report naming it would show, so its broker order ID is
+// its venue order ID, and the owner's clearance of it as never sent is
+// refused (applyClearance).
+func (h *Handler) learnListings(listed []event.BrokerOrder) {
+	for _, l := range listed {
+		o, ok := h.released[l.ClientOrderID]
+		if !ok || l.ClientOrderID == "" || o.InstrumentID != l.InstrumentID {
+			continue
+		}
+		if w := h.watch; w != nil && w.order.ClientOrderID == l.ClientOrderID && w.venueID == "" {
+			w.venueID = l.BrokerOrderID
+		}
+		for i := range h.undecided {
+			if r := &h.undecided[i]; r.id == l.ClientOrderID && r.venueID == "" {
+				r.venueID = l.BrokerOrderID
+			}
+		}
+	}
+}
+
 // applyLifecycle records the venue's report of a change to an order this
 // run released, and decides nothing else from it (ADR 0022). The report must
 // name the order as released: its account, instrument, side, quantity and
@@ -997,6 +1050,9 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	o, ok := h.released[p.ClientOrderID]
 	if !ok {
 		return fmt.Errorf("targetweight: lifecycle %s reports order %s, which this run did not release", in.ID, p.ClientOrderID)
+	}
+	if slices.Contains(h.cleared, p.ClientOrderID) {
+		return h.contradictsClearance(in, p.ClientOrderID)
 	}
 	if !p.Describes(o) {
 		return fmt.Errorf("targetweight: lifecycle %s reports %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
@@ -1027,7 +1083,20 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	default:
 		h.observeOutcome(p.ClientOrderID, false)
 	}
+	// An order the venue ended is no longer working.
+	if p.Terminal() {
+		h.working = slices.DeleteFunc(h.working, func(o undecidedOrder) bool { return o.id == p.ClientOrderID })
+	}
 	return nil
+}
+
+// contradictsClearance refuses a venue report on an order the owner
+// cleared as never sent: a report proves the order reached IBKR, so the
+// clearance was wrong, and the run stops for a person to reconcile before
+// it goes on (ADR 0026, point 2, "Boost", amended 2026-10-18; fail closed,
+// AGENTS.md).
+func (h *Handler) contradictsClearance(in event.Envelope, id string) error {
+	return fmt.Errorf("targetweight: %s %s reports order %s, which the owner cleared as never sent; the report shows it reached IBKR, so the clearance was wrong: reconcile the account with IBKR and start a fresh run", in.Type, in.ID, id)
 }
 
 // undecidedOrder is an order a decided session released that the venue has
@@ -1060,6 +1129,9 @@ func (h *Handler) observeOutcome(id string, rejected bool) {
 	older := h.leaveUndecided(i)
 	stopped := h.rejections >= maxVenueRejections
 	if !rejected {
+		// Accepted, it works until it is filled or ended, whether or not it
+		// is the watched order when a later one replaces it.
+		h.working = append(h.working, o)
 		if !stopped && !older {
 			h.rejections, h.inARow, h.olderThanRejection = 0, nil, 0
 		}
@@ -1230,7 +1302,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		ExitMean: r.ExitMean, ExitMeanReady: r.ExitMeanReady,
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
-		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(),
+		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(), WorkingOrders: h.workingFigures(),
 		VenueRejections: h.rejections, RejectedInARow: slices.Clone(h.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(),
 		UndecidedBeforeRejection: h.olderThanRejection, RejectionsWhileStopped: h.rejectionsWhileStopped, NoVenue: h.noVenue(),
 	}
@@ -1273,6 +1345,22 @@ func (h *Handler) clearedFigures() []event.BoostUndecidedOrder {
 	return out
 }
 
+// workingFigures are the orders the venue accepted that still work besides
+// the watched one, as a decision records them, so a run restarted from the
+// decision reads the venue's later reports on them (ADR 0026, point 5). An
+// order filled in full leaves the list for good.
+func (h *Handler) workingFigures() []event.BoostWatchedOrder {
+	h.working = slices.DeleteFunc(h.working, func(o undecidedOrder) bool { return h.gate.Filled(o.id) >= h.released[o.id].Quantity })
+	var out []event.BoostWatchedOrder
+	for _, o := range h.working {
+		if h.watch != nil && h.watch.order.ClientOrderID == o.id {
+			continue
+		}
+		out = append(out, h.orderFigures(h.released[o.id], o.venueID, "", time.Time{}, false))
+	}
+	return out
+}
+
 // watchedFigures is the watched order as a decision records it, so a run
 // restarted from the decision watches it still (ADR 0026, point 5): its
 // identity as released, its shares filled so far and each execution, and
@@ -1282,14 +1370,20 @@ func (h *Handler) watchedFigures() event.BoostWatchedOrder {
 	if w == nil {
 		return event.BoostWatchedOrder{}
 	}
+	return h.orderFigures(w.order, w.venueID, w.status, w.endedAt, w.afterRejection)
+}
+
+// orderFigures records the released order o with the executions the gate
+// holds of it, as a decision states a watched or working order.
+func (h *Handler) orderFigures(o event.OrderReleasedPayload, venueID, status string, endedAt time.Time, afterRejection bool) event.BoostWatchedOrder {
 	var fills []event.BoostWatchedFill
-	for _, f := range h.gate.Fills(w.order.ClientOrderID) {
+	for _, f := range h.gate.Fills(o.ClientOrderID) {
 		fills = append(fills, event.BoostWatchedFill{FillID: f.FillID, Quantity: f.Quantity, Price: f.Price, Commission: f.Commission, FilledAt: f.FilledAt.UTC()})
 	}
 	return event.BoostWatchedOrder{
-		ClientOrderID: w.order.ClientOrderID, Side: w.order.Side, Released: w.order.Quantity, LimitPrice: w.order.LimitPrice,
-		Filled: h.gate.Filled(w.order.ClientOrderID), Fills: fills, Status: w.status, EndedAt: w.endedAt, AfterRejection: w.afterRejection,
-		VenueOrderID: w.venueID,
+		ClientOrderID: o.ClientOrderID, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice,
+		Filled: h.gate.Filled(o.ClientOrderID), Fills: fills, Status: status, EndedAt: endedAt, AfterRejection: afterRejection,
+		VenueOrderID: venueID,
 	}
 }
 
@@ -1309,11 +1403,13 @@ type emissions struct {
 // that leaves the engine Normal, setting it, and watches the order it
 // released.
 func (b *emissions) settleReplan(i int, decided event.TargetsDecidedPayload) {
-	watched, undecided := b.h.watchedFigures(), b.h.undecidedFigures()
-	if decided.Boost.ReplanPending == b.h.replan && decided.Boost.Watched.Equal(watched) && slices.Equal(decided.Boost.UndecidedOrders, undecided) {
+	watched, undecided, working := b.h.watchedFigures(), b.h.undecidedFigures(), b.h.workingFigures()
+	if decided.Boost.ReplanPending == b.h.replan && decided.Boost.Watched.Equal(watched) && slices.Equal(decided.Boost.UndecidedOrders, undecided) &&
+		slices.EqualFunc(decided.Boost.WorkingOrders, working, event.BoostWatchedOrder.Equal) {
 		return
 	}
 	decided.Boost.ReplanPending, decided.Boost.Watched, decided.Boost.UndecidedOrders = b.h.replan, watched, undecided
+	decided.Boost.WorkingOrders = working
 	e, err := b.h.stamp(b.out[i].ID, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, b.at, b.in, decided)
 	b.fail(err)
 	b.out[i] = e
