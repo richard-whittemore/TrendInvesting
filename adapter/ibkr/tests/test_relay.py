@@ -51,6 +51,10 @@ class FakeEngine:
         self.decisions = decisions
         self.crash_before_reply = set(crash_before_reply)
         self.asked = []
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def decide(self, envelope):
         self.asked.append(envelope["id"])
@@ -544,6 +548,16 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.sent, [], "a closed relay sends nothing")
         self.assertIsNone(self.pending.load(), "and edits nothing")
         second.close()
+
+    def test_close_closes_the_engine_connection_so_the_next_adapter_can_connect(self):
+        # The engine takes one connection at a time (cmd/engine), so an
+        # adapter that stops closes its own before another starts.
+        connect = Restarts({}, {})
+        relay = self.relay(connect)
+        relay.exchange(envelope(0))
+        self.assertFalse(connect.engines[0].closed)
+        relay.close()
+        self.assertTrue(connect.engines[0].closed)
 
     def test_a_relay_closed_mid_settlement_sends_no_further_order(self):
         decisions = {"session:0": [released("tw-1"), released("tw-2")]}

@@ -134,14 +134,17 @@ import uuid
 from datetime import datetime, timezone
 
 from connection import Connection, NotConnected
-from delivery import DELIVERED_SUFFIX, Deliverer, SnapshotRefused, market_open, run_name
+from delivery import (DELIVERED_SUFFIX, Deliverer, PostCloseReading, SnapshotRefused, market_open, nyse_calendar,
+                      run_name)
 from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect
 from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
                    read_engine_log, released_client_order_ids, run_identity, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from account import TOTAL_CASH
-from snapshot import Record, broker_snapshot_record, read_account, read_marks
+from snapshot import (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, RECONCILIATION_TYPE, Record,
+                      account_snapshot_record, broker_snapshot_record, mark_record, read_account, read_marks,
+                      reconciliation_record)
 
 log = logging.getLogger("ibkr")
 
@@ -161,6 +164,9 @@ ENGINE_WAIT_POLL = 0.05
 # How many times one delivery reads the account and the marks for a broker
 # snapshot that is complete and not overtaken by an order report.
 SNAPSHOT_ATTEMPTS = 3
+# The source a mark names: the data job, whose delivered bar's official close
+# it is (adapter/marketdata/kinds.py SOURCE).
+MARK_SOURCE = "marketdata"
 
 
 class ReconcileIncomplete(Exception):
@@ -225,6 +231,11 @@ class _AskedOnItsOwnThread:
         self._engine = engine
         self._await = await_engine
 
+    def close(self):
+        """Close the engine connection, if it can be closed (engine_client.EngineClient can)."""
+        if hasattr(self._engine, "close"):
+            self._engine.close()
+
     def decide(self, envelope):
         outcome = {}
 
@@ -282,7 +293,7 @@ class AdapterLoop:
         # app placed its order (a broker snapshot's cutoff watermark too).
         self._account_executions = 0
         self.delivery = None if streams is None else Deliverer(
-            streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._broker_snapshot, new_id)
+            streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
 
     def start(self):
         """Take the pending file's lock, connect, reconcile, and settle any input left awaiting its reply."""
@@ -359,6 +370,17 @@ class AdapterLoop:
         self.conn.mark_reconciled()
         log.info("ibkr reconciled client_id=%d positions=%d open_orders=%d executions=%d", self.config.client_id,
                  len(reading.positions), len(broker.open_orders), len(broker.executions))
+        # The start-of-run and reconnect reconciliation (ADR 0025 point 5,
+        # ADR 0019): IBKR's positions and cash from this same read, for the
+        # engine to classify against its book, which exists once it has
+        # committed an account snapshot. Before that a run's first stream
+        # batch carries it, behind its account snapshot (delivery.py).
+        if any(i.event_type == ACCOUNT_SNAPSHOT_TYPE for i in read_engine_log(self._engine_log_path).inputs):
+            input_id = self._new_id(RECONCILIATION_TYPE)
+            record = reconciliation_record(reading, input_id)
+            self.submit(record.event_type, record.schema_version, record.payload, record.payload["as_of"],
+                        input_id=input_id)
+            log.info("ibkr reconciliation recorded for the engine id=%s as_of=%s", input_id, record.payload["as_of"])
 
     def submit(self, event_type, schema_version, payload, event_time, input_id=None):
         """Record an input for the engine in the outbox; it is sent, in order, while the link is ready."""
@@ -515,16 +537,24 @@ class AdapterLoop:
         """
         return self._reports_recorded, self.reports.executions_seen(), self._account_executions
 
-    def _broker_snapshot(self):
-        """The account.broker.snapshot of one consistent account read, with IBKR's marks (see the module).
+    def _post_close_reading(self, close, closes):
+        """The batch's account read (delivery.PostCloseReading) for the session closing at close (see the module).
+
+        closes maps each instrument the batch's last session delivers a bar
+        for to that bar's official close: its mark, in the broker snapshot
+        and in market.mark.recorded, with IBKR's last price beside it as
+        evidence only (read_marks; a missing market-data permission leaves
+        it unset and changes nothing decided). The reading is stamped as of
+        close when it can stand for it (_not_as_of_close), else at its read
+        time with why not.
 
         None when it cannot be taken now (the link went, an execution awaits
         its commission, a read was cut off before answers that carry no
-        request ID ended, or the account changed on every attempt); SnapshotRefused when
-        the account could not be read in full within SNAPSHOT_ATTEMPTS.
-        Marks are asked for each holding the configuration has IBKR's
-        contract number for; any other holding is stated with no mark.
-        market_open is the NYSE session's state at the read's time.
+        request ID ended, the account changed on every attempt, or the read
+        time does not follow the last snapshot the engine holds);
+        SnapshotRefused when the account could not be read in full within
+        SNAPSHOT_ATTEMPTS. market_open is the NYSE session's state at the
+        stamp.
         """
         unread = None
         for attempt in range(1, SNAPSHOT_ATTEMPTS + 1):
@@ -540,8 +570,8 @@ class AdapterLoop:
             reading = read_account(self.conn)
             if self._unended(reading):
                 return None
-            con_ids = {s: self.config.con_ids[s] for s in reading.positions if s in self.config.con_ids}
-            marks = read_marks(self.conn, con_ids)
+            con_ids = {s: self.config.con_ids[s] for s in closes if s in self.config.con_ids}
+            last_prices = read_marks(self.conn, con_ids)
             # Read again after the marks: a trade IBKR reports to another
             # client only (an order placed in its own app) still changes
             # the holdings, open orders and cash, and only a second read
@@ -568,12 +598,23 @@ class AdapterLoop:
                          "or cash changed between its reads", attempt, SNAPSHOT_ATTEMPTS)
                 unread = None
                 continue
-            log.info("ibkr broker snapshot as_of=%s cutoff: no order report, execution or account change between "
-                     "its reads; the last report recorded before it %s", _stamp(confirm.as_of),
-                     self._last_report or "none")
+            why = self._not_as_of_close(confirm, close)
+            if why is None:
+                return None
+            stamp = None if why else close
+            log.info("ibkr broker snapshot read_at=%s as_of=%s cutoff: no order report, execution or account change "
+                     "between its reads; the last report recorded before it %s%s", _stamp(confirm.as_of),
+                     _stamp(stamp or confirm.as_of), self._last_report or "none",
+                     "" if stamp else "; not as of the close: " + why)
+            official = {s: closes[s] for s in confirm.positions if s in closes}
             # The second read's as_of is IBKR's time after every component
             # and the marks were read.
-            return broker_snapshot_record(confirm, market_open(confirm.as_of), marks)
+            return PostCloseReading(
+                account=account_snapshot_record(confirm, stamp or confirm.as_of),
+                broker=broker_snapshot_record(confirm, market_open(stamp or confirm.as_of), official, close=stamp,
+                                              why=why),
+                marks=[mark_record(s, close, closes[s], MARK_SOURCE, last_prices.get(s)) for s in sorted(closes)],
+                reading=confirm)
         if unread is not None:
             raise SnapshotRefused(
                 "the account could not be read in full for the broker snapshot in {} attempts ({} could not be "
@@ -582,6 +623,73 @@ class AdapterLoop:
                 "and positions, then start the adapter again (docs/manual/market-data.md, \"What happens to the "
                 "file\")".format(SNAPSHOT_ATTEMPTS, ", ".join(unread)))
         return None
+
+    def _not_as_of_close(self, reading, close):
+        """Why reading cannot stand for the account as of close: "" when it can, None when it cannot be stamped now.
+
+        The owner's decision of 2026-10-18 (ADR 0019, ADR 0025 point 5, ADR
+        0026 point 1, amended): after the close and before the next open,
+        with no order working or pending at IBKR for the account and no
+        execution since the close, the account does not change, so the
+        reading is the account as of the close. Each condition, checked
+        against IBKR's own lists, as the start's reconciliation reads them:
+
+        - read after the close, on the session's own New York date: IBKR's
+          executions reach back only to midnight (ADR 0025 point 5), so only
+          then does its list cover every execution since the close (and the
+          next open is on a later date);
+        - no open order for the account, of any client (working, pending or
+          cancel-pending, snapshot.OPEN_STATUS);
+        - no execution in the account since the close, of any client
+          (orders.collect_broker_orders);
+        - the close after every account or broker snapshot the engine has
+          committed: each is stamped later than the one before it.
+
+        A stamp at the read time must itself follow the last the engine
+        holds; when it does not (a clock behind), None: the batch waits.
+        """
+        reasons = []
+        read_ny, close_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK), close.astimezone(nyse_calendar.NEW_YORK)
+        if not reading.as_of > close:
+            reasons.append("it was read at {}, not after the close at {}".format(_stamp(reading.as_of), _stamp(close)))
+        elif read_ny.date() != close_ny.date():
+            reasons.append("it was read at {}, on a later New York date than the close at {}: IBKR's executions "
+                           "reach back only to midnight, so none since the close can be ruled out".format(
+                               _stamp(reading.as_of), _stamp(close)))
+        if reading.open_orders:
+            reasons.append("IBKR shows {} open order(s) for the account (working, pending or cancel-pending): "
+                           "{}".format(len(reading.open_orders),
+                                       ", ".join(o["broker_order_id"] for o in reading.open_orders)))
+        try:
+            broker = collect_broker_orders(self.conn)
+        except BrokerOrdersIncomplete as err:
+            if "open-orders" in err.missing and "connection" not in err.missing:
+                # The open-order list carries no request ID (see the module).
+                self.conn.drop("untagged-read-interrupted")
+            if "connection" in err.missing or "open-orders" in err.missing:
+                return None
+            reasons.append("IBKR's executions could not be read in full")
+        else:
+            since = [e for e in broker.executions if e.occurred_at > close]
+            if since:
+                reasons.append("IBKR reports {} execution(s) in the account since the close: {}".format(
+                    len(since), ", ".join(e.exec_id for e in since)))
+        last = self._last_stamp()
+        if last is not None and not close > last:
+            reasons.append("the engine already holds an account or broker snapshot as of {}, not before this "
+                           "close".format(_stamp(last)))
+        if reasons and last is not None and not reading.as_of > last:
+            log.info("ibkr broker snapshot waits: its read time %s does not follow the last snapshot the engine "
+                     "holds, as of %s", _stamp(reading.as_of), _stamp(last))
+            return None
+        return "; ".join(reasons)
+
+    def _last_stamp(self):
+        """The latest as-of time of an account or broker snapshot the engine has committed, or None."""
+        stamps = [datetime.fromisoformat(i.payload["as_of"].replace("Z", "+00:00"))
+                  for i in read_engine_log(self._engine_log_path).inputs
+                  if i.event_type in (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE)]
+        return max(stamps, default=None)
 
     def _unended(self, reading):
         """Whether reading was cut off before answers that carry no request ID ended; if so the link is dropped (see the module)."""

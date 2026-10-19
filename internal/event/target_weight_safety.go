@@ -78,8 +78,26 @@ func (p KillSwitchPayload) Validate() error {
 // 2026-09-24). It is an input: replay never asks the broker again.
 const BrokerSnapshotEventType = "account.broker.snapshot"
 
-// BrokerSnapshotSchemaVersion is the current schema version of BrokerSnapshotPayload.
+// BrokerSnapshotSchemaVersion is version 1 of BrokerSnapshotPayload: the
+// snapshot as of the time IBKR's account was read.
 const BrokerSnapshotSchemaVersion uint32 = 1
+
+// BrokerSnapshotReadAtVersion is version 2 of BrokerSnapshotPayload, the
+// version the IBKR adapter writes: version 1 with ReadAt, AsOfClose and
+// NotAsOfClose. Under the owner's decision of 2026-10-18 (ADR 0019, ADR 0025
+// point 5 and ADR 0026 point 1, amended) one reading taken after a session's
+// close and before the next open, with no order working or pending at IBKR
+// for the account and no execution since the close, is the account as of
+// that close: AsOf is then the close and ReadAt the true read time beside it
+// as evidence. Otherwise AsOf is the read time and NotAsOfClose says which
+// condition failed, so the engine finds the reading stale for that close and
+// withholds (ADR 0019's snapshot rule).
+const BrokerSnapshotReadAtVersion uint32 = 2
+
+// BrokerSnapshotVersions returns the versions a broker snapshot is read at.
+func BrokerSnapshotVersions() []uint32 {
+	return []uint32{BrokerSnapshotSchemaVersion, BrokerSnapshotReadAtVersion}
+}
 
 // The components of a broker snapshot that can be unreadable. An unreadable
 // component is not zero (ADR 0019, "An unavailable balance is not zero"): it
@@ -142,6 +160,16 @@ type BrokerSnapshotPayload struct {
 	// stated, empty as []: a missing or null list is no reading, and a list
 	// IBKR could not supply is marked unreadable, never sent as none.
 	OpenOrders []BrokerOrder `json:"open_orders"`
+	// ReadAt, from version 2, is when IBKR's account was actually read, a
+	// whole second never before AsOf. Version 1 carries none.
+	ReadAt time.Time `json:"read_at,omitzero"`
+	// AsOfClose, from version 2, states that AsOf is the close of the
+	// session the reading stands for, read after it at ReadAt (the owner's
+	// decision of 2026-10-18; see BrokerSnapshotReadAtVersion).
+	AsOfClose bool `json:"as_of_close,omitempty"`
+	// NotAsOfClose, from version 2, says why a reading stamped at its read
+	// time could not stand for the close: the condition that failed.
+	NotAsOfClose string `json:"not_as_of_close,omitempty"`
 }
 
 // UnmarshalJSON decodes the snapshot and requires market_open to be stated as
@@ -246,6 +274,9 @@ func (p BrokerSnapshotPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("positions must be strictly ascending by instrument; %q follows %q", position.InstrumentID, p.Positions[i-1].InstrumentID))
 		}
 	}
+	if !p.ReadAt.IsZero() || p.AsOfClose || p.NotAsOfClose != "" {
+		errs = append(errs, p.readAtErrors()...)
+	}
 	for i, o := range p.OpenOrders {
 		if o.BrokerOrderID == "" {
 			errs = append(errs, fmt.Errorf("open order %d: broker order id is required", i+1))
@@ -269,6 +300,50 @@ func (p BrokerSnapshotPayload) Validate() error {
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid broker snapshot payload: %w", err)
+	}
+	return nil
+}
+
+// ValidateSchema is Validate at the version the snapshot arrived at:
+// version 1 carries none of version 2's fields, and version 2 states its
+// read time (BrokerSnapshotReadAtVersion).
+func (p BrokerSnapshotPayload) ValidateSchema(version uint32) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	switch version {
+	case BrokerSnapshotSchemaVersion:
+		if !p.ReadAt.IsZero() || p.AsOfClose || p.NotAsOfClose != "" {
+			return errors.New("invalid broker snapshot payload: version 1 carries no read time, close stamp or reason; those are version 2's")
+		}
+	case BrokerSnapshotReadAtVersion:
+		if err := errors.Join(p.readAtErrors()...); err != nil {
+			return fmt.Errorf("invalid broker snapshot payload: %w", err)
+		}
+	default:
+		return fmt.Errorf("invalid broker snapshot payload: schema version %d is not one of %v", version, BrokerSnapshotVersions())
+	}
+	return nil
+}
+
+// readAtErrors checks version 2's read time against its stamp: as of the
+// close, read after it, with no reason; otherwise stamped at the read time,
+// with the reason the reading could not stand for the close.
+func (p BrokerSnapshotPayload) readAtErrors() []error {
+	if errs := wholeSecondTime("read at", p.ReadAt); errs != nil {
+		return errs
+	}
+	switch {
+	case p.ReadAt.Before(p.AsOf):
+		return []error{fmt.Errorf("read at %s precedes as of %s", p.ReadAt.UTC().Format(time.RFC3339), p.AsOf.UTC().Format(time.RFC3339))}
+	case p.AsOfClose && !p.ReadAt.After(p.AsOf):
+		return []error{errors.New("a snapshot as of the close is read after the close, so read at must follow as of")}
+	case p.AsOfClose && p.NotAsOfClose != "":
+		return []error{errors.New("a snapshot as of the close states no reason it is not")}
+	case !p.AsOfClose && p.NotAsOfClose == "":
+		return []error{errors.New("a snapshot stamped at its read time states why it is not as of the close")}
+	case !p.AsOfClose && !p.ReadAt.Equal(p.AsOf):
+		return []error{errors.New("a snapshot not as of the close is stamped at its read time: as of must equal read at")}
 	}
 	return nil
 }

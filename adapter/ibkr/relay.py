@@ -922,7 +922,9 @@ class Relay:
         sender runs. It waits at most timeout seconds (the relay's
         close_timeout when None) and then raises RelayCloseTimeout, leaving
         the relay open and holding the pending file, so a supervisor can
-        decide what to do.
+        decide what to do. The connection to the engine is closed too: the
+        engine takes one connection at a time (cmd/engine), so the next
+        adapter's start is never refused for this one's.
         """
         wait = self._close_timeout if timeout is None else _positive_seconds("timeout", timeout)
         if not self._step.acquire(timeout=wait):
@@ -933,6 +935,9 @@ class Relay:
             if self._held is not None:
                 os.close(self._held)
                 self._held = None
+            engine, self._engine = self._engine, None
+            if engine is not None and hasattr(engine, "close"):
+                engine.close()
         finally:
             self._step.release()
 

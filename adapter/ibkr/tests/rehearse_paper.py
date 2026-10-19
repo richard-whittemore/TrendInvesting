@@ -1,63 +1,70 @@
-"""The paper rehearsal: one whole synthetic paper day, end to end, against the fake gateway and an engine stand-in.
+"""The paper rehearsal: synthetic paper days, end to end, with the real engine, against the fake gateway.
 
 Run by deploy/rehearse-paper.sh before the first real paper order
 (docs/runbooks/first-paper-order.md, B3; docs/manual/paper-trading.md, "A
 paper day"). It runs the data job (adapter/marketdata/tidata.py) on
-synthetic Massive answers, then starts `python3 -m adapter.ibkr run`
-(cli.main) exactly as the server's unit does, with --streams, on a paper
-configuration with sending switched on and a paper-shaped account read from
-a secrets file, with only Massive, IB Gateway and the engine replaced:
-Massive by a synthetic client, IB Gateway by tests/fake_tws.py, and the
-engine by tests/engine_double.py behind a real Unix-domain socket, so the
-adapter's socket client is the one the server uses. Nothing reaches
-Massive or IBKR.
+synthetic Massive answers, the real engine (cmd/engine, Boost, in paper
+mode, built here or taken from TI_REHEARSAL_ENGINE) on a Unix-domain socket,
+and `python3 -m adapter.ibkr run` (cli.main) exactly as the server's unit
+does, with --streams, on a paper configuration with sending switched on and
+a paper-shaped account read from a secrets file. Only Massive and IB
+Gateway are replaced: Massive by a synthetic client, IB Gateway by
+tests/fake_tws.py. Nothing reaches Massive or IBKR.
 
 It proves, in order, and stops at the first that fails, exiting 1:
 
-1. the data job writes the run's warm-up and, once the day has settled,
-   the day's stream, stamped with the run's identity from the engine's log;
-2. the adapter starts, reads and matches the account before anything else,
-   and delivers the warm-up behind one broker snapshot, in file order;
-3. the day's stream reaches the engine as its broker snapshot (with IBKR's
-   mark for the holding), its bar, then its close; the stand-in releases
-   one order on that close only if the snapshot is fresh at the close's
-   recorded time (ADR 0019's snapshot rule, as the engine checks a sell),
-   its durable log shows that release, and the order goes out once, only
-   after it, as released: a whole-share DAY limit order for the account,
-   tagged with its client order ID;
-4. IBKR's acceptance reaches the engine as a lifecycle input, and each of
-   two fills as a fill input once its commission arrives;
-5. a dropped link is reconnected and matched again, and neither the order
-   nor any stream input is sent again;
-6. a restart of the adapter on the same files sends nothing again and
-   records nothing twice;
-7. a crash of the engine, resumed under a new run name (a new TI_RUN,
+1. the data job writes the run's warm-up, stamped with the run's identity
+   from the engine's own durable log, and the adapter, started the evening
+   before the first paper day, delivers it behind one account reading as of
+   that evening's close, with the start-of-run reconciliation, which the
+   engine matches;
+2. the day's stream reaches the engine as the owner decided on 2026-10-18:
+   the account snapshot and the broker snapshot as of the day's close, read
+   after it (nothing working at IBKR, no execution since), then the bar,
+   the mark from the bar's official close (IBKR's last price beside it),
+   then the close; the engine decides, and its durable log shows the
+   release of one order;
+3. that order goes out once, only after the release, as released: a
+   whole-share SPY DAY limit order for the account, tagged with its client
+   order ID; IBKR's acceptance reaches the engine as a lifecycle input;
+4. a dropped link is reconnected and reconciled again, and a restart of
+   the adapter on the same files reconciles and sends nothing again; the
+   engine matches both reconciliations;
+5. the next day the order fills after the close: the adapter journals both
+   fills, then finds an execution since the close, so it stamps that day's
+   reading at its true read time and says why; the engine withholds the
+   session as stale-account-snapshot, ordering nothing;
+6. a crash of the engine, resumed under a new run name (a new TI_RUN,
    engine -resume: the new log holds the crashed run's records, so the
    run's identity carries over, ADR 0027): the data job writes the next
-   day's stream into the run's own folder, and the adapter, started on the
-   new log, delivers it to the resumed run behind one broker snapshot,
-   once, sending nothing earlier again.
+   day's stream into the run's own folder, the adapter, started on the new
+   log, reconciles and delivers it, once, as of its close, and the resumed
+   engine decides it; nothing earlier is sent again;
+7. a holding that changed with no order to explain it (a trade by hand) is
+   found at the next start's reconciliation, and the engine leaves Normal
+   (ADR 0019: Degraded on the instrument) and journals why.
 
 ibapi is not installed here, so the imported ibapi's version is given as
 the pinned one; everything else the start command checks is checked. The
-day is the latest NYSE session on or before today (New York), and the
-adapter is told it is that session's date, so the order is one released in
-"today's" session as on the server.
+days are the latest NYSE sessions on or before today (New York) and the two
+after, and the adapter is told each one's date as it runs.
 
 The account is synthetic (DU0000001) unless TI_REHEARSAL_ACCOUNT holds one
 beginning DU (deploy/rehearse-paper.sh asks for it at a hidden prompt); it
 is never printed.
 """
+import atexit
 import contextlib
 import datetime as dt
-import hashlib
 import io
 import json
 import os
-import socket
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
-import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -72,32 +79,37 @@ for p in (str(tests_dir), str(adapter_dir), str(adapter_dir.parent)):
 
 from cli import main as adapter_main  # noqa: E402
 from config import is_paper_account  # noqa: E402
-from engine_double import EngineRefused, LoggedEngine  # noqa: E402
 from fake_tws import FakeTWS, contract as fake_contract  # noqa: E402
 from ibapi_pin import read_pin  # noqa: E402
 from marketdata import nyse_calendar, tidata  # noqa: E402
 from relay import RELEASED  # noqa: E402
 from reports import FILL_TYPE, LIFECYCLE_TYPE  # noqa: E402
-from snapshot import BROKER_SNAPSHOT_TYPE  # noqa: E402
+from snapshot import ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, MARK_TYPE, RECONCILIATION_TYPE  # noqa: E402
 
 NEW_YORK = ZoneInfo("America/New_York")
 SYNTHETIC_ACCOUNT = "DU0000001"
-CLIENT_ORDER_ID = "rehearsal-spy-1"
 SPY_CON_ID = 756733
 # The most loop steps one phase may take before the rehearsal calls it stuck.
-MAX_STEPS = 400
+MAX_STEPS = 600
 BAR = "market.bar.completed"
 CLOSED = "market.session.closed"
+DECIDED = "strategy.targets.decided"
+RESULT = "risk.reconciliation.result"
+STATE = "strategy.engine.state"
 RUN = "run-rehearsal"
 # The warm-up's sessions: the shortest history the configuration below
 # accepts (its longest indicator window, five sessions) and one more.
 WARM_SESSIONS = 6
-# The paper account's synthetic holding before the day, and IBKR's synthetic
-# last price for SPY, the mark the broker snapshot carries.
+# The paper account's synthetic holding before the first day, its net
+# liquidation, and IBKR's synthetic last price for SPY (evidence only).
 HELD = 10
-MARK = 401.17
+NET_LIQUIDATION = "1000000.00"
+IBKR_LAST = 401.17
 # A synthetic stand-in for the Massive key: not a credential.
 SYNTHETIC_KEY = "synthetic-rehearsal-key"
+# How long the engine may take to build, listen and stop, in seconds.
+ENGINE_TIMEOUT = float(os.environ.get("TI_TEST_ENGINE_TIMEOUT", "120"))
+GO_TIMEOUT = float(os.environ.get("TI_TEST_GO_TIMEOUT", "300"))
 # Set by the rehearsal's own test: the day's stream is altered after the data
 # job wrote it, which the adapter must refuse.
 STREAM_TAMPER = False
@@ -118,10 +130,16 @@ class SyntheticMassive:
         return [{"results": []}]
 
 
-def boost_configuration(warm_up_start):
-    """The shipped Boost configuration in paper, with indicators short enough for a few sessions' warm-up."""
+def official_close(day):
+    """The day's synthetic official close, as SyntheticMassive answers it."""
+    return 400.0 + day.toordinal() % 7
+
+
+def boost_configuration(warm_up_start, account):
+    """The shipped Boost configuration in paper for account, with indicators short enough for a few sessions' warm-up."""
     cfg = json.loads((repo / "deploy" / "etc" / "engines" / "boost.config").read_text())
     cfg["mode"] = "paper"
+    cfg["account_id"] = account
     cfg["boost"].update(warm_up_start=warm_up_start.isoformat(), trend_days=5, exit_sma=5)
     return cfg
 
@@ -143,6 +161,10 @@ def settled(day):
     return nyse_calendar.session_close(day).astimezone(timezone.utc) + dt.timedelta(minutes=65)
 
 
+def stamp(at):
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class RehearsalFailed(Exception):
     """One of the rehearsal's checks failed."""
 
@@ -153,50 +175,82 @@ def check(ok, what):
     print("PASS: " + what)
 
 
-class SocketEngine:
-    """engine_double.LoggedEngine served on a Unix-domain socket, replying as cmd/engine lays a reply out."""
+_BUILT = {}
 
-    def __init__(self, path, engine):
-        self.engine = engine
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server.bind(path)
-        self.server.listen(4)
-        self.thread = threading.Thread(target=self._serve, daemon=True)
-        self.thread.start()
 
-    def close(self):
-        self.server.close()
+def engine_binary():
+    """The engine to rehearse with: TI_REHEARSAL_ENGINE (deploy/rehearse-paper.sh builds it with make engine), else
+    built here once per process, stamped "rehearsal" (paper mode refuses an unstamped build)."""
+    given = os.environ.get("TI_REHEARSAL_ENGINE")
+    if given:
+        return given
+    if "path" in _BUILT:
+        return _BUILT["path"]
+    folder = tempfile.mkdtemp(prefix="ti-rehearse-engine-")
+    atexit.register(shutil.rmtree, folder, True)
+    binary = os.path.join(folder, "ti-engine")
+    try:
+        subprocess.run(["go", "build", "-ldflags",
+                        "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal",
+                        "-o", binary, "./cmd/engine"], cwd=str(repo), env=dict(os.environ, GOTOOLCHAIN="local"),
+                       timeout=GO_TIMEOUT, capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        raise RehearsalFailed("go is not on PATH: the rehearsal builds the real engine, or set "
+                              "TI_REHEARSAL_ENGINE to a built one") from None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as err:
+        raise RehearsalFailed("the engine did not build: {}".format(getattr(err, "stderr", err))) from None
+    _BUILT["path"] = binary
+    return binary
 
-    def _serve(self):
-        while True:
-            try:
-                conn, _ = self.server.accept()
-            except OSError:
-                return
-            threading.Thread(target=self._connection, args=(conn,), daemon=True).start()
 
-    def _connection(self, conn):
-        buf = b""
-        with conn:
-            while True:
-                while b"\n" not in buf:
-                    chunk = conn.recv(65536)
-                    if not chunk:
-                        return
-                    buf += chunk
-                line, _, buf = buf.partition(b"\n")
-                envelope = json.loads(line)
-                try:
-                    reply = self.engine.decide(envelope)
-                except EngineRefused as refused:
-                    conn.sendall(json.dumps({"error": {"code": "invalid", "message": str(refused),
-                                                       "causation_id": envelope.get("id", "")}}).encode() + b"\n")
-                    continue
-                raw = json.dumps(reply["payload"], separators=(",", ":")).encode()
-                head = {k: v for k, v in reply.items() if k != "payload"}
-                head["payload_hash"] = hashlib.sha256(raw).hexdigest()
-                text = json.dumps(head, separators=(",", ":"))
-                conn.sendall(b'{"envelope":' + text[:-1].encode() + b',"payload":' + raw + b"}}\n")
+class Engine:
+    """The real engine (cmd/engine) in paper mode on a Unix-domain socket, one process per run."""
+
+    def __init__(self, binary, work, config, as_of, socket_path):
+        self.binary, self.work, self.config, self.as_of, self.socket = binary, work, config, as_of, socket_path
+        self.process = None
+
+    def start(self, name, *extra):
+        out = self.work / (name + ".out")
+        with open(out, "w") as sink:
+            self.process = subprocess.Popen(
+                [self.binary, "-mode", "paper", "-config", str(self.config), "-as-of", self.as_of,
+                 "-socket", self.socket, "-log", str(self.work / "engines" / (name + ".log")),
+                 "-out", str(self.work / (name + ".journal"))] + list(extra),
+                stdout=sink, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + ENGINE_TIMEOUT
+        while time.monotonic() < deadline:
+            if "listening on" in out.read_text():
+                return self.work / "engines" / (name + ".log")
+            if self.process.poll() is not None:
+                raise RehearsalFailed("the engine stopped at its start: {}".format(out.read_text().strip()))
+            time.sleep(0.05)
+        raise RehearsalFailed("the engine did not listen within {} s".format(ENGINE_TIMEOUT))
+
+    def stop(self, sig=signal.SIGTERM):
+        if self.process is None:
+            return
+        if self.process.poll() is None:
+            self.process.send_signal(sig)
+        try:
+            self.process.wait(timeout=ENGINE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.process = None
+
+
+def log_groups(path):
+    """The engine's durable log at path as its committed groups: [(input envelope, [decision envelopes])]."""
+    groups, group = [], []
+    for line in Path(path).read_text(encoding="utf-8").splitlines()[1:]:
+        entry = json.loads(line)
+        if "record" in entry:
+            group.append(entry["record"]["envelope"])
+        else:
+            groups.append((group[0], group[1:]))
+            group = []
+    return groups
 
 
 class Phase:
@@ -226,26 +280,20 @@ def rehearse(work, account):
         session -= dt.timedelta(days=1)
     before = nyse_calendar.sessions(session - dt.timedelta(days=30), session)[-(WARM_SESSIONS + 1):-1]
     warm_up_start, eve = before[0], before[-1]
-    stamp = session.strftime("%Y%m%d")
-    released = {"account_id": account, "plan_id": "order-planned:" + CLIENT_ORDER_ID,
-                "tag": "targets-decided:rehearsal", "client_order_id": CLIENT_ORDER_ID, "instrument_id": "SPY",
-                "side": "buy", "quantity": 9, "limit_price": 401.5, "mode": "paper", "send": True}
+    second, third = nyse_calendar.sessions_after(session, 2)
     day_close = "marketdata:session-closed:{}".format(session)
+    close_at = nyse_calendar.session_close(session)
 
-    cfg = boost_configuration(warm_up_start)
+    cfg = boost_configuration(warm_up_start, account)
     config = work / "boost.config"
     config.write_text(json.dumps(cfg))
     (work / "secrets.env").write_text("MASSIVE_API_KEY={}\n".format(SYNTHETIC_KEY))
-    engine_log = work / (RUN + ".log")
-    # The stand-in releases on the day's close only if the broker snapshot
-    # ahead of it is fresh at its recorded time, as the engine sizes a sell.
-    engine = LoggedEngine(str(engine_log), {day_close: [{"type": RELEASED, "payload": released}]},
-                          configuration=cfg,
-                          snapshot_age=dt.timedelta(minutes=cfg["execution"]["max_snapshot_age_minutes"]))
-    streams = work / "data" / "streams" / "boost"
-    warm = data_job(work, config, engine_log, settled(eve), "--backfill-from", warm_up_start.isoformat())
+    (work / "engines").mkdir()
     sock_path = str(work / "engine.sock")
-    server = SocketEngine(sock_path, engine)
+    # The first paper day is the first session decided: the warm-up's
+    # sessions only feed the indicators (the engine's -as-of).
+    engine = Engine(engine_binary(), work, config, stamp(close_at), sock_path)
+    streams = work / "data" / "streams" / "boost"
     pending = work / "adapter" / "pending.json"
     pending.parent.mkdir()
     secrets = work / "boost.env"
@@ -254,9 +302,9 @@ def rehearse(work, account):
     adapter_config = work / "boost.json"
     adapter_config.write_text(json.dumps({
         "host": "127.0.0.1", "port": 4002, "client_id": 11, "mode": "paper", "paper_sending_enabled": True,
-        "connect_timeout": 2.0, "request_timeout": 0.2, "mark_timeout": 0.2, "heartbeat_interval": 30.0, "heartbeat_timeout": 10.0,
-        "restore_timeout": 60.0, "backoff_initial": 0.01, "backoff_max": 0.05, "max_connect_attempts": 3,
-        "commission_wait": 30.0, "con_ids": {"SPY": SPY_CON_ID}}, indent=2))
+        "connect_timeout": 2.0, "request_timeout": 0.2, "mark_timeout": 0.2, "heartbeat_interval": 30.0,
+        "heartbeat_timeout": 10.0, "restore_timeout": 60.0, "backoff_initial": 0.01, "backoff_max": 0.05,
+        "max_connect_attempts": 3, "commission_wait": 30.0, "con_ids": {"SPY": SPY_CON_ID}}, indent=2))
     versions = repo / "deploy" / "versions.env"
     version, sha = read_pin(str(versions))
     record = work / "INSTALLED"
@@ -264,14 +312,18 @@ def rehearse(work, account):
 
     gateway = FakeTWS()
     gateway.managed_accounts = (account,)
-    gateway.summary = [(account, "NetLiquidation", "1000000.00", "USD"),
-                       (account, "TotalCashValue", "1000000.00", "USD"),
-                       (account, "ExcessLiquidity", "1000000.00", "USD")]
+    gateway.summary = [(account, "NetLiquidation", NET_LIQUIDATION, "USD"),
+                       (account, "TotalCashValue", NET_LIQUIDATION, "USD"),
+                       (account, "ExcessLiquidity", NET_LIQUIDATION, "USD")]
     gateway.positions = [(account, fake_contract(), Decimal(HELD), 395.0)]
-    gateway.marks = {SPY_CON_ID: MARK}
-    # IBKR's clock: the evening of the day, after the data job has run.
-    gateway.server_time = int(settled(session).timestamp()) + 600
+    gateway.marks = {SPY_CON_ID: IBKR_LAST}
     gateway.on_place = gateway.accept
+    calendar = {"day": eve}
+
+    def evening(day):
+        """IBKR's clock and the adapter's session date: the evening of day, after the data job has run."""
+        calendar["day"] = day
+        gateway.server_time = int(settled(day).timestamp()) + 600
 
     def argv(engine_log):
         return ["run", "--config", str(adapter_config), "--pending", str(pending), "--engine-log", str(engine_log),
@@ -279,137 +331,211 @@ def rehearse(work, account):
                 "--account-key", "IBKR_ACCOUNT_BOOST", "--ibapi-record", str(record), "--versions", str(versions)]
     log = (work / "adapter.log").open("w")
 
-    def run(phase, engine_log=engine_log):
+    def run(phase, engine_log):
         status = adapter_main(argv(engine_log), api_factory=lambda cfg: gateway, should_stop=phase, err=log,
                               poll=0.01,
                               ibapi_version=lambda: tuple(int(p) for p in version.split(".")),
-                              today=lambda: session,
+                              today=lambda: calendar["day"],
                               now=lambda: datetime.fromtimestamp(gateway.server_time, timezone.utc))
         log.flush()
         if status != 0:
             raise RehearsalFailed("the adapter stopped (exit {}): {}".format(
                 status, (work / "adapter.log").read_text().strip().splitlines()[-1:]))
 
-    def types():
-        return [e["type"] for e in engine.inputs()]
+    def inputs(path):
+        return [i for i, _ in log_groups(path)]
 
-    def ids():
-        return [e["id"] for e in engine.inputs()]
+    def types(path):
+        return [i["type"] for i in inputs(path)]
+
+    def decisions(path, input_id):
+        return [d for i, ds in log_groups(path) if i["id"] == input_id for d in ds]
+
+    def of(path, event_type):
+        return [i for i in inputs(path) if i["type"] == event_type]
 
     def placed():
         return len(gateway.placed)
 
-    written = {}
-
-    def the_day():
-        written["day"] = data_job(work, config, engine_log, settled(session))
-        if STREAM_TAMPER:
-            lines = written["day"].read_text().splitlines()
-            lines[0] = lines[0].replace('"SPY"', '"SPX"', 1)
-            os.chmod(str(written["day"]), 0o644)
-            written["day"].write_text("\n".join(lines) + "\n")
-        written["placed_before"] = placed()
-
-    def fill():
-        gateway.fill(7, shares="4", price=401.25, exec_id="0001f4e8.rehearsal.01.01", cum_qty="4", commission="1.00",
-                     time="{} 09:30:01 US/Eastern".format(stamp))
-        gateway.fill(7, shares="5", price=401.3, exec_id="0001f4e8.rehearsal.02.01", cum_qty="9", commission="0.35",
-                     time="{} 09:30:04 US/Eastern".format(stamp))
-
-    matched = {}
-
-    def drop():
-        matched["executions"] = len(gateway.called("req_executions"))
-        gateway.drop()
-
-    warm_inputs = 1 + 2 * WARM_SESSIONS
     try:
+        # -- 1. the warm-up, the evening before the first paper day ----------
+        run_log = engine.start(RUN)
+        evening(eve)
+        warm = data_job(work, config, run_log, settled(eve), "--backfill-from", warm_up_start.isoformat())
+        warm_types = [ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, RECONCILIATION_TYPE] + [BAR, CLOSED] * (
+            WARM_SESSIONS - 1) + [BAR, MARK_TYPE, CLOSED]
+        run(Phase([(lambda: len(types(run_log)) >= 1 + len(warm_types), None, "the warm-up to reach the engine")]),
+            run_log)
+        check(warm == streams / RUN / "boost-{}.jsonl".format(eve),
+              "the data job wrote the run's warm-up, stamped with the engine's own identity")
+        sent = inputs(run_log)[1:]
+        eve_close = stamp(nyse_calendar.session_close(eve))
+        result = [d for i in sent if i["type"] == RECONCILIATION_TYPE for d in decisions(run_log, i["id"])]
+        check([i["type"] for i in sent] == warm_types
+              and [i["id"] for i in sent if i["source"] == "marketdata"] == [
+                  json.loads(line)["id"] for line in warm.read_text().splitlines()]
+              and sent[0]["payload"]["as_of"] == eve_close and sent[1]["payload"]["as_of_close"] is True
+              and [d["type"] for d in result] == [RESULT] and result[0]["payload"]["action"] == "continue",
+              "the warm-up reached the engine behind one reading as of that evening's close, in file order, and "
+              "the engine matched the start-of-run reconciliation")
+
+        # -- 2. and 3. the first paper day -----------------------------------
+        written = {}
+
+        def the_day():
+            evening(session)
+            written["day"] = data_job(work, config, run_log, settled(session))
+            if STREAM_TAMPER:
+                lines = written["day"].read_text().splitlines()
+                lines[0] = lines[0].replace('"SPY"', '"SPX"', 1)
+                os.chmod(str(written["day"]), 0o644)
+                written["day"].write_text("\n".join(lines) + "\n")
+            written["placed_before"] = placed()
+
+        matched = {}
+
+        def drop():
+            matched["reconciliations"] = len(of(run_log, RECONCILIATION_TYPE))
+            matched["connects"] = len(gateway.called("connect"))
+            gateway.drop()
+
         run(Phase([
-            (lambda: len(types()) >= warm_inputs, the_day, "the warm-up to reach the engine"),
-            (lambda: LIFECYCLE_TYPE in types(), fill, "the order's acceptance to reach the engine"),
-            (lambda: types().count(FILL_TYPE) == 2, drop, "both fills to reach the engine"),
-            (lambda: len(gateway.called("connect")) == 2
-             and len(gateway.called("req_executions")) > matched["executions"], None,
-             "the reconnect to be matched again"),
-        ]))
-        check(warm.parent == streams / RUN and written["day"] == streams / RUN / "boost-{}.jsonl".format(session)
-              and warm.name == "boost-{}.jsonl".format(eve),
-              "the data job wrote the warm-up and the day's stream for the run")
-        calls = [c[0] for c in gateway.calls]
-        check(calls.index("req_account_summary") < calls.index("place_order")
-              and calls.index("req_executions") < calls.index("place_order"),
-              "the account, open orders and executions were read before the order was sent")
-        sent = engine.inputs()
-        check(types()[:warm_inputs] == [BROKER_SNAPSHOT_TYPE] + [BAR, CLOSED] * WARM_SESSIONS
-              and [e["id"] for e in sent[1:warm_inputs]] == [json.loads(line)["id"] for line in
-                                                             warm.read_text().splitlines()]
-              and [e["sequence"] for e in sent[:warm_inputs]] == list(range(2, 2 + warm_inputs)),
-              "the warm-up reached the engine behind one broker snapshot, in file order")
-        day = sent[warm_inputs:warm_inputs + 3]
-        snapshot = day[0]["payload"] if day else {}
-        check([e["type"] for e in day] == [BROKER_SNAPSHOT_TYPE, BAR, CLOSED]
-              and day[1]["id"] == "marketdata:bar:SPY:{}".format(session) and day[2]["id"] == day_close
-              and snapshot.get("positions") == [{"instrument_id": "SPY", "quantity": HELD, "mark": MARK,
-                                                 "mark_set": True}]
-              and snapshot.get("market_open") is False and snapshot.get("unreadable") == [],
-              "the day's stream reached the engine as its broker snapshot, its bar, then its close")
-        committed = engine.decisions_for(day_close)
+            (lambda: True, the_day, "the day's stream"),
+            (lambda: LIFECYCLE_TYPE in types(run_log), drop, "the order's acceptance to reach the engine"),
+            (lambda: len(gateway.called("connect")) == matched["connects"] + 1
+             and len(of(run_log, RECONCILIATION_TYPE)) > matched["reconciliations"], None,
+             "the reconnect to be reconciled again"),
+        ]), run_log)
+        # The start's and the reconnect's reconciliations go ahead of, or
+        # between, the day's own inputs, as the adapter records them.
+        day = [i for i in inputs(run_log)[1 + len(warm_types):]
+               if i["type"] not in (LIFECYCLE_TYPE, RECONCILIATION_TYPE)][:5]
+        account_in, broker_in = (day + [{}, {}])[:2]
+        broker = broker_in.get("payload", {})
+        mark = day[3]["payload"] if len(day) > 3 else {}
+        check([i["type"] for i in day] == [ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, BAR, MARK_TYPE, CLOSED]
+              and account_in["payload"]["as_of"] == stamp(close_at)
+              and account_in["payload"]["positions"] == [{"instrument_id": "SPY", "quantity": HELD}]
+              and (broker["as_of"], broker["as_of_close"], broker["not_as_of_close"]) == (stamp(close_at), True, "")
+              and broker["read_at"] > stamp(close_at)
+              and broker["positions"] == [{"instrument_id": "SPY", "quantity": HELD,
+                                           "mark": official_close(session), "mark_set": True}]
+              and (mark["price"], mark["broker_last"], mark["source"]) == (official_close(session), IBKR_LAST,
+                                                                           "marketdata")
+              and day[4]["id"] == day_close,
+              "the day's stream reached the engine as its account and broker snapshots as of the close (read after "
+              "it), its bar, its mark from the bar's official close, then its close")
+        decided = decisions(run_log, day_close)
+        releases = [d["payload"] for d in decided if d["type"] == RELEASED]
+        targets = [d["payload"] for d in decided if d["type"] == DECIDED]
+        released = releases[0] if releases else {}
+        check(targets and targets[0]["outcome"] == "decided" and len(releases) == 1 and released["send"] is True
+              and released["side"] == "buy" and released["account_id"] == account and released["mode"] == "paper",
+              "the engine decided the day and its durable log shows one buy released to be sent")
         _, contract, order = gateway.placed[0] if gateway.placed else (None, None, None)
-        check(written["placed_before"] == 0 and placed() == 1 and committed == [(RELEASED, released)]
-              and not engine.withheld
+        check(written["placed_before"] == 0 and placed() == 1
               and (order.orderRef, str(order.totalQuantity), order.lmtPrice) == (
                   released["client_order_id"], str(released["quantity"]), released["limit_price"]),
-              "the order went out only after the day's close, which the engine's log shows released it "
-              "(its broker snapshot fresh at the close)")
+              "the order went out once, only after the day's close released it, as released")
         check((contract.conId, contract.secType, contract.currency, contract.exchange) == (SPY_CON_ID, "STK", "USD",
                                                                                            "SMART")
-              and (order.orderType, order.tif, order.transmit, str(order.totalQuantity), order.lmtPrice)
-              == ("LMT", "DAY", True, "9", 401.5)
-              and order.account == account and order.orderRef == CLIENT_ORDER_ID,
+              and (order.orderType, order.tif, order.transmit) == ("LMT", "DAY", True)
+              and order.account == account,
               "it was a whole-share SPY DAY limit order for the account, tagged with its client order ID")
-        lifecycle = engine.inputs(LIFECYCLE_TYPE)
+        lifecycle = of(run_log, LIFECYCLE_TYPE)
         check(len(lifecycle) == 1 and lifecycle[0]["payload"]["status"] == "submitted"
-              and lifecycle[0]["payload"]["client_order_id"] == CLIENT_ORDER_ID,
+              and lifecycle[0]["payload"]["client_order_id"] == released["client_order_id"],
               "IBKR's acceptance reached the engine as a lifecycle input (submitted)")
-        fills = engine.inputs(FILL_TYPE)
-        check([f["payload"]["fill_id"] for f in fills] == ["0001f4e8.rehearsal.01.01", "0001f4e8.rehearsal.02.01"]
-              and [f["payload"]["commission"] for f in fills] == [1.0, 0.35]
-              and sum(f["payload"]["quantity"] for f in fills) == 9,
-              "both fills reached the engine with their commissions, 9 shares in all")
-        check(len(gateway.called("connect")) == 2 and placed() == 1,
-              "the dropped link was reconnected and matched again, and the order was not sent again")
 
-        before_restart = list(types())
+        # -- 4. a reconnect and a restart -------------------------------------
+        before_restart = [i["id"] for i in inputs(run_log)]
+        connects = len(gateway.called("connect"))
         restart = Phase([])
         restart.actions = [(lambda: restart.steps > 20, None, "the restarted adapter to run")]
-        run(restart)
-        check(placed() == 1 and types() == before_restart,
-              "a restart on the same files sent nothing again and recorded nothing twice")
-        check(len(ids()) == len(set(ids())) and types().count(BROKER_SNAPSHOT_TYPE) == 2,
-              "no stream input reached the engine twice across the reconnect and the restart")
-        check(types() == [BROKER_SNAPSHOT_TYPE] + [BAR, CLOSED] * WARM_SESSIONS
-              + [BROKER_SNAPSHOT_TYPE, BAR, CLOSED, LIFECYCLE_TYPE, FILL_TYPE, FILL_TYPE],
-              "the engine holds the warm-up, the day's snapshot, bar and close, the acceptance and two fills, "
-              "in that order")
+        run(restart, run_log)
+        after = inputs(run_log)
+        added = [i["type"] for i in after if i["id"] not in before_restart]
+        results = [d["payload"]["action"] for i in of(run_log, RECONCILIATION_TYPE)
+                   for d in decisions(run_log, i["id"]) if d["type"] == RESULT]
+        check(len(gateway.called("connect")) == connects + 1 and placed() == 1 and added == [RECONCILIATION_TYPE]
+              and results == ["continue"] * 4 and len({i["id"] for i in after}) == len(after),
+              "the reconnect and a restart reconciled the account again, the engine matched both, and nothing was "
+              "sent twice")
 
-        # The engine crashes and is resumed under a new run name; the next
-        # session settles, and the data job and the adapter run on its log.
-        resumed_log = work / (RUN + "-resumed.log")
-        resumed = LoggedEngine.resumed(str(engine_log), str(resumed_log))
-        server.engine = resumed
-        following = nyse_calendar.sessions_after(session, 1)[0]
-        nxt = data_job(work, config, resumed_log, settled(following))
-        gateway.server_time = int(settled(following).timestamp()) + 600
-        following_close = "marketdata:session-closed:{}".format(following)
-        run(Phase([(lambda: following_close in [e["id"] for e in resumed.inputs()], None,
-                    "the next day's stream to reach the resumed run")]), engine_log=resumed_log)
-        check(nxt == streams / RUN / "boost-{}.jsonl".format(following) and sorted(os.listdir(streams)) == [RUN]
-              and [e["type"] for e in resumed.inputs()] == [BROKER_SNAPSHOT_TYPE, BAR, CLOSED]
-              and not set(e["id"] for e in resumed.inputs()) & set(ids()) and placed() == 1,
+        # -- 5. the next day: a fill after the close ------------------------
+        quantity = released["quantity"]
+        fill_price = official_close(session)
+        stamp_day = second.strftime("%Y%m%d")
+        second_close = "marketdata:session-closed:{}".format(second)
+
+        def late_fills():
+            evening(second)
+            first = quantity // 2
+            gateway.fill(7, shares=str(first), price=fill_price, exec_id="0001f4e8.rehearsal.01.01",
+                         cum_qty=str(first), commission="1.00", time="{} 16:30:01 US/Eastern".format(stamp_day))
+            gateway.fill(7, shares=str(quantity - first), price=fill_price, exec_id="0001f4e8.rehearsal.02.01",
+                         cum_qty=str(quantity), commission="0.35", time="{} 16:30:04 US/Eastern".format(stamp_day))
+            gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity), 395.0)]
+            written["second"] = data_job(work, config, run_log, settled(second))
+
+        run(Phase([
+            (lambda: True, late_fills, "the next day"),
+            (lambda: second_close in [i["id"] for i in inputs(run_log)], None, "the next day's close"),
+        ]), run_log)
+        fills = of(run_log, FILL_TYPE)
+        check([f["payload"]["fill_id"] for f in fills] == ["0001f4e8.rehearsal.01.01", "0001f4e8.rehearsal.02.01"]
+              and sum(f["payload"]["quantity"] for f in fills) == quantity,
+              "both fills reached the engine with their commissions, the whole order in all")
+        late = of(run_log, BROKER_SNAPSHOT_TYPE)[-1]["payload"]
+        late_account = of(run_log, ACCOUNT_SNAPSHOT_TYPE)[-1]["payload"]
+        withheld = [d["payload"] for d in decisions(run_log, second_close) if d["type"] == DECIDED]
+        ids = [i["id"] for i in inputs(run_log)]
+        check(late["as_of_close"] is False and late["as_of"] == late["read_at"] == late_account["as_of"]
+              and "0001f4e8.rehearsal.01.01" in late["not_as_of_close"]
+              and "execution(s) in the account since the close" in late["not_as_of_close"]
+              and max(ids.index(f["id"]) for f in fills) < ids.index(second_close)
+              and withheld and withheld[0]["outcome"] == "withheld"
+              and withheld[0]["withheld_reason"] == "stale-account-snapshot"
+              and not [d for d in decisions(run_log, second_close) if d["type"] == RELEASED] and placed() == 1,
+              "with an execution since the close, the reading was stamped at its read time with the reason, and "
+              "the engine withheld the session as stale-account-snapshot, ordering nothing")
+
+        # -- 6. a crash resume under a new run name --------------------------
+        engine.stop(signal.SIGKILL)
+        resumed_log = engine.start(RUN + "-resumed", "-resume", str(run_log))
+        third_close = "marketdata:session-closed:{}".format(third)
+        evening(third)
+        nxt = data_job(work, config, resumed_log, settled(third))
+        copied = len(inputs(resumed_log))
+        run(Phase([(lambda: third_close in [i["id"] for i in inputs(resumed_log)], None,
+                    "the next day's stream to reach the resumed run")]), resumed_log)
+        new = inputs(resumed_log)[copied:]
+        resumed_decided = [d["payload"] for d in decisions(resumed_log, third_close) if d["type"] == DECIDED]
+        check(nxt == streams / RUN / "boost-{}.jsonl".format(third) and sorted(os.listdir(streams)) == [RUN]
+              and [i["type"] for i in new] == [RECONCILIATION_TYPE, ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, BAR,
+                                               MARK_TYPE, CLOSED]
+              and new[1]["payload"]["as_of"] == stamp(nyse_calendar.session_close(third))
+              and resumed_decided and resumed_decided[0]["outcome"] == "decided"
+              and len({i["id"] for i in inputs(resumed_log)}) == len(inputs(resumed_log)),
               "after a crash resume under a new run name, the next day's stream went from the run's own folder "
-              "to the resumed run, once, and nothing earlier was sent again")
+              "to the resumed run, once, as of its close, and the resumed engine decided it; nothing earlier was "
+              "sent again")
+
+        # -- 7. a holding no order explains --------------------------------
+        gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity + 5), 395.0)]
+        reconciled = len(of(resumed_log, RECONCILIATION_TYPE))
+        run(Phase([(lambda: len(of(resumed_log, RECONCILIATION_TYPE)) > reconciled, None,
+                    "the start's reconciliation")]), resumed_log)
+        last = of(resumed_log, RECONCILIATION_TYPE)[-1]
+        outcome = decisions(resumed_log, last["id"])
+        result = [d["payload"] for d in outcome if d["type"] == RESULT]
+        state = [d["payload"] for d in outcome if d["type"] == STATE]
+        check(result and result[0]["classification"] == "unexplained" and result[0]["action"] == "degrade"
+              and state and state[0]["state"] == "degraded" and "SPY" in state[0]["scope_instrument_ids"],
+              "a holding no journalled order explains was found at the next start's reconciliation, and the "
+              "engine left Normal: Degraded on SPY (ADR 0019)")
     finally:
-        server.close()
+        engine.stop()
         log.close()
 
 
@@ -426,6 +552,8 @@ def main(argv=None):
         except RehearsalFailed as failed:
             print("FAIL: {}".format(failed))
             print("adapter log:\n" + (Path(work) / "adapter.log").read_text())
+            for out in sorted(Path(work).glob("*.out")):
+                print("{}:\n{}".format(out.name, out.read_text()))
             return 1
     print("rehearsal passed: nothing was sent to IBKR")
     return 0

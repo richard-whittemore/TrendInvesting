@@ -170,15 +170,14 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("DU0000002", self.err.getvalue(), "nor the login's other accounts")
 
     def test_the_runs_stream_folder_is_delivered_from(self):
-        from test_delivery import session_envelopes, write_stream
+        from test_delivery import DAY, FIRST, session_envelopes, write_stream
         from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION
         streams = self.dir / "streams"
         envelopes = session_envelopes([__import__("datetime").date(2027, 1, 14)], run="run-1",
                                       configuration_hash=CONFIGURATION_HASH, strategy_version=STRATEGY_VERSION)
         write_stream(streams / "run-1", __import__("datetime").date(2027, 1, 14), envelopes)
         self.assertEqual(self.run_main(self.argv("--streams", str(streams)), steps=10), 0, self.err.getvalue())
-        self.assertEqual([e["type"] for e in self.engine.inputs()],
-                         ["account.broker.snapshot", "market.bar.completed", "market.session.closed"])
+        self.assertEqual([e["type"] for e in self.engine.inputs()], FIRST + DAY)
 
     def test_a_run_with_no_stream_folder_stops_and_names_the_warm_up(self):
         streams = self.dir / "streams"

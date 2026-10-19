@@ -1,4 +1,4 @@
-"""account.broker.snapshot and account.reconciliation payloads from one IBKR read.
+"""account.broker.snapshot, account.snapshot, market.mark.recorded and account.reconciliation payloads from one IBKR read.
 
 ADR 0019 and its amendment of 2026-10-17 (reading 11): the broker snapshot is
 IBKR's holdings with marks, net liquidation, Excess Liquidity and every open
@@ -17,14 +17,29 @@ asked for after every component was read; if the link failed before IBKR
 could answer, it is the adapter's own receipt time, and every component is
 then unreadable.
 
-A holding's mark is IBKR's last price for its contract, from a one-off
-market-data snapshot (read_marks): only IBKR's LAST tick counts, so a
-quote, a previous close or a delayed price is never stated as the mark,
-and only from a request that completed with no price that is not valid.
-A holding IBKR gives no last price for, or whose contract number the
-configuration does not hold, is stated with mark_set false, which the
-engine reads as no mark (ADR 0019: the sale back to 98% is then withheld
-and the owner acts by hand).
+The owner's decision of 2026-10-18 (ADR 0019, ADR 0025 point 5 and ADR
+0026 point 1, amended): one reading taken after a session's close and
+before the next open, with no order working or pending at IBKR for the
+account and no execution since the close, is the account as of that close.
+From that one reading come the engine's account.snapshot (version 3,
+account_snapshot_record) and the broker snapshot (version 2,
+broker_snapshot_record), both stamped as of the close, the broker snapshot
+stating the true read time beside it as evidence; when the reading cannot
+stand for the close (the adapter checks the condition, loop.py), both are
+stamped at the read time and the broker snapshot says why, so the engine
+withholds the session as stale (ADR 0019's snapshot rule). A holding's mark
+in the broker snapshot, and the market.mark.recorded the engine checks its
+price band against (version 2, mark_record), is the delivered bar's
+official close, the price the backtest marks at; IBKR's last price is
+recorded beside the mark as evidence and never decided from, so no decision
+needs IBKR market-data permissions. A holding with no delivered bar is
+stated with mark_set false, which the engine reads as no mark (ADR 0019:
+the sale back to 98% is then withheld and the owner acts by hand).
+
+IBKR's last price (read_marks) is its LAST tick for the contract, from a
+one-off market-data snapshot: a quote, a previous close or a delayed price
+is never taken for it, and only a request that completed with no price that
+is not valid gives one.
 """
 import math
 from collections import namedtuple
@@ -38,7 +53,14 @@ from sender import CURRENCY, EXCHANGE, SEC_TYPE
 from values import to_decimal
 
 BROKER_SNAPSHOT_TYPE = "account.broker.snapshot"
-BROKER_SNAPSHOT_VERSION = 1
+# internal/event BrokerSnapshotReadAtVersion: the read time beside the stamp.
+BROKER_SNAPSHOT_VERSION = 2
+# internal/event AccountSnapshotPositionsVersion: what Boost reads.
+ACCOUNT_SNAPSHOT_TYPE = "account.snapshot"
+ACCOUNT_SNAPSHOT_VERSION = 3
+# internal/event MarkRecordedEvidenceVersion: IBKR's last price beside the mark.
+MARK_TYPE = "market.mark.recorded"
+MARK_VERSION = 2
 RECONCILIATION_TYPE = "account.reconciliation"
 RECONCILIATION_VERSION = 1
 MORNING = "morning"
@@ -290,15 +312,34 @@ def _amount(reading, tag, component):
     return 0 if component in reading.unread else float(reading.balances[tag].amount)
 
 
-def broker_snapshot_record(reading, market_open, marks=None):
-    """The account.broker.snapshot of reading.
+def _as_of(reading, close, why):
+    """The stamp of a reading: (as_of, as_of_close), as of close or at its read time (see the module)."""
+    if (close is None) == (not why):
+        raise ValueError("a snapshot is stamped either as of a close or at its read time with why it is not, "
+                         "not both or neither")
+    if close is None:
+        return reading.as_of, False
+    if close.tzinfo is None:
+        raise ValueError("the close is a time with its zone")
+    if close.replace(microsecond=0) != close or not close < reading.as_of:
+        raise ValueError("a reading stands for a close only when taken after it, and a close is a whole second")
+    return close, True
 
-    market_open is the adapter's own statement that the market was open at
-    as_of, and must be a bool. marks maps a symbol to IBKR's current mark for
-    it; a holding with no mark has mark_set false.
+
+def broker_snapshot_record(reading, market_open, marks=None, close=None, why=""):
+    """The account.broker.snapshot (version 2) of reading, as of close or at its read time (see the module).
+
+    With close, an aware datetime before the read, the snapshot is as of
+    that close, its read time beside it; otherwise why, which must be
+    stated, says why the reading cannot stand for the close, and it is
+    stamped at its read time. market_open is the adapter's own statement
+    that the market was open at the stamp, and must be a bool. marks maps a
+    symbol to its mark, the delivered bar's official close; a holding with
+    no mark has mark_set false.
     """
     if not isinstance(market_open, bool):
         raise TypeError("market_open must be stated as True or False")
+    as_of, as_of_close = _as_of(reading, close, why)
     marks = marks or {}
     positions = []
     for symbol in sorted(reading.positions):
@@ -309,13 +350,54 @@ def broker_snapshot_record(reading, market_open, marks=None):
         })
     return Record(BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION, {
         "account_id": reading.account_id,
-        "as_of": _stamp(reading.as_of),
+        "as_of": _stamp(as_of),
         "market_open": market_open,
         "unreadable": sorted(reading.unread & {EXCESS, NET, OPEN_ORDERS, POSITIONS}),
         "net_liquidation": _amount(reading, NET_LIQUIDATION, NET),
         "excess_liquidity": _amount(reading, EXCESS_LIQUIDITY, EXCESS),
         "positions": positions,
         "open_orders": list(reading.open_orders),
+        "read_at": _stamp(reading.as_of),
+        "as_of_close": as_of_close,
+        "not_as_of_close": "" if as_of_close else why,
+    })
+
+
+def account_snapshot_record(reading, as_of):
+    """The engine's account.snapshot (version 3) of reading, as of as_of: its positions and net liquidation.
+
+    Both must have been read in full: an unavailable balance is not zero
+    (ADR 0019), so a reading without them gives no snapshot (ValueError).
+    """
+    if reading.unread & {POSITIONS, NET}:
+        raise ValueError("an account snapshot needs the positions and the net liquidation, and {} could not be "
+                         "read".format(", ".join(sorted(reading.unread & {POSITIONS, NET}))))
+    balance = reading.balances[NET_LIQUIDATION]
+    return Record(ACCOUNT_SNAPSHOT_TYPE, ACCOUNT_SNAPSHOT_VERSION, {
+        "account_id": reading.account_id,
+        "as_of": _stamp(as_of),
+        "net_liquidation": float(balance.amount),
+        "currency": balance.currency,
+        "positions": [{"instrument_id": s, "quantity": reading.positions[s]} for s in sorted(reading.positions)],
+    })
+
+
+def mark_record(symbol, as_of, price, source, broker_last=None):
+    """The market.mark.recorded (version 2) of symbol at as_of: price, the delivered bar's official close.
+
+    source names who reported the price (the data job); broker_last is
+    IBKR's last price beside it, evidence only, None when IBKR gave none.
+    """
+    price = to_decimal(price, "mark")
+    if not price > 0:
+        raise ValueError("a mark is a positive price")
+    return Record(MARK_TYPE, MARK_VERSION, {
+        "instrument_id": symbol,
+        "as_of": _stamp(as_of),
+        "price": float(price),
+        "source": source,
+        "broker_last": 0 if broker_last is None else float(to_decimal(broker_last, "broker last")),
+        "broker_last_set": broker_last is not None,
     })
 
 

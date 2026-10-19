@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -118,7 +119,18 @@ import (
 //     in docs/research/d7l-held-name-2026-10.md (ADR 0026, point 2, "D7-L",
 //     amended 2026-10-18). A journal holding such a name decides
 //     differently under 1.16.0.
-const RulesVersion = "1.17.0"
+//   - 1.18.0 reads account.broker.snapshot version 2 (the read time beside
+//     an as-of that is the session's close, or the reason the reading could
+//     not stand for it) and market.mark.recorded version 2 (IBKR's last
+//     price beside the mark, as evidence), which the IBKR adapter writes
+//     under the owner's decision of 2026-10-18 that one reading after the
+//     close, with nothing working at IBKR and no execution since, is the
+//     account as of that close (ADR 0019, ADR 0025 point 5, ADR 0026 point
+//     1, amended 2026-10-18). Every decision is made as before: the mark is
+//     the delivered bar's official close and IBKR's last price is never
+//     read. A journal holding either version 2 input does not replay under
+//     1.17.0, which refuses it.
+const RulesVersion = "1.18.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -338,10 +350,27 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 
 // decodeInput checks an input's schema version and decodes and validates its payload.
 func decodeInput[T interface{ Validate() error }](in event.Envelope, version uint32) (T, error) {
-	var p T
 	if in.SchemaVersion != version {
+		var p T
 		return p, fmt.Errorf("targetweight: %s schema version %d is not the version %d this build reads (ADR 0015)", in.Type, in.SchemaVersion, version)
 	}
+	return decodeAt[T](in)
+}
+
+// decodeVersions is decodeInput for an input read at any of versions: the
+// broker snapshot and the mark, which the IBKR adapter writes at version 2
+// (the owner's decision of 2026-10-18) and earlier journals hold at 1.
+func decodeVersions[T interface{ Validate() error }](in event.Envelope, versions []uint32) (T, error) {
+	if !slices.Contains(versions, in.SchemaVersion) {
+		var p T
+		return p, fmt.Errorf("targetweight: %s schema version %d is not one of the versions %v this build reads (ADR 0015)", in.Type, in.SchemaVersion, versions)
+	}
+	return decodeAt[T](in)
+}
+
+// decodeAt decodes and validates an input's payload at the version it arrived at.
+func decodeAt[T interface{ Validate() error }](in event.Envelope) (T, error) {
+	var p T
 	if err := json.Unmarshal(in.Payload, &p); err != nil {
 		return p, fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
 	}
@@ -506,7 +535,7 @@ func (h *Handler) applySnapshot(in event.Envelope) error {
 }
 
 func (h *Handler) applyMark(in event.Envelope) error {
-	p, err := decodeInput[event.MarkRecordedPayload](in, event.MarkRecordedSchemaVersion)
+	p, err := decodeVersions[event.MarkRecordedPayload](in, event.MarkRecordedVersions())
 	if err != nil {
 		return err
 	}
@@ -700,7 +729,7 @@ func (h *Handler) applyAcknowledgement(in event.Envelope) error {
 // margin alarm when its level changes; an alarm turning urgent fires the sale
 // back to 98%. Its emissions are timed at the snapshot.
 func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeInput[event.BrokerSnapshotPayload](in, event.BrokerSnapshotSchemaVersion)
+	p, err := decodeVersions[event.BrokerSnapshotPayload](in, event.BrokerSnapshotVersions())
 	if err != nil {
 		return nil, err
 	}

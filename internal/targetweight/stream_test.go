@@ -192,7 +192,20 @@ type options struct {
 	// kill engages (true) or releases (false) the kill switch at the start
 	// of session i.
 	kill map[int]bool
+	// postClose feeds the broker snapshot and the mark as the IBKR adapter
+	// writes them under the owner's decision of 2026-10-18: the broker
+	// snapshot at version 2, as of the close and read readLag after it, and
+	// the mark at version 2, the bar's close with IBKR's last price beside it
+	// (brokerLast times the close). readTime instead stamps the broker and
+	// account snapshots at their read time, the reading not standing for the
+	// close.
+	postClose  bool
+	readTime   bool
+	brokerLast float64
 }
+
+// readLag is how long after the close the adapter's post-close reading is taken.
+const readLag = 70 * time.Minute
 
 type run struct {
 	inputs    []event.Envelope
@@ -285,7 +298,11 @@ func simulate(t *testing.T, opts options) run {
 				}
 			}
 		} else if !opts.noSnap[i] {
-			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), at, acct.snapshot(at, price)))
+			snap := acct.snapshot(at, price)
+			if opts.readTime {
+				snap.AsOf = at.Add(readLag)
+			}
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), snap.AsOf, snap))
 		}
 		if opts.brokers {
 			var b event.BrokerSnapshotPayload
@@ -304,12 +321,26 @@ func simulate(t *testing.T, opts options) run {
 			if m := opts.brokerMutate[i]; m != nil {
 				m(&b)
 			}
-			out := apply(s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("broker:%d", i), b.AsOf, b))
+			version := event.BrokerSnapshotSchemaVersion
+			switch {
+			case opts.readTime:
+				b.AsOf = at.Add(readLag)
+				b.ReadAt, b.NotAsOfClose = b.AsOf, "IBKR reports 1 execution in the account since the close"
+				version = event.BrokerSnapshotReadAtVersion
+			case opts.postClose:
+				b.ReadAt, b.AsOfClose = b.AsOf.Add(readLag), true
+				version = event.BrokerSnapshotReadAtVersion
+			}
+			out := apply(s.envelope(t, event.BrokerSnapshotEventType, version, fmt.Sprintf("broker:%d", i), b.AsOf, b))
 			acct.take(t, out)
 		}
 		if !opts.noMark[i] {
-			apply(s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i), at,
-				event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: price, Source: event.AdapterIBKR}))
+			mark, version := event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: price, Source: event.AdapterIBKR}, event.MarkRecordedSchemaVersion
+			if opts.postClose || opts.readTime {
+				mark.Source, version = "marketdata", event.MarkRecordedEvidenceVersion
+				mark.BrokerLast, mark.BrokerLastSet = price*opts.brokerLast, opts.brokerLast > 0
+			}
+			apply(s.envelope(t, event.MarkRecordedEventType, version, fmt.Sprintf("mark:%d", i), at, mark))
 		}
 		if ids == nil {
 			// The producer's session names what it delivered; a session with

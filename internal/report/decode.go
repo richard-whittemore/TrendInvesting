@@ -79,6 +79,9 @@ var (
 	saleWithheldVersions = []uint32{event.SaleWithheldSchemaVersion}
 	// The margin-cushion alarm's level changes (plan.md section 5).
 	marginAlarmVersions = []uint32{event.MarginAlarmSchemaVersion}
+	// The IBKR adapter's broker snapshot, read for the reason a reading
+	// after the close could not stand for it (version 2).
+	brokerSnapshotVersions = event.BrokerSnapshotVersions()
 	// A target-weight account's orders are limit orders, reported at
 	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
 	lifecycleVersions = []uint32{event.OrderLifecycleLimitVersion}

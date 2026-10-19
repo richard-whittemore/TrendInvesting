@@ -346,7 +346,7 @@ func (r *momentumRun) applySnapshot(in event.Envelope) error {
 }
 
 func (r *momentumRun) applyMark(in event.Envelope) error {
-	p, err := decodeInput[event.MarkRecordedPayload](in, event.MarkRecordedSchemaVersion)
+	p, err := decodeVersions[event.MarkRecordedPayload](in, event.MarkRecordedVersions())
 	if err != nil {
 		return err
 	}
