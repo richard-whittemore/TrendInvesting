@@ -313,6 +313,10 @@ type Handler struct {
 	// (applyClearance); a dry-run's orders, which no venue receives, never
 	// join it.
 	undecided []undecidedOrder
+	// cleared are the orders the owner settled as never sent, in the order
+	// cleared (BoostFigures.ClearedOrders): off undecided, but released in
+	// the gate still, so a decision records them for a restart to restore.
+	cleared []string
 	// olderThanRejection counts the first of undecided, in release order,
 	// that were released before the latest released of the orders inARow
 	// names: an acceptance of one of them is older than the run of
@@ -586,6 +590,22 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 			o.venueID = h.watch.venueID
 		}
 		h.undecided = append(h.undecided, o)
+	}
+	// A cleared order stays released, the oldest the gate knows of, so a
+	// sell never sent is still counted as sold. The watched one is restored
+	// above.
+	for _, r := range p.Boost.ClearedOrders {
+		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
+			o := event.OrderReleasedPayload{
+				AccountID: h.cfg.AccountID, ClientOrderID: r.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
+				Side: r.Side, Quantity: r.Released, LimitPrice: r.LimitPrice,
+			}
+			if err := h.gate.RestoreReleased(o, nil, time.Time{}, ""); err != nil {
+				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+			}
+			h.release(o)
+		}
+		h.cleared = append(h.cleared, r.ClientOrderID)
 	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
@@ -1081,11 +1101,14 @@ func (h *Handler) leaveUndecided(i int) bool {
 // leaves the orders awaiting the venue's word, counted neither accepted nor
 // rejected (ADR 0026, point 2, "Boost", amended 2026-10-18). It must name
 // the decided session's decision and its one order released, still
-// undecided, else it is refused, so a clearance never means more than the
-// owner said (fail closed). Nothing else changes: the order stays released
-// in the gate, so a never-sent sell still counts as being sold and a
-// never-sent buy is not planned again, until the fresh run the owner starts
-// after reconciling.
+// undecided and never named by the venue, else it is refused, so a
+// clearance never means more than the owner said (fail closed): an order
+// the venue has named, even only as submitted, was sent, and its verdict is
+// still to come. Nothing else changes: the order stays released in the
+// gate, so a never-sent sell still counts as being sold and a never-sent buy
+// is not planned again, until the fresh run the owner starts after
+// reconciling; the decision records it among the cleared orders so a restart
+// restores it.
 func (h *Handler) applyClearance(in event.Envelope) error {
 	p, err := decodeInput[event.RebalanceClearedPayload](in, event.RebalanceClearedSchemaVersion)
 	if err != nil {
@@ -1095,8 +1118,12 @@ func (h *Handler) applyClearance(in event.Envelope) error {
 		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
 	}
 	for _, id := range p.ClientOrderIDs {
-		if !slices.ContainsFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id }) {
+		i := slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id })
+		switch {
+		case i < 0:
 			return fmt.Errorf("targetweight: clearance %s names order %s, which is not an order this run released that the venue has not ruled on; Boost clears only an order the adapter never sent", in.ID, id)
+		case h.undecided[i].venueID != "":
+			return fmt.Errorf("targetweight: clearance %s names order %s, which the venue has already named as order %s; it was sent, so it is not an order the adapter never sent, and Boost clears only an order the adapter never sent", in.ID, id, h.undecided[i].venueID)
 		}
 		if orderplan.ClientOrderID(p.DecisionID, h.cfg.Boost.InstrumentID, h.released[id].Side) != id {
 			return fmt.Errorf("targetweight: clearance %s names order %s, which decision %s did not release", in.ID, id, p.DecisionID)
@@ -1104,6 +1131,7 @@ func (h *Handler) applyClearance(in event.Envelope) error {
 	}
 	for _, id := range p.ClientOrderIDs {
 		h.leaveUndecided(slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id }))
+		h.cleared = append(h.cleared, id)
 	}
 	return nil
 }
@@ -1203,7 +1231,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
 		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(),
-		VenueRejections: h.rejections, RejectedInARow: slices.Clone(h.inARow), UndecidedOrders: h.undecidedFigures(),
+		VenueRejections: h.rejections, RejectedInARow: slices.Clone(h.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(),
 		UndecidedBeforeRejection: h.olderThanRejection, RejectionsWhileStopped: h.rejectionsWhileStopped, NoVenue: h.noVenue(),
 	}
 }
@@ -1230,6 +1258,17 @@ func (h *Handler) undecidedFigures() []event.BoostUndecidedOrder {
 			o.Side, o.Released, o.LimitPrice, o.VenueOrderID = released.Side, released.Quantity, released.LimitPrice, r.venueID
 		}
 		out = append(out, o)
+	}
+	return out
+}
+
+// clearedFigures are the orders the owner settled as never sent as a
+// decision records them, each with its release (ADR 0026, point 5).
+func (h *Handler) clearedFigures() []event.BoostUndecidedOrder {
+	var out []event.BoostUndecidedOrder
+	for _, id := range h.cleared {
+		o := h.released[id]
+		out = append(out, event.BoostUndecidedOrder{ClientOrderID: id, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice})
 	}
 	return out
 }

@@ -201,18 +201,23 @@ is never sent, and the next decision time decides afresh. `journal-query
 refusals` and `journal-query orders` show which orders are open; the
 [missed-rebalance runbook](../runbooks/missed-rebalance.md) has the steps.
 
-For Boost (the joint account), a clearance settles one order the adapter
-never sent, after `relay.py resolve --never-sent`: name the decision that
-released it and that order. Boost then stops listing it as an order IBKR
-has not ruled on (`undecided_orders`), and nothing else changes; reconcile
-and start a fresh run ([boost](boost.md)). Boost refuses a clearance that
-names any other order, and every clearance in dry-run, where no order is
-listed. The momentum engine is not composed into the running program yet
-(only Boost is), so today an IRA's clearance is read by the momentum
-strategy and its tests only. Clear only after IBKR shows the order finished. A later IBKR
-report on a cleared order is refused, which stops the engine until you
+For an IRA, clear only after IBKR shows the order finished. A later IBKR
+report on a cleared IRA order is refused, which stops the engine until you
 reconcile. The reporter reads the clearance the same way, so that report
-also raises the urgent "venue report not read" alert.
+also raises the urgent "venue report not read" alert. The momentum engine
+is not composed into the running program yet (only Boost is), so today an
+IRA's clearance is read by the momentum strategy and its tests only.
+
+For Boost (the joint account), a clearance means something else: it
+settles one order the adapter **never sent**, after `relay.py resolve
+--never-sent`, so IBKR has nothing to show for it and there is no report
+to wait for. Name the decision that released it and that order. Boost then
+stops listing it as an order IBKR has not ruled on (`undecided_orders`),
+records it under `cleared_orders`, and nothing else changes; reconcile and
+start a fresh run ([boost](boost.md)). Boost refuses a clearance of an
+order IBKR has already named, even only as "submitted" (that order was
+sent and its verdict is still to come), a clearance that names any other
+order, and every clearance in dry-run, where no order is listed.
 
 ## Acknowledging an alert
 

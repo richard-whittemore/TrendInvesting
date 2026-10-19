@@ -721,6 +721,36 @@ func TestBoostUndecidedOrdersValidate(t *testing.T) {
 	}, "ruled")
 }
 
+// TestBoostClearedOrdersValidate: an order the owner settled as never sent
+// records its release, as released, and no venue order ID, since no venue
+// named it; it is named once and is not also undecided (ADR 0026, point 2,
+// "Boost", amended 2026-10-18, and point 5).
+func TestBoostClearedOrdersValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-3", Side: event.OrderSideBuy, Released: 5, LimitPrice: 100}}
+	v.Boost.ClearedOrders = []event.BoostUndecidedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideSell, Released: 12, LimitPrice: 550},
+		{ClientOrderID: "tw-2", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105},
+	}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("cleared orders beside an undecided one are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	at := func(i int, f func(*event.BoostUndecidedOrder)) func(*P) {
+		return func(p *P) {
+			p.Boost.ClearedOrders = slices.Clone(p.Boost.ClearedOrders)
+			f(&p.Boost.ClearedOrders[i])
+		}
+	}
+	expectInvalid(t, "unnamed", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "" }), "cleared")
+	expectInvalid(t, "named twice", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "tw-2" }), "twice")
+	expectInvalid(t, "also undecided", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "tw-3" }), "undecided")
+	expectInvalid(t, "without its release", v, at(0, func(o *event.BoostUndecidedOrder) { o.Released = 0 }), "released")
+	expectInvalid(t, "with no side", v, at(0, func(o *event.BoostUndecidedOrder) { o.Side = "" }), "released")
+	expectInvalid(t, "with no limit", v, at(0, func(o *event.BoostUndecidedOrder) { o.LimitPrice = 0 }), "released")
+	expectInvalid(t, "with a venue order ID", v, at(0, func(o *event.BoostUndecidedOrder) { o.VenueOrderID = "ib-1" }), "venue")
+}
+
 // TestBoostUndecidedBeforeRejectionValidate: a Boost decision counts how
 // many of the undecided orders were released before the latest rejection it
 // counts, never below none, never more than are listed, never the watched

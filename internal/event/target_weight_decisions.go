@@ -228,6 +228,16 @@ type BoostFigures struct {
 	// on an order it released (ADR 0026, point 5; ADR 0019, amended
 	// 2026-10-15); the watched order's own are in Watched. Omitted when none.
 	UndecidedOrders []BoostUndecidedOrder `json:"undecided_orders,omitempty"`
+	// ClearedOrders are the orders the owner settled as never sent
+	// (operator.rebalance.cleared), in the order cleared, with the release
+	// the gate still counts: a never-sent order leaves UndecidedOrders but
+	// stays released until the owner's fresh run, so a sell is still counted
+	// as sold. Each records its side, shares and limit as released, and
+	// none is also undecided; the watched order, if cleared, is among them
+	// as well as in Watched. A run restarted from the decision restores
+	// them (ADR 0026, point 2, "Boost", amended 2026-10-18, and point 5).
+	// Omitted when none.
+	ClearedOrders []BoostUndecidedOrder `json:"cleared_orders,omitempty"`
 	// RejectedWhileStopped are the account's orders the venue rejected after
 	// two rejections in a row stopped Boost's buys, read since the last
 	// decision: a sell sent while the stop is in force, or an order released
@@ -354,7 +364,7 @@ func (b BoostFigures) IsZero() bool {
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
 		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
 		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero() && b.VenueRejections == 0 &&
-		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
+		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.ClearedOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
 		b.UndecidedBeforeRejection == 0 && b.NoVenue == ""
 }
 
@@ -977,6 +987,28 @@ func (b BoostFigures) validateRejections() []error {
 		case o.Side != OrderSideBuy && o.Side != OrderSideSell, o.Released <= 0, !isFinite(o.LimitPrice), o.LimitPrice <= 0:
 			errs = append(errs, fmt.Errorf("undecided boost order %s, not the watched one, records its side, released shares and positive limit; got %q %d at %v",
 				o.ClientOrderID, o.Side, o.Released, o.LimitPrice))
+		}
+	}
+	// A cleared order is one the owner settled as never sent: named once, not
+	// also undecided, its release as released and no venue order ID, since
+	// no venue named it.
+	cleared := map[string]bool{}
+	for _, o := range b.ClearedOrders {
+		switch {
+		case o.ClientOrderID == "":
+			errs = append(errs, errors.New("a cleared boost order names its client order ID"))
+		case cleared[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost names cleared order %s twice", o.ClientOrderID))
+		case seen[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both cleared and undecided", o.ClientOrderID))
+		}
+		cleared[o.ClientOrderID] = true
+		switch {
+		case o.Side != OrderSideBuy && o.Side != OrderSideSell, o.Released <= 0, !isFinite(o.LimitPrice), o.LimitPrice <= 0:
+			errs = append(errs, fmt.Errorf("cleared boost order %s records its side, released shares and positive limit; got %q %d at %v",
+				o.ClientOrderID, o.Side, o.Released, o.LimitPrice))
+		case o.VenueOrderID != "":
+			errs = append(errs, fmt.Errorf("cleared boost order %s names venue order %s; no venue named an order the adapter never sent", o.ClientOrderID, o.VenueOrderID))
 		}
 	}
 	// The orders released before the latest rejection counted are the first

@@ -176,10 +176,11 @@ IBKR on any order counts as it would have without a restart.
 
 Which orders stay on `undecided_orders`, and when they leave:
 
-- An order IBKR received leaves at IBKR's first word on it: a fill, its
-  expiry or cancellation at the end of its day, or a rejection. A DAY
-  order always gets one, so in paper and live the list holds only orders
-  still working that day, or whose word from IBKR is late.
+- An order IBKR received leaves at its first word beyond "submitted": a
+  fill, its expiry or cancellation at the end of its day, or a rejection.
+  An order IBKR has only reported "submitted" stays listed. A DAY order
+  always gets one such word, so in paper and live the list holds only
+  orders still working that day, or whose word from IBKR is late.
 - An order the adapter **never sent** gets no word from IBKR, so it stays
   on the list, in every decision, until you settle it. After `relay.py
   resolve --never-sent`, record `operator rebalance-cleared` naming the
@@ -190,7 +191,11 @@ Which orders stay on `undecided_orders`, and when they leave:
   later exits smaller and a never-sent buy is not planned again. Reconcile
   and start a fresh run, as the table below says
   (`TestAClearedNeverSentOrderIsNoLongerUndecided`). A clearance that names
-  anything else is refused.
+  anything else is refused, and so is a clearance of an order IBKR has
+  already named (even as "submitted"): that order was sent. Boost records
+  each cleared order under `cleared_orders`, with its release, in every
+  later decision, so a run restarted from one still counts a cleared sell
+  as sold.
 - In **dry-run** no order reaches IBKR, so none is ever listed: each
   decision records `no_venue: "dry-run"` instead, and nothing is counted as
   accepted or rejected (`TestADryRunListsNoUndecidedOrder`). The page that tells you buys stopped names

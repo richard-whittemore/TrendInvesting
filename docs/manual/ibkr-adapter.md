@@ -112,7 +112,8 @@ the order stays released:
 - **Boost** lists the order as one IBKR has not ruled on
   (`undecided_orders`) in every decision until you clear it the same way:
   `operator rebalance-cleared` naming the decision that released it and
-  the order. The clearance only takes it off that list. A never-sent sell
+  the order. The clearance only takes it off that list, and Boost refuses it for an
+  order IBKR has already named (that order was sent). A never-sent sell
   keeps counting as being sold, so every later exit in the run is smaller
   (as in dry-run: [engine](engine.md), "What dry-run simulates"), and a
   never-sent buy is not planned again, because the target in force has not

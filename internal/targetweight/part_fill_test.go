@@ -1360,6 +1360,56 @@ func TestAClearedNeverSentOrderIsNoLongerUndecided(t *testing.T) {
 	assertRecoveredAsTheFullRun(t, opts, 20)
 }
 
+// TestAClearedNeverSentSellIsRecoveredFromALaterDecision: session 17's sell
+// is never sent and is settled as such at session 19, after session 18's buy
+// replaced it as the watched order. It leaves the undecided orders, but its
+// shares stay counted as sold until the owner's fresh run, so a decision
+// after the clearance records the order and a run restarted from that
+// decision counts them as the full run does (ADR 0026, point 2, "Boost",
+// amended 2026-10-18, and point 5: recovered, never recomputed).
+func TestAClearedNeverSentSellIsRecoveredFromALaterDecision(t *testing.T) {
+	opts := options{closes: flippingCloses(), hold: heldFrom(2), clear: map[int][]int{19: {17}}}
+	r := simulate(t, opts)
+	sell := releasedBy(t, r.decisions, 17)
+	if len(sell) != 1 || sell[0].Side != event.OrderSideSell {
+		t.Fatalf("setup: session 17 releases %+v, want one sell", sell)
+	}
+	decided := targets(t, r.decisions)
+	for _, n := range []int{20, 24, 40} {
+		d := decided[n].Boost
+		if len(d.ClearedOrders) != 1 || d.ClearedOrders[0].ClientOrderID != sell[0].ClientOrderID || d.ClearedOrders[0].Released != sell[0].Quantity {
+			t.Errorf("session %d records cleared orders %+v, want the sell %+v", n, d.ClearedOrders, sell[0])
+		}
+	}
+	assertRecoveredAsTheFullRun(t, opts, 19)
+	assertRecoveredAsTheFullRun(t, opts, 20)
+	assertRecoveredAsTheFullRun(t, opts, 24)
+}
+
+// TestAClearedOlderOrderCountsOneFewerBeforeTheRejection: the venue rejects
+// session 18's buy at session 20 (one rejection), when sessions 16's buy
+// and 17's sell, released before it, are undecided: the decision counts them
+// as older than the rejection. At session 22 the owner settles session 16's
+// buy as never sent; it leaves the undecided orders and the count falls by
+// one with the rejection unchanged, and a run restarted from the decision
+// before or after the clearance counts as the full run does (ADR 0026,
+// point 2, "Boost", amended 2026-10-18, and point 5).
+func TestAClearedOlderOrderCountsOneFewerBeforeTheRejection(t *testing.T) {
+	opts := options{closes: flippingCloses(), hold: heldFrom(2), invalidAt: map[int][]int{20: {18}}, clear: map[int][]int{22: {16}}}
+	r := simulate(t, opts)
+	decided := targets(t, r.decisions)
+	before, after := decided[21].Boost, decided[22].Boost
+	if before.VenueRejections != 1 || before.UndecidedBeforeRejection < 1 {
+		t.Fatalf("setup: session 21 counts %d rejections and %d undecided before the rejection, want one and some", before.VenueRejections, before.UndecidedBeforeRejection)
+	}
+	if after.UndecidedBeforeRejection != before.UndecidedBeforeRejection-1 || after.VenueRejections != before.VenueRejections {
+		t.Errorf("session 22 counts %d undecided before the rejection and %d rejections; want %d and %d after the clearance",
+			after.UndecidedBeforeRejection, after.VenueRejections, before.UndecidedBeforeRejection-1, before.VenueRejections)
+	}
+	assertRecoveredAsTheFullRun(t, opts, 21)
+	assertRecoveredAsTheFullRun(t, opts, 22)
+}
+
 // TestAClearanceOfNoUndecidedBoostOrderIsRefused: Boost reads the owner's
 // clearance only for an order of its own account that a decided session
 // released, under the decision it names, and that the venue has not ruled
@@ -1368,7 +1418,7 @@ func TestAClearedNeverSentOrderIsNoLongerUndecided(t *testing.T) {
 // so it refuses every clearance.
 func TestAClearanceOfNoUndecidedBoostOrderIsRefused(t *testing.T) {
 	closes := flippingCloses()[:20]
-	opts := options{closes: closes, hold: heldFrom(2)}
+	opts := options{closes: closes, hold: heldFrom(2), unsent: []int{16}}
 	at := sessionEnd(len(closes) - 1).Add(time.Hour)
 	first := func(r run, n int) event.OrderReleasedPayload {
 		t.Helper()
@@ -1388,6 +1438,12 @@ func TestAClearanceOfNoUndecidedBoostOrderIsRefused(t *testing.T) {
 		"an order not released": {change: func(_ run, p *event.RebalanceClearedPayload) { p.ClientOrderIDs = []string{"tw-nothing"} }},
 		"an order the venue ruled on": {change: func(r run, p *event.RebalanceClearedPayload) {
 			o := first(r, 0) // the first purchase, filled at session 1
+			p.DecisionID, p.ClientOrderIDs = o.Tag, []string{o.ClientOrderID}
+		}},
+		"an order the venue acknowledged": {change: func(r run, p *event.RebalanceClearedPayload) {
+			// Session 17's sell was sent and IBKR named it (submitted), so it
+			// was received by the venue and is not one the adapter never sent.
+			o := first(r, 17)
 			p.DecisionID, p.ClientOrderIDs = o.Tag, []string{o.ClientOrderID}
 		}},
 		"a dry-run's order": {mode: boostDryRun},

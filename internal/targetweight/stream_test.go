@@ -124,6 +124,12 @@ func (a *account) take(t *testing.T, out []event.Envelope) {
 	}
 }
 
+// dropUnsent takes off the queue every order opts says the adapter never
+// sends.
+func (a *account) dropUnsent(opts options) {
+	a.pending = slices.DeleteFunc(a.pending, func(p event.OrderReleasedPayload) bool { return opts.neverReaches(p.Tag) })
+}
+
 // fillAtMost fills every queued order at price, each for at most limit
 // shares when capped, and returns the venue's report of each execution, filled
 // at at; an order capped at 0 shares reports none.
@@ -242,6 +248,24 @@ type options struct {
 	// the owner's operator.rebalance.cleared for the order released at each
 	// session listed: an order the adapter never sent, settled as such.
 	clear map[int][]int
+	// unsent lists the sessions whose released orders the adapter never
+	// sends: the venue is told of none, so none is acknowledged and none
+	// executes. Every session in clear is one.
+	unsent []int
+}
+
+// neverReaches reports whether the adapter never sends the order released
+// by the decision tagged tag.
+func (o options) neverReaches(tag string) bool {
+	if slices.ContainsFunc(o.unsent, func(n int) bool { return decisionTag(n) == tag }) {
+		return true
+	}
+	for _, sessions := range o.clear {
+		if slices.ContainsFunc(sessions, func(n int) bool { return decisionTag(n) == tag }) {
+			return true
+		}
+	}
+	return false
 }
 
 // neverSent is the owner's operator.rebalance.cleared, at at, settling o as
@@ -449,7 +473,6 @@ func simulate(t *testing.T, opts options) run {
 			for _, o := range acct.all {
 				if o.Tag == decisionTag(j) {
 					apply(neverSent(t, s, o, at.Add(-70*time.Minute)))
-					acct.pending = slices.DeleteFunc(acct.pending, func(p event.OrderReleasedPayload) bool { return p.ClientOrderID == o.ClientOrderID })
 				}
 			}
 		}
@@ -493,6 +516,7 @@ func simulate(t *testing.T, opts options) run {
 			}
 			out := apply(s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("broker:%d", i), b.AsOf, b))
 			acct.take(t, out)
+			acct.dropUnsent(opts)
 		}
 		if !opts.noMark[i] {
 			apply(s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i), at,
@@ -506,6 +530,7 @@ func simulate(t *testing.T, opts options) run {
 		out := apply(s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("session:%d", i), at,
 			event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: ids}))
 		acct.take(t, out)
+		acct.dropUnsent(opts)
 	}
 	r.entries = rec.Entries()
 	return r

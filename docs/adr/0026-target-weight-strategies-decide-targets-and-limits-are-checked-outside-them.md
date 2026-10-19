@@ -1012,19 +1012,24 @@ target next changed; point 2 said nothing of a partial fill.
   venue's reports on an order still undecided are read, and a working sell
   among them netted, as on an order the restarted run released. Which
   orders stay listed, and when they leave: an order the venue received
-  leaves at its first word on it, and a DAY order always gets one (an
-  execution, its expiry or cancellation, or a rejection), so in paper and
+  leaves at its first word beyond `submitted` (an execution, its expiry or
+  cancellation, or a rejection; an order the venue has only named as
+  submitted stays listed), and a DAY order always gets one, so in paper and
   live the list holds only orders still working or whose word is late. An
   order the adapter never sent gets no word: it stays listed, in every
   decision, until the owner settles it. The owner settles it with `relay.py
   resolve --never-sent` and then records `operator rebalance-cleared` naming
   the decision that released it and the order; Boost reads that clearance
   for this alone, refuses one that names anything but an undecided order of
-  that decision, and takes the order off the list, counting it neither
-  accepted nor rejected. The clearance changes nothing else: the order stays
-  released in the gate, so a never-sent sell still counts as being sold and
-  a never-sent buy is not planned again, until the fresh run the owner
-  starts after reconciling. A dry-run's orders reach no venue, so none is
+  that decision, or an order the venue has already named (a venue order ID
+  from a `submitted` report: it was sent), and takes the order off the
+  list, counting it neither accepted nor rejected. The clearance changes
+  nothing else: the order stays released in the gate, so a never-sent sell
+  still counts as being sold and a never-sent buy is not planned again,
+  until the fresh run the owner starts after reconciling. Each decision
+  records the cleared orders with their release
+  (`boost.cleared_orders`, omitted when none), so a run restarted from it
+  restores them and counts as the full run does. A dry-run's orders reach no venue, so none is
   ever listed: each dry-run Boost decision records `boost.no_venue:
   "dry-run"` in place of the list and counts no verdict, and the clearance
   is refused there, there being nothing to clear. A fresh run
