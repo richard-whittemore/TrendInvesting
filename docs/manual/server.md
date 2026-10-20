@@ -232,7 +232,7 @@ and the engine (`sudo systemctl stop ti-engine@<account>`). An order the
 engine released that the adapter has not sent is never sent by the fresh
 run you start next: its adapter stops at start naming the order, and you
 settle it with the relay's `resolve --run-ended` command
-([paper trading](paper-trading.md), "What can go wrong"). One the adapter
+([paper trading](paper-trading.md), "What can go wrong"). An order the adapter
 refuses for good (released for an earlier session) is settled `--never-sent`
 with the same command, run on the server
 (`docs/runbooks/first-paper-order.md` shows it). Cancel anything already at

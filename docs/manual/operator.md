@@ -435,7 +435,7 @@ When the tool refuses, it writes nothing; run it again once fixed.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| No `.delivered` marker beside the file | The engine has not read the inbox since: it is stopped, was started without `-operator`, or the adapter has sent it nothing | Check the engine runs with `-operator` (`systemctl status ti-engine@<account>` shows its command line); nothing else is needed: it records the file before the adapter's next input |
+| No `.delivered` marker beside the file | Usually the engine has not read the inbox since: it is stopped, was started without `-operator`, or the adapter has sent it nothing. A missing marker alone does not prove that: the engine can record the instruction and then fail to write the marker (the `mark ... delivered` row below) | Run `journal-query operator <log>` first: if the instruction is listed, it is recorded and in force. If not, check the engine runs with `-operator` (`systemctl status ti-engine@<account>` shows its command line); nothing else is needed: it records the file before the adapter's next input |
 | `.delivered` marker and no `.refused` note | Recorded in the durable log at the sequence the marker states, and in force | Nothing; `journal-query operator <log>` shows it |
 | `.delivered` and a `.refused` note: `kill switch for account "..."; this gate is "joint"` | Recorded with no effect: `-account` was not the configuration's name (the IBKR number, say) | Record it again with `-account joint` and the current time |
 | `.refused`: `kill switch <id> states <time>, earlier than <id>, already applied ...` | Recorded with no effect: backdated with `-at` before a kill switch already applied | Record it again with the current time |

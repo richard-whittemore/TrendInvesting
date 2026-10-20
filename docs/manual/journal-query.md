@@ -105,7 +105,7 @@ orders.jsonl 5    2026-03-02  A1       BBB         refused       order-size     
 orders.jsonl 6    2026-03-02  A1       BBB         engine-state  degraded:risk-limit-breached    breach
 ```
 
-Is a sell of the program's still working?
+Is one of the program's sells still working?
 
 `orders` cannot say on its own. It lists what the program planned
 (`planned`), released (`released`, with `send=true` when it was to be
