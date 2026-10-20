@@ -87,6 +87,7 @@ Run `deploy/rehearse.sh` (Docker, a clean Ubuntu 24.04 container; about 350 MB o
 - the full provisioning pass runs twice and the second pass changes nothing and does not overwrite an owner-entered secret stub;
 - the real pinned IBC, IB Gateway and Tailscale downloads match their checksums; IBC and Tailscale are installed;
 - a corrupt cached download is not trusted;
+- `provision.sh twsapi` installs the pinned protobuf wheel and IBKR's `ibapi` into the adapter's own environment, `ibapi` imports there (version 10.51.01, protobuf 5.29.5), and the adapter's pin check accepts the install record; a protobuf wheel that differs from its pin is refused with no environment or record written, or the existing ones left unchanged (rehearsed 2026-10-20 in a linux/amd64 container; an arm64 container cannot run the x86_64 TWS API installer, so there the downloads are only verified);
 - the service users are non-root with no login shell; secret files are root:root 0600;
 - the credential renderer writes a fake password (with special characters) verbatim to a 0600 file, prints no credential, and leaves no copy under `/etc` or `/var/log`; it refuses an empty login and an unknown trading mode; the gateway's start exits 78 on an empty login, which the unit does not restart on;
 - the reporter, the dashboard, `operator` and `journal-query` are installed from the build, and both tools run as `sudo -u ti-trader <tool>`; the old single reporter's timer, service and timer link are removed;
