@@ -240,6 +240,18 @@ already at IBKR in IBKR's own app.
 | `provision.sh services` is run again after paper edits | The dry-run files come back; the paper engine refuses to start | Redo the paper edits |
 | A disk is lost | Only a Lightsail snapshot, if any, can restore it | `docs/runbooks/durable-log.md`, "A log that cannot be read" |
 
+## What is pinned
+
+Every download is fixed in `deploy/versions.env` by version and SHA-256, and provisioning stops on a mismatch.
+
+| Pin | What it is | Installed by |
+|---|---|---|
+| IBC 3.24.2 | The Gateway's login controller | `provision.sh gateway` |
+| IB Gateway 10.50.1f | IBKR's Gateway | `provision.sh gateway` |
+| TWS API 10.51.01 | IBKR's Python client, `ibapi` | `provision.sh twsapi`, into the adapter's own environment |
+| protobuf 5.29.5 | The Python package `ibapi` needs (PyPI's pure-Python wheel, one file for both machine types). **Proposed to the owner 2026-10-20 as a new runtime dependency (`docs/dependency-policy.md`); not final until ratified.** | `provision.sh twsapi`, before `ibapi`, offline |
+| Tailscale 1.104.1 | The private network | `provision.sh base` |
+
 ## What backs this
 
 - Plan sections 3 (architecture), 7 (operations) and 8 (costs); ADR 0025,

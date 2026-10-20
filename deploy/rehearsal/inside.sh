@@ -109,7 +109,7 @@ else
   # Imported for real, in the adapter's own environment and nowhere else.
   "$venv/bin/python3" -I -c 'import google.protobuf as g, ibapi, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper
 assert g.__version__ == "5.29.5", g.__version__
-assert ibapi.VERSION == {"major": 10, "minor": 51, "micro": 1}, ibapi.VERSION' || fail "ibapi does not import in the adapter's environment"
+assert ibapi.VERSION == {"major": 1051, "minor": 1}, ibapi.VERSION' || fail "ibapi does not import in the adapter's environment"
   grep -qx 'PROTOBUF_VERSION=5.29.5' "$record" || fail "the install record names no protobuf version"
   # The adapter's own start-up check, run in that environment against the record.
   (cd /tmp && "$venv/bin/python3" -I -c 'import sys; sys.path.insert(0, "/"); from ibapi_pin import check_installed

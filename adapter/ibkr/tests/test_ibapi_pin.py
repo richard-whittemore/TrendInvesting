@@ -45,7 +45,8 @@ def protobuf_stub(version=PB_VERSION, path=VENV_PROTOBUF):
 def ibapi_stub(version=(10, 51, 1), path=VENV_IBAPI):
     stub = types.ModuleType("ibapi")
     if version is not None:
-        stub.VERSION = dict(zip(("major", "minor", "micro"), version))
+        # ibapi 10.51.01 reports VERSION = {"major": 1051, "minor": 1}.
+        stub.VERSION = {"major": version[0] * 100 + version[1], "minor": version[2]}
     if path is not None:
         stub.__file__ = path
     return stub
@@ -167,7 +168,8 @@ class PinTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"ibapi": None}), self.assertRaises(IbapiNotPinned) as caught:
             check_installed(str(self.record), str(self.versions))
         self.assertIn("provision.sh twsapi", str(caught.exception))
-        for version in (None, {"major": 10, "minor": 51}, {"major": "10", "minor": 51, "micro": 1}):
+        for version in (None, {"major": 10, "minor": 51, "micro": 1}, {"major": 1051}, {"major": "1051", "minor": 1},
+                        {"major": True, "minor": 1}, {"major": 1051, "minor": -1}):
             stub = ibapi_stub(None)
             if version is not None:
                 stub.VERSION = version

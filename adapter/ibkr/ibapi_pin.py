@@ -26,8 +26,9 @@ AGENTS.md). The files inside the venv are not hashed: the record attests
 the installer, and the venv is root's, rebuilt whole by that step. ADR 0025 point 5: a change of API
 version repeats the paper-account test before the pin moves.
 
-The TWS API's version "10.51.01" is ibapi's VERSION {"major": 10, "minor":
-51, "micro": 1}: compared as whole numbers.
+The TWS API's version "10.51.01" is ibapi's VERSION {"major": 1051, "minor":
+1} (the first two parts joined as hundreds, then the third), as the real
+client reports it: compared as whole numbers.
 """
 import importlib
 import os
@@ -103,7 +104,10 @@ def _require_own_environment(module, name="ibapi"):
 
 
 def installed_ibapi_version():
-    """(major, minor, micro) of the ibapi this Python imports from its own venv, else IbapiNotPinned."""
+    """(major, minor, micro) of the TWS API this Python's ibapi reports, from its own venv, else IbapiNotPinned.
+
+    ibapi.VERSION is {"major": 1051, "minor": 1} for 10.51.01.
+    """
     try:
         ibapi = importlib.import_module("ibapi")
     except ImportError as err:
@@ -111,11 +115,12 @@ def installed_ibapi_version():
                              "twsapi`".format(type(err).__name__)) from None
     _require_own_environment(ibapi)
     version = getattr(ibapi, "VERSION", None)
-    parts = tuple(version.get(k) for k in ("major", "minor", "micro")) if isinstance(version, dict) else ()
-    if len(parts) != 3 or not all(isinstance(p, int) and not isinstance(p, bool) for p in parts):
+    parts = tuple(version.get(k) for k in ("major", "minor")) if isinstance(version, dict) and set(version) == {"major", "minor"} else ()
+    if len(parts) != 2 or not all(isinstance(p, int) and not isinstance(p, bool) for p in parts) or \
+            parts[0] < 100 or parts[1] < 0:
         raise IbapiNotPinned("the ibapi this Python imports names no version (ibapi.VERSION); install the pinned "
                              "build with `sudo deploy/provision.sh twsapi`")
-    return parts
+    return parts[0] // 100, parts[0] % 100, parts[1]
 
 
 def installed_protobuf_version():

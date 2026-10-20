@@ -13,6 +13,10 @@ A new runtime dependency requires a pull-request rationale covering:
 - security history and data-access implications; and
 - how it affects deterministic replay or production failure modes.
 
+Not every runtime dependency is a Go module. Pinned non-Go runtime dependencies, each fixed by version and SHA-256 in `deploy/versions.env` and verified before use:
+
+- **protobuf 5.29.5** (Python, the pure-Python wheel from PyPI, BSD-3-Clause), imported by IBKR's `ibapi` 10.51.01, which the IBKR adapter uses (ADR 0025). Alternatives considered: Ubuntu 24.04's packaged protobuf 3.21.12 (does not work with `ibapi`); the compiled wheels (one per machine type, no behavioural difference the adapter needs); vendoring `ibapi`'s protobuf stubs (they still import `google.protobuf`). It runs only inside the adapter's own virtual environment, offline-installed by `provision.sh twsapi`, with no transitive dependencies; the adapter refuses to start on any other version. It parses IBKR's messages and touches no strategy, risk or replay path. **Proposed to the owner on 2026-10-20; it is a proposal until the owner ratifies it.**
+
 Commit `go.mod` and `go.sum`. Do not use an unreviewed `replace` or `exclude` directive. A long-lived fork or replacement requires an architecture decision record.
 
 ## Development tools
