@@ -216,8 +216,10 @@ Which orders stay on `undecided_orders`, and when they leave:
   echo Boost's order ID is still counted once, not as a second sell
   (`TestARunRecoveredBehindAWorkingSellMatchesItsListingByVenueOrderID`).
   A record that lists an unnamed working order, or the same fill under two
-  orders, is refused (`TestBoostWorkingOrdersValidate`,
-  `TestARecoveredWorkingOrderStatingAnExecutionAlreadyReadIsRefused`).
+  orders, is refused (`TestBoostWorkingOrdersValidate`); so is one whose
+  working or watched order states an execution already read on an order this
+  run released before the recovery
+  (`TestARecoveredOrderStatingAnExecutionAlreadyReadIsRefused`).
 - In **dry-run** no order reaches IBKR, so none is ever listed: each
   decision records `no_venue: "dry-run"` instead, and nothing is counted as
   accepted or rejected (`TestADryRunListsNoUndecidedOrder`). A dry-run

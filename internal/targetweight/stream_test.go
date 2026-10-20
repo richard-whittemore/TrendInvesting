@@ -252,6 +252,21 @@ type options struct {
 	// sends: the venue is told of none, so none is acknowledged and none
 	// executes. Every session in clear is one.
 	unsent []int
+	// ackAt withholds the venue's acknowledgement of the order released at
+	// session j until the start of session ackAt[j]: the venue accepts it
+	// after the orders released later.
+	ackAt map[int]int
+}
+
+// ackWithheld reports whether the venue has yet to acknowledge, at session
+// i, the order released by the decision tagged tag.
+func (o options) ackWithheld(tag string, i int) bool {
+	for j, at := range o.ackAt {
+		if decisionTag(j) == tag && i < at {
+			return true
+		}
+	}
+	return false
 }
 
 // neverReaches reports whether the adapter never sends the order released
@@ -406,6 +421,9 @@ func simulate(t *testing.T, opts options) run {
 			}
 		}
 		for _, o := range acct.pending {
+			if opts.ackWithheld(o.Tag, i) {
+				continue
+			}
 			ack := event.LimitOrderLifecyclePayload{
 				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
 				Side: o.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at.Add(-3 * time.Hour),

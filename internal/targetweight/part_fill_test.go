@@ -1582,6 +1582,49 @@ func TestARunRecoveredWatchingAnOrderTheVenueAcceptedCountsAsTheFullRun(t *testi
 	}
 }
 
+// TestARunRecoveredWithTheWatchedOrderAmongOthersListsItLastOnceReplaced:
+// the order released at session 18 is part-filled at session 19, so the venue
+// accepted it, and the re-plan released at session 19, the watched order,
+// part-fills at session 20; the entry released at session 16, older than
+// both, is accepted at session 21 by a late execution. The full run lists the
+// re-plan before it among the working orders while it is watched, and after
+// the older ones once session 23's release replaces it as the watched order. A
+// run restarted from a decision taken while the re-plan was still the watched
+// one restores the older orders first and the watched one last, so it lists
+// them as the full run does (ADR 0026, point 5: recovered, never recomputed;
+// an order replaced as the watched one is listed after the other working
+// orders).
+func TestARunRecoveredWithTheWatchedOrderAmongOthersListsItLastOnceReplaced(t *testing.T) {
+	hold := heldFrom(18)
+	delete(hold, 18)
+	delete(hold, 19)
+	delete(hold, 20)
+	opts := options{
+		closes: flippingCloses(), hold: hold,
+		partFill: map[int]int64{17: 0, 19: 2, 20: 1}, cancelAt: map[int]int{17: 30, 19: 30, 20: 30},
+		lateFill: map[int]lateFill{17: {at: 21, shares: 3}},
+	}
+	full := simulate(t, opts)
+	decided := targets(t, full.decisions)
+	watched := decided[22].Boost.Watched.ClientOrderID
+	listed := func(n int) []string {
+		var ids []string
+		for _, w := range decided[n].Boost.WorkingOrders {
+			ids = append(ids, w.ClientOrderID)
+		}
+		return ids
+	}
+	if got := listed(22); len(got) != 2 || slices.Contains(got, watched) {
+		t.Fatalf("setup: session 22 lists %v beside the watched %s, want two older orders", got, watched)
+	}
+	if got := listed(23); len(got) != 3 || got[2] != watched {
+		t.Fatalf("setup: session 23 lists %v, want the replaced %s last", got, watched)
+	}
+	for _, n := range []int{21, 22} {
+		assertRecoveredAsTheFullRun(t, opts, n)
+	}
+}
+
 // TestARunRecoveredBehindAWorkingSellMatchesItsListingByVenueOrderID:
 // Boost's exit, a sell released at session 17, executes 5 shares at session
 // 18 before any lifecycle report names it, so the venue accepted it with no
@@ -1635,34 +1678,59 @@ func TestARunRecoveredBehindAWorkingSellMatchesItsListingByVenueOrderID(t *testi
 	}
 }
 
-// TestARecoveredWorkingOrderStatingAnExecutionAlreadyReadIsRefused: a
-// broker snapshot read before the recovered decision releases the sale back
-// to 98%, and its execution is read. A decision whose working order states
-// that execution as its own is refused, and the run stops: an execution is
-// of one order, and counting it on two would net a sell twice (ADR 0019,
-// "Explained means"; fail closed, AGENTS.md).
-func TestARecoveredWorkingOrderStatingAnExecutionAlreadyReadIsRefused(t *testing.T) {
-	at := sessionEnd(0)
-	h, s := configured(t)
-	held := &account{cash: -2000, held: 60}
-	urgent := held.broker(at.Add(-2*time.Hour), 100)
-	urgent.ExcessLiquidity = 0.1 * urgent.NetLiquidation
-	sale := released(t, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k", urgent.AsOf, urgent)))
-	if len(sale) != 1 {
-		t.Fatalf("the urgent broker snapshot released %+v, want the sale back to 98%%", sale)
+// TestARecoveredOrderStatingAnExecutionAlreadyReadIsRefused: a broker
+// snapshot read before the recovered decision releases the sale back to 98%,
+// and its execution is read. A decision whose working order, or whose watched
+// order, states that execution as its own is refused, and the run stops: an
+// execution is of one order, and counting it on two would net a sell twice
+// (ADR 0019, "Explained means"; fail closed, AGENTS.md).
+func TestARecoveredOrderStatingAnExecutionAlreadyReadIsRefused(t *testing.T) {
+	cases := []struct {
+		name  string
+		opts  options
+		n     int
+		state func(*event.TargetsDecidedPayload) *event.BoostWatchedFill
+	}{
+		{"a working order", options{closes: flippingCloses(), hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}}, 17,
+			func(p *event.TargetsDecidedPayload) *event.BoostWatchedFill {
+				if len(p.Boost.WorkingOrders) != 1 || len(p.Boost.WorkingOrders[0].Fills) != 1 {
+					return nil
+				}
+				return &p.Boost.WorkingOrders[0].Fills[0]
+			}},
+		{"the watched order", options{partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 21}}, 17,
+			func(p *event.TargetsDecidedPayload) *event.BoostWatchedFill {
+				if len(p.Boost.Watched.Fills) != 1 {
+					return nil
+				}
+				return &p.Boost.Watched.Fills[0]
+			}},
 	}
-	fill := held.fill(sale[0], "fill:sale", 1, sale[0].LimitPrice, at.Add(-time.Hour))
-	mustApply(t, h, s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, fill.FillID, fill.FilledAt, fill))
-	opts := options{closes: flippingCloses(), hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}}
-	recovery := ofType(simulate(t, opts).decisions, event.TargetsDecidedEventType)[17]
-	var p event.TargetsDecidedPayload
-	decode(t, recovery, &p)
-	if len(p.Boost.WorkingOrders) != 1 || len(p.Boost.WorkingOrders[0].Fills) != 1 {
-		t.Fatalf("setup: session 17 records working orders %+v, want one with one execution", p.Boost.WorkingOrders)
-	}
-	p.Boost.WorkingOrders[0].Fills[0].FillID = fill.FillID
-	_, err := h.Apply(context.Background(), s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, at, p))
-	if err == nil || !strings.Contains(err.Error(), "already applied") {
-		t.Errorf("the recovered decision restoring the sale's execution on its working order was read, err %v; want it refused", err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			at := sessionEnd(0)
+			h, s := configured(t)
+			held := &account{cash: -2000, held: 60}
+			urgent := held.broker(at.Add(-2*time.Hour), 100)
+			urgent.ExcessLiquidity = 0.1 * urgent.NetLiquidation
+			sale := released(t, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k", urgent.AsOf, urgent)))
+			if len(sale) != 1 {
+				t.Fatalf("the urgent broker snapshot released %+v, want the sale back to 98%%", sale)
+			}
+			fill := held.fill(sale[0], "fill:sale", 1, sale[0].LimitPrice, at.Add(-time.Hour))
+			mustApply(t, h, s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, fill.FillID, fill.FilledAt, fill))
+			recovery := ofType(simulate(t, c.opts).decisions, event.TargetsDecidedEventType)[c.n]
+			var p event.TargetsDecidedPayload
+			decode(t, recovery, &p)
+			stated := c.state(&p)
+			if stated == nil {
+				t.Fatalf("setup: session %d records %+v, want %s with one execution", c.n, p.Boost, c.name)
+			}
+			stated.FillID = fill.FillID
+			_, err := h.Apply(context.Background(), s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, at, p))
+			if err == nil || !strings.Contains(err.Error(), "already applied") {
+				t.Errorf("the recovered decision restoring the sale's execution on %s was read, err %v; want it refused", c.name, err)
+			}
+		})
 	}
 }
