@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L")
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8)
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -414,6 +414,7 @@ the module's own rules version and decision corpus (ADR 0016;
 | The owner's birth date enters the journal through the configuration, though it stays out of the repository | **decided 2026-10-16:** only the birth year and month, as a configured value (point 6) |
 | Backtest behaviours live trading will not copy: keeping the last book on short data, SPY treated as risk-on with fewer than 200 closes, a lookback window that shifts across a gap (`defensive_v2.py:269-291`); ties in the ranking (323); a zero volatility weighted as 1 (76); RSI(2)'s dependence on its warm-up seed (`template.py:54-55`) | measured by the parity tests, which report each difference; none is copied into live code without a decision |
 | A name with no sector label, which the backtest ranked and left uncapped (`defensive_v2.py:69-74`) and live trading had left out (`plan.md` section 4, "Sectors", "Chosen") | **decided 2026-10-18 by the owner ("I want parity"): live trading copies the backtest.** The name is ranked and can be picked, counted toward the book's 25 but toward no sector's cap of 3; it is not excluded and has no status of its own. Target-weight rules version 1.13.0. It is not a listed difference: the parity tests require the live book to equal the backtest's here |
+| Three more backtest behaviours of the IRA runs: a buy held back for a newly added stock's first price; a name with no reference price, traded outside the planner; LEAN's own sale of a holding at the stock's delisting | **decided 2026-10-18 by the owner: listed, each only with its recorded evidence and bound.** `price-wait`: a newly added stock bought on the first session it had a price, within five sessions, the wait recorded in the export and verified on the calendar. `unpriced`: only an instrument before its listing date (IEF before July 2002): the export records no price for it that month, and the month comes before the first month any export records a price for it. `liquidated`: LEAN's own "Liquidate from delisting" sale, recorded as such in the orders listing, of a stock Go held (a holding at the last rebalance or a buy it kept). Anything outside those bounds is reported `unexplained` and fails the differences check (`docs/research/parity-2026-10.md`, "Round 4") |
 | Excess Liquidity thresholds: `plan.md` says "their own hash"; this ADR puts them in the account configuration's one hash | corrected in `plan.md` on acceptance (2026-10-16): part of the account configuration's one hash |
 
 ## Alternatives rejected
@@ -858,3 +859,87 @@ which applies no minimum lot, and record no holdings, so no golden month
 changed. The parity tool knows no holdings either; it was re-run on the
 kept exports and its three reports are byte-identical to the
 `_held_gap` reports (`docs/research/parity-2026-10.md`).
+
+## Amendment (2026-10-18, owner decision): the remaining parity scope
+
+The parity runs of the glide path, D7-L and the IRA execution
+(`docs/research/parity-2026-10.md`, "Remaining scope", and "Review fixes
+and re-runs, 2026-10-18") failed only on IRA orders the backtest could not
+place. The owner decided four things on 2026-10-18, and a fifth, on a sell that cannot complete, later that day. The recorded failures
+stand as recorded (AGENTS.md rule 6).
+
+- **Point 8: a stock delisted or acquired at the rebalance.** The list of
+  backtest behaviours live trading does not copy gains one cause: *the
+  stock was delisted or acquired at the rebalance, so the backtest could
+  not trade it.* The backtest's universe still ranks such a stock from the
+  session before, and the IRA planner plans an order for it that
+  QuantConnect cannot fill. The parity tool lists each such order under
+  that cause (`delisted`) **with the detection the export records**, never
+  an inferred cause: QuantConnect refused the order (its placeholder order
+  ID in the first exports, or a refusal that it gave as "non-tradable"), or
+  the stock had no price within five sessions (`unplaced`). An order
+  refused for any other reason still fails. The `ira-orders` check passes
+  when every departure is so listed. *(As the tool applies it, after a
+  second review on 2026-10-18: a placeholder order ID records only that
+  QuantConnect refused, not why, so a refusal recorded by it alone fails;
+  an `unplaced` buy is listed only when the export records the five
+  sessions waited for a price, which the sequence check counts on the
+  calendar; and each detection must name an order Go planned that the
+  backtest did not fill. Every other refusal or unplaced buy fails.)*
+- **Point 7, item 2: the thresholds proposed for the remaining runs are
+  confirmed** as the rule: the glide path's age and bond share within
+  1e-12 absolute; the IRA plan, orders and sequence exact; the IRA buy
+  scaling's scale within 1e-12 absolute, its shares and skips exact.
+- **The IRA buy delay** is read as point 2, "IRA execution", states it:
+  the buys go only after the rebalance's sells have filled (one session
+  later in the runs), at once when there is no sell. Confirmed. *(As the
+  parity tool and the IRA template apply it: a buy waits until every sell
+  of the run is terminal, of any month or tag, not only the rebalance's
+  own; the delay applies when a sell is placed or still working at the
+  rebalance.)*
+- **A sell that cannot complete (decided by the owner, 2026-10-18).** The
+  held-out run had a sell that never filled (CBAY, 2024-04), and no later
+  month's buys were placed. A sell that cannot complete is either refused
+  as non-tradable or left without a price for five sessions. The owner
+  decided that such a sell is set aside as `unfinished` and does not
+  block that rebalance's buys. The buys are scaled to the cash actually
+  available, never counting the stuck sell's proceeds. The stuck holding is
+  reported, and live trading pages the owner (built separately, with the
+  live alerts). *(As the IRA template and the parity tool apply it: a
+  refused sell never works, so it holds nothing; a market sell still
+  working at 8:00 on the fifth session at whose 8:00 it was working (its
+  own day the first when it was placed before 8:00) had no price at any
+  of those opens, and from then on it holds no buy. It stays
+  netted from the holding, since it may still execute (point 5). The tool
+  finds it from the orders listing and the calendar, never from the
+  export, and reports it as `set-aside` when it never filled and either is Go's
+  planned sell of exactly its shares, or is an unpriced sale of a holding
+  with no reference price that was not a pending target; any other
+  set-aside sell fails. One that
+  later fills in full is an ordinary sell, filled after buys it no longer
+  held; one left partly filled fails `ira-orders`.)*
+- **D7-F is dropped from the parity scope.** Point 7, item 2's "repeat
+  with each D7 option" reads D7-L only: D7-F, fractional shares, is not
+  built (point 2, "D7-L", the owner's choice of 2026-10-16). Point 8's D7
+  row is unchanged: if D7-F is ever built, it enters with its own tests.
+
+The thresholds of the remaining parity checks are now:
+
+| Check | Threshold |
+| --- | --- |
+| glide age, glide share | absolute difference at most 1e-12 |
+| glide weights, glide sleeves, D7-L weights | the same instruments; absolute difference at most 1e-12 |
+| D7-L picks, skipped, kept | exact, a withheld month included |
+| IRA plan | exact |
+| IRA scale | scale within 1e-12 absolute; shares and skips exact |
+| IRA orders | exact; a departure listed under point 8's causes passes |
+| IRA sequence | exact |
+| differences | any live departure whose cause point 8 does not list fails |
+
+The comparison was re-run on the kept exports and on the two IRA runs
+made with the fixed template (IRA_PARITY_R2, OOS_IRA_PARITY_R2); no other
+QuantConnect run was made for that review. After a second review the same
+day, the comparison was re-run on the kept exports again and the two IRA
+runs were made once more with the template's further fixes (IRA_PARITY_R3,
+OOS_IRA_PARITY_R3; `docs/research/parity-2026-10.md`, "Second review
+fixes, 2026-10-18").
