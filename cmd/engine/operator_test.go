@@ -441,39 +441,33 @@ func TestAnUnlistableNotesFolderStopsTheDelivery(t *testing.T) {
 	}
 }
 
-// TestAMarkerInTheInboxDoesNotSettleARecord: the inbox's writer is the
-// operator's identity, not the engine's, so a .delivered or .refused file
-// found in the inbox (forged, or left by an earlier layout) settles nothing:
-// only the engine's own notes folder does (ADR 0026, amendment of
-// 2026-10-18, "the operator inbox has a writer of its own").
-func TestAMarkerInTheInboxDoesNotSettleARecord(t *testing.T) {
-	dir := t.TempDir()
-	opts := inboxOptions(t, dir)
-	engaged := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
-	other := writeKillSwitch(t, opts.operatorDir, "ira", boostSession(0).Add(-time.Hour), true)
-	for name, suffix := range map[string]string{engaged.FileName(): deliveredSuffix, other.FileName(): refusedSuffix} {
-		if err := os.WriteFile(filepath.Join(opts.operatorDir, name+suffix), []byte("forged\n"), 0o600); err != nil {
+// TestAMarkerInTheInboxIsRefusedAtTheStart: a .delivered or .refused file
+// found in the inbox is either an earlier layout's or forged, and the engine
+// no longer reads it, so a record it once refused (a time ahead, say) would
+// be read again and delivered once that time passed. The start is refused,
+// naming the file and the manual's upgrade step, rather than leaving the
+// state ambiguous (fail closed, ADR 0019; ADR 0026, amendment of 2026-10-18,
+// "the operator inbox has a writer of its own").
+func TestAMarkerInTheInboxIsRefusedAtTheStart(t *testing.T) {
+	for _, suffix := range []string{deliveredSuffix, refusedSuffix} {
+		dir := t.TempDir()
+		opts := inboxOptions(t, dir)
+		r := writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true)
+		marker := r.FileName() + suffix
+		if err := os.WriteFile(filepath.Join(opts.operatorDir, marker), []byte("forged\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-	}
-	inbox, err := openOperatorInbox(opts, composition{}, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	records, err := inbox.pending()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 2 || records[0].ID != engaged.ID || records[1].ID != other.ID {
-		t.Errorf("pending() = %+v, want both records: a marker in the inbox settles nothing", records)
+		_, err := openOperatorInbox(opts, composition{}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "Upgrading from a build that wrote its notes into the inbox") {
+			t.Errorf("a %s file in the inbox: err = %v, want a refusal naming %s and the upgrade step", suffix, err, marker)
+		}
 	}
 }
 
-// TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice: an earlier layout
-// marked a delivered record beside it in the inbox, a marker the engine no
-// longer reads; the durable log's committed input is what keeps it from
-// being recorded again (ADR 0027), and the engine notes it in its own
-// folder.
+// TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice: with the notes
+// folder gone, the durable log's committed input is what keeps a delivered
+// record from being recorded again (ADR 0027), and the engine notes it in
+// its own folder.
 func TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice(t *testing.T) {
 	dir := t.TempDir()
 	first := inboxOptions(t, dir)
@@ -487,11 +481,9 @@ func TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := feed.sequence
-	// The earlier layout: its marker beside the record, no notes folder.
+	// The earlier layout's marker was moved out, as the manual says, and the
+	// notes folder is gone: the log alone says the record was delivered.
 	if err := os.RemoveAll(operatorNotesDir(first.operatorDir)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(first.operatorDir, engaged.FileName()+deliveredSuffix), []byte("delivered\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

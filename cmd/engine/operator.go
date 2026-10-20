@@ -23,14 +23,15 @@ import (
 // refusedSuffix names the note the engine writes, in its notes folder under an inbox
 // record's name, when it refused the record, saying why; a record with a
 // note is never delivered again. A file of that name in the inbox itself
-// settles nothing: the inbox's writer is not the engine (ADR 0026,
+// settles nothing, and the start refuses an inbox holding one
+// (checkInboxIdentity): the inbox's writer is not the engine (ADR 0026,
 // amendment of 2026-10-18), so it could otherwise silence a kill switch.
 const refusedSuffix = ".refused"
 
 // deliveredSuffix names the marker the engine writes, in its notes folder under
 // an inbox record's name, once the record's input is flushed to the durable
-// log. As for refusedSuffix, one found in the inbox settles nothing; a record
-// an earlier layout marked there is kept from a second delivery by the
+// log. As for refusedSuffix, one found in the inbox settles nothing and the
+// start refuses it; a record kept from a second delivery is kept by the
 // durable log's committed input (ADR 0027).
 const deliveredSuffix = ".delivered"
 
@@ -364,7 +365,9 @@ var (
 // it runs as root. It reads the inbox only through its group, since the tool
 // writes each record 0640 in that group: the engine's user must be in the
 // inbox's group, the mode must be 0750 (no access for others), and a record
-// there must open. A folder or record it cannot read would leave a kill
+// there must open. A marker (refusedSuffix, deliveredSuffix) in the inbox is
+// refused too: the engine no longer reads one, so the state is ambiguous
+// until a person moves it. A folder or record it cannot read would leave a kill
 // switch unread while it decides, so that is refused too (fail closed, ADR
 // 0019).
 func checkInboxIdentity(dir string, info os.FileInfo) error {
@@ -398,6 +401,11 @@ func checkInboxIdentity(dir string, info os.FileInfo) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("engine: the engine cannot list the operator inbox %s: %w", dir, err)
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); entry.Type().IsRegular() && (strings.HasSuffix(name, refusedSuffix) || strings.HasSuffix(name, deliveredSuffix)) {
+			return fmt.Errorf("engine: the operator inbox %s holds %s, a marker an earlier layout wrote there (or a forged one); the engine no longer reads markers in the inbox, so the record it names could be read again, and one refused for a time ahead delivered once that time passed. Move every record that has a marker out of the inbox with its markers before starting (docs/manual/operator.md, \"Upgrading from a build that wrote its notes into the inbox\")", dir, name)
+		}
 	}
 	for _, entry := range entries {
 		if name := entry.Name(); entry.Type().IsRegular() && strings.HasSuffix(name, ".json") {

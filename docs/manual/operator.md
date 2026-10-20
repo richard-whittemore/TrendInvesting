@@ -80,15 +80,16 @@ engine does not decide with it unread.
 
 **Upgrading from a build that wrote its notes into the inbox.** An earlier
 build wrote `.delivered` and `.refused` beside each file in the inbox; this
-build ignores them. A file already recorded in a log still in the engine's
-log folder is not recorded again (the log is the evidence), and the engine
-notes it in its own folder. A file whose log you quarantined or kept
-elsewhere would be recorded again, and a file refused earlier is read again.
-So before the first start of this build, move every file that has a
-`.delivered` or `.refused` beside it out of the inbox, with its markers
+build does not read them, and it refuses to start while the inbox holds one,
+naming the file, because a record that was refused (for a time ahead, say)
+would otherwise be read again and delivered once that time passed. So before
+the first start of this build, move every file that has a `.delivered` or
+`.refused` beside it out of the inbox, with its markers
 (`sudo mkdir /var/lib/trend-investing/engines/<account>/operator-old` and
 `sudo mv` them there); nothing the engine needs is lost, since the log holds
-what was recorded.
+what was recorded. A file already recorded in a log still in the engine's
+log folder is not recorded again (the log is the evidence), and the engine
+notes it in its own folder.
 
 ## The operator inbox
 
@@ -403,7 +404,7 @@ reports ([journal-query](journal-query.md)).
 | An acknowledgement the engine refuses (a time more than five minutes ahead, an unreadable file) | Never recorded; a `.refused` note in the notes folder says why | Record it again with the current time |
 | An acknowledgement recorded for another account | Recorded with no effect; the reporter does not count it, so the alert keeps repeating | Record it again with the right account |
 | Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |
-| Someone edits a file in the inbox | The engine refuses it, writes `<file>.refused` saying why, and never uses it | Record the instruction again with the tool |
+| Someone edits a file in the inbox | The engine refuses it, writes `<file>.refused` in its notes folder saying why, and never uses it | Record the instruction again with the tool |
 | A clearance that names the wrong orders | Recorded with no effect; `.refused` note says which orders are open | Clear again naming exactly those |
 | The engine is restarted fresh while the switch was on | The fresh run starts with the switch off; `operator approve` warns you | Record the switch again before starting it |
 | A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
