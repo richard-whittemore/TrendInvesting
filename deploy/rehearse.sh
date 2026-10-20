@@ -46,4 +46,6 @@ id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)
 trap 'docker rm -f "$id" >/dev/null 2>&1 || true; rm -rf "$dist"' EXIT
 docker cp "$repo/deploy" "$id:/deploy"
 docker cp "$dist" "$id:/dist"
+# The adapter's pin check, run inside the container against the real install.
+docker cp "$repo/adapter/ibkr/ibapi_pin.py" "$id:/ibapi_pin.py"
 docker start -a "$id"

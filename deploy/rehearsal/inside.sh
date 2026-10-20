@@ -89,6 +89,39 @@ test ! -e /opt/ibc/.version-3.24.2 || fail "a mismatched download was installed"
 "$p" gateway
 pass "corrupt cache replaced; checksum mismatch refused and nothing installed"
 
+# The adapter's ibapi (provision.sh twsapi), for real. The protobuf wheel it
+# imports is pinned beside it and verified like every download: a wheel whose
+# checksum differs from the pin is refused with nothing installed (no
+# environment, no install record), before and after a good install.
+venv=/opt/trend-investing/adapter-venv
+record=/opt/trend-investing/twsapi/INSTALLED
+cp -a /root/deploy /root/deploy-badpb
+sed -i 's/^PROTOBUF_SHA256=.*/PROTOBUF_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' /root/deploy-badpb/versions.env
+grep -q '^PROTOBUF_SHA256=0\{64\}$' /root/deploy-badpb/versions.env || fail "could not break the protobuf pin"
+rm -f "$cache"/protobuf-*.whl
+if /root/deploy-badpb/provision.sh twsapi >/dev/null 2>&1; then fail "a protobuf wheel that does not match its pin was accepted"; fi
+test ! -e "$venv" && test ! -e "$record" || fail "a mismatched protobuf wheel left an environment or an install record"
+"$p" twsapi
+if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
+  test -s "$cache/protobuf-5.29.5-py3-none-any.whl" || fail "protobuf wheel not downloaded"
+  echo "REHEARSAL note: ibapi not imported on $(uname -m): the TWS API installer is x86_64 only and was not executed"
+else
+  # Imported for real, in the adapter's own environment and nowhere else.
+  "$venv/bin/python3" -I -c 'import google.protobuf as g, ibapi, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper
+assert g.__version__ == "5.29.5", g.__version__
+assert ibapi.VERSION == {"major": 10, "minor": 51, "micro": 1}, ibapi.VERSION' || fail "ibapi does not import in the adapter's environment"
+  grep -qx 'PROTOBUF_VERSION=5.29.5' "$record" || fail "the install record names no protobuf version"
+  # The adapter's own start-up check, run in that environment against the record.
+  (cd /tmp && "$venv/bin/python3" -I -c 'import sys; sys.path.insert(0, "/"); from ibapi_pin import check_installed
+print(check_installed(sys.argv[1], sys.argv[2]))' "$record" /root/deploy/versions.env) || fail "the adapter's pin check refuses the installed ibapi"
+  cp "$record" "$record.good"
+  if /root/deploy-badpb/provision.sh twsapi >/dev/null 2>&1; then fail "a protobuf wheel that does not match its pin was accepted"; fi
+  cmp -s "$record" "$record.good" || fail "a refused protobuf wheel changed the install record"
+  rm -f "$record.good"
+  "$venv/bin/python3" -I -c 'import ibapi' || fail "a refused protobuf wheel broke the installed environment"
+fi
+pass "the pinned protobuf wheel is verified, a mismatch is refused with nothing installed, ibapi imports in the adapter's environment"
+
 # Credential rendering: a fake secret must reach the config file only, mode 0600.
 # shellcheck disable=SC2016
 fake_pw='fakePW!with$pecial&chars\\n#x'
@@ -232,7 +265,7 @@ pass "the reporter runs as its unit runs it, as ti-trader, delivers to both chan
 test -e /opt/trend-investing/bin/ti-engine || install -m 0755 /dev/null /opt/trend-investing/bin/ti-engine
 # The adapter's environment and code (provision.sh twsapi and adapter).
 install -d /opt/trend-investing/adapter-venv/bin /opt/trend-investing/adapter
-install -m 0755 /dev/null /opt/trend-investing/adapter-venv/bin/python3
+test -x /opt/trend-investing/adapter-venv/bin/python3 || install -m 0755 /dev/null /opt/trend-investing/adapter-venv/bin/python3
 cd /etc/systemd/system
 verify_log=$(mktemp)
 verify_status=0

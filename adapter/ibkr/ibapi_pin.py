@@ -1,17 +1,22 @@
 """The adapter runs only on the ibapi build deploy/versions.env pins (ADR 0025 point 4, amended 2026-10-18).
 
 `deploy/provision.sh twsapi` fetches IBKR's TWS API installer, verifies its
-SHA-256 against the pin, installs the bundled Python client into the
-adapter's environment and, only then, writes an install record:
+SHA-256 against the pin, installs the pinned protobuf wheel (which ibapi
+imports as google.protobuf; docs/dependency-policy.md) and the bundled Python
+client into the adapter's environment and, only then, writes an install
+record:
 
     TWSAPI_VERSION=<the pinned version>
     TWSAPI_SHA256=<the pinned installer's SHA-256>
+    PROTOBUF_VERSION=<the pinned protobuf version>
+    PROTOBUF_SHA256=<the pinned protobuf wheel's SHA-256>
 
 At start the adapter compares that record with the pin in the versions.env
 beside its own code (installed by `provision.sh adapter` from the same
 checkout), and the version of the ibapi Python actually imports with the
-pinned version, and requires that ibapi to be the one in the venv the
-adapter runs in (its file under sys.prefix), and refuses to start on any
+pinned version, and requires that ibapi, and the google.protobuf it
+imports at the pinned protobuf version, to be the ones in the venv the
+adapter runs in (their files under sys.prefix), and refuses to start on any
 difference: code updated to a new pin without ibapi being installed again,
 an environment changed after the record was written, an ibapi from outside
 the venv (a system-wide or hand-installed one, whatever version it
@@ -29,10 +34,10 @@ import os
 import re
 import sys
 
-PIN_KEYS = ("TWSAPI_VERSION", "TWSAPI_SHA256")
+PIN_KEYS = ("TWSAPI_VERSION", "TWSAPI_SHA256", "PROTOBUF_VERSION", "PROTOBUF_SHA256")
 _LINE = re.compile(r"([A-Z0-9_]+)=(.*)")
 _VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
+_SHAPES = (_VERSION, re.compile(r"[0-9a-f]{64}"), _VERSION, re.compile(r"[0-9a-f]{64}"))
 
 
 class IbapiNotPinned(Exception):
@@ -60,40 +65,41 @@ def _pin_values(text, path, what):
         if key in values:
             raise IbapiNotPinned("{} {} names {} twice".format(what, path, key))
         values[key] = value
-    for key, shape in zip(PIN_KEYS, (_VERSION, _SHA256)):
+    for key, shape in zip(PIN_KEYS, _SHAPES):
         if key not in values or not shape.fullmatch(values[key]):
             raise IbapiNotPinned("{} {} carries no {} in the form the pin takes".format(what, path, key))
     return values
 
 
 def read_pin(versions_path):
-    """(version, SHA-256) of the TWS API build pinned in versions_path (deploy/versions.env), else IbapiNotPinned."""
+    """The pins in versions_path (deploy/versions.env), in PIN_KEYS order: the TWS API's version and SHA-256, then
+    protobuf's, else IbapiNotPinned."""
     values = _pin_values(_read(versions_path, "the pin file"), versions_path, "the pin file")
-    return values["TWSAPI_VERSION"], values["TWSAPI_SHA256"]
+    return tuple(values[key] for key in PIN_KEYS)
 
 
 def _version_numbers(text):
     return tuple(int(part) for part in text.split("."))
 
 
-def _require_own_environment(ibapi):
-    """Refuse an ibapi that is not the adapter's venv's own: the version alone does not say which files run.
+def _require_own_environment(module, name="ibapi"):
+    """Refuse an ibapi (or protobuf) that is not the adapter's venv's own: the version alone does not say which files run.
 
     The venv is built with --system-site-packages (deploy/provision.sh), so
     the system's site packages follow its own on sys.path, and a system-wide
     or hand-installed ibapi that reports the pinned version would otherwise
     pass. The Python must run in a venv (sys.prefix is not sys.base_prefix)
-    and ibapi's file must lie under that venv.
+    and the module's file must lie under that venv.
     """
     prefix = os.path.realpath(sys.prefix)
     if prefix == os.path.realpath(sys.base_prefix):
         raise IbapiNotPinned("this Python ({}) is not the adapter's environment; run the adapter with the venv "
                              "`sudo deploy/provision.sh twsapi` creates".format(sys.prefix))
-    path = getattr(ibapi, "__file__", None)
+    path = getattr(module, "__file__", None)
     if not isinstance(path, str) or not os.path.isabs(path) or \
             os.path.commonpath((prefix, os.path.realpath(path))) != prefix:
-        raise IbapiNotPinned("the ibapi this Python imports ({}) is not the one installed in its environment {}; "
-                             "install the pinned build with `sudo deploy/provision.sh twsapi`".format(path, prefix))
+        raise IbapiNotPinned("the {} this Python imports ({}) is not the one installed in its environment {}; "
+                             "install the pinned build with `sudo deploy/provision.sh twsapi`".format(name, path, prefix))
 
 
 def installed_ibapi_version():
@@ -112,12 +118,29 @@ def installed_ibapi_version():
     return parts
 
 
-def check_installed(record_path, versions_path, installed_version=installed_ibapi_version):
+def installed_protobuf_version():
+    """The version string of the google.protobuf this Python imports from its own venv, else IbapiNotPinned."""
+    try:
+        protobuf = importlib.import_module("google.protobuf")
+    except ImportError as err:
+        raise IbapiNotPinned("protobuf does not import ({}); install the pinned build with `sudo deploy/provision.sh "
+                             "twsapi`".format(type(err).__name__)) from None
+    _require_own_environment(protobuf, "protobuf")
+    version = getattr(protobuf, "__version__", None)
+    if not isinstance(version, str):
+        raise IbapiNotPinned("the protobuf this Python imports names no version; install the pinned build with "
+                             "`sudo deploy/provision.sh twsapi`")
+    return version
+
+
+def check_installed(record_path, versions_path, installed_version=installed_ibapi_version,
+                    installed_protobuf=installed_protobuf_version):
     """Return the pinned version if exactly that build is recorded as installed and imports, else raise IbapiNotPinned.
 
     The record holds the two pin keys and nothing else, each once.
-    installed_version returns the imported ibapi's (major, minor, micro);
-    by default the ibapi this Python imports.
+    installed_version returns the imported ibapi's (major, minor, micro) and
+    installed_protobuf the imported protobuf's version string; by default
+    those this Python imports.
     """
     pinned = read_pin(versions_path)
     text = _read(record_path, "the ibapi install record")
@@ -125,14 +148,20 @@ def check_installed(record_path, versions_path, installed_version=installed_ibap
     if set(values) != set(PIN_KEYS):
         raise IbapiNotPinned("the ibapi install record {} carries {}, not exactly {}".format(
             record_path, ", ".join(sorted(values)), ", ".join(PIN_KEYS)))
-    installed = (values["TWSAPI_VERSION"], values["TWSAPI_SHA256"])
+    installed = tuple(values[key] for key in PIN_KEYS)
     if installed != pinned:
-        raise IbapiNotPinned("the installed ibapi is TWS API {} (installer {}), but the pin is {} ({}); install the "
-                             "pinned build with `sudo deploy/provision.sh twsapi` before starting".format(
-                                 installed[0], installed[1][:12], pinned[0], pinned[1][:12]))
+        raise IbapiNotPinned("the installed ibapi is TWS API {} (installer {}) with protobuf {} ({}), but the pin is "
+                             "{} ({}) with protobuf {} ({}); install the pinned build with `sudo deploy/provision.sh "
+                             "twsapi` before starting".format(
+                                 installed[0], installed[1][:12], installed[2], installed[3][:12],
+                                 pinned[0], pinned[1][:12], pinned[2], pinned[3][:12]))
     imported = installed_version()
     if tuple(imported) != _version_numbers(pinned[0]):
         raise IbapiNotPinned("the ibapi this Python imports is {}, but the pin is TWS API {}; install the pinned "
                              "build with `sudo deploy/provision.sh twsapi` before starting".format(
                                  ".".join(map(str, imported)), pinned[0]))
+    protobuf = installed_protobuf()
+    if protobuf != pinned[2]:
+        raise IbapiNotPinned("the protobuf this Python imports is {}, but the pin is {}; install the pinned build "
+                             "with `sudo deploy/provision.sh twsapi` before starting".format(protobuf, pinned[2]))
     return pinned[0]
