@@ -58,7 +58,7 @@ func Holdings(accountID string, book *Book, changes []Change, next Book) event.R
 		positionsOnly = &b
 	}
 	uncompared := fmt.Sprintf("; the holdings of the close snapshot %s are compared with the book and the changes journalled since it, and its cash is not compared", next.AnchorID)
-	r := classify(positionsOnly, changes, next.AnchorID, obs, uncompared)
+	r, _ := classify(positionsOnly, changes, next.AnchorID, obs, uncompared)
 	if r.Classification == event.ReconciliationUnexplained {
 		r.Detail = strings.Replace(r.Detail, "unexplained: ", "unexplained: holdings no journalled fill explains (a trade the engine did not place, a fill it was not given, or a journalled fill IBKR does not show): ", 1)
 	}

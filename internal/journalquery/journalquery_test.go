@@ -696,7 +696,7 @@ func TestTheSafetyVersionsOfOrderRecordsAreRead(t *testing.T) {
 		"an IRA reason at version 1":     dec(event.OrderRefusedEventType, 1, d, iraRefused),
 		"planned at an unknown version":  dec(event.OrderPlannedEventType, event.OrderPlannedSafetyVersion+1, d, sale),
 		"released at an unknown version": dec(event.OrderReleasedEventType, event.OrderReleasedSafetyVersion+1, d, released),
-		"refused at an unknown version":  dec(event.OrderRefusedEventType, event.OrderRefusedSafetyVersion+1, d, refused),
+		"refused at an unknown version":  dec(event.OrderRefusedEventType, event.OrderRefusedPendingCashVersion+1, d, refused),
 	} {
 		js := []journalquery.Journal{load(t, "j", build(t, input, bad))}
 		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 2") {
@@ -852,7 +852,7 @@ func TestTheNextVersionOfEveryReadRecordIsRefused(t *testing.T) {
 		{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleSyntheticVersion + 1, d, map[string]any{}},
 		{journal.KindDecision, event.OrderPlannedEventType, event.OrderPlannedSafetyVersion + 1, d, map[string]any{}},
 		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSafetyVersion + 1, d, map[string]any{}},
-		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedSafetyVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedPendingCashVersion + 1, d, map[string]any{}},
 		{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion + 1, d, map[string]any{}},
 	} {
 		js := []journalquery.Journal{load(t, "j", build(t, rec{journal.KindInput, "other.thing", 1, d, 1}, r))}

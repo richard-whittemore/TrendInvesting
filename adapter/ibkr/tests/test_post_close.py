@@ -105,7 +105,7 @@ class PostCloseTests(unittest.TestCase):
         loop = AdapterLoop(config(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT),
                            self.fake, engine or self.engine, self.pending, self.engine_log,
                            now=lambda: RECEIVED, today=lambda: FRIDAY, sleep=sleep, monotonic=clock, poll=0,
-                           new_id=self.new_id, streams=str(self.streams))
+                           new_id=self.new_id, streams=str(self.streams), cash_ledger=getattr(self, "ledger", None))
         self.addCleanup(loop.close)
         return loop
 
@@ -232,6 +232,45 @@ class PostCloseTests(unittest.TestCase):
         self.two_closes(lambda loop: self.cash("101500.00"))
         broker = self.sent(BROKER_SNAPSHOT_TYPE)[-1]["payload"]
         self.assertEqual((broker["as_of"], broker["cash_drift"]), (CLOSE, 1500), broker["not_as_of_close"])
+
+    # -- a transfer the Flex reader journalled (ADR 0019, amended 2026-10-21) --
+    def journal_transfer(self, transaction_id, amount, as_of):
+        """A deposit (amount > 0) or withdrawal in the instance's Flex ledger, as the reader writes it."""
+        self.ledger = str(Path(self.dir.name) / "cash-movements.jsonl")
+        payload = {"amount": amount, "as_of": as_of, "currency": "USD", "equity_before": 158873.5,
+                   "transaction_id": transaction_id}
+        record = {"event_time": as_of, "id": "ibkr-flex:" + transaction_id, "payload": payload, "schema_version": 2,
+                  "source": "ibkr-flex", "type": "account.cash-movement"}
+        with open(self.ledger, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def test_a_journalled_deposit_is_subtracted_before_the_drift_bound(self):
+        # $5,000 in, dated by day alone on FRIDAY's session day (midnight New
+        # York): beyond the 1% bound on its own, but the reader has it.
+        self.journal_transfer("T1", 5000.0, "2027-01-14T05:00:00Z")
+        self.two_closes(lambda loop: self.cash("105000.00"))
+        broker = self.sent(BROKER_SNAPSHOT_TYPE)[-1]["payload"]
+        self.assertEqual((broker["as_of"], broker["cash_drift"], broker["unexplained_cash"]), (CLOSE, 0, 0),
+                         broker["not_as_of_close"])
+
+    def test_a_transfer_the_previous_close_holds_is_not_subtracted_again(self):
+        # Dated the evening of THURSDAY's close, read after it: THURSDAY's
+        # reading holds it, so FRIDAY's cash is the same and nothing drifts.
+        self.journal_transfer("T2", 5000.0, "2027-01-13T23:00:00Z")
+        self.two_closes()
+        broker = self.sent(BROKER_SNAPSHOT_TYPE)[-1]["payload"]
+        self.assertEqual((broker["as_of"], broker["cash_drift"]), (CLOSE, 0), broker["not_as_of_close"])
+
+    def test_a_ledger_that_cannot_be_read_fails_the_cash_check(self):
+        self.journal_transfer("T1", 5000.0, "2027-01-14T05:00:00Z")
+
+        def broken(loop):
+            with open(self.ledger, "a", encoding="utf-8") as f:
+                f.write("not a record\n")
+            self.cash("105000.00")
+        self.two_closes(broken)
+        why = self.assert_stamped_at_read_time("Flex ledger")
+        self.assertIn("line 2", why)
 
     def test_the_unexplained_cash_adds_up_the_drift_since_the_owners_book(self):
         # The owner's starting cash, 99,990, is the last cash explained: the

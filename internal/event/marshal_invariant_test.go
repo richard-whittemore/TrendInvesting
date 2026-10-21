@@ -55,6 +55,7 @@ func marshalPayloads() []validatedPayload {
 		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
 		validAdjustedBar(), validCloseHistory(), validSessionRetracted(),
 		validReconciliation(), validReconciliationResult(), validAlertAcknowledged(),
+		validFlexStatus(), pendingResult(),
 	}
 }
 

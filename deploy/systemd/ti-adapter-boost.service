@@ -30,9 +30,13 @@ EnvironmentFile=/var/lib/trend-investing/engines/boost/run.env
 # the run that began it, as the data job finds it. It refuses to start
 # until that folder exists: run the data job's warm-up first
 # (docs/manual/market-data.md, "The one-time warm-up", "A crash resume").
+# --cash-ledger: the Flex reader's Boost ledger (ti-flex@boost), read only;
+# its journalled deposits and withdrawals are subtracted from the cash since
+# the previous close before the 1% drift bound (ADR 0019, amended
+# 2026-10-21).
 LoadCredential=account:/etc/trend-investing/accounts/boost.env
 WorkingDirectory=/opt/trend-investing/adapter
-ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --streams /var/lib/trend-investing/data/streams/boost --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
+ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --streams /var/lib/trend-investing/data/streams/boost --cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
 # Never restarted by systemd: every stop is for a person to read (the reason
 # is in the journal: journalctl -u ti-adapter-boost), and every start is the
 # owner's. SIGTERM stops it cleanly.
@@ -43,7 +47,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/trend-investing/adapters/boost
-ReadOnlyPaths=/var/lib/trend-investing/engines/boost -/var/lib/trend-investing/data/streams/boost
+ReadOnlyPaths=/var/lib/trend-investing/engines/boost -/var/lib/trend-investing/data/streams/boost -/var/lib/trend-investing/flex/boost
 # No instruction can come from this unit: it runs as ti-trader, the engine's
 # user, and reads data from outside, so the operator inboxes are hidden from
 # it, and nothing under the engines' state is writable (ProtectSystem=strict;

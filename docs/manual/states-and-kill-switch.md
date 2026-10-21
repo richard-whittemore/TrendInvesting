@@ -64,6 +64,21 @@ instrument is frozen, every buy is refused and sells carry on. A second breach
 on another instrument widens the scope; it never narrows. Degraded can become Halted.
 Halted never becomes Degraded again.
 
+**A pending cash read is not a state.** When an IRA's reconciliation finds
+only its cash different, on a day the Flex reader has not yet read (a deposit
+or withdrawal you made that day, which the reader records at 9:30 p.m.), the
+account stays in the state it is in; you get one reconciliation alert,
+`<account>: reconciliation pending-cash-read (<id>)`. With more cash than the
+book (a deposit), buys carry on, sized without the new cash until the
+reader's record explains it. With less (a withdrawal), every buy waits,
+refused `pending-cash-decrease`, until it is settled (the first refused buy
+pages once; the rest are recorded only); sells and exits go on,
+as while Degraded, but nothing else of Degraded applies. It becomes Degraded on
+cash only if the reader's record does not explain it once the reader has read
+that day, or after more than two sessions, whichever comes first: it never
+waits longer ([reconciliation](reconciliation.md), "A deposit or withdrawal
+you make").
+
 **Leaving Degraded or Halted is never automatic.** A later clean check does
 not bring the account back to Normal. Only you can, by recovery. A fresh run
 starts only after you record an approval (`operator.run.approved`, decided
@@ -534,10 +549,10 @@ the dashboard read every version. See [journal-query](journal-query.md).
 
 Every refusal reaches you as an urgent alert,
 `<account>: order refused (...)` with the reason filled in, within 5 minutes
-([alerts-and-dashboard](alerts-and-dashboard.md)). The kill switch and a
-stale IBKR snapshot are the exceptions: they alert once per engagement or
-outage. `journal-query refusals <log>` lists every refusal, state change and
-withheld sale, with its detail. In the tables, `joint` is the margin
+([alerts-and-dashboard](alerts-and-dashboard.md)). The kill switch, a stale
+IBKR snapshot and a pending cash decrease are the exceptions: they alert once
+per engagement, outage or pending difference. `journal-query refusals <log>`
+lists every refusal, state change and withheld sale, with its detail. In the tables, `joint` is the margin
 account's name; an IRA's alerts carry its own.
 
 ### Orders the gate refuses
@@ -546,6 +561,7 @@ account's name; an IRA's alerts carry its own.
 | --- | --- | --- |
 | `kill-switch`. Alert: `joint: order refused (kill-switch)`, for the first refusal of each engagement only | Refuses every order except the margin account's one sale back to 98%. The engine state does not change. A refused Boost order is planned again at the first close that decides after you release the switch | Nothing, if you meant it. Release it with `sudo -u ti-operator operator kill-switch -inbox /var/lib/trend-investing/engines/boost/operator -account joint -state released -by owner -detail "why"` ([operator](operator.md)). The switch does not cancel an order already working at IBKR: cancel that in IBKR's own app |
 | `engine-degraded`. Alert: `joint: order refused (engine-degraded)` | The account is Degraded: every buy, and every order on an instrument in the scope, is refused. Sells elsewhere still go | Work the [halted-account runbook](../runbooks/halted-account.md) for the Degraded alert that came first |
+| `pending-cash-decrease`. Alert: `<account>: order refused (pending-cash-decrease)` | An IRA's reconciliation found less cash than the book on a day the Flex reader has not yet read (a pending cash read): it may be a withdrawal, so every buy is refused until the reader's record explains it or it is decided (once more than two sessions have closed since it: at most three decisions). Every refusal is recorded; only the first of the pending difference pages, once. Sells and exits go on. The engine state does not change. A refused buy is planned again at the next decision | Nothing, if you withdrew money that day: it clears at the first reconciliation after the reader has covered the day. If you did not, check IBKR's activity for what moved the cash ([reconciliation](reconciliation.md), "A deposit or withdrawal you make") |
 | `engine-halted`. Alert: `joint: order refused (engine-halted)` | The account is Halted: every order but the sale back to 98% is refused | The [halted-account runbook](../runbooks/halted-account.md) |
 | `undecided-order`. Alerts: `joint: order refused (undecided-order)` and `joint: engine halted (risk-limit-breached)` | An order (or a sale) named no recorded decision. That is a defect in the program's order path, so the account is Halted at once | Do not recover until the cause is found: keep the log, and report it as a defect. Then the [halted-account runbook](../runbooks/halted-account.md) |
 | `order-count`. Alerts: `joint: order refused (order-count)` and `joint: engine degraded (risk-limit-breached)` | More orders that are not risk-reducing were planned at one decision than the limit allows. The buys are refused and the instrument is added to the Degraded scope; risk-reducing sells are never counted | Check the plan in `journal-query orders`; then the [halted-account runbook](../runbooks/halted-account.md) |
@@ -566,6 +582,8 @@ account's name; an IRA's alerts carry its own.
 | `<account>: engine <state> (<reason>)`, urgent | The account left Normal (Degraded or Halted), or Degraded widened, or became Halted. The body says since when, why, the scope, and what still goes. It is sent again every 30 minutes, day and night, until you acknowledge it | Acknowledge it with the key at the end of its text (`operator acknowledge`, [operator](operator.md)), then work the [halted-account runbook](../runbooks/halted-account.md). Acknowledging changes nothing else |
 | `risk-limit-breached`. Alert: `joint: engine degraded (risk-limit-breached)` or `joint: engine halted (risk-limit-breached)` | An order broke a hard limit (Degraded, its instrument frozen) or named no decision (Halted). It never returns to Normal by itself, not after a clean check and not after a crash | The [halted-account runbook](../runbooks/halted-account.md); recovery ends in a fresh run approved with `operator approve -clear-incident` ([restart](restart.md)) |
 | Degraded or Halted after a reconciliation | See [reconciliation](reconciliation.md), "What can go wrong", which owns those reasons | As that chapter says |
+| A pending cash read: alert `<account>: reconciliation pending-cash-read (<id>)` after you deposited or withdrew money | No state change: Normal stays Normal. With more cash than the book, buys carry on, sized without the new cash until it is explained; with less, every buy is refused (`pending-cash-decrease`) until it is settled, and sells and exits go on. The engine checks the difference again at each reconciliation; the reader's record of your transfer explains it, usually at the next one. If it does not once the reader has read that day, or after more than two sessions, the account goes Degraded on cash: the `engine degraded (reconciliation-unexplained)` alert follows. The alert's text says the account stays in its state, how much the cash differs and which way, on what day, whether buys continue, and when it becomes Degraded | Acknowledge it. Nothing else if you moved money that day; otherwise check IBKR's activity ([reconciliation](reconciliation.md), "What can go wrong"). Do not approve a fresh run while it is pending |
+| A pending cash read turned Degraded after two sessions with the Flex reader set aside | Degraded on cash: buys stop, sells carry on | Fix the reader (its status file and `journalctl -u ti-flex@<instance>`), check the ledger now records the transfer, then recover with a fresh run that clears the incident ([halted-account runbook](../runbooks/halted-account.md)) |
 | The account is Halted and Boost wants to buy | Refused (`engine-halted` above). Only the sale back to 98% goes | Recover as above |
 | The engine crashes mid-incident | It replays its durable log and resumes in the same state, scope and incident. It does not repeat a sale it already sent | Resume it ([restart](restart.md)) |
 | You upgrade the program mid-incident | A new build never resumes an old log. It starts a fresh run, only after your recorded approval, which carries the incident unless you clear it | Approve with `operator approve` ([operator](operator.md)) |

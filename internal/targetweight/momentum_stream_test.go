@@ -144,6 +144,31 @@ func (a *ira) snapshot(at time.Time, prices map[string]float64) event.AccountCas
 	}
 }
 
+// reconciliation is IBKR's view of the account at at: its holdings and its
+// total cash.
+func (a *ira) reconciliation(id string, at time.Time) event.ReconciliationPayload {
+	positions := []event.AccountPosition{}
+	for _, id := range slices.Sorted(mapsKeys(a.held)) {
+		if a.held[id] != 0 {
+			positions = append(positions, event.AccountPosition{InstrumentID: id, Quantity: a.held[id]})
+		}
+	}
+	return event.ReconciliationPayload{
+		AccountID: a.account, ReconciliationID: id, Trigger: event.ReconciliationTriggerMorning, AsOf: at,
+		Unreadable: []string{}, Positions: positions, TotalCash: float64(a.settled + a.unsettled), Currency: "USD",
+	}
+}
+
+// previousDay is the calendar day before session, as the Flex reader's
+// covered_to writes it.
+func previousDay(session string) string {
+	d, err := time.Parse(time.DateOnly, session)
+	if err != nil {
+		panic(err)
+	}
+	return d.AddDate(0, 0, -1).Format("20060102")
+}
+
 func mapsKeys[V any](m map[string]V) func(func(string) bool) {
 	return func(yield func(string) bool) {
 		for k := range m {
@@ -206,6 +231,21 @@ type momentumOptions struct {
 	// refusals names inputs, by envelope ID, the run must refuse, with what
 	// the refusal says.
 	refusals map[string]string
+	// deposit is session -> dollars the owner deposits that day, before the
+	// Flex reader has read it: the reconciliation of the batch's reading,
+	// stamped at its true read time half an hour after the close and sent
+	// ahead of the snapshot stamped at the close, as the IBKR adapter sends
+	// them (ADR 0019, "Reconciliation with every reading"), finds against
+	// the previous close's book the cash it added, pending a reading (ADR
+	// 0019, amended 2026-10-21). depositRecorded has the reader record it
+	// after that reading, and a reconciliation then decide it.
+	deposit         map[string]float64
+	depositRecorded bool
+	// depositNextDay lands the deposit the New York day after that close:
+	// the close's snapshot does not hold it, and the next morning's
+	// reconciliation, against that snapshot's book, finds it pending a
+	// reading.
+	depositNextDay bool
 	// brokerLast, when set, feeds every mark at version 2 with IBKR's last
 	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
 	// ADR 0026 point 1, amended 2026-10-18).
@@ -420,12 +460,28 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				}
 			}
 		}
+		amount, deposits := opts.deposit[session]
+		if deposits && !opts.depositNextDay {
+			acct.settled = float64(acct.settled + amount)
+			apply(flexStatusInput(t, s, event.FlexStateRead, previousDay(session), end.Add(-time.Hour)))
+			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("after-close:"+session, end.Add(30*time.Minute))))
+		}
 		if !opts.noSnapshot[session] {
 			asOf := end
 			if opts.lateSnapshot[session] {
 				asOf = end.Add(time.Hour)
 			}
 			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, marks)))
+		}
+		if deposits && opts.depositNextDay {
+			acct.settled = float64(acct.settled + amount)
+			apply(flexStatusInput(t, s, event.FlexStateRead, previousDay(session), end.Add(-time.Hour)))
+			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("next-morning:"+session, end.Add(12*time.Hour))))
+		}
+		if deposits && opts.depositRecorded {
+			apply(movementInput(t, s, "D:"+session, amount, newYorkDay(session)))
+			apply(flexStatusInput(t, s, event.FlexStateRead, strings.ReplaceAll(session, "-", ""), end.Add(31*time.Minute)))
+			apply(reconciliationInput(t, s, "reconciliation:recorded:"+session, acct.reconciliation("after-reading:"+session, end.Add(32*time.Minute))))
 		}
 		if !opts.compact {
 			marked = ids

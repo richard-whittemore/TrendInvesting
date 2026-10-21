@@ -23,6 +23,7 @@ EnvironmentFile=/var/lib/trend-investing/engines/%i/run.env
 Environment=TI_CONFIG=/etc/trend-investing/engines/%i.config
 Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
 Environment=TI_DATA_DIR=/var/lib/trend-investing/data
+Environment=TI_FLEX_DIR=/var/lib/trend-investing/flex/%i
 LoadCredential=secrets:/etc/trend-investing/secrets.env
 # The socket lives in a private directory, /run/ti-engine-%i, mode 0700,
 # which transport.Listen requires of a socket's parent (ADR 0014).
@@ -36,10 +37,15 @@ RuntimeDirectoryMode=0700
 # or if it cannot read it (docs/manual/operator.md, "Who can write an
 # instruction"); what it notes about each record goes in operator-notes/
 # beside it, its own.
+# The instance's Flex ledger, written by ti-flex@%i (the engine only reads
+# it): its journalled deposits and withdrawals and the reader's status are
+# delivered as inputs, so a transfer explains the cash it moved (ADR 0019,
+# amended 2026-10-21; docs/manual/reconciliation.md). A ledger not yet
+# written delivers nothing.
 # Every setting is explicit. $TI_RESTART_ARGS is empty for a first run,
 # "-approval <file>" for a fresh run after an earlier one, or
 # "-resume <log>" after a crash; it expands to zero or more arguments.
-ExecStart=/opt/trend-investing/bin/ti-engine -mode ${TI_MODE} -config ${TI_CONFIG} -socket %t/ti-engine-%i/engine.sock -log ${TI_STATE_DIR}/${TI_RUN}.log -out ${TI_STATE_DIR}/${TI_RUN}.journal -as-of ${TI_AS_OF} -operator ${TI_STATE_DIR}/operator $TI_RESTART_ARGS
+ExecStart=/opt/trend-investing/bin/ti-engine -mode ${TI_MODE} -config ${TI_CONFIG} -socket %t/ti-engine-%i/engine.sock -log ${TI_STATE_DIR}/${TI_RUN}.log -out ${TI_STATE_DIR}/${TI_RUN}.journal -as-of ${TI_AS_OF} -operator ${TI_STATE_DIR}/operator -cash-ledger ${TI_FLEX_DIR}/cash-movements.jsonl $TI_RESTART_ARGS
 # Never restarted by systemd: a crash is resumed, and any other restart is a
 # fresh run the owner approves, both as an explicit step (owner decision
 # 2026-10-16). SIGTERM stops it cleanly and writes its journal.
@@ -52,6 +58,7 @@ ReadWritePaths=/var/lib/trend-investing/engines/%i
 ReadOnlyPaths=/var/lib/trend-investing/data
 # The engine only reads its inbox, whatever its mode says.
 ReadOnlyPaths=-/var/lib/trend-investing/engines/%i/operator
+ReadOnlyPaths=-/var/lib/trend-investing/flex/%i
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

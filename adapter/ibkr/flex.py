@@ -92,18 +92,23 @@ record's ID is ID_PREFIX and IBKR's transaction ID, so a transfer already
 in it is never written again, however often its statement is read, and one
 IBKR restates with another amount, date or currency refuses the reading
 rather than being written twice or silently changed. It is not the engine's
-durable log: the engine writes that alone (ADR 0027), and nothing the
-engine decides reads a cash movement, so the reader cannot change a
-decision. The cash-drift check (ADR 0019) stays the cross-check: a transfer
-the reader missed still shows as drift.
+durable log: the engine writes that alone (ADR 0027). The engine reads the
+ledger and this status file (its -cash-ledger) and journals each record and
+status as an input, so a journalled transfer explains the cash it moved in a
+reconciliation, and a cash difference on a day the status does not cover is
+pending rather than Degraded (ADR 0019, amended 2026-10-21); a record cannot
+place an order. The adapter's cash-drift check subtracts the journalled
+transfers before its bound (loop.AdapterLoop._transfers) and stays the
+cross-check: a transfer the reader missed still shows as drift.
 
 Fail closed (AGENTS.md): any refusal, a token IBKR rejects or a service
 error sets the reader aside for this reading. Nothing is written to the
 ledger, the status file records "set-aside" with why (and IBKR's error
 code), and read_once returns False, which the command turns into exit
 status 1, a failed unit. The next firing reads again; a good reading
-clears it. The engine, the adapter and the trading loop do not depend on
-it. Standard library only, and the adapter's own reader of the engine's
+clears it. Trading does not depend on it: while it is set aside, a cash
+difference waits at most two sessions for it before the account is Degraded
+on cash. Standard library only, and the adapter's own reader of the engine's
 durable log (relay.py).
 """
 import fcntl

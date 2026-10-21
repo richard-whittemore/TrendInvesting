@@ -264,6 +264,18 @@ See [re-delivery](redelivery.md).
 QuantConnect backtests from the same data, within thresholds fixed in
 advance (ADR 0026, point 7). See [parity](parity.md).
 
+**Pending cash read.** A reconciliation that found only an IRA's cash
+different on a day the Flex reader has not yet read, so a deposit or
+withdrawal you made may explain it. It sends one reconciliation alert and
+changes no state. With more cash than the book (a deposit), buys carry on but
+are sized without the new cash until the reader's record explains it; with
+less (a withdrawal), every buy is refused (`pending-cash-decrease`) until it
+is settled, with one more urgent page for the first refused buy only, and
+sells and exits go on. It is settled when the
+reader's record explains it, or becomes Degraded on cash once the reader has
+read the day, or after more than two sessions. See
+[reconciliation](reconciliation.md).
+
 **Pending file.** The adapter's small file holding the input it is waiting
 for the engine's reply to. The hand-over file (`.handover`), the file of your
 resolve decisions (`.handover.decisions`), the lock (`.lock`) and the outbox

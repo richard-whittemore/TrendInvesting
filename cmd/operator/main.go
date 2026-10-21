@@ -389,7 +389,7 @@ func approve(args []string, out io.Writer) error {
 	}
 	approval, err := restart.ProposeApproval(end, restart.ApprovalRequest{
 		AccountID: *account, PreviousLog: name, PreviousLogFinalHash: recovery.FinalRecordHash,
-		ApprovedBy: *by, ApprovedAt: at, ClearIncident: *clearIncident, SaleAttempted: *saleAttempted,
+		ApprovedBy: *by, ApprovedAt: at, ClearIncident: *clearIncident, SaleAttempted: *saleAttempted, StartingBook: book != nil,
 	})
 	if err != nil {
 		return err
