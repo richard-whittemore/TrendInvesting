@@ -473,12 +473,26 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
-// handSaleSteps is the hand-sale procedure while a program sale may be
-// working (docs/manual/states-and-kill-switch.md): the program plans
-// Boost's exit again at each decided session while it is due, and a hand
-// sale placed after the last IBKR snapshot is not counted until a snapshot
-// lists it, so the owner stops new orders before selling by hand.
-const handSaleSteps = "Before you sell anything by hand, stop the program sending new orders: engage the kill switch (operator kill-switch -state engaged) where the engine was started with -operator, otherwise stop the engine (sudo systemctl stop ti-engine@<account>). Then cancel any working sale of the program's in IBKR's app, confirm that no working, pending or cancel-pending sell remains, and only then sell."
+// handSaleSteps is the hand-sale procedure for the account while a program sale may be
+// working (docs/manual/states-and-kill-switch.md, "Selling by hand safely"):
+// the program plans Boost's exit again at each decided session while it is
+// due, a hand sale placed after the last IBKR snapshot is not counted until a
+// snapshot lists it, and the kill switch does not stop the sale back to 98%,
+// so the owner stops the engine and the adapter before selling by hand. The
+// fresh run's approval states the book after the sale: no fill of a hand
+// sale is committed, so the previous close adjusted by the fills is not the
+// book, and a first reading that is not the book halts the account as
+// unverifiable (ADR 0019, amended 2026-10-18).
+//
+// The units are named by the engine instance, not by the account it
+// decides, which the journal records: the steps come only from Boost's
+// rejections, and Boost runs as ti-engine@boost with ti-adapter-boost, the
+// only adapter unit, wired to that engine's socket and log, whatever account
+// its configuration decides (the shipped one decides "joint";
+// deploy/systemd, docs/manual/server.md). The approval names the account.
+func handSaleSteps(account string) string {
+	return fmt.Sprintf("Before you sell anything by hand, stop the engine and the adapter (sudo systemctl stop ti-engine@boost ti-adapter-boost); the kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start the fresh run you approve only once your sale has filled or been cancelled; its approval states the book as it is after your sale (operator approve -log <previous run's log> -account %[1]s -by <you> -positions SYM=shares,... -cash <IBKR's TotalCashValue> -currency USD -out <approval>), typed right after reading the book in IBKR, or the fresh run's first reading is not the book it is compared with and the account halts as unverifiable. Then start the adapter only after the fresh run's engine is running; never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account)
+}
 
 // rejectionAlert states the rejection that brought the account's Boost
 // orders rejected in a row to two, whatever their targets, after the other
@@ -499,7 +513,7 @@ func rejectionAlert(account string, e event.Envelope, w event.BoostReplan, inARo
 		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost buys stopped", account, w.ClientOrderID),
 		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled)%s, and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			w.ClientOrderID, w.Filled, w.Released, after, handSaleSteps),
+			w.ClientOrderID, w.Filled, w.Released, after, handSaleSteps(account)),
 	}
 }
 
@@ -521,7 +535,7 @@ func stoppedRejectionAlert(account string, e event.Envelope, r event.BoostReplan
 		Key: "rejected-while-stopped:" + r.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected: another rejection while Boost's buys are stopped (%s since the stop)", account, r.ClientOrderID, ordinal(nth)),
 		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled): another rejection while Boost's buys are stopped, the %s since the stop.%s A rejected sell, such as Boost's exit, is planned again at the next decided session while it is due; the program still sends no buy for this account until you start a fresh run. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), stoppedBy, handSaleSteps),
+			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), stoppedBy, handSaleSteps(account)),
 	}
 }
 

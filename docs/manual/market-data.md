@@ -470,7 +470,7 @@ whole warm-up again to a run whose log already holds it. If this run is a
 crash resume, restore its first run's log from the backup as the engine
 wrote it; if the log is an old run's, once that run has ended move its
 folder out of `streams/boost/` and its log out of the engine's log folder
-(`/var/lib/trend-investing/engines/<account>/`, beside the running log),
+(`/var/lib/trend-investing/engines/<instance>/`, beside the running log),
 and keep both as evidence in a folder outside both: a durable log is never
 edited or deleted. A log whose first records name this run is read
 whole: if it cannot be read, both stop, naming it ("names this run in its
@@ -669,8 +669,10 @@ days), it takes them all, oldest first.
    close is the last account snapshot of this run, or of the earlier runs
    its approvals name, however long ago, or the **starting book** you
    stated when you approved the account's first run (or a fresh run, after
-   a transfer you checked; `operator approve -first-run`,
-   docs/runbooks/first-paper-order.md), whichever is latest: a fresh run's
+   a transfer or a sale by hand you checked; `operator approve -first-run` for the first
+   run, docs/runbooks/first-paper-order.md, and `operator approve -log
+   <previous run's log> ... -positions ... -cash ... -currency USD` for a
+   fresh run, [operator](operator.md), "An approval"), whichever is latest: a fresh run's
    first reading is compared with the last run's close, never taken as the
    book unchecked. The
    broker snapshot records the real read time beside it (`read_at`) as
@@ -849,17 +851,41 @@ which writes the sessions again from its recordings, and start the adapter
   has not been written for this `TI_RUN`. The adapter refuses to start and
   names the warm-up command. Run the warm-up ("The one-time warm-up",
   above), then start the adapter.
+- **The run's stream folder cannot be found or told apart** (the message
+  begins "the run's stream folder is found by the run's identity, from its
+  durable log", and says the log cannot be read or that no earlier folder is
+  a whole copy of this run's history): the adapter stops and delivers
+  nothing, since a wrong folder could feed the engine another run's days.
+  Check the engine's log is whole and readable, then move the unmatched
+  folder aside as the message says and start the adapter again.
+- **The kept bases file does not read** (a warning in the adapter's log):
+  nothing stops. The adapter walks the earlier runs again to rebuild the
+  previous close and replaces the file; it is only a saving of work.
 - **The `.delivered` file cannot be read**: something other than the adapter
   changed it. The adapter stops before delivering anything. Restore it from
   the backup as it was ([server](server.md), "Backups"); never edit it.
 - **The link to IB Gateway drops while the snapshot is read**: nothing is
   written down or sent. Once the link is back and matched, the adapter takes
   a fresh snapshot and hands the file over then.
-- **The reading cannot stand for the close** (an order still working at
-  IBKR, an execution since the close, a reading on a later date than the
-  close because the adapter was not running that evening): this stops
-  nothing. The file goes, with both snapshots stamped at the read time and
-  the reason in the broker snapshot; the engine withholds that session
+- **The reading cannot stand for the close**: it was read before the
+  close or on a later New York date than the close (the adapter was not
+  running that evening); IBKR shows an open order for the account from any
+  client (working, pending or cancel-pending); IBKR's executions could not
+  be read in full, or one is at or since the close; a holding has no
+  official close in the file; IBKR's own net liquidation is not above zero;
+  the holdings are not the previous close's plus or minus the fills
+  recorded since; the cash is more than 1% of the net liquidation at the
+  close (IBKR's own at the read when the account cannot be valued at the
+  close) from the previous close's adjusted by those fills; or the engine
+  already holds a snapshot as of this close or later (the conditions
+  above). This stops nothing, except for a run's first reading that is not
+  the book it was compared with: that one sends no snapshot, only its
+  reconciliation, and the account **halts** as unverifiable; the remedy is
+  a fresh run whose approval states the book you read in IBKR
+  ([reconciliation](reconciliation.md), "What can go wrong"). Otherwise
+  the file goes, with both snapshots stamped at the read time and the
+  reason in the broker snapshot (`not_as_of_close`); the engine withholds
+  that session
   (`stale-account-snapshot`) and you are paged with the reason
   ([paper trading](paper-trading.md), "What can go wrong").
 - **IBKR cannot give the whole account three times running** (the message
