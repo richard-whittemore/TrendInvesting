@@ -68,6 +68,14 @@ case ${1:-} in
     # chmod without CAP_FSETID would drop the setgid bit silently.
     jm=$(stat -c %a /var/log/journal)
     test "$jm" = 2755 || fail "/var/log/journal is mode $jm after the boot, not 2755 (setgid lost)"
+    # The boot's mode is 2755 already on every boot after a volume's first, and
+    # systemd-tmpfiles leaves an unchanged mode alone, so the read above proves
+    # CAP_FSETID only once. Break the mode and have tmpfiles set it again as
+    # root, which is the setgid-keeping chmod, on every run.
+    chmod 0755 /var/log/journal
+    systemd-tmpfiles --create --prefix /var/log/journal
+    jm=$(stat -c %a /var/log/journal)
+    test "$jm" = 2755 || fail "systemd-tmpfiles left /var/log/journal at mode $jm, not 2755: its chmod dropped the setgid bit (CAP_FSETID missing)"
     failed=$(systemctl list-units --state=failed --no-legend --plain | awk '{print $1}' | sort | tr '\n' ' ')
     for u in $failed; do
       case " ${ALLOWED:-} " in *" $u "*) ;; *) fail "unit $u failed (system $s); journalctl -u $u: $(journalctl -u "$u" -n 5 --no-pager -o cat)" ;; esac
