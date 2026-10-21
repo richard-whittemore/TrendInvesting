@@ -52,7 +52,8 @@ func boostOptions(t *testing.T, dir string) options {
 // boostFeed plays the adapter for a dry-run Boost engine: per session, the
 // SPY bar, the account snapshot, the mark and the session close, continuing
 // the engine's one input sequence. The account is simulated: an order the
-// engine releases fills at the next session's close.
+// engine releases fills a minute before the next session's close, and the
+// venue's report of it is sent.
 type boostFeed struct {
 	t        *testing.T
 	client   *transport.Client
@@ -178,6 +179,14 @@ func (f *boostFeed) sessions(from, to int) {
 			}
 			f.held += q
 			f.cash -= float64(float64(q) * price)
+			// The venue reports the execution, inside the session: the
+			// close snapshot holding shares no reported fill explains is a
+			// difference (ADR 0019, amended 2026-10-21).
+			filledAt := at.Add(-time.Minute)
+			f.send(event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID, filledAt, event.TargetWeightFillPayload{
+				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+				Side: o.Side, Quantity: o.Quantity, Price: price, FilledAt: filledAt,
+			})
 		}
 		f.pending = nil
 		view := func(label string) event.PriceView {

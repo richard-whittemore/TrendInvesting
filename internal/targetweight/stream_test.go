@@ -202,7 +202,11 @@ type options struct {
 	recorded []event.Envelope
 	// snapshots, when set, supplies each session's account snapshot from an
 	// earlier run's inputs, so a restarted run sees the account the original
-	// run's orders left.
+	// run's orders left. A restarted run is given none before the recovered
+	// decision's session: a fresh run's first book is the reading the adapter
+	// takes when it starts, and every later book must be the one before it
+	// adjusted by the fills the run itself was given (ADR 0019, amended
+	// 2026-10-21).
 	snapshots []event.Envelope
 	from      int // first session fed
 	mutate    func(*event.TargetWeightConfigurationPayload)
@@ -331,6 +335,16 @@ func (a *account) fill(o event.OrderReleasedPayload, id string, shares int64, pr
 	}
 }
 
+// credit adds a reported execution f to the account.
+func (a *account) credit(f event.TargetWeightFillPayload) {
+	quantity := f.Quantity
+	if f.Side == event.OrderSideSell {
+		quantity = -quantity
+	}
+	a.held += quantity
+	a.cash -= float64(float64(quantity) * f.Price)
+}
+
 // cancelAtOr is the session the cancel of an order part-filled at session i
 // is delivered at: cancelAt's, else i itself.
 func (o options) cancelAtOr(i int) int {
@@ -353,6 +367,18 @@ type run struct {
 
 // simulate feeds the synthetic series session by session through a journal
 // Recorder wrapping a fresh handler, filling released orders as it goes.
+// beforeRecovery reports whether at precedes the session of recovery, the
+// recovered decision, when there is one.
+func beforeRecovery(t *testing.T, recovery *event.Envelope, at time.Time) bool {
+	t.Helper()
+	if recovery == nil {
+		return false
+	}
+	var p event.TargetsDecidedPayload
+	decode(t, *recovery, &p)
+	return at.Before(p.SessionPeriodEnd)
+}
+
 func simulate(t *testing.T, opts options) run {
 	t.Helper()
 	cfg := testConfiguration()
@@ -385,7 +411,8 @@ func simulate(t *testing.T, opts options) run {
 		order  event.OrderReleasedPayload
 		shares int64
 	}
-	rests := map[int][]rest{} // late executions due at each session
+	rests := map[int][]rest{}     // late executions due at each session
+	credited := map[string]bool{} // the executions of opts.fills the account holds
 	start := sessionEnd(0).Add(-time.Hour)
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
 	for _, e := range opts.recorded {
@@ -494,6 +521,13 @@ func simulate(t *testing.T, opts options) run {
 		}
 		delete(rests, i)
 		for _, f := range opts.fills[i] {
+			// The account holds what the venue reports it executed, once
+			// per execution however often it is reported: a snapshot
+			// holding less is a difference (ADR 0019, amended 2026-10-21).
+			if !credited[f.FillID] {
+				credited[f.FillID] = true
+				acct.credit(f)
+			}
 			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
 		}
 		for _, j := range opts.clear[i] {
@@ -515,7 +549,7 @@ func simulate(t *testing.T, opts options) run {
 		}
 		if opts.snapshots != nil {
 			for _, in := range opts.snapshots {
-				if in.ID == fmt.Sprintf("snapshot:%d", i) {
+				if in.ID == fmt.Sprintf("snapshot:%d", i) && !beforeRecovery(t, opts.recovery, at) {
 					var p event.AccountPositionsSnapshotPayload
 					decode(t, in, &p)
 					apply(s.envelope(t, in.Type, in.SchemaVersion, in.ID, at, p))

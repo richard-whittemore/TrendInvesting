@@ -182,7 +182,23 @@ import (
 //     margin alarm divides Excess Liquidity by IBKR's own net liquidation at
 //     the read beside it (one price basis per rule). A journal holding either
 //     version 2 input does not replay under 1.18.0, which refuses it.
-const RulesVersion = "1.19.0"
+//   - 1.20.0 checks every account snapshot after a run's first against the
+//     book in force and the fills, dividends and splits journalled since it
+//     before it becomes the book (risklimit.Gate.CheckBook,
+//     reconcile.Holdings): a holding they do not explain, such as a trade
+//     made during the session that the engine did not place, a fill it was
+//     never given or a journalled fill IBKR does not show, is journalled as
+//     a risk.reconciliation.result (reconciliation ID
+//     close-snapshot:<snapshot ID>) and degrades the account on the
+//     instrument, where 1.19.0 took the snapshot as the book silently (ADR
+//     0019, amended 2026-10-21). A snapshot whose holdings a reconciliation
+//     already classified against the same book and the same changes is not
+//     classified again, nor is a difference already reported with the same
+//     residual, nor is an unverifiable snapshot whose every reason a
+//     journalled Halt already gave, and whose unexplained holdings were
+//     already reported, while the account stays Halted. A journal holding such a snapshot decides differently under
+//     1.19.0.
+const RulesVersion = "1.20.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -453,7 +469,7 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 	case event.CompletedBarEventType:
 		return nil, h.applyBar(in)
 	case event.AccountSnapshotEventType:
-		return nil, h.applySnapshot(in)
+		return h.applySnapshot(in)
 	case event.MarkRecordedEventType:
 		return nil, h.applyMark(in)
 	case event.SessionClosedEventType:
@@ -765,21 +781,39 @@ func (h *Handler) applyBar(in event.Envelope) error {
 	return nil
 }
 
-func (h *Handler) applySnapshot(in event.Envelope) error {
+func (h *Handler) applySnapshot(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeInput[event.AccountPositionsSnapshotPayload](in, event.AccountSnapshotPositionsVersion)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if p.AccountID != h.cfg.AccountID {
-		return fmt.Errorf("targetweight: snapshot for account %q; this run decides %q", p.AccountID, h.cfg.AccountID)
+		return nil, fmt.Errorf("targetweight: snapshot for account %q; this run decides %q", p.AccountID, h.cfg.AccountID)
 	}
 	if h.snapshot != nil && !p.AsOf.After(h.snapshot.AsOf) {
-		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, h.snapshot.AsOf)
+		return nil, fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, h.snapshot.AsOf)
 	}
 	h.snapshot = &p
 	h.gate.ObserveAccount(p)
-	h.gate.SetBook(reconcile.PositionsBook(in.ID, p))
-	return nil
+	return h.checkBook(in, reconcile.PositionsBook(in.ID, p), p.AsOf)
+}
+
+// checkBook checks book, the account snapshot in, against the book in force
+// and the fills journalled since it before it becomes the book
+// (risklimit.Gate.CheckBook), and journals the check's result, then the
+// engine state when it moved, timed at the snapshot, when there is one to
+// journal: a holding no fill explains is a difference (ADR 0019, amended
+// 2026-10-21).
+func (h *Handler) checkBook(in event.Envelope, book reconcile.Book, at time.Time) ([]event.Envelope, error) {
+	r, journal := h.gate.CheckBook(book)
+	if !journal {
+		return nil, nil
+	}
+	b := &emissions{h: h, in: in, at: at}
+	b.add(r.ResultID, event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, r.Result)
+	if r.State != nil {
+		b.add(r.StateID, event.EngineStateEventType, r.StateSchemaVersion, *r.State)
+	}
+	return b.result()
 }
 
 func (h *Handler) applyMark(in event.Envelope) error {
