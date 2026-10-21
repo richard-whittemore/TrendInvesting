@@ -9,14 +9,27 @@ import (
 
 // CashMovementEventType identifies the cash-movement input payload for the
 // Envelope's Type field: a deposit into, or withdrawal from, the account
-// (ADR 0007). Produced by fixtures today; a brokerage or ledger integration
-// produces it later, the same relationship AccountSnapshotPayload has to the
-// LEAN adapter/broker.
+// (ADR 0007). Version 1 is produced by fixtures, and read by the Turtle
+// reducer; version 2 by the IBKR Flex reader (adapter/ibkr/flex.py), from
+// the broker's own cash transactions.
 const CashMovementEventType = "account.cash-movement"
 
-// CashMovementSchemaVersion is the current schema version of
-// CashMovementPayload, for the Envelope's SchemaVersion field.
+// CashMovementSchemaVersion is version 1 of CashMovementPayload, the version
+// the Turtle reducer reads.
 const CashMovementSchemaVersion uint32 = 1
+
+// CashMovementTransferVersion is version 2 of CashMovementPayload, the
+// version the IBKR Flex reader writes (ADR 0015):
+//
+//   - Version 2 adds TransactionID, the broker's own ID for the transfer,
+//     which the reader dedupes on across runs. Version 1 carries none; each
+//     version is refused what it does not state (ValidateSchema).
+const CashMovementTransferVersion uint32 = 2
+
+// CashMovementVersions returns the versions a cash movement is read at.
+func CashMovementVersions() []uint32 {
+	return []uint32{CashMovementSchemaVersion, CashMovementTransferVersion}
+}
 
 // CashMovementPayload carries one deposit or withdrawal.
 //
@@ -46,6 +59,10 @@ type CashMovementPayload struct {
 	// Currency is the currency Amount and EquityBefore are stated in,
 	// mirroring AccountSnapshotPayload.Currency.
 	Currency string `json:"currency"`
+	// TransactionID, from version 2, is the broker's own ID for the
+	// transfer (IBKR's transactionID in its Cash Transactions), unique per
+	// account; empty, and left out, at version 1.
+	TransactionID string `json:"transaction_id,omitempty"`
 }
 
 // Validate checks that the movement identifies when it occurred, that
@@ -102,6 +119,28 @@ func (p CashMovementPayload) Validate() error {
 
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid cash movement payload: %w", err)
+	}
+	return nil
+}
+
+// ValidateSchema is Validate at the version the movement arrived at: version
+// 2 requires the broker's transaction ID and version 1 carries none
+// (CashMovementTransferVersion).
+func (p CashMovementPayload) ValidateSchema(version uint32) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	switch version {
+	case CashMovementSchemaVersion:
+		if p.TransactionID != "" {
+			return errors.New("invalid cash movement payload: version 1 carries no transaction id; that is version 2's")
+		}
+	case CashMovementTransferVersion:
+		if p.TransactionID == "" {
+			return errors.New("invalid cash movement payload: transaction id is required at version 2")
+		}
+	default:
+		return fmt.Errorf("invalid cash movement payload: schema version %d is not one of %v", version, CashMovementVersions())
 	}
 	return nil
 }

@@ -116,3 +116,39 @@ func TestCashMovementPayloadValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestCashMovementPayloadValidateSchema: version 2 is version 1 with the
+// broker's own transaction ID, which a reader of the broker's cash
+// transactions dedupes on; version 1 carries none (ADR 0015: each version
+// is refused what it does not state).
+func TestCashMovementPayloadValidateSchema(t *testing.T) {
+	t.Parallel()
+
+	v1 := validCashMovement()
+	if err := v1.ValidateSchema(event.CashMovementSchemaVersion); err != nil {
+		t.Fatalf("version 1 without a transaction ID: %v", err)
+	}
+	if err := v1.ValidateSchema(event.CashMovementTransferVersion); err == nil || !strings.Contains(err.Error(), "transaction id is required") {
+		t.Fatalf("version 2 without a transaction ID: error = %v", err)
+	}
+
+	v2 := validCashMovement()
+	v2.TransactionID = "900000001"
+	if err := v2.ValidateSchema(event.CashMovementTransferVersion); err != nil {
+		t.Fatalf("version 2 with a transaction ID: %v", err)
+	}
+	if err := v2.ValidateSchema(event.CashMovementSchemaVersion); err == nil || !strings.Contains(err.Error(), "version 1 carries no transaction id") {
+		t.Fatalf("version 1 with a transaction ID: error = %v", err)
+	}
+	if err := v2.ValidateSchema(3); err == nil || !strings.Contains(err.Error(), "schema version 3") {
+		t.Fatalf("an unknown version: error = %v", err)
+	}
+	bad := v2
+	bad.Amount = 0
+	if err := bad.ValidateSchema(event.CashMovementTransferVersion); err == nil || !strings.Contains(err.Error(), "non-zero") {
+		t.Fatalf("version 2 still checks the version 1 fields: error = %v", err)
+	}
+	if got := event.CashMovementVersions(); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("CashMovementVersions() = %v", got)
+	}
+}

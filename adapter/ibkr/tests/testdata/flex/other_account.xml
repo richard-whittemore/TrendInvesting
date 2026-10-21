@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic: a statement for another made-up account. -->
+<FlexQueryResponse queryName="synthetic-cash" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="DU0000999" fromDate="20270112" toDate="20270115" period="Last30CalendarDays" whenGenerated="20270116;083000">
+      <CashTransactions>
+        <CashTransaction accountId="DU0000999" currency="USD" type="Deposits/Withdrawals" dateTime="20270114" amount="2500" transactionID="900000201" levelOfDetail="DETAIL"/>
+      </CashTransactions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

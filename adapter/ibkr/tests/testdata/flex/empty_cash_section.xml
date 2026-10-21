@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic: the Cash Transactions section, with nothing posted in the period. -->
+<FlexQueryResponse queryName="synthetic-cash" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="DU0000001" fromDate="20270112" toDate="20270115" period="Last30CalendarDays" whenGenerated="20270116;083000">
+      <CashTransactions/>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

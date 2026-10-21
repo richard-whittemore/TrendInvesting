@@ -43,6 +43,7 @@ began delivering the data job's daily file to the engine:
 | Daily data job | Boost's stream, installed with its timer | A job for the IRAs |
 | IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind one account reading after the close: the account snapshot and broker snapshot as of the close when nothing is working at IBKR and nothing has executed since (else at the read time, with the reason), and SPY's mark from the official close; all against a stand-in gateway, rehearsed with the real engine ([paper trading](paper-trading.md), "A paper day") | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed |
 | Morning reconciliation | The engine's comparison, states and alert; the adapter's read delivered to the engine at a run's first delivery, every start and every reconnect | The checks after fills and before orders, and on a timer; open orders; the joint account's cash (the Boost book states none, so cash is not compared); any command to record a missed event |
+| Flex reader of deposits and withdrawals | The reader and its unit and timer for the Boost account, writing each new transfer to the account's ledger; against synthetic statements only ([reconciliation](reconciliation.md), "Deposits and withdrawals, read from IBKR") | A reading of a real statement; the reporter's page when it is set aside; the dashboard's use of the ledger; recording dividends, interest and fees; the IRAs |
 | Reporter and dashboard | Both programs, installed on the server; the reporter checks every 5 minutes, around the clock | The outside heartbeat |
 | Operator tool and journal-query | Both programs, installed on the server, and the engine's operator inbox, created by the provisioner and passed by the service file | — |
 | Server | Provisioning, the Gateway unit, the firewall, pinned downloads | Backups; a real server run |
@@ -59,6 +60,7 @@ are what this build runs):
 | Target-weight configuration schema | 7 |
 | Decision record (`strategy.targets.decided`) | 6 |
 | Fresh-run approval (`operator.run.approved`); version 3 states the starting book | 3 |
+| Cash movement (`account.cash-movement`) the Flex reader writes; version 2 carries IBKR's transaction ID | 2 |
 | IB Gateway, pinned | 10.50.1f |
 | IBKR TWS API (`ibapi`), pinned | 10.51.01 |
 | IBC, pinned | 3.24.2 |

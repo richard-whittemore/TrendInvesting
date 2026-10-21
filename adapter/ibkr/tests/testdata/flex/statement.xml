@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A synthetic Flex statement: made-up account, amounts and IDs, never a real one. -->
+<FlexQueryResponse queryName="synthetic-cash" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="DU0000001" fromDate="20270112" toDate="20270115" period="Last30CalendarDays" whenGenerated="20270116;083000">
+      <CashTransactions>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Deposits/Withdrawals" dateTime="20270114" amount="2500" transactionID="900000101" levelOfDetail="DETAIL" description="SYNTHETIC DEPOSIT"/>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Deposits/Withdrawals" dateTime="20270115;101500" amount="-400.50" transactionID="900000102" levelOfDetail="DETAIL" description="SYNTHETIC WITHDRAWAL"/>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Dividends" dateTime="20270113" amount="12.34" transactionID="900000103" levelOfDetail="DETAIL" symbol="SPY"/>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Broker Interest Paid" dateTime="20270113" amount="-3.21" transactionID="900000104" levelOfDetail="DETAIL"/>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Broker Interest Received" dateTime="20270113" amount="0.42" transactionID="900000105" levelOfDetail="DETAIL"/>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Commission Adjustments" dateTime="20270113" amount="-1.00" transactionID="900000106" levelOfDetail="DETAIL"/>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Other Fees" dateTime="20270113" amount="-10" transactionID="900000107" levelOfDetail="DETAIL"/>
+        <CashTransaction accountId="DU0000001" currency="USD" type="Deposits/Withdrawals" dateTime="20270114" amount="2500" levelOfDetail="SUMMARY"/>
+      </CashTransactions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

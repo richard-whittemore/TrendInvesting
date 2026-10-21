@@ -129,6 +129,24 @@ def _parser():
                      help="the install record provision.sh twsapi writes (/opt/trend-investing/twsapi/INSTALLED)")
     run.add_argument("--versions", required=True, metavar="FILE",
                      help="the pin file installed with the adapter's code (deploy/versions.env)")
+    reader = commands.add_parser(
+        "flex", help="read IBKR's Cash Transactions once and record each new deposit or withdrawal",
+        description="Read the owner's Flex query from IBKR's Flex Web Service once (flex.py; "
+                    "docs/manual/reconciliation.md, \"Deposits and withdrawals, read from IBKR\") and add each "
+                    "deposit or withdrawal not yet in the ledger to it. Exit status 0 for a reading, 1 when the "
+                    "reader is set aside (why on standard error and in the ledger's status file).")
+    reader.add_argument("--secrets", required=True, metavar="FILE",
+                        help="a KEY=VALUE file holding TI_IBKR_FLEX_TOKEN and TI_IBKR_FLEX_QUERY_ID (on the server: "
+                             "/etc/trend-investing/secrets.env, handed over as a credential)")
+    reader.add_argument("--account-secrets", required=True, metavar="FILE",
+                        help="the KEY=VALUE file naming the instance's IBKR account (on the server: "
+                             "/etc/trend-investing/accounts/boost.env)")
+    reader.add_argument("--account-key", required=True, metavar="NAME", help="its line, e.g. IBKR_ACCOUNT_BOOST")
+    reader.add_argument("--engine-log", required=True, metavar="FILE",
+                        help="the engine's durable log, read only, for the net liquidation before each transfer")
+    reader.add_argument("--ledger", required=True, metavar="FILE",
+                        help="the instance's cash-movement ledger, one record a line; its status file is beside it "
+                             "(on the server: /var/lib/trend-investing/flex/boost/cash-movements.jsonl)")
     return parser
 
 
@@ -206,7 +224,8 @@ def _engine_connect(path, timeout):
 
 
 def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL,
-         ibapi_version=None, protobuf_version=None, today=None, now=None, zone_lookup=None):
+         ibapi_version=None, protobuf_version=None, today=None, now=None, zone_lookup=None, flex_get=None,
+         flex_sleep=None):
     """Run the command; returns the process exit status.
 
     api_factory, engine_connect, should_stop, ibapi_version and protobuf_version replace the
@@ -216,10 +235,15 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     synthetic session) and now the adapter's clock (the rehearsal's, kept
     with its synthetic IBKR clock); zone_lookup replaces zoneinfo.ZoneInfo
     in the check that IBKR's time zones are installed; poll is how long one
-    step waits for a callback.
+    step waits for a callback; flex_get and flex_sleep replace the Flex
+    reader's HTTP GET and its wait (`flex`; the tests, which use no network).
     """
     err = err or sys.stderr
     args = _parser().parse_args(argv)
+    if args.command == "flex":
+        import flex
+        return flex.command(args, err, **({"get": flex_get} if flex_get else {}),
+                            **({"sleep": flex_sleep} if flex_sleep else {}))
     try:
         cfg = load_config(args)
         require_zones(zone_lookup or ZoneInfo)

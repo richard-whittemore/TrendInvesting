@@ -564,6 +564,7 @@ pass "three distinct engine client IDs, and none for the data step"
 
 # The adapter's state directory and its configuration, created once and kept.
 test "$(stat -c %U:%a /var/lib/trend-investing/adapters/boost)" = ti-trader:750 || fail "adapter state directory not ti-trader 0750"
+test "$(stat -c %U:%a /var/lib/trend-investing/flex/boost)" = ti-trader:750 || fail "Flex reader's ledger directory not ti-trader 0750"
 grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.json || fail "adapter configuration not created from the example"
 pass "adapter state directory and configuration in place, sending off"
 echo "REHEARSAL COMPLETE"

@@ -219,6 +219,84 @@ Two conservative choices, both of which can only make a sale smaller:
   open-order report does not carry what has filled;
 - an order IBKR holds back (`Inactive`) counts as one that may still execute.
 
+## Deposits and withdrawals, read from IBKR
+
+The adapter reads the account's balances, not the reasons they move. A deposit
+or withdrawal you make changes IBKR's cash without any fill, so on its own it
+shows only as cash drift (above, and the daily summary's `cash drift` and
+`unexplained cash`). To record it, a small program, the **Flex reader**, asks
+IBKR once a day for the account's cash transactions and writes down each
+deposit and withdrawal.
+
+**What is read.** IBKR's Flex Web Service gives a saved report, a *Flex
+query*, to a program holding a *Flex token*. The reader asks for yours, reads
+its **Cash Transactions** section, and sorts each row by IBKR's type:
+deposits and withdrawals, dividends, broker interest paid and received,
+commission adjustments, and other fees, each with IBKR's own transaction ID,
+its date, amount and currency.
+
+**What is written.** Each deposit or withdrawal not already recorded becomes
+one cash movement (`account.cash-movement`, version 2) in the account's
+**ledger**, `/var/lib/trend-investing/flex/boost/cash-movements.jsonl`: the
+amount (positive in, negative out), the date, the currency, IBKR's
+transaction ID, and the account's equity before it, the net liquidation of
+the engine's last account snapshot before that date. The other postings are
+read but not written yet; they are for the running totals of costs.
+
+- **Each transfer once.** The ledger is the record of what has been read: a
+  transfer whose transaction ID is already in it is never written again,
+  however many days IBKR's report repeats it. If IBKR ever states a recorded
+  transfer with another amount, date or currency, nothing is changed and the
+  reader stops (below).
+- **Only this account.** A report for another account, or with a row for
+  another account, is refused whole.
+- **A transfer from before the engine's first close** is already in the
+  first book you approved, so it is not written; the reader's log says so.
+- **Times.** IBKR's dates are New York dates; a date with no time is read as
+  the start of that day, so the equity before it is the previous close's.
+- **Nothing the engine decides reads the ledger.** It is a separate file the
+  engine never sees, so the reader cannot change an order, a state or a
+  reconciliation. The cash-drift check stays as it is, and stays the
+  cross-check: a transfer the reader missed still shows as drift.
+
+**When.** `ti-flex-boost.timer` runs it on weekdays at 9:30 p.m. New York
+time, after the close and the evening's data step. IBKR may add a day's
+transfer to the report only after its own end-of-day processing, so a
+transfer can appear one evening late; set the query to cover several days
+(below) and the next evening's reading writes it.
+
+**What you set up once, in IBKR's Client Portal.**
+
+1. Create the Flex query: **Performance & Reports → Flex Queries → Activity
+   Flex Query → +**. Give it a name, tick the **Cash Transactions** section
+   and, inside it, select all fields (or at least Account ID, Currency, Type,
+   Date/Time, Amount, Transaction ID, Level of Detail). Set **Format** to
+   XML, **Period** to *Last 7 Calendar Days* or longer, and leave the date
+   format (`yyyyMMdd`), the time format (`HHmmss`) and the date/time
+   separator (`;`) at their defaults: the reader refuses any other. Save it
+   and note its **Query ID**.
+2. Create the token: **Performance & Reports → Flex Queries → Flex Web
+   Service Configuration**, turn the service on and **generate a token**.
+   Note the token and its expiry date; IBKR ends a token at its expiry, and
+   you generate a new one then.
+3. Put both in the server's secrets file, never anywhere else: `sudo -e
+   /etc/trend-investing/secrets.env`, the lines `TI_IBKR_FLEX_TOKEN=` and
+   `TI_IBKR_FLEX_QUERY_ID=` (no quotes, no spaces). The token is a password
+   to your account's reports: never paste it into a chat, an issue or a
+   command line.
+4. Turn the reader on (`docs/runbooks/lightsail-deployment.md`, "The Flex
+   reader").
+
+**When it cannot read.** The reader *sets itself aside* for that evening:
+it writes nothing to the ledger, records why in the status file beside the
+ledger (`cash-movements.jsonl.status.json`, `"state": "set-aside"`, with
+IBKR's error code when IBKR gave one), and its unit shows as failed
+(`systemctl --failed`, `journalctl -u ti-flex-boost`). Trading carries on:
+the engine, the adapter and the reporter do not depend on it. The next
+evening it tries again, and a good reading puts the status back to
+`"read"`. The reporter does not page you about it yet (see "What is not
+built yet").
+
 ## What can go wrong, and what the program does then
 
 | What you see | What the program does | What you do |
@@ -233,6 +311,15 @@ Two conservative choices, both of which can only make a sale smaller:
 | The daily summary shows `cash drift` and `unexplained cash` | Information only: the drift since the previous close and that drift added up since the cash was last explained (an explained reconciliation, else the starting book). The program does not act on it, and the post-close reading is stamped at its read time instead of the close when the drift exceeds 1% of net liquidation (the session is then withheld). | A small posting day (interest, a dividend) is expected; a figure that keeps growing is a cash movement to find at IBKR before approving anything. |
 | Margin interest on the joint account | Not compared: Boost's book states no cash, so the result says cash is not compared. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
 | A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
+| `ti-flex-boost` failed; its status file says IBKR's Flex Web Service **rejected the token or the query** (error 1012 the token expired, 1015 the token is invalid, 1014 the query is invalid, 1011, 1013 or 1016 the service, its IP address or the account is not allowed) | The Flex reader is set aside for this reading: no request for the statement is made, nothing is written to the ledger, and the token is never printed. Trading is unaffected. It tries again at the next firing | In Client Portal, check the Flex Web Service is on and the token not expired (generate a new one if it is), and the query ID; correct `TI_IBKR_FLEX_TOKEN` or `TI_IBKR_FLEX_QUERY_ID` with `sudo -e /etc/trend-investing/secrets.env`, then `sudo systemctl start ti-flex-boost` and check `journalctl -u ti-flex-boost` says it read |
+| `ti-flex-boost` failed; its status file says the Flex Web Service **gave no statement** (busy, error 1009 or 1018; not ready, 1003 to 1008; still generating after 5 minutes, 1019; or IBKR could not be reached) | Set aside for this reading, nothing written; the next firing asks again | Nothing, if the next evening reads. If it keeps failing, check the server's network, and IBKR's system status |
+| `ti-flex-boost` failed; its status file says the Flex statement **is for another account**, or a row is | The whole statement is refused and nothing of it is written; neither account number is printed | Make the Flex query cover this account (Client Portal, the query's account selection); for one query covering several accounts this account must be among them |
+| `ti-flex-boost` failed; its status file says the statement **has no Cash Transactions section** | Refused: without the section the reader cannot tell "nothing moved" from "not asked for" | Edit the Flex query in Client Portal and tick **Cash Transactions** (above, "What you set up once") |
+| `ti-flex-boost` failed; its status file says the statement **is not XML**, or a row has no transaction ID, type, currency, a number for its amount, or a date as `yyyyMMdd[;HHmmss]` | Refused whole; nothing written | Set the query's format to XML and its date, time and separator formats back to the defaults (`yyyyMMdd`, `HHmmss`, `;`) |
+| `ti-flex-boost` failed; its status file says **transaction N is in the ledger as one amount, but IBKR now states another** | Refused: a recorded cash movement is never changed or written twice | Check the transfer in IBKR's activity statement. Leave the ledger as it is and tell the developer: a corrected transfer needs its own recorded correction, which is not built |
+| `ti-flex-boost` failed; its status file says **the ledger line N is not a cash movement as this reader writes it** | The ledger is never appended to while a line in it cannot be read | Put back the line as the reader wrote it (from a backup or the server's snapshot); never edit the ledger by hand |
+| `ti-flex-boost` failed: "the secrets file ... does not hold exactly one filled-in TI_IBKR_FLEX_TOKEN line" (or `TI_IBKR_FLEX_QUERY_ID`, or the account's line) | Refused before anything is asked of IBKR | Fill the line in (above, "What you set up once"), or turn the reader's timer off until you have: `sudo systemctl disable --now ti-flex-boost.timer` |
+| The reader's log says "transfer N not written: ... before the engine's first account snapshot" | Information only: that transfer is already in the first book you approved | Nothing |
 | A fill stamped in the same second as the morning read | It counts as after the read. If IBKR's figure includes it, the result is a difference and the account goes Degraded on that instrument: the safe side. | Check the fill at IBKR, then recover as for any difference. |
 | A trade during a session that the engine did not place (one you made by hand in IBKR, or another program's), a fill report the engine was never given, or a journalled fill IBKR does not show. Alert: `<account>: reconciliation unexplained (close-snapshot:<snapshot ID>)` | The session's close snapshot holds shares that the book and the fills journalled since it do not explain. The engine records the check (`risk.reconciliation.result`, its input the snapshot) and the account goes **Degraded** on that stock: no buys, the stock frozen, the snapshot still taken as the book the next decision sizes from. A delisting, merger or symbol change journalled since the book cannot be applied, so the check is unverifiable and the account goes **Halted**, as for any unverifiable reconciliation. If the delivery's reconciliation from the same reading already reported the same holdings, and no fill or corporate action is dated between the reconciliation's reading and the snapshot's (whichever came first), nothing more is sent: you get that reconciliation's alert instead. The same difference, with the same shares, is not reported again after a fill of another stock; once a later reconciliation finds the stock matched, the same difference recurring is reported anew. A Halt is sent unless the account is already Halted for the same change. Nothing is recorded for a snapshot the fills explain. | Find the trade in IBKR's trade log for the session. Then follow `docs/runbooks/reconciliation.md`, "Recover", as for any unexplained difference: a fresh run whose approval clears the incident, or carries it in force. Halted: recover as `docs/runbooks/halted-account.md`, "Recover", says: after a session ends with none of the program's orders working, reconcile against IBKR, stop the engine, and start a fresh run whose approval clears the incident (`-clear-incident`). Stating the book (`-positions`) is only for a run's first reading that was not the book. |
 | A difference that arises while the market is open and remains in the close snapshot | Found at that session's close, by the delivery's reconciliation or the close-snapshot check (above), not when it happens: the after-fill and pre-order reconciliations are not built. A difference reversed before the close, such as a holding-neutral trade, is not seen by either check. | Compare IBKR with the journal yourself when anything looks wrong during the day. |
@@ -247,3 +334,8 @@ Two conservative choices, both of which can only make a sale smaller:
   the comparison of open orders; the joint account's cash; matching each cash
   activity to IBKR's activity rows rather than comparing one net total; and
   the outside heartbeat monitor. These are tracked as follow-up issues.
+- The Flex reader writes its ledger, but nothing reads it yet: the reporter
+  does not page when the reader is set aside (you see a failed unit only),
+  the dashboard's comparison does not yet use the deposits and withdrawals,
+  and the dividends, interest and fees it reads are not yet recorded. The
+  reader is built for the Boost account only.

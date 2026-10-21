@@ -582,7 +582,8 @@ CONF
   write_stub "$etc/accounts/boost.env" "$here/etc/accounts/boost.env.example"
   if mac_mini; then ensure_operator_user 2003; else ensure_operator_user; fi
   install -d -o ti-trader -g ti-trader -m 0750 \
-    /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines
+    /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines \
+    /var/lib/trend-investing/flex
   local a
   for a in boost trad-ira roth-ira; do
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a"
@@ -592,6 +593,9 @@ CONF
     # can (ADR 0026, kill-switch amendment; docs/manual/operator.md).
     install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
+    # The Flex reader's ledger of cash movements and its status file
+    # (ti-flex-boost.service; docs/manual/reconciliation.md).
+    install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/flex/$a"
   done
   # The adapter's configuration carries no secret (the account number comes
   # from accounts/boost.env): created once from the example, never overwritten, so
