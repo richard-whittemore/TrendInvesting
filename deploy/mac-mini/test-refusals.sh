@@ -185,7 +185,21 @@ test "$(readlink "$lock")" = "$self" || fail "a refused up.sh changed the lock i
 # The start time is read the same way whatever the time zone or language of
 # the shell that runs up.sh, so a live holder is never taken for a stale one.
 : >"$work/calls"
-if launch "$clean" TI_DIST="$work/dist" TZ=Pacific/Auckland LC_ALL=de_DE.UTF-8 LANG=de_DE.UTF-8; then fail "a launcher in another time zone and language ran with a live lock held"; fi
+# The language case needs an installed locale that makes ps print the start
+# time differently from C; pick one that does, and say which path ran.
+c_form=$(LC_ALL=C ps -o lstart= -p $$)
+alt_locale=""
+for cand in $(locale -a 2>/dev/null | grep -v -e '^C' -e '^POSIX' -e '^en_'); do
+  if test "$(LC_ALL=$cand ps -o lstart= -p $$ 2>/dev/null)" != "$c_form"; then alt_locale=$cand; break; fi
+done
+if test -n "$alt_locale"; then
+  echo "test-refusals: lock start time checked under time zone Pacific/Auckland and locale $alt_locale"
+  tz_env=(TZ=Pacific/Auckland LC_ALL="$alt_locale" LANG="$alt_locale")
+else
+  echo "test-refusals: no installed locale prints the start time differently from C; lock start time checked under the time zone alone"
+  tz_env=(TZ=Pacific/Auckland)
+fi
+if launch "$clean" TI_DIST="$work/dist" "${tz_env[@]}"; then fail "a launcher in another time zone and language ran with a live lock held"; fi
 grep -qiF "another up.sh" "$work/out" || fail "a launcher in another time zone and language did not see the live lock: $(cat "$work/out")"
 test "$(readlink "$lock")" = "$self" || fail "a launcher in another time zone and language replaced a live lock"
 gone=$(sh -c 'echo $$')
