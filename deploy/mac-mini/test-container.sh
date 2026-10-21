@@ -78,10 +78,12 @@ fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 # docker exec passes the container's environment, not this one's: what a
 # check reads from here is passed by name.
 inside() { docker exec --env "ALLOWED=${ALLOWED:-}" --env "SINK_PORT=$sink_port" "$name" /root/deploy/mac-mini/container-checks.sh "$@"; }
-up() { env TI_MAC_NAME="$name" TI_DIST="$work/dist" TI_MAC_DASHBOARD_PORT="$port" "$work/checkout/deploy/mac-mini/up.sh" "$@"; }
+up() { env TI_MAC_NAME="$name" TI_DIST="$work/dist-link" TI_MAC_DASHBOARD_PORT="$port" "$work/checkout/deploy/mac-mini/up.sh" "$@"; }
 
 step "a checkout outside the synced folders, and the programs built for arm64"
 mkdir -p "$work/checkout" "$work/dist"
+# The build folder is reached through a symbolic link, as a TI_DIST may be: the programs must still arrive.
+ln -s "$work/dist" "$work/dist-link"
 # Only deploy/ is copied in; a copy, not a link, so up.sh sees no synced path.
 (cd "$repo" && tar -cf - deploy) | (cd "$work/checkout" && tar -xf -)
 "$repo/deploy/build-data.sh" "$work/dist/ti-data" >/dev/null
@@ -225,7 +227,7 @@ done
 for v in etc state opt journal; do
   docker volume create --label org.trend-investing.mac-mini="$name-x" --label org.trend-investing.checkout=/elsewhere "$name-x-$v" >/dev/null
 done
-if env TI_MAC_NAME="$name-x" TI_DIST="$work/dist" TI_MAC_DASHBOARD_PORT="$((port + 1))" "$work/checkout/deploy/mac-mini/up.sh" >"$work/volumes-out" 2>&1; then cat "$work/volumes-out"; fail "up.sh provisioned over another checkout's volumes"; fi
+if env TI_MAC_NAME="$name-x" TI_DIST="$work/dist-link" TI_MAC_DASHBOARD_PORT="$((port + 1))" "$work/checkout/deploy/mac-mini/up.sh" >"$work/volumes-out" 2>&1; then cat "$work/volumes-out"; fail "up.sh provisioned over another checkout's volumes"; fi
 cat "$work/volumes-out"
 grep -q "docker volume rm $name-x-etc" "$work/volumes-out" || fail "the refusal does not give the owner's two choices"
 if docker container inspect "$name-x" >/dev/null 2>&1; then fail "a container was created on another checkout's volumes"; fi
