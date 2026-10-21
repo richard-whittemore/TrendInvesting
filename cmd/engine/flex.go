@@ -59,8 +59,10 @@ type flexLedger struct {
 	saidLedger, saidStatus string
 	recorder               *journal.Recorder
 	out                    io.Writer
-	strategyVersion        string
-	configurationHash      string
+	// readFile reads a file; nil is os.ReadFile.
+	readFile          func(string) ([]byte, error)
+	strategyVersion   string
+	configurationHash string
 }
 
 // openFlexLedger checks -cash-ledger names a ledger of this engine's own
@@ -105,9 +107,15 @@ func openFlexLedger(opts options, comp composition, recovered *journal.Recovery,
 }
 
 // pending returns the Flex inputs not yet journalled in this run: the
-// ledger's records, then the status.
+// ledger's records, then the status. The status is read first: the reader
+// writes its ledger before the status saying "read" (adapter/ibkr/flex.py,
+// read_once), so a ledger read after the status holds every transfer that
+// status covers, and a reading that finishes between the two reads only
+// adds records, never a coverage the delivered records lack (ADR 0019,
+// amended 2026-10-21).
 func (l *flexLedger) pending() []event.Envelope {
 	var out []event.Envelope
+	rawStatus, statusRead := l.read(l.path+flexStatusSuffix, &l.saidStatus)
 	if raw, ok := l.read(l.path, &l.saidLedger); ok {
 		records, err := event.DecodeFlexLedger(raw)
 		if err != nil {
@@ -121,8 +129,8 @@ func (l *flexLedger) pending() []event.Envelope {
 			}
 		}
 	}
-	if raw, ok := l.read(l.path+flexStatusSuffix, &l.saidStatus); ok {
-		status, err := event.DecodeFlexStatus(raw, l.accountID)
+	if statusRead {
+		status, err := event.DecodeFlexStatus(rawStatus, l.accountID)
 		if err != nil {
 			l.say(&l.saidStatus, fmt.Sprintf("engine: the Flex status %s%s is not delivered: %v", l.path, flexStatusSuffix, err))
 		} else {
@@ -139,7 +147,11 @@ func (l *flexLedger) pending() []event.Envelope {
 // read returns the file at path, or false when it is not there yet or
 // cannot be read, which is said once.
 func (l *flexLedger) read(path string, said *string) ([]byte, bool) {
-	raw, err := os.ReadFile(path) // #nosec G304 -- the ledger and its status are the files -cash-ledger names, in the instance's own Flex folder.
+	readFile := l.readFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	raw, err := readFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, false

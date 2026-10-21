@@ -1630,10 +1630,12 @@ type OrderRefusedPayload struct {
 	// Alert marks the refusal that raises the urgent alert: the first
 	// stale-broker-snapshot refusal of the account's stale episode (ADR 0019,
 	// amendment of 2026-10-17, reading 10), or the first kill-switch refusal
-	// of one engagement (ADR 0026, point 3, kill switch: "alert once"). The
-	// later refusals of the same episode or engagement are recorded without
-	// it and send nothing. Only a journal recorded under rules version 1.16.0
-	// or later flags a kill-switch refusal.
+	// of one engagement (ADR 0026, point 3, kill switch: "alert once"), or
+	// the first pending-cash-decrease refusal of one pending cash difference
+	// (ADR 0019, amended 2026-10-21). The later refusals of the same episode,
+	// engagement or difference are recorded without it and send nothing.
+	// Only a journal recorded under rules version 1.16.0 or later flags a
+	// kill-switch refusal.
 	Alert bool `json:"alert,omitempty"`
 }
 
@@ -1683,8 +1685,8 @@ func (p OrderRefusedPayload) Validate() error {
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a refusal without its figures cannot be checked"))
 	}
-	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot && p.Reason != RefusedKillSwitch {
-		errs = append(errs, errors.New("only a stale-broker-snapshot or kill-switch refusal raises the alert"))
+	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot && p.Reason != RefusedKillSwitch && p.Reason != RefusedPendingCashDecrease {
+		errs = append(errs, errors.New("only a stale-broker-snapshot, kill-switch or pending-cash-decrease refusal raises the alert"))
 	}
 	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {

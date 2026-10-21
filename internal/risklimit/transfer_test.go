@@ -343,8 +343,8 @@ func TestAPendingCashDecreaseWithholdsEveryBuyUntilTheReaderExplainsIt(t *testin
 	if err := buy.Refused.ValidateSchema(buy.Refused.SchemaVersion()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buy.Refused.Detail, "reconciliation:1") || buy.Refused.Alert {
-		t.Errorf("the refusal names the pending difference and raises no alert of its own: %+v", buy.Refused)
+	if !strings.Contains(buy.Refused.Detail, "reconciliation:1") {
+		t.Errorf("the refusal names the pending difference: %+v", buy.Refused)
 	}
 	released(t, check(t, g, order(event.OrderSideSell, 1, 10))[0])
 	if g.State() != risklimit.StateNormal {
@@ -361,6 +361,86 @@ func TestAPendingCashDecreaseWithholdsEveryBuyUntilTheReaderExplainsIt(t *testin
 		t.Fatalf("settled %+v", next.Settled)
 	}
 	released(t, check(t, g, order(event.OrderSideBuy, 1, 0))[0])
+}
+
+func TestAPendingCashDecreasePagesOncePerPendingDifference(t *testing.T) {
+	// Every buy withheld is journalled, refused pending-cash-decrease, but
+	// only the first refusal of the pending difference raises the urgent
+	// alert, as the kill switch's first refusal of its engagement does
+	// (ADR 0019, amended 2026-10-21): two decisions of two buys each page
+	// once.
+	g := booked(t)
+	flexRead(t, g, "20250304", at.Add(-12*time.Hour))
+	reconcileWith(t, g, "reconciliation:1", morningOf(500, 10))
+	pages := 0
+	for decision := range 2 {
+		for _, out := range check(t, g, order(event.OrderSideBuy, 1, 0), order(event.OrderSideBuy, 2, 0)) {
+			refusedFor(t, out, event.RefusedPendingCashDecrease)
+			if err := out.Refused.ValidateSchema(out.Refused.SchemaVersion()); err != nil {
+				t.Fatalf("decision %d: %v", decision, err)
+			}
+			if out.Refused.Alert {
+				pages++
+			}
+		}
+	}
+	if pages != 1 {
+		t.Fatalf("one pending difference pages once, got %d pages", pages)
+	}
+	// Once it is decided, a new pending decrease is a new difference, and
+	// pages again.
+	rebook(g, 0, 500)
+	deposited(t, g, "W1", -500, 30)
+	flexRead(t, g, "20250305", at.Add(12*time.Hour))
+	reconcileWith(t, g, "reconciliation:2", day(1, 500))
+	reconcileWith(t, g, "reconciliation:3", day(1, 200))
+	if out := check(t, g, order(event.OrderSideBuy, 1, 0))[0]; out.Refused == nil || !out.Refused.Alert {
+		t.Errorf("a new pending decrease pages: %+v", out)
+	}
+}
+
+func TestARepeatedReadingOfAPendingDifferenceIsTheSameDifference(t *testing.T) {
+	// A reconnect reconciles again against the same book: the same cash
+	// difference is one pending difference, not two, so its increase is
+	// left out of the buy budget once, and the reading that repeats it is
+	// decided with it (ADR 0019, amended 2026-10-21: one difference).
+	g := booked(t)
+	flexRead(t, g, "20250304", at.Add(-12*time.Hour))
+	reconcileWith(t, g, "reconciliation:1", morningOf(1500, 10))
+	again := morningOf(1500, 10)
+	again.AsOf, again.ReconciliationID = again.AsOf.Add(time.Hour), "reconnect"
+	r := reconcileWith(t, g, "reconciliation:2", again)
+	if r.Result.Classification != event.ReconciliationPendingCashRead {
+		t.Fatalf("got %s", r.Result.Classification)
+	}
+	if !strings.Contains(r.Result.Detail, "the same difference reconciliation morning (reconciliation:1) found") {
+		t.Errorf("the repeat names the reading that found it: %q", r.Result.Detail)
+	}
+	if got := g.PendingCashIncrease(); got != 500 {
+		t.Fatalf("one difference of $500 pends, got %v", got)
+	}
+	rebook(g, 0, 1500)
+	deposited(t, g, "T1", 500, 30)
+	flexRead(t, g, "20250305", at.Add(12*time.Hour))
+	next := reconcileWith(t, g, "reconciliation:3", day(1, 1500))
+	if len(next.Settled) != 2 {
+		t.Fatalf("both readings are decided, got %+v", next.Settled)
+	}
+	for i, input := range []string{"reconciliation:1", "reconciliation:2"} {
+		s := next.Settled[i]
+		if err := s.Result.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if s.Result.InputID != input || s.Result.Classification != event.ReconciliationExplained {
+			t.Errorf("settled %d: %s %s", i, s.Result.InputID, s.Result.Classification)
+		}
+	}
+	if next.Settled[0].ResultID == next.Settled[1].ResultID {
+		t.Errorf("each has its own ID: %s", next.Settled[0].ResultID)
+	}
+	if got := g.PendingCashIncrease(); got != 0 {
+		t.Errorf("decided: %v pends", got)
+	}
 }
 
 func TestAPendingCashDecreaseIsDegradedOnCashAtTheTwoSessionCap(t *testing.T) {

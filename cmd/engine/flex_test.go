@@ -214,3 +214,52 @@ func TestTheCashLedgerFlagIsChecked(t *testing.T) {
 		t.Errorf("a backtest takes no ledger: %v", err)
 	}
 }
+
+func TestAStatusIsNeverNewerThanTheLedgerItIsDeliveredWith(t *testing.T) {
+	// The reader writes its ledger, then its status saying "read", under
+	// its own lock, which the engine does not take. The engine reads the
+	// status first and the ledger after it, so a reading that finishes
+	// between the two reads can only add records, never deliver a status
+	// covering a day whose transfers the ledger read lacked (ADR 0019,
+	// amended 2026-10-21).
+	logPath, ledgerPath := instanceDirs(t, "trad-ira")
+	old := strings.Replace(readStatus, "20260601", "20260531", 1)
+	writeFile(t, ledgerPath, ledgerRecord("T1"))
+	writeFile(t, ledgerPath+".status.json", old)
+	l, err := openFlexLedger(options{logPath: logPath, cashLedger: ledgerPath, mode: modePaper}, composition{accountID: "joint", strategyVersion: "test", configurationHash: flexHash}, nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := false
+	l.readFile = func(path string) ([]byte, error) {
+		raw, err := os.ReadFile(path) // #nosec G304 -- the test's own temporary files.
+		if !finished {
+			// The reader finishes a reading the moment the engine has read
+			// its first file: a new transfer, then the status covering it.
+			finished = true
+			appendFile(t, ledgerPath, ledgerRecord("T2"))
+			writeFile(t, ledgerPath+".status.json", readStatus)
+		}
+		return raw, err
+	}
+	var covered string
+	var transfers []string
+	for _, e := range l.pending() {
+		switch e.Type {
+		case event.FlexStatusEventType:
+			var p event.FlexStatusPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			covered = p.CoveredTo
+		case event.CashMovementEventType:
+			transfers = append(transfers, e.ID)
+		}
+	}
+	if covered == "20260601" && len(transfers) != 2 {
+		t.Fatalf("a status covering 20260601 was delivered with the ledger before its transfer: %v", transfers)
+	}
+	if covered == "" || len(transfers) == 0 {
+		t.Fatalf("both are delivered: status %q, transfers %v", covered, transfers)
+	}
+}

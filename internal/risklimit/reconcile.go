@@ -268,6 +268,34 @@ type pendingCash struct {
 	from    time.Time
 	to      time.Time
 	counted map[string]bool
+	// alerted is set once a buy refused on this difference has raised the
+	// urgent alert: one pending difference pages once (withheldOnCash).
+	alerted bool
+	// repeats is each later reconciliation that found the same difference
+	// against the same book, as a reconnect's does: it is decided with this
+	// one, each under its own result (pend).
+	repeats []repeatedRead
+}
+
+// repeatedRead is a reconciliation that found a pending difference again:
+// its input and its reconciliation ID.
+type repeatedRead struct {
+	inputID          string
+	reconciliationID string
+}
+
+// sameDifference returns the undecided pending difference r, found against
+// the book in force from from, repeats, or nil: the same book, the same
+// residual in the same currency, after the same transfers.
+func (g *Gate) sameDifference(r event.ReconciliationResultPayload, cash event.ReconciliationComponent, from time.Time, counted map[string]bool) *pendingCash {
+	for i := range g.pendingCash {
+		pc := &g.pendingCash[i]
+		if pc.result.AnchorID == r.AnchorID && pc.from.Equal(from) && pc.result.Currency == r.Currency &&
+			pc.cash.Residual == cash.Residual && maps.Equal(pc.counted, counted) {
+			return pc
+		}
+	}
+	return nil
 }
 
 // pend returns o's result as a pending cash read when the difference may be
@@ -302,16 +330,30 @@ func (g *Gate) pend(id string, o reconcile.Outcome, p event.ReconciliationPayloa
 	if g.flex.State == event.FlexStateRead {
 		read = "has read IBKR's cash transactions only through " + g.flex.CoveredTo
 	}
-	// A cash increase is at IBKR, so a buy sized on it is sized on cash that
-	// is there; a decrease may be a withdrawal, so every buy is withheld
-	// while it pends (withheldOnCash).
-	direction := fmt.Sprintf("it is a cash increase of %s %s, like a deposit: this result withholds no buy, since the cash is at IBKR", cents(cash.Residual), r.Currency)
+	// A cash increase may be reversed, so buys are sized without it while it
+	// pends (PendingCashIncrease); a decrease may be a withdrawal, so every
+	// buy is withheld while it pends (withheldOnCash).
+	direction := fmt.Sprintf("it is a cash increase of %s %s, like a deposit: this result withholds no buy, and buys are sized from the cash less it until the reader's records explain it, so a credit that is reversed is never invested", cents(cash.Residual), r.Currency)
 	if cash.Residual < 0 {
 		direction = fmt.Sprintf("it is a cash decrease of %s %s, like a withdrawal: buys are withheld on the whole account while it pends, so no plan is sized on cash that may not be there, and sells and exits continue", cents(-cash.Residual), r.Currency)
 	}
+	// A repeat of a difference already pending is that difference: it is
+	// judged against the first reading's day and decided with it, so its
+	// increase is left out of the budget once (ADR 0019, amended
+	// 2026-10-21).
+	same := g.sameDifference(r, cash, from, counted)
+	found, repeat := p.AsOf, ""
+	if same != nil {
+		found = same.to
+		repeat = fmt.Sprintf("the same difference reconciliation %s (%s) found, still pending, decided with it; ", same.result.ReconciliationID, same.inputID)
+	}
 	r.Classification, r.Action, r.ScopeCashComponents = event.ReconciliationPendingCashRead, event.ReconciliationActionAlert, nil
-	r.Detail = fmt.Sprintf("pending-cash-read: %s; the Flex reader %s, so a deposit or withdrawal it has not yet recorded may explain it; %s; %s; the difference is checked again at each reconciliation until the reader's records explain it, or it is Degraded on cash once the reader has covered %s or more than %d sessions have closed since",
-		strings.TrimPrefix(r.Detail, "unexplained: "), read, direction, g.stateClause(), p.AsOf.In(nysecalendar.NewYork).Format("20060102"), pendingSessions)
+	r.Detail = fmt.Sprintf("pending-cash-read: %s%s; the Flex reader %s, so a deposit or withdrawal it has not yet recorded may explain it; %s; %s; the difference is checked again at each reconciliation until the reader's records explain it, or it is Degraded on cash once the reader has covered %s or more than %d sessions have closed since",
+		repeat, strings.TrimPrefix(r.Detail, "unexplained: "), read, direction, g.stateClause(), found.In(nysecalendar.NewYork).Format("20060102"), pendingSessions)
+	if same != nil {
+		same.repeats = append(same.repeats, repeatedRead{inputID: id, reconciliationID: r.ReconciliationID})
+		return r
+	}
 	g.pendingCash = append(g.pendingCash, pendingCash{inputID: id, result: r, cash: cash, from: from, to: p.AsOf, counted: counted})
 	return r
 }
@@ -333,18 +375,34 @@ func (g *Gate) stateClause() string {
 	return "the account stays Normal"
 }
 
-// withheldOnCash returns the reconciliation input that found the earliest
-// pending cash decrease still undecided, or "" when none: while one pends,
-// every buy is withheld, since it may be a withdrawal and the cash a buy is
-// sized on may not be there; sells and exits go (ADR 0019, amended
-// 2026-10-21).
-func (g *Gate) withheldOnCash() (inputID string, residual int64, currency string) {
-	for _, pc := range g.pendingCash {
-		if pc.cash.Residual < 0 {
-			return pc.inputID, pc.cash.Residual, pc.result.Currency
+// withheldOnCash returns the earliest pending cash decrease still
+// undecided, or nil when none: while one pends, every buy is withheld, since
+// it may be a withdrawal and the cash a buy is sized on may not be there;
+// sells and exits go (ADR 0019, amended 2026-10-21). Its alerted flag makes
+// the first refusal on it the one that pages.
+func (g *Gate) withheldOnCash() *pendingCash {
+	for i := range g.pendingCash {
+		if g.pendingCash[i].cash.Residual < 0 {
+			return &g.pendingCash[i]
 		}
 	}
-	return "", 0, ""
+	return nil
+}
+
+// PendingCashIncrease is the sum, in dollars, of every pending cash
+// increase still undecided: cash IBKR shows that no journalled transfer or
+// fill explains yet. Buys are sized from the book's cash, the broker's less
+// this, so a credit that is reversed or posted in error is never invested;
+// once the Flex reader's records explain it, it leaves the sum and the next
+// decision invests it (ADR 0019, amended 2026-10-21).
+func (g *Gate) PendingCashIncrease() float64 {
+	var sum int64
+	for _, pc := range g.pendingCash {
+		if pc.cash.Residual > 0 {
+			sum += pc.cash.Residual
+		}
+	}
+	return float64(sum) / 100
 }
 
 // settlePending decides each pending cash difference reported before p, the
@@ -406,6 +464,13 @@ func (g *Gate) settlePending(id string, p event.ReconciliationPayload) []Reconci
 		r.InputID = pc.inputID
 		r.Components = []event.ReconciliationComponent{c}
 		out = append(out, g.consequence(id+":pending-cash:"+pc.inputID, r))
+		// Each reading that repeated the difference is decided with it, so
+		// none is left undecided in the log (restart.CheckPendingCash).
+		for _, rep := range pc.repeats {
+			rr := r
+			rr.InputID, rr.ReconciliationID = rep.inputID, rep.reconciliationID
+			out = append(out, g.consequence(id+":pending-cash:"+rep.inputID, rr))
+		}
 	}
 	g.pendingCash = kept
 	return out

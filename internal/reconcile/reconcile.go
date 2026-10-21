@@ -483,11 +483,17 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 // journal order, since the Flex reader may journal an earlier transfer after
 // a later one; transfers of the same time run in IBKR's transaction ID
 // order, as the reader writes them (adapter/ibkr/flex.py), and other changes
-// of the same time before them, in journal order.
+// of the same time before them, in journal order. A transfer stamped at the
+// start of its New York day is one IBKR dated by day alone (the reader's
+// stamp, adapter/ibkr/flex.py, Posting.dated_only), which is not when the
+// cash moved: it runs after that day's other changes, as at the end of the
+// session, so a withdrawal the day's sells funded is no overdraft; a timed
+// transfer keeps its time. The order is the test's alone: the cash compared
+// is the same sum in any order.
 func overdrawnIn(book int64, applied []Change) []string {
 	ordered := slices.Clone(applied)
 	slices.SortStableFunc(ordered, func(a, b Change) int {
-		if c := a.At.Truncate(time.Second).Compare(b.At.Truncate(time.Second)); c != 0 {
+		if c := overdrawnAt(a).Compare(overdrawnAt(b)); c != 0 {
 			return c
 		}
 		return strings.Compare(a.TransactionID, b.TransactionID)
@@ -507,6 +513,23 @@ func overdrawnIn(book int64, applied []Change) []string {
 		cash = next
 	}
 	return overdrawn
+}
+
+// overdrawnAt is when c runs in the overdrawn test: its time to the second,
+// except that a transfer dated by day alone, stamped at the start of its New
+// York day, runs at the start of the next one, after every change of its own
+// day (overdrawnIn).
+func overdrawnAt(c Change) time.Time {
+	at := c.At.Truncate(time.Second)
+	if c.Kind != ChangeCashMovement {
+		return at
+	}
+	local := at.In(nysecalendar.NewYork)
+	y, m, d := local.Date()
+	if start := time.Date(y, m, d, 0, 0, 0, 0, nysecalendar.NewYork); !at.Equal(start) {
+		return at
+	}
+	return time.Date(y, m, d+1, 0, 0, 0, 0, nysecalendar.NewYork)
 }
 
 // appendEntry completes c's residual and whether it is explained, and adds it

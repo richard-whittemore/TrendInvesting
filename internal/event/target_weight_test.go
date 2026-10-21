@@ -462,12 +462,13 @@ func TestMarginLimitsAndModesStandAlone(t *testing.T) {
 // TestARefusalAlertBelongsToAKillSwitchOrStaleRefusal: the alert flag marks
 // the one refusal that pages the owner for a kill-switch engagement (ADR
 // 0026, point 3, kill switch: "alert once") or a stale episode (ADR 0019,
-// amendment of 2026-10-17, reading 10); no other reason carries it.
+// amendment of 2026-10-17, reading 10) or a pending cash decrease (ADR
+// 0019, amended 2026-10-21); no other reason carries it.
 func TestARefusalAlertBelongsToAKillSwitchOrStaleRefusal(t *testing.T) {
-	for _, reason := range []string{event.RefusedKillSwitch, event.RefusedStaleBrokerSnapshot} {
+	for _, reason := range []string{event.RefusedKillSwitch, event.RefusedStaleBrokerSnapshot, event.RefusedPendingCashDecrease} {
 		p := validOrderRefused()
 		p.Reason, p.Alert = reason, true
-		if err := p.ValidateSchema(event.OrderRefusedSafetyVersion); err != nil {
+		if err := p.ValidateSchema(p.SchemaVersion()); err != nil {
 			t.Errorf("%s with the alert: %v", reason, err)
 		}
 	}

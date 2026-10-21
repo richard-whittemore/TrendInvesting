@@ -102,12 +102,13 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 // Alerts returns the journal's alerts in recording order, each incident once.
 //
 //   - Every risk.order.refused is its own incident, except that a kill-switch
-//     engagement and a stale episode alert once: the gate flags the first
-//     kill-switch or stale-broker-snapshot refusal of its engagement or
-//     episode (ADR 0026, point 3, kill switch: "alert once"; ADR 0019,
-//     amendment of 2026-10-17, reading 10), and an unflagged one sends
-//     nothing once an earlier record of the same reason in the journal
-//     carried the flag. Without that proof the journal may predate the flag,
+//     engagement, a stale episode and a pending cash decrease alert once:
+//     the gate flags the first kill-switch, stale-broker-snapshot or
+//     pending-cash-decrease refusal of its engagement, episode or pending
+//     difference (ADR 0026, point 3, kill switch: "alert once"; ADR 0019,
+//     amendment of 2026-10-17, reading 10, and amended 2026-10-21), and an
+//     unflagged one sends nothing once an earlier record of the same reason
+//     in the journal carried the flag. Without that proof the journal may predate the flag,
 //     so an unflagged refusal alerts as any other (ADR 0019, "Alerting": an
 //     alert is a safety requirement).
 //   - A risk.sale.withheld the gate flagged opens the account's stale
@@ -433,9 +434,11 @@ func slicesConcat(a, b []string) []string { return append(append([]string{}, a..
 
 // refusalAlerts states one refusal. flags reports that the journal has
 // proven the gate flags refusals of this reason; only then is an unflagged
-// kill-switch or stale-broker-snapshot refusal a repeat that sends nothing.
+// kill-switch, stale-broker-snapshot or pending-cash-decrease refusal a
+// repeat that sends nothing.
 func refusalAlerts(account string, e event.Envelope, p event.OrderRefusedPayload, flags bool) []Alert {
-	if (p.Reason == event.RefusedKillSwitch || p.Reason == event.RefusedStaleBrokerSnapshot) && !p.Alert && flags {
+	once := p.Reason == event.RefusedKillSwitch || p.Reason == event.RefusedStaleBrokerSnapshot || p.Reason == event.RefusedPendingCashDecrease
+	if once && !p.Alert && flags {
 		return nil
 	}
 	out := []Alert{{

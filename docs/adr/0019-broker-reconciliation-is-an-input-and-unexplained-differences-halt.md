@@ -868,12 +868,19 @@ meet the money before the reader has recorded it.
    its direction (the owner's rule of 2026-10-21: fail closed, and the
    owner's own transfers never need a manual recovery):
    - **a cash increase** (IBKR shows more than the book: deposit-like) stops
-     no buy, because the cash is real at the broker;
+     no buy, but while it pends unexplained the buys are sized from the
+     book's cash, the broker's less the unexplained increase, so a credit
+     IBKR reverses or posted in error is never invested; the new cash is
+     invested at the first decision after the reader's records explain it,
+     usually the next evening;
    - **a cash decrease** (IBKR shows less: withdrawal-like) withholds every
      buy on the whole account while it pends, so no plan is sized on cash
      that may not be there (`risk.order.refused`, reason
      `pending-cash-decrease`, which moves no state); sells and exits go, as
-     they do while Degraded.
+     they do while Degraded. Every refusal is journalled; only the first
+     refusal of one pending difference carries the refusal's alert flag
+     and pages, as the kill switch's first refusal of its engagement does,
+     so a withdrawal pages once, not once per withheld buy.
    The detail names the direction, the consequence, and the account's engine
    state as it stands (a pending cash read is no state: an account already
    Degraded or Halted stays so). The difference is checked again at each
@@ -888,7 +895,14 @@ meet the money before the reader has recorded it.
      **two sessions** have closed since it (or the calendar cannot count
      them): a result `unexplained` is journalled for it, and the account goes
      Degraded on cash, as it would have before this amendment;
-   - otherwise nothing is journalled: one difference, one alert.
+   - otherwise nothing is journalled: one difference, one reconciliation
+     alert.
+   A later reconciliation against the same book that finds the same
+   difference (the same residual after the same transfers, as a reconnect's
+   does) is the same pending difference: its result is journalled
+   `pending-cash-read`, naming the reading that found it, and it is judged
+   against that reading's day and decided with it, each reading under its
+   own result, so its increase is left out of the buy budget once.
    A difference never pends for longer than two sessions, whatever the reader
    does: a reader set aside for a week does not keep a difference unreported.
 4. **What still degrades at once.** A difference in a holding; a cash
@@ -899,7 +913,11 @@ meet the money before the reader has recorded it.
    never pending. The cash on hand is run in time order (each change's time,
    then IBKR's transaction ID for transfers of the same time, as the reader
    writes them), not journal order, since the reader may journal an earlier
-   transfer after a later one. A book the NYSE calendar cannot place is never
+   transfer after a later one. A transfer IBKR dates by day alone, which the
+   reader stamps at the start of that New York day, is not timed: for this
+   test it runs after that day's fills, as at the end of the session, so a
+   withdrawal the day's sells funded is no overdraft; a timed transfer keeps
+   its time. A book the NYSE calendar cannot place is never
    pending either.
 5. **The adapter's cash-drift bound subtracts journalled transfers before it
    is applied.** The IBKR adapter's post-close check (condition 2 of the
@@ -917,6 +935,11 @@ meet the money before the reader has recorded it.
    naming it, and the engine refuses such an approval at its start, unless
    the approval states the starting book the owner checked in IBKR after the
    transfer (`-positions`, `-cash`, `-currency`), which supersedes it.
+7. **The engine reads the reader's status before its ledger.** The reader
+   writes its ledger before the status saying it read, so a ledger read
+   after the status holds every transfer that status covers: a reading that
+   finishes between the engine's two reads can add records, never deliver a
+   coverage whose transfers the delivered ledger lacks.
 
 **What this does not cover.** A deposit or withdrawal made during the day
 that moves the cash by more than the adapter's 1% drift bound makes that

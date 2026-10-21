@@ -1,6 +1,7 @@
 package targetweight_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -129,5 +130,47 @@ func TestTransferInputsAreChecked(t *testing.T) {
 	if out := mustApply(t, b, bs.envelope(t, event.FlexStatusEventType, event.FlexStatusSchemaVersion, "ibkr-flex-status:1", sessionEnd(0),
 		event.FlexStatusPayload{AccountID: "joint", State: event.FlexStateRunning, CheckedAt: sessionEnd(0)})); out != nil {
 		t.Errorf("Boost: %+v", out)
+	}
+}
+
+// TestAPendingCashIncreaseIsNotInvestedUntilTheReaderExplainsIt: while a
+// cash increase is pending a reading of IBKR's statement, the buys are
+// sized from the book's cash, the broker's less the unexplained increase,
+// so a credit that is reversed or posted in error is never invested; once
+// the reader's record explains it, the next decision invests it (ADR 0019,
+// amended 2026-10-21).
+func TestAPendingCashIncreaseIsNotInvestedUntilTheReaderExplainsIt(t *testing.T) {
+	const deposited = 2500
+	base := released(t, simulateMomentum(t, momentumOptions{}).decisions)[4:]
+	pending := simulateMomentum(t, momentumOptions{deposit: map[string]float64{"2025-02-28": deposited}})
+	results := ofType(pending.decisions, event.ReconciliationResultEventType)
+	if len(results) != 1 {
+		t.Fatalf("want the pending result alone, got %d results", len(results))
+	}
+	var r event.ReconciliationResultPayload
+	decode(t, results[0], &r)
+	if r.Classification != event.ReconciliationPendingCashRead {
+		t.Fatalf("the deposit the reader has not read: %s: %s", r.Classification, r.Detail)
+	}
+	buys := released(t, pending.decisions)[4:]
+	if len(base) == 0 || len(buys) == 0 {
+		t.Fatalf("%d and %d buys", len(base), len(buys))
+	}
+	if got, want := buys[0].Figures.CashAvailable, base[0].Figures.CashAvailable; math.Abs(got-want) > 1e-6 {
+		t.Errorf("pending: the first buy is checked against %v, want %v, the budget without the unexplained %v", got, want, float64(deposited))
+	}
+	explained := simulateMomentum(t, momentumOptions{deposit: map[string]float64{"2025-02-28": deposited}, depositRecorded: true})
+	var settled bool
+	for _, e := range ofType(explained.decisions, event.ReconciliationResultEventType) {
+		var p event.ReconciliationResultPayload
+		decode(t, e, &p)
+		settled = settled || p.InputID == "reconciliation:2025-02-28" && p.Classification == event.ReconciliationExplained
+	}
+	if !settled {
+		t.Fatal("the reader's record explains the pending difference")
+	}
+	buys = released(t, explained.decisions)[4:]
+	if got, want := buys[0].Figures.CashAvailable, base[0].Figures.CashAvailable+deposited; math.Abs(got-want) > 1e-6 {
+		t.Errorf("explained: the first buy is checked against %v, want %v, the budget with the deposit", got, want)
 	}
 }

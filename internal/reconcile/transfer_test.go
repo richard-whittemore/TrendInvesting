@@ -184,9 +184,37 @@ func TestTheOverdrawnTestRunsInTimeOrderNotJournalOrder(t *testing.T) {
 	}
 	// A withdrawal dated before the deposit is overdrawn, whatever the
 	// journal order.
-	late := []reconcile.Change{transfer("T10", 2000, midnight.Add(time.Hour)), transfer("T20", -1000, midnight)}
+	late := []reconcile.Change{transfer("T10", 2000, midnight.Add(time.Hour)), transfer("T20", -1000, midnight.Add(30*time.Minute))}
 	if o := reconcile.Reconcile(iraBook(), late, "reconciliation:1", observed(1500, held("SPY", 147), held("TLT", 20))); !o.Overdrawn {
 		t.Errorf("the withdrawal an hour before the deposit took more than the cash: %q", o.Result.Detail)
+	}
+}
+
+func TestAWithdrawalDatedByDayAloneRunsAfterThatDaysFills(t *testing.T) {
+	// The reader stamps a transfer IBKR dates by day alone at the start of
+	// that New York day, which is not when the cash moved: for the overdrawn
+	// test it runs after the day's fills, as at the end of the session. A
+	// $3,000 withdrawal funded by the morning's $4,998.75 sale is no
+	// overdraft; the $10 still missing is an ordinary difference (ADR 0019,
+	// amended 2026-10-21).
+	sell := reconcile.FillChange(event.TargetWeightFillPayload{
+		AccountID: "ira", ClientOrderID: "tw-2", FillID: "exec-2", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Quantity: 10, Price: 500, Commission: 1.25, FilledAt: midnight.Add(9*time.Hour + 35*time.Minute),
+	})
+	evening := observed(512.3+4998.75-3000-10, held("SPY", 137), held("TLT", 20))
+	evening.AsOf = midnight.Add(17 * time.Hour)
+	o := reconcile.Reconcile(iraBook(), []reconcile.Change{transfer("W1", -3000, midnight), sell}, "reconciliation:1", evening)
+	if o.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("got %s: %s", o.Result.Classification, o.Result.Detail)
+	}
+	if o.Overdrawn || strings.Contains(o.Result.Detail, "more than the cash") {
+		t.Errorf("the day's sale funded the day-dated withdrawal: %v %q", o.Overdrawn, o.Result.Detail)
+	}
+	// A withdrawal IBKR timed before the sale keeps its time, and is
+	// overdrawn.
+	timed := []reconcile.Change{transfer("W1", -3000, midnight.Add(9*time.Hour)), sell}
+	if o := reconcile.Reconcile(iraBook(), timed, "reconciliation:1", evening); !o.Overdrawn {
+		t.Errorf("the withdrawal at 9 a.m., before the sale, took more than the cash: %q", o.Result.Detail)
 	}
 }
 

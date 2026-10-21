@@ -206,12 +206,19 @@ import (
 //     book to the expected cash, listing them beside the fills; a difference
 //     in cash alone on a New York day the reader's status does not cover is
 //     a pending cash read (risk.reconciliation.result classified
-//     pending-cash-read, action alert), which moves no state and stops no
-//     buy, and is decided at a later reconciliation: explained once the
-//     transfers recorded since account for it, else Degraded on cash once
-//     the reader has covered the day or more than two sessions have closed.
-//     A journalled withdrawal larger than the cash before it, or a run with
-//     no reader status, degrades as before. The cash-drift bound, 1% of net
+//     pending-cash-read, action alert), which moves no state; a pending
+//     decrease withholds every buy on the account (risk.order.refused,
+//     pending-cash-decrease, the first refusal of each pending difference
+//     flagged as its one alert), and a pending increase withholds none but
+//     is left out of the buy budget until the reader's records explain it;
+//     a later reconciliation that finds the same difference against the
+//     same book is that difference. It is decided at a later
+//     reconciliation: explained once the transfers recorded since account
+//     for it, else Degraded on cash once the reader has covered the day or
+//     more than two sessions have closed. A journalled withdrawal larger
+//     than the cash before it (a transfer dated by day alone counted after
+//     that day's fills), or a run with no reader status, degrades as
+//     before. The cash-drift bound, 1% of net
 //     liquidation, is unchanged. A journal holding a cash difference with a
 //     reader's status, or a transfer, decides differently under 1.20.0,
 //     which refuses both inputs.

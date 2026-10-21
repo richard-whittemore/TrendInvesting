@@ -2,6 +2,7 @@ package report_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,25 @@ func TestAKillSwitchOrStaleRefusalAlertsOnlyWhenFlagged(t *testing.T) {
 		if a.Kind != report.KindRefusal || a.Severity != report.Urgent {
 			t.Errorf("alert = %+v", a)
 		}
+	}
+}
+
+// TestAPendingCashDecreasePagesOncePerPendingDifference: every buy refused
+// while a cash decrease is pending a reading of IBKR's statement is
+// journalled, but only the one the gate flags, the first of the pending
+// difference, pages (ADR 0019, amended 2026-10-21), so a withdrawal is not an
+// urgent page per withheld buy at each decision.
+func TestAPendingCashDecreasePagesOncePerPendingDifference(t *testing.T) {
+	s := newStream(t)
+	for n, flagged := range []bool{true, false, false, false} {
+		s.flaggedRefusal(n, fmt.Sprintf("tw-%d", n), event.RefusedPendingCashDecrease, flagged)
+	}
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Key != "refusal:refuse:tw-0" {
+		t.Fatalf("alerts = %+v, want the flagged refusal tw-0 only", got)
 	}
 }
 

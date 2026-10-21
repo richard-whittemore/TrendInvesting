@@ -29,7 +29,7 @@ things:
 | **explained** | they differ, but journalled events account for every difference exactly | nothing; no alert |
 | **unexplained** | a difference no journalled event accounts for | the account goes **Degraded** on exactly what differs, and you get one urgent alert |
 | **unverifiable** | IBKR's figures could not be read, or cannot be compared | the account goes **Halted**, and you get one urgent alert |
-| **pending-cash-read** | only the cash differs, on a day the Flex reader has not yet read (a deposit or withdrawal it has not yet recorded may explain it) | the account's state does not change, and you get one alert. **More cash** than the book (like a deposit): buys are not stopped, because the cash is at IBKR. **Less cash** (like a withdrawal): every buy waits (refused `pending-cash-decrease`) until it is settled; sells and exits go on. The difference is checked again at each later reconciliation (below, "A deposit or withdrawal you make") |
+| **pending-cash-read** | only the cash differs, on a day the Flex reader has not yet read (a deposit or withdrawal it has not yet recorded may explain it) | the account's state does not change, and you get one reconciliation alert. **More cash** than the book (like a deposit): buys are not stopped, but they are sized without the new cash until the reader's record explains it, so a credit IBKR reverses is never invested. **Less cash** (like a withdrawal): every buy waits (refused `pending-cash-decrease`) until it is settled, and the first refused buy sends one more urgent page, the later ones none; sells and exits go on. The difference is checked again at each later reconciliation (below, "A deposit or withdrawal you make") |
 
 A matching reconciliation changes nothing and sends nothing.
 
@@ -228,7 +228,8 @@ Two conservative choices, both of which can only make a sale smaller:
 
 **In short: deposit any time; nothing to do.** The reader records it that
 evening, and the strategy invests it at the next decision after the reader has
-recorded it, usually the following evening. A deposit of more than 1% of the
+recorded it, usually the following evening (until then buys are sized
+without it). A deposit of more than 1% of the
 account's value (a typical IRA contribution is) also makes that evening's
 reading stamped at its read time, so the engine skips that evening's decision
 and you get that page too; that is expected, and it is still nothing to do. A
@@ -248,23 +249,32 @@ liquidation):
    yet (it runs at 9:30 p.m.), so the evening's reconciliation finds IBKR's
    cash higher (or lower) than the book and nothing recorded to explain it.
    Because the reader has not yet read that day, this is a **pending cash
-   read**, not a difference: one alert, `<account>: reconciliation
+   read**, not a difference: one reconciliation alert, `<account>: reconciliation
    pending-cash-read (<id>)`, and the account's state does not change. What
    it does to buys depends on which way the cash moved:
-   - **more cash than the book** (a deposit): buys carry on, because the cash
-     is really at IBKR;
+   - **more cash than the book** (a deposit): buys carry on, but they are
+     sized from the book's cash, IBKR's less the new cash, so money IBKR
+     reverses or posted in error is never invested; the deposit is invested
+     at the first decision after the reader's record explains it;
    - **less cash than the book** (a withdrawal): every buy on the account
      waits, refused with the reason `pending-cash-decrease`, so no order is
      sized on cash that may not be there; sells and exits go on, as while
-     Degraded. Buys go again as soon as the difference is settled.
+     Degraded. Each refused buy is recorded, but only the first one pages you
+     (`<account>: order refused (pending-cash-decrease)`), once for the whole
+     pending difference. Buys go again as soon as the difference is settled.
+   A reconnect that reads the account again before the book changes finds
+   the same difference: its result says so and it is settled with the
+   first.
    The alert's private text says which, and the account's state as it is.
 2. **That evening**, the adapter compares the post-close reading with the
    previous close. The reader has not recorded the transfer yet, so a deposit
    or withdrawal of more than 1% of the account's net liquidation is more
    than the adapter's drift bound: the reading is stamped at its read time
    (`not_as_of_close`), the engine withholds that session as stale, and the
-   reporter pages that as well. A smaller one is within the bound, and that
-   evening's decision sizes from the new cash. At 9:30 p.m. the reader
+   reporter pages that as well. A smaller one is within the bound: for a
+   deposit, that evening's decision goes ahead but sizes its buys without the
+   new cash, still unexplained; for a withdrawal, its sells go and its buys
+   wait, as step 1 says. At 9:30 p.m. the reader
    records the transfer in the ledger, if IBKR's statement already shows it
    (it may show a day's transfer only the next evening), and the engine
    journals it before IBKR's next reading reaches it.
@@ -292,7 +302,9 @@ difference when no Flex reader status has been recorded (the reader not set
 up for the account); one on a day the reader has already read; and a
 recorded withdrawal larger than the cash before it, which the result names
 (the cash is counted in time order, so a deposit and a withdrawal on the same
-day are never mistaken for an overdraft). Only a transfer in the account's own
+day are never mistaken for an overdraft, and a withdrawal IBKR dates by day
+alone counts after that day's sales, so one the day's sales paid for is not
+either). Only a transfer in the account's own
 currency explains a difference.
 
 **Do not approve a fresh run while a cash read is pending.** A fresh run
@@ -553,7 +565,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | Alert: `<account>: reconciliation <classification> (<id>)`, urgent, repeating until acknowledged; `<classification>` is `unexplained`, `unverifiable` or `pending-cash-read`, `<id>` the reconciliation's ID | Sent once per reconciliation that degrades or halts. Its text names what differs (or "evidence that could not be compared"), the account's whole state after it, what it still does and what it has stopped; on the public relay, no figures. It ends "Recovery is a person's: docs/runbooks/reconciliation.md." | Read the full text on PagerDuty or the dashboard. Follow `docs/runbooks/reconciliation.md`, "First, in every case". Acknowledge with `operator acknowledge` and the alert key the text ends with. |
 | `reconciliation-unexplained`. Alert: `<account>: reconciliation unexplained (<id>)` | A difference no journalled event accounts for. The account goes **Degraded** on exactly what differs: a holding's instrument is frozen, unexplained cash refuses every buy. A later difference widens the scope; a later match never brings it back to Normal. | `docs/runbooks/reconciliation.md`, "Find the cause", then "Recover": explain each difference at IBKR, then start a fresh run whose approval clears the incident (`operator approve -clear-incident <id>`), or carries it in force if something is still unexplained ([restart](restart.md)). |
 | `reconciliation-unverifiable`. Alert: `<account>: reconciliation unverifiable (<id>)` | The figures could not be compared, so the account goes **Halted**: no order is released, except, for the joint account, the one sale back to 98%. The private text lists why, for example `the broker's positions could not be read`, `the broker's total cash could not be read`, `no account snapshot has been recorded, so the journal has no book to compare`, `the observation as of ... precedes the book as of ...`, or `the broker's cash is in ...; the book's is in ...`. | Fix what could not be read (the adapter's link, `journalctl -u ti-adapter-boost`), then follow the runbook's "Recover". Leaving Halted is never automatic: it takes a fresh run you approve. |
-| `pending-cash-read`. Alert: `<account>: reconciliation pending-cash-read (<id>)` | Only the cash differs, on a day the Flex reader has not yet read, so a deposit or withdrawal it has not recorded yet may explain it. **No state changes.** More cash than the book: buys are not stopped. Less cash: every buy is refused (`pending-cash-decrease`) until it is settled; sells and exits go on. The private text says how far the reader has read. At each later reconciliation the difference is checked against the transfers recorded since: explained to the cent, it is settled (a result `explained` for it, no alert); once the reader has read its day with the difference still there, or after more than two sessions, the account goes **Degraded** on cash (the `unexplained` row below, same `<id>`). The alert text's account-state sentence may say "Degraded on instruments [] and cash []": the account is not; trust the engine state in `journal-query refusals` | If you moved money that day, nothing: it clears at the first reconciliation after the reader has covered the day, usually the next evening, sometimes the one after. Acknowledge the alert. If you did not, check IBKR's activity for what moved the cash. Do not approve a fresh run while a cash read is pending: `operator approve` refuses one unless you state the book you checked in IBKR after the transfer |
+| `pending-cash-read`. Alert: `<account>: reconciliation pending-cash-read (<id>)` | Only the cash differs, on a day the Flex reader has not yet read, so a deposit or withdrawal it has not recorded yet may explain it. **No state changes.** More cash than the book: buys are not stopped, but are sized without the new cash until it is explained. Less cash: every buy is refused (`pending-cash-decrease`) until it is settled, the first refusal paging once; sells and exits go on. The private text says how far the reader has read. At each later reconciliation the difference is checked against the transfers recorded since: explained to the cent, it is settled (a result `explained` for it, no alert); once the reader has read its day with the difference still there, or after more than two sessions, the account goes **Degraded** on cash (the `unexplained` row below, same `<id>`). The alert text's account-state sentence may say "Degraded on instruments [] and cash []": the account is not; trust the engine state in `journal-query refusals` | If you moved money that day, nothing: it clears at the first reconciliation after the reader has covered the day, usually the next evening, sometimes the one after. Acknowledge the alert. If you did not, check IBKR's activity for what moved the cash. Do not approve a fresh run while a cash read is pending: `operator approve` refuses one unless you state the book you checked in IBKR after the transfer |
 | A pending cash read becomes Degraded: the private text says the Flex reader `has covered <day> and its records do not explain it`, or that `<n> sessions have closed since it, more than the two sessions` | The difference was not a transfer the reader recorded, or the reader was set aside too long: the account is Degraded on cash, buys stop | Check `ti-flex@<instance>`'s status file; if the reader was set aside, fix it (rows below) and check the ledger now holds the transfer. Then recover as for any unexplained difference (`docs/runbooks/reconciliation.md`) |
 | The private text names `withdrawal ibkr-flex:<id> of <amount> is more than the cash on hand before it, ..., which IBKR refuses` | A recorded withdrawal larger than the account's cash: IBKR would have refused it, so the record and the account disagree. Degraded on cash at once, never pending | Check the withdrawal in IBKR's activity statement and tell the developer; recover as for any unexplained difference |
 | The engine's log says `the Flex ledger ... is refused, so none of its transfers is delivered` (naming the line) | A ledger line is not as the reader writes it, so no record of that ledger reaches the engine; a cash difference a record would have explained is a difference. Said once until it changes | Put the line back as the reader wrote it (as for the reader's own refusal above); never edit the ledger by hand |
