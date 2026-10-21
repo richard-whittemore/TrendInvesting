@@ -39,13 +39,13 @@ holdings IBKR reports.
    ascending order or not (the tool sorts them):
 
    ```
-   sudo -u ti-trader operator rebalance-cleared -inbox <inbox> -account <IRA> \
+   sudo -u ti-operator operator rebalance-cleared -inbox <inbox> -account <IRA> \
      -decision targets-decided:<account>:<close time> \
      -orders <client order id>,<client order id> -by owner -detail "cancelled at IBKR"
    ```
 
 4. **Check it took**: `journal-query operator <log>` shows the clearance; if
-   the engine refused it, a `<file>.refused` note in the inbox says which
+   the engine refused it, a `<file>.refused` note in the engine's notes folder (`operator-notes`, beside the inbox) says which
    orders are open. The rest of that rebalance (its buys, if they were still
    waiting) is never sent; the next decision time decides afresh from IBKR's
    holdings.
