@@ -362,7 +362,23 @@ scenario() {
     volume_roots=("$etc" "$work/vol/state" "$work/vol/opt")
     # FAKE_FIND_FAILS=1: find lists what it finds, then fails (an unreadable
     # folder part way through a volume).
-    if test "${FAKE_FIND_FAILS:-0}" = 1; then find() { command find "$@"; echo "find: a folder could not be read" >&2; return 1; }; fi
+    # The stand-in files belong to whoever runs the test, so find is asked for
+    # the stand-in old owner (1998:1998, never root's 0) as that real owner,
+    # and the cases pass for any caller, root included.
+    find() {
+      local a=() x prev=''
+      for x in "$@"; do
+        if test "$prev" = -uid && test "$x" = 1998; then x=$(command id -u); fi
+        if test "$prev" = -gid && test "$x" = 1998; then x=$(command id -g); fi
+        a+=("$x")
+        prev=$x
+      done
+      command find "${a[@]}"
+    }
+    if test "${FAKE_FIND_FAILS:-0}" = 1; then
+      eval "owned_find() $(declare -f find | tail -n +2)"
+      find() { owned_find "$@"; echo "find: a folder could not be read" >&2; return 1; }
+    fi
     if test -n "${TEST_LEAK:-}"; then eval "$TEST_LEAK"; fi
     # STEP may carry the step's arguments (reown NAME UID GID).
     # shellcheck disable=SC2086
@@ -601,8 +617,8 @@ said "provision.sh reown ti-trader 998 998" || fail "the refusal of ti-trader at
 # The re-owning step, after the re-creation: every file in the volumes
 # owned by the old UID goes to the fixed one and every file of the old GID to
 # the fixed group, links not followed; nothing else is touched.
-me=$(command id -u)
-mygid=$(command id -g)
+me=1998
+mygid=1998
 rm -rf "${work:?}/vol"
 mkdir -p "$work/vol/state/engines/boost"
 : >"$work/vol/state/engines/boost/durable.log"
