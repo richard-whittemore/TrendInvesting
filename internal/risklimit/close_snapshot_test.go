@@ -486,8 +486,9 @@ func resolvedThenDelivered(t *testing.T, readAt time.Duration) *risklimit.Gate {
 	again := morningOf(1000, 12)
 	again.AsOf = at.Add(readAt)
 	reconcileWith(t, g, "reconciliation:3", again)
-	// A last, older reading ends the classified standing of the third, so the
-	// close snapshot is judged by what was reported.
+	// A last reading older than the third is older knowledge: it does not
+	// replace the classified verdict, and the close snapshot is judged by what
+	// was reported.
 	old := morningOf(1000, 10)
 	old.AsOf = at.Add(10 * time.Minute)
 	reconcileWith(t, g, "reconciliation:4", old)
@@ -561,5 +562,48 @@ func TestADelayedEarlierReadingAfterAChangeDoesNotReplaceTheLatestVerdict(t *tes
 	reconcileWith(t, g, "reconciliation:3", delayed)
 	if r, journal := checkBookWith(t, g, closeSnapshot(12, 240)); !journal {
 		t.Fatalf("the latest verdict was 10, so a snapshot of 12 is a new difference: %+v", r.Result)
+	}
+}
+
+// withIEF is the morning reading of 10 SPY, and 2 IEF when held is set.
+func withIEF(minutes int, held bool) event.ReconciliationPayload {
+	p := morningOf(1000, 10)
+	p.AsOf = at.Add(time.Duration(minutes) * time.Minute)
+	if held {
+		p.Positions = append([]event.AccountPosition{{InstrumentID: "IEF", Quantity: 2}}, p.Positions...)
+	}
+	return p
+}
+
+func snapshotWithIEF(minutes int) reconcile.Book {
+	s := account(10, minutes)
+	s.Positions = append([]event.AccountPosition{{InstrumentID: "IEF", Quantity: 2}}, s.Positions...)
+	return reconcile.CashBook("snapshot:2", event.AccountCashSnapshotPayload{AccountPositionsSnapshotPayload: s, SettledCash: 1000, TotalCash: 1000})
+}
+
+// TestAReadingOmittingAReportedHoldingForgetsItsResidual: IEF was never in
+// the book; a reading reports 2, a later reading no longer shows it, so a
+// snapshot holding 2 again is a new difference and is journalled (ADR 0019,
+// amended 2026-10-21, point 6).
+func TestAReadingOmittingAReportedHoldingForgetsItsResidual(t *testing.T) {
+	g := booked(t)
+	if r := reconcileWith(t, g, "reconciliation:1", withIEF(60, true)); r.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("the first reading differs: %+v", r.Result)
+	}
+	reconcileWith(t, g, "reconciliation:2", withIEF(120, false))
+	if r, journal := checkBookWith(t, g, snapshotWithIEF(180)); !journal {
+		t.Fatalf("the holding recurred after the reading that omitted it: %+v", r.Result)
+	}
+}
+
+// TestADelayedReadingDoesNotRestoreAForgottenResidual: a reading taken before
+// the one that omitted the holding, delivered after it, records nothing.
+func TestADelayedReadingDoesNotRestoreAForgottenResidual(t *testing.T) {
+	g := booked(t)
+	reconcileWith(t, g, "reconciliation:1", withIEF(60, true))
+	reconcileWith(t, g, "reconciliation:2", withIEF(120, false))
+	reconcileWith(t, g, "reconciliation:3", withIEF(90, true))
+	if r, journal := checkBookWith(t, g, snapshotWithIEF(180)); !journal {
+		t.Fatalf("the delayed reading recorded nothing, so the holding is reported: %+v", r.Result)
 	}
 }

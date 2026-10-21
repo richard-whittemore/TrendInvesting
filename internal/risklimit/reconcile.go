@@ -193,7 +193,7 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 		}
 		g.classifiedAsOf = p.AsOf
 	}
-	g.report(r, p.AsOf)
+	g.report(r, p.AsOf, g.book != nil && p.Readable(event.ReconciliationComponentPositions) && !p.AsOf.Before(g.book.AsOf))
 	return g.consequence(id, r), nil
 }
 
@@ -205,7 +205,24 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 // whether that one reported or resolved it, says nothing new about it, so it
 // neither forgets nor replaces what the later reading found. A resolved
 // instrument keeps its reading time, without a residual, for that guard.
-func (g *Gate) report(r event.ReconciliationResultPayload, asOf time.Time) {
+// compared is whether r compared the broker's positions with the book: such a
+// reading names every instrument either holds, so a recorded residual whose
+// instrument it omits (the holding is gone, and was never in the book) is
+// forgotten the same way, unless the reading is earlier than the one that
+// recorded it.
+func (g *Gate) report(r event.ReconciliationResultPayload, asOf time.Time, compared bool) {
+	if compared {
+		named := map[string]bool{}
+		for _, c := range r.Components {
+			named[c.InstrumentID] = true
+		}
+		for id := range g.reported {
+			if !named[id] && !asOf.Before(g.reportedAsOf[id]) {
+				delete(g.reported, id)
+				g.reportedAsOf[id] = asOf
+			}
+		}
+	}
 	for _, c := range r.Components {
 		switch {
 		case c.InstrumentID == "":
