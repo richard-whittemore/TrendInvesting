@@ -160,9 +160,10 @@ type account struct {
 	// the account's figures. Every other account still renders in full.
 	Name    string `json:",omitempty"`
 	Message string `json:",omitempty"`
-	// Anchor is a message card's page anchor, "dir-<n>" by the directory's
-	// place in the list: no account's id can be taken for it, nor another
-	// directory of the same name.
+	// Anchor is a message card's page anchor, "dir-<n>", where n is the card's
+	// position in the whole account list, counting the fixed journals first
+	// (not its position among the engine directories): no account's id can be
+	// taken for it, nor another directory of the same name.
 	Anchor string `json:"-"`
 }
 

@@ -415,10 +415,23 @@ func TestMessageCardAnchorsAreUnique(t *testing.T) {
 		}
 		dirs = append(dirs, d)
 	}
+	// A healthy account, named by its journal's account id ("joint"), so its
+	// anchor acct-joint must stand alone beside the message cards' dir-<n>.
+	healthy := filepath.Join(t.TempDir(), "trad-ira")
+	if err := os.Mkdir(healthy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRun(t, healthy, "run1.log", approval("", ""), 0, time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC), halted(t, 5))
+	dirs = append(dirs, healthy)
 	body := get(newHandlerFor(nil, dirs, "SPY"), http.MethodGet, "/").Body.String()
-	for _, want := range []string{`id="dir-0"`, `id="dir-1"`, `href="#dir-1"`} {
+	for _, want := range []string{`id="dir-0"`, `id="dir-1"`, `href="#dir-1"`, `id="acct-joint"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %s", want)
+		}
+	}
+	for _, id := range []string{`id="dir-0"`, `id="dir-1"`, `id="acct-joint"`} {
+		if n := strings.Count(body, id); n != 1 {
+			t.Errorf("%s appears %d times, want once", id, n)
 		}
 	}
 	if strings.Contains(body, `id="acct-boost"`) {
