@@ -41,6 +41,8 @@ rehearsal=${TI_REHEARSAL:-0}
 ti_target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
 dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
+# Where systemd reads the units the services step installs.
+unit_dir=/etc/systemd/system
 
 log() { printf 'provision: %s\n' "$*"; }
 die() { printf 'provision: %s\n' "$*" >&2; exit 1; }
@@ -487,21 +489,21 @@ CONF
     # report as active, so the service is stopped unconditionally; stopping a
     # unit that is not loaded fails, which must not trip set -e.
     systemctl stop ti-reporter.service || true
-    if test -e /etc/systemd/system/ti-reporter.timer; then
+    if test -e "$unit_dir/ti-reporter.timer"; then
       systemctl disable ti-reporter.timer
     fi
   fi
-  rm -f /etc/systemd/system/ti-reporter.service /etc/systemd/system/ti-reporter.timer \
-    /etc/systemd/system/timers.target.wants/ti-reporter.timer
+  rm -f "$unit_dir/ti-reporter.service" "$unit_dir/ti-reporter.timer" \
+    "$unit_dir/timers.target.wants/ti-reporter.timer"
   # On the Mac mini the Gateway's unit file is not installed: masking puts a
   # link to /dev/null in its place, which a real file there would block.
   local unit
   for unit in "$here"/systemd/*.service "$here"/systemd/*.timer; do
     if mac_mini && test "$(basename "$unit")" = ti-gateway.service; then continue; fi
-    install -m 0644 "$unit" /etc/systemd/system/
+    install -m 0644 "$unit" "$unit_dir/"
   done
-  if mac_mini && test -f /etc/systemd/system/ti-gateway.service && ! test -L /etc/systemd/system/ti-gateway.service; then
-    rm -f /etc/systemd/system/ti-gateway.service
+  if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
+    rm -f "$unit_dir/ti-gateway.service"
   fi
   if test "$rehearsal" != 1; then
     systemctl daemon-reload

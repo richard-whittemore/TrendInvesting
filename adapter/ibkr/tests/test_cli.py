@@ -138,6 +138,10 @@ class CommandTests(unittest.TestCase):
         self.assertIn("US/Eastern", message)
         self.assertIn("corrupt", message)
         self.assertNotIn("not installed", message)
+        self.assertNotIn("cannot be read", message)
+        self.assertIn("cannot be parsed", message)
+        self.assertIn("reinstall", message)
+        self.assertIn("restore the zone database", message)
         self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
 
     def test_the_account_comes_from_one_place_only_and_is_never_echoed(self):

@@ -19,6 +19,8 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 # The caller's environment must not decide any case.
 unset TI_TARGET TI_REHEARSAL TI_REHEARSAL_ANY_ARCH TI_REHEARSAL_SKIP_INSTALLER TI_DIST
+# The harness's own switches are the caller's to set per case, never inherited.
+unset FAKE_ANY_ARCH FAKE_SKIP FAKE_DIST FAKE_NO_CLOCK FAKE_LIVE
 
 failures=0
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
@@ -32,6 +34,9 @@ cp -R "$here/.." "$work/deploy"
 # in $work/out, the commands it called in $work/calls, one per line; its
 # exit status is returned. FAKE_ANY_ARCH=1 sets TI_REHEARSAL_ANY_ARCH=1,
 # FAKE_SKIP=1 TI_REHEARSAL_SKIP_INSTALLER=1, and FAKE_DIST the dist/ folder.
+# FAKE_LIVE=1 runs without TI_REHEARSAL, so the systemctl branches execute
+# against the stand-ins. The systemd unit folder is always $work/units, never
+# the host's /etc/systemd/system.
 scenario() {
   local target=$1 arch=$2 step=$3
   : >"$work/calls"
@@ -68,6 +73,8 @@ scenario() {
     # The clock check reads the machine's time daemon, which the stand-ins do not model.
     if test "${FAKE_NO_CLOCK:-0}" = 1; then step_clock() { record step_clock; }; fi
     etc=$work/etc
+    unit_dir=$work/units
+    if test "${FAKE_LIVE:-0}" = 1; then rehearsal=0; fi
     twsapi_root=$work/twsapi
     adapter_venv=$work/venv
     main "$step"
@@ -146,6 +153,31 @@ if called "ti-gateway.service"; then fail "Mac mini all installs the Gateway uni
 if called "fetch $TAILSCALE_URL"; then fail "Mac mini all fetches Tailscale"; fi
 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail services failed"
 called "$work/deploy/systemd/ti-gateway.service" || fail "Lightsail services no longer installs the Gateway unit: $(cat "$work/calls")"
+
+# --- The Mac mini's services step with the systemctl branches executing: a
+# stray regular-file Gateway unit is deleted, the Gateway is masked and never
+# enabled or installed, and every other unit is still installed.
+mkdir -p "$work/units"
+echo stray >"$work/units/ti-gateway.service"
+FAKE_LIVE=1 FAKE_DIST=$work/arm64all scenario mac-mini aarch64 services || fail "Mac mini live services failed: $(cat "$work/out")"
+called "rm -f $work/units/ti-gateway.service" || fail "the Mac mini does not delete a regular-file Gateway unit: $(cat "$work/calls")"
+called "systemctl mask ti-gateway.service" || fail "the Mac mini does not mask the Gateway: $(cat "$work/calls")"
+if called "systemctl enable ti-gateway.service"; then fail "the Mac mini enables the Gateway: $(cat "$work/calls")"; fi
+if called "systemd/ti-gateway.service"; then fail "the Mac mini installs the Gateway unit: $(cat "$work/calls")"; fi
+for u in ti-dashboard.service ti-data.timer ti-reporter@.service; do
+  called "install -m 0644 $work/deploy/systemd/$u $work/units/" || fail "the Mac mini skipped installing $u: $(cat "$work/calls")"
+done
+called "systemctl enable ti-dashboard.service" || fail "the Mac mini does not enable the dashboard: $(cat "$work/calls")"
+# A link (what mask leaves) is not a file to delete.
+rm -f "$work/units/ti-gateway.service"
+ln -s /dev/null "$work/units/ti-gateway.service"
+FAKE_LIVE=1 FAKE_DIST=$work/arm64all scenario mac-mini aarch64 services || fail "Mac mini live services (masked) failed: $(cat "$work/out")"
+if called "rm -f $work/units/ti-gateway.service"; then fail "the Mac mini deletes the masking link: $(cat "$work/calls")"; fi
+called "systemctl mask ti-gateway.service" || fail "the Mac mini does not re-mask the Gateway: $(cat "$work/calls")"
+rm -f "$work/units/ti-gateway.service"
+FAKE_LIVE=1 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail live services failed: $(cat "$work/out")"
+called "systemctl enable ti-gateway.service" || fail "Lightsail does not enable the Gateway: $(cat "$work/calls")"
+if called "systemctl mask"; then fail "Lightsail masks a unit: $(cat "$work/calls")"; fi
 
 # --- services refuses a Go program built for another architecture.
 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail services refused an x86_64 dist/: $(cat "$work/out")"
