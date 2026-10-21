@@ -49,7 +49,7 @@ mkdir -p "$fake_home" "$work/bin"
 #   FAKE_SYSTEM           what is-system-running says (default running)
 #   FAKE_FAILED           the failed units it lists
 #   FAKE_MOUNT_SHARED=1   mount-shared.service is not active
-#   FAKE_TEST_X_FAILS=1   `test -x` inside the container fails (a program did not arrive)
+#   FAKE_TEST_F_FAILS=1   `test -f` inside the container fails (a program did not arrive)
 #   FAKE_PROPAGATION      the propagation of / (default shared)
 cat >"$work/bin/docker" <<'STUB'
 #!/bin/bash
@@ -70,7 +70,7 @@ case "$*" in
   *"systemctl list-units --state=failed"*) test -z "${FAKE_FAILED:-}" || printf '%s\n' $FAKE_FAILED ;;
   *"systemctl is-system-running"*) echo "${FAKE_SYSTEM:-running}" ;;
   *"systemctl is-active --quiet mount-shared.service"*) test "${FAKE_MOUNT_SHARED:-0}" = 0 ;;
-  *"test -x "*) test "${FAKE_TEST_X_FAILS:-0}" = 0 ;;
+  *"test -f "*) test "${FAKE_TEST_F_FAILS:-0}" = 0 ;;
   *"findmnt"*) echo "${FAKE_PROPAGATION:-shared}" ;;
   *) exit 0 ;;
 esac
@@ -327,7 +327,7 @@ refused_after "an unlabelled container, --recreate" "not one up.sh made" --recre
 # One made by an earlier up.sh, before it recorded the checkout: the refusal
 # gives the command that removes it, keeping its volumes.
 refused_after "a container from the launcher before the checkout label" "docker rm ti" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="ti|"
-expect_line "a container from the launcher before the checkout label" "up: the container ti was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter and then its engine (docker exec ti systemctl stop ti-adapter-boost && docker exec ti systemctl stop ti-engine@boost), then stop and remove it: docker stop -t 60 ti && docker rm ti (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
+expect_line "a container from the launcher before the checkout label" "up: the container ti was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter and then its engine (docker exec ti systemctl stop ti-adapter-boost && docker exec ti systemctl stop ti-engine@boost; if either stop fails, stop there and read docker exec ti journalctl -u <unit> before going on), then stop and remove it: docker stop -t 60 ti && docker rm ti (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
 refused_after "a container made from another checkout" "/elsewhere" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="ti|/elsewhere"
 refused_after "a container with a fifth mount" "mounts" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" \
   FAKE_MOUNTS="volume ti-etc /etc/trend-investing;volume ti-state /var/lib/trend-investing;volume ti-opt /opt/trend-investing;volume ti-journal /var/log/journal;bind  /data;"
@@ -350,7 +350,7 @@ refused_after "volumes made for another name" "is not one up.sh made" -- FAKE_VO
 expect_line "volumes made for another name" "up: the volume ti-etc is not one up.sh made from this checkout: its labels name 'other' from '/elsewhere', and this is ti from $co. Nothing was changed. Run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm ti-etc ti-state ti-opt ti-journal (once no container uses them)"
 # A container on volumes of the earlier launcher: the safe way out, never -f.
 refused_after "a container on volumes from the launcher before the checkout label" "systemctl stop" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_VOLUME_LABELS="ti|"
-expect_line "a container on volumes from the launcher before the checkout label" "up: the volume ti-etc was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container ti uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter and then its engine (docker exec ti systemctl stop ti-adapter-boost && docker exec ti systemctl stop ti-engine@boost), then docker stop -t 60 ti && docker rm ti, then remove the four volumes (docker volume rm ti-etc ti-state ti-opt ti-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
+expect_line "a container on volumes from the launcher before the checkout label" "up: the volume ti-etc was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container ti uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter and then its engine (docker exec ti systemctl stop ti-adapter-boost && docker exec ti systemctl stop ti-engine@boost; if either stop fails, stop there and read docker exec ti journalctl -u <unit> before going on), then docker stop -t 60 ti && docker rm ti, then remove the four volumes (docker volume rm ti-etc ti-state ti-opt ti-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
 grep -qF "docker stop -t 60 ti" "$work/out" || fail "the refusal does not give docker stop -t 60: $(cat "$work/out")"
 grep -qF "docker rm ti" "$work/out" || fail "the refusal does not give docker rm: $(cat "$work/out")"
 grep -qF "docker volume rm ti-etc" "$work/out" || fail "the refusal does not give docker volume rm: $(cat "$work/out")"
@@ -372,9 +372,9 @@ done
 # --recreate while an engine or the adapter runs: refused, naming the unit.
 refused_after "--recreate while the engine runs" "ti-engine@boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service"
 refused_after "--recreate while the adapter runs" "ti-adapter-boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-adapter-boost.service"
-# Every running unit is named in the remedy, the adapter before its engine,
-# not only the first listed.
-refused_after "--recreate while both run" "stop ti-adapter-boost.service ti-engine@boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service"
+# Every running unit is named in the remedy, each with its own stop command,
+# the adapter before its engine, joined by && so a failed stop ends the chain.
+refused_after "--recreate while both run" "docker exec ti systemctl stop ti-adapter-boost.service && docker exec ti systemctl stop ti-engine@boost.service; if either stop fails, stop there and read docker exec ti journalctl -u <unit> before going on" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service"
 # systemd not answering which units run: refused, saying so, before anything
 # is stopped.
 refused_after "--recreate when systemd does not list its units" "cannot ask systemd" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_LIST_FAILS=1
@@ -409,7 +409,7 @@ run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" TI_DIST="$work/link-dist" || fail
 cp_src=$(grep '^docker cp .* ti:/root/dist$' "$work/calls" | sed -e 's/^docker cp //' -e 's/ ti:\/root\/dist$//' || true)
 test -n "$cp_src" || fail "the build folder was not copied in: $(cat "$work/calls")"
 if test -L "$cp_src"; then fail "docker cp was given the symbolic link $cp_src, not the folder it names"; fi
-if run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" TI_DIST="$work/link-dist" FAKE_TEST_X_FAILS=1; then fail "programs that did not arrive were accepted"; fi
+if run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" TI_DIST="$work/link-dist" FAKE_TEST_F_FAILS=1; then fail "programs that did not arrive were accepted"; fi
 grep -qF "/root/dist/ti-data" "$work/out" || fail "the refusal does not name the missing program: $(cat "$work/out")"
 if grep -q 'provision.sh' "$work/calls"; then fail "it provisioned with the programs missing: $(cat "$work/calls")"; fi
 

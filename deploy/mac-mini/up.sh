@@ -227,7 +227,7 @@ check_own() {
   made=${labels%%|*}
   from=${labels#*|}
   if test "$made" = "$name" && test -z "$from"; then
-    refuse "the container $name was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter and then its engine (docker exec $name systemctl stop ti-adapter-boost && docker exec $name systemctl stop ti-engine@boost), then stop and remove it: docker stop -t 60 $name && docker rm $name (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
+    refuse "the container $name was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter and then its engine (docker exec $name systemctl stop ti-adapter-boost && docker exec $name systemctl stop ti-engine@boost; if either stop fails, stop there and read docker exec $name journalctl -u <unit> before going on), then stop and remove it: docker stop -t 60 $name && docker rm $name (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
   fi
   if test "$made" != "$name" || test "$from" != "$repo"; then
     refuse "the container $name is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. Use another TI_MAC_NAME, or run up.sh from the checkout that made it."
@@ -261,7 +261,7 @@ check_volumes() {
     from=${labels#*|}
     if test "$made" = "$name" && test -z "$from"; then
       if test "${exists:-0}" = 1; then
-        refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container $name uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter and then its engine (docker exec $name systemctl stop ti-adapter-boost && docker exec $name systemctl stop ti-engine@boost), then docker stop -t 60 $name && docker rm $name, then remove the four volumes (docker volume rm $name-etc $name-state $name-opt $name-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
+        refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container $name uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter and then its engine (docker exec $name systemctl stop ti-adapter-boost && docker exec $name systemctl stop ti-engine@boost; if either stop fails, stop there and read docker exec $name journalctl -u <unit> before going on), then docker stop -t 60 $name && docker rm $name, then remove the four volumes (docker volume rm $name-etc $name-state $name-opt $name-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
       fi
       refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal's and its contents may go, remove the four volumes ($name-etc, $name-state, $name-opt, $name-journal) once no container uses them: docker volume rm $name-etc $name-state $name-opt $name-journal. Then run up.sh again, which creates them anew"
     fi
@@ -298,9 +298,13 @@ if test "$exists" = 1 && test "$recreate" = 1; then
     stop_order=
     for u in $running; do case $u in ti-adapter-*) stop_order="$stop_order $u" ;; esac; done
     for u in $running; do case $u in ti-adapter-*) ;; *) stop_order="$stop_order $u" ;; esac; done
-    stop_order=${stop_order# }
+    # One systemctl call orders its stops by unit dependencies, not by the
+    # order of its arguments, so each unit gets its own command; && ends the
+    # chain at a failed stop, leaving the engine running to be looked at.
+    stop_cmds=
+    for u in $stop_order; do stop_cmds="${stop_cmds:+$stop_cmds && }docker exec $name systemctl stop $u"; done
     if test -n "$running"; then
-      refuse "refusing to remove $name while $running runs: stop it first (docker exec $name systemctl stop $stop_order; the adapter before its engine), then run up.sh --recreate again"
+      refuse "refusing to remove $name while $running runs: stop it first, the adapter before its engine ($stop_cmds; if either stop fails, stop there and read docker exec $name journalctl -u <unit> before going on), then run up.sh --recreate again"
     fi
     # systemd shuts its units down in order on the image's STOPSIGNAL; the
     # bound is the container's --stop-timeout.
@@ -412,8 +416,10 @@ if test -d "$dist"; then
   real_dist=$(cd "$dist" && pwd -P)
   docker cp "$real_dist" "$name:/root/dist"
   for b in ti-data ti-engine ti-reporter ti-dashboard operator journal-query; do
+    # The same test on both sides: provision.sh tests -f and installs the
+    # program with mode 0755, so a program without the execute bit still works.
     if test -f "$real_dist/$b"; then
-      docker exec "$name" test -x "/root/dist/$b" \
+      docker exec "$name" test -f "/root/dist/$b" \
         || refuse "the program $b did not arrive in $name at /root/dist/$b from $dist, so it would not be installed; see the build folder and: docker exec $name ls -l /root/dist"
     fi
   done

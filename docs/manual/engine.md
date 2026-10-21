@@ -176,8 +176,9 @@ provisioner creates, owned by `ti-operator` in the engine's group, mode
 write it itself, or if it cannot read it ([operator](operator.md), "Who can
 write an instruction"). The kill switch refuses Boost's orders but not the
 sale back to 98%, so before you sell by hand stop the adapter, then the
-engine (`sudo systemctl stop ti-adapter-boost` && `sudo systemctl stop ti-engine@boost`) and follow
-[states-and-kill-switch](states-and-kill-switch.md), "Selling by hand
+engine
+(`sudo systemctl stop ti-adapter-boost && sudo systemctl stop ti-engine@boost`)
+and follow [states-and-kill-switch](states-and-kill-switch.md), "Selling by hand
 safely". Stopping the engine alone is not enough: an order it has released
 waits in the adapter, and goes out once the Gateway is back the same day. A
 fresh run's adapter never sends an earlier run's order: it stops naming it,
