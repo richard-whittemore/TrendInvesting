@@ -125,8 +125,8 @@ func loadHostClock(path string) (hostClock, error) {
 // clockPagesAfter checks in a row have failed; a passing check resolves the
 // incident on each working PagerDuty channel that took it and forgets it for
 // every channel, so the next failure pages anew; the one exception is a
-// PagerDuty channel set aside this run, whose record is kept until a run in
-// which it works. It returns the check the summary shows, if any.
+// PagerDuty channel set aside this run or whose resolve failed, whose record
+// is kept until a run in which it works. It returns the check the summary shows, if any.
 func clockStep(path, command, host string, senders []sender, setAside []channelFault, clock func() time.Time, every time.Duration) (*report.ClockCheck, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -191,20 +191,26 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 	key := report.ClockDriftKey(host)
 	switch {
 	case h.Last.Passed && deliveredAnywhere(seen, key):
-		if err := resolveAll(senders, key, seen); err != nil {
-			return h.Last, err
-		}
+		failed, resolveErr := resolveAll(senders, key, seen)
 		// Each channel's record is cleared on its own (ADR 0019, "Alerting"):
 		// a working channel, or one no longer configured, forgets the
 		// incident at once so a new fault pages it again. Only a set-aside
 		// channel that can close incidents keeps its record, until a run in
 		// which it works and its resolve is sent.
+		// A channel whose resolve failed keeps its record too, to retry the
+		// resolve; the others forget at once and are not held back by it.
 		keep := map[string]bool{}
 		for _, f := range setAside {
 			keep[f.channel] = f.channel == "pagerduty"
 		}
+		for _, name := range failed {
+			keep[name] = true
+		}
 		forgetAlert(key, keep, seen, sent, repeats)
-		return h.Last, record()
+		if err := record(); err != nil {
+			return h.Last, errors.Join(resolveErr, err)
+		}
+		return h.Last, resolveErr
 	case !h.Last.Passed && h.Failures >= clockPagesAfter:
 		return h.Last, deliver(senders, report.ClockDriftAlert(host, *h.Last, h.Failures), seen, sent, repeats, now, every, record)
 	}
@@ -235,20 +241,23 @@ type resolver interface {
 }
 
 // resolveAll closes the incident keyed key on every channel that took it and
-// can close it. Any failure is returned, and the caller keeps the record so
-// the next firing tries again.
-func resolveAll(senders []sender, key string, seen map[string]bool) error {
+// can close it. It returns the names of the channels whose resolve failed and
+// the joined error; the caller keeps only those channels' records so the next
+// firing tries again.
+func resolveAll(senders []sender, key string, seen map[string]bool) ([]string, error) {
 	var failures []error
+	var names []string
 	for _, s := range senders {
 		r, ok := s.(resolver)
 		if !ok || !seen[channelKey(s.name(), key)] {
 			continue
 		}
 		if err := r.resolve(key); err != nil {
+			names = append(names, s.name())
 			failures = append(failures, fmt.Errorf("%s: resolve %s: %w", s.name(), key, err))
 		}
 	}
-	return errors.Join(failures...)
+	return names, errors.Join(failures...)
 }
 
 // hostName names this server in the clock alert; the clock is the host's.

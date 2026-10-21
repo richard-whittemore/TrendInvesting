@@ -856,14 +856,61 @@ func TestAPassingCheckForgetsTheWorkingChannelsWhileOneIsSetAside(t *testing.T) 
 		t.Fatal("ntfy was never paged")
 	}
 	broken := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.private.test", "TI_PAGERDUTY_ROUTING_KEY": ""})
+	triggers, resolves := len(pagerDutyActions(r, "trigger")), len(pagerDutyActions(r, "resolve"))
+	onlyPagerDuty := func(err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "pagerduty") || strings.Contains(err.Error(), "ntfy") {
+			t.Errorf("got %v, want an error naming only the set-aside pagerduty channel", err)
+		}
+	}
 	check.pass()
-	_ = runWith(t, r, dir, check, "ntfy,pagerduty", broken, at.Add(10*time.Minute))
+	onlyPagerDuty(runWith(t, r, dir, check, "ntfy,pagerduty", broken, at.Add(10*time.Minute)))
 	check.fail(clockFailure)
 	for i := 2; i <= 3; i++ {
-		_ = runWith(t, r, dir, check, "ntfy,pagerduty", broken, at.Add(time.Duration(10+5*i)*time.Minute))
+		onlyPagerDuty(runWith(t, r, dir, check, "ntfy,pagerduty", broken, at.Add(time.Duration(10+5*i)*time.Minute)))
 	}
-	if got := ntfyClockPages(r); got <= before {
-		t.Errorf("ntfy was paged %d times after a new fault, was %d before: the passing check kept its record", got, before)
+	if got := ntfyClockPages(r); got != before+1 {
+		t.Errorf("ntfy was paged %d times after a new fault, was %d before: want exactly one more", got, before)
+	}
+	if got := len(pagerDutyActions(r, "trigger")); got != triggers {
+		t.Errorf("%d PagerDuty triggers, was %d: a set-aside channel was sent to", got, triggers)
+	}
+	if got := len(pagerDutyActions(r, "resolve")); got != resolves {
+		t.Errorf("%d PagerDuty resolves, was %d: a set-aside channel was sent to", got, resolves)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "host-clock.json"))
+	if err != nil || !strings.Contains(string(raw), "pagerduty|clock-drift:") {
+		t.Errorf("the set-aside PagerDuty channel's record was dropped: %s (%v)", raw, err)
+	}
+}
+
+// A PagerDuty resolve that fails keeps only PagerDuty's record, for the
+// retry; ntfy, which has nothing to close, forgets the incident at once, so a
+// new fault during the PagerDuty failure still pages ntfy.
+func TestAFailedPagerDutyResolveDoesNotHoldNtfyBack(t *testing.T) {
+	f := &refusingResolve{relay: &relay{sent: map[string][]string{}}}
+	check := newStandInCheck(t)
+	dir := t.TempDir()
+	at := t0.Add(time.Hour)
+	failingTwice(t, f, dir, check, at)
+	before := ntfyClockPages(f.relay)
+	if before == 0 {
+		t.Fatal("ntfy was never paged")
+	}
+	check.pass()
+	if err := clockRun(t, f, dir, check.path(), at.Add(10*time.Minute)); err == nil {
+		t.Error("a failed resolve was not reported as the run's error")
+	}
+	check.fail(clockFailure)
+	for i := 2; i <= 3; i++ {
+		_ = clockRun(t, f, dir, check.path(), at.Add(time.Duration(10+5*i)*time.Minute))
+	}
+	if got := ntfyClockPages(f.relay); got != before+1 {
+		t.Errorf("ntfy was paged %d times, was %d before: a failed PagerDuty resolve held it back", got, before)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "host-clock.json"))
+	if !strings.Contains(string(raw), "pagerduty|clock-drift:") {
+		t.Errorf("PagerDuty's record was not kept for the resolve retry: %s", raw)
 	}
 }
 
