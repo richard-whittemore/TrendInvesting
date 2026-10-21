@@ -97,8 +97,10 @@ A book with no stock and nothing skipped (nothing eligible) is withheld as
 Whole shares also mean that a small trade can round down to zero shares. The
 program records every such trade as a `strategy.order.skipped` event instead
 of dropping it silently. It names the instrument, the shares the rule asked
-for and one of three reasons. It is written to the journal only: no alert is sent
-(see "What can go wrong" below).
+for and one of three reasons. No alert is sent; the daily summary and the
+dashboard list the day's skipped trades under "Trades skipped", and
+`journal-query orders` lists each as `skipped` (see "What can go wrong"
+below).
 
 - `below-one-share`: the trade the planner sized is less than one share. For
   a stock already held this is a trade past the rebalance band; a buy of a
@@ -200,18 +202,18 @@ alert.
 
 ## What can go wrong, and what the program does then
 
-The three skipped-trade reasons below are written to the journal only. The
-reporter sends no alert for any of them, the daily summary does not list
-them, and `journal-query` has no report for them ([journal-query](journal-query.md)).
-To see one, search the run's journal file (one JSON line per event) for
-`strategy.order.skipped`.
+The reporter sends no alert for the three skipped-trade reasons below. The
+daily summary and the dashboard list the day's skipped trades under "Trades
+skipped" (each with its side, the shares the rule asked for and its reason),
+and `journal-query orders` lists every one as `skipped`
+([journal-query](journal-query.md)).
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
 | `all-unaffordable`. Alert: `<account>: decision withheld (all-unaffordable)`, urgent, with the detail naming the one-share lot, the momentum scale and the net liquidation value used, and how many candidates were valued and found unaffordable | No stock with a target above zero can be bought at its target (or the only ones are held stocks kept one lot short). Decides nothing, keeps the book the account holds, orders nothing. Every skipped stock is recorded `unaffordable` with its one-share price and target value. | Check the net liquidation value in the detail against the broker, and the one-share prices of the `unaffordable` names against the market. If the figures are right, the account is too small for the book; nothing to fix, and the next month decides afresh. If they are wrong, fix the data; the next decision runs on it. |
-| `below-one-share`. No alert. A `strategy.order.skipped` line in the journal naming the instrument and the shares the rule asked for | The trade the planner sized is less than one share, so whole-share rounding leaves none. For a stock already held this is a trade past the 25% rebalance band; a buy of a stock not held has no band. Nothing is sent for it. | Nothing. The next month compares again. If it keeps happening for a stock you want, the account is small for that stock's price. |
-| `scaled-below-one-share`. No alert. A `strategy.order.skipped` line in the journal with the scale used | A buy was scaled down to fit the budget (the fee allowance) and is left with less than one share. Nothing is sent for it. | Nothing. The next month decides afresh. |
-| `held-by-working-sells`. No alert. A `strategy.order.skipped` line in the journal | A sell was sized at one share or more, but the whole holding is already committed to sells that are still working, so there is nothing left to sell. Nothing more is sent. | Nothing, unless those working sells do not fill; then see [order lifecycle](order-lifecycle.md). |
+| `below-one-share`. No alert. Listed under "Trades skipped" in the daily summary and the dashboard, and as `skipped` in `journal-query orders`, with the instrument and the shares the rule asked for | The trade the planner sized is less than one share, so whole-share rounding leaves none. For a stock already held this is a trade past the 25% rebalance band; a buy of a stock not held has no band. Nothing is sent for it. | Nothing. The next month compares again. If it keeps happening for a stock you want, the account is small for that stock's price. |
+| `scaled-below-one-share`. No alert. Listed under "Trades skipped" in the daily summary and the dashboard, and as `skipped` in `journal-query orders` (the scale used is in the journal's `strategy.order.skipped` record) | A buy was scaled down to fit the budget (the fee allowance) and is left with less than one share. Nothing is sent for it. | Nothing. The next month decides afresh. |
+| `held-by-working-sells`. No alert. Listed under "Trades skipped" in the daily summary and the dashboard, and as `skipped` in `journal-query orders` | A sell was sized at one share or more, but the whole holding is already committed to sells that are still working, so there is nothing left to sell. Nothing more is sent. | Nothing, unless those working sells do not fill; then see [order lifecycle](order-lifecycle.md). |
 | A held stock listed `held-one-lot-short` in the decision, with its holding and share of the account | Intended. It keeps its place and weight in the book and no order is placed in it: not bought, not sold, not trimmed. | Check its recorded share of the account. If it has grown large, the account is small for that stock's price. The next rebalance compares it again. |
 | A stock listed `unaffordable` while the book still decides | Intended. The stock is skipped and the next-ranked eligible stock within the sector cap takes its place. The decision keeps whether the backtest would have picked it, so the difference can be measured. | Nothing. |
 | The decision says every pick's target is zero (fully risk-off) | Intended, not a fault: nothing is compared, the whole invested fraction goes to the risk-off instrument and every held stock is sold. | Nothing. |

@@ -63,7 +63,9 @@ account.
 | An order was refused | urgent | refused order, except: a kill-switch refusal once per engagement (turning the switch off and on again is a new one), and a refusal for a too-old IBKR snapshot once per stale episode ([states-and-kill-switch](states-and-kill-switch.md)); a log written before the engine marked those first refusals alerts for every one |
 | IBKR rejected two of the account's Boost orders in a row, whatever their targets (the page names the order whose rejection made it two, even an older order rejected late, and the rejection before it), or rejected an order after that (paged as another rejection while buys are stopped, with which one since the stop it is and the two rejections that stopped buys). The program sends no more buys for the account until you approve a fresh run (`operator approve`, adding `-clear-incident` if the run also ended in an incident). Its sells still go: Boost's exit, tried again at each decided session while due, and the margin alarm's sale back to 98%. So before any sale by hand, stop the engine and the adapter (the kill switch is not enough: it does not stop the sale back to 98%), cancel any working program sale in IBKR's app, confirm none remains, and only then sell; start again only once your sale has filled, as a fresh run whose approval states the book as it is after your sale (`-positions ... -cash ... -currency USD`, typed right after reading the book in IBKR), or the fresh run halts on its first reading as unverifiable ([states](states-and-kill-switch.md#selling-by-hand-safely)). Find the reason in IBKR's order log first ([boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan)). The rule was confirmed by the owner on 2026-10-18 | urgent | each rejected order |
 | A sale back to 98% was not placed because the IBKR snapshot was too old, and it opened the stale episode (sell by hand if it is needed) | urgent | stale episode; the episode's later too-old refusals send nothing more |
-| A sale back to 98% was not placed because IBKR's values could not be read (`broker-values-unreadable`) or a sell this program did not release is working at IBKR (`unknown-working-sell`, CONTAINMENT REQUIRED). The program will not try again: sell by hand | urgent | withheld sale |
+| A sale back to 98% was not placed because IBKR's values could not be read (`broker-values-unreadable`) or a sell this program did not release is working at IBKR (`unknown-working-sell`, CONTAINMENT REQUIRED). The program will not try again: sell by hand. The page carries the steps of [Selling by hand safely](states-and-kill-switch.md#selling-by-hand-safely): stop the engine and the adapter, cancel every open order on the instrument, confirm none is open, sell, and start again as a fresh run whose approval states the book after your sale | urgent | withheld sale |
+| A sale back to 98% was not placed because IBKR reported a net liquidation or mark of zero or less (`non-positive-broker-values`). It is decided again from the next positive snapshot, but until one comes nothing sells; the page carries the same hand-sale steps, so a sale you make cannot go out beside the program's | urgent | sale (the same sale withheld again at the next snapshot sends nothing more) |
+| The risk gate refused the sale back to 98% itself as larger than IBKR's holding (`broker-holding`), beside the refused-order alert. The refusal spends the attempt, so the program will not try again: sell by hand, with the same hand-sale steps | urgent | sale |
 | The margin-cushion alarm changed level ([margin warning](../runbooks/margin-warning.md)): warning (check the account the same day), urgent (the program sells back to 98% once) or clear | urgent for the urgent level; routine for warning and clear | change of level |
 | A sale back to 98% was released to be sent, sized from the IBKR snapshot it names; in dry-run, released and not sent | routine | sale (its client order ID) |
 | A sale back to 98% filled, in part or in full: the alert says how many shares are filled and how many are left | routine | fill (its fill ID; a resent fill is not counted again) |
@@ -83,12 +85,13 @@ account.
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
+| The reporter set one delivery channel aside (its secret is empty or malformed, or its name is unknown); sent on the channels that still work | urgent | account, channel and problem |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
 
 A sale back to 98% withheld for any other reason sends none of these
-alerts: `non-positive-broker-values` is decided again from the next good
-snapshot, `nothing-to-sell` has nothing to do, and a lapse (`lapsed`) goes in
-the daily summary. A sale the gate refused alerts as a refused order, and one
+alerts: `nothing-to-sell` has nothing to do, and a lapse (`lapsed`) goes in
+the daily summary. A sale the gate refused alerts as a refused order (and,
+refused as `broker-holding`, with the "sell by hand" page above), and one
 IBKR never reported on alerts as an order not acknowledged. The sale alerts
 read the records the engine already writes: the planned sale, its release, the
 fills and IBKR's reports on it. A fill or report the engine could not read
@@ -97,8 +100,9 @@ IBKR the engine did not read".
 
 A trade the momentum engine skipped (one share costs more than its target,
 or it waits for a working sell: [momentum minimum lot](momentum-minimum-lot.md))
-sends no alert, and the daily summary and the dashboard do not list it: it is
-in the log only, as part of that day's decision.
+sends no alert. The daily summary and the dashboard list the day's skipped
+trades under "Trades skipped", and `journal-query orders` lists each as
+`skipped` ([journal-query](journal-query.md)).
 
 "No sign of life" is measured in NYSE sessions, not hours: the alert fires
 once `-heartbeat-sessions` sessions (default 2, minimum 2) have closed since the log
@@ -208,8 +212,17 @@ empty. On the server the secrets go in `/etc/trend-investing/secrets.env`
 (root only, mode 0600; the names are in `deploy/etc/secrets.env.example`),
 which systemd hands the reporter as a private credential file; nothing puts
 them in its environment. A secrets file that cannot be read, or a line in it
-that is not `KEY=VALUE`, stops the run with an error naming the line's number,
-never its text.
+that is not `KEY=VALUE`, is reported in the run's error, naming the line's
+number, never its text; every line that reads is still used.
+
+Each channel is checked on its own. A channel whose secret is empty or
+malformed (an empty topic or routing key, a server or endpoint that is not a
+URL), or whose name is unknown, is set aside: the other channels still get
+every alert, an urgent alert "the reporter cannot deliver to" that channel
+goes to them, the daily summary ends with "Channels not delivering:" and the
+channel's name and why, and the run ends with an error naming it. Only when
+no channel that reaches you is left does the run stop before sending
+anything.
 
 `stdout` is only an echo for whoever is watching the terminal. It reaches no
 one else, so it never counts as a delivery: `-channel stdout` alone is refused,
@@ -368,6 +381,14 @@ section.
   withheld", with its reason, what fired it and the engine's detail. A lapse
   (`lapsed`: what fired the sale ended before a good snapshot came) appears
   only here, never as an alert.
+- Every trade the program sized but did not order that day (ADR 0026, point
+  8) is listed under "Trades skipped", with its client order ID, side,
+  instrument, the shares the rule asked for (to at most six decimals; a smaller size is shown in scientific notation) and its reason
+  (`below-one-share`, `scaled-below-one-share` or `held-by-working-sells`;
+  [momentum minimum lot](momentum-minimum-lot.md)). The dashboard shows the
+  same list.
+- When the reporter set a channel aside, the summary it sends on the others
+  ends with "Channels not delivering:" and each such channel and why.
 - With the IBKR adapter, the summary shows the cash checks of the latest
   reading after the close (ADR 0019, amended 2026-10-18): "Cash drift since
   the previous close", the day's difference the adapter accepted (at most 1%
@@ -399,6 +420,8 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: sale back to 98% failed (<status>, <instrument>)` | urgent | [states and kill switch](states-and-kill-switch.md) |
 | `<account>: sale of <instrument> withheld (<reason>)` | urgent | [states and kill switch](states-and-kill-switch.md) |
 | `<account>: sale of <instrument> withheld, sell by hand (<reason>)` | urgent | [states and kill switch](states-and-kill-switch.md) |
+| `<account>: sale back to 98% refused, sell by hand (<instrument>)` | urgent | [states and kill switch](states-and-kill-switch.md) |
+| `<account>: the reporter cannot deliver to <channel>` | urgent | this chapter, "What can go wrong" |
 | `<account>: no recorded mark for <instrument>` | urgent | [states and kill switch](states-and-kill-switch.md) |
 | `<account>: reconciliation <classification> (<id>)` | urgent, repeated until acknowledged | [reconciliation](reconciliation.md) |
 | `<account>: venue report <id> not read` | urgent | [order lifecycle](order-lifecycle.md) |
@@ -429,17 +452,18 @@ and whether the alert is urgent:
 **Reasons that come in other titles, or in no alert:**
 
 - A sale back to 98% withheld: `stale-broker-snapshot` (in `sale of
-  <instrument> withheld (<reason>)`), `broker-values-unreadable` and
-  `unknown-working-sell` (in `sale of <instrument> withheld, sell by hand
-  (<reason>)`); `non-positive-broker-values`, `nothing-to-sell` and `lapsed`
-  send no alert (a lapse is in the daily summary). All in
+  <instrument> withheld (<reason>)`), `broker-values-unreadable`,
+  `unknown-working-sell` and `non-positive-broker-values` (in `sale of
+  <instrument> withheld, sell by hand (<reason>)`); `nothing-to-sell` and
+  `lapsed` send no alert (a lapse is in the daily summary). All in
   [states and kill switch](states-and-kill-switch.md).
 - An engine state's reason: `risk-limit-breached` in
   [states and kill switch](states-and-kill-switch.md);
   `reconciliation-unexplained` and `reconciliation-unverifiable` in
   [reconciliation](reconciliation.md).
 - A skipped trade: `below-one-share`, `scaled-below-one-share` and
-  `held-by-working-sells` send no alert and are not in the summary; see
+  `held-by-working-sells` send no alert; they are listed under "Trades
+  skipped" in the summary and the dashboard; see
   [momentum minimum lot](momentum-minimum-lot.md).
 
 ## What can go wrong, and what the program does then
@@ -464,9 +488,10 @@ and whether the alert is urgent:
 | --- | --- | --- |
 | Nothing at all for a long time | Possible causes: the timer is not running, the binary is not installed, or every run stops before it sends (the rows below). Nothing outside the server notices: the outside heartbeat (a dead-man's switch) is not built, and nothing reads a `HEALTHCHECK_URL` line | `systemctl list-timers ti-reporter@boost.timer` shows the next firing; `systemctl status ti-reporter@boost` and `journalctl -u ti-reporter@boost` show the last run and its error |
 | The unit failed: "ti-reporter: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the boost engine once first ..." | The reporter does not run, so it sends nothing | Start the engine by `docs/runbooks/durable-log.md`, "Restarting an engine"; the next firing follows its log |
-| "reporter: the ntfy channel needs TI_NTFY_TOPIC ..." or "reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY ..." | The whole run is refused before anything is sent, on either channel | Fill the line in with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses it |
-| "reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org" | The whole run is refused before anything is sent | Correct the line, or leave it empty for the public ntfy.sh relay |
-| "reporter: the secrets file cannot be read; check -secrets-file names the credential file", or "reporter: the secrets file's line N is not KEY=VALUE" | The run stops before anything is sent. The error never shows a secret's text | Correct that line of `secrets.env` (`KEY=VALUE`, no spaces round `=`) with `sudo -e` |
+| `<account>: the reporter cannot deliver to <channel>`, urgent, on the channels that still work | One channel's secret is empty or malformed, or its name in `-channel` is unknown, so that channel is set aside; every alert still goes to the others, the daily summary ends with "Channels not delivering:" naming it, and the run ends with an error naming it (the rows below). Once per channel and problem; nothing reaches the channel set aside until it is fixed | Fix that channel's line in `secrets.env` (the rows below say which), or the unit's `-channel`; the next firing delivers to it everything it missed |
+| "reporter: the ntfy channel needs TI_NTFY_TOPIC ..." or "reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY ..." | That channel is set aside and the other still delivers (the row above). With no channel left that reaches you, the whole run is refused before anything is sent | Fill the line in with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses it |
+| "reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org" or "reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue" | That channel is set aside and the other still delivers; with none left, the run is refused before anything is sent | Correct the line, or leave it empty for the public ntfy.sh relay or PagerDuty's own endpoint |
+| "reporter: the secrets file cannot be read; check -secrets-file names the credential file", or "reporter: the secrets file's line N is not KEY=VALUE" | Reported in the run's error, which never shows a secret's text. Every line that reads is still used, so only a channel whose secret that leaves unset is set aside; with no channel left, nothing is sent | Correct that line of `secrets.env` (`KEY=VALUE`, no spaces round `=`) with `sudo -e` |
 | "ntfy: server answered 403 Forbidden" (or another status), "pagerduty: server answered 400 Bad Request", "pagerduty: the answer did not acknowledge the event", or "post failed" | That channel failed, so the alert is not delivered, even if the other channel took it. Only the failed channel is retried, at every firing, until it takes the alert | A wrong topic, server or routing key: correct `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` or `TI_PAGERDUTY_ROUTING_KEY` in `secrets.env`. A network fault clears by itself |
 | PagerDuty shows incidents, but your phone shows nothing | Both channels accepted the alert, so the reporter counts it delivered. What your phone does with it is up to the PagerDuty and ntfy apps | Check the PagerDuty app's notification rules, and that the ntfy app is subscribed to exactly the topic (and server) in `secrets.env` |
 | "reporter: the state file is unreadable and is not reset, since a reset resends every alert: ..." | The run stops before anything is sent, every firing | Move the file aside: `sudo -u ti-trader mv /var/lib/trend-investing/reports/boost.reporter.json /var/lib/trend-investing/reports/boost.reporter.json.bad`. The next firing sends every alert in the log once more, which is safer than none |
@@ -499,17 +524,24 @@ and whether the alert is urgent:
   `TestAWithheldRunIsOneIncidentAndADecisionEndsIt`,
   `TestAnAllUnaffordableWithholdIsUrgent`, `TestALabelsMissingWithholdIsUrgent`,
   `TestHeartbeatLossIsCountedInSessionsAndAlertsOncePerSilence`,
-  `TestEachMarginAlarmLevelChangeIsAlerted` and
-  `TestAWithheldSaleTheOwnerMustMakeByHandIsAlertedUrgently`.
+  `TestEachMarginAlarmLevelChangeIsAlerted`,
+  `TestAWithheldSaleTheOwnerMustMakeByHandIsAlertedUrgently`,
+  `TestANonPositiveWithheldSalePagesSellByHand`,
+  `TestASaleRefusedAsBrokerHoldingPagesSellByHand`,
+  `TestAChannelTheReporterCannotUseIsAnUrgentAlertOnTheOthers` and
+  `TestTheSummaryListsTheDaysSkippedTrades`.
 - Tests in `cmd/reporter`, among them
   `TestAJournalTheReporterCannotReadStillAlertsAndChecksTheHeartbeat`,
   `TestAFailureOnOneChannelIsNeverADeliveryAndOnlyThatChannelIsRetried`,
   `TestAnUnacknowledgedHaltRepeatsOnBothChannelsUntilAcknowledged`,
   `TestTheDailySummaryNeverGoesThroughThePublicRelay`,
   `TestTheSecretsFileSuppliesTheChannelSecrets`,
+  `TestOneChannelsBadSecretNeverSilencesTheOther`,
+  `TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset`,
   `TestTheServiceFileRunsTheReporterOnTheEnginesLog` and
   `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`.
 - Tests in `cmd/dashboard`, among them `TestEveryRouteRefusesEveryWritingMethod`,
+  `TestDashboardShowsTheDaysSkippedTrades`,
   `TestDashboardRefusesAJournalThatDoesNotVerify`,
   `TestListenAddressMustBeLoopbackOrThisHostsTailscaleAddress` and
   `TestTheServiceFileServesTheBoostLogOnTheOnePort`.

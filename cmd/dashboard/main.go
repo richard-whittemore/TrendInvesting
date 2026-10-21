@@ -247,6 +247,7 @@ func view(envelopes []event.Envelope, benchmark string) (account, error) {
 
 var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	"weight": func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) },
+	"shares": event.FormatSkippedShares,
 	"pct":    func(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) },
 }).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -263,6 +264,7 @@ table{border-collapse:collapse}td,th{padding:.2rem .7rem;text-align:left;border-
 <p>Refusals today: {{.Refusals}}</p>
 <h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{.Quantity}} @ {{printf "%.2f" .Price}}</td><td>{{.ClientOrderID}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 {{if .SalesWithheld}}<h3>Sales back to 98% withheld</h3><table>{{range .SalesWithheld}}<tr><td>{{.ClientOrderID}}</td><td>{{.InstrumentID}}</td><td>{{.Reason}}</td><td>{{.Trigger}}</td><td>{{.Detail}}</td></tr>{{end}}</table>{{end}}
+{{if .Skipped}}<h3>Trades skipped</h3><table>{{range .Skipped}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{shares .Shares}} shares</td><td>{{.Reason}}</td></tr>{{end}}</table>{{end}}
 <h3>Equity against {{.Benchmark}}</h3>{{if .Equity.Available}}<p>{{.Equity.StartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>{{if .Equity.DayAvailable}}Day, {{.Equity.DayStartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.{{else}}Day: not available (no paired snapshot and {{.Benchmark}} close on {{.Date}}).{{end}}</p>{{else}}<p>Not enough paired snapshots and bars yet.</p>{{end}}
 {{if .RejectedInputs}}<p class="urgent">Inputs not read: {{.RejectedInputs}} (an unknown schema version or values that fail validation; they move no figure).</p>{{end}}{{end}}
 <h3>Alerts</h3>{{if .Alerts}}<table>{{range .Alerts}}<tr class="{{.Severity}}"><td>{{.At.UTC.Format "2006-01-02 15:04Z"}}</td><td>{{.Severity}}</td><td>{{.Title}}<p>{{.Body}}</p></td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
