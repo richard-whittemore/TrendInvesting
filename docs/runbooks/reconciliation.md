@@ -51,7 +51,7 @@ stops ordering, not an order resting at the broker.
 4. **Do not trade by hand while a sale of the program's is working.** If
    you must act at IBKR first, stop the program sending anything new: the
    kill switch (`sudo -u ti-operator operator kill-switch ... -state engaged`),
-   and to stop everything, also stop the engine and the adapter (stopping the
+   and to stop everything, also stop the adapter, then the engine (stopping the
    Gateway only delays: a released order goes out once it is back the same
    day). The kill switch does not cancel an order already at IBKR: cancel
    one in IBKR's own app.

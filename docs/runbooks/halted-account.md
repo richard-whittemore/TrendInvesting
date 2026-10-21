@@ -13,7 +13,7 @@ approve.
 ## First, in every case
 
 1. **Do not trade by hand while a sale of the program's is working.** If you
-   must sell at IBKR, stop the engine and the adapter first, as the manual's
+   must sell at IBKR, stop the adapter, then the engine, first, as the manual's
    "Selling by hand safely" says (`docs/manual/states-and-kill-switch.md`):
    the kill switch does not stop the sale back to 98%. To investigate
    without trading, record the kill switch so the program sends nothing new

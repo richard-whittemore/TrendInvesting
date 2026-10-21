@@ -562,7 +562,7 @@ CONF
   fi
 
   log "systemd units"
-  # The reporter is one instance per account (ti-reporter@<account>); an
+  # The reporter is one instance per engine (ti-reporter@<instance>); an
   # earlier provisioner's single unit and its timer link are removed. It is
   # stopped and disabled first: systemd keeps a running unit loaded after its
   # file is gone, firing a service that no longer exists.

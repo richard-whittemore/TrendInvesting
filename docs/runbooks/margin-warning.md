@@ -34,8 +34,9 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    than the backtest assumed: you may engage the kill switch to stop the
    next boost buy (`sudo -u ti-operator operator kill-switch ... -state engaged`),
    which still lets the sale back to 98% go. Selling by
-   hand is your call; if you do, stop the engine and the adapter first
-   (`sudo systemctl stop ti-engine@boost ti-adapter-boost`), as
+   hand is your call; if you do, stop the adapter, then the engine, first
+   (`sudo systemctl stop ti-adapter-boost`, then `sudo systemctl stop ti-engine@boost`;
+   if the first fails, stop there and read `journalctl -u ti-adapter-boost`), as
    the manual's "Selling by hand safely" says
    (`docs/manual/states-and-kill-switch.md`): the kill switch does not stop
    the sale back to 98%, so the program could sell beside you.
@@ -54,7 +55,7 @@ reporter checks every 5 minutes, around the clock, seven days a week).
      not try again for this alarm, and the urgent "sale withheld, sell by
      hand" alert says so. **Act by hand at IBKR now**: sell back to 98% of
      net liquidation, following the manual's "Selling by hand safely" (stop
-     the engine and the adapter, cancel and confirm nothing is working in
+     the adapter, then the engine, cancel and confirm nothing is working in
      IBKR's app, then sell).
    - `stale-broker-snapshot` or `non-positive-broker-values`: the program
      decides it again from the next good snapshot while the alarm is urgent.
@@ -63,9 +64,9 @@ reporter checks every 5 minutes, around the clock, seven days a week).
      with the hand-sale steps, since nothing sells until a positive
      snapshot comes.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
-     by hand, but stop the engine and the adapter first ("Selling by hand
-     safely"): the attempt is unspent, so the program can still sell from
-     the next good snapshot, beside your sale.
+     by hand, but stop the adapter, then the engine, first ("Selling by hand
+     safely", step 1, with its guard): the attempt is unspent, so the program
+     can still sell from the next good snapshot, beside your sale.
    - **Refused at the gate as `broker-holding`** (the sale is larger than
      IBKR's holding): the refusal spends the attempt, and the urgent "sale
      back to 98% refused, sell by hand" page says so. Check the holding at

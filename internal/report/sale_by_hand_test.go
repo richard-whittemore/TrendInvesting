@@ -10,11 +10,11 @@ import (
 
 // handSaleSteps are the phrases of docs/manual/states-and-kill-switch.md,
 // "Selling by hand safely", a "sell by hand" page must carry: stop the
-// engine and the adapter, cancel every open order on the instrument, confirm
-// none is open, sell, and come back as a fresh run whose approval states the
-// book after the sale.
+// adapter, then the engine, cancel every open order on the instrument,
+// confirm none is open, sell, and come back as a fresh run whose approval
+// states the book after the sale.
 var handSaleSteps = []string{
-	"stop the engine and the adapter",
+	"stop the adapter, then the engine",
 	"cancel every open order on the instrument",
 	"confirm there that none is open",
 	"only then sell",
@@ -46,8 +46,8 @@ func (s *stream) saleRefused(n int, clientID, reason string) {
 // because IBKR reported a net liquidation or mark of zero or less is decided
 // again from the next positive snapshot, but until one comes nothing sells,
 // so the owner is paged with the hand-sale steps (docs/manual/
-// states-and-kill-switch.md, "Selling by hand safely"): stopping the engine
-// and the adapter first keeps the decided-again sale from going out beside
+// states-and-kill-switch.md, "Selling by hand safely"): stopping the adapter,
+// then the engine, first keeps the decided-again sale from going out beside
 // the owner's. One page per sale: the same sale withheld again on the next
 // snapshot is the same incident.
 func TestANonPositiveWithheldSalePagesSellByHand(t *testing.T) {

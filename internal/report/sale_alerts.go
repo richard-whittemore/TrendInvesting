@@ -163,8 +163,8 @@ func (s sales) refused(account string, e event.Envelope, p event.OrderRefusedPay
 // 2026-10-15, "No order when it cannot be checked"). A sale withheld because
 // IBKR's net liquidation or mark is not strictly positive is not an attempt,
 // but nothing sells until a positive snapshot comes, so it pages too, once
-// per sale (its tag and instrument): the hand-sale steps stop the engine and
-// the adapter first, so the sale decided again cannot go out beside the
+// per sale (its tag and instrument): the hand-sale steps stop the adapter,
+// then the engine, first, so the sale decided again cannot go out beside the
 // owner's. Any other reason decides again, has nothing to sell, or lapsed,
 // and raises no alert here: a lapse goes in the daily summary.
 func byHandAlert(account string, e event.Envelope, p event.SaleWithheldPayload) (Alert, bool) {
