@@ -159,10 +159,21 @@ func TestEngineStateIsGroupedByHowMuchAttentionItNeeds(t *testing.T) {
 // given account and benchmark values, one per consecutive date.
 func seriesFixture(nets, benches []float64) account {
 	a := pairedFixture(0)
+	eq := &a.Summary.Equity
 	for i := range nets {
-		a.Summary.Equity.Points = append(a.Summary.Equity.Points, report.EquityPoint{Date: fmt.Sprintf("d%05d", i), Net: nets[i], Benchmark: benches[i]})
+		eq.Points = append(eq.Points, report.EquityPoint{Date: fmt.Sprintf("d%05d", i), Net: nets[i], Benchmark: benches[i]})
 	}
-	a.Summary.Equity.Available = len(nets) >= 2
+	eq.Available = len(nets) >= 2
+	if n := len(nets); n >= 2 {
+		first, last := eq.Points[0], eq.Points[n-1]
+		eq.StartDate, eq.EndDate = first.Date, last.Date
+		a.Summary.Date = last.Date
+		eq.AccountReturn, eq.BenchmarkReturn = last.Net/first.Net-1, last.Benchmark/first.Benchmark-1
+		eq.Excess = eq.AccountReturn - eq.BenchmarkReturn
+		prev := eq.Points[n-2]
+		eq.DayAvailable, eq.DayStartDate = true, prev.Date
+		eq.DayAccountReturn, eq.DayBenchmarkReturn = last.Net/prev.Net-1, last.Benchmark/prev.Benchmark-1
+	}
 	return a
 }
 
@@ -252,7 +263,7 @@ func TestDailyChangeStripPrintedStartDateEqualsItsScreenReaderLabel(t *testing.T
 
 func TestDailyChangeStripSaysItsBarsSpanPairedPointsNotDays(t *testing.T) {
 	body := execThemed(t, "", []account{pairedFixture(6)})
-	for _, want := range []string{"Change between paired points", "Account, left bar of each pair", "several sessions apart"} {
+	for _, want := range []string{"Change between paired points", "Account, left bar of each pair", "several sessions apart when a snapshot or a SPY close is missing"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("strip lacks %q", want)
 		}

@@ -22,7 +22,7 @@ const pageHTML = `{{define "needtwo"}}<p class="note">The chart needs two paired
 {{range .Bars}}<rect class="bar-account" x="{{.AX}}" y="{{.AY}}" width="{{$.Width}}" height="{{.AH}}"/><rect class="bar-benchmark" x="{{.BX}}" y="{{.BY}}" width="{{$.Width}}" height="{{.BH}}"/>{{end}}
 <text class="date" x="{{.Left}}" y="204">{{.StartDate}}</text><text class="date" x="{{.Right}}" y="204" text-anchor="end">{{.EndDate}}</text></svg>
 <p class="legend"><span><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect class="key-bar-account" x="1" y="1" width="10" height="10"/></svg>Account, left bar of each pair</span><span><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect class="key-bar-benchmark" x="1" y="1" width="10" height="10"/></svg>{{.Benchmark}}, right bar</span></p>
-<p class="legend">Each bar is the change from one paired point to the next, which can be several sessions apart when a snapshot is missing; points are spaced evenly, not by calendar. Shows the most recent {{.Cap}} changes at most.</p>{{else}}{{template "needtwo"}}{{end}}{{end}}
+<p class="legend">Each bar is the change from one paired point to the next, which can be several sessions apart when a snapshot or a SPY close is missing; points are spaced evenly, not by calendar. Shows the most recent {{.Cap}} changes at most.</p>{{else}}{{template "needtwo"}}{{end}}{{end}}
 <!doctype html>
 <html lang="en"{{if .Theme}} data-theme="{{.Theme}}"{{end}}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">

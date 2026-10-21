@@ -22,7 +22,8 @@ const (
 	chartTop, chartBottom = 40.0, 160.0
 )
 
-// stripCap is the most paired points the strip draws, so bars stay visible.
+// stripCap is the most changes (bar pairs) the strip draws, from the most
+// recent stripCap+1 paired points, so bars stay at least one unit wide.
 const stripCap = 120
 
 func f(v float64) string { return fmt.Sprintf("%.1f", v) }
