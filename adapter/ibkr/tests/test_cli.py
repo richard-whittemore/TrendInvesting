@@ -53,9 +53,7 @@ class CommandTests(unittest.TestCase):
         self.engine_log = self.dir / "run-1.log"
         self.write_config(dict(CONFIG))
         self.secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT))
-        self.versions.write_text("TWSAPI_VERSION=10.51.01
-TWSAPI_SHA256={}
-".format(SHA) + PINS)
+        self.versions.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA) + PINS)
         self.record.write_text(record())
         # The account's first run, approved with the book the fake shows.
         self.engine = LoggedEngine(str(self.engine_log), approval=run_approval(ACCOUNT, starting_book=({}, 100000.0)))
