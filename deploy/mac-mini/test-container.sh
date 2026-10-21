@@ -27,7 +27,8 @@
 #
 # And up.sh refuses --recreate while the engine runs, leaving it running;
 # provision.sh reown moves files of an old UID and GID in the volumes to the
-# fixed IDs, links themselves, and leaves root's alone.
+# fixed IDs, links themselves, and leaves root's alone, and refuses an old ID
+# an account or group in the container holds now.
 #
 # And the container leaves the Docker VM's binfmt handlers alone: they are
 # listed before it is created and after every boot and must not change, and
@@ -267,7 +268,16 @@ printf '%s\n' "$owners"
 test "$(printf '%s\n' "$owners" | grep -c '^2002:2002 ')" = 4 || fail "reown did not move every file of 1998 to 2002:2002 (above)"
 printf '%s\n' "$owners" | grep -q '^0:0 /var/lib/trend-investing/reown-test/root-own$' || fail "reown changed root's file (above)"
 printf '%s\n' "$owners" | grep -q '^0:0 /etc/hostname$' || fail "reown followed a link out of the volumes (above)"
+# An old ID an account holds now is refused before any file changes: root's
+# 0, and the image's own system account at UID 1 and group 1 (daemon).
+for ids in "0 0" "1" "1998 1"; do
+  # shellcheck disable=SC2086 # IDS is the step's one or two arguments.
+  if docker exec --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh reown ti-trader $ids; then
+    fail "reown accepted the old ID(s) $ids, which an account holds now"
+  fi
+done
+test "$(docker exec "$name" stat -c '%u:%g' /var/lib/trend-investing/reown-test/root-own)" = 0:0 || fail "a refused reown changed root's file"
 docker exec "$name" rm -rf /var/lib/trend-investing/reown-test /etc/trend-investing/reown-test.env
-echo "reown moved the old UID's files to 2002:2002, links themselves, and left root's alone"
+echo "reown moved the old UID's files to 2002:2002, links themselves, left root's alone, and refused IDs held now"
 
 step "REAL CONTAINER TEST COMPLETE"

@@ -46,8 +46,9 @@ fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 redirected_vars='etc unit_dir dl_cache twsapi_root adapter_venv adapter_root'
 # redirect_leaks FILE: prints, as "LINE: TEXT;", each line with a redirection of output
 # in FILE (outside a comment line) to a literal absolute path other than
-# /dev/null or /dev/stderr, or to a path starting with a variable not in
-# $redirected_vars. A redirection cannot be intercepted by a stand-in, so
+# /dev/null or /dev/stderr (bare, double- or single-quoted), to a path
+# starting with a variable not in $redirected_vars, or to one starting with
+# "~" or a command substitution, whose place the test cannot know. A redirection cannot be intercepted by a stand-in, so
 # these are the only ones the provisioner may use.
 redirect_leaks() {
   awk -v allowed=" $redirected_vars " '
@@ -55,10 +56,10 @@ redirect_leaks() {
     {
       line = $0
       bad = 0
-      while (match(line, />>?[|]?[[:space:]]*"?(\$\{?[A-Za-z_][A-Za-z_0-9]*|\/[^[:space:];|&)"]*)/)) {
+      while (match(line, />>?[|]?[[:space:]]*["\047]?(\$\{?[A-Za-z_][A-Za-z_0-9]*|\$\(|~|\/[^[:space:];|&)"\047]*)/)) {
         t = substr(line, RSTART, RLENGTH)
         line = substr(line, RSTART + RLENGTH)
-        sub(/^>>?[|]?[[:space:]]*"?/, "", t)
+        sub(/^>>?[|]?[[:space:]]*["\047]?/, "", t)
         if (t ~ /^\$/) {
           v = t; sub(/^\$\{?/, "", v)
           if (index(allowed, " " v " ")) continue
@@ -99,9 +100,15 @@ resolve() {
   local p=$1 out='' c target depth=${2:-0}
   test "$depth" -lt 40 || { echo /resolve-loop; return; }
   case $p in /*) ;; *) p=$PWD/$p ;; esac
-  local IFS=/
+  # Split on "/" with pathname expansion off, so that a component holding *,
+  # ? or [...] is taken as it is written, never matched against files; the
+  # caller's setting is restored.
+  local IFS=/ noglob=0
+  case $- in *f*) noglob=1 ;; esac
+  set -f
   # shellcheck disable=SC2086
   set -- $p
+  test "$noglob" = 1 || set +f
   for c in "$@"; do
     case $c in
       '' | .) ;;
@@ -231,19 +238,34 @@ scenario() {
       if test "${1:-}" = -d; then command mktemp -d "$work/tmp/tmp.XXXXXX"; else command mktemp "$work/tmp/tmp.XXXXXX"; fi
     }
     # File commands run only inside the test's tree: every argument that is
-    # not an option (each one after "--"), an option's "=value", and dd's
-    # if=/of= operands is resolved as `realpath -m` would, against the case's
-    # folder, and must be $work or under it. A sed script or a mode resolves
-    # as a relative name inside the tree, so it passes.
+    # not an option (each one after "--"), an option's "=value", the value of
+    # a short option in $path_opts given attached (cp -t/dir, or in a
+    # cluster, -at/dir), and dd's if=/of= operands is resolved as
+    # `realpath -m` would, against the case's folder, and must be $work or
+    # under it. A mode (0644) resolves as a relative name inside the tree, so
+    # it passes. A sed script is not a path: sed's stand-in below leaves it
+    # out, so one beginning with an address ("/^$/d") is not refused.
     inside_work() {
-      local a p ends=0
+      local a p ends=0 rest c
       for a in "$@"; do
         p=$a
         if test "$ends" = 0; then
           case $p in
             --) ends=1; continue ;;
             --*=*) p=${p#*=} ;;
-            -*) continue ;;
+            -?*)
+              # A cluster of short options: the rest after one in $path_opts
+              # is its path; after one in $value_opts, a value that is not.
+              rest=${p#-} p=
+              while test -n "$rest"; do
+                c=${rest:0:1} rest=${rest:1}
+                case $c in
+                  [$value_opts]) break ;;
+                  [$path_opts]) p=$rest; break ;;
+                esac
+              done
+              test -n "$p" || continue
+              ;;
             if=* | of=*) p=${p#*=} ;;
           esac
         fi
@@ -252,16 +274,20 @@ scenario() {
         case $p in "$work" | "$work"/*) ;; *) return 1 ;; esac
       done
     }
+    # refuse CMD ARGS...: records the refusal and ends the case.
+    refuse() {
+      record "REFUSED $*"
+      echo "test-target: refused '$*': outside the test's tree" >&2
+      exit 97
+    }
     guarded() {
-      local cmd=$1
+      local cmd=$1 path_opts=' ' value_opts=' '
       shift
-      if inside_work "$@"; then
-        command "$cmd" "$@"
-      else
-        record "REFUSED $cmd $*"
-        echo "test-target: refused '$cmd $*': outside the test's tree" >&2
-        exit 97
-      fi
+      # GNU cp and mv: -t DIR is the target directory, -S SUFFIX the
+      # backups' suffix. (A space keeps each bracket expression valid.)
+      case $cmd in cp | mv) path_opts=t value_opts=S ;; esac
+      inside_work "$@" || refuse "$cmd" "$@"
+      command "$cmd" "$@"
     }
     rm() { guarded rm "$@"; }
     rmdir() { guarded rmdir "$@"; }
@@ -273,12 +299,51 @@ scenario() {
     truncate() { guarded truncate "$@"; }
     dd() { guarded dd "$@"; }
     # sed changes a file only in place: -i alone, in a cluster (-ni, -Ei,
-    # -i.bak) or as --in-place[=SUFFIX].
+    # -i.bak) or as --in-place[=SUFFIX]. Then every file it is given must be
+    # inside the tree: each operand and each -f/--file script file, but not
+    # the script itself (an -e/--expression value, or else the first
+    # operand), which is not a path even when it begins with "/".
     sed() {
-      local a
+      local a inplace=0
       for a in "$@"; do
-        case $a in --in-place* | -i* | -[!-]*i*) guarded sed "$@"; return ;; esac
+        case $a in --in-place* | -i* | -[!-]*i*) inplace=1 ;; esac
       done
+      if test "$inplace" = 0; then command sed "$@"; return; fi
+      local paths=() operands=() ends=0 want='' scripted=0 rest c
+      for a in "$@"; do
+        case $want in
+          e) want=''; continue ;;
+          f) want=''; paths+=("$a"); continue ;;
+        esac
+        if test "$ends" = 0; then
+          case $a in
+            --) ends=1; continue ;;
+            --expression=*) scripted=1; continue ;;
+            --expression) scripted=1; want=e; continue ;;
+            --file=*) scripted=1; paths+=("${a#*=}"); continue ;;
+            --file) scripted=1; want=f; continue ;;
+            --*) continue ;;
+            -?*)
+              # A cluster: -i's suffix, -e's script and -f's file are
+              # attached, or else -e's and -f's are the next argument.
+              rest=${a#-}
+              while test -n "$rest"; do
+                c=${rest:0:1} rest=${rest:1}
+                case $c in
+                  i | l) break ;;
+                  e) scripted=1; test -n "$rest" || want=e; break ;;
+                  f) scripted=1; if test -n "$rest"; then paths+=("$rest"); else want=f; fi; break ;;
+                esac
+              done
+              continue
+              ;;
+          esac
+        fi
+        operands+=("$a")
+      done
+      if test "$scripted" = 0 && test "${#operands[@]}" -gt 0; then operands=("${operands[@]:1}"); fi
+      paths+=(${operands[@]+"${operands[@]}"})
+      inside_work -- ${paths[@]+"${paths[@]}"} || refuse sed "$@"
       command sed "$@"
     }
     etc=$work/etc
@@ -288,6 +353,9 @@ scenario() {
     adapter_venv=$work/opt/adapter-venv
     adapter_root=$work/opt/adapter
     volume_roots=("$etc" "$work/vol/state" "$work/vol/opt")
+    # FAKE_FIND_FAILS=1: find lists what it finds, then fails (an unreadable
+    # folder part way through a volume).
+    if test "${FAKE_FIND_FAILS:-0}" = 1; then find() { command find "$@"; echo "find: a folder could not be read" >&2; return 1; }; fi
     if test -n "${TEST_LEAK:-}"; then eval "$TEST_LEAK"; fi
     # STEP may carry the step's arguments (reown NAME UID GID).
     # shellcheck disable=SC2086
@@ -317,7 +385,8 @@ for leak in "rm -rf $canary/keep" "cp /dev/null $canary/keep" "mv $canary/keep $
   "dd if=/dev/zero of=$canary/keep count=1" "dd if=/dev/zero of=${up%/}$canary/keep count=1" \
   "sed -ni s/keep/gone/p $canary/keep" "sed -Ei s/keep/gone/ $canary/keep" \
   "sed --in-place s/keep/gone/ $canary/keep" "sed --in-place=.bak s/keep/gone/ $canary/keep" \
-  "sed -e s/keep/gone/ -i $canary/keep"; do
+  "sed -e s/keep/gone/ -i $canary/keep" "cp -t$canary /dev/null" "mv -t$canary $canary/keep" \
+  "cp -at$canary /dev/null" "sed -i -f /dev/null $canary/keep" "sed -i -e /^keep/d $canary/keep"; do
   status=0
   TEST_LEAK=$leak scenario mac-mini aarch64 services || status=$?
   test "$status" = 97 || fail "the guard did not end the case on '$leak' (status $status)"
@@ -325,13 +394,33 @@ for leak in "rm -rf $canary/keep" "cp /dev/null $canary/keep" "mv $canary/keep $
   if called "systemctl"; then fail "the case went on after '$leak' was refused"; fi
 done
 test "$(cat "$canary/keep" 2>/dev/null)" = keep || fail "a refused command changed the canary"
-test ! -e "$canary/moved" && test ! -e "$canary/made" && test ! -e "$canary/touched" || fail "a refused command created a file outside the test's tree: $(ls "$canary")"
+test ! -e "$canary/moved" && test ! -e "$canary/made" && test ! -e "$canary/touched" && test ! -e "$canary/null" || fail "a refused command created a file outside the test's tree: $(ls "$canary")"
 # A path inside the test's tree is allowed, given absolute or relative to
 # the case's folder, and as dd's operand.
 TEST_LEAK="mkdir -p $work/tmp/allowed" scenario mac-mini aarch64 services || fail "the guard refused a path inside the test's tree: $(cat "$work/out")"
 TEST_LEAK="mkdir -p ../tmp/relative" scenario mac-mini aarch64 services || fail "the guard refused a relative path inside the test's tree: $(cat "$work/out")"
 test -d "$work/tmp/relative" || fail "the guard did not run an allowed relative mkdir"
 TEST_LEAK="dd if=/dev/zero of=$work/tmp/dd count=1" scenario mac-mini aarch64 services || fail "the guard refused dd inside the test's tree: $(cat "$work/out")"
+# A sed script is not a path, even one that begins with an address (and so
+# with "/"): given alone, with -e, or with --expression, it is not resolved,
+# and the file it edits inside the tree is. So is cp's target directory given
+# attached to -t. Only the guard's decision is checked: the Mac's own sed and
+# cp (BSD) read some of these options differently from the server's (GNU).
+for allowed in "sed -i /^drop/d $work/tmp/x" "sed -i -e /^drop/d $work/tmp/x" "sed -i --expression=/^drop/d $work/tmp/x" \
+  "sed -ni /^keep/p $work/tmp/x" "sed -i -- /^drop/d $work/tmp/x" "sed -i -f $work/tmp/script $work/tmp/x" \
+  "cp -t$work/tmp /dev/null" "cp -at$work/tmp /dev/null"; do
+  status=0
+  TEST_LEAK="$allowed || true" scenario mac-mini aarch64 services || status=$?
+  if test "$status" = 97 || called "REFUSED"; then fail "the guard refused '$allowed' inside the test's tree: $(cat "$work/out")"; fi
+done
+# resolve takes every component literally: one holding *, ? or [...] is never
+# expanded against the folder's files.
+globbed=$(cd "$work/cwd" && : >xfile && resolve '[x]file' && resolve '*' && resolve 'x?ile/..')
+expected="$work/cwd/[x]file
+$work/cwd/*
+$work/cwd"
+test "$globbed" = "$expected" || fail "resolve expanded a component as a pattern: $globbed"
+rm -f "$work/cwd/xfile"
 # No redirection to a path the test does not redirect: a literal absolute
 # path other than /dev/null, or a variable other than those set under $work
 # above. A redirection cannot be intercepted by a stand-in.
@@ -345,12 +434,16 @@ printf x >/etc/flagged-literal
 printf x >> "/var/flagged-quoted"
 printf x >"$somewhere/flagged-variable"
 printf x 2>${elsewhere}/flagged-braced
+printf x >'/etc/flagged-single-quoted'
+printf x >~/flagged-tilde
+printf x >"$(pick)/flagged-substituted"
+printf x >$(pick)-flagged-bare-substituted
 printf x >"$etc/fine" 2>/dev/null
 printf x >"$unit_dir/fine" >&2
 # printf x >/etc/a-comment
 SHAPES
 got=$(redirect_leaks "$work/redirects")
-for shape in flagged-literal flagged-quoted flagged-variable flagged-braced; do
+for shape in flagged-literal flagged-quoted flagged-variable flagged-braced flagged-single-quoted flagged-tilde flagged-substituted flagged-bare-substituted; do
   case $got in *"$shape"*) ;; *) fail "the redirection check missed '$shape': $got" ;; esac
 done
 case $got in *fine* | *a-comment*) fail "the redirection check flagged an allowed line: $got" ;; esac
@@ -513,6 +606,20 @@ if scenario "" x86_64 "reown ti-trader $me $mygid"; then fail "reown ran on Ligh
 if called "chown"; then fail "reown on Lightsail changed a file"; fi
 if scenario mac-mini aarch64 "reown root 0 0"; then fail "reown accepted root"; fi
 if scenario mac-mini aarch64 "reown ti-trader 99x 998"; then fail "reown accepted a UID that is not a number"; fi
+# Refused: an old ID that an account holds now, whose files are its own:
+# root's 0, a service user's fixed ID, or any other existing account's or
+# group's; given as a number however written. Nothing is changed.
+withother="$default_passwd
+ti-other:x:1500:1600::/nonexistent:/usr/sbin/nologin"
+for ids in "0" "0 $mygid" "00" "2001" "2002" "2003" "02003" "1500" "$me 0" "$me 2001" "$me 2002" "$me 1600" "$me 002002" "99999999999999999999"; do
+  if FAKE_PASSWD=$withother scenario mac-mini aarch64 "reown ti-trader $ids"; then fail "reown accepted the old ID(s) $ids"; fi
+  if called "chown" || called "chgrp"; then fail "reown with the old ID(s) $ids changed a file: $(cat "$work/calls")"; fi
+done
+if scenario mac-mini aarch64 "reown ti-operator 0"; then fail "reown accepted ti-operator from UID 0"; fi
+# A listing that fails is an error, never "re-owned 0 file(s)".
+if FAKE_FIND_FAILS=1 scenario mac-mini aarch64 "reown ti-trader $me $mygid"; then fail "reown succeeded although find failed"; fi
+if said "re-owned"; then fail "reown reported a count although find failed: $(cat "$work/out")"; fi
+said "could not list" || fail "reown does not say the listing failed: $(cat "$work/out")"
 # Lightsail is unchanged: the users are created as before, at no fixed ID.
 FAKE_PASSWD='' TEST_REHEARSAL=1 scenario "" x86_64 base || fail "Lightsail base with no service users failed: $(cat "$work/out")"
 called "useradd --system --user-group --home-dir /var/lib/trend-investing" || fail "Lightsail no longer creates ti-trader as before: $(grep useradd "$work/calls")"

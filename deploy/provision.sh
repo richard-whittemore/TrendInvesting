@@ -638,6 +638,10 @@ step_firewall() {
 # GID, links themselves and not their targets, within each volume. Only
 # once NAME is at its fixed ID, so the pass cannot hand files to a number no
 # account holds. ti-operator has no group of its own (it is ti-trader's).
+# An old ID that an account or group holds now is refused: root's 0, the
+# fixed 2001 to 2003, and any other this container has. Its files are that
+# account's own (root's secret stubs and installed programs among them), not
+# files left behind, and handing them to a service user would expose them.
 step_reown() {
   mac_mini || die "reown is for the Mac mini's container only (TI_TARGET=mac-mini)"
   local name=${1:-} old_uid=${2:-} old_gid=${3:-} want
@@ -647,21 +651,55 @@ step_reown() {
     ti-operator) want=2003; test -z "$old_gid" || die "ti-operator has no group of its own; give only its old UID" ;;
     *) die "usage: provision.sh reown ti-gateway|ti-trader|ti-operator OLD_UID [OLD_GID]" ;;
   esac
-  case $old_uid in '' | *[!0-9]*) die "the old UID must be a number, not '$old_uid'" ;; esac
-  case $old_gid in *[!0-9]*) die "the old GID must be a number, not '$old_gid'" ;; esac
   test "$(id -u "$name" 2>/dev/null || echo none)" = "$want" \
     || die "$name is not at its fixed UID $want in this container: run up.sh --recreate first, then reown"
-  local root f owned=0 grouped=0
+  old_uid=$(reown_old_id UID passwd "$old_uid") || exit 1
+  if test -n "$old_gid"; then old_gid=$(reown_old_id GID group "$old_gid") || exit 1; fi
+  local root owned=0 grouped=0 n
   for root in "${volume_roots[@]}"; do
     test -d "$root" || continue
-    while IFS= read -r -d '' f; do chown -h "$want" "$f"; owned=$((owned + 1)); done \
-      < <(find "$root" -xdev -uid "$old_uid" -print0)
+    # find's own failure fails the pipeline (pipefail), so a listing that
+    # stopped part way is reported, never counted as nothing left to re-own.
+    n=$(find "$root" -xdev -uid "$old_uid" -print0 | reown_listed chown "$want") \
+      || die "could not list or re-own the files of UID $old_uid under $root (see find's message above); some of them may have been changed already, and running reown again is safe once the cause is fixed"
+    owned=$((owned + n))
     if test -n "$old_gid"; then
-      while IFS= read -r -d '' f; do chgrp -h "$want" "$f"; grouped=$((grouped + 1)); done \
-        < <(find "$root" -xdev -gid "$old_gid" -print0)
+      n=$(find "$root" -xdev -gid "$old_gid" -print0 | reown_listed chgrp "$want") \
+        || die "could not list or re-group the files of GID $old_gid under $root (see find's message above); some of them may have been changed already, and running reown again is safe once the cause is fixed"
+      grouped=$((grouped + n))
     fi
   done
   log "re-owned $owned file(s) from UID $old_uid to $name ($want)${old_gid:+, and $grouped from GID $old_gid to $want}"
+}
+
+# reown_old_id KIND DB ID: prints ID as a plain number (leading zeros taken
+# out), or dies if it is not a number up to 4294967294 or if root, a fixed
+# service ID (2001 to 2003) or an existing entry of DB (passwd or group)
+# holds it now.
+reown_old_id() {
+  local kind=$1 db=$2 id=$3 holder
+  case $id in '' | *[!0-9]*) die "the old $kind must be a number, not '$id'" ;; esac
+  id=${id#"${id%%[!0]*}"}
+  id=${id:-0}
+  test "${#id}" -le 10 && test "$id" -le 4294967294 || die "the old $kind must be at most 4294967294, not '$3'"
+  case $id in
+    0 | 2001 | 2002 | 2003) die "the old $kind $id is held now (by root or a service user's fixed ID); its files are that account's own, not files left behind" ;;
+  esac
+  if holder=$(getent "$db" "$id"); then
+    die "the old $kind $id is held now by '${holder%%:*}' in this container; its files are that account's own, not files left behind"
+  fi
+  printf '%s\n' "$id"
+}
+
+# reown_listed CMD ID: runs CMD -h ID on each NUL-separated path read from
+# its input, and prints how many.
+reown_listed() {
+  local f n=0
+  while IFS= read -r -d '' f; do
+    "$1" -h "$2" "$f" || return 1
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
 }
 
 main() {

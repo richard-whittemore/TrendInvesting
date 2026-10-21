@@ -194,6 +194,33 @@ refused "a stale lock another up.sh is taking over" "taking over" "$clean" TI_DI
 test "$(readlink "$lock")" = "$gone" || fail "an up.sh that lost the takeover changed the lock: $(readlink "$lock")"
 test "$(readlink "$lock.takeover")" = $$ || fail "an up.sh that lost the takeover changed the takeover lock"
 rm -f "$lock" "$lock.takeover"
+# A taker that died part way (killed, or the Mac lost power) leaves its
+# takeover link naming a process no longer running: that link is itself
+# stale, and taken over the same way, so it never blocks every later run.
+ln -s "$gone" "$lock"
+ln -s "$gone" "$lock.takeover"
+: >"$work/calls"
+if launch "$clean" TI_DIST="$work/dist"; then :; fi
+grep -q '^docker info' "$work/calls" || fail "a stale takeover link (process $gone) blocked the lock's takeover: $(cat "$work/out")"
+for left in "$lock" "$lock.takeover" "$lock.takeover.takeover"; do
+  test ! -L "$left" || fail "up.sh left $left behind after taking over a stale takeover link"
+done
+# ...and taking over that link is one at a time too: while another up.sh
+# holds the link above it, a second refuses and changes none of them.
+rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
+ln -s "$gone" "$lock"
+ln -s "$gone" "$lock.takeover"
+ln -s $$ "$lock.takeover.takeover"
+refused "a stale takeover link another up.sh is taking over" "taking over" "$clean" TI_DIST="$work/dist"
+test "$(readlink "$lock")" = "$gone" && test "$(readlink "$lock.takeover")" = "$gone" && test "$(readlink "$lock.takeover.takeover")" = $$ \
+  || fail "an up.sh that lost the takeover of a stale takeover link changed a link"
+# The chain is bounded: when every link up to the last is stale, up.sh
+# refuses and names the links to remove, rather than going on without end.
+rm -f "$lock.takeover.takeover"
+ln -s "$gone" "$lock.takeover.takeover"
+refused "a chain of stale takeover links" "by hand" "$clean" TI_DIST="$work/dist"
+test "$(readlink "$lock")" = "$gone" || fail "an up.sh refusing a chain of stale links changed the lock"
+rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
 
 # --- Once Docker is reached (an arm64 VM).
 co=$(cd "$clean" && pwd -P)

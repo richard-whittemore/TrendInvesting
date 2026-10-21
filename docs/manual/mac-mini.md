@@ -61,7 +61,8 @@ nothing on your home network can reach it.
 
 The user accounts (`/etc/passwd`) are not in a volume: they are on the
 container's own disk and are created again when the container is. That is
-why the two service users have fixed IDs: the files in the volumes are owned
+why the three service users have fixed IDs (`ti-gateway` 2001, `ti-trader`
+2002 and `ti-operator` 2003, in `ti-trader`'s group 2002): the files in the volumes are owned
 by those numbers, so a container created again, even from a changed image,
 gives them back to the same users. If a changed image already has another
 account at one of those IDs, provisioning stops and names it.
@@ -126,7 +127,11 @@ It is careful with what it did not make:
   (`~/.trend-investing/up-ti.lock`) while it works; a second run stops and
   names the first. A lock left by a run that no longer exists is taken over,
   by one run only: a run that finds another already taking it over stops
-  too.
+  too. A run killed while taking over (or a Mac that lost power then) leaves
+  its takeover link, `up-ti.lock.takeover`, naming a process that no longer
+  exists; that link is taken over the same way, so it does not block later
+  runs. Only if the lock and both links above it were all left by dead runs
+  does up.sh stop and name the three to remove by hand.
 - **A bad port is refused first.** `TI_MAC_DASHBOARD_PORT` must be a number
   from 1 to 65535, checked before anything in Docker is touched.
 - **A machine that did not start well is not provisioned.** systemd
@@ -265,7 +270,8 @@ restart ti`) has the server's rules:
 | `up: refusing the checkout at ...: it holds N what look like iCloud sync duplicates` | Names the first five and stops before it touches Docker | Delete them, or take a fresh checkout outside the synced folders, then run it again |
 | `up: refusing the checkout at ...: could not read all of it` | Stops before it touches Docker | Fix the folder's permissions it names, or take a fresh checkout |
 | `up: another up.sh (process N) is working on the container ti` | Stops before it touches Docker | Wait for the other run to finish; if no such process exists, run it again (the lock is taken over) |
-| `up: another up.sh (process N) is taking over the stale lock on ti` | Stops before it touches Docker; the lock is left alone | Wait for the other run, then run it again. If no up.sh runs at all (one was killed mid-takeover), remove `~/.trend-investing/up-ti.lock.takeover` it names, then run it again |
+| `up: another up.sh (process N) is taking over the stale lock on ti` | Stops before it touches Docker; the lock is left alone | Wait for the other run, then run it again. A takeover link left by a run that was killed is taken over by the next run by itself |
+| `up: the lock on ti and the links taking it over were all left by runs no longer running` | Stops before it touches Docker | Check that no `up.sh` runs (`pgrep -fl up.sh`), remove the three links it names, then run it again |
 | `up: TI_MAC_DASHBOARD_PORT must be a port number from 1 to 65535` | Stops before it touches Docker | Set a port in that range, or leave it unset (8088) |
 | `up: Docker's VM is x86_64` | Stops: the container is for Apple silicon only | Run it on the Mac mini |
 | `up: the container ti was made by an earlier up.sh, before it recorded the checkout` | Changes nothing and removes nothing: it cannot tell this container from another checkout's | If it is your own rehearsal container: stop its adapter, then its engine, then `docker stop -t 60 ti && docker rm ti` (the volumes are kept), and run `up.sh` again, which creates it anew on the same volumes |
@@ -278,7 +284,7 @@ restart ti`) has the server's rules:
 | `provision: the clock is not good` during `up.sh` | The clock step refuses, and `up.sh` stops before the services step | Turn on the Mac's "Set time and date automatically", then run `up.sh` again ([server](server.md), "The clock") |
 | `ti-clock-check` failed (`systemctl --failed` inside) | The engine is not stopped by it; a clock behind IBKR's makes it withhold every sell | Read `journalctl -u ti-clock-check`; fix the Mac's time (or wait for Docker Desktop to correct it after sleep); `systemctl start ti-clock-check` to check again |
 | `provision: UID 2002 (or 2001, 2003) is held by the account '...' in this image` | Stops before creating the service users | A changed image took the ID; remove that account from the image, then `up.sh --recreate` |
-| `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the `reown` step the message gives, inside the container (`docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh reown ti-trader 998 998`): it moves every file in the volumes of the old UID and GID to the fixed ones and says how many. Then run `up.sh` again |
+| `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the `reown` step the message gives, inside the container (`docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh reown ti-trader 998 998`): it moves every file in the volumes of the old UID and GID to the fixed ones and says how many. It refuses an old ID that an account or group in the container holds now (root's 0, 2001 to 2003, or any other), since those files are that account's own; and if it cannot list a volume it stops with `could not list`, never a count. Then run `up.sh` again |
 | `up: note: ti runs the image ..., not ...` | Keeps the running container and provisions it as before | Run `up.sh --recreate` when it suits you; every volume is kept |
 | After a Mac or Docker Desktop restart, the engine and the adapter are stopped | Nothing: this is the rule, and the timers and dashboard are back | Start the engine as a fresh approved run and then the adapter ([restart](restart.md)) |
 | `systemctl is-system-running` inside says `degraded`, with `ti-reporter@boost` failed | The reporter fails every 5 minutes until the Boost engine has run once and `secrets.env` holds its channels | Expected before the first run; otherwise read `journalctl -u ti-reporter@boost` ([alerts and dashboard](alerts-and-dashboard.md)) |
@@ -297,11 +303,13 @@ restart ti`) has the server's rules:
   service users at fixed IDs, and refused when another account holds one;
   the clock check's timer on the Mac mini only. It never changes the machine
   it runs on: every path a file command is given, relative ones and `dd`'s
-  and `sed`'s in-place forms included, is resolved against the test's own
+  and `sed`'s in-place forms and `cp -t/dir` included (a `sed` script, even
+  one starting with `/`, is not a path and is not refused), is resolved against the test's own
   temporary folder, and one outside it is refused and fails the test; the
   test proves that refusal works for each of those shapes. A redirection
   cannot be refused that way, so the test also checks that the provisioner
-  redirects only to `/dev/null` or under the folders it sets inside its own.
+  redirects only to `/dev/null` or under the folders it sets inside its own:
+  never to a literal path, quoted or not, `~` or a command substitution.
   `deploy/mac-mini/test-refusals.sh` checks every refusal of the launcher
   listed above, the order of stop and removal on `--recreate`, and that the
   container is created without `--privileged`. Both run in `make check`.
