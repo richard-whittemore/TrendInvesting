@@ -1,8 +1,8 @@
 """The Flex cash-movement reader: IBKR's Cash Transactions, read once a day, each transfer into the instance's ledger.
 
-`python3 -m adapter.ibkr flex ...` (cli.py), run by ti-flex-boost.timer after
-the close (docs/manual/reconciliation.md, "Deposits and withdrawals, read
-from IBKR"). One reading:
+`python3 -m adapter.ibkr flex ...` (cli.py), run by ti-flex@<instance>.timer
+after the close (docs/manual/reconciliation.md, "Deposits and withdrawals,
+read from IBKR"). One reading:
 
 1. asks IBKR's Flex Web Service for the owner's saved Flex query
    (SendRequest, then GetStatement, version 3), the token and query ID read
@@ -16,12 +16,37 @@ from IBKR"). One reading:
    that is not as IBKR writes one is refused whole;
 3. writes one account.cash-movement, version 2 (internal/event
    CashMovementTransferVersion; ADR 0007, ADR 0015), per deposit or
-   withdrawal not yet in the instance's ledger, with the equity before it:
-   the net liquidation of the engine's last account snapshot before it,
-   found back through the chain of runs (relay.run_chain). A transfer dated
-   before the chain's first snapshot is already in the first book and is
-   not written. Postings other than transfers are parsed, and kept on the
-   Statement, but not written.
+   withdrawal not yet in the instance's ledger, with the equity before it
+   (equity_before), found back through the chain of runs (relay.run_chain).
+   The first book is the starting book the owner states at the first run's
+   approval (ADR 0027, starting-book amendment), so the approval's
+   approved_at is the cutoff: a transfer dated before it is in that book and
+   is not written (counted as in_first_book); one at or after it is always
+   written, or the reading is set aside. Postings other than transfers are
+   parsed, and kept on the Statement, but not written; a type KINDS does not
+   know is counted in the status file (unknown_types) and said.
+
+The equity before a transfer (equity_before) is, in order:
+
+- the net liquidation of the last close snapshot before it, plus the
+  transfers between that snapshot and it (a close snapshot is read after
+  the close and holds that day's later transfers; ADR 0019, "the reading
+  after the close counts as the close");
+- for a transfer timed after the close, that day's close snapshot less the
+  transfers of that evening from it on, itself included (that snapshot,
+  read later, already holds it): equity_before_basis
+  "same-day-snapshot-less-amount";
+- for a transfer in the first run's window, before any snapshot, the first
+  snapshot after it less the transfers up to that snapshot, itself
+  included: equity_before_basis "next-snapshot-less-amount". The market's
+  move between the transfer and that snapshot is in the figure; a transfer
+  is never left unwritten for it (the shadow account that reads the ledger
+  needs its amount and date). With no snapshot yet, the reading is set
+  aside until the first close snapshot is committed.
+
+Both approximations assume the close snapshot was read after the transfer,
+as the post-close reading is (17:05 New York or later); a transfer IBKR
+times later that evening is taken as held by it.
 
 The ledger is the instance's own file of cash movements, one JSON record a
 line, beside its status file (STATUS_SUFFIX). It is the seen-IDs state: a
@@ -45,6 +70,7 @@ durable log (relay.py).
 """
 import fcntl
 import json
+import math
 import os
 import re
 import time
@@ -53,13 +79,19 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
 from collections import namedtuple
-from datetime import datetime, timezone
+from datetime import datetime, time as clock, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
-from relay import LOG_INPUT, ResolveRefused, run_chain
+from relay import LOG_INPUT, RUN_APPROVED, ResolveRefused, run_chain
 
 CASH_MOVEMENT = ("account.cash-movement", 2)   # internal/event CashMovementTransferVersion
+ACCOUNT_SNAPSHOT = ("account.snapshot", 3)      # internal/event AccountSnapshotPositionsVersion
+FIRST_RUN_APPROVAL_VERSION = 3                  # the operator.run.approved that states the starting book
+# internal/event EquityBeforeNextSnapshotLessAmount and EquityBeforeSameDaySnapshotLessAmount.
+NEXT_SNAPSHOT_LESS_AMOUNT = "next-snapshot-less-amount"
+SAME_DAY_SNAPSHOT_LESS_AMOUNT = "same-day-snapshot-less-amount"
+BASES = (NEXT_SNAPSHOT_LESS_AMOUNT, SAME_DAY_SNAPSHOT_LESS_AMOUNT)
 SOURCE = "ibkr-flex"
 ID_PREFIX = "ibkr-flex:"
 STATUS_SUFFIX = ".status.json"
@@ -67,14 +99,19 @@ LOCK_SUFFIX = ".lock"
 
 # IBKR's Flex Web Service, version 3. GetStatement's address comes from
 # SendRequest's answer; the token is sent only to an https address on
-# IBKR_HOST.
+# IBKR_HOST, and a redirect is never followed (_NoRedirect): the token rides
+# in the query string, which a redirect would re-send to its Location.
 SEND_REQUEST_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
 FLEX_VERSION = "3"
 IBKR_HOST = re.compile(r"(?:[a-z0-9-]+\.)*interactivebrokers\.com")
 USER_AGENT = "TrendInvesting-flex-reader/1"
 REQUEST_TIMEOUT = 60
 # A statement IBKR is still generating (code 1019) is asked for again every
-# GENERATION_WAIT seconds, GENERATION_ATTEMPTS times in all (5 minutes).
+# GENERATION_WAIT seconds, GENERATION_ATTEMPTS times in all. With each
+# request taking up to REQUEST_TIMEOUT, a reading's worst case is SendRequest
+# and every attempt to their timeout plus the waits (about 36 minutes);
+# ti-flex@.service's TimeoutStartSec is above it, and a reading stopped
+# anyway leaves its status file saying "running" (read_once).
 GENERATION_WAIT = 10
 GENERATION_ATTEMPTS = 30
 GENERATING = "1019"
@@ -84,10 +121,15 @@ GENERATING = "1019"
 # statement that could not be generated): set aside as unavailable.
 REJECTED_CODES = frozenset(("1010", "1011", "1012", "1013", "1014", "1015", "1016", "1020"))
 
-# IBKR states a Flex date as yyyyMMdd and a date and time as yyyyMMdd;HHmmss
-# (the Flex query's default formats, which the owner keeps), in New York
-# time. A date alone is the start of that New York day.
+# A posting is dated by its dateTime alone, the only date field read (a
+# report date or settle date is not when the cash moved). IBKR's
+# documentation gives yyyyMMdd, or yyyyMMdd;HHmmss with a time, as the Flex
+# query's default formats, which the owner keeps. That it is New York time
+# is an assumption until the first live statement is checked against the
+# owner's activity statement (docs/manual/reconciliation.md). A date alone
+# is taken as the start of that New York day.
 NEW_YORK = ZoneInfo("America/New_York")
+CLOSE = clock(16, 0)  # the US close, New York time: a close snapshot's as-of (ADR 0019)
 FLEX_DATE = re.compile(r"([0-9]{4})([0-9]{2})([0-9]{2})(?:;([0-9]{2})([0-9]{2})([0-9]{2}))?")
 
 # The kinds of posting, from IBKR's Cash Transactions type. Only TRANSFER is
@@ -123,6 +165,7 @@ Statement = namedtuple("Statement", "account_id from_date to_date postings")
 ACCOUNT_NUMBER = re.compile(r"\b[A-Z]{1,2}[0-9]{5,9}\b")
 RECORD_FIELDS = ("id", "type", "schema_version", "event_time", "source", "payload")
 PAYLOAD_FIELDS = ("as_of", "amount", "equity_before", "currency", "transaction_id")
+OPTIONAL_PAYLOAD_FIELDS = ("equity_before_basis",)
 
 
 class StatementRefused(ValueError):
@@ -216,17 +259,28 @@ def parse_statement(data, account_id):
                 where, transaction_id)) from None
         if not amount.is_finite():
             raise StatementRefused("{} (transaction {}) has an amount that is not finite".format(where, transaction_id))
-        when = row.get("dateTime") if row.get("dateTime") is not None else row.get("date")
+        when = row.get("dateTime")
         postings.append(Posting(transaction_id, KINDS.get(ibkr_type, OTHER), ibkr_type,
                                 _flex_time(when, "{} (transaction {})".format(where, transaction_id)), amount,
                                 currency))
     return Statement(account_id, statement.get("fromDate"), statement.get("toDate"), postings)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses every redirect: urllib then raises the 3xx as an HTTPError, an OSError, so the reading is set aside."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _get(url, params):
-    """The body IBKR answers a GET of url with params; OSError (urllib's) on any failure."""
+    """The body IBKR answers a GET of url with params, never following a redirect; OSError (urllib's) on any
+    failure."""
     request = urllib.request.Request(url + "?" + urllib.parse.urlencode(params), headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+    with _OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
         return response.read()
 
 
@@ -298,35 +352,127 @@ def _parse_stamp(text):
         return None
 
 
-def account_snapshots(engine_log_path):
-    """[(as_of, net liquidation, currency)] of every committed account snapshot (version 3) in the chain of runs."""
-    found = []
-    for path, groups, _ in run_chain(engine_log_path):
+def read_chain(engine_log_path):
+    """(approved_at, snapshots) of the chain of runs: the first run's approval time, the starting book's cutoff, and
+    [(as_of, net liquidation, currency)] of every committed account snapshot, in time order.
+
+    StatementRefused for an account snapshot at a version the reader does not know (ADR 0015: a version is read
+    only as it is stated, never skipped as if absent), one without what the reader needs, or a chain that ends
+    without a first run's approval stating the starting book."""
+    found, first = [], None
+    for path, groups, approval in run_chain(engine_log_path):
+        # The walk ends at the first run, whose approval names no run before it and states the starting book; a
+        # fresh run's approval may restate a book, but its time is not the first book's.
+        first = None
         for group in groups:
             for _, kind, envelope in group:
-                if kind != LOG_INPUT or (envelope["type"], envelope["schema_version"]) != ("account.snapshot", 3):
+                if kind != LOG_INPUT:
                     continue
+                if (envelope["type"] == RUN_APPROVED and isinstance(approval, dict)
+                        and approval.get("previous_log") == "" and isinstance(approval.get("starting_book"), dict)):
+                    first = (path, envelope)
+                if envelope["type"] != ACCOUNT_SNAPSHOT[0]:
+                    continue
+                if envelope["schema_version"] != ACCOUNT_SNAPSHOT[1]:
+                    raise StatementRefused("the account snapshot {} in {} is at version {}, which this reader does not "
+                                           "read (it reads version {})".format(envelope["id"], path,
+                                                                               envelope["schema_version"],
+                                                                               ACCOUNT_SNAPSHOT[1]))
                 payload = envelope["payload"]
                 as_of = _parse_stamp(payload.get("as_of")) if isinstance(payload, dict) else None
                 value = payload.get("net_liquidation") if isinstance(payload, dict) else None
-                if (as_of is None or isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
+                if (as_of is None or not _number(value) or value <= 0
                         or not isinstance(payload.get("currency"), str)):
                     raise StatementRefused("the account snapshot {} in {} has no as-of time, positive net "
                                            "liquidation and currency".format(envelope["id"], path))
-                found.append((as_of, float(value), payload["currency"]))
-    return sorted(found)
+                found.append((as_of, Decimal(repr(float(value))), payload["currency"]))
+    if first is None:
+        raise StatementRefused("the chain of runs from {} ends without a first run's approval stating the starting "
+                               "book, so the first book's time is not known".format(engine_log_path))
+    path, envelope = first
+    approved_at = None
+    if envelope["schema_version"] == FIRST_RUN_APPROVAL_VERSION and isinstance(
+            envelope["payload"].get("approved_at"), str):
+        try:
+            approved_at = datetime.fromisoformat(envelope["payload"]["approved_at"].replace("Z", "+00:00"))
+        except ValueError:
+            approved_at = None
+    if approved_at is None or approved_at.tzinfo is None:
+        raise StatementRefused("the first run's approval in {} (the starting book) has no approved_at time at version "
+                               "{}".format(path, FIRST_RUN_APPROVAL_VERSION))
+    return approved_at, sorted(found)
 
 
-def _equity_before(snapshots, as_of):
-    before = [s for s in snapshots if s[0] < as_of]
-    return before[-1] if before else None
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _record(posting, equity, currency):
-    payload = {"as_of": _stamp(posting.as_of), "amount": float(posting.amount), "equity_before": equity,
+def _is_close_stamp(moment):
+    local = moment.astimezone(NEW_YORK)
+    return local.time() == CLOSE
+
+
+def _held_until(snapshot_as_of):
+    """The moment up to which a snapshot's net liquidation holds every transfer: a close snapshot is read after the
+    close, so it holds the rest of its New York day; any other reading holds what came before it."""
+    if not _is_close_stamp(snapshot_as_of):
+        return snapshot_as_of
+    day = snapshot_as_of.astimezone(NEW_YORK).date() + timedelta(days=1)
+    return datetime.combine(day, clock(0), tzinfo=NEW_YORK).astimezone(timezone.utc)
+
+
+def _equity_before(snapshots, transfers, posting):
+    """(equity before posting, its currency, basis) from snapshots and transfers [(as_of, transaction ID, amount)];
+    StatementRefused when no snapshot is committed yet."""
+    key = (posting.as_of, posting.transaction_id)
+    day = posting.as_of.astimezone(NEW_YORK).date()
+    before = [s for s in snapshots if s[0] < posting.as_of]
+    # A transfer at the close's own second is after it, as one later that evening is.
+    before += [s for s in snapshots if s[0] == posting.as_of and _is_close_stamp(s[0])]
+    if before:
+        as_of, value, currency = before[-1]
+        if _is_close_stamp(as_of) and as_of.astimezone(NEW_YORK).date() == day:
+            # At or after the close: that day's close snapshot, read later, already holds it.
+            evening = sum((amount for at, ident, amount in transfers
+                           if (at, ident) >= key and at >= as_of and at.astimezone(NEW_YORK).date() == day),
+                          Decimal(0))
+            return value - evening, currency, SAME_DAY_SNAPSHOT_LESS_AMOUNT
+        since = sum((amount for at, ident, amount in transfers if at >= _held_until(as_of) and (at, ident) < key),
+                    Decimal(0))
+        return value + since, currency, None
+    after = [s for s in snapshots if s[0] >= posting.as_of]  # none is the close at posting's own second
+    if not after:
+        raise StatementRefused("transfer {}, dated {}, is after the first run's approval, but no close snapshot is "
+                               "committed yet to give the equity before it; the first reading after the first close "
+                               "snapshot writes it".format(posting.transaction_id, _stamp(posting.as_of)))
+    as_of, value, currency = after[0]
+    upto = sum((amount for at, ident, amount in transfers if (at, ident) >= key and at < _held_until(as_of)),
+               Decimal(0))
+    return value - upto, currency, NEXT_SNAPSHOT_LESS_AMOUNT
+
+
+def _record(posting, equity, currency, basis):
+    payload = {"as_of": _stamp(posting.as_of), "amount": float(posting.amount), "equity_before": float(equity),
                "currency": currency, "transaction_id": posting.transaction_id}
+    if basis is not None:
+        payload["equity_before_basis"] = basis
     return {"id": ID_PREFIX + posting.transaction_id, "type": CASH_MOVEMENT[0], "schema_version": CASH_MOVEMENT[1],
             "event_time": payload["as_of"], "source": SOURCE, "payload": payload}
+
+
+def _payload_as_written(payload):
+    """Whether payload holds the fields _record writes, each of the type it writes: a transaction ID, an as-of
+    stamp, a finite non-zero amount, a finite positive equity before that the amount leaves positive, a three-letter
+    currency, and a named basis or none (internal/event CashMovementPayload.ValidateSchema at version 2)."""
+    fields = set(payload) - set(OPTIONAL_PAYLOAD_FIELDS)
+    if fields != set(PAYLOAD_FIELDS):
+        return False
+    amount, equity = payload["amount"], payload["equity_before"]
+    return (isinstance(payload["transaction_id"], str) and bool(payload["transaction_id"])
+            and _parse_stamp(payload["as_of"]) is not None
+            and _number(amount) and amount != 0 and _number(equity) and equity > 0 and equity + amount > 0
+            and isinstance(payload["currency"], str) and re.fullmatch(r"[A-Z]{3}", payload["currency"]) is not None
+            and payload.get("equity_before_basis", BASES[0]) in BASES)
 
 
 def read_ledger(path):
@@ -350,25 +496,32 @@ def read_ledger(path):
         payload = record.get("payload") if isinstance(record, dict) else None
         if (not isinstance(record, dict) or tuple(sorted(record)) != tuple(sorted(RECORD_FIELDS))
                 or (record["type"], record["schema_version"], record["source"]) != CASH_MOVEMENT + (SOURCE,)
-                or not isinstance(payload, dict) or tuple(sorted(payload)) != tuple(sorted(PAYLOAD_FIELDS))
-                or not isinstance(payload["transaction_id"], str)
+                or not isinstance(payload, dict) or not _payload_as_written(payload)
                 or record["id"] != ID_PREFIX + payload["transaction_id"] or record["id"] in records
-                or _parse_stamp(payload["as_of"]) is None or record["event_time"] != payload["as_of"]):
+                or record["event_time"] != payload["as_of"]):
             raise StatementRefused("the ledger {} line {} is not a cash movement as this reader writes it; it is "
                                    "never appended to until it is put back".format(path, n))
         records[record["id"]] = record
     return records
 
 
-def new_movements(statement, ledger, snapshots):
-    """(records to write, transfers not written and why): each transfer of statement not yet in ledger."""
+def new_movements(statement, ledger, approved_at, snapshots):
+    """(records to write, transfers not written as in the first book and why): each transfer of statement not yet in
+    ledger, dated at or after approved_at, the first run's approval; StatementRefused when one cannot be written."""
+    transfers = sorted((p for p in statement.postings if p.kind == TRANSFER), key=lambda p: (p.as_of, p.transaction_id))
+    known = {r["payload"]["transaction_id"]: (_parse_stamp(r["payload"]["as_of"]), r["payload"]["transaction_id"],
+                                              Decimal(repr(float(r["payload"]["amount"]))))
+             for r in ledger.values()}
+    for posting in transfers:
+        if posting.as_of >= approved_at and posting.transaction_id not in known:
+            known[posting.transaction_id] = (posting.as_of, posting.transaction_id, posting.amount)
+    moved = sorted(known.values())
     written, skipped = [], []
-    for posting in sorted((p for p in statement.postings if p.kind == TRANSFER),
-                          key=lambda p: (p.as_of, p.transaction_id)):
-        known = ledger.get(ID_PREFIX + posting.transaction_id)
-        if known is not None:
-            stated = known["payload"]
-            if (Decimal(repr(stated["amount"])) != posting.amount or stated["currency"] != posting.currency
+    for posting in transfers:
+        recorded = ledger.get(ID_PREFIX + posting.transaction_id)
+        if recorded is not None:
+            stated = recorded["payload"]
+            if (Decimal(repr(float(stated["amount"]))) != posting.amount or stated["currency"] != posting.currency
                     or stated["as_of"] != _stamp(posting.as_of)):
                 raise StatementRefused(
                     "transaction {} is in the ledger as {} {} on {}, but IBKR now states {} {} on {}; the ledger is "
@@ -376,22 +529,21 @@ def new_movements(statement, ledger, snapshots):
                         posting.transaction_id, stated["amount"], stated["currency"], stated["as_of"],
                         posting.amount, posting.currency, _stamp(posting.as_of)))
             continue
+        if posting.as_of < approved_at:
+            skipped.append((posting.transaction_id, "dated {}, before the first run's approval at {}, so it is in the "
+                                                    "starting book".format(_stamp(posting.as_of),
+                                                                           _stamp(approved_at))))
+            continue
         if posting.amount == 0:
             raise StatementRefused("transfer {} is of nothing".format(posting.transaction_id))
-        equity = _equity_before(snapshots, posting.as_of)
-        if equity is None:
-            skipped.append((posting.transaction_id, "dated {}, before the engine's first account snapshot, so it is "
-                                                    "already in the first book".format(_stamp(posting.as_of))))
-            continue
-        _, value, currency = equity
+        equity, currency, basis = _equity_before(snapshots, moved, posting)
         if currency != posting.currency:
             raise StatementRefused("transfer {} is in {}, but the account's net liquidation is in {}".format(
                 posting.transaction_id, posting.currency, currency))
-        record = _record(posting, value, currency)
-        if not value + record["payload"]["amount"] > 0:
+        if not equity > 0 or not equity + posting.amount > 0:
             raise StatementRefused("transfer {} of {} would take the equity before it, {}, to zero or below".format(
-                posting.transaction_id, posting.amount, value))
-        written.append(record)
+                posting.transaction_id, posting.amount, equity))
+        written.append(_record(posting, equity, currency, basis))
     return written, skipped
 
 
@@ -422,15 +574,28 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         if err is not None:
             print(mask(text, token, account_id), file=err)
 
-    status = {"state": "read", "checked_at": _stamp(now())}
+    checked_at = _stamp(now())
+    status_path = ledger_path + STATUS_SUFFIX
+    status = {"state": "read", "checked_at": checked_at}
     with open(ledger_path + LOCK_SUFFIX, "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        # Said first, so a reading stopped part way (its unit's timeout, a kill) leaves "running" with its time,
+        # never the previous reading's "read" (docs/manual/reconciliation.md, "The status file").
+        _write_whole(status_path, json.dumps({"state": "running", "checked_at": checked_at}, sort_keys=True) + "\n")
         try:
             ledger = read_ledger(ledger_path)
             statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep), account_id)
-            written, skipped = new_movements(statement, ledger, account_snapshots(engine_log_path))
+            approved_at, snapshots = read_chain(engine_log_path)
+            written, skipped = new_movements(statement, ledger, approved_at, snapshots)
             for transaction_id, why in skipped:
                 say("flex: transfer {} not written: {}".format(transaction_id, why))
+            unknown = {}
+            for posting in statement.postings:
+                if posting.kind == OTHER:
+                    unknown[posting.ibkr_type] = unknown.get(posting.ibkr_type, 0) + 1
+            for ibkr_type, count in sorted(unknown.items()):
+                say("flex: {} posting(s) of type {!r}, which the reader does not classify, not written".format(
+                    count, ibkr_type))
             if written:
                 kept = ""
                 if ledger:
@@ -438,7 +603,7 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
                         kept = f.read()
                 _write_whole(ledger_path, kept + "".join(_line(r) for r in written))
             status.update(written=len(written), period=[statement.from_date, statement.to_date],
-                          postings=len(statement.postings))
+                          postings=len(statement.postings), in_first_book=len(skipped), unknown_types=unknown)
             say("flex: read {} postings for {} to {}; wrote {} cash movement(s)".format(
                 len(statement.postings), statement.from_date, statement.to_date, len(written)))
             ok = True
@@ -451,7 +616,7 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             status.update(state="set-aside", reason=reason, code=getattr(refused, "code", None))
             say("flex: set aside: " + reason)
             ok = False
-        _write_whole(ledger_path + STATUS_SUFFIX, json.dumps(status, sort_keys=True) + "\n")
+        _write_whole(status_path, json.dumps(status, sort_keys=True) + "\n")
     return ok
 
 
@@ -471,12 +636,20 @@ def read_key(path, key):
     return found[0]
 
 
+INSTANCES = ("boost", "trad-ira", "roth-ira")
+
+
+def account_key(instance):
+    """The KEY of instance's IBKR account line: IBKR_ACCOUNT_BOOST, IBKR_ACCOUNT_TRAD_IRA, IBKR_ACCOUNT_ROTH_IRA."""
+    return "IBKR_ACCOUNT_" + instance.upper().replace("-", "_")
+
+
 def command(args, err, get=_get, sleep=time.sleep):
     """`flex`'s exit status: 0 for a reading, 1 for a refusal or a set-aside (why on err)."""
     try:
         token = read_key(args.secrets, "TI_IBKR_FLEX_TOKEN")
         query_id = read_key(args.secrets, "TI_IBKR_FLEX_QUERY_ID")
-        account_id = read_key(args.account_secrets, args.account_key)
+        account_id = read_key(args.account_secrets, account_key(args.instance))
     except StatementRefused as refusal:
         print("refused: {}".format(mask(str(refusal))), file=err)
         return 1

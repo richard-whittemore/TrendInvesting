@@ -1,0 +1,8 @@
+{
+  "as_of": "2027-01-14T19:00:00Z",
+  "amount": 2500.0,
+  "equity_before": 6530.0,
+  "currency": "USD",
+  "transaction_id": "900000201",
+  "equity_before_basis": "next-snapshot-less-amount"
+}

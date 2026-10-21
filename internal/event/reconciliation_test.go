@@ -285,4 +285,11 @@ func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
 	if movement.Amount != 2500 || movement.EquityBefore != 8530 || movement.TransactionID != "900000101" || movement.Currency != "USD" {
 		t.Errorf("cash movement %+v", movement)
 	}
+	// A transfer in the first run's window, before any snapshot, takes the
+	// next snapshot less itself, and says so.
+	var approximated event.CashMovementPayload
+	read("cash_movement_approximated.json", event.CashMovementTransferVersion, &approximated)
+	if approximated.EquityBefore != 6530 || approximated.EquityBeforeBasis != event.EquityBeforeNextSnapshotLessAmount {
+		t.Errorf("approximated cash movement %+v", approximated)
+	}
 }

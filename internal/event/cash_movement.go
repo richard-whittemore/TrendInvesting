@@ -22,11 +22,37 @@ const CashMovementSchemaVersion uint32 = 1
 // version the IBKR Flex reader writes (ADR 0015):
 //
 //   - Version 2 adds TransactionID, the broker's own ID for the transfer,
-//     which the reader dedupes on across runs. Version 1 carries none; each
-//     version is refused what it does not state (ValidateSchema).
+//     which the reader dedupes on across runs, and EquityBeforeBasis, how
+//     an EquityBefore that is not the last snapshot's own figure was
+//     approximated. Version 1 carries neither; each version is refused what
+//     it does not state (ValidateSchema).
 const CashMovementTransferVersion uint32 = 2
 
-// CashMovementVersions returns the versions a cash movement is read at.
+// The two ways an EquityBefore is approximated at version 2, the starting
+// book's time being the first run's approval and a close snapshot being
+// read after the close (ADR 0019, "the reading after the close counts as
+// the close"; ADR 0027, starting-book amendment):
+//
+//   - EquityBeforeNextSnapshotLessAmount: the movement falls after the
+//     first run's approval and before any account snapshot, so it is the
+//     first snapshot after it less the movements up to that snapshot,
+//     itself included; the market's move in between is in it.
+//   - EquityBeforeSameDaySnapshotLessAmount: the movement is timed after
+//     the close, so that day's close snapshot, read later, already holds
+//     it; it is that snapshot less that day's movements after the close
+//     from this one on, itself included.
+//
+// Empty: the last snapshot before the movement plus the movements between.
+const (
+	EquityBeforeNextSnapshotLessAmount    = "next-snapshot-less-amount"
+	EquityBeforeSameDaySnapshotLessAmount = "same-day-snapshot-less-amount"
+)
+
+// CashMovementVersions returns the versions ValidateSchema accepts. No
+// reader of the engine's log reads version 2 yet: the Turtle reducer reads
+// version 1 only (internal/strategy, notional.go), and version 2 is read
+// only by the adapter contract test (TestTheIBKRAdapterPayloadsDecodeAndValidate)
+// until a reader of the Flex reader's ledger is built.
 func CashMovementVersions() []uint32 {
 	return []uint32{CashMovementSchemaVersion, CashMovementTransferVersion}
 }
@@ -63,6 +89,11 @@ type CashMovementPayload struct {
 	// transfer (IBKR's transactionID in its Cash Transactions), unique per
 	// account; empty, and left out, at version 1.
 	TransactionID string `json:"transaction_id,omitempty"`
+	// EquityBeforeBasis, from version 2, names how EquityBefore was
+	// approximated (EquityBeforeNextSnapshotLessAmount or
+	// EquityBeforeSameDaySnapshotLessAmount); empty, and left out, when it
+	// is the last snapshot's own figure, and always at version 1.
+	EquityBeforeBasis string `json:"equity_before_basis,omitempty"`
 }
 
 // Validate checks that the movement identifies when it occurred, that
@@ -124,8 +155,8 @@ func (p CashMovementPayload) Validate() error {
 }
 
 // ValidateSchema is Validate at the version the movement arrived at: version
-// 2 requires the broker's transaction ID and version 1 carries none
-// (CashMovementTransferVersion).
+// 2 requires the broker's transaction ID and allows only a named equity
+// before basis, and version 1 carries neither (CashMovementTransferVersion).
 func (p CashMovementPayload) ValidateSchema(version uint32) error {
 	if err := p.Validate(); err != nil {
 		return err
@@ -135,9 +166,18 @@ func (p CashMovementPayload) ValidateSchema(version uint32) error {
 		if p.TransactionID != "" {
 			return errors.New("invalid cash movement payload: version 1 carries no transaction id; that is version 2's")
 		}
+		if p.EquityBeforeBasis != "" {
+			return errors.New("invalid cash movement payload: version 1 carries no equity before basis; that is version 2's")
+		}
 	case CashMovementTransferVersion:
 		if p.TransactionID == "" {
 			return errors.New("invalid cash movement payload: transaction id is required at version 2")
+		}
+		switch p.EquityBeforeBasis {
+		case "", EquityBeforeNextSnapshotLessAmount, EquityBeforeSameDaySnapshotLessAmount:
+		default:
+			return fmt.Errorf("invalid cash movement payload: equity before basis %q is not one of %q, %q or empty",
+				p.EquityBeforeBasis, EquityBeforeNextSnapshotLessAmount, EquityBeforeSameDaySnapshotLessAmount)
 		}
 	default:
 		return fmt.Errorf("invalid cash movement payload: schema version %d is not one of %v", version, CashMovementVersions())

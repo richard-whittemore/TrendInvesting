@@ -594,7 +594,7 @@ CONF
     install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
     # The Flex reader's ledger of cash movements and its status file
-    # (ti-flex-boost.service; docs/manual/reconciliation.md).
+    # (ti-flex@<instance>.service; docs/manual/reconciliation.md).
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/flex/$a"
   done
   # The adapter's configuration carries no secret (the account number comes

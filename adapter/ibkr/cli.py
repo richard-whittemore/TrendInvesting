@@ -140,13 +140,15 @@ def _parser():
                              "/etc/trend-investing/secrets.env, handed over as a credential)")
     reader.add_argument("--account-secrets", required=True, metavar="FILE",
                         help="the KEY=VALUE file naming the instance's IBKR account (on the server: "
-                             "/etc/trend-investing/accounts/boost.env)")
-    reader.add_argument("--account-key", required=True, metavar="NAME", help="its line, e.g. IBKR_ACCOUNT_BOOST")
+                             "/etc/trend-investing/accounts/<instance>.env)")
+    reader.add_argument("--instance", required=True, choices=("boost", "trad-ira", "roth-ira"),
+                        help="the account the reading is for; its line in --account-secrets is IBKR_ACCOUNT_ and the "
+                             "instance in capitals, a dash as an underscore (IBKR_ACCOUNT_TRAD_IRA)")
     reader.add_argument("--engine-log", required=True, metavar="FILE",
                         help="the engine's durable log, read only, for the net liquidation before each transfer")
     reader.add_argument("--ledger", required=True, metavar="FILE",
                         help="the instance's cash-movement ledger, one record a line; its status file is beside it "
-                             "(on the server: /var/lib/trend-investing/flex/boost/cash-movements.jsonl)")
+                             "(on the server: /var/lib/trend-investing/flex/<instance>/cash-movements.jsonl)")
     return parser
 
 

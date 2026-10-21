@@ -152,3 +152,31 @@ func TestCashMovementPayloadValidateSchema(t *testing.T) {
 		t.Fatalf("CashMovementVersions() = %v", got)
 	}
 }
+
+// TestCashMovementEquityBeforeBasis: at version 2 an equity before that is
+// not the last snapshot's own figure says how it was approximated, one of
+// two named ways; version 1 states none (ADR 0015: each version is refused
+// what it does not state).
+func TestCashMovementEquityBeforeBasis(t *testing.T) {
+	t.Parallel()
+
+	v2 := validCashMovement()
+	v2.TransactionID = "900000001"
+	for _, basis := range []string{"", event.EquityBeforeNextSnapshotLessAmount, event.EquityBeforeSameDaySnapshotLessAmount} {
+		p := v2
+		p.EquityBeforeBasis = basis
+		if err := p.ValidateSchema(event.CashMovementTransferVersion); err != nil {
+			t.Errorf("version 2, basis %q: %v", basis, err)
+		}
+	}
+	guessed := v2
+	guessed.EquityBeforeBasis = "a guess"
+	if err := guessed.ValidateSchema(event.CashMovementTransferVersion); err == nil || !strings.Contains(err.Error(), "equity before basis") {
+		t.Errorf("version 2, an unnamed basis: error = %v", err)
+	}
+	v1 := validCashMovement()
+	v1.EquityBeforeBasis = event.EquityBeforeNextSnapshotLessAmount
+	if err := v1.ValidateSchema(event.CashMovementSchemaVersion); err == nil || !strings.Contains(err.Error(), "version 1 carries no equity before basis") {
+		t.Errorf("version 1 with a basis: error = %v", err)
+	}
+}

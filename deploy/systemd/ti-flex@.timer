@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the Boost account's Flex reader after the US close on weekdays
+Description=Run the Flex reader for account %i after the US close on weekdays
 
 [Timer]
 # 21:30 New York, weekdays: after the close (4 p.m.) and the evening's data
@@ -8,11 +8,12 @@ Description=Run the Boost account's Flex reader after the US close on weekdays
 # missing from one evening's statement is read the next: the owner's Flex
 # query covers several days (docs/manual/reconciliation.md), and a transfer
 # already in the ledger is never written again. Persistent: a run missed
-# while the server was down runs at boot. Enabled by the owner once the
-# token and query ID are in secrets.env (docs/runbooks/lightsail-deployment.md).
+# while the server was down runs at boot. Enabled per account by the owner
+# once the token and query ID are in secrets.env and the account's file is
+# in accounts/ (docs/runbooks/lightsail-deployment.md, "The Flex reader").
 OnCalendar=Mon..Fri 21:30 America/New_York
 Persistent=true
-Unit=ti-flex-boost.service
+Unit=ti-flex@%i.service
 
 [Install]
 WantedBy=timers.target
