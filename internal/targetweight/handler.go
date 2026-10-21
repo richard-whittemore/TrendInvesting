@@ -194,7 +194,9 @@ import (
 //     0019, amended 2026-10-21). A snapshot whose holdings a reconciliation
 //     already classified against the same book and the same changes is not
 //     classified again, nor is a difference already reported with the same
-//     residual. A journal holding such a snapshot decides differently under
+//     residual, nor is an unverifiable snapshot whose every reason a
+//     journalled Halt already gave, and whose unexplained holdings were
+//     already reported, while the account stays Halted. A journal holding such a snapshot decides differently under
 //     1.19.0.
 const RulesVersion = "1.20.0"
 

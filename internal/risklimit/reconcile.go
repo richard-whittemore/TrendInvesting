@@ -63,9 +63,10 @@ func (g *Gate) SetBook(b reconcile.Book) {
 //     point 6: one difference, one report).
 //
 // An unverifiable snapshot halts and is journalled, unless the account is
-// already Halted on every one of its reasons (alreadyHaltedOn): neither of
-// the last two cases ever suppresses a Halt, and a Halt for a new change is
-// always journalled.
+// already Halted on every one of its reasons (alreadyHaltedOn) and every
+// unexplained holding it carries was already reported (alreadyReported):
+// neither of the last two cases ever suppresses a Halt, and a Halt for a new
+// change or a new unexplained holding is always journalled.
 func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
 	defer g.SetBook(b)
 	if g.book == nil {
@@ -78,9 +79,9 @@ func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
 	case r.Action == event.ReconciliationActionHalt:
 		// A Halt is never hidden by what was classified or reported as a
 		// difference, but the account already Halted on every one of these
-		// reasons is not halted again for them: a Halt for a new change is
-		// still journalled.
-		if g.alreadyHaltedOn(r) {
+		// reasons, with no unexplained holding it has not reported, finds
+		// nothing new: a Halt for a new change or holding is journalled.
+		if g.alreadyHaltedOn(r) && g.alreadyReported(r) {
 			return Reconciliation{}, false
 		}
 	case g.classifiedStandsFor(b) || g.alreadyReported(r):
@@ -196,7 +197,8 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 // instrument r finds explained, so a difference that recurs after it was
 // resolved is a new difference (ADR 0019, amended 2026-10-21, point 6). r
 // was read at asOf: a reading before the one that reported an instrument
-// says nothing about whether it was resolved, so it forgets nothing.
+// says nothing new about it, so it neither forgets nor replaces what the
+// later reading reported.
 func (g *Gate) report(r event.ReconciliationResultPayload, asOf time.Time) {
 	for _, c := range r.Components {
 		switch {
@@ -208,6 +210,9 @@ func (g *Gate) report(r event.ReconciliationResultPayload, asOf time.Time) {
 			delete(g.reported, c.InstrumentID)
 			delete(g.reportedAsOf, c.InstrumentID)
 		default:
+			if at, ok := g.reportedAsOf[c.InstrumentID]; ok && asOf.Before(at) {
+				continue
+			}
 			if g.reported == nil {
 				g.reported, g.reportedAsOf = map[string]int64{}, map[string]time.Time{}
 			}

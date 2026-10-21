@@ -344,7 +344,11 @@ func TestAFillInAReadingsOwnSecondAgreesWithTheClassifier(t *testing.T) {
 			p := morningOf(1000, c.reconciled)
 			p.AsOf = at.Add(time.Duration(c.reconcileMin) * time.Minute)
 			reconcileWith(t, g, "reconciliation:1", p)
-			r, journal := checkBookWith(t, g, closeSnapshot(c.snapshot, c.snapshotMin))
+			snapshot := closeSnapshot(c.snapshot, c.snapshotMin)
+			if got := g.ClassifiedStandsFor(snapshot); got != c.wantStandsAndSilent {
+				t.Fatalf("the reconciliation stands for the snapshot: %v, want %v", got, c.wantStandsAndSilent)
+			}
+			r, journal := checkBookWith(t, g, snapshot)
 			if journal == c.wantStandsAndSilent {
 				t.Fatalf("journalled %v, want %v: %+v", journal, !c.wantStandsAndSilent, r.Result)
 			}
@@ -401,5 +405,69 @@ func TestAnEarlierReadReconciliationDoesNotReopenAReportedDifference(t *testing.
 	}
 	if r, journal := checkBookWith(t, g, closeSnapshot(12, 180)); journal {
 		t.Fatalf("the earlier reading did not resolve the difference: %+v", r.Result)
+	}
+}
+
+// TestASnapshotIsHaltedForANewChangeBesideARememberedOne: the snapshot's
+// window holds the delisting a journalled Halt already gave and a new one, so
+// not every reason was given and the Halt is journalled (ADR 0019, amended
+// 2026-10-21, point 6: a Halt for a new change always is).
+func TestASnapshotIsHaltedForANewChangeBesideARememberedOne(t *testing.T) {
+	g := booked(t)
+	remembered := event.CorporateActionPayload{InstrumentID: "TLT", Kind: event.CorporateActionKindDelisting, EffectiveAt: at.Add(70 * time.Minute)}
+	if err := g.ObserveCorporateAction("ca:tlt-delisting", remembered); err != nil {
+		t.Fatal(err)
+	}
+	p := morningOf(1000, 10)
+	p.AsOf = at.Add(2 * time.Hour)
+	if r := reconcileWith(t, g, "reconciliation:1", p); r.Result.Action != event.ReconciliationActionHalt {
+		t.Fatalf("the reconciliation halts: %+v", r.Result)
+	}
+	other := event.CorporateActionPayload{InstrumentID: "IEF", Kind: event.CorporateActionKindDelisting, EffectiveAt: at.Add(210 * time.Minute)}
+	if err := g.ObserveCorporateAction("ca:ief-delisting", other); err != nil {
+		t.Fatal(err)
+	}
+	r, journal := checkBookWith(t, g, closeSnapshot(10, 270))
+	if !journal || r.Result.Action != event.ReconciliationActionHalt || len(r.Result.Unverifiable) < 2 {
+		t.Fatalf("a new change beside a remembered one is a new Halt: %v %+v", journal, r.Result)
+	}
+}
+
+// TestAHaltedSnapshotWithANewUnexplainedHoldingIsJournalled: a snapshot that
+// repeats an earlier Halt's reason but also holds shares nothing explains is
+// not the same Halt, so it is journalled and never adopted silently (ADR
+// 0019, amended 2026-10-21, point 6).
+func TestAHaltedSnapshotWithANewUnexplainedHoldingIsJournalled(t *testing.T) {
+	g := booked(t)
+	delisting := event.CorporateActionPayload{InstrumentID: "TLT", Kind: event.CorporateActionKindDelisting, EffectiveAt: at.Add(70 * time.Minute)}
+	if err := g.ObserveCorporateAction("ca:tlt-delisting", delisting); err != nil {
+		t.Fatal(err)
+	}
+	p := morningOf(1000, 10)
+	p.AsOf = at.Add(2 * time.Hour)
+	if r := reconcileWith(t, g, "reconciliation:1", p); r.Result.Action != event.ReconciliationActionHalt {
+		t.Fatalf("the reconciliation halts: %+v", r.Result)
+	}
+	r, journal := checkBookWith(t, g, closeSnapshot(12, 180))
+	if !journal || r.Result.Action != event.ReconciliationActionHalt {
+		t.Fatalf("a new unexplained holding is journalled: %v %+v", journal, r.Result)
+	}
+}
+
+// TestALateEarlierReadingDoesNotOverwriteAReportedResidual: a reconciliation
+// read before the one that reported an instrument, delivered late, keeps the
+// newer residual, so the close snapshot showing it is not paged again (ADR
+// 0019, amended 2026-10-21, point 6).
+func TestALateEarlierReadingDoesNotOverwriteAReportedResidual(t *testing.T) {
+	g := booked(t)
+	later := morningOf(1000, 12)
+	later.AsOf = at.Add(2 * time.Hour)
+	reconcileWith(t, g, "reconciliation:2", later)
+	earlier := morningOf(1000, 11)
+	if r := reconcileWith(t, g, "reconciliation:1", earlier); r.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("the earlier reading differs: %+v", r.Result)
+	}
+	if r, journal := checkBookWith(t, g, closeSnapshot(12, 180)); journal {
+		t.Fatalf("the later reading's residual stands: %+v", r.Result)
 	}
 }
