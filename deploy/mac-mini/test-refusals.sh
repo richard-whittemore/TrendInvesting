@@ -175,13 +175,19 @@ fi
 # A holder is its process ID and start time: a process now running under the
 # ID of one that died (IDs are handed out again, after a restart above all)
 # started at another time, so its link is stale.
-self="$$:$(ps -o lstart= -p $$ | sed 's/^ *//;s/ *$//')"
+self="$$:$(LC_ALL=C TZ=UTC0 ps -o lstart= -p $$ | sed 's/^ *//;s/ *$//')"
 reused="$$:Thu Jan  1 00:00:00 1970"
 lock=$fake_home/.trend-investing/up-ti.lock
 mkdir -p "$fake_home/.trend-investing"
 ln -s "$self" "$lock"
 refused "a second up.sh while one runs" "another up.sh" "$clean" TI_DIST="$work/dist"
 test "$(readlink "$lock")" = "$self" || fail "a refused up.sh changed the lock it did not hold"
+# The start time is read the same way whatever the time zone or language of
+# the shell that runs up.sh, so a live holder is never taken for a stale one.
+: >"$work/calls"
+if launch "$clean" TI_DIST="$work/dist" TZ=Pacific/Auckland LC_ALL=de_DE.UTF-8 LANG=de_DE.UTF-8; then fail "a launcher in another time zone and language ran with a live lock held"; fi
+grep -qiF "another up.sh" "$work/out" || fail "a launcher in another time zone and language did not see the live lock: $(cat "$work/out")"
+test "$(readlink "$lock")" = "$self" || fail "a launcher in another time zone and language replaced a live lock"
 gone=$(sh -c 'echo $$')
 rm -f "$lock"
 ln -s "$gone" "$lock"

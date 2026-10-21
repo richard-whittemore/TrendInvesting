@@ -130,8 +130,16 @@ refuse_duplicates() {
 # never goes on without end.
 take_lock() {
   mkdir -p "$HOME/.trend-investing"
-  self="$$:$(ps -o lstart= -p $$ | sed 's/^ *//;s/ *$//')"
+  self="$$:$(start_of $$)"
   take_link "$HOME/.trend-investing/up-$name.lock" 0
+}
+
+# start_of PID: the process's start time as ps prints it, in the C locale and
+# UTC, so the text is the same whatever the time zone or language of the shell
+# that reads it (a lock written under one and read under another must still
+# name the same start).
+start_of() {
+  LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" | sed 's/^ *//;s/ *$//'
 }
 
 # holder_runs HOLDER: HOLDER is "PID:START" (a bare PID is checked by the
@@ -142,7 +150,7 @@ holder_runs() {
   case $1 in
     *:*)
       start=${1#*:}
-      now=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//')
+      now=$(start_of "$pid" 2>/dev/null)
       test "$now" = "$start"
       ;;
   esac

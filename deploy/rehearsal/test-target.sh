@@ -299,14 +299,14 @@ scenario() {
     truncate() { guarded truncate "$@"; }
     dd() { guarded dd "$@"; }
     # sed changes a file only in place: -i alone, in a cluster (-ni, -Ei,
-    # -i.bak) or as --in-place[=SUFFIX] or an abbreviation of it. Then every file it is given must be
+    # -i.bak) or as --in-place[=SUFFIX] or any unambiguous prefix of it (--i, --in, ...). Then every file it is given must be
     # inside the tree: each operand and each -f/--file script file, but not
     # the script itself (an -e/--expression value, or else the first
     # operand), which is not a path even when it begins with "/".
     sed() {
       local a inplace=0
       for a in "$@"; do
-        case $a in --in* | -i* | -[!-]*i*) inplace=1 ;; esac
+        case $a in --i* | -i* | -[!-]*i*) inplace=1 ;; esac
       done
       if test "$inplace" = 0; then command sed "$@"; return; fi
       local paths=() operands=() ends=0 want='' scripted=0 rest c
@@ -326,7 +326,7 @@ scenario() {
             --e*) scripted=1; want=e; continue ;;
             --fi*=*) scripted=1; paths+=("${a#*=}"); continue ;;
             --fi*) scripted=1; want=f; continue ;;
-            --in* | --quiet | --silent | --regexp-extended | --follow-symlinks | --null-data \
+            --i* | --quiet | --silent | --regexp-extended | --follow-symlinks | --null-data \
               | --zero-terminated | --separate | --sandbox | --debug | --posix | --unbuffered | --binary \
               | --line-length=*) continue ;;
             --*) refuse sed "$@" ;;
@@ -395,7 +395,7 @@ for leak in "rm -rf $canary/keep" "cp /dev/null $canary/keep" "mv $canary/keep $
   "sed -e s/keep/gone/ -i $canary/keep" "cp -t$canary /dev/null" "mv -t$canary $canary/keep" \
   "cp -at$canary /dev/null" "sed -i -f /dev/null $canary/keep" "sed -i -e /^keep/d $canary/keep" \
   "sed -i --expr=s/keep/gone/ $canary/keep" "sed -i --exp s/keep/gone/ $canary/keep" \
-  "sed -i --fi=/dev/null $canary/keep" "sed --in-pl s/keep/gone/ $canary/keep" \
+  "sed -i --fi=/dev/null $canary/keep" "sed --in-pl s/keep/gone/ $canary/keep" "sed --i s/keep/gone/ $canary/keep" "sed --i=.bak s/keep/gone/ $canary/keep" \
   "sed -i --some-future-option s/keep/gone/ $canary/keep"; do
   status=0
   TEST_LEAK=$leak scenario mac-mini aarch64 services || status=$?
