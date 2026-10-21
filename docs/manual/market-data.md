@@ -319,7 +319,7 @@ session it missed in one file. A run that hangs is stopped after an hour
    `TI_RUN` in the engine's `run.env`) for the run's configuration hash and
    strategy version, and uses the run's name (the log's file name without `.log`; the
    run's *identity* is a separate thing, used only to find its folder) as the
-   stream's correlation id, so the stream carries exactly the identity the engine expects. The log's
+   stream's correlation id, so the stream carries exactly the name the engine expects. The log's
    first input is the configuration the engine started with; the job refuses
    if `/etc/trend-investing/engines/boost.config` no longer agrees with it on
    the instrument, `warm_up_start` or an indicator length, since the stream
