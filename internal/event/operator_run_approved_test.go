@@ -1,6 +1,9 @@
 package event_test
 
 import (
+	"encoding/json"
+	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -145,7 +148,7 @@ func TestAnApprovalStatesTheIncidentsRestrictions(t *testing.T) {
 // latch, or no statement of the incident in force (null states that there is
 // none) is never a default (ADR 0026, point 5; ADR 0019, amended 2026-10-15).
 func TestDecodeOperatorRunApprovedRequiresEveryKey(t *testing.T) {
-	base := `"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2026-10-17T13:00:00Z"`
+	base := `"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2026-10-17T13:00:00Z","starting_book":null`
 	accept := []string{
 		`{` + base + `,"boost":{"latched":true},"incident_in_force":null}`,
 		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","state":"halted","scope_instrument_ids":[],"scope_cash_components":[],"sale_attempted":false}}`,
@@ -183,8 +186,8 @@ func TestDecodeOperatorRunApprovedRequiresEveryKey(t *testing.T) {
 // version 2: Degraded names instruments or cash components or both, strictly
 // ascending; Halted names neither.
 func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
-	if event.OperatorRunApprovedSchemaVersion != 2 {
-		t.Errorf("OperatorRunApprovedSchemaVersion = %d, want 2 once an incident in force states its cash scope", event.OperatorRunApprovedSchemaVersion)
+	if event.OperatorRunApprovedSchemaVersion < 2 {
+		t.Errorf("OperatorRunApprovedSchemaVersion = %d, want at least 2 once an incident in force states its cash scope", event.OperatorRunApprovedSchemaVersion)
 	}
 	type P = event.OperatorRunApprovedPayload
 	v := validOperatorRunApproved()
@@ -211,12 +214,17 @@ func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
 
 	base := `"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2026-10-17T13:00:00Z","boost":{"latched":false}`
 	cashOnly := `{` + base + `,"incident_in_force":{"incident_id":"engine-state:joint:1","state":"degraded","scope_instrument_ids":[],"scope_cash_components":["total-cash"],"sale_attempted":false}}`
-	p, err := event.DecodeOperatorRunApproved([]byte(cashOnly))
+	// The file states every key of the current version, the starting book
+	// (version 3) included.
+	current := func(raw string) []byte {
+		return []byte(strings.Replace(raw, `"boost"`, `"starting_book":null,"boost"`, 1))
+	}
+	p, err := event.DecodeOperatorRunApproved(current(cashOnly))
 	if err != nil || p.IncidentInForce == nil || len(p.IncidentInForce.ScopeCashComponents) != 1 {
 		t.Errorf("DecodeOperatorRunApproved(cash alone) = %+v, %v", p.IncidentInForce, err)
 	}
 	unstated := `{` + base + `,"incident_in_force":{"incident_id":"engine-state:joint:1","state":"degraded","scope_instrument_ids":["SPY"],"sale_attempted":false}}`
-	if _, err := event.DecodeOperatorRunApproved([]byte(unstated)); err == nil || !strings.Contains(err.Error(), "incident_in_force.scope_cash_components") {
+	if _, err := event.DecodeOperatorRunApproved(current(unstated)); err == nil || !strings.Contains(err.Error(), "incident_in_force.scope_cash_components") {
 		t.Errorf("an incident in force that does not state its cash scope: %v", err)
 	}
 
@@ -231,7 +239,7 @@ func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
 	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 2); err != nil {
 		t.Errorf("a version 2 approval: %v", err)
 	}
-	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 3); err == nil || !strings.Contains(err.Error(), "schema version 3") {
+	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 4); err == nil || !strings.Contains(err.Error(), "schema version 4") {
 		t.Errorf("an approval at an unknown schema version: %v", err)
 	}
 }
@@ -258,7 +266,7 @@ func TestOperatorRunApprovedValidateSchema(t *testing.T) {
 	if err := withCash.ValidateSchema(1); err == nil || !strings.Contains(err.Error(), "cash") {
 		t.Errorf("version 1 naming a cash scope: %v", err)
 	}
-	for _, v := range []uint32{0, 3} {
+	for _, v := range []uint32{0, 4} {
 		if err := plain.ValidateSchema(v); err == nil || !strings.Contains(err.Error(), "schema version") {
 			t.Errorf("version %d: %v", v, err)
 		}
@@ -267,5 +275,112 @@ func TestOperatorRunApprovedValidateSchema(t *testing.T) {
 	bad.AccountID = ""
 	if err := bad.ValidateSchema(2); err == nil {
 		t.Error("an invalid payload passed ValidateSchema")
+	}
+}
+
+func firstRunApproval() event.OperatorRunApprovedPayload {
+	p := validOperatorRunApproved()
+	p.PreviousLog, p.PreviousLogFinalHash, p.Boost.Latched = "", "", new(false)
+	p.StartingBook = &event.StartingBook{
+		Positions: []event.AccountPosition{{InstrumentID: "IEF", Quantity: 3}, {InstrumentID: "SPY", Quantity: 147}},
+		TotalCash: -4211.37, Currency: "USD",
+	}
+	return p
+}
+
+// TestAFirstRunsApprovalStatesTheStartingBook: an account's first run has no
+// earlier run whose last account snapshot its first reading can be compared
+// with, so its approval states the holdings and total cash the owner confirms
+// it starts from (schema version 3), and the adapter compares its first
+// reading with that, never adopting IBKR's book unchecked (ADR 0019, amended
+// 2026-10-18; ADR 0027). A fresh run's approval may state one too, the book
+// the owner confirms after a change no fill explains (a transfer, a deposit).
+func TestAFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
+	if event.OperatorRunApprovedSchemaVersion != 3 {
+		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 3 once an approval states a starting book", event.OperatorRunApprovedSchemaVersion)
+	}
+	first := firstRunApproval()
+	if err := first.Validate(); err != nil {
+		t.Fatalf("a first run's approval: %v", err)
+	}
+	if !first.FirstRun() || validOperatorRunApproved().FirstRun() {
+		t.Error("FirstRun names the approval with no previous log")
+	}
+	stated := validOperatorRunApproved()
+	stated.StartingBook = first.StartingBook
+	if err := stated.Validate(); err != nil {
+		t.Errorf("a fresh run's approval stating the book the owner confirms: %v", err)
+	}
+	type P = event.OperatorRunApprovedPayload
+	book := func(mutate func(*event.StartingBook)) func(*P) {
+		return func(p *P) {
+			b := *p.StartingBook
+			b.Positions = slices.Clone(b.Positions)
+			mutate(&b)
+			p.StartingBook = &b
+		}
+	}
+	expectInvalid(t, "first run, no book", first, func(p *P) { p.StartingBook = nil }, "previous log is required")
+	expectInvalid(t, "first run, a hash", first, func(p *P) { p.PreviousLogFinalHash = validOperatorRunApproved().PreviousLogFinalHash }, "first run")
+	expectInvalid(t, "first run, latched", first, func(p *P) { p.Boost.Latched = new(true) }, "latch")
+	expectInvalid(t, "first run, an incident cleared", first, func(p *P) { p.IncidentID = "engine-state:joint:1" }, "incident")
+	expectInvalid(t, "first run, an incident in force", first, func(p *P) { p.IncidentInForce = validOperatorRunApprovedInIncident().IncidentInForce }, "incident")
+	expectInvalid(t, "positions out of order", first, book(func(b *event.StartingBook) { slices.Reverse(b.Positions) }), "ascending")
+	expectInvalid(t, "a zero holding", first, book(func(b *event.StartingBook) { b.Positions[0].Quantity = 0 }), "quantity")
+	expectInvalid(t, "an unnamed holding", first, book(func(b *event.StartingBook) { b.Positions[0].InstrumentID = "" }), "instrument")
+	expectInvalid(t, "cash not finite", first, book(func(b *event.StartingBook) { b.TotalCash = math.NaN() }), "total cash")
+	expectInvalid(t, "no currency", first, book(func(b *event.StartingBook) { b.Currency = "" }), "currency")
+	expectInvalid(t, "positions null", first, book(func(b *event.StartingBook) { b.Positions = nil }), "positions")
+
+	if err := first.ValidateSchema(2); err == nil || !strings.Contains(err.Error(), "starting book") {
+		t.Errorf("version 2 stating a starting book: %v", err)
+	}
+	if err := first.ValidateSchema(3); err != nil {
+		t.Errorf("version 3: %v", err)
+	}
+	raw, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil || back.StartingBook == nil || back.StartingBook.TotalCash != -4211.37 || len(back.StartingBook.Positions) != 2 {
+		t.Fatalf("round trip = %+v, %v from %s", back.StartingBook, err, raw)
+	}
+	// A starting book that does not state its cash is refused, never read
+	// as an approved zero balance: an unavailable balance is not zero (ADR
+	// 0019), and the book is the owner's to state (ADR 0027, amended
+	// 2026-10-18).
+	for name, cash := range map[string]string{"omitted": "", "null": `"total_cash":null,`} {
+		book := strings.Replace(string(raw), `"total_cash":-4211.37,`, cash, 1)
+		if book == string(raw) {
+			t.Fatalf("setup: %s holds no total_cash to replace", raw)
+		}
+		if _, err := event.DecodeOperatorRunApproved([]byte(book)); err == nil || !strings.Contains(err.Error(), "total_cash") {
+			t.Errorf("a starting book with its cash %s: %v", name, err)
+		}
+	}
+	var asObject map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &asObject)
+	asObject["starting_book"] = json.RawMessage(`[]`)
+	notABook, _ := json.Marshal(asObject)
+	if _, err := event.DecodeOperatorRunApproved(notABook); err == nil || !strings.Contains(err.Error(), "object or null") {
+		t.Errorf("a starting book that is no object: %v", err)
+	}
+	chained, _ := json.Marshal(validOperatorRunApproved())
+	if !strings.Contains(string(chained), `"starting_book":null`) {
+		t.Errorf("an approval stating no book does not say so: %s", chained)
+	}
+	var keys map[string]json.RawMessage
+	_ = json.Unmarshal(chained, &keys)
+	delete(keys, "starting_book")
+	unstated, _ := json.Marshal(keys)
+	if _, err := event.DecodeOperatorRunApproved(unstated); err == nil || !strings.Contains(err.Error(), "starting_book") {
+		t.Errorf("an approval file that does not state starting_book: %v", err)
+	}
+	if _, err := event.DecodeRecordedOperatorRunApproved(unstated, 2); err != nil {
+		t.Errorf("a version 2 approval, which has no starting book: %v", err)
+	}
+	if _, err := event.DecodeRecordedOperatorRunApproved(chained, 2); err == nil || !strings.Contains(err.Error(), "starting_book") {
+		t.Errorf("a version 2 approval stating starting_book: %v", err)
 	}
 }

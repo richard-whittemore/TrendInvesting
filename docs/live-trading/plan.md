@@ -174,7 +174,9 @@ TREND_DAYS 200, EXIT_SMA 5):
 - Whether a boost is on is state (`sig` latches in
   `boost/template.py:89-94`). After a restart it is recovered from the
   journal, never recomputed; a missing daily bar fails closed rather than
-  computing RSI across the gap.
+  computing RSI across the gap. *(Amended 2026-10-18 by the owner, ADR
+  0026 point 5: the session with no bar is withheld and skipped, and the
+  readings continue at the next bar over the closes received.)*
 - The joint account is taxable: its tax lot method is set to LIFO at IBKR
   before the first trade, so a boost's exit sells the shares it bought days
   earlier, not the core holding (the tax study's assumption,

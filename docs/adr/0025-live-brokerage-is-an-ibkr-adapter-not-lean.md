@@ -155,3 +155,59 @@ The version and checksum the amendment of 2026-10-16 left open are set in
 - The Gateway is pinned at 10.50.1f (stable) and the API at 10.51.01: the API
   client negotiates the server version on connect, and the paper-account
   test confirms the pair works before any account sends.
+
+## Amendment (2026-10-18, owner decision): the adapter's stamping duty after the close
+
+To point 5. The owner decided on 2026-10-18 that the adapter's one account
+reading after a session's close is the account as of that close when all of
+ADR 0019's conditions (amended 2026-10-18) hold:
+
+- it is taken after the close and before the next open, on the close's own
+  New York date (`reqExecutions` reaches back only to midnight, so only then
+  does IBKR's list cover everything since the close);
+- no order is working or pending at IBKR for the account, from any client,
+  in either account read or the last open-order list, and no execution is in
+  the account at or since the close, both read from IBKR's own lists as the
+  reconciliation at a start reads them;
+- every holding has an official close in the batch, so the account is valued
+  at the close, and IBKR's own net liquidation at the read is positive;
+- the holdings are the previous close's book adjusted by the journalled fills
+  since, share for share, and the total cash that book's adjusted by those
+  fills within 1% of the net liquidation at the close. The previous close's
+  book is the latest account snapshot of the run or of the runs its Run
+  approvals chain back to, or the latest starting book an approval states
+  (an account's first run's included; ADR 0027, amended 2026-10-18), so a
+  fresh run's first delivery is compared too;
+- the engine holds no snapshot already stamped at or after that close.
+
+The adapter's duty is to check those conditions at every delivery and stamp
+accordingly: from the one reading it sends the engine's `account.snapshot`
+and the `account.broker.snapshot` stamped as of the close, the broker
+snapshot carrying the true read time, IBKR's own net liquidation, the day's
+cash drift and the unexplained cash beside it, and the
+`market.mark.recorded` for each instrument the session delivers a bar for,
+from the delivered bar's official close, with IBKR's last price beside it.
+Nothing is sized from IBKR's price, so no decision needs IBKR market-data
+permissions, but the price band compares a checked order's reference price
+with it when IBKR gives one (ADR 0026, point 3, amended 2026-10-18). When a
+condition fails it stamps the true read time and states why, so the engine
+withholds (ADR 0019, amended 2026-10-18).
+
+With an account snapshot now produced, the adapter also sends the
+reconciliation record this point calls for, in this flow:
+
+- every delivery carries a reconciliation from its own reading. Once the
+  engine holds a book it goes ahead of the delivery's snapshots, so the
+  engine classifies the reading against that book before the new snapshot
+  replaces it. In a run's first delivery, before which the engine holds no
+  book, it goes behind them when the reading was found to be the previous
+  close's book; when it was not (or there was none to compare with) it
+  goes alone, the snapshots withheld, and the engine classifies it
+  unverifiable and halts;
+- after every start and reconnect, once the engine holds a book, a
+  reconciliation is read afresh once every execution IBKR replayed has its
+  commission and its fill is recorded, and sent before any stream input; a
+  read whose positions or cash IBKR does not give is tried at most three
+  times in a row, then the adapter stops for a person.
+
+A difference is classified as ADR 0019 sets out.

@@ -250,3 +250,36 @@ func TestRulesVersionDeclaresTheHeldNameKeptOneLotShort(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheReplanAfterAPartFill pins ADR 0016's
+// same-rules-version replay guarantee for a Boost order that ends with shares
+// unfilled, and for a session with no SPY bar: the next decided session plans
+// the remaining difference to the target in force, as after a refusal, and a
+// gap is skipped rather than withholding every later session (ADR 0026,
+// points 2 "Boost" and 5, amended 2026-10-18), so a journal holding either
+// decides differently and the build must not claim 1.17.0 or earlier.
+func TestRulesVersionDeclaresTheReplanAfterAPartFill(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0", "1.17.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.17.0 once Boost re-plans an unfilled remainder and skips a missing bar", targetweight.RulesVersion)
+		}
+	}
+}
+
+// TestRulesVersionDeclaresThePostCloseReadingInputs pins ADR 0016's
+// same-rules-version replay guarantee for the inputs the IBKR adapter writes
+// under the owner's decision of 2026-10-18 (ADR 0019, ADR 0026 point 1,
+// amended): account.broker.snapshot version 2 and market.mark.recorded
+// version 2, which a 1.18.0 build refuses, so a journal holding either does
+// not replay under 1.18.0 and the build must not claim it or earlier.
+func TestRulesVersionDeclaresThePostCloseReadingInputs(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0", "1.17.0", "1.18.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.18.0 once the handler reads broker snapshot and mark version 2", targetweight.RulesVersion)
+		}
+	}
+}

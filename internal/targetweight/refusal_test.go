@@ -165,7 +165,7 @@ func TestDecisionsBeforeTheFirstSessionToDecideAreQuiet(t *testing.T) {
 		at := sessionEnd(i)
 		ids := []string{"SPY"}
 		if i == 1 {
-			ids = []string{"QQQ"} // a gap during the warm-up still poisons the indicators
+			ids = []string{"QQQ"} // a gap during the warm-up is skipped (ADR 0026, point 5, amended 2026-10-18)
 		} else {
 			mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)))
 		}
@@ -176,7 +176,10 @@ func TestDecisionsBeforeTheFirstSessionToDecideAreQuiet(t *testing.T) {
 		if i >= 3 {
 			var p event.TargetsDecidedPayload
 			decode(t, out[0], &p)
-			if p.WithheldReason != event.WithheldMissingBars {
+			// No snapshot is fed, so the session is withheld for that, not
+			// for the gap, and the gap before session 2's bar is not this
+			// decision's to record.
+			if p.WithheldReason != event.WithheldStaleAccountSnapshot || len(p.Boost.GapSessions) != 0 {
 				t.Fatalf("session %d after a warm-up gap: %+v", i, p)
 			}
 		}

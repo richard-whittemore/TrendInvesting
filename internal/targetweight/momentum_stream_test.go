@@ -206,6 +206,10 @@ type momentumOptions struct {
 	// refusals names inputs, by envelope ID, the run must refuse, with what
 	// the refusal says.
 	refusals map[string]string
+	// brokerLast, when set, feeds every mark at version 2 with IBKR's last
+	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
+	// ADR 0026 point 1, amended 2026-10-18).
+	brokerLast float64
 }
 
 type momentumResult struct {
@@ -426,8 +430,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			if opts.noMark[session] == id {
 				continue
 			}
-			apply(s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%s:%s", id, session), end,
-				event.MarkRecordedPayload{InstrumentID: id, AsOf: end, Price: prices[id], Source: event.AdapterIBKR}))
+			mark, version := event.MarkRecordedPayload{InstrumentID: id, AsOf: end, Price: prices[id], Source: event.AdapterIBKR}, event.MarkRecordedSchemaVersion
+			if opts.brokerLast != 0 {
+				mark.BrokerLast, mark.BrokerLastSet, version = float64(prices[id]*opts.brokerLast), true, event.MarkRecordedEvidenceVersion
+			}
+			apply(s.envelope(t, event.MarkRecordedEventType, version, fmt.Sprintf("mark:%s:%s", id, session), end, mark))
 		}
 		slices.Sort(ids)
 		if opts.beforeClose != nil {

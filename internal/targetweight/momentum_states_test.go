@@ -151,5 +151,5 @@ func TestAMomentumRunRefusesBadSafetyInputs(t *testing.T) {
 	mustRefuse(t, h, s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion+1, "k", at, event.KillSwitchPayload{}), "schema version")
 	mustRefuse(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "b", at,
 		event.BrokerSnapshotPayload{AccountID: "joint", AsOf: at, NetLiquidation: 1, ExcessLiquidity: 1, Positions: []event.BrokerPosition{}, OpenOrders: []event.BrokerOrder{}}), "broker snapshot for account")
-	mustRefuse(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion+1, "b", at, event.BrokerSnapshotPayload{}), "schema version")
+	mustRefuse(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotReadAtVersion+1, "b", at, event.BrokerSnapshotPayload{}), "schema version")
 }

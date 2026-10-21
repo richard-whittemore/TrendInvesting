@@ -10,9 +10,18 @@ and what it does not"). Every decision the
 engine makes rests on what it believes you hold, so a difference it cannot
 explain is a reason to stop taking on new risk (ADR 0019).
 
-Every morning, before the day's first decision, the IBKR adapter reads the
-account's positions and cash from IBKR and records them in the journal. The
-engine then compares them with its own book and decides one of four things:
+At every start of the IBKR adapter, at every reconnect, and with every
+delivery of market data, the adapter reads the account's positions and cash
+from IBKR and records them in the journal. A delivery's goes ahead of that
+day's account snapshot, so the engine compares IBKR's holdings with the book
+it holds before the new snapshot replaces it: shares no fill explains are
+found, never taken over. A run's first delivery carries it right behind the
+first account snapshot, which is the engine's first book. A start's or a
+reconnect's is read only once every trade IBKR replayed has its commission
+and its fill has reached the engine. Before the engine holds any account
+snapshot there is no book to compare, so the adapter sends none at a start
+or reconnect then. The engine compares them with its own book and decides one of four
+things:
 
 | Result | What it means | What happens |
 | --- | --- | --- |
@@ -143,12 +152,21 @@ amounts.
 
 The adapter reads positions, the account summary (net liquidation, total cash,
 Excess Liquidity) and every open order in one pass, then asks IBKR the time.
-From that one read it builds two records:
+From that one read it builds the records the engine reads:
 
+- the engine's **account snapshot** (`account.snapshot`), positions and net
+  liquidation, the **book** the strategy decides from;
 - the **broker snapshot** (`account.broker.snapshot`), which the risk gate
   sizes sells and the sale back to 98% from, and the margin alarm watches;
 - the **reconciliation** (`account.reconciliation`), positions and total cash
-  for the morning comparison.
+  for the comparison, stamped with the true read time.
+
+After a session's close, the account and broker snapshots are stamped as of
+that close when the reading can stand for it (your decision of 2026-10-18:
+nothing working at IBKR, no execution since the close, read on the close's
+own date), else at the read time ([paper trading](paper-trading.md), "A
+paper day"). The reconciliation always carries the read time, so it is
+never earlier than the book it is compared with.
 
 Every field is always stated. A list with nothing in it is sent as an empty
 list. Something IBKR did not deliver, or delivered in a form the engine cannot
@@ -166,8 +184,19 @@ Two conservative choices, both of which can only make a sale smaller:
 
 ## What can go wrong
 
-- **No account snapshot yet.** With nothing to compare against, the
-  reconciliation is unverifiable and the account goes Halted.
+- **No account snapshot yet.** With nothing to compare against, a
+  reconciliation would be unverifiable and halt the account, so the adapter
+  sends none until the engine holds a book; the run's first delivery carries
+  the first, right behind its account snapshot.
+- **A run's first reading that is not the book it was compared with** (the
+  previous run's last close, or your starting book). The adapter sends its
+  reconciliation alone and withholds its snapshots, so the engine, holding
+  no book, finds it unverifiable and halts, and nothing of that reading is
+  taken as the book, by this run or the next. Clear it with a fresh run whose
+  approval states the book you check in IBKR (`operator approve -log ...
+  -clear-incident ... -positions ... -cash ... -currency USD`;
+  [restart](restart.md)): without one, the fresh run is compared with the
+  same book again and halts again.
 - **IBKR cannot be read.** Unverifiable, Halted. The alert names what could not
   be read.
 - **A dividend, interest charge or fee the journal has not recorded.** The cash
@@ -186,11 +215,9 @@ Two conservative choices, both of which can only make a sale smaller:
 
 ## What is not built yet
 
-- The adapter's records are not yet sent over the transport, so the morning
-  reconciliation does not run on its own yet. The engine side and the alert
-  are built and tested against recorded inputs.
-- The reconciliations ADR 0019 also asks for at startup, after every fill,
-  before every order and on a timer; until they exist, a difference that
+- The reconciliations ADR 0019 also asks for after every fill, before every
+  order and on a timer (the start, reconnect and daily-delivery ones are
+  sent); until they exist, a difference that
   arises during a session (a lost fill report among them) is not caught. Also
   the comparison of open orders; the joint account's cash; matching each cash
   activity to IBKR's activity rows rather than comparing one net total; and

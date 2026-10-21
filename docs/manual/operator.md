@@ -34,9 +34,9 @@ It has four commands:
 | Command | What it records | Where it goes | When the engine acts |
 | --- | --- | --- | --- |
 | `operator kill-switch` | the kill switch engaged or released | the engine's operator inbox | before the engine's next input from the adapter |
-| `operator rebalance-cleared` | your clearance of a rebalance that is stuck | the engine's operator inbox | before the engine's next input from the adapter |
+| `operator rebalance-cleared` | your clearance of a rebalance that is stuck, or of a Boost order the adapter never sent | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator acknowledge` | your acknowledgement of one alert, by its alert key | the engine's operator inbox | before the engine's next input from the adapter; the reporter stops repeating the alert at its next run |
-| `operator approve` | your approval of a fresh run | an approval file you pass to the engine with `-approval` | when that fresh run starts, as its second input |
+| `operator approve` | your approval of a fresh run, or of an account's first run with its starting book (`-first-run`) | an approval file you pass to the engine with `-approval` | when that run starts, as its second input |
 
 ## Who can write an instruction
 
@@ -259,12 +259,26 @@ is never sent, and the next decision time decides afresh. `journal-query
 refusals` and `journal-query orders` show which orders are open; the
 [missed-rebalance runbook](../runbooks/missed-rebalance.md) has the steps.
 
-The momentum engine is not composed into the running program yet (only
-Boost is), so today a clearance is read by the momentum strategy and its
-tests only. Clear only after IBKR shows the order finished. A later IBKR
-report on a cleared order is refused, which stops the engine until you
+For an IRA, clear only after IBKR shows the order finished. A later IBKR
+report on a cleared IRA order is refused, which stops the engine until you
 reconcile. The reporter reads the clearance the same way, so that report
-also raises the urgent "venue report not read" alert.
+also raises the urgent "venue report not read" alert. The momentum engine
+is not composed into the running program yet (only Boost is), so today an
+IRA's clearance is read by the momentum strategy and its tests only.
+
+For Boost (the joint account), a clearance means something else: it
+settles one order the adapter **never sent**, after `relay.py resolve
+--never-sent`, so IBKR should have nothing to show for it. Name the decision that released it and that order. Boost then
+stops listing it as an order IBKR has not ruled on (`undecided_orders`),
+records it under `cleared_orders`, and nothing else changes; reconcile and
+start a fresh run ([boost](boost.md)). Boost refuses a clearance of an
+order IBKR has already named, even only as "submitted" (that order was
+sent and its verdict is still to come), one that IBKR lists among its
+open orders, a clearance that names any other order, and every clearance
+in dry-run, where no order is listed. If IBKR reports on a cleared Boost
+order after all, the clearance was wrong: Boost refuses the report, which
+stops the engine until you reconcile with IBKR and start a fresh run, as
+for an IRA.
 
 ## Acknowledging an alert
 
@@ -350,6 +364,31 @@ a fresh run starts with the switch released, so record it again with
 `operator kill-switch -state engaged` before you start the engine. The
 engine reads that record before the fresh run's first input from the
 adapter, before any order is checked.
+
+**An account's first run** is approved too, with the book it starts from,
+since there is no previous log to read. Check the paper account's holdings
+and total cash (`TotalCashValue`) in IBKR, then:
+
+```
+operator approve -first-run -account <IBKR account> -by owner \
+  -positions SPY=<shares> -cash <total cash> -currency USD \
+  -out /var/lib/trend-investing/engines/boost/first-run-approval.json
+```
+
+(`-positions ""` when the account holds nothing). It prints the book and the
+next step. The cash is IBKR's `TotalCashValue` in USD, the currency the
+adapter reads IBKR's cash in: any other `-currency` is refused. A first
+run has no incident to clear, so `-clear-incident` with `-first-run` is
+refused too. Approve right after you read the book: the approval's time is
+the book's cutoff (a trade before it is taken as in the book, one after it
+as a change since), so an `-at` later than now is refused whenever a
+starting book is stated. A fresh run's approval takes the same three options when you
+moved shares or cash in or out since the previous run, or to clear a halt
+on a run's first reading (see [restart](restart.md)): the fresh run's first
+reading is then compared with the book you state, not with the previous
+run's last close (ADR 0019 and ADR 0027, amended 2026-10-18), and the tool
+prints that book back before the next step. A first run in paper or live
+mode does not start without its approval.
 
 The engine checks the approval against the same log when the fresh run
 starts (see [restart](restart.md), "What the engine checks"). One more check
@@ -463,7 +502,10 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
 `TestTheOwnersClearanceEndsARebalanceInProgress`,
-`TestAClearanceMustNameTheRebalanceInProgress`, `TestBoostReadsNoClearance`
+`TestAClearanceMustNameTheRebalanceInProgress`,
+`TestBoostRefusesAClearanceOfAnOrderItNeverReleased`,
+`TestAClearedNeverSentOrderIsNoLongerUndecided`,
+`TestAClearanceOfNoUndecidedBoostOrderIsRefused`
 (`internal/targetweight`); `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`,
 `TestAnApprovalNeverUnderstatesTheSaleAttempt`,
 `TestProposeApprovalStatesTheEndStateOrClearsTheIncident`

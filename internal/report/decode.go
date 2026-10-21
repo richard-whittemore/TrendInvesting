@@ -79,6 +79,9 @@ var (
 	saleWithheldVersions = []uint32{event.SaleWithheldSchemaVersion}
 	// The margin-cushion alarm's level changes (plan.md section 5).
 	marginAlarmVersions = []uint32{event.MarginAlarmSchemaVersion}
+	// The IBKR adapter's broker snapshot, read for the reason a reading
+	// after the close could not stand for it (version 2).
+	brokerSnapshotVersions = event.BrokerSnapshotVersions()
 	// A target-weight account's orders are limit orders, reported at
 	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
 	lifecycleVersions = []uint32{event.OrderLifecycleLimitVersion}
@@ -94,7 +97,7 @@ var (
 	acknowledgedVersions   = []uint32{event.AlertAcknowledgedSchemaVersion}
 	// A fresh run's approval, for the incident it carries in force: version
 	// 1, which could not state a cash scope, and the current version.
-	approvalVersions = []uint32{1, event.OperatorRunApprovedSchemaVersion}
+	approvalVersions = []uint32{1, 2, event.OperatorRunApprovedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }

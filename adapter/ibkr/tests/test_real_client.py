@@ -118,7 +118,7 @@ class _EClient:
         self.requests.append(("reqAllOpenOrders",))
 
     def reqExecutions(self, reqId, flt):
-        self.requests.append(("reqExecutions", reqId, flt.acctCode))
+        self.requests.append(("reqExecutions", reqId, flt.acctCode, flt.clientId))
 
     def reqMktData(self, reqId, contract, genericTickList, snapshot, regulatorySnapshot, mktDataOptions):
         self.requests.append(("reqMktData", reqId, contract.conId, contract.symbol, contract.secType,
@@ -205,6 +205,8 @@ def _install_stub(new_error_signature, order_class=_Order, contract_class=_Contr
 
     class ExecutionFilter:
         acctCode = ""
+        # Unset here, so a test sees the client filter the adapter states.
+        clientId = None
 
     client.EClient = _EClient
     wrapper.EWrapper = EWrapper
@@ -450,7 +452,9 @@ class ForwardingTests(unittest.TestCase):
         self.assertEqual(client._client.requests, [
             ("connect", "127.0.0.1", 4002, 11), ("reqCurrentTime",), ("reqPositions",),
             ("cancelPositions",), ("reqAccountSummary", 3, "All", "NetLiquidation"),
-            ("cancelAccountSummary", 3), ("reqAllOpenOrders",), ("reqExecutions", 4, "DU0000001"),
+                        # Every client's executions (client filter 0): IBKR then
+            # returns other clients' to the Master API client ID.
+            ("cancelAccountSummary", 3), ("reqAllOpenOrders",), ("reqExecutions", 4, "DU0000001", 0),
             # A one-off snapshot of the contract by its conId: no generic
             # ticks (IBKR refuses them on a snapshot), not a regulatory one.
             ("reqMktData", 5, 756733, "SPY", "STK", "USD", "SMART", "", True, False, []),
