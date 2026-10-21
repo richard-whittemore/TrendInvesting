@@ -34,7 +34,7 @@ It has four commands:
 | Command | What it records | Where it goes | When the engine acts |
 | --- | --- | --- | --- |
 | `operator kill-switch` | the kill switch engaged or released | the engine's operator inbox | before the engine's next input from the adapter |
-| `operator rebalance-cleared` | your clearance of a rebalance that is stuck | the engine's operator inbox | before the engine's next input from the adapter |
+| `operator rebalance-cleared` | your clearance of a rebalance that is stuck, or of a Boost order the adapter never sent | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator acknowledge` | your acknowledgement of one alert, by its alert key | the engine's operator inbox | before the engine's next input from the adapter; the reporter stops repeating the alert at its next run |
 | `operator approve` | your approval of a fresh run, or of an account's first run with its starting book (`-first-run`) | an approval file you pass to the engine with `-approval` | when that run starts, as its second input |
 
@@ -259,12 +259,26 @@ is never sent, and the next decision time decides afresh. `journal-query
 refusals` and `journal-query orders` show which orders are open; the
 [missed-rebalance runbook](../runbooks/missed-rebalance.md) has the steps.
 
-The momentum engine is not composed into the running program yet (only
-Boost is), so today a clearance is read by the momentum strategy and its
-tests only. Clear only after IBKR shows the order finished. A later IBKR
-report on a cleared order is refused, which stops the engine until you
+For an IRA, clear only after IBKR shows the order finished. A later IBKR
+report on a cleared IRA order is refused, which stops the engine until you
 reconcile. The reporter reads the clearance the same way, so that report
-also raises the urgent "venue report not read" alert.
+also raises the urgent "venue report not read" alert. The momentum engine
+is not composed into the running program yet (only Boost is), so today an
+IRA's clearance is read by the momentum strategy and its tests only.
+
+For Boost (the joint account), a clearance means something else: it
+settles one order the adapter **never sent**, after `relay.py resolve
+--never-sent`, so IBKR should have nothing to show for it. Name the decision that released it and that order. Boost then
+stops listing it as an order IBKR has not ruled on (`undecided_orders`),
+records it under `cleared_orders`, and nothing else changes; reconcile and
+start a fresh run ([boost](boost.md)). Boost refuses a clearance of an
+order IBKR has already named, even only as "submitted" (that order was
+sent and its verdict is still to come), one that IBKR lists among its
+open orders, a clearance that names any other order, and every clearance
+in dry-run, where no order is listed. If IBKR reports on a cleared Boost
+order after all, the clearance was wrong: Boost refuses the report, which
+stops the engine until you reconcile with IBKR and start a fresh run, as
+for an IRA.
 
 ## Acknowledging an alert
 
@@ -488,7 +502,10 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
 `TestTheOwnersClearanceEndsARebalanceInProgress`,
-`TestAClearanceMustNameTheRebalanceInProgress`, `TestBoostReadsNoClearance`
+`TestAClearanceMustNameTheRebalanceInProgress`,
+`TestBoostRefusesAClearanceOfAnOrderItNeverReleased`,
+`TestAClearedNeverSentOrderIsNoLongerUndecided`,
+`TestAClearanceOfNoUndecidedBoostOrderIsRefused`
 (`internal/targetweight`); `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`,
 `TestAnApprovalNeverUnderstatesTheSaleAttempt`,
 `TestProposeApprovalStatesTheEndStateOrClearsTheIncident`

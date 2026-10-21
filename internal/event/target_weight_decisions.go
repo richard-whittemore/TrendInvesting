@@ -3,6 +3,7 @@ package event
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -46,7 +47,32 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     keeps one lot short (ADR 0026, point 2, "D7-L", amended 2026-10-18),
 //     are of this version too; the figures are omitted when unset, so a
 //     decision with no such name has the bytes it had before.
-const TargetsDecidedSchemaVersion uint32 = 5
+//   - Version 6 records why a Boost decision re-plans (ADR 0026, point 2,
+//     "Boost", amended 2026-10-18): BoostFigures.Replan, the cause, refused,
+//     part-filled, unfilled or rejected, with such an order's client order
+//     ID and its filled and released shares, omitted when the decision
+//     entered with no re-plan pending; BoostFigures.ReplanWithheld, the
+//     rejection that made the account's orders rejected in a row two;
+//     BoostFigures.VenueRejections, the rejections in a row,
+//     BoostFigures.RejectedInARow, the orders it counts, and
+//     BoostFigures.UndecidedOrders, the released orders the venue has not
+//     yet ruled on, and BoostFigures.UndecidedBeforeRejection, how many of
+//     them were released before the latest rejection counted;
+//     BoostFigures.NoVenue, dry-run, when no venue receives the orders, so
+//     none is listed;
+//     BoostFigures.ClearedOrders, the orders the owner settled as never sent
+//     (operator.rebalance.cleared), each with its release;
+//     BoostFigures.WorkingOrders, the orders the venue accepted that still
+//     work besides the watched one, each with its executions;
+//     BoostFigures.RejectedWhileStopped and RejectionsWhileStopped, the
+//     rejections read after that stop and their count;
+//     BoostFigures.Watched, the order watched for an unfilled remainder with
+//     its executions, its end and its venue order ID, so a restart watches
+//     it still; and
+//     BoostFigures.GapSessions, the sessions with no bar the decision's
+//     readings span (ADR 0026, point 5, amended 2026-10-18). Each is omitted
+//     when unset.
+const TargetsDecidedSchemaVersion uint32 = 6
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -57,7 +83,8 @@ const (
 // The closed set of reasons a decision is withheld (ADR 0026, points 1 and 5).
 const (
 	// WithheldMissingBars: a session closed without the instrument's bar.
-	// Boost never computes RSI across a gap (plan.md section 2, "Boost").
+	// Boost skips the session and its next bar continues the indicators
+	// (ADR 0026, point 5, amended 2026-10-18).
 	WithheldMissingBars = "missing-bars"
 	// WithheldStaleAccountSnapshot: no account snapshot as of the session's
 	// close, so nothing can be valued at the previous close (ADR 0020).
@@ -155,6 +182,307 @@ type BoostFigures struct {
 	// last decision with the target in force (ADR 0026, point 5). Omitted
 	// when unset.
 	ReplanPending bool `json:"replan_pending,omitempty"`
+	// Replan is the cause of the re-plan this decision planned, or, on a
+	// withheld decision, of the one still pending after it (ADR 0026, point
+	// 2, "Boost", amended 2026-10-18). Omitted when the decision entered with
+	// none pending.
+	Replan BoostReplan `json:"replan,omitzero"`
+	// GapSessions are the sessions, YYYY-MM-DD and ascending, that closed
+	// with no bar since the last bar the indicators read before this
+	// decision's: the gap this decision's readings span (ADR 0026, point 5,
+	// amended 2026-10-18). Omitted when empty.
+	GapSessions []string `json:"gap_sessions,omitempty"`
+	// ReplanWithheld is the rejection that made the account's orders the
+	// venue rejected in a row two, whatever their targets and whichever
+	// order it was, the watched one or an older one rejected late, after
+	// which no session buys until the owner starts a fresh run (ADR 0026,
+	// point 2, "Boost", amended 2026-10-18): cause rejected, with its client
+	// order ID and its filled and released shares. It is recorded once, on
+	// the decision of the session at whose close it was read or, when that
+	// session only fed the indicators (a restarted run's warm-up), on the
+	// first decision after it, and omitted otherwise; a rejection after it
+	// is RejectedWhileStopped.
+	ReplanWithheld BoostReplan       `json:"replan_withheld,omitzero"`
+	Watched        BoostWatchedOrder `json:"watched,omitzero"`
+	// VenueRejections counts, as they stand after this decision, the orders
+	// decided sessions released that the venue rejected (invalid) in a row,
+	// whatever their targets, since the last such order it accepted (an
+	// execution, or any lifecycle report but submitted), each counted when
+	// the venue's first word on it is read, however late. At
+	// BoostVenueRejectionLimit, two, no session buys until the owner starts
+	// a fresh run, and the count stays at two, never above it (ADR 0026,
+	// point 2, "Boost", amended 2026-10-18), and a restart from the decision
+	// recovers it (ADR 0026, point 5). Omitted when none.
+	VenueRejections int `json:"venue_rejections,omitempty"`
+	// RejectedInARow names the orders VenueRejections counts, in the order
+	// their rejections were read: exactly VenueRejections of them, so at
+	// the stop the two rejections that stopped buys, which stay named until
+	// the fresh run (ADR 0026, point 2, "Boost", amended 2026-10-18). An
+	// order the venue accepted empties it with the count before the stop. A
+	// restart from the decision recovers it (ADR 0026, point 5). Omitted
+	// when none.
+	RejectedInARow []BoostRejectedOrder `json:"rejected_in_a_row,omitempty"`
+	// UndecidedOrders are the orders decided sessions released that the
+	// venue has not yet ruled on, accepted or rejected, in release order: a
+	// late verdict on any of them counts as it would have when it came
+	// (ADR 0026, point 2, "Boost", amended 2026-10-18). Each but the watched
+	// order records its side, shares and limit as released and its venue
+	// order ID once a lifecycle report or a broker snapshot's open-order
+	// listing named it, so a run restarted from the
+	// decision reads the venue's reports on it, and nets a working sell, as
+	// on an order it released (ADR 0026, point 5; ADR 0019, amended
+	// 2026-10-15); the watched order's own are in Watched. Omitted when none.
+	UndecidedOrders []BoostUndecidedOrder `json:"undecided_orders,omitempty"`
+	// ClearedOrders are the orders the owner settled as never sent
+	// (operator.rebalance.cleared), in the order cleared, with the release
+	// the gate still counts: a never-sent order leaves UndecidedOrders but
+	// stays released until the owner's fresh run, so a sell is still counted
+	// as sold. Each records its side, shares and limit as released, and
+	// none is also undecided; the watched order, if cleared, is among them
+	// as well as in Watched. A run restarted from the decision restores
+	// them (ADR 0026, point 2, "Boost", amended 2026-10-18, and point 5).
+	// Omitted when none.
+	ClearedOrders []BoostUndecidedOrder `json:"cleared_orders,omitempty"`
+	// WorkingOrders are the orders the venue accepted (an execution, or any
+	// lifecycle report but submitted) that still work, neither fully filled
+	// nor ended, besides the watched order, in the order the venue accepted
+	// them: a later
+	// order replaced them as the watched one. Each records its release, its
+	// executions and its venue order ID as Watched does, and no end, so a
+	// run restarted from the decision reads the venue's later fills and
+	// cancel of it, and nets a working sell, as on an order it released (ADR
+	// 0026, point 5; ADR 0019, amended 2026-10-15). None is also the
+	// watched, an undecided or a cleared order. Omitted when none.
+	WorkingOrders []BoostWatchedOrder `json:"working_orders,omitempty"`
+	// RejectedWhileStopped are the account's orders the venue rejected after
+	// two rejections in a row stopped Boost's buys, read since the last
+	// decision: a sell sent while the stop is in force, or an order released
+	// before it, each cause rejected with its order and shares, recorded
+	// once and paged once (ADR 0026, points 2, "Boost", amended 2026-10-18,
+	// and 4). Omitted when none.
+	RejectedWhileStopped []BoostReplan `json:"rejected_while_stopped,omitempty"`
+	// RejectionsWhileStopped counts those rejections since the stop, as they
+	// stand after this decision, so a page can say which one it is and a
+	// restart from the decision counts on from it. Omitted when none.
+	RejectionsWhileStopped int `json:"rejections_while_stopped,omitempty"`
+	// UndecidedBeforeRejection counts the first of UndecidedOrders, in
+	// release order, that were released before the latest released of the
+	// orders RejectedInARow names: the venue's acceptance of one of them,
+	// read late, is older than the run of rejections and does not end it,
+	// so a re-planned order rejected again is always the second in a row
+	// (ADR 0026, point 2, "Boost", amended 2026-10-18). A restart from the
+	// decision recovers it (ADR 0026, point 5). Omitted when none.
+	UndecidedBeforeRejection int `json:"undecided_before_rejection,omitempty"`
+	// NoVenue is the run's mode, dry-run, when no venue receives the orders
+	// it releases: none will ever be ruled on, so none is listed in
+	// UndecidedOrders and no verdict is counted (ADR 0026, point 3, "Mode",
+	// and point 2, "Boost", amended 2026-10-18). Omitted in paper and live.
+	NoVenue string `json:"no_venue,omitempty"`
+}
+
+// BoostVenueRejectionLimit is how many of the account's orders the venue
+// may reject in a row before Boost buys nothing more until the owner starts
+// a fresh run (ADR 0026, point 2, "Boost", amended 2026-10-18).
+const BoostVenueRejectionLimit = 2
+
+// BoostRejectedOrder is one of the orders BoostFigures.VenueRejections
+// counts: its client order ID and, when a lifecycle report or a broker
+// snapshot's open-order listing named it, the venue's own ID for it, so the
+// record and the page can name it.
+type BoostRejectedOrder struct {
+	ClientOrderID string `json:"client_order_id"`
+	VenueOrderID  string `json:"venue_order_id,omitempty"`
+}
+
+// BoostUndecidedOrder is an order a decided session released that the
+// venue has not yet ruled on (BoostFigures.UndecidedOrders): its client
+// order ID and, unless it is the watched order, its side, shares and limit
+// as released and its venue order ID once a lifecycle report or a broker
+// snapshot's open-order listing named it.
+type BoostUndecidedOrder struct {
+	ClientOrderID string  `json:"client_order_id"`
+	Side          string  `json:"side,omitempty"`
+	Released      int64   `json:"released,omitempty"`
+	LimitPrice    float64 `json:"limit_price,omitempty"`
+	VenueOrderID  string  `json:"venue_order_id,omitempty"`
+}
+
+// carriesRelease reports whether o records any of the order as released.
+func (o BoostUndecidedOrder) carriesRelease() bool {
+	return o.Side != "" || o.Released != 0 || o.LimitPrice != 0 || o.VenueOrderID != ""
+}
+
+// BoostWatchedOrder is the order the latest decided Boost session
+// released, while it is watched for an unfilled remainder (ADR 0026, point
+// 2, "Boost", amended 2026-10-18): its client order ID, side, released
+// shares and limit as released, the shares its fill reports executed so
+// far and each of those executions, its terminal status once the venue
+// reported it (canceled or invalid) and when that end occurred, and whether
+// it is the one re-plan of an order the venue rejected. A run restarted
+// from the decision watches it still and reads the venue's reports on it
+// (ADR 0026, point 5): an execution it holds, sent again, is a redelivery
+// that changes nothing (ADR 0019, "Explained means"), and a sell is netted
+// from its executions and its end as any working sell (ADR 0019, amended
+// 2026-10-15).
+type BoostWatchedOrder struct {
+	ClientOrderID  string             `json:"client_order_id"`
+	Side           string             `json:"side"`
+	Released       int64              `json:"released"`
+	LimitPrice     float64            `json:"limit_price"`
+	Filled         int64              `json:"filled,omitempty"`
+	Fills          []BoostWatchedFill `json:"fills,omitempty"`
+	Status         string             `json:"status,omitempty"`
+	EndedAt        time.Time          `json:"ended_at,omitzero"`
+	AfterRejection bool               `json:"after_rejection,omitempty"`
+	// VenueOrderID is the venue's own ID for the order, from the first
+	// lifecycle report or broker snapshot's open-order listing that names
+	// it, omitted before one: a run restarted from the
+	// decision matches IBKR's listing of the order by it when IBKR echoes no
+	// client order ID (ADR 0026, point 5, amended 2026-10-18).
+	VenueOrderID string `json:"venue_order_id,omitempty"`
+}
+
+// BoostWatchedFill is one execution of a watched order, as its fill report
+// stated it; the order names its account, instrument and side.
+type BoostWatchedFill struct {
+	FillID     string    `json:"fill_id"`
+	Quantity   int64     `json:"quantity"`
+	Price      float64   `json:"price"`
+	Commission float64   `json:"commission,omitempty"`
+	FilledAt   time.Time `json:"filled_at"`
+}
+
+// IsZero reports whether no order is watched; encoding/json's omitzero
+// reads it.
+func (w BoostWatchedOrder) IsZero() bool { return w.Equal(BoostWatchedOrder{}) }
+
+// Equal reports whether w and o record the same watched order, each instant
+// the same however its UTC offset is written.
+func (w BoostWatchedOrder) Equal(o BoostWatchedOrder) bool {
+	return w.ClientOrderID == o.ClientOrderID && w.Side == o.Side && w.Released == o.Released && w.LimitPrice == o.LimitPrice &&
+		w.Filled == o.Filled && w.Status == o.Status && w.EndedAt.Equal(o.EndedAt) && w.AfterRejection == o.AfterRejection &&
+		w.VenueOrderID == o.VenueOrderID &&
+		slices.EqualFunc(w.Fills, o.Fills, func(a, b BoostWatchedFill) bool {
+			return a.FillID == b.FillID && a.Quantity == b.Quantity && a.Price == b.Price && a.Commission == b.Commission && a.FilledAt.Equal(b.FilledAt)
+		})
+}
+
+// Fill returns the fill report the watched execution f restates, for an
+// order of accountID in instrumentID.
+func (w BoostWatchedOrder) Fill(accountID, instrumentID string, f BoostWatchedFill) TargetWeightFillPayload {
+	return TargetWeightFillPayload{
+		AccountID: accountID, ClientOrderID: w.ClientOrderID, FillID: f.FillID, InstrumentID: instrumentID,
+		Side: w.Side, Quantity: f.Quantity, Price: f.Price, Commission: f.Commission, FilledAt: f.FilledAt,
+	}
+}
+
+// IsZero reports whether b is empty, as a momentum decision's Boost figures
+// are; encoding/json's omitzero reads it.
+func (b BoostFigures) IsZero() bool {
+	return b.InstrumentID == "" && b.Close == 0 && b.RSI == 0 && !b.RSIReady && b.TrendMean == 0 && !b.TrendMeanReady &&
+		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
+		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
+		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero() && b.VenueRejections == 0 &&
+		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.ClearedOrders) == 0 && len(b.WorkingOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
+		b.UndecidedBeforeRejection == 0 && b.NoVenue == ""
+}
+
+// validateGaps checks the gap sessions against the decided session's date:
+// dates, strictly ascending, each before it.
+func (b BoostFigures) validateGaps(session time.Time) []error {
+	var errs []error
+	day := session.UTC().Format(time.DateOnly)
+	for i, s := range b.GapSessions {
+		switch _, err := time.Parse(time.DateOnly, s); {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("boost gap session %q is not a YYYY-MM-DD date", s))
+		case i > 0 && s <= b.GapSessions[i-1]:
+			errs = append(errs, fmt.Errorf("boost gap sessions must be strictly ascending; %s follows %s", s, b.GapSessions[i-1]))
+		case s >= day:
+			errs = append(errs, fmt.Errorf("boost gap session %s is not before the session %s whose bar the decision read", s, day))
+		}
+	}
+	return errs
+}
+
+// The closed set of causes of a Boost re-plan (ADR 0026, point 2, "Boost",
+// amended 2026-10-18).
+const (
+	// ReplanCauseRefused: the last planned order was refused and the refusal
+	// left the engine Normal.
+	ReplanCauseRefused = "refused"
+	// ReplanCausePartFilled: the last released order was canceled (a DAY
+	// order's expiry included) with fewer shares filled than released and
+	// more than none.
+	ReplanCausePartFilled = "part-filled"
+	// ReplanCauseUnfilled: the last released order was canceled with
+	// nothing filled.
+	ReplanCauseUnfilled = "unfilled"
+	// ReplanCauseRejected: the venue refused the last planned order before
+	// it rested (invalid), a reason that may last, so it is re-planned once;
+	// the rejection that makes two in a row is withheld
+	// (BoostFigures.ReplanWithheld).
+	ReplanCauseRejected = "rejected"
+)
+
+// BoostReplan is why a Boost decision plans the difference to the target in
+// force though the target has not changed: the cause and, for an order that
+// ended part-filled, unfilled or rejected, its client order ID and its
+// filled and released shares.
+type BoostReplan struct {
+	Cause         string `json:"cause"`
+	ClientOrderID string `json:"client_order_id,omitempty"`
+	Filled        int64  `json:"filled,omitempty"`
+	Released      int64  `json:"released,omitempty"`
+}
+
+func (r BoostReplan) validate() []error {
+	switch r.Cause {
+	case "":
+		if r != (BoostReplan{}) {
+			return []error{errors.New("boost re-plan figures need a re-plan cause")}
+		}
+	case ReplanCauseRefused:
+		if r.ClientOrderID != "" || r.Filled != 0 || r.Released != 0 {
+			return []error{errors.New("a boost re-plan after a refusal names no order or shares")}
+		}
+	case ReplanCausePartFilled:
+		var errs []error
+		if r.ClientOrderID == "" {
+			errs = append(errs, errors.New("a part-fill re-plan names its order"))
+		}
+		if r.Filled <= 0 || r.Filled >= r.Released {
+			errs = append(errs, fmt.Errorf("a part-fill re-plan has filled shares between none and the %d released; got %d", r.Released, r.Filled))
+		}
+		return errs
+	case ReplanCauseRejected:
+		var errs []error
+		if r.ClientOrderID == "" {
+			errs = append(errs, errors.New("a rejected re-plan names its order"))
+		}
+		if r.Released <= 0 {
+			errs = append(errs, errors.New("a rejected re-plan names the shares released"))
+		}
+		if r.Filled < 0 || r.Filled >= r.Released {
+			errs = append(errs, fmt.Errorf("a rejected re-plan has fewer filled shares than the %d released; got %d", r.Released, r.Filled))
+		}
+		return errs
+	case ReplanCauseUnfilled:
+		var errs []error
+		if r.ClientOrderID == "" {
+			errs = append(errs, errors.New("an unfilled re-plan names its order"))
+		}
+		if r.Filled != 0 {
+			errs = append(errs, fmt.Errorf("an unfilled re-plan has no filled shares; got %d", r.Filled))
+		}
+		if r.Released <= 0 {
+			errs = append(errs, errors.New("an unfilled re-plan names the shares released"))
+		}
+		return errs
+	default:
+		return []error{fmt.Errorf("boost re-plan cause %q is not refused, part-filled, unfilled or rejected", r.Cause)}
+	}
+	return nil
 }
 
 // TargetsDecidedPayload is one account's target decision.
@@ -296,6 +624,7 @@ func (p TargetsDecidedPayload) Validate() error {
 	switch p.StrategyID {
 	case TargetWeightStrategyBoost:
 		errs = append(errs, p.Boost.validate()...)
+		errs = append(errs, p.Boost.validateGaps(p.SessionPeriodEnd)...)
 		if !p.Momentum.isZero() {
 			errs = append(errs, errors.New("a boost decision carries no momentum figures"))
 		}
@@ -305,7 +634,7 @@ func (p TargetsDecidedPayload) Validate() error {
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
 		errs = append(errs, p.Glide.validate(p.Momentum.CloseSession)...)
-		if p.Boost != (BoostFigures{}) {
+		if !p.Boost.IsZero() {
 			errs = append(errs, errors.New("a momentum decision carries no boost figures"))
 		}
 	default:
@@ -597,6 +926,254 @@ func (b BoostFigures) validate() []error {
 		errs = append(errs, errors.New("boost target in force must be finite and not negative"))
 	case !b.TargetInForceSet && b.TargetInForce != 0:
 		errs = append(errs, errors.New("boost target in force carries a value but none is set"))
+	}
+	errs = append(errs, b.Replan.validate()...)
+	errs = append(errs, b.Watched.validate()...)
+	switch {
+	case b.VenueRejections < 0:
+		errs = append(errs, fmt.Errorf("boost venue rejections in a row are never below none; got %d", b.VenueRejections))
+	case b.VenueRejections > BoostVenueRejectionLimit:
+		errs = append(errs, fmt.Errorf("boost venue rejections in a row stay at two once reached; got %d", b.VenueRejections))
+	}
+	errs = append(errs, b.validateRejections()...)
+	switch {
+	case b.RejectionsWhileStopped < 0, b.RejectionsWhileStopped > 0 && b.VenueRejections != BoostVenueRejectionLimit,
+		len(b.RejectedWhileStopped) > b.RejectionsWhileStopped:
+		errs = append(errs, fmt.Errorf("boost rejections while buys are stopped are counted only once two in a row stopped them, at least as many as recorded; got %d counted, %d recorded, %d in a row",
+			b.RejectionsWhileStopped, len(b.RejectedWhileStopped), b.VenueRejections))
+	}
+	for _, r := range b.RejectedWhileStopped {
+		if r.Cause != ReplanCauseRejected {
+			errs = append(errs, fmt.Errorf("a boost order rejected while buys are stopped is a rejection's; got cause %q", r.Cause))
+			continue
+		}
+		errs = append(errs, r.validate()...)
+	}
+	if w := b.ReplanWithheld; w != (BoostReplan{}) {
+		if w.Cause != ReplanCauseRejected {
+			errs = append(errs, fmt.Errorf("a withheld boost re-plan is a rejection's; got cause %q", w.Cause))
+		} else {
+			errs = append(errs, w.validate()...)
+		}
+	}
+	return errs
+}
+
+// validateRejections checks the orders the count names and the orders not
+// yet ruled on: the count names exactly as many orders as it counts, each
+// once; an undecided order is named once and is not among them; each but
+// the watched one records its release, the watched one does not and, being
+// the latest released, comes last, and it has had no execution and no end,
+// either of which is the venue's word on it.
+func (b BoostFigures) validateRejections() []error {
+	var errs []error
+	if len(b.RejectedInARow) != b.VenueRejections {
+		errs = append(errs, fmt.Errorf("boost names %d orders rejected in a row; the count is %d", len(b.RejectedInARow), b.VenueRejections))
+	}
+	rejected := map[string]bool{}
+	for _, o := range b.RejectedInARow {
+		switch {
+		case o.ClientOrderID == "":
+			errs = append(errs, errors.New("a boost order rejected in a row names its client order ID"))
+		case rejected[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost names order %s rejected in a row twice", o.ClientOrderID))
+		}
+		rejected[o.ClientOrderID] = true
+	}
+	seen := map[string]bool{}
+	for i, o := range b.UndecidedOrders {
+		switch {
+		case o.ClientOrderID == "":
+			errs = append(errs, errors.New("an undecided boost order names its client order ID"))
+		case seen[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost names undecided order %s twice", o.ClientOrderID))
+		case rejected[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both rejected and undecided", o.ClientOrderID))
+		}
+		seen[o.ClientOrderID] = true
+		watched := o.ClientOrderID != "" && o.ClientOrderID == b.Watched.ClientOrderID
+		switch {
+		case watched && i != len(b.UndecidedOrders)-1:
+			errs = append(errs, fmt.Errorf("the watched order %s is the last undecided boost order, the latest released", o.ClientOrderID))
+		case watched && (b.Watched.Filled > 0 || b.Watched.Status != ""):
+			errs = append(errs, fmt.Errorf("the watched order %s has executed or ended, so the venue has ruled on it; it is not undecided", o.ClientOrderID))
+		}
+		switch {
+		case watched:
+			if o.carriesRelease() {
+				errs = append(errs, fmt.Errorf("undecided boost order %s is the watched order, whose release is recorded as watched", o.ClientOrderID))
+			}
+		case o.Side != OrderSideBuy && o.Side != OrderSideSell, o.Released <= 0, !isFinite(o.LimitPrice), o.LimitPrice <= 0:
+			errs = append(errs, fmt.Errorf("undecided boost order %s, not the watched one, records its side, released shares and positive limit; got %q %d at %v",
+				o.ClientOrderID, o.Side, o.Released, o.LimitPrice))
+		}
+	}
+	// A cleared order is one the owner settled as never sent: named once, not
+	// also undecided, its release as released and no venue order ID, since
+	// no venue named it.
+	cleared := map[string]bool{}
+	for _, o := range b.ClearedOrders {
+		switch {
+		case o.ClientOrderID == "":
+			errs = append(errs, errors.New("a cleared boost order names its client order ID"))
+		case cleared[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost names cleared order %s twice", o.ClientOrderID))
+		case seen[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both cleared and undecided", o.ClientOrderID))
+		}
+		cleared[o.ClientOrderID] = true
+		switch {
+		case o.Side != OrderSideBuy && o.Side != OrderSideSell, o.Released <= 0, !isFinite(o.LimitPrice), o.LimitPrice <= 0:
+			errs = append(errs, fmt.Errorf("cleared boost order %s records its side, released shares and positive limit; got %q %d at %v",
+				o.ClientOrderID, o.Side, o.Released, o.LimitPrice))
+		case o.VenueOrderID != "":
+			errs = append(errs, fmt.Errorf("cleared boost order %s names venue order %s; no venue named an order the adapter never sent", o.ClientOrderID, o.VenueOrderID))
+		}
+	}
+	// The orders released before the latest rejection counted are the first
+	// of those listed; the watched order, the latest released, is never one.
+	older := len(b.UndecidedOrders)
+	if older > 0 && b.UndecidedOrders[older-1].ClientOrderID == b.Watched.ClientOrderID {
+		older--
+	}
+	switch k := b.UndecidedBeforeRejection; {
+	case k < 0 || k > older:
+		errs = append(errs, fmt.Errorf("boost counts %d undecided orders released before the latest rejection; between none and %d are listed before the watched order", k, older))
+	case k > 0 && b.VenueRejections == 0:
+		errs = append(errs, fmt.Errorf("boost counts %d undecided orders released before the latest rejection, but counts no rejection", k))
+	}
+	// A dry-run's orders reach no venue, so none awaits a verdict and none
+	// is counted (ADR 0026, point 3, "Mode").
+	switch {
+	case b.NoVenue == "":
+	case b.NoVenue != TradingModeDryRun:
+		errs = append(errs, fmt.Errorf("boost records no venue only for a dry-run, not %q", b.NoVenue))
+	case len(b.UndecidedOrders) > 0 || b.VenueRejections > 0 || len(b.ClearedOrders) > 0 || len(b.WorkingOrders) > 0:
+		errs = append(errs, errors.New("a dry-run boost decision lists no undecided, cleared or working order and counts no rejection: no venue receives its orders, so there is nothing to rule on or clear"))
+	}
+	// A working order is an accepted one that works besides the watched
+	// order: named, still working, named once, and in no other list. An
+	// execution is of one order, so no fill id is recorded under two of
+	// them, the watched order and the working ones (ADR 0019, "Explained
+	// means"; fail closed, AGENTS.md).
+	working := map[string]bool{}
+	fillOf := map[string]string{}
+	for _, f := range b.Watched.Fills {
+		fillOf[f.FillID] = b.Watched.ClientOrderID
+	}
+	for _, o := range b.WorkingOrders {
+		errs = append(errs, o.validate()...)
+		for _, f := range o.Fills {
+			if other, ok := fillOf[f.FillID]; ok && other != o.ClientOrderID {
+				errs = append(errs, fmt.Errorf("boost records fill id %s on two orders, %s and %s", f.FillID, other, o.ClientOrderID))
+			}
+			fillOf[f.FillID] = o.ClientOrderID
+		}
+		switch {
+		case o.ClientOrderID == "":
+			errs = append(errs, errors.New("a working boost order names its client order ID"))
+		case o.Status != "":
+			errs = append(errs, fmt.Errorf("working boost order %s has ended; a working order has not", o.ClientOrderID))
+		case o.ClientOrderID == b.Watched.ClientOrderID:
+			errs = append(errs, fmt.Errorf("working boost order %s is the watched order, recorded as watched", o.ClientOrderID))
+		case working[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost names working order %s twice", o.ClientOrderID))
+		case seen[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both working and undecided", o.ClientOrderID))
+		case cleared[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both working and cleared", o.ClientOrderID))
+		case rejected[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both working and rejected", o.ClientOrderID))
+		}
+		working[o.ClientOrderID] = true
+	}
+	// A venue order ID is the venue's ID for one order: a restarted run
+	// matches IBKR's listing with no client order ID echoed by it, and an ID
+	// two orders carry would match the wrong one (ADR 0026, point 5, amended
+	// 2026-10-18; fail closed, AGENTS.md).
+	venueOf := map[string]string{}
+	named := func(client, venueID string) {
+		if venueID == "" {
+			return
+		}
+		if other, ok := venueOf[venueID]; ok && other != client {
+			errs = append(errs, fmt.Errorf("boost orders %s and %s both name venue order %s; a venue order ID names one order", other, client, venueID))
+		}
+		venueOf[venueID] = client
+	}
+	named(b.Watched.ClientOrderID, b.Watched.VenueOrderID)
+	for _, o := range b.UndecidedOrders {
+		named(o.ClientOrderID, o.VenueOrderID)
+	}
+	for _, o := range b.WorkingOrders {
+		named(o.ClientOrderID, o.VenueOrderID)
+	}
+	return errs
+}
+
+func (w BoostWatchedOrder) validate() []error {
+	if w.IsZero() {
+		return nil
+	}
+	var errs []error
+	if w.ClientOrderID == "" {
+		errs = append(errs, errors.New("a watched boost order names its client order ID"))
+	}
+	if w.Side != OrderSideBuy && w.Side != OrderSideSell {
+		errs = append(errs, fmt.Errorf("a watched boost order is a buy or a sell; got %q", w.Side))
+	}
+	if !isFinite(w.LimitPrice) || w.LimitPrice <= 0 {
+		errs = append(errs, errors.New("a watched boost order has a positive limit price"))
+	}
+	if w.Released <= 0 || w.Filled < 0 || w.Filled >= w.Released {
+		errs = append(errs, fmt.Errorf("a watched boost order has released shares and fewer filled; got %d of %d", w.Filled, w.Released))
+	}
+	switch w.Status {
+	case "", OrderLifecycleStatusCanceled, OrderLifecycleStatusInvalid:
+	default:
+		errs = append(errs, fmt.Errorf("a watched boost order's status is canceled, invalid or none; got %q", w.Status))
+	}
+	switch {
+	case (w.Status == "") != w.EndedAt.IsZero():
+		errs = append(errs, errors.New("a watched boost order has ended_at exactly when it has a status: when the venue ended it"))
+	case !w.EndedAt.IsZero() && !writableTime(w.EndedAt):
+		errs = append(errs, errors.New("a watched boost order's ended_at cannot be written as RFC 3339"))
+	}
+	var sum int64
+	overflow := false
+	seen := map[string]bool{}
+	for _, f := range w.Fills {
+		switch {
+		case f.FillID == "":
+			errs = append(errs, errors.New("a watched boost order's fill names its fill id"))
+		case seen[f.FillID]:
+			errs = append(errs, fmt.Errorf("a watched boost order records fill id %s twice", f.FillID))
+		}
+		seen[f.FillID] = true
+		if f.Quantity <= 0 {
+			errs = append(errs, fmt.Errorf("a watched boost order's fill %s has a positive quantity; got %d", f.FillID, f.Quantity))
+		}
+		if !isFinite(f.Price) || f.Price <= 0 {
+			errs = append(errs, fmt.Errorf("a watched boost order's fill %s has a finite, positive price", f.FillID))
+		}
+		if !isFinite(f.Commission) || f.Commission < 0 {
+			errs = append(errs, fmt.Errorf("a watched boost order's fill %s has a finite commission, not negative", f.FillID))
+		}
+		errs = append(errs, wholeSecondTime("a watched boost order's fill "+f.FillID+" filled at", f.FilledAt)...)
+		// Each fill is checked against the shares released before it is
+		// added, so the sum stays within them and can never wrap (fail
+		// closed, AGENTS.md).
+		switch {
+		case f.Quantity <= 0:
+		case f.Quantity > max(w.Released, 0)-sum:
+			errs = append(errs, fmt.Errorf("a watched boost order's fills come to more shares than released, %d", w.Released))
+			overflow = true
+		default:
+			sum += f.Quantity
+		}
+	}
+	if !overflow && sum != w.Filled {
+		errs = append(errs, fmt.Errorf("a watched boost order's fills sum to %d shares; it records %d filled", sum, w.Filled))
 	}
 	return errs
 }

@@ -1,7 +1,9 @@
 package risklimit_test
 
 import (
+	"math"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -954,4 +956,427 @@ func TestAListedBuyIsNoUnknownSell(t *testing.T) {
 	if got := oneMore(t, g); got != 0 {
 		t.Errorf("working sells %d, want 0", got)
 	}
+}
+
+// TestFilledCountsEachExecutionOnce: the shares a released order's fill
+// reports executed, a redelivered execution counted once, and none for an
+// order the gate never released.
+func TestFilledCountsEachExecutionOnce(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	sellFill(t, g, "tw-sell", "f1", 10, 1)
+	sellFill(t, g, "tw-sell", "f1", 10, 1)
+	sellFill(t, g, "tw-sell", "f2", 5, 2)
+	if got := g.Filled("tw-sell"); got != 15 {
+		t.Errorf("Filled = %d, want 15", got)
+	}
+	if got := g.Filled("tw-unknown"); got != 0 {
+		t.Errorf("Filled of an order never released = %d, want 0", got)
+	}
+}
+
+// restoredSell is a sell of quantity an earlier run released, which a
+// restarted run watches (ADR 0026, point 5).
+func restoredSell(quantity int64) event.OrderReleasedPayload {
+	return event.OrderReleasedPayload{AccountID: "joint", ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: quantity, LimitPrice: 1}
+}
+
+// restoredFill is an execution of the restored sell, minutes after the
+// fixture time.
+func restoredFill(id string, quantity int64, minutes int) event.TargetWeightFillPayload {
+	return event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-old", FillID: id, InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: quantity, Price: 1, FilledAt: at.Add(time.Duration(minutes) * time.Minute)}
+}
+
+// TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart: an order
+// an earlier run released and a restarted run watches (ADR 0026, point 5)
+// is restored with the executions reported before the restart, so the
+// venue's later reports on it are read, the fills counting on from those
+// shares and never past the order's own; a second restore, one for another
+// account, one with every share filled, or one with a fill that is not the
+// order's, is refused.
+func TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	o := restoredSell(39)
+	if err := g.RestoreReleased(o, []event.TargetWeightFillPayload{restoredFill("f0", 20, -1)}, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	sellFill(t, g, "tw-old", "f1", 10, 1)
+	if got := g.Filled("tw-old"); got != 30 {
+		t.Errorf("Filled = %d, want the 20 before the restart and 10 after", got)
+	}
+	if err := g.ObserveFill(restoredFill("f2", 10, 2)); err == nil {
+		t.Error("a fill past the order's 39 shares must be refused")
+	}
+	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: "tw-old", OrderID: "ib-1", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled, Quantity: 39, LimitPrice: 1, OccurredAt: at}); err != nil {
+		t.Errorf("the restored order's cancel: %v", err)
+	}
+	if err := g.RestoreReleased(o, nil, time.Time{}, ""); err == nil {
+		t.Error("a second restore of the same order must be refused")
+	}
+	other := o
+	other.ClientOrderID, other.AccountID = "tw-other", "ira"
+	if err := g.RestoreReleased(other, nil, time.Time{}, ""); err == nil {
+		t.Error("a restore for another account must be refused")
+	}
+	for name, fills := range map[string][]event.TargetWeightFillPayload{
+		"every share filled": {restoredFill("f0", 39, -1)},
+		"another order's": {func() event.TargetWeightFillPayload {
+			f := restoredFill("f0", 1, -1)
+			f.ClientOrderID = "tw-other"
+			return f
+		}()},
+		"a buy's": {func() event.TargetWeightFillPayload {
+			f := restoredFill("f0", 1, -1)
+			f.Side = event.OrderSideBuy
+			return f
+		}()},
+		"an invalid one":    {restoredFill("", 1, -1)},
+		"one fill id twice": {restoredFill("f0", 1, -1), restoredFill("f0", 2, -1)},
+		// MaxInt64 + MaxInt64 + 3 wraps to 1, fewer than 39.
+		"fills overflowing their sum": {restoredFill("f0", math.MaxInt64, -1), restoredFill("f1", math.MaxInt64, -1), restoredFill("f2", 3, -1)},
+	} {
+		g := gate(t, limits(), event.TradingModeDryRun)
+		if err := g.RestoreReleased(o, fills, time.Time{}, ""); err == nil {
+			t.Errorf("a restore with %s fill must be refused", name)
+		}
+		if got := g.Filled("tw-old"); got != 0 {
+			t.Errorf("a refused restore with %s fill counts %d shares", name, got)
+		}
+	}
+	if err := gate(t, limits(), event.TradingModeDryRun).RestoreReleased(restoredSell(0), nil, time.Time{}, ""); err == nil {
+		t.Error("a restore of an order with no shares released must be refused")
+	}
+	applied := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, applied, "broker:1", broker(100))
+	released(t, check(t, applied, order(event.OrderSideSell, 60, 100))[0])
+	sellFill(t, applied, "tw-sell", "f0", 10, 1)
+	if err := applied.RestoreReleased(o, []event.TargetWeightFillPayload{restoredFill("f0", 1, -1)}, time.Time{}, ""); err == nil {
+		t.Error("a restore stating a fill id another order's execution holds must be refused")
+	}
+}
+
+// TestARestoredOrderCountsAnExecutionFromBeforeTheRestartOnce: the venue
+// re-reports an execution the earlier run had already applied; the restored
+// order knows its identity, so the redelivery changes nothing, as on an
+// order this run released (ADR 0019, "Explained means"), and the same fill
+// id for a different execution is refused.
+func TestARestoredOrderCountsAnExecutionFromBeforeTheRestartOnce(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	before := restoredFill("f1", 10, -1)
+	if err := g.RestoreReleased(restoredSell(39), []event.TargetWeightFillPayload{before}, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ObserveFill(before); err != nil {
+		t.Fatalf("the redelivered execution: %v", err)
+	}
+	if got := g.Filled("tw-old"); got != 10 {
+		t.Errorf("Filled = %d, want the execution before the restart counted once", got)
+	}
+	changed := before
+	changed.Quantity = 20
+	if err := g.ObserveFill(changed); err == nil {
+		t.Error("the fill id of an execution before the restart, reused for another, must be refused")
+	}
+	if got := g.Fills("tw-old"); len(got) != 1 || !got[0].SameExecution(before) {
+		t.Errorf("Fills = %+v, want the one execution", got)
+	}
+	if got := g.Fills("tw-unknown"); got != nil {
+		t.Errorf("Fills of an order never released = %+v, want none", got)
+	}
+}
+
+// TestARestoredSellIsNettedAsAWorkingSell: a sell an earlier run released
+// and a restarted run watches is still being sold, so it is netted as any
+// working sell (ADR 0019, amended 2026-10-15, sized "net of every working
+// or pending sell"): 54 released, 20 executed before an account snapshot of
+// 127, so 34 may still sell after it. Its later execution is shown by no
+// snapshot before it, and its end, once a later snapshot follows it, frees
+// what it left unsold.
+func TestARestoredSellIsNettedAsAWorkingSell(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	g.ObserveAccount(account(127, -5))
+	pendingIs(t, g, 34, "the restored sell's 34 still to sell")
+	sellFill(t, g, "tw-old", "f2", 4, 1)
+	pendingIs(t, g, 34, "an account snapshot before the later execution")
+	g.ObserveAccount(account(123, 2))
+	pendingIs(t, g, 30, "an account snapshot after it")
+
+	ended := gate(t, limits(), event.TradingModeDryRun)
+	if err := ended.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, at.Add(-5*time.Minute), ""); err != nil {
+		t.Fatal(err)
+	}
+	ended.ObserveAccount(account(127, -7))
+	pendingIs(t, ended, 34, "an account snapshot before the restored sell ended")
+	ended.ObserveAccount(account(127, -1))
+	pendingIs(t, ended, 0, "an account snapshot after it ended")
+}
+
+// TestARestoredSellListedBeforeItsRestoreIsCountedOnce: a broker snapshot
+// read before the restore lists the earlier run's working sell, which the
+// gate does not yet know, so it is filed as an unknown sell. The restore
+// takes that listing onto the restored sell, matched by its client order ID
+// and instrument as a listing of a sell this run released is, so the sell
+// is counted once (the pending rule's invariant "Unknown sells are counted
+// once"; ADR 0019, amended 2026-10-15): 54 released, 20 executed, so 34
+// still to sell, not 68. A hand sell listed beside it stays unknown.
+func TestARestoredSellListedBeforeItsRestoreIsCountedOnce(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", later(broker(127, listed("tw-old", event.BrokerOrderWorking, 34)), -5))
+	if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	g.ObserveAccount(account(127, -1))
+	pendingIs(t, g, 34, "the restored sell, listed before its restore")
+
+	withHand := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, withHand, "broker:1", later(broker(127, hand(5), listed("tw-old", event.BrokerOrderWorking, 34)), -5))
+	if err := withHand.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	withHand.ObserveAccount(account(127, -1))
+	pendingIs(t, withHand, 39, "the restored sell's 34 and the hand sell's 5")
+}
+
+// unechoed is IBKR's listing of a sell with no client order ID echoed, under
+// venue order ID id.
+func unechoed(id string, remaining int64) event.BrokerOrder {
+	return event.BrokerOrder{BrokerOrderID: id, InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: remaining}
+}
+
+// TestARestoredSellListedWithoutItsClientOrderIDIsMatchedByItsVenueOrderID:
+// IBKR does not always echo the client order ID. A broker snapshot read
+// before the restore lists the earlier run's sell with none, and the
+// decision recorded the sell's venue order ID, so the restore takes that
+// listing, and every later one under the same venue order ID, onto the
+// restored sell: 54 released, 20 executed, so 34 still to sell, counted
+// once (the pending rule's invariant "Unknown sells are counted once"; ADR
+// 0019, amended 2026-10-15). A sell of the same size under another venue
+// order ID is someone else's and is counted beside it.
+func TestARestoredSellListedWithoutItsClientOrderIDIsMatchedByItsVenueOrderID(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", later(broker(127, unechoed("ib-tw-old", 34)), -5))
+	if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, "ib-tw-old"); err != nil {
+		t.Fatal(err)
+	}
+	g.ObserveAccount(account(127, -4))
+	pendingIs(t, g, 34, "the restored sell, listed before its restore with no client order ID")
+	observe(t, g, "broker:2", later(broker(127, unechoed("ib-tw-old", 34)), -3))
+	g.ObserveAccount(account(127, -2))
+	pendingIs(t, g, 34, "the restored sell, listed again after its restore with no client order ID")
+
+	other := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, other, "broker:1", later(broker(127, unechoed("ib-hand", 34), unechoed("ib-tw-old", 34)), -5))
+	if err := other.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, "ib-tw-old"); err != nil {
+		t.Fatal(err)
+	}
+	other.ObserveAccount(account(127, -1))
+	pendingIs(t, other, 68, "the restored sell's 34 and a hand sell of 34 under another venue order ID")
+}
+
+// TestARestoredSellWithNoVenueOrderIDIsCountedBesideAnUnechoedListing: the
+// decision recorded no venue order ID, and a broker snapshot read before
+// the restore lists, with no client order ID, a sell of exactly the shares
+// the restored sell still has to sell. Nothing proves the two are one
+// order, so both are counted, 34 and 34: a brief over-count, which sells
+// less, the pending rule's fail-closed direction (ADR 0019, amended
+// 2026-10-15; ADR 0026, point 5, amended 2026-10-18). A later listing or
+// lifecycle report under another venue order ID keeps both counted. The
+// double count ends when the restored sell's own identity is shown: a
+// lifecycle report on it naming the listing's venue order ID, or a listing
+// of it under its client order ID with that venue order ID.
+func TestARestoredSellWithNoVenueOrderIDIsCountedBesideAnUnechoedListing(t *testing.T) {
+	restored := func(t *testing.T) *risklimit.Gate {
+		t.Helper()
+		g := gate(t, limits(), event.TradingModeDryRun)
+		observe(t, g, "broker:1", later(broker(127, unechoed("ib-a", 34)), -5))
+		if err := g.RestoreReleased(restoredSell(54), []event.TargetWeightFillPayload{restoredFill("f1", 20, -10)}, time.Time{}, ""); err != nil {
+			t.Fatal(err)
+		}
+		g.ObserveAccount(account(127, -4))
+		pendingIs(t, g, 68, "the restored sell's 34 and the unechoed listing's 34, both counted")
+		return g
+	}
+	report := func(t *testing.T, g *risklimit.Gate, venueID string, minutes int) {
+		t.Helper()
+		if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+			AccountID: "joint", ClientOrderID: "tw-old", OrderID: venueID, InstrumentID: "SPY", Side: event.OrderSideSell,
+			Status: event.OrderLifecycleStatusSubmitted, Quantity: 54, LimitPrice: 1, OccurredAt: at.Add(time.Duration(minutes) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("another venue order ID keeps both counted", func(t *testing.T) {
+		g := restored(t)
+		observe(t, g, "broker:2", later(broker(127, unechoed("ib-a", 34), listed("tw-old", event.BrokerOrderWorking, 34)), -3))
+		g.ObserveAccount(account(127, -2))
+		pendingIs(t, g, 68, "the restored sell listed under ib-tw-old beside the listing under ib-a")
+		report(t, g, "ib-b", -1)
+		observe(t, g, "broker:3", later(broker(127, unechoed("ib-a", 34)), 0))
+		g.ObserveAccount(account(127, 1))
+		pendingIs(t, g, 68, "a report naming ib-b, and the listing under ib-a again")
+	})
+	t.Run("a report naming the listing's venue order ID ends the double count", func(t *testing.T) {
+		g := restored(t)
+		report(t, g, "ib-a", -3)
+		g.ObserveAccount(account(127, -2))
+		pendingIs(t, g, 34, "the restored sell, once its report names ib-a")
+		observe(t, g, "broker:2", later(broker(127, unechoed("ib-a", 34)), -1))
+		g.ObserveAccount(account(127, 1))
+		pendingIs(t, g, 34, "a later listing under ib-a, the restored sell's own")
+	})
+	t.Run("its own listing under that venue order ID ends the double count", func(t *testing.T) {
+		g := restored(t)
+		own := listed("tw-old", event.BrokerOrderWorking, 34)
+		own.BrokerOrderID = "ib-a"
+		observe(t, g, "broker:2", later(broker(127, own), -3))
+		g.ObserveAccount(account(127, -2))
+		pendingIs(t, g, 34, "the restored sell, listed under its client order ID and ib-a")
+		observe(t, g, "broker:3", later(broker(127, unechoed("ib-a", 34)), -1))
+		g.ObserveAccount(account(127, 1))
+		pendingIs(t, g, 34, "a later listing under ib-a with no client order ID, the restored sell's own")
+	})
+}
+
+// TestAReleasedSellListedWithoutItsClientOrderIDIsMatchedByItsVenueOrderID:
+// the venue's lifecycle report names a released sell's venue order ID, so a
+// broker listing under that ID with no client order ID echoed, read before
+// the report or after it, is the sell's own and counted once: 60 released,
+// 60 still to sell, not 120.
+func TestAReleasedSellListedWithoutItsClientOrderIDIsMatchedByItsVenueOrderID(t *testing.T) {
+	for name, listedFirst := range map[string]bool{"listed after its report": false, "listed before its report": true} {
+		t.Run(name, func(t *testing.T) {
+			g := gate(t, limits(), event.TradingModeDryRun)
+			observe(t, g, "broker:1", broker(100))
+			released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+			if listedFirst {
+				observe(t, g, "broker:2", later(broker(100, unechoed("ib-tw-sell", 60)), 1))
+			}
+			sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusSubmitted, 60, 1, 1)
+			if !listedFirst {
+				observe(t, g, "broker:2", later(broker(100, unechoed("ib-tw-sell", 60)), 1))
+			}
+			g.ObserveAccount(account(100, 2))
+			pendingIs(t, g, 60, "the released sell, listed with no client order ID")
+		})
+	}
+}
+
+// TestARestoreRefusesAVenueOrderIDAnotherSellCarries: a venue order ID
+// names one order. Two restored sells carrying the same one would let an
+// unechoed listing match whichever was restored last, so the restore
+// refuses the second and restores nothing of it (the pending rule's
+// fail-closed direction, ADR 0019, amended 2026-10-15; ADR 0026, point 5,
+// amended 2026-10-18).
+func TestARestoreRefusesAVenueOrderIDAnotherSellCarries(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	if err := g.RestoreReleased(restoredSell(54), nil, time.Time{}, "ib-dup"); err != nil {
+		t.Fatal(err)
+	}
+	second := restoredSell(40)
+	second.ClientOrderID = "tw-old2"
+	err := g.RestoreReleased(second, nil, time.Time{}, "ib-dup")
+	if err == nil || !strings.Contains(err.Error(), "venue order") {
+		t.Fatalf("a second restored sell under venue order ib-dup: err = %v, want a venue order refusal", err)
+	}
+	if err := g.RestoreReleased(second, nil, time.Time{}, "ib-other"); err != nil {
+		t.Fatalf("nothing of the refused restore was kept, so the order restores under another venue order ID: %v", err)
+	}
+}
+
+// TestAReportOrListingGivingASecondSellAVenueOrderIDAnotherCarriesIsRefused:
+// a venue order ID is the venue's ID for one order, so a lifecycle report,
+// or a listing echoing a client order ID, that would give a second live
+// sell the ID another already carries is refused when it arrives, naming
+// the report and both orders, and nothing of it is taken in (ADR 0019,
+// amended 2026-10-15; ADR 0026, point 5; fail closed, AGENTS.md).
+func TestAReportOrListingGivingASecondSellAVenueOrderIDAnotherCarriesIsRefused(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(200))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+		AccountID: "joint", ClientOrderID: "tw-sell", OrderID: "ib-dup", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: 60, LimitPrice: 1, OccurredAt: at.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RestoreReleased(restoredSell(54), nil, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	report := event.LimitOrderLifecyclePayload{
+		AccountID: "joint", ClientOrderID: "tw-old", OrderID: "ib-dup", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: 54, LimitPrice: 1, OccurredAt: at.Add(2 * time.Minute),
+	}
+	err := g.ObserveLifecycle(report)
+	for _, want := range []string{"lifecycle report", "tw-old", "tw-sell", "ib-dup"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("a report giving tw-old the venue order ID tw-sell carries: err %v, want it refused naming %q", err, want)
+		}
+	}
+	snapshot := later(broker(200), 3)
+	snapshot.OpenOrders = []event.BrokerOrder{{BrokerOrderID: "ib-dup", ClientOrderID: "tw-old", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 54}}
+	_, err = g.ObserveBroker("broker:2", snapshot)
+	for _, want := range []string{"broker:2", "tw-old", "tw-sell", "ib-dup"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("a listing giving tw-old the venue order ID tw-sell carries: err %v, want it refused naming %q", err, want)
+		}
+	}
+	// Nothing of either was taken in: the refused snapshot is not recorded,
+	// so the next one, in its place, still reads the account.
+	observe(t, g, "broker:2", later(broker(200), 3))
+	g.ObserveAccount(account(200, 4))
+	pendingIs(t, g, 114, "the two sells, 60 and 54, with neither report nor listing taken in")
+	// A synthetic dry-run report names no venue order ID, and no sell
+	// carries none: it is not a second sell's claim on one.
+	synthetic := report
+	synthetic.OrderID, synthetic.Synthetic, synthetic.Status = "", true, event.OrderLifecycleStatusCanceled
+	synthetic.Message = "dry-run: never sent"
+	if err := g.ObserveLifecycle(synthetic); err != nil {
+		t.Fatalf("a synthetic report naming no venue order ID: %v", err)
+	}
+}
+
+// TestNoInputCanGiveTwoSellsOneVenueOrderIDWithinItself: a broker snapshot
+// lists each open order under a distinct, non-empty broker order ID, and a
+// lifecycle report names one order under a non-empty venue order ID, so a
+// single input cannot hand two sells one venue order ID, nor an empty one:
+// validation refuses it when it arrives, and nothing of it is taken in
+// (ADR 0019, amended 2026-10-15; ADR 0026, point 5; fail closed,
+// AGENTS.md).
+func TestNoInputCanGiveTwoSellsOneVenueOrderIDWithinItself(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(200))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	if err := g.RestoreReleased(restoredSell(54), nil, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	same := later(broker(200), 2)
+	same.OpenOrders = []event.BrokerOrder{
+		{BrokerOrderID: "ib-dup", ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 54},
+		{BrokerOrderID: "ib-dup", ClientOrderID: "tw-sell", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 60},
+	}
+	if _, err := g.ObserveBroker("broker:2", same); err == nil || !strings.Contains(err.Error(), "ascending") {
+		t.Errorf("one snapshot listing two sells under one broker order ID: err %v, want it refused as not strictly ascending", err)
+	}
+	empty := later(broker(200), 2)
+	empty.OpenOrders = []event.BrokerOrder{{ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 54}}
+	if _, err := g.ObserveBroker("broker:2", empty); err == nil || !strings.Contains(err.Error(), "broker order id is required") {
+		t.Errorf("a snapshot listing a sell under no broker order ID: err %v, want it refused", err)
+	}
+	err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+		AccountID: "joint", ClientOrderID: "tw-sell", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: 60, LimitPrice: 1, OccurredAt: at.Add(time.Minute),
+	})
+	if err == nil || !strings.Contains(err.Error(), "order id is required") {
+		t.Errorf("a venue report naming no venue order ID: err %v, want it refused", err)
+	}
+	observe(t, g, "broker:2", later(broker(200), 2))
+	pendingIs(t, g, 114, "the two sells, 60 and 54, with none of the refused inputs taken in")
 }

@@ -711,7 +711,7 @@ then the adapter stops for a person rather than hold the day's stream behind
 it in silence. Every reconciliation is stamped with its true read time,
 never earlier than the book it is compared with.
 
-Target-weight rules version 1.18.0 reads the new schema versions, and with
+Target-weight rules version 1.19.0 reads the new schema versions, and with
 them the margin alarm's basis above and the price band's comparison (ADR
 0026, point 3, amended 2026-10-18), so a journal holding one does not replay
-under 1.17.0.
+under 1.18.0.
