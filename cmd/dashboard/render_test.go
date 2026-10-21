@@ -17,7 +17,7 @@ func TestDashboardSaysWhetherAReleasedOrderWasSent(t *testing.T) {
 		{ClientOrderID: "tw-b", Side: event.OrderSideBuy, Quantity: 1, InstrumentID: "SPY", LimitPrice: 101, Status: report.OrderReleased},
 		{ClientOrderID: "tw-c", Side: event.OrderSideBuy, Quantity: 2, InstrumentID: "SPY", LimitPrice: 101, Status: report.OrderRefused, Reason: "order-size"},
 	}}
-	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
+	if err := execPage(&buf, []account{{Summary: s}}); err != nil {
 		t.Fatal(err)
 	}
 	body := buf.String()
@@ -33,7 +33,7 @@ func TestDashboardShowsEveryTimeInUTC(t *testing.T) {
 	var buf bytes.Buffer
 	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY", HaveSnapshot: true, HoldingsAsOf: time.Date(2024, time.January, 2, 16, 0, 0, 0, eastern)}
 	alerts := []alertView{{Kind: report.KindRefusal, Severity: report.Urgent, At: time.Date(2024, time.January, 2, 16, 5, 0, 0, eastern), Title: "t"}}
-	if err := page.Execute(&buf, []account{{Summary: s, Alerts: alerts}}); err != nil {
+	if err := execPage(&buf, []account{{Summary: s, Alerts: alerts}}); err != nil {
 		t.Fatal(err)
 	}
 	body := buf.String()
@@ -50,7 +50,7 @@ func TestDashboardShowsTheDaysWithheldSalesAndFillSides(t *testing.T) {
 	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
 		Fills:         []report.FillLine{{InstrumentID: "SPY", Side: event.OrderSideSell, ClientOrderID: "sale-1", Quantity: 5, Price: 96}},
 		SalesWithheld: []report.SaleWithheldLine{{ClientOrderID: "sale-1", InstrumentID: "SPY", Trigger: event.SaleTriggerExit, Reason: event.SaleWithheldLapsed, Detail: "the exit is no longer refused"}}}
-	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
+	if err := execPage(&buf, []account{{Summary: s}}); err != nil {
 		t.Fatal(err)
 	}
 	body := buf.String()
@@ -69,7 +69,7 @@ func TestDashboardShowsTheDaysSkippedTrades(t *testing.T) {
 	var buf bytes.Buffer
 	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
 		Skipped: []report.SkippedLine{{ClientOrderID: "tw-a", InstrumentID: "SPY", Side: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: 0.004}}}
-	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
+	if err := execPage(&buf, []account{{Summary: s}}); err != nil {
 		t.Fatal(err)
 	}
 	body := buf.String()
@@ -79,7 +79,7 @@ func TestDashboardShowsTheDaysSkippedTrades(t *testing.T) {
 		}
 	}
 	buf.Reset()
-	if err := page.Execute(&buf, []account{{Summary: report.Summary{AccountID: "joint"}}}); err != nil {
+	if err := execPage(&buf, []account{{Summary: report.Summary{AccountID: "joint"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(buf.String(), "Trades skipped") {
@@ -95,7 +95,7 @@ func TestDashboardBoundsSkippedSharesDecimals(t *testing.T) {
 	var buf bytes.Buffer
 	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
 		Skipped: []report.SkippedLine{{ClientOrderID: "tw-n", InstrumentID: "SPY", Side: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: a + b}}}
-	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
+	if err := execPage(&buf, []account{{Summary: s}}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "<td>0.3 shares</td>") || strings.Contains(buf.String(), "0.30000000000000004") {
