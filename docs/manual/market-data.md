@@ -32,7 +32,7 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
-| `python3 -m marketdata encode --out DIR --first YYYY-MM-DD --asof YYYY-MM-DD --configuration-hash H --strategy-version V --run-id R --stream FILE ...` (all of these but `--asof` are required: the engine's configuration hash, strategy version and run identity come from its durable log; `--run-id` takes the run's identity, not a name: for a paper run it is the Run approval's ID, and a dry-run first run, which has no approval, uses the identity its durable log gives it) | the engines' input stream (below) | no, and it never uses the network |
+| `python3 -m marketdata encode --out DIR --first YYYY-MM-DD --asof YYYY-MM-DD --configuration-hash H --strategy-version V --run-id R --stream FILE ...` (all of these but `--asof` are required: the engine's configuration hash, strategy version and run identity come from its durable log; `--run-id` takes the run's name, the value the data job stamps on every envelope as its correlation id: the `TI_RUN` of the run that began the chain, which is its durable log's file name without `.log`, for a paper run and a dry-run first run alike. It is not the run's identity, the Run approval's ID or, for a dry-run first run, the configuration's hash and as-of time, which the job uses only to find the run's folder) | the engines' input stream (below) | no, and it never uses the network |
 | `python3 -m marketdata retract --out DIR --session YYYY-MM-DD --reason TEXT` | that the exchange cancelled a session (below) | no |
 
 If your recordings hold an older 253-session backfill, extend it to 260
@@ -317,8 +317,9 @@ session it missed in one file. A run that hangs is stopped after an hour
 1. Picks the latest settled session.
 2. Reads the Boost engine's durable log (the `-log` file of the run named by
    `TI_RUN` in the engine's `run.env`) for the run's configuration hash and
-   strategy version, and uses the run's name as the stream's correlation id,
-   so the stream carries exactly the identity the engine expects. The log's
+   strategy version, and uses the run's name (the log's file name without `.log`; the
+   run's *identity* is a separate thing, used only to find its folder) as the
+   stream's correlation id, so the stream carries exactly the identity the engine expects. The log's
    first input is the configuration the engine started with; the job refuses
    if `/etc/trend-investing/engines/boost.config` no longer agrees with it on
    the instrument, `warm_up_start` or an indicator length, since the stream
@@ -967,7 +968,7 @@ for the recording and encoding steps.
 | `ti-data refused:` "run ... has no stream yet: run the warm-up once first" | No file is written | Run the one-time warm-up with the date it names ("The one-time warm-up") |
 | `ti-data refused:` the engine's durable log "cannot be read", "is not an engine durable log", "holds no committed configuration input: start the engine first", "holds no committed input, so it names no run", or the run's first input "is not its configuration" | No file is written | Start the engine once (so `run.env` and its log exist), check `TI_RUN`, and restore a log that cannot be read from the backup as the engine wrote it; never edit it |
 | `ti-data refused:` "it is not a Boost configuration", "warm_up_start ... is not an NYSE session", "--backfill-from ... is not the configuration's warm_up_start", "session ... precedes the warm-up start", or "the Boost configuration ... is not the one the engine's durable log ... holds" | No file is written | Correct the date or put the configuration back as the engine started with it; an edited configuration is a new run |
-| `ti-data refused:` "the history ... holds N sessions; the indicators need M", or Massive returns nothing for a trading day | No file is written; recordings already made are kept | Choose a later `warm_up_start`; once the engine has started, a changed `warm_up_start` changes the recorded configuration, so it needs a new run. Or let the next firing retry the day |
+| `ti-data refused:` "the history ... holds N sessions; the indicators need M", or Massive returns nothing for a trading day | No file is written; recordings already made are kept | For a history that is too short, choose an earlier `warm_up_start` (more sessions) inside Massive's two-year window; once the engine has started, a changed `warm_up_start` changes the recorded configuration, so it needs a new run. If Massive returned nothing for a day, let the next firing retry it instead |
 | `ti-data refused:` "... differs from the stream its recordings and the engine log ... give now", or "cannot be encoded again from their recordings" | Nothing more is written for the run: the engine has already read the old file | "A file already written differs" under "The daily data job": usually a new run with its own warm-up |
 | `ti-data refused:` "ConflictingActions: dividends <id> differs between recordings" | No file is written | Check the figure against the fund's notice and quarantine the recordings that hold the wrong one ("Two recordings give different figures for one dividend") |
 | `ti-data refused:` "has more than one stream folder", "cannot be matched to any run", "names this run in its first records but cannot be read", "does not follow its record hash chain", or "a second start of a first run" | No file is written | Restore or move aside as "A crash resume" says; never run a warm-up for a resumed run's new name |
