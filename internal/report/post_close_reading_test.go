@@ -89,7 +89,9 @@ func TestABrokerSnapshotThatDoesNotReadRaisesNoAlert(t *testing.T) {
 
 // TestTheDailySummaryShowsTheCashDriftAndTheUnexplainedCash: the summary
 // shows the day's cash drift the adapter accepted and the unexplained cash
-// added up since the last reconciliation the engine explained, from the
+// added up since the cash was last explained (a reconciliation the engine
+// explained, or the starting book, which is always the basis for Boost,
+// whose book carries no cash; adapter/ibkr book_basis), from the
 // latest broker snapshot as of a close, so drift within the daily bound is
 // still seen as it accumulates (ADR 0019, amended 2026-10-18). A reading
 // stamped at its read time checked no drift, and the summary says so.
@@ -112,7 +114,7 @@ func TestTheDailySummaryShowsTheCashDriftAndTheUnexplainedCash(t *testing.T) {
 		t.Fatalf("summary cash = %+v", got)
 	}
 	text := report.RenderText(got)
-	for _, want := range []string{"Cash drift since the previous close -3.25", "unexplained cash since the last reconciliation the engine explained 412.50"} {
+	for _, want := range []string{"Cash drift since the previous close -3.25", "unexplained cash since the cash was last explained (a reconciliation the engine explained, or the starting book; for Boost, whose book carries no cash, the starting book) 412.50"} {
 		if !contains(text, want) {
 			t.Errorf("the summary lacks %q:\n%s", want, text)
 		}

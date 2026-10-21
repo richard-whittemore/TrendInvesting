@@ -362,11 +362,16 @@ operator approve -first-run -account <IBKR account> -by owner \
 ```
 
 (`-positions ""` when the account holds nothing). It prints the book and the
-next step. A fresh run's approval takes the same three options when you
-moved shares or cash in or out since the previous run: the fresh run's first
+next step. The cash is IBKR's `TotalCashValue` in USD, the currency the
+adapter reads IBKR's cash in: any other `-currency` is refused. A first
+run has no incident to clear, so `-clear-incident` with `-first-run` is
+refused too. A fresh run's approval takes the same three options when you
+moved shares or cash in or out since the previous run, or to clear a halt
+on a run's first reading (see [restart](restart.md)): the fresh run's first
 reading is then compared with the book you state, not with the previous
-run's last close (ADR 0019 and ADR 0027, amended 2026-10-18). A first run in
-paper or live mode does not start without its approval.
+run's last close (ADR 0019 and ADR 0027, amended 2026-10-18), and the tool
+prints that book back before the next step. A first run in paper or live
+mode does not start without its approval.
 
 The engine checks the approval against the same log when the fresh run
 starts (see [restart](restart.md), "What the engine checks"). One more check

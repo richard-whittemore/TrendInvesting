@@ -76,8 +76,8 @@ class RehearsalTests(unittest.TestCase):
 
     def test_a_first_reading_that_is_not_the_starting_book_halts_the_real_engine(self):
         # ADR 0019 and ADR 0027, amended 2026-10-18: the real engine, holding
-        # no book, classifies the reconciliation the adapter puts ahead of
-        # the snapshots unverifiable and halts.
+        # no book, classifies the reconciliation the adapter sends alone,
+        # the snapshots withheld, unverifiable and halts.
         with mock.patch.object(rehearse_paper, "BOOK_MISMATCH", True):
             status, out = self.run_rehearsal(TI_REHEARSAL_ACCOUNT="")
         self.assertEqual(status, 0, out)

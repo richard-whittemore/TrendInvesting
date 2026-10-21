@@ -9,6 +9,7 @@ Synthetic figures only.
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -16,7 +17,8 @@ tests_dir = Path(__file__).resolve().parent
 if str(tests_dir) not in sys.path:
     sys.path.insert(0, str(tests_dir))
 
-from book_basis import cash_change, holdings_after, previous_close
+from book_basis import cash_change, fills_since, holdings_after, previous_close
+from relay import ResolveRefused
 from engine_double import LoggedEngine, final_hash, run_approval
 from fake_tws import ACCOUNT
 from test_delivery import commit
@@ -28,7 +30,7 @@ FILL = {"account_id": ACCOUNT, "client_order_id": "tw-1", "fill_id": "f1", "inst
 def snapshot(engine, ident, positions, cash):
     """A batch's account snapshot and the reconciliation of the same reading, as the adapter derives their IDs."""
     commit(engine, ident + ":account.reconciliation", kind="account.reconciliation", payload={
-        "total_cash": cash, "unreadable": []})
+        "as_of": "2027-01-13T21:00:00Z", "total_cash": cash, "unreadable": []})
     commit(engine, ident + ":account.snapshot", kind="account.snapshot", version=3, payload={
         "as_of": "2027-01-13T21:00:00Z", "positions": [{"instrument_id": s, "quantity": q}
                                                         for s, q in sorted(positions.items())]})
@@ -96,6 +98,108 @@ class BookBasisTests(unittest.TestCase):
         daily, unexplained = previous_close(str(self.root / "a.log"))
         self.assertIsNone(daily.cash)
         self.assertIsNone(unexplained)
+
+    # -- the runs before this one, read once per run --------------------------
+    def chain(self):
+        """a.log, the account's first run, with a snapshot and a fill; b.log, a fresh run approving it, with a fill."""
+        first = LoggedEngine(str(self.root / "a.log"), approval=run_approval(ACCOUNT, starting_book=({}, 100.0)))
+        snapshot(first, "b1", {"SPY": 2}, 90.0)
+        commit(first, "fill", kind="execution.fill", payload=FILL)
+        fresh = LoggedEngine(str(self.root / "b.log"), approval=run_approval(
+            ACCOUNT, previous_log="a.log", previous_log_final_hash=final_hash(self.root / "a.log")))
+        commit(fresh, "fill-2", kind="execution.fill", payload=dict(FILL, fill_id="f2"))
+        return fresh
+
+    def test_the_runs_before_this_one_are_read_once_and_the_basis_kept(self):
+        fresh = self.chain()
+        cache = str(self.root / "pending.json.basis")
+        walked = previous_close(str(self.root / "b.log"), cache)
+        # The earlier run's log is never read again for this run: the basis
+        # its walk found is kept beside the adapter's files.
+        (self.root / "a.log").unlink()
+        self.assertEqual(previous_close(str(self.root / "b.log"), cache), walked)
+        commit(fresh, "fill-3", kind="execution.fill", payload=dict(FILL, fill_id="f3"))
+        daily, unexplained = previous_close(str(self.root / "b.log"), cache)
+        self.assertEqual((daily.positions, daily.cash, len(daily.fills)), ({"SPY": 2}, Decimal("90.0"), 3),
+                         "this run's own log is read every time; only the runs before it are kept")
+        self.assertEqual((unexplained.cash, len(unexplained.fills)), (Decimal("100.0"), 3))
+
+    def test_a_kept_basis_of_another_approval_is_walked_again(self):
+        self.chain()
+        cache = str(self.root / "pending.json.basis")
+        previous_close(str(self.root / "b.log"), cache)
+        LoggedEngine(str(self.root / "c.log"), approval=run_approval(
+            ACCOUNT, previous_log="b.log", previous_log_final_hash=final_hash(self.root / "b.log")))
+        daily, _ = previous_close(str(self.root / "c.log"), cache)
+        self.assertEqual(len(daily.fills), 2, "a fresh run's chain is walked once for it, b.log's fill included")
+        self.assertIn("a.log", daily.source)
+
+    def test_a_kept_basis_that_does_not_read_is_walked_again(self):
+        self.chain()
+        cache = self.root / "pending.json.basis"
+        cache.write_text("{not json")
+        daily, _ = previous_close(str(self.root / "b.log"), str(cache))
+        self.assertEqual(daily.positions, {"SPY": 2})
+
+    def test_a_missing_earlier_log_stops_naming_it(self):
+        self.chain()
+        (self.root / "a.log").unlink()
+        with self.assertRaises(ResolveRefused) as caught:
+            previous_close(str(self.root / "b.log"), str(self.root / "pending.json.basis"))
+        self.assertIn("a.log", str(caught.exception))
+        self.assertIn("the run before it", str(caught.exception))
+
+    def test_a_starting_book_in_another_currency_is_never_compared(self):
+        approval = run_approval(ACCOUNT, starting_book=({"SPY": 1}, 500.0))
+        approval["starting_book"]["currency"] = "CAD"
+        LoggedEngine(str(self.root / "a.log"), approval=approval)
+        daily, unexplained = previous_close(str(self.root / "a.log"))
+        self.assertIn("CAD", daily.refused)
+        self.assertIn("USD", daily.refused)
+        self.assertEqual(unexplained.refused, daily.refused)
+
+    # -- a book's fills are those after its as-of time (internal/reconcile) --
+    def test_a_fill_the_starting_book_already_shows_is_not_counted_again(self):
+        # The owner checked IBKR, which already showed an execution the
+        # adapter then replays after the approval (run_approval's approved_at
+        # is 2026-10-17T14:00:00Z): it is in the book, never added to it.
+        engine = LoggedEngine(str(self.root / "a.log"), approval=run_approval(ACCOUNT, starting_book=({"SPY": 9}, 500.0)))
+        commit(engine, "fill", kind="execution.fill", payload=dict(FILL, filled_at="2026-10-17T13:59:59Z"))
+        commit(engine, "fill-2", kind="execution.fill", payload=dict(FILL, fill_id="f2", filled_at="2026-10-17T14:00:00Z"))
+        daily, unexplained = previous_close(str(self.root / "a.log"))
+        self.assertEqual([f["fill_id"] for f in daily.fills], ["f2"])
+        self.assertEqual([f["fill_id"] for f in unexplained.fills], ["f2"])
+
+    def test_a_fill_before_the_snapshots_as_of_time_is_in_the_snapshot(self):
+        engine = LoggedEngine(str(self.root / "a.log"), approval=run_approval(ACCOUNT, starting_book=({}, 100.0)))
+        snapshot(engine, "b1", {"SPY": 2}, 90.0)  # as of 2027-01-13T21:00:00Z
+        commit(engine, "fill", kind="execution.fill", payload=dict(FILL, filled_at="2027-01-13T20:59:59Z"))
+        commit(engine, "fill-2", kind="execution.fill", payload=dict(FILL, fill_id="f2"))
+        daily, _ = previous_close(str(self.root / "a.log"))
+        self.assertEqual([f["fill_id"] for f in daily.fills], ["f2"])
+
+    def test_fills_since_selects_by_the_books_and_the_readings_times(self):
+        early, inside, late = (dict(FILL, fill_id=i, filled_at=t) for i, t in (
+            ("early", "2027-01-13T20:59:59Z"), ("inside", "2027-01-13T21:00:00.400Z"), ("late", "2027-01-14T22:05:00Z")))
+        at = datetime(2027, 1, 13, 21, tzinfo=timezone.utc)
+        read = datetime(2027, 1, 14, 22, 5, tzinfo=timezone.utc)
+        self.assertEqual([f["fill_id"] for f in fills_since([late, inside, early], at, read)], ["inside"])
+
+    # -- an earlier run's log is read only when its record hash chain holds --
+    def test_a_log_whose_record_hash_chain_is_broken_stops_naming_it(self):
+        self.chain()
+        a = self.root / "a.log"
+        text = a.read_text(encoding="utf-8")
+        # A record's schema version changed: its payload hash and the log's
+        # final record hash still read, its record hash does not.
+        tampered = text.replace('"type":"account.snapshot","envelope_version":1,"schema_version":3',
+                                '"type":"account.snapshot","envelope_version":1,"schema_version":4', 1)
+        self.assertNotEqual(tampered, text, "setup: the snapshot's record")
+        a.write_text(tampered, encoding="utf-8")
+        with self.assertRaises(ResolveRefused) as caught:
+            previous_close(str(self.root / "b.log"))
+        self.assertIn("a.log", str(caught.exception))
+        self.assertIn("record hash chain", str(caught.exception))
 
     def test_fills_move_holdings_and_cash_as_ibkr_books_them(self):
         sell = dict(FILL, side="sell", quantity=2, price=10.005, commission=0.004)

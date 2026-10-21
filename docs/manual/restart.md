@@ -55,7 +55,18 @@ template):
   explains (you moved shares or cash in or out), and then the adapter
   compares the fresh run's first reading after a close with it instead of
   with the previous run's last close (ADR 0019 and ADR 0027, amended
-  2026-10-18).
+  2026-10-18). The cash is IBKR's `TotalCashValue` in USD, the currency the
+  adapter reads IBKR's cash in; `operator approve` refuses another, and the
+  adapter never compares a book stated in one.
+
+**A run that halted on its first reading** (the reading did not match the
+previous close or the starting book, so its reconciliation was
+unverifiable) holds no snapshot of that reading: the adapter sent the
+reconciliation alone. A fresh run approved without a starting book is
+compared with the same book again and halts again. Check the account in
+IBKR, and approve the fresh run that clears the incident with the book you
+find there (`operator approve -log ... -clear-incident ... -positions ...
+-cash ... -currency USD`).
 
 **An account's first run** has no previous log, so its approval names none
 and states the starting book instead, the boost not latched and no

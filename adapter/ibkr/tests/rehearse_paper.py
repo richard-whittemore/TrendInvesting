@@ -384,6 +384,10 @@ def rehearse(work, account):
         warm = data_job(work, config, run_log, settled(eve), "--backfill-from", warm_up_start.isoformat())
         warm_types = [ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, RECONCILIATION_TYPE] + [BAR, CLOSED] * (
             WARM_SESSIONS - 1) + [BAR, MARK_TYPE, CLOSED]
+        if BOOK_MISMATCH:
+            # A reading never checked sends its reconciliation alone, its
+            # snapshots withheld (delivery._entries).
+            warm_types = [RECONCILIATION_TYPE] + warm_types[3:]
         run(Phase([(lambda: len(types(run_log)) >= HEAD + len(warm_types), None, "the warm-up to reach the engine")]),
             run_log)
         check(warm == streams / RUN / "boost-{}.jsonl".format(eve),
@@ -394,13 +398,12 @@ def rehearse(work, account):
             outcome = decisions(run_log, first["id"])
             result = [d["payload"] for d in outcome if d["type"] == RESULT]
             state = [d["payload"] for d in outcome if d["type"] == STATE]
-            check([i["type"] for i in sent[:3]] == [RECONCILIATION_TYPE, ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE]
-                  and sent[2]["payload"]["as_of_close"] is False
-                  and "starting book" in sent[2]["payload"]["not_as_of_close"]
+            check([i["type"] for i in sent] == warm_types
+                  and not [i for i in sent if i["type"] in (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE)]
                   and result and result[0]["classification"] == "unverifiable" and result[0]["action"] == "halt"
                   and state and state[0]["state"] == "halted",
-                  "a first reading that is not the owner's starting book was never taken as the book: its "
-                  "reconciliation went ahead of the snapshots and the engine, holding no book, halted")
+                  "a first reading that is not the owner's starting book was never taken as the book: only its "
+                  "reconciliation went, no snapshot of it was committed, and the engine, holding no book, halted")
             return
         check(types(run_log)[:HEAD] == [CONFIGURATION_TYPE, RUN_APPROVED_TYPE]
               and inputs(run_log)[1]["payload"]["starting_book"]["positions"] == [

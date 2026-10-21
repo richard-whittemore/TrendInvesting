@@ -1230,27 +1230,30 @@ def _resolve(pending, client_order_id, decision, reason, today):
 def run_identity(path):
     """The identity of the run whose durable log is at path: its Run approval's ID, else its first committed input's.
 
-    Every fresh run but an engine's first holds one Run approval of its own
-    (cmd/engine records it before it listens), and a resumed run's log holds
-    a copy of the crashed run's records, its approval included (ADR 0027,
-    section 6), so a crash's resume keeps the identity and a fresh run has
-    its own. A run with no approval is named by its log's first committed
+    Every fresh run holds one Run approval of its own (cmd/engine records it
+    before it listens), named by the run it follows; so does a first run in
+    paper or live mode, which does not start without one, named by its
+    declared start (as-of) and its payload's hash
+    (operator-run-approved:first-run:<as-of>:<payload hash>; ADR 0027,
+    amended 2026-10-18). A resumed run's log holds a copy of the crashed
+    run's records, its approval included (ADR 0027, section 6), so a crash's
+    resume keeps the identity and a fresh run has its own. Only a dry run's
+    first run may hold no approval: it is named by its log's first committed
     input, the configuration, which a resume copies first: its ID (the
     configuration's hash) and its recorded time (the run's as-of time), so
     two unapproved starts of other configurations or other as-of times are
-    two runs, never one. The residual: two unapproved starts with the same
-    configuration and as-of time (a first run started again the same day
-    from the same run.env, without -approval) share an identity, so the
-    second is taken for a resume of the first and is asked for the first
-    one's waiting input; nothing in the two logs tells them apart by
+    two runs, never one. The residual, for a dry run only: two unapproved
+    starts with the same configuration and as-of time (a first dry run
+    started again the same day from the same run.env) share an identity, so
+    the second is taken for a resume of the first and is asked for the
+    first one's waiting input; nothing in the two logs tells them apart by
     identity (delivering market data, delivery.stream_run stops such a
-    start: its log does not begin with the first run's record hash chain). Never
-    start a first run again without an approval (docs/manual/paper-trading.md,
-    "Starting the adapter"): a crashed first run is resumed, and any other
-    restart is a fresh run with its approval. Read as journalled_reports
-    reads the log. Fail
-    closed (ResolveRefused): a log with no committed input names no run,
-    and is never read as any run's.
+    start: its log does not begin with the first run's record hash chain).
+    A crashed first run is resumed, and any other restart is a fresh run
+    with its approval (docs/manual/paper-trading.md, "Starting the
+    adapter"). Read as journalled_reports reads the log. Fail closed
+    (ResolveRefused): a log with no committed input names no run, and is
+    never read as any run's.
     """
     return _identity(path, _committed_groups(path).groups)
 
@@ -1528,7 +1531,7 @@ def run_logs(path, today=None, settled=None):
     return logs
 
 
-def run_chain(path):
+def run_chain(path, verify_chain=False):
     """Each run of the chain from the engine's durable log at path, newest first: (log path, committed groups, approval).
 
     approval is the payload of the run's one committed Run approval, or None
@@ -1541,10 +1544,25 @@ def run_chain(path):
     after a close reads back to the last account snapshot or starting book
     of the chain (ADR 0019 and ADR 0027, amended 2026-10-18). Each log is
     read only when the walk reaches it. Fail closed (ResolveRefused), as
-    run_logs states.
+    run_logs states. With verify_chain, each log's committed records must
+    also hold their record hash chain (LOG_CHAIN_ALGORITHM) before its groups
+    are given: a log's final record hash binds its history only when every
+    record's own hash is the one the chain gives (ADR 0027), so a record
+    changed in place is refused, naming the log, never read as approved
+    history. (The comparison's walk, book_basis, verifies it; the chain is
+    otherwise the engine's to verify at a fresh run's start.)
     """
+    def read(log):
+        found = _committed_groups(log)
+        if verify_chain and found.chain_break is not None and found.chain_break <= len(found.record_hashes):
+            raise ResolveRefused(
+                "the engine's durable log {} breaks its record hash chain at sequence {}: a record there is not "
+                "the one the engine wrote, so its history is not read as approved (docs/runbooks/durable-log.md)"
+                .format(log, found.chain_break))
+        return found
+
     seen = {os.path.realpath(path)}
-    current, groups = path, _committed_groups(path).groups
+    current, groups = path, read(path).groups
     while True:
         approvals = [envelope for group in groups for _, kind, envelope in group
                      if kind == LOG_INPUT and envelope["type"] == RUN_APPROVED]
@@ -1567,15 +1585,24 @@ def run_chain(path):
         if os.path.realpath(previous) in seen:
             raise ResolveRefused("the Run approvals from {} name {} twice; the chain of runs must end at the first "
                                  "run".format(path, name))
-        read = _committed_groups(previous)
-        if read.final_hash is None or read.final_hash != approved_hash:
+        try:
+            earlier = read(previous)
+        except ResolveRefused as err:
+            # An earlier run's log is evidence the comparison and the
+            # reconciliation read back to (ADR 0027, amended 2026-10-18):
+            # one missing or unreadable stops for a person, named.
+            raise ResolveRefused(
+                "the Run approval in {} names {}, the run before it, but that log cannot be read ({}): every "
+                "earlier run's log of the chain stays beside the engine's, so put it back as the engine wrote it "
+                "(docs/runbooks/durable-log.md)".format(current, name, err)) from None
+        if earlier.final_hash is None or earlier.final_hash != approved_hash:
             raise ResolveRefused(
                 "the Run approval in {} names {} with final record hash {!r}, but that log's final record hash is "
                 "{}: it is not the log the owner approved, so its orders and reports are not taken as this "
                 "engine's (docs/manual/paper-trading.md)".format(current, name, approved_hash,
-                                                                 read.final_hash or "none (it holds no commit)"))
+                                                                 earlier.final_hash or "none (it holds no commit)"))
         seen.add(os.path.realpath(previous))
-        current, groups = previous, read.groups
+        current, groups = previous, earlier.groups
 
 
 def _yesterdays_session(today):

@@ -615,8 +615,16 @@ func TestTheFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
 	previousLog(t, logPath, event.Envelope{ID: "targets-decided:joint:1", Type: event.TargetsDecidedEventType, SchemaVersion: event.TargetsDecidedSchemaVersion,
 		Payload: encoded(t, event.TargetsDecidedPayload{Boost: event.BoostFigures{LatchedAfter: false}})})
 	stated := filepath.Join(dir, "stated.json")
-	if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-positions", "SPY=100", "-cash", "250.5", "-currency", "USD", "-out", stated, "-at", at); err != nil {
+	out, err = invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-positions", "SPY=100", "-cash", "250.5", "-currency", "USD", "-out", stated, "-at", at)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// The book the owner typed is echoed back, as a first run's is, so a
+	// typo is seen before the run starts rather than at the next halt.
+	for _, want := range []string{"SPY 100", "250.5 USD"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed %q, want it to echo %q", out, want)
+		}
 	}
 	raw, _ = os.ReadFile(stated)
 	if p, err = event.DecodeOperatorRunApproved(raw); err != nil || p.FirstRun() || p.StartingBook == nil || p.StartingBook.TotalCash != 250.5 {
@@ -636,10 +644,22 @@ func TestTheFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
 		"cash not a number":        {[]string{"-first-run", "-positions", "", "-cash", "lots", "-currency", "USD"}, "lots"},
 		"cash not finite":          {[]string{"-first-run", "-positions", "", "-cash", "NaN", "-currency", "USD"}, "NaN"},
 		"half a book":              {[]string{"-log", logPath, "-cash", "1", "-currency", "USD"}, "-positions"},
+		// A first run has no incident to clear; the flag is refused, never
+		// dropped in silence.
+		"a first run clearing an incident": {[]string{"-first-run", "-clear-incident", "engine-state:joint:1", "-positions", "", "-cash", "1", "-currency", "USD"}, "-clear-incident"},
+		// The adapter reads IBKR's cash in the account's currency, USD
+		// (adapter/ibkr snapshot.BASE_CURRENCY): a book in another is never
+		// compared, so it is refused here.
+		"a first run's book in another currency": {[]string{"-first-run", "-positions", "", "-cash", "134000", "-currency", "CAD"}, "USD"},
+		"a fresh run's book in another currency": {[]string{"-log", logPath, "-positions", "", "-cash", "134000", "-currency", "CAD"}, "USD"},
 	} {
-		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json"), "-at", at}, c.args...)
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", path, "-at", at}, c.args...)
 		if _, err := invoke(t, args...); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want it to mention %q", name, err, c.want)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: an approval was written (%v); every input is validated before anything is written", name, err)
 		}
 	}
 }

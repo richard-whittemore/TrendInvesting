@@ -697,9 +697,11 @@ before which the engine holds no book, carries it behind its snapshots, as
 the start-of-run reconciliation (ADR 0025 point 5), once the adapter has
 found the reading to be the previous close's book (condition 2): a reading
 that differs from an earlier run's last close or from the starting book, or
-has neither to compare with, has its reconciliation ahead of its snapshots
-instead, where the engine, holding no book, classifies it unverifiable and
-halts, so the difference is never adopted. The reconciliation of a start or
+has neither to compare with, sends its reconciliation alone instead, its
+snapshots withheld, where the engine, holding no book, classifies it
+unverifiable and halts, so the difference is never adopted, and no account
+snapshot of that reading is committed for a fresh run's first reading to be
+compared with later. The reconciliation of a start or
 a reconnect is read only once every execution IBKR replayed has its
 commission and its fill is recorded, and goes to the engine before any
 stream input, so no fill reaches the engine after a reconciliation that

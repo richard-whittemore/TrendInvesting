@@ -735,10 +735,12 @@ days), it takes them all, oldest first.
    replaces that book, so shares no fill explains are found (Degraded on
    the instrument), never quietly taken over. A run's first file, before
    which the engine holds no book, carries it behind the snapshots when the
-   reading matched the previous close or your starting book (above), and
-   **ahead of them when it did not**, or had nothing to be compared with:
-   the engine, holding no book, then finds the reconciliation unverifiable
-   and halts, so the difference is never taken as the book. At every later
+   reading matched the previous close or your starting book (above). When
+   it did not, or had nothing to be compared with, **the reconciliation goes
+   alone and both snapshots are withheld**: the engine, holding no book,
+   finds it unverifiable and halts, so the difference is never taken as the
+   book, and the halted run's log holds no snapshot of that reading for the
+   next run to be compared with. The adapter's log gives the reason. At every later
    start of the adapter, and every reconnect, the adapter sends one too,
    read once every trade IBKR replayed has its commission and its fill has
    reached the engine, and before any of the file's lines; if IBKR does not

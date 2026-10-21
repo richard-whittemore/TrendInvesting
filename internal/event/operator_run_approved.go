@@ -239,7 +239,9 @@ func (p OperatorRunApprovedPayload) firstRunErrors() []error {
 // 0015), then validates it. Version 1 could not state an incident's cash
 // scope, so a payload naming one is refused under it; version 2 holds it
 // (that the key was stated, null included, is checked where the raw JSON is
-// read, in DecodeRecordedOperatorRunApproved); any other version is refused.
+// read, in DecodeRecordedOperatorRunApproved); versions 1 and 2 cannot state
+// a starting book, which version 3 may (ADR 0027, amended 2026-10-18); any
+// other version is refused.
 func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 	switch version {
 	case 1, 2:
@@ -264,6 +266,11 @@ var approvalKeys = []string{"account_id", "previous_log", "previous_log_final_ha
 // when the approval states none.
 const startingBookKey = "starting_book"
 
+// startingBookKeys are the keys a stated starting book must state, none of
+// them null: a cash left out is never read as an approved zero balance (ADR
+// 0019: an unavailable balance is not zero; ADR 0027, amended 2026-10-18).
+var startingBookKeys = []string{"positions", "total_cash", "currency"}
+
 // incidentKeys are the keys an incident in force must state at schema
 // version 1; the sale's client order ID alone may be left out, when no sale
 // was sent. Version 2 adds incidentCashKey.
@@ -285,8 +292,11 @@ func DecodeOperatorRunApproved(raw []byte) (OperatorRunApprovedPayload, error) {
 // DecodeRecordedOperatorRunApproved decodes and validates an approval
 // recorded at schemaVersion, as DecodeOperatorRunApproved does: version 1
 // could not state an incident's cash scope, so it is read with none and may
-// not name one; version 2 must state it; any other version is refused (ADR
-// 0015).
+// not name one; versions 2 and 3 must state it; version 3 must also state
+// the starting_book key, null when the approval states no book, and a book
+// it states must state its positions, total_cash and currency, none null,
+// while versions 1 and 2 may not state the key; any other version is
+// refused (ADR 0015).
 func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (OperatorRunApprovedPayload, error) {
 	if schemaVersion < 1 || schemaVersion > OperatorRunApprovedSchemaVersion {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval's schema version %d is not one this build reads (1, 2 or %d; ADR 0015)", schemaVersion, OperatorRunApprovedSchemaVersion)
@@ -310,6 +320,22 @@ func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (Operat
 	}
 	if len(missing) > 0 {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval states no %s; every key is required, null where there is none", strings.Join(missing, ", "))
+	}
+	if statesBook {
+		var book map[string]json.RawMessage
+		if err := json.Unmarshal(keys[startingBookKey], &book); err != nil {
+			return OperatorRunApprovedPayload{}, fmt.Errorf("decode the approval's %s: it must be an object or null: %w", startingBookKey, err)
+		}
+		if book != nil {
+			for _, key := range startingBookKeys {
+				if value, ok := book[key]; !ok || string(bytes.TrimSpace(value)) == "null" {
+					missing = append(missing, startingBookKey+"."+key)
+				}
+			}
+		}
+		if len(missing) > 0 {
+			return OperatorRunApprovedPayload{}, fmt.Errorf("the approval states no %s; a starting book states its holdings, total cash and currency, none of them null", strings.Join(missing, ", "))
+		}
 	}
 	var incident map[string]json.RawMessage
 	if err := json.Unmarshal(keys["incident_in_force"], &incident); err != nil {

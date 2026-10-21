@@ -121,8 +121,10 @@ type Summary struct {
 	// CashChecked is set when the latest broker snapshot is the IBKR
 	// adapter's reading as of a close (version 2): CashDrift is then the
 	// cash drift since the previous close it accepted, within its daily
-	// bound, and UnexplainedCash that drift added up since the last
-	// reconciliation the engine explained (ADR 0019, amended 2026-10-18).
+	// bound, and UnexplainedCash that drift added up since the cash was
+	// last explained: a reconciliation the engine explained, or the owner's
+	// starting book, which is always the basis for Boost, whose book
+	// carries no cash (ADR 0019, amended 2026-10-18).
 	// CashUnchecked is set instead when that snapshot is a version-2 reading
 	// stamped at its read time, which checked no drift.
 	CashChecked     bool

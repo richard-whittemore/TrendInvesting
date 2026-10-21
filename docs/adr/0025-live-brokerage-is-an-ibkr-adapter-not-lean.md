@@ -201,8 +201,9 @@ reconciliation record this point calls for, in this flow:
   engine classifies the reading against that book before the new snapshot
   replaces it. In a run's first delivery, before which the engine holds no
   book, it goes behind them when the reading was found to be the previous
-  close's book, and ahead of them when it was not (or there was none to
-  compare with), where the engine classifies it unverifiable and halts;
+  close's book; when it was not (or there was none to compare with) it
+  goes alone, the snapshots withheld, and the engine classifies it
+  unverifiable and halts;
 - after every start and reconnect, once the engine holds a book, a
   reconciliation is read afresh once every execution IBKR replayed has its
   commission and its fill is recorded, and sent before any stream input; a

@@ -359,10 +359,11 @@ read is answered "method not allowed". If a log does not verify the page says
 - With the IBKR adapter, the summary shows the cash checks of the latest
   reading after the close (ADR 0019, amended 2026-10-18): "Cash drift since
   the previous close", the day's difference the adapter accepted (at most 1%
-  of net liquidation), and "unexplained cash since the last reconciliation
-  the engine explained", that difference added up since the cash was last
-  explained (for Boost, since the starting book you approved the account's
-  first run with). A figure that keeps growing is a posting no trade
+  of net liquidation), and "unexplained cash since the cash was last
+  explained", that difference added up since a reconciliation the engine
+  explained, or since the latest starting book you approved (for Boost
+  always that starting book, since its book carries no cash; approving a
+  fresh run with a new starting book starts the figure again from it). A figure that keeps growing is a posting no trade
   explains: check the account in IBKR. When the latest reading was stamped
   at its read time it says "Cash drift: not checked".
 

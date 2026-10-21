@@ -85,8 +85,9 @@ since the last cash explained) recorded beside it. Otherwise both are
 stamped at the read time, with the reason, and are IBKR's own reading, so
 the engine withholds the session; when the engine holds no book and the
 reading differs from the earlier run's close or the starting book, or has
-neither to compare with, its reconciliation goes ahead of its snapshots, so
-the engine, with no book, classifies it unverifiable and halts (ADR 0019).
+neither to compare with, its reconciliation goes alone, its snapshots
+withheld, so the engine, with no book, classifies it unverifiable and halts
+(ADR 0019).
 A stream entry is sent as the data job
 wrote it, with the engine's next sequence (the file's own is a file-local
 ordinal) and its send time as its recorded time, as every input the
@@ -106,8 +107,8 @@ its commission and its fill is recorded, and sent before any stream entry
 while its positions or cash cannot be read, then stopping the adapter for a
 person (ReconcileIncomplete); every batch carries one too, from its own
 reading, ahead of its snapshots once the engine holds a book (delivery.py);
-before it, a run's first batch carries one behind them, or ahead of them
-when the reading is unverified (above).
+before it, a run's first batch carries one behind them, or alone when the
+reading is unverified (above).
 
 The account reading is one consistent reading (ADR 0019: its components
 share one cutoff): every callback already received is applied first, so a
@@ -175,7 +176,7 @@ from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, Pendin
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from account import NET_LIQUIDATION, TOTAL_CASH
-from book_basis import cash_change, holdings_after, previous_close
+from book_basis import cash_change, fills_since, holdings_after, previous_close
 from book_basis import cents as _cents
 from snapshot import (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, CASH, NET, POSITIONS, RECONCILIATION_TYPE, Record,
                       account_snapshot_record, broker_snapshot_record, close_valuation, mark_record, read_account,
@@ -191,6 +192,9 @@ ENVELOPE_VERSION = 1
 # suffixes are .handover, .refused, .not-handed-over, .run, .run-ended,
 # .corrections, .late-fills and .lock, and relay.OUTBOX_SUFFIX the outbox's).
 HELD_SUFFIX = ".held"
+# The bases the runs before the one now running give its readings, kept once
+# per run (book_basis).
+BASIS_SUFFIX = ".basis"
 # The input types whose event time is in their payload.
 EVENT_TIME_FIELD = {LIFECYCLE_TYPE: "occurred_at", FILL_TYPE: "filled_at"}
 # How long, in seconds, the loop waits on the engine's thread between reads
@@ -746,6 +750,10 @@ class AdapterLoop:
                 marks = {s: last_prices[s] for s in confirm.positions if s in last_prices}
                 account = account_snapshot_record(confirm, confirm.as_of)
                 snapshot = broker_snapshot_record(confirm, market_open(confirm.as_of), marks, why=why)
+            if unverified:
+                log.warning("ibkr broker snapshot read_at=%s: the engine holds no book and the reading is not the "
+                            "book it was compared with, so only its reconciliation is sent, its snapshots withheld: "
+                            "the engine halts on it (docs/manual/reconciliation.md)", _stamp(confirm.as_of))
             return PostCloseReading(
                 account=account, broker=snapshot,
                 marks=[mark_record(s, close, closes[s], MARK_SOURCE, last_prices.get(s)) for s in sorted(closes)],
@@ -814,7 +822,9 @@ class AdapterLoop:
         - a check that needs no client ID: the holdings are the previous
           close's adjusted by the fills since, and the total cash is the
           previous close's adjusted by those fills, within CASH_DRIFT_BOUND
-          of the net liquidation (a posting such as interest or a dividend),
+          of the net liquidation at the close, or IBKR's own at the read
+          when the account cannot be valued at the close (a posting such as
+          interest or a dividend),
           the difference recorded as the cash drift; a corporate action, a
           transfer or a trade this client cannot see fails it. The previous
           close is found back through the chain of runs, or is the owner's
@@ -888,17 +898,21 @@ class AdapterLoop:
         chain back to, its total cash the reconciliation read with it, or
         the latest starting book an approval states (ADR 0019 and ADR 0027,
         amended 2026-10-18), with every fill committed since and those still
-        in the outbox. The holdings must be its own adjusted by those fills,
+        in the outbox, stamped at or after its as-of time and before the
+        read (book_basis.fills_since). The holdings must be its own adjusted by those fills,
         share for share, and the total cash its own adjusted by them within
-        CASH_DRIFT_BOUND of the net liquidation at the close; drift is the
+        CASH_DRIFT_BOUND of the net liquidation at the close (IBKR's own at
+        the read when valuation is None); drift is the
         cash difference, and unexplained the cash IBKR shows beyond the
         unexplained-cash basis and every fill since it, the drift added up.
         unverified is set when the engine holds no book (the basis is not
         this run's own account snapshot) and the reading failed the
         comparison or had nothing to be compared with: its reconciliation
-        then goes ahead of its snapshots (delivery._entries), never adopted.
+        then goes alone, its snapshots withheld (delivery._entries), never
+        adopted. A cash check that cannot be bounded fails the comparison,
+        and so does a basis that cannot be compared with (Basis.refused).
         """
-        daily, cumulative = previous_close(self._engine_log_path)
+        daily, cumulative = previous_close(self._engine_log_path, self._pending_path + BASIS_SUFFIX)
         committed = {i.id for i in read_engine_log(self._engine_log_path).inputs}
         pending = [e["payload"] for e in self.outbox.load()
                    if e["event_type"] == FILL_TYPE and e["id"] not in committed]
@@ -909,7 +923,13 @@ class AdapterLoop:
                            "first run with the holdings and cash checked in IBKR (operator approve -first-run; "
                            "docs/runbooks/first-paper-order.md)")
             return Decimal(0), Decimal(0), True
-        fills = daily.fills + pending
+        if daily.refused:
+            reasons.append(daily.refused)
+            return Decimal(0), Decimal(0), not daily.own
+        # Only the fills stamped at or after the basis's as-of time and before
+        # the read move it (book_basis.fills_since, internal/reconcile's
+        # window): one already in the book is never counted again.
+        fills = fills_since(daily.fills + pending, daily.as_of, reading.as_of)
         failed = False
         expected = holdings_after(daily.positions, fills)
         if expected != reading.positions:
@@ -925,13 +945,28 @@ class AdapterLoop:
             return Decimal(0), Decimal(0), not daily.own
         cash = reading.balances[TOTAL_CASH].amount
         drift = _cents(cash - (daily.cash + cash_change(fills)))
-        if valuation is not None and abs(drift) > CASH_DRIFT_BOUND * abs(valuation):
-            reasons.append("IBKR's total cash differs from that of {} and the {} fill(s) committed since by {}, "
-                           "beyond the {}% of net liquidation ({}) allowed for postings such as interest or a "
-                           "dividend".format(daily.source, len(fills), drift, (CASH_DRIFT_BOUND * 100).normalize(),
-                                             _cents(CASH_DRIFT_BOUND * abs(valuation))))
+        # The cash bound is part of the comparison (ADR 0019 condition 2): an
+        # account that cannot be valued at the close is bounded by IBKR's
+        # own net liquidation at the read, and with neither the check fails
+        # rather than pass unchecked (AGENTS.md: fail closed).
+        bound, basis = valuation, "net liquidation"
+        if bound is None and NET not in reading.unread and reading.balances[NET_LIQUIDATION].amount > 0:
+            bound, basis = reading.balances[NET_LIQUIDATION].amount, "IBKR's own net liquidation at the read"
+        if bound is None:
+            reasons.append("the account has no net liquidation the cash since {} can be bounded by, so the cash "
+                           "cannot be checked".format(daily.source))
             failed = True
-        unexplained = _cents(cash - (cumulative.cash + cash_change(cumulative.fills + pending)))
+        elif abs(drift) > CASH_DRIFT_BOUND * abs(bound):
+            reasons.append("IBKR's total cash differs from that of {} and the {} fill(s) committed since by {}, "
+                           "beyond the {}% of {} ({}) allowed for postings such as interest or a "
+                           "dividend".format(daily.source, len(fills), drift, (CASH_DRIFT_BOUND * 100).normalize(),
+                                             basis, _cents(CASH_DRIFT_BOUND * abs(bound))))
+            failed = True
+        if cumulative.refused:
+            reasons.append(cumulative.refused)
+            return drift, Decimal(0), not daily.own
+        since = fills_since(cumulative.fills + pending, cumulative.as_of, reading.as_of)
+        unexplained = _cents(cash - (cumulative.cash + cash_change(since)))
         return drift, unexplained, failed and not daily.own
 
     def _last_stamp(self, engine_log):

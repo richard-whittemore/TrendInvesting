@@ -48,6 +48,13 @@ import (
 
 const usage = "usage: operator <kill-switch|rebalance-cleared|acknowledge|approve> [flags]; see docs/manual/operator.md"
 
+// accountCurrency is the one currency a starting book is stated in: the IBKR
+// adapter reads IBKR's balances in it (adapter/ibkr snapshot.BASE_CURRENCY)
+// and compares a reading's cash with the book's, so a book in another would
+// subtract cash in two currencies (ADR 0019 and ADR 0027, amended
+// 2026-10-18). Multi-currency accounts are out of scope.
+const accountCurrency = "USD"
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -320,6 +327,8 @@ func approve(args []string, out io.Writer) error {
 	switch {
 	case *firstRun && *logPath != "":
 		return errors.New("operator: -first-run approves an account's first run, which has no previous log: leave out -log")
+	case *firstRun && set["clear-incident"]:
+		return errors.New("operator: -first-run approves an account's first run, which has no incident to clear: leave out -clear-incident")
 	case !*firstRun && *logPath == "":
 		return errors.New("operator: -log is required: the previous run's durable log (or -first-run for an account's first run)")
 	case *outPath == "":
@@ -399,6 +408,9 @@ func startingBook(set map[string]bool, positions, cash, currency string, require
 			return nil, fmt.Errorf("operator: -%s is required: a starting book states the holdings (-positions, empty when none), the total cash (-cash) and its currency (-currency) checked in IBKR", name)
 		}
 	}
+	if currency != accountCurrency {
+		return nil, fmt.Errorf("operator: -currency %q: the adapter reads IBKR's cash in %s, so state IBKR's %s TotalCashValue with -currency %s", currency, accountCurrency, accountCurrency, accountCurrency)
+	}
 	book := &event.StartingBook{Positions: []event.AccountPosition{}, Currency: currency}
 	seen := map[string]bool{}
 	if positions != "" {
@@ -431,17 +443,24 @@ func startingBook(set map[string]bool, positions, cash, currency string, require
 // operator does next.
 func describeFirstRun(out io.Writer, approval event.OperatorRunApprovedPayload, path string) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "the account's first run starts from the book you checked in IBKR: holdings")
-	if len(approval.StartingBook.Positions) == 0 {
-		b.WriteString(" none")
-	}
-	for _, p := range approval.StartingBook.Positions {
-		fmt.Fprintf(&b, " %s %d", p.InstrumentID, p.Quantity)
-	}
-	fmt.Fprintf(&b, ", total cash %s %s; the adapter compares its first reading after a close with it\n", strconv.FormatFloat(approval.StartingBook.TotalCash, 'f', -1, 64), approval.StartingBook.Currency)
+	b.WriteString("the account's first run starts from the book you checked in IBKR: ")
+	writeBook(&b, *approval.StartingBook)
 	fmt.Fprintf(&b, "wrote %s: start the first run with -approval %s (docs/runbooks/first-paper-order.md)\n", path, path)
 	_, err := io.WriteString(out, b.String())
 	return err
+}
+
+// writeBook writes the holdings and cash of book, as the owner typed them,
+// and what the adapter does with it, so a typo is seen before the run starts.
+func writeBook(b *strings.Builder, book event.StartingBook) {
+	b.WriteString("holdings")
+	if len(book.Positions) == 0 {
+		b.WriteString(" none")
+	}
+	for _, p := range book.Positions {
+		fmt.Fprintf(b, " %s %d", p.InstrumentID, p.Quantity)
+	}
+	fmt.Fprintf(b, ", total cash %s %s; the adapter compares its first reading after a close with it\n", strconv.FormatFloat(book.TotalCash, 'f', -1, 64), book.Currency)
 }
 
 // create writes raw at path, refusing to replace anything there.
@@ -483,7 +502,12 @@ func describe(out io.Writer, name string, end restart.EndState, approval event.O
 	default:
 		b.WriteString("; it ended normal")
 	}
-	fmt.Fprintf(&b, "\nwrote %s: start the fresh run with -approval %s (docs/runbooks/durable-log.md, \"Restarting an engine\")\n", path, path)
+	b.WriteString("\n")
+	if approval.StartingBook != nil {
+		b.WriteString("the fresh run starts from the book you checked in IBKR, not the previous run's last close: ")
+		writeBook(&b, *approval.StartingBook)
+	}
+	fmt.Fprintf(&b, "wrote %s: start the fresh run with -approval %s (docs/runbooks/durable-log.md, \"Restarting an engine\")\n", path, path)
 	if end.KillSwitchEngaged {
 		b.WriteString("the kill switch was engaged when it ended; a fresh run starts with it released, so record it again with `operator kill-switch -state engaged` before starting the engine\n")
 	}

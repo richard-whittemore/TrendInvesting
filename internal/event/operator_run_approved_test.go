@@ -346,6 +346,26 @@ func TestAFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
 	if err != nil || back.StartingBook == nil || back.StartingBook.TotalCash != -4211.37 || len(back.StartingBook.Positions) != 2 {
 		t.Fatalf("round trip = %+v, %v from %s", back.StartingBook, err, raw)
 	}
+	// A starting book that does not state its cash is refused, never read
+	// as an approved zero balance: an unavailable balance is not zero (ADR
+	// 0019), and the book is the owner's to state (ADR 0027, amended
+	// 2026-10-18).
+	for name, cash := range map[string]string{"omitted": "", "null": `"total_cash":null,`} {
+		book := strings.Replace(string(raw), `"total_cash":-4211.37,`, cash, 1)
+		if book == string(raw) {
+			t.Fatalf("setup: %s holds no total_cash to replace", raw)
+		}
+		if _, err := event.DecodeOperatorRunApproved([]byte(book)); err == nil || !strings.Contains(err.Error(), "total_cash") {
+			t.Errorf("a starting book with its cash %s: %v", name, err)
+		}
+	}
+	var asObject map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &asObject)
+	asObject["starting_book"] = json.RawMessage(`[]`)
+	notABook, _ := json.Marshal(asObject)
+	if _, err := event.DecodeOperatorRunApproved(notABook); err == nil || !strings.Contains(err.Error(), "object or null") {
+		t.Errorf("a starting book that is no object: %v", err)
+	}
 	chained, _ := json.Marshal(validOperatorRunApproved())
 	if !strings.Contains(string(chained), `"starting_book":null`) {
 		t.Errorf("an approval stating no book does not say so: %s", chained)

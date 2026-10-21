@@ -188,6 +188,15 @@ Two conservative choices, both of which can only make a sale smaller:
   reconciliation would be unverifiable and halt the account, so the adapter
   sends none until the engine holds a book; the run's first delivery carries
   the first, right behind its account snapshot.
+- **A run's first reading that is not the book it was compared with** (the
+  previous run's last close, or your starting book). The adapter sends its
+  reconciliation alone and withholds its snapshots, so the engine, holding
+  no book, finds it unverifiable and halts, and nothing of that reading is
+  taken as the book, by this run or the next. Clear it with a fresh run whose
+  approval states the book you check in IBKR (`operator approve -log ...
+  -clear-incident ... -positions ... -cash ... -currency USD`;
+  [restart](restart.md)): without one, the fresh run is compared with the
+  same book again and halts again.
 - **IBKR cannot be read.** Unverifiable, Halted. The alert names what could not
   be read.
 - **A dividend, interest charge or fee the journal has not recorded.** The cash

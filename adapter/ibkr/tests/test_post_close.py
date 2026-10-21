@@ -166,11 +166,6 @@ class PostCloseTests(unittest.TestCase):
         self.deliver()
         self.assert_stamped_at_read_time("net liquidation", "-10")
 
-    def test_a_holding_with_no_bar_in_the_batch_cannot_be_valued_at_the_close(self):
-        self.fake.positions.append((ACCOUNT, contract(con_id=8314, symbol="IEF"), Decimal("10"), 95.1))
-        self.deliver()
-        self.assert_stamped_at_read_time("IEF", "official close")
-
     # -- the account since the previous close (ADR 0019, amended 2026-10-18) --
     def two_closes(self, between=lambda loop: None):
         """THURSDAY's batch read that evening, then FRIDAY's that evening, with between run in the day between."""
@@ -279,33 +274,83 @@ class PostCloseTests(unittest.TestCase):
                          [ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE, RECONCILIATION, BAR, MARK, CLOSED])
         self.assertEqual(self.sent(BROKER_SNAPSHOT_TYPE)[0]["payload"]["as_of"], CLOSE)
 
+    def withheld(self, act, *why):
+        """act() run: the reading it delivers is never sent as a book, only its reconciliation, then the day's lines.
+
+        The engine, holding no book, classifies that reconciliation
+        unverifiable and halts (ADR 0019); with no account snapshot of the
+        reading committed, the halted run's latest snapshot is never IBKR's
+        unchecked book. The reason is in the adapter's log.
+        """
+        with self.assertLogs("ibkr", "INFO") as logs:
+            act()
+        self.assertEqual([e["type"] for e in self.engine.inputs()], [RECONCILIATION, BAR, MARK, CLOSED])
+        text = "\n".join(logs.output)
+        self.assertIn("snapshots withheld", text)
+        for part in why:
+            self.assertIn(part, text)
+        return text
+
     def test_a_change_before_a_fresh_runs_first_batch_is_never_adopted(self):
         # 50 SPY moved in between the runs, with no execution this adapter
         # saw: the fresh run's first reading differs from the earlier run's
-        # last close, so it is stamped at its read time and its
-        # reconciliation goes ahead of the snapshots, where the engine, with
+        # last close, so only its reconciliation goes, where the engine, with
         # no book, classifies it unverifiable and halts (ADR 0019).
-        self.fresh_run(lambda: setattr(self.fake, "positions", [(ACCOUNT, contract(), Decimal("197"), 312.5)]))
-        self.assertEqual([e["type"] for e in self.engine.inputs()][:3],
-                         [RECONCILIATION, ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE])
-        why = self.assert_stamped_at_read_time("SPY 197", "SPY 147")
+        why = self.withheld(lambda: self.fresh_run(
+            lambda: setattr(self.fake, "positions", [(ACCOUNT, contract(), Decimal("197"), 312.5)])),
+            "SPY 197", "SPY 147")
         self.assertIn(RUN + ".log", why, "names the earlier run whose close it was compared with")
 
     def test_a_first_runs_first_batch_is_compared_with_the_owners_starting_book(self):
         self.restart_engine(run_approval(ACCOUNT, starting_book=({"SPY": 100}, 100000.0)))
-        self.deliver()
-        self.assertEqual([e["type"] for e in self.engine.inputs()][:3],
-                         [RECONCILIATION, ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE])
-        why = self.assert_stamped_at_read_time("SPY 147", "SPY 100")
-        self.assertIn("starting book", why)
+        self.withheld(self.deliver, "SPY 147", "SPY 100", "starting book")
 
     def test_a_first_run_with_no_starting_book_is_never_adopted(self):
         self.restart_engine(None)
+        self.withheld(self.deliver, "starting book", "operator approve -first-run")
+
+    def test_a_holding_that_cannot_be_valued_at_the_close_still_has_its_cash_checked(self):
+        # IEF has no bar in the batch, so the account cannot be valued at the
+        # close; $50,000 no fill explains is bounded by IBKR's own net
+        # liquidation at the read instead, and fails (ADR 0019 condition 2).
+        self.restart_engine(run_approval(ACCOUNT, starting_book=({"IEF": 10, "SPY": 147}, 100000.0)))
+        self.fake.positions.append((ACCOUNT, contract(con_id=8314, symbol="IEF"), Decimal("10"), 95.1))
+        self.cash("150000.00")
+        self.withheld(self.deliver, "50000", "net liquidation at the read")
+
+    def test_a_holding_with_no_bar_in_the_batch_cannot_be_valued_at_the_close(self):
+        # The starting book holds IEF too, and the cash is within the bound
+        # of IBKR's own net liquidation at the read: IBKR's own reading.
+        self.restart_engine(run_approval(ACCOUNT, starting_book=({"IEF": 10, "SPY": 147}, 100000.0)))
+        self.fake.positions.append((ACCOUNT, contract(con_id=8314, symbol="IEF"), Decimal("10"), 95.1))
+        self.cash("100012.50")
         self.deliver()
-        self.assertEqual([e["type"] for e in self.engine.inputs()][:3],
-                         [RECONCILIATION, ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE])
-        why = self.assert_stamped_at_read_time("starting book")
-        self.assertIn("operator approve -first-run", why)
+        self.assert_stamped_at_read_time("IEF", "official close")
+
+    def test_a_fill_the_starting_book_already_shows_is_not_counted_again(self):
+        # The owner checked IBKR's 147 SPY, then approved (at
+        # 2026-10-17T14:00:00Z); IBKR replays the earlier execution of 9 of
+        # them, which waits in the outbox when the batch is read: it is in
+        # the book, never added to it (ADR 0019: one cutoff).
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        payload = {"account_id": ACCOUNT, "client_order_id": "tw-synthetic", "fill_id": "0001f4e8.t.01.01",
+                   "instrument_id": "SPY", "side": "buy", "quantity": 9, "price": 401.25, "commission": 1.0,
+                   "filled_at": "2026-10-17T13:00:00Z"}
+        loop.submit(FILL_TYPE, 1, payload, payload["filled_at"])
+        with mock.patch.object(loop, "_drain"):
+            loop.step()
+        for _ in range(40):
+            loop.step()
+        broker = self.sent(BROKER_SNAPSHOT_TYPE)[0]["payload"]
+        self.assertEqual((broker["as_of"], broker["cash_drift"]), (CLOSE, 0), broker["not_as_of_close"])
+
+    def test_a_starting_book_in_another_currency_is_never_compared(self):
+        approval = run_approval(ACCOUNT, starting_book=({"SPY": 147}, 100000.0))
+        approval["starting_book"]["currency"] = "CAD"
+        self.restart_engine(approval)
+        self.withheld(self.deliver, "'CAD'", "USD")
 
     # -- the start and reconnect reconciliation stops for a person ----------
     def test_a_reconciliation_whose_cash_is_never_read_stops_for_a_person(self):

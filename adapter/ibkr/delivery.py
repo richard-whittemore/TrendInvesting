@@ -147,8 +147,8 @@ account.snapshot, the broker snapshot, the marks (one per instrument the batch's
 for, in instrument order), each a snapshot.Record, and the snapshot.AccountReading they were made from.
 unverified is set when the engine holds no book and the reading differs from the book it was compared with
 (an earlier run's last close or the owner's starting book, book_basis), or has none to compare with: its
-reconciliation then goes ahead of its snapshots, so the engine classifies it with no book, unverifiable, and
-halts, never adopting it (ADR 0019 and ADR 0027, amended 2026-10-18)."""
+reconciliation then goes alone, its snapshots withheld, so the engine classifies it with no book,
+unverifiable, and halts, never adopting it (ADR 0019 and ADR 0027, amended 2026-10-18)."""
 
 Stream = namedtuple("Stream", "name session first sha256 envelopes")
 """One stream file read strictly: its file name, its last session (which its name gives and its last line
@@ -667,8 +667,11 @@ class Deliverer:
     def _finish(self, batch):
         """Settle a batch a stop left QUEUING; True once it is QUEUED (or DROPPED, an earlier run's)."""
         recorded = {e["id"] for e in self._outbox.load()}
-        if batch["snapshot"] not in recorded and batch["snapshot"] not in {
-                i.id for i in read_engine_log(self._engine_log_path).inputs}:
+        # The reconciliation is in every batch, its snapshots withheld when
+        # the reading is unverified (_entries), so it marks a batch queued.
+        queued_by = (batch["snapshot"], _derived(batch["snapshot"], RECONCILIATION_TYPE))
+        committed = {i.id for i in read_engine_log(self._engine_log_path).inputs}
+        if not any(i in recorded or i in committed for i in queued_by):
             if batch["run"] != self.run:
                 # Never recorded or sent, and its run is not running: the run
                 # now running has its own stream from its warm-up.
@@ -752,9 +755,14 @@ def _entries(run, snapshot_id, reading, streams, book):
     adopted. With no book yet, the account.snapshot, the broker snapshot,
     then the start-of-run reconciliation (ADR 0025 point 5), once the
     adapter found the reading to be the earlier run's last close or the
-    owner's starting book adjusted by the fills since; a reading that is
-    not (reading.unverified) has its reconciliation first too, which the
-    engine, with no book, classifies unverifiable and halts on. Then every
+    owner's starting book adjusted by the fills since. A reading that is
+    not (reading.unverified) sends its reconciliation alone, its snapshots
+    withheld: the engine, with no book, classifies it unverifiable and
+    halts on it, and no account.snapshot of a reading never checked is
+    committed, so the halted run's latest snapshot, which a fresh run's
+    first reading is compared with (book_basis), is never IBKR's unchecked
+    book (ADR 0019, amended 2026-10-18: IBKR's book is never adopted
+    unchecked). Then every
     envelope of each file in order, with each mark just before the last
     session's close, so the engine reads the account snapshot, the bar, the
     mark, then the close that decides.
@@ -766,7 +774,10 @@ def _entries(run, snapshot_id, reading, streams, book):
     reconciliation = adapter_entry(reconciliation_record(reading.reading, reconciliation_id), reconciliation_id)
     entries = [adapter_entry(reading.account, _derived(snapshot_id, ACCOUNT_SNAPSHOT_TYPE)),
                adapter_entry(reading.broker, snapshot_id)]
-    entries = [reconciliation] + entries if book or reading.unverified else entries + [reconciliation]
+    if reading.unverified:
+        entries = [reconciliation]
+    else:
+        entries = [reconciliation] + entries if book else entries + [reconciliation]
     last_close = streams[-1].envelopes[-1]["id"]
     # A retraction a later file repeats (_repeats) is recorded once, as the
     # first file wrote it.

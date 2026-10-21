@@ -224,6 +224,9 @@ class DeliveryTests(unittest.TestCase):
                                                   "mark_set": True}])
 
     def test_a_holding_with_no_contract_number_is_stated_without_a_mark_and_not_asked_for(self):
+        Path(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, starting_book=({"IEF": 5, "SPY": 147}, 100000.0)))
         self.fake.positions.append((ACCOUNT, contract(con_id=8314, symbol="IEF"), Decimal("5"), 95.1))
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
@@ -347,6 +350,28 @@ class DeliveryTests(unittest.TestCase):
         self.settle(restarted)
         self.assertEqual(self.types(), FIRST + DAY)
         self.assertEqual(len(self.fake.called("req_mkt_data")), 1, "one snapshot: the one recorded")
+
+    def test_a_crash_before_the_record_closes_on_a_reading_never_checked_queues_nothing_twice(self):
+        # The reading is not the starting book, so the batch's
+        # reconciliation goes alone, its snapshots withheld (delivery.py):
+        # the reconciliation, not the broker snapshot, shows it was queued.
+        Path(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, starting_book=({"SPY": 100}, 100000.0)))
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        import delivery
+        with mock.patch.object(delivery.DeliveryRecord, "mark_queued",
+                               side_effect=OSError("synthetic: the machine stopped")):
+            with self.assertRaises(OSError):
+                loop.step()
+        self.assertEqual(len(loop.outbox.load()), 4)
+        loop.close()
+        restarted = self.loop()
+        restarted.start()
+        self.settle(restarted)
+        self.assertEqual(self.types(), [RECONCILIATION] + DAY)
 
     def test_a_crash_after_the_engine_committed_and_before_the_reply_asks_again_under_the_same_id(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
