@@ -374,7 +374,15 @@ refused_after "--recreate while the engine runs" "ti-engine@boost.service" --rec
 refused_after "--recreate while the adapter runs" "ti-adapter-boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-adapter-boost.service"
 # Every running unit is named in the remedy, each with its own stop command,
 # the adapter before its engine, joined by && so a failed stop ends the chain.
-refused_after "--recreate while both run" "docker exec ti systemctl stop ti-adapter-boost.service && docker exec ti systemctl stop ti-engine@boost.service; if either stop fails, stop there and read docker exec ti journalctl -u <unit> before going on" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service"
+refused_after "--recreate while both run" "docker exec ti systemctl stop ti-adapter-boost.service && docker exec ti systemctl stop ti-engine@boost.service; if either stop fails, stop there and read docker exec ti journalctl -u ti-adapter-boost.service (and the same for ti-engine@boost.service)" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service"
+# Three or more units: "any" of the stops, the first unit named and the rest
+# said to be the same.
+refused_after "--recreate while three run" "if any of these stops fails, stop there and read docker exec ti journalctl -u ti-adapter-boost.service (and the same for the others)" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service ti-engine@cde.service"
+# Two adapters and two engines: every adapter's stop comes before every
+# engine's, whatever order systemd lists them in.
+refused_after "--recreate while two adapters and two engines run" "systemctl stop ti-adapter-cde.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service ti-engine@cde.service ti-adapter-cde.service"
+stop_units=$(grep -o 'systemctl stop [^ ;]*' "$work/out" | sed 's/^systemctl stop //' | tr '\n' ' ')
+test "$stop_units" = "ti-adapter-boost.service ti-adapter-cde.service ti-engine@boost.service ti-engine@cde.service " || fail "two adapters and two engines are not stopped adapters first: '$stop_units' in $(cat "$work/out")"
 # systemd not answering which units run: refused, saying so, before anything
 # is stopped.
 refused_after "--recreate when systemd does not list its units" "cannot ask systemd" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_LIST_FAILS=1

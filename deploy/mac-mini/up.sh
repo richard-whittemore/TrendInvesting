@@ -303,8 +303,17 @@ if test "$exists" = 1 && test "$recreate" = 1; then
     # chain at a failed stop, leaving the engine running to be looked at.
     stop_cmds=
     for u in $stop_order; do stop_cmds="${stop_cmds:+$stop_cmds && }docker exec $name systemctl stop $u"; done
+    # The remedy names the units that run, so the owner reads the journal of
+    # the one whose stop failed: "either" for two, "any" for more.
+    read -r -a stop_units <<<"$stop_order"
+    case ${#stop_units[@]} in
+      0) stop_note= ;;
+      1) stop_note="if the stop fails, stop there and read docker exec $name journalctl -u ${stop_units[0]}" ;;
+      2) stop_note="if either stop fails, stop there and read docker exec $name journalctl -u ${stop_units[0]} (and the same for ${stop_units[1]})" ;;
+      *) stop_note="if any of these stops fails, stop there and read docker exec $name journalctl -u ${stop_units[0]} (and the same for the others)" ;;
+    esac
     if test -n "$running"; then
-      refuse "refusing to remove $name while $running runs: stop it first, the adapter before its engine ($stop_cmds; if either stop fails, stop there and read docker exec $name journalctl -u <unit> before going on), then run up.sh --recreate again"
+      refuse "refusing to remove $name while $running runs: stop it first, the adapter before its engine ($stop_cmds; $stop_note), then run up.sh --recreate again"
     fi
     # systemd shuts its units down in order on the image's STOPSIGNAL; the
     # bound is the container's --stop-timeout.
