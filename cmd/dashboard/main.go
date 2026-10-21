@@ -154,6 +154,11 @@ type account struct {
 	Summary report.Summary
 	Alerts  []alertView
 	Warning string `json:",omitempty"`
+	// Name and Message, set for an engine directory that shows no run, are
+	// the whole card: the directory's name, and "<name>: <why>", in place of
+	// the account's figures. Every other account still renders in full.
+	Name    string `json:",omitempty"`
+	Message string `json:",omitempty"`
 }
 
 type alertView struct {
@@ -248,17 +253,28 @@ func readOnly(next http.Handler) http.Handler {
 // the page says so about rather than calling the journal unavailable.
 var errNoRun = errors.New("the engine directory holds no run yet")
 
-// fail answers without naming the server's paths. A broken chain of runs
-// never reaches it: the page shows it on the equity card (load).
-func fail(w http.ResponseWriter, err error) {
-	message := "journal unavailable"
+// errAbandoned is the engine directory holding only starts that never
+// recorded their approval: a run that started and crashed, not a first start.
+var errAbandoned = errors.New("the engine directory holds only abandoned starts")
+
+// reason says why a journal is not shown, without naming the server's paths.
+// A broken chain of runs never reaches it: the page shows it on the equity
+// card (load).
+func reason(err error) string {
 	switch {
 	case errors.Is(err, errNoRun):
-		message = "no run yet: the engine has not started a run"
+		return "no run yet: the engine has not started a run"
+	case errors.Is(err, errAbandoned):
+		return "the engine started a run but recorded no approval"
 	case strings.Contains(err.Error(), "does not verify"):
-		message = "journal does not verify"
+		return "journal does not verify"
 	}
-	http.Error(w, message, http.StatusInternalServerError)
+	return "journal unavailable"
+}
+
+// fail answers a fixed journal that cannot be shown.
+func fail(w http.ResponseWriter, err error) {
+	http.Error(w, reason(err), http.StatusInternalServerError)
 }
 
 // source is where the accounts' logs are: fixed journals, and engine
@@ -272,7 +288,7 @@ type source struct{ journals, dirs []string }
 // the current run's holdings, state, alerts and day's figures do not depend
 // on it.
 func load(src source, benchmark string, logs *logCache) ([]account, error) {
-	type current struct{ path, warning string }
+	type current struct{ path, warning, name, message string }
 	var paths []current
 	for _, path := range src.journals {
 		paths = append(paths, current{path: path})
@@ -280,12 +296,19 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 	for _, dir := range src.dirs {
 		path, warning, err := currentLogIn(dir, logs)
 		if err != nil {
-			return nil, err
+			// One directory's trouble is that account's card only.
+			name := filepath.Base(dir)
+			paths = append(paths, current{name: name, message: name + ": " + reason(err)})
+			continue
 		}
-		paths = append(paths, current{path, warning})
+		paths = append(paths, current{path: path, warning: warning})
 	}
 	var out []account
 	for _, c := range paths {
+		if c.message != "" {
+			out = append(out, account{Name: c.name, Message: c.message})
+			continue
+		}
 		raw, err := logs.readFile(c.path)
 		if err != nil {
 			return nil, errors.New("read journal")
@@ -339,6 +362,9 @@ func currentLogIn(dir string, logs *logCache) (path, warning string, err error) 
 		return "", "", err
 	}
 	if head == "" {
+		if len(files) > 0 {
+			return "", "", errAbandoned
+		}
 		return "", "", errNoRun
 	}
 	if newer != "" {

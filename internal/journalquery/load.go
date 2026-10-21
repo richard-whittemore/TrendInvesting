@@ -4,8 +4,9 @@
 // fills build, and the refusals and engine-state changes along the way.
 //
 // It is read-only by construction: every function takes bytes already read
-// and returns a table, so nothing here can write to a journal or reach an
-// engine. A journal is trusted only after journal.Verify accepts it; a file
+// and returns a table, except the directory listing (ListLogs), which only
+// reads a directory's entries, so nothing here can write to a journal or
+// reach an engine. A journal is trusted only after journal.Verify accepts it; a file
 // whose hash chain does not verify is refused whole, naming the record where
 // it breaks, and no figure from it is reported (ADR 0017). Any index a caller
 // builds from these tables is a disposable copy, never a second source of

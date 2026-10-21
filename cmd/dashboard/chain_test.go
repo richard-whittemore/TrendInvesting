@@ -253,11 +253,72 @@ func TestDashboardOfAFixedJournalStillFollowsTheChain(t *testing.T) {
 
 // TestDashboardOfAnEngineDirectoryWithNoRunSaysSo: a directory the engine has
 // not started a run in is a first start, not a damaged log, so the page says
-// there is no run yet rather than that the journal is unavailable.
+// there is no run yet, naming the account, rather than that the journal is
+// unavailable.
 func TestDashboardOfAnEngineDirectoryWithNoRunSaysSo(t *testing.T) {
-	h := newHandlerFor(nil, []string{t.TempDir()}, "SPY")
-	rec := get(h, http.MethodGet, "/api/summary.json")
-	if got := strings.TrimSpace(rec.Body.String()); got != "no run yet: the engine has not started a run" {
-		t.Fatalf("status %d body %q, want the no-run message", rec.Code, got)
+	dir := filepath.Join(t.TempDir(), "trad-ira")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(newHandlerFor(nil, []string{dir}, "SPY"), http.MethodGet, "/")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "trad-ira: no run yet: the engine has not started a run") {
+		t.Fatalf("status %d body %q, want the account's no-run message", rec.Code, rec.Body)
+	}
+}
+
+// TestDashboardDegradesPerAccount: an engine directory with no run, or one
+// that cannot be read, shows its own message and never blanks the other
+// accounts' cards.
+func TestDashboardDegradesPerAccount(t *testing.T) {
+	root := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	good := filepath.Join(root, "boost")
+	empty := filepath.Join(root, "trad-ira")
+	for _, d := range []string{good, empty} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRun(t, good, "run1.log", approval("", ""), 0, base, halted(t, 5))
+	missing := filepath.Join(root, "gone")
+	h := newHandlerFor(nil, []string{good, empty, missing}, "SPY")
+	rec := get(h, http.MethodGet, "/")
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, body)
+	}
+	for _, want := range []string{"trad-ira: no run yet", "gone: journal unavailable", "acct-joint", "halted"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, root) {
+		t.Error("the page must not leak the server's paths")
+	}
+	rec = get(h, http.MethodGet, "/api/summary.json")
+	var accounts []account
+	if err := json.Unmarshal(rec.Body.Bytes(), &accounts); err != nil || len(accounts) != 3 || accounts[0].Summary.EngineState != "halted" || accounts[1].Message == "" {
+		t.Fatalf("accounts = %+v, err = %v", accounts, err)
+	}
+}
+
+// TestDashboardOfOnlyAbandonedStartsSaysTheEngineStarted: a directory holding
+// only a log with no approval is a run that started and crashed, not a first
+// start.
+func TestDashboardOfOnlyAbandonedStartsSaysTheEngineStarted(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "boost")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var file memoryFile
+	if _, err := journal.CreateLog(&file, journal.NewLogHeader("h", "v")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run1.log"), file.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := get(newHandlerFor(nil, []string{dir}, "SPY"), http.MethodGet, "/").Body.String()
+	if !strings.Contains(body, "boost: the engine started a run but recorded no approval") || strings.Contains(body, "has not started a run") {
+		t.Fatalf("body %q", body)
 	}
 }
