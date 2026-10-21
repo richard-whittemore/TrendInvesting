@@ -80,7 +80,7 @@ backtest runs on their servers.
 - `shorting/` — `trend_template.py` (a 200-day trend rule going to cash or
   short) and `factors_ls.py` (the factor script with long/short and 130/30
   momentum modes and a borrow fee).
-- `build_variants.py` — writes all 98 follow-up variants exactly as run,
+- `build_variants.py` — writes every follow-up variant exactly as run,
   from these templates and a local TB3MS CSV.
 - `momentum/` — `momentum.py`, the long/short factor script plus a switch
   for entries-and-exits-only trading and a volatility-scaling crash guard,
@@ -94,9 +94,12 @@ backtest runs on their servers.
   left in cash for a month. Every other stock-universe script keeps the
   original behaviour so its recorded runs reproduce.
 - `portfolio/blend.py` — several runs' equity curves combined as separate,
-  never-rebalanced accounts: CAGR, month-end drawdown, correlations and the
-  longest stretch behind SPY; `strategies_together.json` is the recorded
-  spec (exports not committed).
+  never-rebalanced accounts, or as one account reset to its weights every
+  month (a book marked `"monthly"`): CAGR, month-end drawdown, correlations
+  and the longest stretch behind SPY. The recorded specs (exports not
+  committed) are `strategies_together.json`, `bonds.json` (momentum with a
+  bond fund, for retirement accounts) and `bonds_blend.json` (the same with
+  short and intermediate bonds together).
 - `tax/tax_drag.py` — the federal tax cost of a strategy in a taxable
   account, from a run's fills and equity (export not committed).
 - `boost/lev_etf_template.py` — Boost with the extra exposure from a 2x or
@@ -107,10 +110,62 @@ backtest runs on their servers.
   close, with each broker's margin spread and commissions; and
   `defensive_v2.py`'s book traded some sessions after it is computed (a
   change made by hand).
+- `momentum/universe_parity.py` and `momentum/parity_compare.py` — the
+  universe parity study (`docs/live-trading/plan.md`, section 4).
+  `defensive_v2.py` with additions only: the month's universe can be limited
+  to IWB's holdings at least `ETF_LAG_DAYS` old (QuantConnect's US ETF
+  Constituents data, free in its cloud). `parity_compare.py` rebuilds two
+  runs' holdings month by month from their fills (the tax study's export
+  format; the Free plan's 10 KB logs are too small for ten years of picks),
+  and reports the stocks the books share and whether both were risk-off.
+- `momentum/glide_path.py` — the glide-path backtest
+  (`docs/live-trading/plan.md`, section 2). `defensive_v2.py` with additions
+  only: the combination plus a half-IEF/SHY bond sleeve in one account. Its
+  share follows the owner's age schedule from a chosen starting age, or is
+  held fixed for the comparison mixes.
+- `sectors/` — the sector-label check (`docs/live-trading/plan.md`,
+  section 4). `snapshot.py`, run once on QuantConnect, logs the backtest's
+  universe on one date with each stock's Morningstar sector; `compare.py`,
+  local, sets those against the GICS sectors in an iShares holdings file
+  and lists the disagreements. Tested by `sectors/test_sectors.py`.
+- `momentum/fresh_universe.py` — decision D8's timing
+  (`docs/research/universe-massive-2026-10.md`, Finding 2).
+  `defensive_v2.py` with additions only: with `FRESH_SELECTION` each
+  month's universe is chosen on the last session before the month, so the
+  first rebalance never ranks the previous month's universe; the
+  `Selections` statistic counts the months chosen before the 1st.
+- `momentum/minimum_lot.py` — the D7-L held-name study
+  (`docs/research/d7l-held-name-2026-10.md`). `fresh_universe.py` with
+  additions only: `MIN_LOT` adds ADR 0026's minimum-lot rule (a pick whose
+  one share at the raw close exceeds its target value is skipped for the
+  next eligible name), as written (`"literal"`) or with a held pick kept
+  untraded (`"held"`); the `MinLot` statistic counts what the rule did.
+- `momentum/golden_log.py` — golden cases for the Go target-weight module
+  (`docs/adr/0026-*.md`, point 7). `defensive_v2.py` with additions only:
+  for each month in `GOLDEN_MONTHS` it logs the risk-off inputs, the top
+  40 ranked names with score, volatility, sector and cap outcome, and the
+  final weights; the `Golden` statistic counts the lines logged.
+- `boost/golden_log.py` — golden cases for Boost's Go module
+  (`docs/adr/0026-*.md`, point 7). `boost/template.py` with additions only:
+  each trading day of the months in `GOLDEN_MONTHS`, and the first decision
+  after warm-up, logs the close, RSI(2), both averages, the boost state and
+  the target; the `Golden` statistic counts the lines.
+- `momentum/parity_log.py` and `boost/parity_log.py` — the parity check's
+  exports (`docs/adr/0026-*.md`, point 7, item 2;
+  `docs/research/parity-2026-10.md`). `fresh_universe.py` and `template.py`
+  with additions only: for each month in `PARITY_MONTHS` the momentum one
+  writes the rebalance's risk-off inputs, every scored name with its score,
+  volatility, sector and mark, the weights, and a sample of names' adjusted
+  closes; with `PARITY` the Boost one writes every bar's close, indicators
+  and state. The Free plan's log is too small and its object store cannot
+  be written, so each export rides in an order tag (`UpdateTag` on an order
+  the strategy places anyway, which changes no fill). `cmd/parity` reads
+  the orders and prints the pass/fail report.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same
-  blend without the rule. `etf/rotation.py`'s `country_rot` mode ranks
+  blend without the rule, and with one bond fund (IEF, TLT, SHY) it is the
+  bond holding for `portfolio/bonds.json`. `etf/rotation.py`'s `country_rot` mode ranks
   17 single-country funds outside the US the same way as `sector_rot`.
 - `futures/` — `carry.py` and `blend.py`, local studies on the
   `research/futures-local` engine and the Pinnacle files, which are not in

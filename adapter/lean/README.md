@@ -856,7 +856,7 @@ docker volume create trend30sock
 docker run -d --name trend30-engine -v trend30sock:/run/adapter -v <stage>:/stage \
   --entrypoint /stage/engine quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d \
   -socket /run/adapter/private/s.sock -config /stage/configuration.json -out /stage/journal.jsonl \
-  -as-of 2003-01-01T00:00:00Z
+  -mode backtest -as-of 2003-01-01T00:00:00Z
 lean backtest <project> --image quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d \
   --no-update --extra-docker-config '{"volumes": {"trend30sock": {"bind": "/run/adapter", "mode": "rw"}}}'
 docker stop trend30-engine   # the engine writes the journal on SIGTERM
@@ -864,7 +864,7 @@ go run ./cmd/backtest -verify <stage>/journal.jsonl
 go run ./cmd/backtest -replay <stage>/journal.jsonl
 ```
 
-The required `-as-of` is the run's declared start in RFC 3339: this example
+The required `-mode backtest` declares that nothing here reaches a broker (every other mode requires `-log`, ADR 0027). The required `-as-of` is the run's declared start in RFC 3339: this example
 uses `run.json`'s `"start": "2003-01-01"` as midnight UTC. Change both
 together. Missing, invalid or zero times refuse engine startup before the
 socket opens. The configuration input's `event_time` and `recorded_at` both

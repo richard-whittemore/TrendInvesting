@@ -313,6 +313,12 @@ So when the corpus asks you to add scenarios, ask of each one whether the previo
 - `internal/journal/` owns the run's journal: the append-only file of input and decision records, the hash chain that makes an edit to one detectable (ADR 0017), and the `Verify` path that recomputes it — knowing nothing of strategy rules, and deliberately not answering replay equivalence's question.
 - `internal/registry/` owns the run registry: the record of every run under its configuration hash (ADR 0012), the closed status vocabulary, and the layout that makes the record append-only and mergeable — one file per run, in a directory named for the hash, with no index file for two branches to conflict over. It performs no I/O of its own: like `internal/journal/` it defines the record and where it belongs, and `cmd/` installs it.
 - `internal/fills/` owns the intraday fill model (ADR 0005) and the cost model (ADR 0013): the resting orders in force for an instrument, learned from the reducer's own emissions, and the per-Session protocol (`RunSession`, ADR 0021) that turns one Session's completed bars into `execution.fill` events indistinguishable in shape from adapter-produced ones — kept separate from `internal/strategy/` because it decides what a venue did, never what the strategy should do.
+- `internal/targetweight/` owns the target-weight strategy module (ADR 0026, point 1): a `replay.Handler` that decides each account's target weights and records them as `strategy.targets.decided`, sharing nothing with `internal/strategy/`. Its rule cores are subpackages (`boost/`, `momentum/` and `glide/`), pure arithmetic over adjusted closes that know nothing of events.
+- `internal/orderplan/` owns the strategy-independent order planner (ADR 0026, point 2): it turns a target decision, the account snapshot and configuration into `strategy.order.planned` orders, and knows no strategy rule.
+- `internal/risklimit/` owns the hard-limit gate outside the strategy (ADR 0026, points 3 and 4): each planned order is released or refused, and a breach moves the account to Degraded or Halted. It also holds the engine state and its scope, the kill switch, the latest broker snapshot and the margin-cushion alarm, and decides when the sale back to 98% goes; the sale's sizing is `internal/orderplan`'s.
+- `internal/reconcile/` owns the reconciliation classifier (ADR 0019, "Explain changes by causing events"): the journal's book, the fills and corporate actions since it, and IBKR's observation give each position and the cash a residual, classified matched, explained, unexplained or unverifiable, with the scope an unexplained result degrades. It is pure and never adopts a broker figure; `internal/risklimit` holds the book and moves the engine state from its result.
+- `internal/restart/` owns the restart rules (ADR 0019, "The state survives a restart"; ADR 0026, point 5; ADR 0027 §6): which earlier log is the latest run, which logs are abandoned resume attempts or abandoned starts, how a log that cannot be read is classified, and whether a fresh run's approval restores the latch and incident the approved log ended in without loosening them. Its functions are pure over already-recovered records; `cmd/engine` finds, orders and reads the logs.
+- `internal/targetweight/momentum/` owns the IRAs' momentum combination rule (ADR 0026 point 1): universe ranking, 12-1 scores, the sector cap, inverse-volatility weights and risk-off, as plain inputs and outputs with no events, sharing nothing with `internal/strategy/` (AGENTS.md rule 4).
 - Future strategy packages must not import LEAN, database, or transport implementations.
 - `adapter/lean/` documents and will contain the deliberately thin Python boundary.
 
@@ -327,3 +333,56 @@ Each change should reference its GitHub issue (`#N`) and state:
 - unresolved assumptions.
 
 Never hide a failed research result by rewriting or removing its recorded configuration and evidence.
+
+## Review cost
+
+Bot reviews are metered, so:
+
+- Push once per review round. Batch all fixes for a round into one push.
+- While automatic review is active, do not request a bot review manually.
+  Every review event, whether an automatic incremental review on a push or a
+  manual request, uses one review from CodeRabbit's per-developer hourly
+  allowance (usage charges apply only beyond the included limits, when
+  enabled), and that allowance is what has throttled us. Some plans also lower
+  the refill rate as a developer's review count over the last 7 days rises.
+  `.coderabbit.yaml` sets `auto_pause_after_reviewed_commits: 2`: after two
+  reviewed commits CodeRabbit pauses, and `@coderabbitai review` reviews the
+  incremental changes when the branch is ready.
+- Drafts are not reviewed (`.coderabbit.yaml` and `.greptile/config.json`), so
+  stacked work stays draft until its base merges.
+- Review scope: both bots review the capital-safety paths (`internal/risklimit`,
+  `internal/reconcile`, `internal/orderplan`, `internal/targetweight`, `internal/journal`,
+  `internal/event`, `internal/replay`, `cmd/engine`, `adapter/ibkr`,
+  `adapter/marketdata/adjust.py`, `adapter/marketdata/history.py`, `transport/`,
+  `deploy/`). `transport/` is the live adapter socket path. The review tooling's
+  own configuration (`.greptile/`, `.coderabbit.yaml`) is reviewed too: it is
+  safety-relevant, so a PR that loosens the Greptile scope must still get a
+  Greptile review. Everywhere else CodeRabbit alone reviews. Greptile is scoped
+  through `ignorePatterns` in `.greptile/config.json` (a deny list, so a new path
+  outside the safety list must be added there); CodeRabbit is unscoped.
+- Greptile bills per completed review (1, 3 or 10 credits by review tier; 50
+  credits per active developer per billing period, then $1 per credit).
+  Skipped reviews are free. Scoping by path therefore saves money only on PRs
+  that touch no safety path; a mixed PR still costs a full review. Listed in
+  `ignorePatterns` ahead of need: `cmd/reporter/`, `cmd/dashboard/`,
+  `internal/report/`, `/tools/` (not all exist yet). The Turtle-only packages
+  `internal/strategy`, `internal/sizing`, `internal/indicator` and
+  `internal/universe` are ignored because they are off the live path (owner
+  approved their retirement in principle, 2026-10-17); `/transport/` is the live
+  adapter socket path and stays reviewed.
+- On non-safety PRs the orchestrator may run a Claude review agent as a second
+  reader when warranted.
+- Option 3 (owner decision, 2026-10-17): while CodeRabbit is rate-limited, a
+  Claude review agent stands in for CodeRabbit on docs-only and config-only PRs.
+- The merge rule: every finding from whichever reviewer ran is addressed. The
+  merge gate (`tools/gate.py`) currently requires `Greptile Review` to report
+  success.
+- Open owner decision: Greptile may post no check on a PR whose changed files
+  are all ignored, which would leave the required `Greptile Review` check
+  missing (the gate would end in `TIMEOUT`, or `REVIEW_STOP` if the check
+  description says the review was skipped). Proposed: remove the bot checks from
+  the required status checks and let the merge gate enforce review. The ruleset
+  is unchanged until decided. Until then a docs-only PR may need a manual
+  `@greptileai review` to obtain the check (a single, deliberate exception to
+  the no-manual-request rule above).
+- The orchestrator's watcher nudges once if no review appears.

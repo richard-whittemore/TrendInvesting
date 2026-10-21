@@ -1,0 +1,39 @@
+[Unit]
+Description=Read-only dashboard (loopback only; published to the tailnet by tailscale serve)
+After=network-online.target
+# No Condition: a missing binary or run.env fails the unit with a message,
+# so the owner sees a failed unit, never a silent skip.
+
+[Service]
+Type=simple
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+# TI_RUN: the Boost engine's current run, whose durable log is shown. Read
+# at start: after a fresh run, restart the dashboard to follow the new log
+# (docs/runbooks/lightsail-deployment.md). Optional here ("-") so that its
+# absence reaches the check below, which names it.
+EnvironmentFile=-/var/lib/trend-investing/engines/boost/run.env
+ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/boost/run.env || { echo "ti-dashboard: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the Boost engine once first (it names the run whose durable log is shown)" >&2; exit 1; }'
+# Loopback only, on the port `tailscale serve --bg 8088` publishes; the
+# firewall also closes every non-Tailscale port. The dashboard needs no
+# secret, so it is handed none.
+ExecStart=/opt/trend-investing/bin/ti-dashboard -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log -addr 127.0.0.1:8088
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/trend-investing
+# No instruction can come from this unit: it runs as ti-trader, the engine's
+# user, and reads data from outside, so the operator inboxes are hidden from
+# it, and nothing under the engines' state is writable (ProtectSystem=strict;
+# ADR 0026, kill-switch amendment; docs/manual/server.md).
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

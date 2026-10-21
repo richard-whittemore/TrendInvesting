@@ -2,11 +2,11 @@
 
 ## Decision boundary
 
-The system deliberately separates trading decisions from market and brokerage mechanics.
+The system deliberately separates trading decisions from market and brokerage mechanics. LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025). Both use the same transport and envelope contract. ADR 0025 adds an identity check, not yet built: a live engine will refuse any adapter but the one its configuration names. The live target-weight strategies (momentum, Boost) decide target weights only; a strategy-independent order planner turns targets into orders, and hard limits are checked outside the strategy, in Go and again in the adapter (ADR 0026, not yet built). Each account runs its own engine.
 
 ```text
-LEAN container
-  -> thin Python adapter
+LEAN container (backtests) or IB Gateway (live, ADR 0025)
+  -> thin Python adapter (LEAN adapter or IBKR adapter)
   -> versioned, transport-neutral messages
   -> Go application
        - strategy modules
@@ -14,7 +14,8 @@ LEAN container
        - decision and reconciliation state machine
        - durable event journal and projections
        - structured telemetry
-  -> trade proposals returned to LEAN
+  -> trade proposals returned to the same Python adapter
+  -> the adapter submits orders to LEAN or IBKR
   -> orders and fill events returned to Go
 ```
 
@@ -75,6 +76,8 @@ A run's last input is `replay.run.completed`, stating the instant the input stre
 
 The chain lives in the record and never on the envelope: a chain field on an envelope would make the same decision hash differently depending on its position in a journal, and byte-identical replay would become unsatisfiable. The `kind` is inside the chain because replay equivalence reads it to decide what to feed in and what to compare against, so a record relabelled from decision to input would otherwise change that check's meaning undetectably. `journal.Verify` recomputes it and reports the first broken link by sequence. That is tamper-evidence, not tamper-proofing, and it is a different question from replay equivalence — see ADR 0017 and `docs/running-a-backtest.md`.
 
+A long-lived `cmd/engine` run given `-log` also streams a **durable log** beside the journal (ADR 0027). For each input it writes the input, the decisions that input caused and a commit line, all in one write followed by one fsync, before any of those decisions is returned to the adapter. That ordering is journal-before-send (ADR 0026 §3). The log's records are chained with ADR 0017's formula, seeded from a header that names the run and states no span. `-resume` rebuilds a restarted process from a previous log. It replays the logged inputs through a fresh reducer, requires every regenerated record to match the log byte for byte, and writes them into a new log. A torn tail left by a crash mid-write is excluded and the adapter sends that input again. Any other damage is refused. The old log is never modified.
+
 ## Local transport
 
 Envelopes cross the Python-to-Go boundary over a Unix-domain socket carrying newline-delimited JSON, one request and one reply at a time per connection. Local gRPC was measured against it and rejected: at the universe size this system runs it was no faster, worse at p99, and cost 37 modules of transitive dependency. ADR 0014 records the measurements and the constraints the choice imposes — notably that a socket on a macOS bind mount cannot be reached from inside the container, that a reply must be checked against the bar it answers, and that a connection whose exchange did not complete must be abandoned rather than reused.
@@ -99,8 +102,10 @@ The following are intentionally not selected in the initial scaffold:
 
 - PostgreSQL schema and migration tool;
 - observability vendor;
-- cloud provider and deployment topology;
-- brokerage; and
+- cloud provider and deployment topology; and
 - Kubernetes or service decomposition.
+
+Brokerage is no longer deferred: Interactive Brokers, through our own
+adapter (ADR 0025).
 
 These decisions require evidence from the corresponding GitHub issues (see #4 and `docs/agents/issue-tracker.md`).

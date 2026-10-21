@@ -4,6 +4,9 @@
 *.test
 *.out
 coverage.txt
+# A local `go build ./cmd/engine` at the root; `make engine` builds the
+# stamped binary under /bin/.
+/engine
 
 # Python
 __pycache__/

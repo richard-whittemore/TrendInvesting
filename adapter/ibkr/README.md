@@ -1,0 +1,252 @@
+# IBKR adapter
+
+The live broker adapter (ADR 0025): Python, over IBKR's TWS API, between IB
+Gateway and the Go engine. It has no strategy logic.
+
+**Built so far: the connection and account layer, the payloads of the
+broker snapshot and the morning reconciliation, paper sending, and the
+adapter's main loop and start command, all tested against the fake
+gateway.** The loop speaks the envelope transport (ADR 0014) for the inputs
+it records itself (IBKR's lifecycle reports and fills, and any input put in
+its outbox), and delivers the data job's market-data stream behind one
+account reading (`delivery.py`): the engine's `account.snapshot` (version 3)
+and the `account.broker.snapshot` (version 2), stamped as of the session's
+close when the reading stands for it (the owner's decision of 2026-10-18:
+read after the close on its own New York date, no order working or pending
+at IBKR, no execution since the close; else at the read time, with the
+reason), and `market.mark.recorded` (version 2) from the delivered bar's
+official close, IBKR's last price beside it (the price band's comparison
+when set). A reading as of the close is also the previous close's holdings
+and cash adjusted by the fills since (cash within `CASH_DRIFT_BOUND`, 1%):
+the previous close is the latest account snapshot of the run or of the runs
+its Run approvals chain back to, or the latest starting book an approval
+states, an account's first run's included (`book_basis.py`), so a fresh
+run's first batch is never adopted unchecked. It is valued at the close
+(`snapshot.close_valuation`), IBKR's own net liquidation, the cash drift and
+the unexplained cash (the drift added up since the cash was last explained)
+beside it; one at its read time is IBKR's own reading, marked at IBKR's last
+price. Every batch carries an `account.reconciliation` of the same reading,
+ahead of its snapshots once the engine holds a book; in a run's first batch
+behind them when the reading matched the previous close's book, else ahead,
+where the engine, with no book, halts. Every later start and reconnect
+records one once the engine holds an account snapshot, read only when no
+execution awaits its commission, before any stream entry, and stops for a
+person after three reads in a row without positions or cash.
+The durable log is read by the one reader the data job shares,
+`adapter/marketdata/engine_log.py`, loaded by path (`relay.marketdata_module`).
+The whole paper day is rehearsed with the real engine
+(`deploy/rehearse-paper.sh`). Only a paper configuration on a paper
+account (ID beginning `DU`) can send, and the real `ibapi` client places an
+order only when that configuration also sets `paper_sending_enabled` to
+`true` and IBKR's login names the account (AGENTS.md rule 5). No order has
+yet been sent to IBKR's real paper servers.
+
+| Module | What it does |
+| --- | --- |
+| `tws.py` | `TWSApi`, the narrow interface over IBKR's client, and `Inbox`, the thread-safe queue every callback lands in |
+| `real_client.py` | `TWSApi` implemented with IBKR's `ibapi`. The only module that imports it. Each connect is a new session (its own `EWrapper` and `EClient`, bound to that connect's `Inbox`); the old session's reader is joined first, and no new session starts while it is still running; the socket connect is bounded by `connect_timeout`. `can_place_orders()`, the sending switch, is true only on a configuration in mode `paper` on a `DU` account with `paper_sending_enabled` true, once this session's `managedAccounts` names that account; otherwise `place_order` raises `SendRefused` and nothing reaches `EClient`. The link is not part of the switch: `is_connected()` is true only while both `EClient`'s state and ibapi's own socket (`EClient.conn`) are open, since IB Gateway closing the socket leaves `EClient`'s state unchanged, and `place_order` checks it immediately before and after `EClient.placeOrder` (which returns without sending on a closed socket): closed at either moment, it raises `HandoverNotConfirmed` (a `relay.HandoverUnconfirmed`), so the order is never taken as sent and the adapter stops for a person. The installed ibapi's `Contract` and `Order` are checked at construction for every field the adapter sets (`check_ibapi_fields`; `IbapiMismatch` otherwise), so a mismatch refuses before any order is marked. `ibapi_contract` and `ibapi_order` build ibapi's `Contract` and `Order` from the adapter's request shape (`sender.request_shape`): exactly the request's fields (a whole-share `DAY` `LMT` order, `orderRef` = the client order ID, the account, `transmit` true), every field in `ORDER_FIELDS_SET` set to its plain value (`outsideRth` false, `includeOvernight` false, `parentId` 0, no OCA group or conditions, `whatIf` false, `auxPrice` and `trailStopPrice` unset, not hidden, not all-or-none, no start or end time, no algo, `usePriceMgmtAlgo` false rather than ibapi's `None`, the account's own setting), refusing (`OrderShapeRefused`) any other request and an ibapi lacking a field it sets. `DEFAULTS_TO_CONFIRM` (`displaySize`, `minQty`, `percentOffset`, `discretionaryAmt`, `sweepToFill`, `blockOrder`, `notHeld`, `eTradeOnly`, `firmQuoteOnly`, `cashQty`) are the defaults the paper test confirms from IBKR's view of the order; ibapi's `Order` has other fields the adapter neither sets nor lists |
+| `config.py` | host, port, per-engine client ID, account ID, mode, and the timing bounds, `commission_wait` (how long an execution may wait for its commission report) among them, and `con_ids`, the contract map from the engine's instrument ID to IBKR's contract ID (positive integers, one contract per instrument: two instruments sharing a contract ID are refused, naming both; kept read-only). Every value is required except `paper_sending_enabled`, the switch that lets the real client place an order in paper: left out it is `false`; it must be a JSON `true` or `false` and is refused on any mode but `paper`. That includes `mark_timeout`, how long the marks wait for IBKR to end its market-data snapshots (ADR 0019: no default; the example sets 15 seconds, `MARK_TIMEOUT`, because IBKR ends a snapshot only at the end of its 11-second window; `request_timeout` bounds the account reads). Credential-like keys are refused |
+| `connection.py` | connect, reconnect with capped exponential backoff, disconnect detection (socket close, IBKR codes 1100/1101/1102/2110/504/1300, an unanswered `reqCurrentTime` heartbeat), and `ConnectionStatus` records for ADR 0019's heartbeat. Each session records the accounts IBKR's `managedAccounts` names, and `mark_reconciled` refuses (`AccountNotManaged`) unless the configured account is among them. `maintain()`, called from the adapter's loop, is what brings a lost link back: at once after a drop, except that a drop asked for while Gateway has lost IBKR's servers (1100/2110) waits for the restoration (1101/1102) or `restore_timeout`; a link Gateway has not restored by `restore_timeout` is dropped and connected again. A new `connect()` starts with no deferred drop |
+| `account.py` | `read_snapshot`: positions, NetLiquidation, TotalCashValue and ExcessLiquidity for the configured account, as exact decimals with currency |
+| `snapshot.py` | `read_account`: positions, the account summary and every open order in one pass, marking what could not be read. `read_marks`: IBKR's last price (tick type 4) for each contract, from one market-data snapshot each (`TWSApi.req_mkt_data`); an error, no end within `mark_timeout`, or a price not finite and positive gives no mark (`mark_set` false). `broker_snapshot_record` (version 2: `read_at`, `as_of_close`, `not_as_of_close`), `account_snapshot_record` (version 3), `mark_record` (version 2: `broker_last`, `broker_last_set`) and `reconciliation_record` build the `account.broker.snapshot`, `account.snapshot`, `market.mark.recorded` and `account.reconciliation` payloads from that one read, every field stated (`[]` for none, the `unreadable` marker for what failed), times in whole seconds. `tests/testdata/` holds the payloads the engine's own test decodes and validates |
+| `delivery.py` | `Deliverer`: with `--streams`, each step while the link is up and reconciled picks up the files of `<streams>/<run>` (`<run>` from `stream_run`, the data job's rule: the engine log's name without `.log`, or for a crash resume, whose new log carries the crashed run's identity (`relay.run_identity`), the name of the run that began it, so its saved batch and folder carry on, looked up once the engine listens, so a resume's copy is whole; the folder must exist at start, and `StreamRefused` stops it on two folders of one run, its own name's included, and on a folder of another name whose log's committed records are not the head of this log's record hash chain, hash for hash, or are its configuration alone: an unapproved second start of a first run shares its identity and never inherits its folder; only folders with a log beside are read, each first by its head, `relay.head_identity`: a log whose head names another run is read no further, one whose head cannot be read is warned of and stops the start (a folder of the run's own name does not excuse it), and one naming this run is read whole and strictly) it has not delivered, oldest session first, reads them all strictly before anything is written (`read_stream`: exactly the encoder's envelope fields, only the types, schema versions and source the data job writes, from its one table `adapter/marketdata/kinds.py`, the payload's hash, unique IDs, the file-local sequence 1..N, a last line that closes the session the name gives, and the run's configuration hash, strategy version and run name; across the batch, each file's first session after the last delivered or the file before it, and no input ID in two files, except a session retraction repeated with the same type, schema version and payload, recorded once, or already in the outbox), takes one account reading (`AdapterLoop._post_close_reading`: `read_account`, `read_marks` for each instrument the last session delivers a bar for and each holding, then `read_account` again, then `collect_broker_orders` for the last open-order list and the executions since the close (`_not_as_of_close`, with the check against the previous close, `_since_previous_close`), the snapshot being the second read, under one cutoff through the last list: read again when an order report or an execution of any client's order (counted once by its execution ID) arrives between them, when the two reads' holdings, open orders or cash differ, or when any component is unread, up to `SNAPSHOT_ATTEMPTS`; a component still unread then stops with `SnapshotRefused`, and a snapshot still overtaken or changed waits for the next step; a read cut off before the positions or open orders ended (their answers carry no request ID), by a timeout or by Gateway losing IBKR's servers (which it restores on the same socket), drops the link (`Connection.drop`) instead of reading again on it; when Gateway has lost IBKR's servers the drop waits for Gateway's restoration (1101/1102) or `restore_timeout` first, and the restored socket is dropped, never read on. The relay's open-order read for an order due does the same only when the link had gone part-way through the list (closed, or Gateway lost IBKR's servers); a relay read that times out with the link up stops the adapter (`BrokerOrdersIncomplete`); `market_open` by the NYSE calendar, `adapter/marketdata/nyse_calendar.py`; both files installed beside the adapter) and records its reconciliation (first once the engine holds a book), account snapshot, broker snapshot (both withheld, the reconciliation alone, when the engine holds no book and the reading is not the book it was compared with) and each mark (just before the last session's close), all naming its run, and every envelope in the outbox in one write (`Outbox.extend`, which checks the whole list first). The delivery record (`PENDING_FILE.delivered`, read strictly, `DeliveryRecordInvalid`) names the batch's files, their SHA-256 and the snapshot's input ID, queuing before the outbox write and queued after; a batch a stop left queuing is queued again from a fresh snapshot under the same ID only when neither that ID nor its reconciliation's is in the outbox or committed; a batch not delivered to its run (left queuing when another run started, or struck off unsent by a fresh run) is dropped, and a resumed run gets its files again. A new batch waits while any stream entry is in the outbox. A stream entry is sent as written with the engine's next sequence and its send time as `recorded_at` (`AdapterLoop._envelope`); another run's batch is marked dropped and then struck off unsent in one outbox write (`Outbox.strike_all`); a broker report recorded behind a stream entry is sent before it, and no stream entry is sent while an execution awaits its commission |
+| `orders.py` | `OrderTracker`: order status, open-order, execution and commission callbacks as records. IBKR's code 201 is an order's rejection (`invalid`, with IBKR's reason); the codes in `PLACEMENT_REJECTION_CODES` (103, 110, 200, 203 and 321, which the Read-Only API answers every order with) are one only for an order `placed()` names (the loop names each order it sends) that IBKR has not yet shown working, since IBKR uses them for other requests too. `collect_broker_orders` and `match_on_reconnect`: matching by client order ID, under this engine's own client ID, on reconnect |
+| `sender.py` | `DryRunSender` journals with `send=False` and holds no IBKR client; its `check` validates only. `PaperSender` sends a released order to IB Gateway: only on a connection whose configuration is `paper` on a paper account, only for that account and only if the session's login manages it, only while the link is up (the connection's state and the client's own socket, `is_connected()`) and reconciled, both checked before the switch so a link down holds the input (`NotConnected`, `NotReconciled`) rather than stop the adapter, only through a client that can place orders (`can_place_orders()`), as a whole-share DAY limit order released in today's session (New York), under the next IBKR order ID (never reused); `check` runs every refusal, and the relay calls it itself before it marks the order about to be sent or an order ID is used, so a refused order leaves no mark. That is the one link check before the mark: `send` re-checks only the request's shape, and the real client's own socket test in `place_order` is the one after it (a socket closed in between is `HandoverNotConfirmed`, not a refusal that would leave the mark behind). `release_to_request` maps a released order and the session it was released in (its input's event time) to a request, refusing one not marked `send`, released in another mode, or with no session. `make_sender` refuses `live` |
+| `reports.py` | `OrderReportJournal`: IBKR's reports on this engine's orders (its own client ID, a client order ID) as the engine's inputs, `execution.order.lifecycle` version 2 when the order's status changes and `execution.fill` version 5 once an execution's commission arrives, describing the order as IBKR holds it so the engine judges it against the release. A report it cannot state exactly raises `UnreportableOrder`: a fill price that is not finite and above zero, a commission not finite, negative or not below the order's notional, an execution still without its commission `commission_wait` seconds on (`check_overdue`), a naive time, IBKR's correction of an execution (the same execId base, another last segment) unless the owner acknowledged it (then passed over, never a fill), or an order IBKR shows with another side, quantity or limit than already reported. A cancellation or refusal is held while an execution of that order awaits its commission, and journalled after the fills of every execution of that order seen before it is journalled; the hold is written durably to `held_path` (beside the journal) before it is accepted, rewritten before a further execution of the held order is accepted, and read strictly at start (its own account and client ID, a complete lifecycle payload, one entry per order), so a stop before the commission loses nothing: IBKR replays the executions and their commissions, and the held report follows the fills once. An execution or another status of an order whose terminal report is already journalled stops for a person, and so does any status other than a held report's own while it is held. IBKR replays the day's executions on every start, so an execution after a journalled cancellation or refusal stops every start until the owner acknowledges it (`late_fills`, from `relay.py acknowledge-late-fill`); it is then passed over and never a fill, since the engine's `OrderReports` refuses a fill on an ended order, and is left to reconciliation. The held file is read and written only while the adapter holds its exclusive lock (`owns_lock`, `Relay.holds`: construct the journal after the relay). A held report leaves the file only after its own journal write, so a failed write stops the run and is retried by the next record or a restart; one whose execution IBKR does not replay within `commission_wait` of the link being up and reconciled (`ready`; the wait restarts after a reconnect) stops for a person (`check_overdue`). A commission report is read before the overdue check. Seeded with the records already journalled, so IBKR's replay of statuses and commissions after a restart writes nothing twice. The loop that pumps the connection must call `check_overdue` after each pump, and `loop.py` does |
+| `relay.py` | `Relay`: the adapter's side of re-delivery (ADR 0027 section 4). It keeps the input awaiting its reply on disk (`PendingInput`), asks for that input's committed reply again by sending it again under its ID after the engine or the adapter restarts, and hands each released order marked `send` to the sender once: it records "about to send" on disk before each hand-over and never sends a recorded order again, skips one IBKR shows open or executed, and stops (`HandoverUnconfirmed`) rather than resend one it was handing over when it stopped that IBKR shows neither open nor executed. A changed retry under the waiting input's ID is refused (`InputChanged`) after the original is settled. The "about to send" record is read strictly (`HandoverRecordInvalid` on any unknown mark), and a person settles a stopped hand-over with `python3 relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent \| --resend \| --never-sent \| --not-handed-over --reason TEXT`, which writes only a known mark (`--never-sent` only for an order with no mark while an input awaits its reply: the sender refused it for good, and the relay then passes over it), settles an order marked about to be sent or holding a resend permission (`--sent` withdraws a permission; an unknown or already sent order is refused), allows a resend only for an order committed in today's session and only on that day (a later start stops with `ResendExpired`), refuses while the adapter holds the pending file (each relay holds its own lock on `PENDING_FILE.lock` from construction until close, and re-checks it before every mark and send; a second adapter, or a closed relay, stops with `PendingInUse`; `close` from another thread waits for the step in flight, at most `close_timeout` seconds, then raises `RelayCloseTimeout`), and keeps each decision, its reason, its UTC time and session date in the `.handover.decisions` file. The relay takes a sender with `check` and `send` and calls `check` before every mark, whatever `to_request` does. `--never-sent` is accepted only for the order the relay recorded it is refusing for the waiting input (`PENDING_FILE.refused`), `--not-handed-over` only for an order marked about to be sent whose sender raised a `HandoverUnconfirmed` with `handed_over` false (the real client's socket closed before placeOrder), which the relay records in `PENDING_FILE.not-handed-over` for that order and input and removes before every hand-over; it settles the order as never sent on any day. A never-sent order is passed over only while IBKR shows no open order or execution under its tag; otherwise the relay stops (`NeverSentAtBroker`, a `HandoverUnconfirmed`) and the owner marks it `--sent`. An input awaiting its reply that the adapter sent to an earlier engine run (it records the run, `run_identity`: the run's Run approval ID, else its log's first committed input, the configuration, which a resume copies, and never nothing, in `PENDING_FILE.run` before it first sends an input) is never sent to a fresh run: `AdapterLoop` stops with `EarlierRunInput` (`earlier_run`), naming the input, the earlier run's log, whether it committed the input and the orders its reply released unsent, and `relay.py resolve --run-ended PENDING_FILE INPUT_ID --journal ENGINE_LOG --reason TEXT` (`resolve_run_ended`) records the input and those orders as refused, "run ended", in `PENDING_FILE.run-ended` (never sent or journalled again), with each lifecycle or fill report the outbox holds on an order a run of the chain before `ENGINE_LOG` released, struck off unsent (the loop also strikes any a settlement names); every other entry stays for the fresh run. It then clears the pending file; it is refused for an input of the run whose log is `ENGINE_LOG`, for an input whose `recorded_at` cannot be read (so the session it was recorded in is unknown), and for an input with no `PENDING_FILE.run` record of its run (missing, or naming another input), since the settlement would name no run. A `.run-ended` line with no run stops the start (`HandoverRecordInvalid`). The decisions file (`PENDING_FILE.handover.decisions`) is read strictly, like the other records: a line that cannot be read stops the start (`HandoverRecordInvalid`). `relay.py acknowledge-correction PENDING_FILE --journal ENGINE_LOG EXEC_ID --corrects ORIGINAL --reason TEXT` reads the engine's durable log (its `-log` file, streamed as the engine runs; ADR 0027) strictly, counting only committed fill inputs and refusing a log it cannot read as the engine writes it (never read as holding no fills), and refuses a correction of an execution that log does not hold as a fill (the original was never recorded: reconcile by hand), and otherwise records the owner's acknowledgement of IBKR's correction of an execution in `PENDING_FILE.corrections`, read strictly at start and passed to `OrderReportJournal`. `relay.py acknowledge-late-fill PENDING_FILE --journal ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason TEXT` reads the same log (`journalled_reports`: committed fills, and the orders a committed lifecycle input cancelled or refused), refuses a trade that log holds as a fill or one after an order neither it nor the input awaiting its reply (`PENDING_FILE`) holds ended, and otherwise records the acknowledgement in `PENDING_FILE.late-fills`, read strictly at start and passed to `OrderReportJournal` as `late_fills`; the trade is never a fill, so the next start's reconciliation reports its shares as a difference and the engine goes Degraded until the reconciliation runbook's recovery (ADR 0019) |
+| `loop.py` | `AdapterLoop`, the adapter's main loop. At start: takes the pending file's lock (the relay), connects to the engine's socket (`Relay.connect_engine`; `EngineUnavailable` if it is not listening, before anything is read: the engine opens its socket only after recording its start, a fresh run's Run approval included), reads the engine's durable log for the run's identity and the inputs it has committed (`relay.read_engine_log`; it refuses to start without it), with `--streams` finds the run's stream folder from it (`Deliverer.check`), connects, reconciles, then asks again for the input a stop left awaiting its reply. Reconciling is `snapshot.read_account` in full (anything unread stops with `ReconcileIncomplete`: an unavailable balance is not zero), IBKR's open orders and executions (`collect_broker_orders`) matched against the orders the engine's log, and the logs of the earlier runs its Run approvals chain back to (`relay.run_logs`: each approval's `previous_log_final_hash` must be the named log's last committed record hash, and the walk stops at the first earlier run whose committed inputs all predate yesterday's session (the weekday before today) and whose released orders have all ended, by a committed cancellation or refusal input or fill inputs for their whole quantity in that log or a later one, or by the adapter's own records (`PendingInput.settled_orders`: an order settled never sent or not handed over, left unsent by a run-ended settlement (one marked handing-over may have reached IBKR, and reconciliation stops on it if IBKR still shows it), or ended by reports settled there, as the input or struck off with it); every run of today's or yesterday's session is read, and an earlier day's run with an order not ended is kept; the dry-run engine's synthetic reports are decisions and never read as reports), released to be sent (`relay.released_client_order_ids`, plus any hand-over mark) by `orders.match_on_reconnect`, then `mark_reconciled`; an open order or execution none of them explains stops for a person (`ReconcileMismatch`), and a released order IBKR no longer shows is left to the relay's own check of the order it sends. Positions and balances are read in full, not matched: that is the engine's reconciliation. It is repeated after every reconnect or restoration. Each step: `maintain()`, one `pump()`, `check_overdue()`, then, while the link is up and reconciled, the outbox drained into the engine through the relay; while the engine decides, the exchange runs on its own thread and the loop keeps pumping IB Gateway's callbacks and checking overdue commissions. A link lost while an order is due holds the input (`NotConnected`, `NotReconciled`, or the broker read cut short by the drop). Every input is recorded first in the outbox (`PENDING_FILE.outbox`, rewritten atomically under an exclusive lock on `PENDING_FILE.outbox.lock`, which any other producer writing it through `Outbox.append` takes too), with its input ID; its sequence (one past the last committed input's) and the run's identity come from the engine's log when it is sent, with source `ibkr`. An entry is struck off once its reply has been acted on and before the input awaiting its reply is cleared (`Relay`'s `settled`), so a stop between the two leaves that input awaiting its reply and a fresh run never takes it. An outbox entry the log already holds with the same type, schema version and payload is struck off unsent, and one with other content under that ID stops for a person (`OutboxInvalid`); the committed records of this run and the earlier runs of the chain, and the outboxed and awaiting records, seed the report journal in the order they were made, never by their times (a lifecycle report's time is the adapter's clock at receipt, whole seconds only): each run of the chain oldest first, its committed inputs and then the run-ended settlements of that run (a settlement of a run older than the chain first; one with no recorded run has no place that can be known, so it stops the start, `HandoverRecordInvalid`), then the input awaiting its reply (the outbox's head while it is exchanged), then the outbox in order, so each order keeps its latest status (a status struck at a settlement never outlives a later run's report, of the same second or stamped later by a clock set back); a report whose event time cannot be read stops the start (`ReportRecordInvalid`), so a restart, or a fresh run the same day, records nothing twice. The held reports file is `PENDING_FILE.held`; the bases the runs before this one give its readings after a close (`book_basis.previous_close`) are kept once per run in `PENDING_FILE.basis`, under the run's approval's `previous_log` and `previous_log_final_hash`, so only the run's own log is walked at each reading; one that does not read, or names another approval, is walked again, and an earlier run's log that cannot be read stops the adapter naming it |
+| `engine_client.py` | `EngineClient`, the adapter's side of the engine's socket: one exchange at a time; a reply is used only if it names the input sent, is the run's own (configuration hash, strategy version), is `engine.decisions` in envelope version 1 and schema version 1 (`ACCEPTED_ENVELOPE_VERSIONS`, `ACCEPTED_SCHEMA_VERSIONS`), and its payload's exact bytes match its hash; anything else is `relay.EngineUnavailable` and the connection is abandoned. An error the engine states is `EngineRejected`, which stops the adapter |
+| `ibapi_pin.py` | `check_installed`: the adapter starts only if the install record `provision.sh twsapi` writes (`TWSAPI_VERSION`, `TWSAPI_SHA256`, `TWSAPI_ARTEFACT` (`installer` or `archive`), `PROTOBUF_VERSION` and `PROTOBUF_SHA256`, nothing else; an older record without `TWSAPI_ARTEFACT` is refused with "reinstall") matches the pin in the `versions.env` installed with the adapter's code, names the artefact this machine installs from (installer on x86_64, archive on arm64, from `platform.machine()`; a mismatch is refused) and carries that artefact's pinned SHA-256, and the `ibapi` Python imports reports that version (`ibapi.VERSION`, `{"major": 1051, "minor": 1}` for 10.51.01) and the `google.protobuf` it imports is the pinned one; both are the adapter venv's own (its file under `sys.prefix`, in a venv); anything else, or an `ibapi` that does not import, raises `IbapiNotPinned` |
+| `cli.py`, `__main__.py` | `python3 -m adapter.ibkr run --config FILE --pending FILE --engine-log FILE --socket PATH --ibapi-record FILE --versions FILE [--secrets FILE --account-key NAME] [--streams DIR]`, run from the directory that holds `adapter/`. Reads the configuration strictly, the account number from exactly one place (the configuration's `account_id`, or the named `KEY=VALUE` line of the adapter's own account file, read bare: surrounding whitespace dropped, quotes or inner spaces refused), checks the ibapi pin, then runs the loop until SIGTERM or SIGINT. Exit 0 for a requested stop, 1 for a refusal or a stop for a person (its reason on standard error, any account number masked), 2 for a usage error. The account number is never logged |
+
+## Rules this code keeps
+
+- **One client ID per engine** (ADR 0026 point 8). A client-ID conflict
+  (IBKR code 326) fails closed. It is not retried, and no other ID is tried.
+  Client ID 0, IBKR's master binding for manual TWS orders, is refused.
+- **Reconciliation before orders.** Every connect and every restoration sets
+  `needs_reconciliation`. Only a caller that has read IBKR's account in
+  full and matched its open orders and executions to the journal clears it
+  (ADR 0025 point 5; `loop.AdapterLoop.reconcile`).
+- **An unavailable balance is not zero** (ADR 0019). A missing tag or end
+  marker, a drop mid-read, an IBKR error, or no server time raises
+  `SnapshotIncomplete`, which names what is missing. A conflicting or
+  unparseable value raises `SnapshotInvalid`.
+- **IBKR's timestamps.** IBKR does not timestamp positions or account-summary
+  values. A snapshot is bracketed by two IBKR server times
+  (`reqCurrentTime`), one before and one after, plus the adapter's own receipt
+  time. Executions keep IBKR's time string verbatim, and `occurred_at` is its
+  UTC reading. A time with no zone is refused. Every time the engine records
+  for a snapshot (`as_of`) or a fill (`filled_at`) is a whole second, as IBKR
+  stamps them: the risk gate orders snapshots and fills by the second, and
+  event validation refuses a time with a fraction of a second. IBKR answers `reqCurrentTime`
+  in order, so each request's answer is found by counting. Within
+  `request_timeout` of a restoration that found requests unanswered, a late
+  old answer may still arrive, and a read fails closed rather than take it as
+  fresh. If any request is still unanswered after that, a lost answer and a
+  late one cannot be told apart, so the link is dropped and the adapter's loop
+  reconnects; the new session counts from zero and no old answer reaches it.
+- **Order IDs come only from IBKR.** Records carry IBKR's `clientId`,
+  `orderId` and `permId` as reported. IBKR's `orderId` is unique only within
+  one client ID, so an order is identified by (`clientId`, `orderId`), or by
+  `permId` for a manual TWS order with no positive `orderId` (`order_key`). The decision's tag travels as `orderRef`
+  (`client_order_id`). Reconnect matching uses the tag, and each tag belongs
+  to one IBKR order: executions of that order are its fills, and a second
+  order with the same tag, open or executed, is unknown. The result is
+  evidence for reconciliation and never triggers a resend.
+- **ADR 0022's closed status set.** `Submitted`/`PreSubmitted` are
+  `submitted`, `PendingCancel` is `cancel-pending`, and
+  `Cancelled`/`ApiCancelled` are `canceled`. A rejection (IBKR code 201) is
+  `invalid`. `Inactive` counts as `invalid` only after that rejection,
+  because IBKR also uses `Inactive` for held orders. Any other status raises
+  `UnrecognisedOrderReport`. `PendingSubmit`/`ApiPending`/`Filled` are
+  recorded with no lifecycle status: the order is not yet acknowledged, or it
+  is finished, which executions report.
+- **Seen only once recorded.** A status or execution counts as a duplicate
+  only after the sink has accepted it, so IBKR's redelivery after a failed
+  journal write is recorded, not dropped.
+- **Other accounts are skipped.** One IBKR login may reach all three accounts.
+  Rows, orders and executions for any other account are ignored, and so is a
+  commission report whose execution was not this account's. An order status
+  carries no account, so it is held until an open order (or IBKR's rejection)
+  shows the order is this account's, and discarded if it is another's. A
+  held status whose record failed stays ahead of every later status for that
+  order, so history is never recorded out of order.
+- **No credential.** The adapter never handles the IBKR password, which IBC
+  holds. Logs name host, port and client ID only.
+
+## ibapi
+
+ADR 0025 point 4 (amended 2026-10-16 and 2026-10-18) pins IBKR's own
+`ibapi` to one released build, the TWS API 10.51.01 Linux installer, by its
+SHA-256 in `deploy/versions.env`, together with the protobuf 5.29.5 wheel it
+imports (a new runtime dependency, `docs/dependency-policy.md`, proposed to
+the owner 2026-10-20). Neither is ever committed and not needed for
+the tests. `real_client.py` imports it only if present.
+
+On the server, `sudo deploy/provision.sh twsapi` (its own step, not run by
+`all`) fetches the installer and the protobuf wheel, verifies both SHA-256s
+and stops on a mismatch with nothing installed,
+runs it unprivileged (as `nobody`) into a scratch directory, installs only
+the Python client it unpacks, as root, under
+`/opt/trend-investing/twsapi/10.51.01/pythonclient`, installs that
+Python client (`source/pythonclient`) offline into a fresh
+environment, `/opt/trend-investing/adapter-venv` (protobuf first, offline),
+checks that `google.protobuf` and the `ibapi` modules import from that environment, resolve under it and that `google.protobuf` is the pinned version, and only then writes `/opt/trend-investing/twsapi/INSTALLED`.
+
+The venv check is the step's last gate, and `verify_adapter_venv` in
+`deploy/provision.sh` runs its checks in this order, stopping at the first
+failure:
+
+1. The venv directory must exist; its real path (symbolic links resolved) is
+   taken for the location checks below.
+2. With the adapter venv's Python (`python3 -I`, so nothing from the current
+   directory), `google.protobuf`, `ibapi.client`, `ibapi.contract`,
+   `ibapi.order` and `ibapi.wrapper` must import.
+3. The interpreter must be a real venv: its `sys.prefix` must differ from its
+   `sys.base_prefix`, as the adapter checks at start.
+4. `google.protobuf` must resolve under the real path of the venv directory.
+5. `ibapi` must resolve under the real path of the venv directory.
+6. `google.protobuf.__version__` must equal the `PROTOBUF_VERSION` pinned in
+   `versions.env`.
+
+The locations are checked before the version because the venv is built with
+`--system-site-packages`: a system `google/__init__.py` (a regular package) can
+shadow the venv's namespace `google`, and the shadowing system protobuf then
+has the system's version. A location refusal names the shadowing path; a
+version refusal would point at the wheel, which is the wrong remedy.
+
+Every refusal writes nothing, prints one line prefixed `provision: ` on
+standard error, and leaves no `INSTALLED` record (the step removes any earlier
+one before it installs). The messages, with `VENV` the venv argument as given,
+are:
+
+- `VENV does not exist; not recording it`: step 1 found no directory. Remedy:
+  re-run `sudo deploy/provision.sh twsapi`, which builds the venv afresh.
+- `ibapi did not import from VENV after installing it; not recording it`:
+  step 2 failed. The message does not name the module; run the import by hand
+  (below) to see the error. Remedy: fix the environment, then re-run the step.
+- `could not read where protobuf and ibapi resolve in VENV; not recording it`:
+  the venv's Python imported the modules but could not report their paths and
+  version (step 2's read-back failed). Remedy: run the import by hand (below),
+  fix the environment, and re-run the step.
+- `VENV is not a venv (its interpreter's sys.prefix is the base prefix BASE);
+  not recording it`: step 3 found the interpreter is not in a venv. Remedy:
+  re-run `sudo deploy/provision.sh twsapi`, which rebuilds the venv.
+- `google.protobuf resolves to PATH, outside VENV; not recording it`: step 4
+  found protobuf imported from outside the venv. `PATH` is the shadowing
+  package. Re-running the step rebuilds only the venv and cannot remove a
+  system package, so remove or move the package at `PATH` (or its system
+  `google` package), then re-run the step.
+- `ibapi resolves to PATH, outside VENV; not recording it`: as the protobuf
+  message, for `ibapi`.
+- `protobuf X in VENV, pinned Y; not recording it`: step 6 found protobuf `X`
+  where the pin is `Y`. Remedy: re-run `sudo deploy/provision.sh twsapi`, which
+  rebuilds the venv from the verified wheels. If it fails again, the venv or
+  the system packages are at fault: run the import by hand, fix the
+  environment, and re-run the step.
+
+If a re-run fails again, the venv or the system packages are at fault: run the
+same import by hand with
+`/opt/trend-investing/adapter-venv/bin/python3 -I -c 'import google.protobuf, ibapi.client; print(google.protobuf.__file__)'`
+to see the error or the path, fix the environment, and re-run the step. Do not
+write `INSTALLED` by hand; the adapter then refuses to start with
+`IbapiNotPinned` until the step passes. The adapter re-checks the same things
+at start (below).
+
+`sudo deploy/provision.sh adapter` installs this directory's code (not its
+tests) and `versions.env` under `/opt/trend-investing/adapter`. The adapter
+refuses to start unless the install record equals that pin and the `ibapi`
+it imports is that version (`ibapi_pin.py`). Neither step has yet been run on a server.
+
+On arm64 (the Mac mini's container) the x86_64-only installer cannot run, so
+the step fetches the same release's Mac/Unix archive instead, pinned beside
+it as `TWSAPI_ARCHIVE_URL` and `TWSAPI_ARCHIVE_SHA256`, verifies it the same
+way and unpacks only its `source/pythonclient` (`deploy/twsapi-archive.py`).
+The record then names the archive's SHA-256 and `TWSAPI_ARTEFACT=archive`
+(the installer's record says `installer`); the adapter accepts the installer's
+record only on x86_64 and the archive's only on arm64, and refuses a record
+without `TWSAPI_ARTEFACT` (written by an earlier step) until `provision.sh
+twsapi` is run again.
+
+## Running it
+
+On the server the unit `deploy/systemd/ti-adapter-boost.service` runs, as
+`ti-trader`, from `/opt/trend-investing/adapter`:
+
+```sh
+/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run \
+  --config /etc/trend-investing/adapters/boost.json \
+  --secrets "$CREDENTIALS_DIRECTORY/account" --account-key IBKR_ACCOUNT_BOOST \
+  --pending /var/lib/trend-investing/adapters/boost/pending.json \
+  --engine-log /var/lib/trend-investing/engines/boost/$TI_RUN.log \
+  --socket /run/ti-engine-boost/engine.sock \
+  --streams /var/lib/trend-investing/data/streams/boost \
+  --ibapi-record /opt/trend-investing/twsapi/INSTALLED \
+  --versions /opt/trend-investing/adapter/versions.env
+```
+
+The engine starts first (its durable log must exist); the unit is never
+enabled or restarted by systemd. `--streams` is the data job's Boost stream
+folder: without it the adapter delivers no market data for the day, and it
+refuses to start until the run's own folder inside it exists (the one-time
+warm-up in `docs/manual/market-data.md` writes it). The configuration
+(`deploy/etc/adapters/boost.json.example`, copied once by `provision.sh
+services`) ships in dry-run with sending off and an empty `con_ids`.
+
+## Tests
+
+`make adapter-test` runs `python3 -m unittest discover -s tests` here, against
+`tests/fake_tws.py`, a scripted stand-in for IB Gateway with synthetic
+accounts and prices, and `tests/engine_double.py`, a stand-in for the
+engine that writes its durable log as the engine lays it out. A
+paper-account test against IBKR's servers is run by hand (ADR 0025
+Consequences; `docs/runbooks/first-paper-order.md`) and has not been run.
+`tests/test_paper.py` sends one released SPY order through the relay and the
+paper sender to the fake and journals IBKR's answers;
+`tests/testdata/paper_*.json` are the order and the records the engine's own
+test reads by its report rule. `tests/test_loop.py` runs the main loop over
+the same order. `deploy/rehearse-paper.sh` (`tests/rehearse_paper.py`, also
+run by `tests/test_rehearsal.py`) runs the start command end to end against
+the fake gateway and the engine stand-in on a real socket and exits 1 at the
+first check that fails.

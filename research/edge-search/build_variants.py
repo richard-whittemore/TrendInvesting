@@ -12,6 +12,7 @@ Usage: python3 build_variants.py TB3MS.csv OUT_DIR
        writes OUT_DIR/<variant>/main.py for every variant.
 """
 import csv
+import datetime
 import os
 import re
 import sys
@@ -26,15 +27,61 @@ _OOS = {"START_DATE": (2015, 1, 1), "END_DATE": (2026, 6, 30), "MEASURE_FROM": (
 _HALF = {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}
 _COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
 _M1 = {"SPREAD": 0.022, "FEES": "none"}
+# Glide path (docs/live-trading/plan.md, section 2): the combination plus a
+# half-IEF/SHY sleeve in one account. Tuning window 2002-08 to 2015-12 (the
+# bond funds start in July 2002), held-out window 2016-01 to 2026-09 as set; QuantConnect's
+# data ends on 2026-07-18, so the runs end there.
+_GLIDE_IS = dict(_COMBO, START_DATE=(2001, 8, 1), MEASURE_FROM=(2002, 8, 1), END_DATE=(2015, 12, 31),
+                 BOND_FUNDS={"IEF": 0.5, "SHY": 0.5})
+_GLIDE_OOS = dict(_COMBO, START_DATE=(2015, 1, 1), MEASURE_FROM=(2016, 1, 1), END_DATE=(2026, 9, 30),
+                  BOND_FUNDS={"IEF": 0.5, "SHY": 0.5})
+# Universe parity (docs/live-trading/plan.md, section 4): the combination's
+# held-out settings, set to run to September 2026; QuantConnect's data ends on 2026-07-18.
+_PARITY = dict(_OOS, **_COMBO, END_DATE=(2026, 9, 30), ETF_TICKER="IWB")
+#: Sector check (docs/research/sector-labels-2026-10.md): today's universe
+#: stocks whose GICS sector, mapped onto Morningstar's codes, differs.
+_GICS_RELABEL = {"ADP": 310, "AGNC": 103, "AMCR": 101, "ASTS": 308, "CASY": 205, "CLSK": 311, "CRCL": 311,
+                 "FISV": 103, "HUT": 311, "IREN": 311, "MARA": 311, "MOD": 310, "NXT": 310, "PAYX": 310,
+                 "RIOT": 311, "ROL": 310, "SPCX": 308, "TOST": 103, "UBER": 310, "XYZ": 103}
 _CTRY_OOS = {"MODE": "country_rot", "START": (2015, 1, 1), "END": (2026, 6, 30), "MEASURE_FROM": (2016, 1, 1)}
 _US3X = {"SPY": 1, "MDY": 1, "IWM": 1, "EFA": 1}
 _D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
+
+def _every(first, last, step):
+    """(year, month) from ``first`` to ``last`` inclusive, every ``step`` months."""
+    out, (y, m) = [], first
+    while (y, m) <= last:
+        out.append((y, m))
+        y, m = y + (m - 1 + step) // 12, (m - 1 + step) % 12 + 1
+    return out
+
+
+#: Parity (docs/research/parity-2026-10.md, "Months"), chosen before any
+#: comparison: every 8th rebalance of the tuning years from 1999-03 and every
+#: 5th of the held-out years from 2016-01 (at least 24 each), plus every month
+#: the golden runs logged in that window.
+PARITY_MONTHS_IS = tuple(sorted(set(_every((1999, 3), (2015, 12), 8))
+                                | {(2000, 3), (2008, 11), (2009, 6), (2013, 5)}))
+PARITY_MONTHS_OOS = tuple(sorted(set(_every((2016, 1), (2026, 6), 5))
+                                 | {(2016, 2), (2020, 4), (2021, 3), (2022, 6), (2024, 3)}))
+
+#: Glide-path parity (docs/research/parity-2026-10.md, "Remaining scope,
+#: plan, 2026-10-19"): the months of the tuning window's momentum export,
+#: every 6th from its first measured month plus the golden months in it.
+GLIDE_PARITY_MONTHS_IS = tuple(sorted(set(_every((2002, 8), (2015, 12), 6))
+                                      | {(2008, 11), (2009, 6), (2013, 5)}))
+
 
 #: variant -> (template, {class constant: value}), exactly as run.
 VARIANTS = {
     # Boost deep-dive
     "BX_SPY": ("boost/template.py", {}),
     "BX_SPY_BH": ("boost/template.py", {"MODE": "bh"}),
+    # Golden cases for the Go module (ADR 0026): BX_SPY unchanged, with each
+    # day of three pullback months in uptrends, and the first decision, logged.
+    "BX_GOLD": ("boost/golden_log.py", {"GOLDEN_MONTHS": ((2017, 8), (2019, 5), (2024, 4))}),
+    # Months where BX_SPY (b275c80d) exits and buys again the next session, which BX_GOLD's lack.
+    "BX_GOLD_2": ("boost/golden_log.py", {"GOLDEN_MONTHS": ((2023, 10), (2024, 7))}),
     "BX_SPY_C105": ("boost/template.py", {"MODE": "const", "CONST_LEV": 1.055}),
     "BX_SPY_C110": ("boost/template.py", {"MODE": "const", "CONST_LEV": 1.10}),
     "BX_QQQ": ("boost/template.py", {"TICKER": "QQQ"}),
@@ -49,6 +96,11 @@ VARIANTS = {
     "MB_US3X_BH": ("boost/multi.py", {"SLEEVES": _US3X, "MODE": "bh"}),
     "MB_SPY": ("boost/multi.py", {"SLEEVES": {"SPY": 1}}),
     "MB_SPY_BH": ("boost/multi.py", {"SLEEVES": {"SPY": 1}, "MODE": "bh"}),
+    # Bond funds held, for momentum-plus-bonds retirement mixes (portfolio/bonds.json):
+    # the multi-fund holder with one sleeve, no rule to tune
+    "MB_IEF_BH": ("boost/multi.py", {"SLEEVES": {"IEF": 1}, "MODE": "bh"}),
+    "MB_TLT_BH": ("boost/multi.py", {"SLEEVES": {"TLT": 1}, "MODE": "bh"}),
+    "MB_SHY_BH": ("boost/multi.py", {"SLEEVES": {"SHY": 1}, "MODE": "bh"}),
     "BX_SLIP5": ("boost/template.py", {"SLIPPAGE": 0.0005}),
     "BX_SLIP10": ("boost/template.py", {"SLIPPAGE": 0.001}),
     "BX_SPR3": ("boost/template.py", {"SPREAD": 0.03}),
@@ -136,6 +188,80 @@ VARIANTS = {
     "OOS_F_130_S10_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.001, BORROW_FEE=0.05)),
     "OOS_F_130_S20_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.002, BORROW_FEE=0.05)),
     # Execution test (M1 against Interactive Brokers): the half-filter and
+    # D8 timing (docs/research/universe-massive-2026-10.md, Finding 2): the
+    # combination with each month's universe chosen on the last session
+    # before it, against F_COMBO / OOS_F_COMBO run again on the same data
+    "FU_COMBO": ("momentum/fresh_universe.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "FRESH_SELECTION": True}),
+    "OOS_FU_COMBO": ("momentum/fresh_universe.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                        RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True)),
+    # Parity (ADR 0026 point 7, item 2): FU_COMBO, OOS_FU_COMBO and BX_SPY
+    # unchanged, exporting their inputs for the parity months in order tags.
+    "FU_PARITY": ("momentum/parity_log.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                             "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "FRESH_SELECTION": True,
+                                             "PARITY_MONTHS": PARITY_MONTHS_IS}),
+    "OOS_FU_PARITY": ("momentum/parity_log.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                     RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                     PARITY_MONTHS=PARITY_MONTHS_OOS)),
+    "BX_PARITY": ("boost/parity_log.py", {"PARITY": True}),
+    # Commission drag at $30k (#376, slice 7): FU_COMBO, OOS_FU_COMBO, F_COMBO
+    # and OOS_F_COMBO with only the starting cash changed. The templates set
+    # the Interactive Brokers brokerage model, which applies LEAN's
+    # InteractiveBrokersFeeModel to every equity: no fee switch is needed.
+    "FU_COMBO_30K": ("momentum/fresh_universe.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                    "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                    "FRESH_SELECTION": True, "CASH": 30_000}),
+    "OOS_FU_COMBO_30K": ("momentum/fresh_universe.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                            RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                            CASH=30_000)),
+    "F_COMBO_30K": ("momentum/defensive_v2.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                 "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "CASH": 30_000}),
+    "OOS_F_COMBO_30K": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                         RISK_OFF_FRACTION=0.5, CASH=30_000)),
+    # D7-L and the held name (docs/research/d7l-held-name-2026-10.md):
+    # FU_COMBO_30K and OOS_FU_COMBO_30K with ADR 0026's minimum-lot rule as
+    # written ("literal"), or with a held pick D7-L would skip kept ("held");
+    # None is the template unchanged, the same-day control.
+    "D7L_NONE_30K": ("momentum/minimum_lot.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                 "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                 "FRESH_SELECTION": True, "CASH": 30_000, "MIN_LOT": None}),
+    "D7L_LIT_30K": ("momentum/minimum_lot.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                "FRESH_SELECTION": True, "CASH": 30_000, "MIN_LOT": "literal"}),
+    "D7L_HELD_30K": ("momentum/minimum_lot.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                 "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                 "FRESH_SELECTION": True, "CASH": 30_000, "MIN_LOT": "held"}),
+    "OOS_D7L_LIT_30K": ("momentum/minimum_lot.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                        RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                        CASH=30_000, MIN_LOT="literal")),
+    "OOS_D7L_HELD_30K": ("momentum/minimum_lot.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                         RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                         CASH=30_000, MIN_LOT="held")),
+    # The remaining parity runs (docs/research/parity-2026-10.md, "Remaining
+    # scope, plan, 2026-10-19"): the glide-path runs, D7-L with the held-name
+    # exception, and the IRA planner with the buy delay and the buy scaling,
+    # each exporting what cmd/parity compares.
+    **{"G_{}_{}_PARITY".format(w, a): ("momentum/glide_parity_log.py", dict(
+        base, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=float(a[1:]), GLIDE_PARITY=True,
+        **({"PARITY_MONTHS": months} if a == "P38" else {})))
+       for w, base, months in (("IS", _GLIDE_IS, GLIDE_PARITY_MONTHS_IS), ("OOS", _GLIDE_OOS, PARITY_MONTHS_OOS))
+       for a in ("P38", "P53", "P65")},
+    "D7L_PARITY": ("momentum/minimum_lot_parity_log.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                          "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                          "FRESH_SELECTION": True, "CASH": 30_000,
+                                                          "MIN_LOT": "held", "LOT_PARITY_MONTHS": PARITY_MONTHS_IS}),
+    "OOS_D7L_PARITY": ("momentum/minimum_lot_parity_log.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                                  RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                                  CASH=30_000, MIN_LOT="held",
+                                                                  LOT_PARITY_MONTHS=PARITY_MONTHS_OOS)),
+    "IRA_PARITY": ("momentum/ira_parity_log.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                  "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                  "FRESH_SELECTION": True, "CASH": 30_000, "IRA_EXEC": True,
+                                                  "EXEC_DELAY": 1, "PRICE_BAND": 0.05, "MAX_FEES": 2.0}),
+    "OOS_IRA_PARITY": ("momentum/ira_parity_log.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                          RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                          CASH=30_000, IRA_EXEC=True, EXEC_DELAY=1,
+                                                          PRICE_BAND=0.05, MAX_FEES=2.0)),
     # combination books of F_HALF / F_COMBO and their held-out runs, traded
     # 1 or 3 sessions after the month's book is computed.
     "XF_HALF_D3": ("momentum/execution.py", dict(_HALF, EXEC_DELAY=3)),
@@ -147,6 +273,54 @@ VARIANTS = {
     # Boost on SPY minute data: when each decision is made and filled, the
     # margin spread (IB about 1.5%, M1 5.90% less the T-bill, about 2.2%)
     # and commissions (IB's, or none at M1).
+    # Universe parity: the backtest's own universe, then IWB's holdings at
+    # least 7 days old and, for the sensitivity, 1 day old.
+    "OOS_P_COARSE": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="coarse", ETF_LAG_DAYS=7)),
+    "OOS_P_IWB7": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=7)),
+    "OOS_P_IWB1": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=1)),
+    # Sector check: the backtest's own universe with the 20 stocks whose GICS
+    # sector (iShares IWV, 2026-10-14, mapped onto Morningstar's) differs from
+    # Morningstar's relabelled the GICS way.
+    "OOS_P_GICS": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="coarse", ETF_LAG_DAYS=7,
+                                                       SECTOR_OVERRIDE=_GICS_RELABEL)),
+    # Glide path: the schedule started at ages 38, 53 and 65 on each window's
+    # first date, and the fixed mixes either side of each run (plan section 2).
+    "G_IS_P38": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_IS_P53": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=53.0)),
+    "G_IS_P65": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=65.0)),
+    "G_IS_F00": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_IS_F30": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.3, PATH_START_AGE=38.0)),
+    "G_IS_F50": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.5, PATH_START_AGE=38.0)),
+    "G_IS_F60": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.6, PATH_START_AGE=38.0)),
+    "G_IS_F70": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.7, PATH_START_AGE=38.0)),
+    "G_OOS_P38": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_OOS_P53": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=53.0)),
+    "G_OOS_P65": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=65.0)),
+    "G_OOS_F00": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_OOS_F30": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.3, PATH_START_AGE=38.0)),
+    "G_OOS_F50": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.5, PATH_START_AGE=38.0)),
+    "G_OOS_F70": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.7, PATH_START_AGE=38.0)),
+    # Golden cases for the Go module (ADR 0026): the combination, trading
+    # exactly as recorded, with chosen months' working logged. Months chosen
+    # for a risk-off month, a binding sector cap and a recovery.
+    # One month per run, each ending at its month's end: the log holds one
+    # month (up to about 8 KB at full precision when the cap pushes picks
+    # deep into the ranking) inside the Free plan's 10 KB cap, and trading up
+    # to that month is exactly the full run's.
+    "OOS_GOLD_2016_02": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2016, 2),), END_DATE=(2016, 2, 29))),
+    "OOS_GOLD_2020_04": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2020, 4),), END_DATE=(2020, 4, 30))),
+    "OOS_GOLD_2021_03": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2021, 3),), END_DATE=(2021, 3, 31))),
+    "OOS_GOLD_2022_06": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2022, 6),), END_DATE=(2022, 6, 30))),
+    "OOS_GOLD_2024_03": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2024, 3),), END_DATE=(2024, 3, 31))),
+    "IS_GOLD_2000_03": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2000, 3),), END_DATE=(2000, 3, 31))),
+    "IS_GOLD_2008_11": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2008, 11),), END_DATE=(2008, 11, 30))),
+    "IS_GOLD_2009_06": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2009, 6),), END_DATE=(2009, 6, 30))),
+    "IS_GOLD_2013_05": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2013, 5),), END_DATE=(2013, 5, 31))),
+    # Second parts of the two months the 10 KB log cap cut, from the rank after the last one logged.
+    "OOS_GOLD_2021_03_B": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2021, 3),), END_DATE=(2021, 3, 31),
+                                                          GOLDEN_FROM_RANK=139)),
+    "IS_GOLD_2000_03_B": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2000, 3),), END_DATE=(2000, 3, 31),
+                                                         GOLDEN_FROM_RANK=145)),
     "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),
     "BE_IB_OPEN": ("boost/execution.py", {"EXEC": "next_open"}),
     "BE_M1_AM": ("boost/execution.py", dict(_M1, EXEC="next_open")),
@@ -194,6 +368,25 @@ VARIANTS = {
 }
 
 
+def _universe_log_variants(first=(2024, 11), months=24):
+    """Decision D8's comparison (docs/live-trading/plan.md, section 4): the
+    backtest's universe logged for the months Massive's free two-year
+    history covers, two months a run to fit the Free plan's log cap. Each run
+    starts a week before its first month and ends on the 5th of its second."""
+    out, (y, m) = {}, first
+    for _ in range(months // 2):
+        a = (y, m)
+        b = (y + 1, 1) if m == 12 else (y, m + 1)
+        start = datetime.date(*a, 1) - datetime.timedelta(days=7)
+        out["U_LOG_{}_{:02d}".format(*a)] = ("universe/qc_universe.py", {
+            "START": (start.year, start.month, start.day), "END": (b[0], b[1], 5), "MONTHS": (a, b)})
+        y, m = (b[0] + 1, 1) if b[1] == 12 else (b[0], b[1] + 1)
+    return out
+
+
+VARIANTS.update(_universe_log_variants())
+
+
 def prior_month_rates(tb3ms_path, first_month=FIRST_MONTH):
     """{YYYYMM: previous month's TB3MS / 100} from ``first_month`` on.
     Refuses a file without the rate ``first_month`` needs."""
@@ -228,7 +421,9 @@ def render(template_src, params, rates):
 
 #: Templates whose long-only modes ignore VOL_TARGET: their book comes from
 #: defensive_book, which has no volatility scaling.
-NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py")
+NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py",
+                 "momentum/fresh_universe.py", "momentum/parity_log.py", "momentum/minimum_lot.py",
+                 "momentum/minimum_lot_parity_log.py", "momentum/ira_parity_log.py")
 
 
 def check_variant(template, params):

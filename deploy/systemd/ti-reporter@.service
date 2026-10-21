@@ -1,0 +1,52 @@
+[Unit]
+Description=Reporter for account %i: alerts, their repeats and the daily summary
+# No Condition: a missing binary, a missing run.env or an empty secret fails
+# the unit with a message, so the owner sees a failed unit, never a silent
+# skip (docs/manual/alerts-and-dashboard.md, "What can go wrong").
+
+[Service]
+Type=oneshot
+# Stopped well before the timer's next firing (ti-reporter@.timer, every 5
+# minutes), which systemd would otherwise skip while this run is active. The
+# reporter saves each delivery to its state file as a channel takes it, so a
+# run stopped here makes the next one send again at most the one alert on the
+# one channel that had taken it but was not yet saved (at-least-once:
+# PagerDuty folds the repeat by its key, ntfy posts it twice).
+TimeoutStartSec=4min
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
+Environment=TI_REPORTS_DIR=/var/lib/trend-investing/reports
+# TI_RUN: the engine's current run, whose durable log is read. systemd reads
+# the file again at every start, so after a fresh run the next firing follows
+# the new log. Optional here ("-") so that its absence reaches the check
+# below, which names it.
+EnvironmentFile=-/var/lib/trend-investing/engines/%i/run.env
+ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/%i/run.env || { echo "ti-reporter: /var/lib/trend-investing/engines/%i/run.env is missing or empty: start the %i engine once first (it names the run whose durable log is reported)" >&2; exit 1; }'
+# TI_NTFY_TOPIC, TI_NTFY_SERVER and TI_PAGERDUTY_ROUTING_KEY, read from
+# %d/secrets and never printed.
+LoadCredential=secrets:/etc/trend-investing/secrets.env
+# The clock check is run at every firing, after the incident alerts: two
+# failing checks in a row page once for the whole host, a passing check
+# resolves it, and the daily summary shows the last check (ADR 0019,
+# "Alerting"; docs/manual/server.md, "The clock"). Installed by provision.sh
+# clock. The clock is the host's, so every instance shares one clock state,
+# host-clock.json in the reports directory, under a lock.
+# The state file of delivered alerts is per account, so it outlives a run:
+# an alert already delivered is not sent again from a later run's log.
+ExecStart=/opt/trend-investing/bin/ti-reporter -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/reports
+ReadOnlyPaths=/var/lib/trend-investing/engines
+# No instruction can come from this unit: it runs as ti-trader, the engine's
+# user, and reads data from outside, so the operator inboxes are hidden from
+# it, and nothing under the engines' state is writable (ProtectSystem=strict;
+# ADR 0026, kill-switch amendment; docs/manual/server.md).
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

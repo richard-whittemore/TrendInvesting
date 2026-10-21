@@ -1,0 +1,346 @@
+package momentum
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Outcome is whether a decision set targets (ADR 0026 point 1, "Output").
+type Outcome string
+
+// The closed set of Outcome values.
+const (
+	OutcomeDecided  Outcome = "decided"
+	OutcomeWithheld Outcome = "withheld"
+)
+
+// WithheldReason says why a decision set no targets. Empty when decided.
+type WithheldReason string
+
+// The closed set of WithheldReason values (ADR 0026 points 1 and 5).
+const (
+	// ReasonMissingBars: the trend instrument has no close on a session of
+	// its window, the last included.
+	ReasonMissingBars WithheldReason = "missing-bars"
+	// ReasonInsufficientTrendHistory: the trend instrument has fewer than
+	// TrendCloses closes. The backtest treated this as risk-on
+	// (defensive_v2.py:279).
+	ReasonInsufficientTrendHistory WithheldReason = "insufficient-trend-history"
+	// ReasonMissingUniverse: no universe snapshot for the close session.
+	ReasonMissingUniverse WithheldReason = "missing-universe"
+	// ReasonNoEligibleNames: no universe member could be picked, and none
+	// was skipped as unaffordable or kept held one lot short under D7-L. The
+	// backtest kept the last book (defensive_v2.py:319-320).
+	ReasonNoEligibleNames WithheldReason = "no-eligible-names"
+	// ReasonAllUnaffordable: no universe member could be picked and D7-L
+	// skipped as unaffordable or kept held one lot short at least one, every
+	// pick with a positive target being dear by the share. The last book is
+	// kept: a bad net liquidation or bad raw closes would look the same, and
+	// selling every stock on them is the wrong failure (ADR 0026, point 2,
+	// "D7-L", and point 5).
+	ReasonAllUnaffordable WithheldReason = "all-unaffordable"
+	// ReasonLabelsMissing: more than Config.MaxUnlabelledShare of the ranked
+	// members have no sector label. A name with no label is ranked uncapped
+	// (ADR 0026 point 8), so a label outage would decide a book with the
+	// sector cap silently absent; it is withheld and the last book kept
+	// (ADR 0026 point 5).
+	ReasonLabelsMissing WithheldReason = "labels-missing"
+)
+
+// Snapshot is one session's universe rows (ADR 0026 point 1,
+// market.universe.snapshot).
+type Snapshot struct {
+	Session string
+	Rows    []Row
+}
+
+// Input is everything one decision reads.
+type Input struct {
+	// Sessions is the trading calendar, ascending, as YYYY-MM-DD; its last
+	// session is the close session, the last before the decision.
+	Sessions []string
+	// Universe is ranked on the close session (plan.md section 4, D8
+	// "rank": the last session before the rebalance).
+	Universe Snapshot
+	// Closes maps instrument -> session -> split- and dividend-adjusted
+	// close, for the trend instrument and every universe member
+	// (ADR 0026 point 1, "Weights use split- and dividend-adjusted
+	// closes").
+	Closes map[string]map[string]float64
+	// MinimumLot, when set, applies D7-L's substitution
+	// (SelectBookWithMinimumLot); nil selects the book as the backtest did.
+	MinimumLot *MinimumLot
+	// Held names the instruments the account holds at the decision. A held
+	// member whose window has a gap is scored across it, as the backtest
+	// scored every name (ScoreHeld; ADR 0026 point 5, amended 2026-10-18).
+	Held map[string]bool
+}
+
+// NameRecord is the decision's record of one universe member.
+type NameRecord struct {
+	InstrumentID string
+	UniverseRank int
+	DollarVolume float64
+	Sector       string
+	SectorSource string
+	Status       Status
+	// Closes counts its adjusted closes up to the close session.
+	Closes int
+	// Score and Volatility are set when it had a full window.
+	Score      float64
+	Volatility float64
+	// ScoreRank is its place by score among the names with a full window,
+	// 0 for the others.
+	ScoreRank         int
+	Weight            float64
+	BacktestWouldPick bool
+	// OneShare and TargetValue are set for an unaffordable name (D7-L).
+	OneShare    float64
+	TargetValue float64
+	// HeldQuantity, HeldValue and HeldShare are set for a held name kept one
+	// lot short (StatusHeldOneLotShort): the holding it keeps, its value at
+	// the previous raw close and that value over net liquidation.
+	HeldQuantity int64
+	HeldValue    float64
+	HeldShare    float64
+	// GapSessions are the calendar sessions with no close inside the window
+	// it was scored, or refused, on: for StatusGap the live window's, for a
+	// held name scored across its gap the sessions its closes span. Empty
+	// for a complete window.
+	GapSessions []string
+}
+
+// Decision is one momentum decision with the figures behind it, so the
+// record alone can check it (ADR 0026 point 1, "Output").
+type Decision struct {
+	Outcome Outcome
+	Reason  WithheldReason
+	// Detail explains an all-unaffordable withhold, naming the valuation; a
+	// labels-missing withhold, counting the unlabelled members; a decided
+	// book whose every pick has weight zero, which sells every stock held;
+	// and a decided book with a held name kept one lot short, naming each
+	// kept holding (ADR 0026, point 2, "D7-L", amended 2026-10-18). Empty
+	// otherwise.
+	Detail       string
+	CloseSession string
+	Trend        Trend
+	Universe     UniverseCounts
+	// Names holds every universe member in universe rank order.
+	Names []NameRecord
+	// Targets is set only when decided: ascending instrument ID, with the
+	// risk-off instrument last.
+	Targets []Target
+}
+
+// Decide makes one month's momentum decision: risk-off from the trend
+// instrument (EvaluateTrend), the universe (RankUniverse), each member's
+// score and volatility (Score) and the book (SelectBook) (plan.md
+// section 2, "Momentum, combination").
+//
+// A decision it cannot make from complete data is withheld with its
+// reason, never made from the last book or a guess (ADR 0026 point 5). A
+// malformed input or configuration is an error.
+func Decide(cfg Config, in Input) (Decision, error) {
+	if err := cfg.Validate(); err != nil {
+		return Decision{}, err
+	}
+	if err := checkCalendar(in.Sessions); err != nil {
+		return Decision{}, err
+	}
+	d := Decision{CloseSession: in.Sessions[len(in.Sessions)-1]}
+
+	trend, reason, err := EvaluateTrend(cfg, in.Sessions, in.Closes[cfg.TrendInstrument])
+	if err != nil {
+		return Decision{}, fmt.Errorf("momentum: %s: %w", cfg.TrendInstrument, err)
+	}
+	d.Trend = trend
+	if reason != "" {
+		return withhold(d, reason), nil
+	}
+
+	members, counts, err := RankUniverse(cfg, in.Universe.Rows)
+	if err != nil {
+		return Decision{}, err
+	}
+	d.Universe = counts
+	if in.Universe.Session != d.CloseSession || len(members) == 0 {
+		return withhold(d, ReasonMissingUniverse), nil
+	}
+
+	d.Names = make([]NameRecord, len(members))
+	index := make(map[string]int, len(members))
+	var candidates []Candidate
+	for i, m := range members {
+		score := Score
+		if in.Held[m.InstrumentID] {
+			score = ScoreHeld
+		}
+		h, err := score(cfg, in.Sessions, in.Closes[m.InstrumentID])
+		if err != nil {
+			return Decision{}, fmt.Errorf("momentum: %s: %w", m.InstrumentID, err)
+		}
+		d.Names[i] = NameRecord{
+			InstrumentID: m.InstrumentID,
+			UniverseRank: m.Rank,
+			DollarVolume: m.DollarVolume,
+			Sector:       m.Sector,
+			SectorSource: m.SectorSource,
+			Status:       h.Status,
+			Closes:       h.Closes,
+			GapSessions:  h.GapSessions,
+		}
+		index[m.InstrumentID] = i
+		if h.Status == StatusScored || h.Status == StatusZeroVolatility {
+			candidates = append(candidates, Candidate{
+				InstrumentID: m.InstrumentID,
+				Sector:       m.Sector,
+				Score:        h.Score,
+				Volatility:   h.Volatility,
+			})
+		}
+	}
+
+	// A name with no sector label is ranked uncapped, as the backtest did
+	// (ADR 0026 point 8), but too many at once is a label outage, which
+	// would decide a book with the sector cap silently absent: withheld,
+	// the last book kept (ADR 0026 point 5). The share is compared as a
+	// quotient: a product with the ceiling rounds below the exact count for
+	// many decimal ceilings, withholding a month exactly at it.
+	if unlabelled := countUnlabelled(members); float64(unlabelled)/float64(len(members)) > cfg.MaxUnlabelledShare {
+		d = withhold(d, ReasonLabelsMissing)
+		d.Detail = fmt.Sprintf("%d of %d ranked members (%.4g%%) have no sector label, above the ceiling of %.4g%%: "+
+			"a sector-label source or its mapping may have failed; the book is kept: check the sector-label recordings",
+			unlabelled, len(members), 100*float64(unlabelled)/float64(len(members)), 100*cfg.MaxUnlabelledShare)
+		return d, nil
+	}
+
+	var book Book
+	if in.MinimumLot != nil {
+		book, err = SelectBookWithMinimumLot(cfg, candidates, trend.RiskOff, *in.MinimumLot)
+	} else {
+		book, err = SelectBook(cfg, candidates, trend.RiskOff)
+	}
+	if err != nil {
+		return Decision{}, err
+	}
+	picked, unaffordable, allZero := false, false, true
+	for _, r := range book.Ranked {
+		n := &d.Names[index[r.InstrumentID]]
+		n.Status = r.Status
+		n.Score = r.Score
+		n.Volatility = r.Volatility
+		n.ScoreRank = r.ScoreRank
+		n.Weight = r.Weight
+		n.BacktestWouldPick = r.BacktestWouldPick
+		n.OneShare, n.TargetValue = r.OneShare, r.TargetValue
+		n.HeldQuantity, n.HeldValue, n.HeldShare = r.HeldQuantity, r.HeldValue, r.HeldShare
+		if r.Status == StatusPicked {
+			picked = true
+			allZero = allZero && r.Weight == 0
+		}
+		unaffordable = unaffordable || r.Status == StatusUnaffordable || r.Status == StatusHeldOneLotShort
+	}
+	// A book with no pick is withheld and the last book kept (ADR 0026,
+	// point 5). When D7-L skipped a name the reason is all-unaffordable: a
+	// systematic valuation error, a bad net liquidation or bad raw closes,
+	// looks the same as an account too small for every pick, so the owner
+	// is shown the valuation rather than every stock being sold on it
+	// (ADR 0026, point 2, "D7-L"). A held name kept one lot short is no
+	// affordable pick: a book of kept names alone would sell every other
+	// stock held on the same valuation, so it is withheld too (ADR 0026,
+	// point 2, "D7-L", amended 2026-10-18).
+	if !picked {
+		if !unaffordable {
+			return withhold(d, ReasonNoEligibleNames), nil
+		}
+		d = withhold(d, ReasonAllUnaffordable)
+		d.Detail = allUnaffordableDetail(d.Names, in.MinimumLot)
+		return d, nil
+	}
+	d.Outcome = OutcomeDecided
+	d.Targets = book.Targets
+	// Every pick's weight is zero only by design, in a risk-off month at
+	// RiskOffFraction 1: the whole of Invested is in RiskOffInstrument and
+	// the planner sells every stock held, as the risk-off rule asks.
+	if allZero {
+		d.Detail = fmt.Sprintf("every pick's target weight is zero (risk-off at risk-off fraction %g): the whole invested fraction goes to %s and every stock held is sold",
+			cfg.RiskOffFraction, cfg.RiskOffInstrument)
+	} else if kept := keptDetail(d.Names, in.MinimumLot); kept != "" {
+		d.Detail = kept
+	}
+	return d, nil
+}
+
+// keptDetail names each held pick D7-L kept one lot short, with the holding
+// it keeps, that holding's value and share of net liquidation, its target
+// value and its one-share price, so the concentration a kept holding
+// carries, which may be several times its target, is on the record (ADR
+// 0026, point 2, "D7-L", amended 2026-10-18). Empty when none was kept.
+// Every pick's weight is zero only when nothing was compared, so this never
+// meets the risk-off detail.
+func keptDetail(names []NameRecord, lot *MinimumLot) string {
+	var kept []string
+	for _, n := range names {
+		if n.Status == StatusHeldOneLotShort {
+			kept = append(kept, fmt.Sprintf("%s holds %d shares worth %.2f (%.4g%% of net liquidation %.2f) against a target value of %.2f, one share %.2f",
+				n.InstrumentID, n.HeldQuantity, n.HeldValue, 100*n.HeldShare, lot.NetLiquidation, n.TargetValue, n.OneShare))
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	return "kept one lot short, each held as it is with no order (one share at the previous raw close exceeds the target value): " +
+		strings.Join(kept, "; ")
+}
+
+// allUnaffordableDetail counts the candidates D7-L valued and found
+// unaffordable, and the candidates left out for another reason. With no pick
+// every candidate is unaffordable or has zero volatility, since a sector cap
+// or the top-N limit needs a pick first, so only zero volatility can leave a
+// name out here.
+func allUnaffordableDetail(names []NameRecord, lot *MinimumLot) string {
+	var valued, held, zeroVol int
+	for _, n := range names {
+		switch n.Status {
+		case StatusUnaffordable:
+			valued++
+		case StatusHeldOneLotShort:
+			valued++
+			held++
+		case StatusZeroVolatility:
+			zeroVol++
+		}
+	}
+	left := "none left out"
+	if zeroVol > 0 {
+		left = fmt.Sprintf("%d left out (%d zero volatility)", zeroVol, zeroVol)
+	}
+	candidates := "candidates"
+	if valued == 1 {
+		candidates = "candidate"
+	}
+	heldOf := ""
+	if held > 0 {
+		heldOf = fmt.Sprintf(", %d of them held", held)
+	}
+	return fmt.Sprintf("%d %s valued, every one unaffordable (one share at its previous raw close exceeds its target value: "+
+		"weight x momentum scale %g x net liquidation %.2f)%s; %s; the book is kept: check the net liquidation and the raw closes",
+		valued, candidates, lot.Scale, lot.NetLiquidation, heldOf, left)
+}
+
+// countUnlabelled counts the members with no sector label.
+func countUnlabelled(members []Member) int {
+	n := 0
+	for _, m := range members {
+		if m.Sector == "" {
+			n++
+		}
+	}
+	return n
+}
+
+func withhold(d Decision, reason WithheldReason) Decision {
+	d.Outcome = OutcomeWithheld
+	d.Reason = reason
+	return d
+}

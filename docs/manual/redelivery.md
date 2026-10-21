@@ -1,0 +1,200 @@
+# Re-delivery: an order the engine decided is never lost and never doubled
+
+*For the owner. What happens to an order when the engine or the adapter
+stops at the wrong moment, and why it is sent exactly once.*
+
+## What it does
+
+The engine writes every decision to its durable log, forces it to disk, and
+only then replies to the adapter (journal-before-send, ADR 0027). So there is
+a moment, after the write and before the reply arrives, when an order exists
+on disk but the adapter has not received it. A crash in that moment would
+leave the order decided but never sent.
+
+Re-delivery closes that gap:
+
+- **The adapter can ask for the reply to any input it sent.** It asks by
+  sending that input again, unchanged, under the same ID. The engine looks up
+  what it recorded for that input and sends back exactly that reply, byte for
+  byte (or, if it refused that input, the same refusal). It does not decide again.
+- **This works after a restart too.** When the engine resumes from its log
+  after a crash (see [restart](restart.md)), it rebuilds the record of every
+  reply. The adapter asks again for the input it never got an answer to, and
+  receives the order that was decided before the crash.
+- **The same input never makes a second order.** Asking again returns the
+  same reply; the input is not applied twice, so nothing new is recorded.
+  An input sent under an ID the engine has already used, but with different
+  content, is refused: one ID names one input.
+- **The adapter remembers what it is waiting for.** Before it sends an input,
+  the IBKR adapter writes it to a small file. It deletes the file only after it
+  has acted on the reply. If the adapter itself restarts, it asks for that
+  input's reply first, before sending anything new.
+- **The adapter sends each order once.** It hands an order to IBKR only if the
+  reply marks it to be sent (dry-run orders never are), it has not sent it
+  already, and IBKR shows no order with that order's tag (its client order
+  ID, which IBKR calls `orderRef`), neither open nor already executed.
+- **The adapter writes down that it is about to send, before it sends.**
+  Once the order's request to IBKR is fully built, and just before it is
+  handed over, it records on disk "about to send this client order ID", and
+  the moment the sender returns, "sent". That means the request left the
+  adapter; IBKR's acknowledgement is the separate lifecycle report that
+  moves the order to acknowledged. An order whose request cannot be built is
+  never recorded, since it never left the adapter. It never sends a
+  recorded order again. If the adapter stopped in between, it cannot know
+  whether IBKR got the order, so after its restart it looks for the order in
+  IBKR's open orders **and** its executions (an order that has already filled
+  is no longer open). If either shows it, IBKR has it and nothing is sent. If
+  neither does, the adapter stops with "was being handed to the broker when
+  the adapter stopped" and sends nothing more until you have looked: the order
+  may have reached IBKR and been cancelled, or never arrived, and only you can
+  tell which.
+- **A changed input never replaces the one waiting for its reply.** If the
+  adapter is asked to send an input under the ID of the one it is still
+  waiting on, but with different content, it first finishes the original
+  (asks for its reply and sends its orders once), then refuses the changed
+  copy. The original is never overwritten on disk.
+
+## Why
+
+A real order can be decided once and must be sent once. Sending it twice
+doubles the position; not sending it at all leaves the account off its
+target without anyone knowing. The engine cannot tell whether a reply
+reached the adapter, so it never resends on its own (ADR 0027 §6). The
+adapter is the only side that knows what it received, so the adapter asks.
+Because the answer always comes from the log, it is the same answer before
+and after a crash.
+
+## The rules and their sources
+
+- ADR 0027 §4: journal-before-send. Durable means *possibly* sent.
+- ADR 0027 §6: a restart rebuilds the run from the log and sends nothing by
+  itself. The amendment "Re-delivery on request" records that the adapter
+  asks for a reply by sending its input again.
+- ADR 0026 point 2: every order carries a client order ID derived from the
+  decision, which is what lets IBKR and reconciliation recognise it.
+- ADR 0019: an order IBKR holds that the log does not explain is a
+  reconciliation difference, which is why the adapter checks IBKR before
+  sending anything a second time.
+
+## The tests
+
+- `cmd/engine`, `TestAnInputSentAgainIsAnsweredWithItsCommittedReply`: the
+  same input sent twice gets the same reply, byte for byte, and the log holds
+  one order.
+- `cmd/engine`, `TestAnotherInputUnderACommittedIDIsRefused`: a different
+  input under a used ID is refused and nothing is recorded.
+- `cmd/engine`, `TestAResumedEngineServesACommittedButUnsentOrderAgain`: the
+  engine stops after recording an order the adapter never received; resumed
+  from its log, it hands over the same reply, the order included, and the new
+  log holds no second order.
+- `adapter/ibkr/tests/test_relay.py`: the adapter asks again after a crash
+  and sends the order once; it never sends an order twice when the reply comes
+  twice; it skips an order IBKR shows open or executed; after its own restart
+  it asks for the pending input before the next one; it never sends a dry-run
+  order.
+  - `test_an_order_handed_over_before_a_crash_is_never_sent_again`: the
+    adapter stops mid-send; by its restart the order has filled, so only its
+    execution shows it, and it is not sent again.
+  - `test_a_handover_the_broker_does_not_show_stops_the_relay_rather_than_resend`:
+    the adapter stops mid-send and IBKR shows nothing; the restarted adapter
+    refuses to go on, every time, and the order is sent once only.
+  - `test_a_handover_record_with_an_unknown_mark_stops_the_relay_and_sends_nothing`:
+    a hand-edited mark such as `"Sent"` stops the adapter; the order is not
+    sent again.
+  - `test_resolving_a_handover_as_sent_lets_the_relay_go_on_without_sending_it`
+    and `test_resolving_a_same_session_handover_for_resend_sends_it_once_more`:
+    the resolve command's two decisions; a resend goes out at the original
+    limit.
+  - `test_a_resend_is_refused_unless_the_order_was_committed_in_todays_session`
+    and `test_resolving_an_order_the_record_does_not_hold_is_refused`: the
+    command changes nothing for an earlier session's order, an unknown client
+    order ID, an unknown decision or an empty reason.
+  - `test_an_order_marked_sent_cannot_be_resolved`: neither decision is
+    accepted for an order the adapter recorded as handed over, and nothing is
+    sent again.
+  - `test_a_resend_permission_expires_with_its_day_and_stops_for_another_check`:
+    an adapter started the day after a resend was allowed sends nothing and
+    stops, and the order can then only be marked sent.
+  - `test_a_resend_permission_can_be_withdrawn_by_marking_the_order_sent`:
+    an owner who allowed a resend and then found the order at IBKR marks it
+    sent; a second resend is refused, both decisions are kept, and nothing is
+    sent again.
+  - `test_a_resend_mark_is_read_only_in_the_shape_resolve_writes`: a resend
+    date in any form but `YYYY-MM-DD` (such as `20261016` or a week date)
+    stops the adapter, whatever the Python version reads as a date.
+  - `test_resolve_is_refused_while_an_adapter_holds_the_pending_file`,
+    `test_an_adapter_cannot_start_while_resolve_or_another_adapter_holds_the_pending_file`
+    and `test_each_relay_holds_its_own_lock_and_a_closed_relay_never_edits_or_sends`:
+    the adapter and the command never edit the record at the same time, and
+    a stopped relay edits and sends nothing.
+  - `test_close_from_another_thread_waits_for_the_record_being_cleared`,
+    `test_close_gives_up_after_its_timeout_while_the_sender_runs_and_works_once_it_returns`
+    and their neighbours: stopping the adapter from another thread waits for
+    the order or record edit in flight (at most `close_timeout`, 60 seconds
+    by default), then raises `RelayCloseTimeout` and leaves the adapter
+    running and holding the file, so a supervisor sees a stuck sender
+    instead of a hang.
+  - `test_an_order_the_mapper_cannot_shape_leaves_no_mark_and_is_sent_after_a_restart`:
+    an order whose broker request cannot be built never reached IBKR, so it
+    leaves no "about to send" record and is sent once after a restart.
+  - `test_a_never_sent_order_ibkr_shows_open_or_executed_stops_for_a_person`,
+    `test_never_sent_is_refused_for_any_order_but_the_one_the_relay_is_refusing`
+    and `test_never_sent_is_refused_when_the_relay_recorded_no_refusal_for_the_waiting_input`:
+    a never-sent settlement names only the order the adapter is refusing,
+    and is honoured only while IBKR shows nothing under its tag.
+  - `adapter/ibkr/tests/test_loop.py`,
+    `test_an_earlier_runs_uncommitted_input_stops_a_fresh_run_for_a_person_and_is_never_sent_to_it`
+    and `test_an_earlier_runs_committed_reply_with_an_unsent_order_stops_naming_it_and_settles_without_sending`:
+    a fresh run is never sent an earlier run's waiting input, and never sends
+    an order the earlier run released; the adapter stops naming them, and
+    after `resolve --run-ended` nothing of them is sent.
+    `test_run_ended_is_refused_for_an_input_of_the_current_run` and
+    `test_after_an_earlier_runs_input_is_settled_the_fresh_runs_own_first_input_goes_through`:
+    the settlement is refused for the running run's own input, and once it
+    is made the fresh run's own inputs go through.
+    `test_run_ended_settles_each_report_on_an_earlier_runs_order_so_none_drains_into_the_fresh_run`
+    and `test_an_outbox_entry_recorded_at_a_settlement_is_never_sent_even_if_the_strike_was_cut_short`:
+    every input waiting behind the settled one is settled with it and never
+    sent to the fresh run.
+    `test_two_unapproved_starts_are_two_runs_and_the_first_ones_input_stops_the_second`
+    and `test_an_approved_fresh_run_resumed_after_a_crash_takes_its_own_input_awaiting_its_reply`:
+    a run with no Run approval still has an identity of its own, and a
+    resumed run, approved or not, is asked for its own input again.
+    `test_a_crash_resume_keeps_the_saved_batch_and_delivers_the_rest_of_it_once`
+    and `test_a_crash_resume_after_every_input_was_committed_sends_nothing_again`
+    (`adapter/ibkr/tests/test_delivery.py`): a crash resume under a new
+    `TI_RUN` keeps the day's market-data batch and its stream folder (found
+    by the run's identity, [market data](market-data.md), "A crash
+    resume"), so what the crashed run committed is never sent again and the
+    rest goes once; `test_a_fresh_run_drops_the_earlier_runs_batch_and_needs_its_own_warm_up_folder`:
+    a fresh run never takes the earlier run's batch or folder.
+  - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
+    a changed copy under the waiting input's ID is refused; the original's
+    reply is asked for and its order sent once.
+
+## What can go wrong, and what the program does then
+
+The adapter's pending file, hand-over and outbox are in the [glossary](glossary.md).
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| The adapter stops with "was being handed to the broker when the adapter stopped" | The adapter stopped while sending that order, and IBKR shows it neither open nor executed (the order may have been taken and cancelled, or never arrived). It will not guess: it does not send that order again, or anything else, until you settle it. | Look in IBKR for an order whose `orderRef` is the client order ID named. Do not place it by hand until you know. Leave the adapter stopped (the command refuses with "stop it first" while the adapter runs), and settle the order with the adapter's resolve command; never edit the `.handover` file by hand (the adapter refuses any value in it it does not know and stops again). From the repository: `python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent --reason "what IBKR showed"`, or `--resend` in place of `--sent`. `PENDING_FILE` is the adapter's pending file (not the `.handover` file next to it). Choose: **`--sent`** if IBKR shows the order at all (working, filled or cancelled): it is never sent again. **`--resend`** only if the order was committed in today's session and IBKR has no trace of it today (open orders, cancelled orders and today's trades): the adapter sends it again at its **original limit**, whatever the price has done since. Start the adapter the same day: the permission is dated, and an adapter started on a later day does not send the order but stops with "was allowed to be sent again on", and the order needs settling again, by `--sent` after checking IBKR's history for every day since. If, after choosing `--resend`, you find the order at IBKR after all (for example the audit trail shows it accepted and then cancelled), withdraw the permission before starting the adapter: run the same command with `--sent`. That is the only change the command accepts for an order already allowed to be sent again; a second `--resend` is refused. The command refuses `--resend` for an order from an earlier session, because one that filled or was cancelled on an earlier day no longer shows in today's lists: check IBKR's order and trade history for every day since the order was committed (an Account Management activity statement or the audit trail), then mark it `--sent` and let the next rebalance place a fresh order. The command also refuses a client order ID the record does not hold or does not mark `"handing-over"` or `"resend:"` and a date (an order marked `"sent"` was handed to IBKR and needs no decision, and no decision can undo that), so a typo naming any other order changes nothing; it keeps each decision, its reason, the time (UTC) and the session date it was judged against in the file ending `.handover.decisions`. A third decision, **`--never-sent`**, is only for the order the adapter is refusing before it wrote "about to send" and always will (one released for an earlier session, or one it can never shape); it is refused for any order the record marks and for any order but the one the adapter recorded it is refusing (the command names that one). See [paper trading](paper-trading.md), "What can go wrong", for when to use it and the engine-side clearance that follows. A fourth, **`--not-handed-over`**, is only for an order the adapter stopped on because IB Gateway's socket closed **before** placeOrder ("so nothing was handed to IB Gateway"), which it records in `PENDING_FILE.not-handed-over`: after IBKR's order history shows no order under its client order ID, it settles that order as never sent on any day, where `--resend` is accepted only in the order's own session. It is refused for any other order, including one stopped mid-send. See [paper trading](paper-trading.md), the row "IB Gateway closed the connection as an order went out". Leave the pending file alone, and do not edit the engine's log: the log is the record of what the engine committed, and the adapter asks for the waiting input's committed reply again on restart. Then start the adapter. |
+| The adapter stops with "was settled as never sent, but IBKR shows" | An order you settled with `--never-sent` has an open order or trade at IBKR carrying its client order ID after all. The adapter will not pass over an order the broker has: it stops and sends nothing more. | Check the order at IBKR. With the adapter stopped, mark it `python3 adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent --reason "what IBKR showed"` (the only decision accepted for a never-sent order), reconcile, then start the adapter. |
+| The adapter stops naming the `.handover` file with "which is none of", "not an object of marks" or "is not JSON" | The `.handover` file holds something other than the adapter's own marks, most likely after a hand edit. The adapter stops and sends nothing while it is so. | Do not guess which orders it covered. Restore the file to a JSON object from client order ID to `"handing-over"`, `"sent"`, `"never-sent"` or `"resend:"` and a date written exactly `YYYY-MM-DD` as the adapter wrote it (any other date form, such as `20261016`, is refused), then settle each `"handing-over"` order with the resolve command above. |
+| The adapter, or the resolve command, stops naming the `.handover.decisions` file with "line N is not JSON" or "is not a decision as relay.py resolve writes one" | The file of your resolve decisions holds a line the adapter did not write, most likely after a hand edit, or a last line cut short by a stop while the command was writing it. N is the line's number in the file, blank lines counted. The adapter reads every decision strictly, at every start, reconnect and resolve command, because a later decision can undo an earlier one (`--sent` after `--never-sent`), so it sends nothing while any line is unreadable. | Do not delete lines to make it start. Restore the file from your backup. If the only damage is the last line, cut short, remove that one line: the command writes the decision before it changes the order's mark, so the decision it was writing never took effect. Then run the same resolve command again for that order (it refuses one already settled), and start the adapter. |
+| The adapter stops at start with "has no occurred_at that can be read" or "has no filled_at that can be read" | A report on an order (a status or a fill) in one of the adapter's own records, the engine's log of a run, the outbox, the file of inputs settled as left by an earlier run, or the pending file, has no time in the form the adapter writes. The adapter reads IBKR's reports from these records to know each order's latest status, and will not take one it did not write as it writes one. The message names the report and where it is (the file, or the run whose log holds it). | Do not edit the file to make it start. The record was changed outside the adapter: restore the file named from your backup, check the order named against IBKR, and start the adapter again. Never edit the engine's log; if the message names it, follow `docs/runbooks/durable-log.md`. |
+| The adapter stops at start naming the `.run-ended` file with "with no recorded run", or `resolve --run-ended` refuses with "has no record of the run it was sent to" | A settlement of an input left by an earlier run must name that run, so the adapter knows where its reports fall among the runs and which status of each order is the latest. The adapter records the run an input is sent to (the `.run` file) before it saves the input, so a settlement with no run, or a waiting input with no `.run` record of its own, is not something the adapter wrote: the file was edited, or written by another tool. The adapter will not guess where it belongs; it sends nothing. | Do not edit the file to make it start. Restore the `.run-ended` or `.run` file named (and the pending file beside it) from your backup, check the orders the input names against IBKR, and start the adapter again. If no backup holds the record, leave the adapter stopped and investigate before anything is sent. |
+| The adapter, or the resolve command, refuses with "is held by another adapter or by relay.py resolve" or "stop it first" | Another process still has the pending file open: an adapter that is still running (perhaps hung) or a resolve command still at work. Only one may edit the hand-over record at a time. | Find that process and stop it, then try again. Never delete the file ending `.lock` beside the pending file: it stays on disk after every stop by design and is not a stale lock. Deleting it while a process still holds it lets a second one lock a new file, and two of them then edit the record at once. |
+| The adapter stops on IBKR's correction of a trade it recorded (two execution IDs that differ only at the end) | It records no second fill and stops at every start until you acknowledge the correction. | Check IBKR's trades, then, with the adapter stopped: `python3 adapter/ibkr/relay.py acknowledge-correction PENDING_FILE --journal ENGINE_LOG EXEC_ID --corrects ORIGINAL_EXEC_ID --reason "what IBKR shows"`. `ENGINE_LOG` is the engine's `-log` file. The full row is in [paper trading](paper-trading.md), "What can go wrong". |
+| The adapter stops on a trade IBKR reported after the order was recorded cancelled or refused ("after the order was recorded as") | The engine reads nothing on an order that has ended, so it cannot record the trade as a fill. The adapter stops at every start until you acknowledge it. | Check IBKR, then, with the adapter stopped: `python3 adapter/ibkr/relay.py acknowledge-late-fill PENDING_FILE --journal ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason "what IBKR shows"`, and reconcile the account by hand. The full row is in [paper trading](paper-trading.md), "What can go wrong". |
+| The adapter reports "retried with other content" | The adapter was given a copy of its waiting input with something changed. It finished the original first (asked for its reply and sent its orders once) and refused the changed copy; the original on disk is untouched. | A fault in the adapter. Find why the input changed before starting again. |
+| The adapter reports "committed with different content" | The adapter sent a different input under an ID the engine had already used. The engine refused it and recorded nothing. That is a fault in the adapter, not the market. | Stop the adapter. Find why the input changed before starting again. |
+| An urgent alert that an order was not acknowledged (see [order lifecycle](order-lifecycle.md)) | The reporter alerts once: the order is on disk and IBKR has not reported on it. Re-delivery is what resends an order the adapter never received. | Follow the alert's text. Look in IBKR for an order whose `orderRef` is the alert's client order ID **before** anything is placed by hand. |
+| The engine was resumed and the adapter has no pending file | The adapter received its last reply before the crash and acted on it, so it has nothing to ask for. | Nothing: the adapter sends its next input as usual. |
+| The adapter stops at start with "awaits its reply from an earlier engine run" | The input it was waiting on was sent to an earlier run, and the engine now running is a fresh run. Re-delivery only ever asks the same run again (a crash is resumed); a fresh run never takes the earlier run's input and never sends the orders the earlier run decided. | Follow the row with the same words in [paper trading](paper-trading.md), "What can go wrong": resume the crashed run if that was meant, or check IBKR and settle the input with `relay.py resolve --run-ended`. |
+| The engine refuses to resume | The log could not be resumed (see [restart](restart.md)), so the engine does not start the run. No reply can be re-delivered from a run that did not resume. | Follow `docs/runbooks/durable-log.md`. A fresh run starts from a reconciled baseline, so check IBKR's open orders first. |
+
+What this does **not** do yet: sending is built for paper only, and has been
+tested against a stand-in for IB Gateway, not yet against IBKR's paper
+account by hand (see [paper trading](paper-trading.md)). Live stays
+switched off (AGENTS.md rule 5).

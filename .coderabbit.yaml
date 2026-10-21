@@ -1,0 +1,23 @@
+# CodeRabbit configuration. Goal: keep reviews cheap without losing real findings.
+# Keys verified against https://docs.coderabbit.ai/reference/configuration
+# Only settings that differ from CodeRabbit's defaults are set, plus the two
+# kept explicit below.
+reviews:
+  # Explicit (also the default): no auto-approve on resolution; the merge gate decides.
+  request_changes_workflow: false
+  # Skip the long PR summary to shorten output.
+  high_level_summary: false
+  auto_review:
+    enabled: true
+    # Explicit (also the default): draft PRs (stacked work) are not reviewed.
+    drafts: false
+    # Every review event, automatic incremental or manual, uses one review from the
+    # per-developer hourly allowance. Pause automatic reviews after 2 reviewed
+    # commits on a branch; comment `@coderabbitai review` when ready for the next.
+    auto_pause_after_reviewed_commits: 2
+    # A PR whose title contains one of these tokens is skipped (case-insensitive).
+    ignore_title_keywords:
+      - "[WIP]"
+      - "WIP:"
+  # No path_filters: the repo has no generated or vendored files, and docs
+  # reviews catch real errors, so nothing is excluded.

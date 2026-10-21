@@ -120,6 +120,34 @@ var notYetCrossed = map[string]string{
 	// next touched, so it stays here rather than in wireCovered's "ignored
 	// decision" group.
 	"strategy.watchlist.published": "no LEAN adapter fixture proves receipt or handling yet; not part of orders.py's SCHEMA_VERSIONS",
+	// ADR 0026's target-weight types belong to the live path: the IBKR
+	// adapter (ADR 0025), not LEAN, will send the mark and receive the
+	// decisions; LEAN never runs the target-weight strategies.
+	"strategy.target-weight.configuration": "composed by the target-weight engine's own composition root, not the adapter",
+	"market.mark.recorded":                 "sent by the IBKR adapter (ADR 0025), never by LEAN",
+	"strategy.targets.decided":             "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"strategy.order.planned":               "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"risk.order.released":                  "acted on by the IBKR adapter (ADR 0025), never by LEAN",
+	"risk.order.refused":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"operator.kill-switch":                 "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
+	"account.broker.snapshot":              "sent by the IBKR adapter (ADR 0025), never by LEAN",
+	"risk.margin.alarm":                    "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"risk.sale.withheld":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	// cmd/engine delivers the owner's approval itself, from -approval,
+	// before the socket opens; no adapter sends or receives it.
+	"operator.run.approved":      "cmd/engine's approval input (-approval), not an adapter",
+	"operator.rebalance.cleared": "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
+	"market.universe.snapshot":   "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.session.calendar":    "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.close.history":       "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
+	"market.session.retracted":   "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
+	"strategy.order.skipped":     "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	// ADR 0019's reconciliation belongs to the live path too: the IBKR
+	// adapter records the observation, the target-weight engines classify
+	// it, and the owner's acknowledgement is an operator input.
+	"account.reconciliation":      "sent by the IBKR adapter (ADR 0025), never by LEAN",
+	"risk.reconciliation.result":  "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"operator.alert.acknowledged": "recorded by the target-weight engine's composition root from the operator, never by LEAN",
 }
 
 func main() {

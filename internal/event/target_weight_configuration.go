@@ -1,0 +1,635 @@
+package event
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+	"strings"
+	"time"
+)
+
+// TargetWeightConfigurationEventType identifies the configuration that opens
+// every target-weight run (ADR 0026, point 6). It is a separate type from
+// strategy.configuration, which is the Turtle reducer's: the two strategies
+// share no rule and no state (AGENTS.md rule 4).
+const TargetWeightConfigurationEventType = "strategy.target-weight.configuration"
+
+// TargetWeightConfigurationSchemaVersion is the current schema version of
+// TargetWeightConfigurationPayload.
+//
+//   - Version 1 held Boost's strategy fields, the margin account's limits and
+//     the account's identity only.
+//   - Version 2 added the momentum strategy for an IRA: Momentum (its rule's
+//     parameters, the universe data source and the sector-label sources) and
+//     Execution (the D5 cash rule, the share quantity rule, the fee
+//     allowance). StrategyID chooses which strategy section is set; the other
+//     is zero.
+//   - Version 3 added Glide, the glide path for an IRA (ADR 0026, point 6,
+//     "Glide path"): the schedule's anchors, the retirement age, the bond
+//     sleeve's split and the owner's birth year and month. A momentum
+//     configuration requires it; a Boost one sets none.
+//   - Version 4 settled D7 (owner decision 2026-10-16): Execution's share
+//     quantity is minimum-lot, D7-L, whole shares with the momentum rule's
+//     substitution of an unaffordable pick. Version 3's whole-shares had no
+//     substitution and is not a value of version 4.
+//   - Version 5 adds the margin-cushion alarm's Excess Liquidity thresholds
+//     to the limits (ADR 0026, point 6): required for Boost's margin account,
+//     absent for an IRA, which has no margin cushion; and the execution
+//     section's MaxSnapshotAge, required for every account, from 1 minute to
+//     MaxSnapshotAgeCeiling. Each version is a new hash (ADR 0016).
+//   - Version 6 adds Momentum's UniverseInput, the shape of the universe
+//     input the run reads (bars or compact), required for momentum: the
+//     run applies the compact input's rules from its first decision session
+//     instead of inferring the shape from the first close history read.
+//   - Version 7 adds Momentum's MaxUnlabelledShare, the largest share of the
+//     ranked members that may have no sector label in a decided month,
+//     required for momentum: above it the decision is withheld as
+//     labels-missing, since a name with no label is ranked uncapped (ADR 0026
+//     points 5 and 8).
+const TargetWeightConfigurationSchemaVersion uint32 = 7
+
+// The strategies this schema configures: Boost on SPY for the joint margin
+// account, and the momentum combination for an IRA (docs/live-trading/plan.md,
+// section 2, "Boost" and "Momentum, combination").
+const (
+	TargetWeightStrategyBoost    = "boost"
+	TargetWeightStrategyMomentum = "momentum"
+)
+
+// MomentumRuleTrend names the momentum variant configured: mom_trend, the
+// variant F_COMBO selects (research/edge-search/build_variants.py:152-153).
+const MomentumRuleTrend = "mom_trend"
+
+// The D5 cash rules: which cash an IRA's buys are funded from (ADR 0026,
+// point 2, "Budget"; plan.md section 5, "IRA execution"). Whether a buy may
+// use unsettled sale proceeds is IBKR's answer to D5, so it is configuration.
+const (
+	// CashRuleSettled funds buys from settled cash only; the proceeds of the
+	// rebalance's own sells do not count until they settle.
+	CashRuleSettled = "settled-cash"
+	// CashRuleTotal funds buys from total cash, settled and unsettled, plus
+	// the proceeds the rebalance's sells realise.
+	CashRuleTotal = "total-cash"
+)
+
+// ShareQuantityMinimumLot is D7-L, the share quantity rule the owner chose
+// for the IRAs on 2026-10-16, since IBKR does not take fractional orders
+// through the TWS API (ADR 0026, point 2, "D7"; plan.md section 5, "whole
+// shares"): whole shares, rounded toward zero, and a pick whose one share at
+// the previous raw close exceeds its target value is skipped for the next
+// eligible ranked name within the sector cap (plan.md lines 380-383). D7-F,
+// fractional shares, is not built.
+const ShareQuantityMinimumLot = "minimum-lot"
+
+// The shapes of a momentum run's universe input (owner decision of
+// 2026-10-16 on the momentum input shape; ADR 0026, point 1).
+const (
+	// UniverseInputBars is a daily bar for every universe member it ranks,
+	// beside one market.universe.snapshot per session; it reads no
+	// market.close.history.
+	UniverseInputBars = "bars"
+	// UniverseInputCompact is one market.universe.snapshot per session and,
+	// at a decision session, one market.close.history per member ranked
+	// from it, in place of those members' bars.
+	UniverseInputCompact = "compact"
+)
+
+// The trading modes, set per account (docs/live-trading/plan.md, section 5,
+// "Modes"). A dry-run releases orders with send false and never sends them
+// (ADR 0026, point 3).
+const (
+	TradingModeDryRun = "dry-run"
+	TradingModePaper  = "paper"
+	TradingModeLive   = "live"
+)
+
+// AdapterIBKR names the live broker adapter (ADR 0025, point 3).
+const AdapterIBKR = "ibkr"
+
+// warmUpLayout is the date layout of BoostConfiguration.WarmUpStart.
+const warmUpLayout = "2006-01-02"
+
+// TargetWeightConfigurationPayload is one account's target-weight
+// configuration (ADR 0026, point 6). Any change is a new hash and a new run.
+type TargetWeightConfigurationPayload struct {
+	StrategyID string `json:"strategy_id"`
+	AccountID  string `json:"account_id"`
+	Mode       string `json:"mode"`
+	Adapter    string `json:"adapter"`
+	// Boost holds the rule's parameters (research/edge-search/boost/template.py:33-37),
+	// set only for StrategyID boost.
+	Boost BoostConfiguration `json:"boost,omitzero"`
+	// Momentum holds the momentum rule's parameters, set only for StrategyID
+	// momentum.
+	Momentum MomentumConfiguration `json:"momentum,omitzero"`
+	// Glide holds the IRA's glide path, set only for StrategyID momentum.
+	Glide GlideConfiguration `json:"glide,omitzero"`
+	// Execution holds the IRA's execution rules and every account's
+	// MaxSnapshotAge, which is all the joint margin account sets.
+	Execution ExecutionConfiguration `json:"execution,omitzero"`
+	// Limits holds the account's hard limits (ADR 0026, point 3).
+	Limits MarginLimits `json:"limits"`
+}
+
+// MomentumConfiguration is the momentum combination's parameters as
+// backtested: research/edge-search/momentum/defensive_v2.py as F_COMBO
+// configures it (ADR 0026, point 6, "Strategy"; plan.md section 2), and the
+// identity of the universe's inputs (ADR 0026, point 6, "Identity").
+type MomentumConfiguration struct {
+	// Rule is MomentumRuleTrend.
+	Rule string `json:"rule"`
+	// ListingType is the listing type a universe row must carry, "CS"
+	// (plan.md section 4, D8 "As built").
+	ListingType string `json:"listing_type"`
+	// UniverseSize is how many rows by dollar volume join the universe (500).
+	UniverseSize int `json:"universe_size"`
+	// MinPrice is the unadjusted close a row needs, inclusive ($5).
+	MinPrice float64 `json:"min_price"`
+	// ScoreLookback (252) and ScoreSkip (21) place the 12-1 score's two
+	// closes, in sessions back from the last (defensive_v2.py:287-289).
+	ScoreLookback int `json:"score_lookback"`
+	ScoreSkip     int `json:"score_skip"`
+	// VolatilityReturns is how many daily returns the volatility measures (252).
+	VolatilityReturns int `json:"volatility_returns"`
+	TopN              int `json:"top_n"`
+	SectorCap         int `json:"sector_cap"`
+	// InverseVolatility is F_COMBO's INV_VOL; only true is built.
+	InverseVolatility bool    `json:"inverse_volatility"`
+	Invested          float64 `json:"invested"`
+	TrendInstrument   string  `json:"trend_instrument"`
+	// TrendCloses is TREND_DAYS: the closes the trend mean covers (200).
+	TrendCloses       int     `json:"trend_closes"`
+	RiskOffInstrument string  `json:"risk_off_instrument"`
+	RiskOffFraction   float64 `json:"risk_off_fraction"`
+	// RebalanceBand is REBALANCE_BAND: a held name is traded only when its
+	// weight is more than RebalanceBand x its target away from it (0.25).
+	RebalanceBand float64 `json:"rebalance_band"`
+	// UniverseSource names the producer of market.universe.snapshot; each
+	// snapshot must name it (ADR 0026, point 8).
+	UniverseSource string `json:"universe_source"`
+	// SectorSources are the sector-label sources a universe row may name, in
+	// order of preference (plan.md section 4, "Sectors", "Chosen": GICS from
+	// IWV, then Nasdaq's screener).
+	SectorSources []string `json:"sector_sources"`
+	// UniverseInput is the shape of the universe input the run reads,
+	// UniverseInputBars or UniverseInputCompact, declared rather than
+	// inferred from the inputs, so the rules of the compact input hold from
+	// the first decision session (ADR 0026, point 5, "fail closed").
+	UniverseInput string `json:"universe_input"`
+	// MaxUnlabelledShare is the largest share of the ranked members that may
+	// have no sector label in a month that is decided, in (0, 1). A name with
+	// no label is ranked uncapped, as the backtest ranked a stock with no
+	// Morningstar sector (ADR 0026 point 8); a snapshot above the share is a
+	// label outage and is withheld as labels-missing (ADR 0026 point 5). The
+	// backtest's months had 3.5% to 5.3% unlabelled
+	// (docs/research/parity-2026-10.md); the configured value is 0.20.
+	MaxUnlabelledShare float64 `json:"max_unlabelled_share"`
+}
+
+// GlideConfiguration is an IRA's glide path (plan.md section 2, "Bond sleeve
+// and glide path", decision D2; ADR 0026, point 6): the bond share b set by
+// the owner's age in whole months on the rebalance date, held in BondFunds;
+// the momentum sleeve holds the rest. The schedule's arithmetic is
+// internal/targetweight/glide's.
+type GlideConfiguration struct {
+	// Anchors are the schedule's corners in order of age: b is 0 at or
+	// before the first, linear in months between two, and the last's share
+	// after it (plan.md section 2 table: 38/0, 53/0.308, 65/0.5, 72/0.7;
+	// research/edge-search/momentum/glide_path.py:59-71).
+	Anchors []GlideAnchor `json:"anchors"`
+	// RetirementAgeYears is the retirement age the schedule assumes (65,
+	// plan.md section 2), one of the anchors' ages.
+	RetirementAgeYears int `json:"retirement_age_years"`
+	// BondFunds is the bond sleeve's split, in order: IEF 0.5, SHY 0.5 (D2;
+	// glide_path.py:177). Fractions are positive and sum to 1.
+	BondFunds []BondFund `json:"bond_funds"`
+	// Birth is the owner's birth year and month, YYYY-MM, never the day
+	// (owner decision 2026-10-16). Its value is supplied only by the
+	// server's configuration and is never committed to the repository
+	// (plan.md section 2); every value in this repository is synthetic.
+	Birth string `json:"birth"`
+}
+
+// GlideAnchor is one corner of the glide schedule: bond share Share at the
+// owner's age AgeYears whole years.
+type GlideAnchor struct {
+	AgeYears int     `json:"age_years"`
+	Share    float64 `json:"share"`
+}
+
+// BondFund is one fund of the bond sleeve and its fraction of the sleeve.
+type BondFund struct {
+	InstrumentID string  `json:"instrument_id"`
+	Fraction     float64 `json:"fraction"`
+}
+
+// ExecutionConfiguration is an account's execution rules (ADR 0026, points 2
+// and 6): an IRA's cash rule, share quantity and fee allowance, and every
+// account's MaxSnapshotAge, which is all the joint margin account sets.
+type ExecutionConfiguration struct {
+	// CashRule is one of the CashRule constants (D5). It and ShareQuantity
+	// are always set for an IRA, so omitting them when empty changes no IRA
+	// configuration's bytes or hash, and the joint account's execution
+	// section encodes only what it sets.
+	CashRule string `json:"cash_rule,omitzero"`
+	// ShareQuantity is ShareQuantityMinimumLot (D7).
+	ShareQuantity string `json:"share_quantity,omitzero"`
+	// MaxFeesPerOrder is the most commission and fees one order can cost,
+	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
+	// cost").
+	MaxFeesPerOrder float64 `json:"max_fees_per_order"`
+	// MaxSnapshotAge, in minutes, is the oldest the latest broker snapshot
+	// may be at the trigger for the sale back to 98%, or at a sell's planned
+	// time for the broker-holding check, to be read (ADR 0019: the maximum
+	// snapshot age is required configuration with no permissive default; "a
+	// stale matching snapshot is not success"). Every account sets it, from 1
+	// to MaxSnapshotAgeCeiling minutes.
+	MaxSnapshotAge int `json:"max_snapshot_age_minutes,omitzero"`
+}
+
+// MaxSnapshotAgeCeiling is the largest MaxSnapshotAge, in minutes: one
+// regular session, 09:30 to 16:00. A snapshot older than a session is never
+// fresh evidence of the holding (ADR 0019: "a stale matching snapshot is not
+// success"), and the bound keeps the minutes within what a duration holds.
+const MaxSnapshotAgeCeiling = 390
+
+// BoostConfiguration is Boost's parameters as backtested
+// (research/edge-search/boost/template.py:33-37; plan.md section 2: SPY,
+// BOOST_SIZE 1.5, RSI_ENTRY 10, TREND_DAYS 200, EXIT_SMA 5, 98% invested).
+type BoostConfiguration struct {
+	InstrumentID     string  `json:"instrument_id"`
+	InvestedFraction float64 `json:"invested_fraction"`
+	BoostSize        float64 `json:"boost_size"`
+	// RSIPeriod is the RSI's length in closes; the research uses RSI(2) with
+	// Wilder smoothing (template.py:54).
+	RSIPeriod int     `json:"rsi_period"`
+	RSIEntry  float64 `json:"rsi_entry"`
+	TrendDays int     `json:"trend_days"`
+	ExitSMA   int     `json:"exit_sma"`
+	// WarmUpStart is the first session whose close feeds the indicators,
+	// as YYYY-MM-DD. It is a string, not a time.Time, so the hashed bytes are
+	// the date a reader sees (canonicalJSON cannot traverse time.Time). RSI(2)
+	// depends on its seed (ADR 0026, point 8), so the start is configuration.
+	WarmUpStart string `json:"warm_up_start"`
+}
+
+// MarginLimits is an account's hard limits (ADR 0026, point 3): the joint
+// margin account's, or an IRA's, whose MaxExposure is at most 1 because an IRA
+// never uses margin. Each is set so every order in the parity backtests
+// passes; a value that refuses a backtested order is a configuration error.
+type MarginLimits struct {
+	// MaxExposure is the pre-trade exposure limit, 1.5 for the joint account
+	// and 1.0 for an IRA (plan.md section 5). It applies only to orders that
+	// increase exposure.
+	MaxExposure          float64 `json:"max_exposure"`
+	MaxOrdersPerDecision int     `json:"max_orders_per_decision"`
+	// MaxOrderFraction bounds |quantity x price| / net liquidation per order.
+	MaxOrderFraction float64 `json:"max_order_fraction"`
+	// PriceBand is the fraction either side of the recorded mark within which
+	// the reference price must lie, and the distance of each limit price from
+	// the reference price (ADR 0026, point 2, "Order type and price").
+	PriceBand float64 `json:"price_band"`
+	// The margin-cushion alarm's thresholds (plan.md section 5; ADR 0026,
+	// point 6): Excess Liquidity as a share of net liquidation, a warning
+	// below ExcessLiquidityWarning (0.40), urgent below ExcessLiquidityUrgent
+	// (0.20), and no reading for ExcessLiquidityStaleMinutes (30) while the
+	// market is open counting as urgent. All three are set for a margin
+	// account and all three are zero, and omitted, for an IRA.
+	ExcessLiquidityWarning      float64 `json:"excess_liquidity_warning,omitzero"`
+	ExcessLiquidityUrgent       float64 `json:"excess_liquidity_urgent,omitzero"`
+	ExcessLiquidityStaleMinutes int     `json:"excess_liquidity_stale_minutes,omitzero"`
+}
+
+// WarmUpDate returns WarmUpStart parsed as a UTC date.
+func (c BoostConfiguration) WarmUpDate() (time.Time, error) {
+	return time.Parse(warmUpLayout, c.WarmUpStart)
+}
+
+// Validate checks every field against its closed set or range.
+func (p TargetWeightConfigurationPayload) Validate() error {
+	var errs []error
+	switch p.StrategyID {
+	case TargetWeightStrategyBoost:
+		errs = append(errs, p.Boost.validate()...)
+		if !p.Limits.HasCushion() {
+			errs = append(errs, errors.New("a margin account's limits set the excess liquidity thresholds"))
+		}
+		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{MaxSnapshotAge: p.Execution.MaxSnapshotAge}) {
+			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section beyond the execution max snapshot age"))
+		}
+		if !p.Glide.isZero() {
+			errs = append(errs, errors.New("a boost configuration sets no glide section"))
+		}
+	case TargetWeightStrategyMomentum:
+		errs = append(errs, p.Momentum.validate()...)
+		errs = append(errs, p.Execution.validate()...)
+		if p.Glide.isZero() {
+			errs = append(errs, errors.New("a momentum configuration's glide path is required"))
+		} else {
+			errs = append(errs, p.Glide.validate()...)
+		}
+		if p.Boost != (BoostConfiguration{}) {
+			errs = append(errs, errors.New("a momentum configuration sets no boost section"))
+		}
+		if p.Limits.MaxExposure > 1 {
+			errs = append(errs, errors.New("an IRA's max exposure is at most 1: it never uses margin"))
+		}
+		if p.Limits.HasCushion() {
+			errs = append(errs, errors.New("an IRA's limits set no excess liquidity thresholds: it has no margin cushion"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("strategy id %q is not a target-weight strategy this schema configures", p.StrategyID))
+	}
+	switch {
+	case p.Execution.MaxSnapshotAge < 1:
+		errs = append(errs, errors.New("execution max snapshot age must be at least 1 minute: every account's broker-holding check reads the broker snapshot"))
+	case p.Execution.MaxSnapshotAge > MaxSnapshotAgeCeiling:
+		errs = append(errs, fmt.Errorf("execution max snapshot age of %d minutes exceeds %d, one session", p.Execution.MaxSnapshotAge, MaxSnapshotAgeCeiling))
+	}
+	if p.AccountID == "" {
+		errs = append(errs, errors.New("account id is required"))
+	}
+	if !validTradingMode(p.Mode) {
+		errs = append(errs, fmt.Errorf("mode %q is not dry-run, paper or live", p.Mode))
+	}
+	errs = append(errs, accountMatchesMode(p.AccountID, p.Mode)...)
+	if p.Adapter != AdapterIBKR {
+		errs = append(errs, fmt.Errorf("adapter %q is not %q (ADR 0025)", p.Adapter, AdapterIBKR))
+	}
+	errs = append(errs, p.Limits.validate()...)
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid target-weight configuration payload: %w", err)
+	}
+	return nil
+}
+
+func (c BoostConfiguration) validate() []error {
+	var errs []error
+	if c.InstrumentID == "" {
+		errs = append(errs, errors.New("boost instrument id is required"))
+	}
+	if !isFinite(c.InvestedFraction) || c.InvestedFraction <= 0 || c.InvestedFraction > 1 {
+		errs = append(errs, errors.New("boost invested fraction must be finite, above 0 and at most 1"))
+	}
+	if !isFinite(c.BoostSize) || c.BoostSize < 1 {
+		errs = append(errs, errors.New("boost size must be finite and at least 1"))
+	}
+	if c.RSIPeriod < 1 {
+		errs = append(errs, errors.New("boost rsi period must be at least 1"))
+	}
+	if !isFinite(c.RSIEntry) || c.RSIEntry <= 0 || c.RSIEntry >= 100 {
+		errs = append(errs, errors.New("boost rsi entry must lie strictly between 0 and 100"))
+	}
+	if c.TrendDays < 1 {
+		errs = append(errs, errors.New("boost trend days must be at least 1"))
+	}
+	if c.ExitSMA < 1 {
+		errs = append(errs, errors.New("boost exit sma must be at least 1"))
+	}
+	if _, err := c.WarmUpDate(); err != nil {
+		errs = append(errs, fmt.Errorf("boost warm-up start %q is not a YYYY-MM-DD date", c.WarmUpStart))
+	}
+	return errs
+}
+
+func (c MomentumConfiguration) isZero() bool {
+	return c.Rule == "" && c.ListingType == "" && c.UniverseSize == 0 && c.MinPrice == 0 &&
+		c.ScoreLookback == 0 && c.ScoreSkip == 0 && c.VolatilityReturns == 0 && c.TopN == 0 &&
+		c.SectorCap == 0 && !c.InverseVolatility && c.Invested == 0 && c.TrendInstrument == "" &&
+		c.TrendCloses == 0 && c.RiskOffInstrument == "" && c.RiskOffFraction == 0 &&
+		c.RebalanceBand == 0 && c.UniverseSource == "" && len(c.SectorSources) == 0 &&
+		c.UniverseInput == "" && c.MaxUnlabelledShare == 0
+}
+
+func (c MomentumConfiguration) validate() []error {
+	var errs []error
+	if c.Rule != MomentumRuleTrend {
+		errs = append(errs, fmt.Errorf("momentum rule %q is not %q", c.Rule, MomentumRuleTrend))
+	}
+	if c.ListingType == "" {
+		errs = append(errs, errors.New("momentum listing type is required"))
+	}
+	for _, f := range []struct {
+		name  string
+		value int
+	}{{"universe size", c.UniverseSize}, {"score lookback", c.ScoreLookback}, {"top n", c.TopN}, {"sector cap", c.SectorCap}, {"trend closes", c.TrendCloses}} {
+		if f.value < 1 {
+			errs = append(errs, fmt.Errorf("momentum %s must be at least 1", f.name))
+		}
+	}
+	if c.ScoreSkip < 0 || c.ScoreSkip >= c.ScoreLookback {
+		errs = append(errs, errors.New("momentum score skip must lie in [0, score lookback)"))
+	}
+	if c.VolatilityReturns < 2 || c.VolatilityReturns > c.ScoreLookback {
+		errs = append(errs, errors.New("momentum volatility returns must lie in [2, score lookback]"))
+	}
+	if !isFinite(c.MinPrice) || c.MinPrice < 0 {
+		errs = append(errs, errors.New("momentum min price must be finite and not negative"))
+	}
+	if !c.InverseVolatility {
+		errs = append(errs, errors.New("momentum inverse volatility must be true: equal weights are not built"))
+	}
+	if !isFinite(c.Invested) || c.Invested <= 0 || c.Invested > 1 {
+		errs = append(errs, errors.New("momentum invested must be finite, above 0 and at most 1"))
+	}
+	if c.TrendInstrument == "" || c.RiskOffInstrument == "" || c.TrendInstrument == c.RiskOffInstrument {
+		errs = append(errs, errors.New("momentum trend and risk-off instruments are required and distinct"))
+	}
+	if !isFinite(c.RiskOffFraction) || c.RiskOffFraction < 0 || c.RiskOffFraction > 1 {
+		errs = append(errs, errors.New("momentum risk-off fraction must lie in [0, 1]"))
+	}
+	if !isFinite(c.RebalanceBand) || c.RebalanceBand <= 0 || c.RebalanceBand >= 1 {
+		errs = append(errs, errors.New("momentum rebalance band must lie strictly between 0 and 1"))
+	}
+	if c.UniverseSource == "" {
+		errs = append(errs, errors.New("momentum universe source is required"))
+	}
+	if !isFinite(c.MaxUnlabelledShare) || c.MaxUnlabelledShare <= 0 || c.MaxUnlabelledShare >= 1 {
+		errs = append(errs, errors.New("momentum max unlabelled share must lie strictly between 0 and 1"))
+	}
+	if c.UniverseInput != UniverseInputBars && c.UniverseInput != UniverseInputCompact {
+		errs = append(errs, fmt.Errorf("momentum universe input %q is not %q or %q", c.UniverseInput, UniverseInputBars, UniverseInputCompact))
+	}
+	if len(c.SectorSources) == 0 {
+		errs = append(errs, errors.New("momentum sector sources are required"))
+	}
+	for i, s := range c.SectorSources {
+		if s == "" || slices.Contains(c.SectorSources[:i], s) {
+			errs = append(errs, fmt.Errorf("momentum sector source %d is empty or repeated", i+1))
+		}
+	}
+	return errs
+}
+
+func (c GlideConfiguration) isZero() bool {
+	return len(c.Anchors) == 0 && c.RetirementAgeYears == 0 && len(c.BondFunds) == 0 && c.Birth == ""
+}
+
+func (c GlideConfiguration) validate() []error {
+	var errs []error
+	if len(c.Anchors) < 2 {
+		errs = append(errs, errors.New("glide path needs at least two anchors"))
+	}
+	retirement := false
+	for i, a := range c.Anchors {
+		switch {
+		case a.AgeYears < 0:
+			errs = append(errs, fmt.Errorf("glide anchor %d age must not be negative", i+1))
+		case i > 0 && a.AgeYears <= c.Anchors[i-1].AgeYears:
+			errs = append(errs, fmt.Errorf("glide anchor %d age does not increase", i+1))
+		}
+		if !isFinite(a.Share) || a.Share < 0 || a.Share > 1 {
+			errs = append(errs, fmt.Errorf("glide anchor %d share must lie in [0, 1]", i+1))
+		} else if i > 0 && a.Share < c.Anchors[i-1].Share {
+			// b only rises with age (plan.md section 2).
+			errs = append(errs, fmt.Errorf("glide anchor %d share does not rise: b only rises with age", i+1))
+		}
+		retirement = retirement || a.AgeYears == c.RetirementAgeYears
+	}
+	// The schedule is 0 at or before the first anchor (glide_path.py:62), so
+	// a first anchor with a share would be a step the schedule never takes.
+	if len(c.Anchors) > 0 && c.Anchors[0].Share != 0 {
+		errs = append(errs, errors.New("glide first anchor share must be 0: b is 0 up to it"))
+	}
+	if !retirement {
+		errs = append(errs, fmt.Errorf("glide retirement age %d is not an anchor's age", c.RetirementAgeYears))
+	}
+	if len(c.BondFunds) == 0 {
+		errs = append(errs, errors.New("glide bond fund split is required"))
+	}
+	total := 0.0
+	for i, f := range c.BondFunds {
+		switch {
+		case f.InstrumentID == "":
+			errs = append(errs, fmt.Errorf("glide bond fund %d has an empty instrument id", i+1))
+		case slices.ContainsFunc(c.BondFunds[:i], func(g BondFund) bool { return g.InstrumentID == f.InstrumentID }):
+			errs = append(errs, fmt.Errorf("glide bond fund %s is repeated", f.InstrumentID))
+		}
+		if !isFinite(f.Fraction) || f.Fraction <= 0 {
+			errs = append(errs, fmt.Errorf("glide bond fund %d fraction must be finite and positive", i+1))
+		}
+		total += f.Fraction
+	}
+	if len(c.BondFunds) > 0 && !(math.Abs(total-1) <= 1e-9) {
+		errs = append(errs, errors.New("glide bond fund fractions must sum to 1"))
+	}
+	if !validBirth(c.Birth) {
+		errs = append(errs, errors.New("glide birth value must be YYYY-MM with a month 01-12"))
+	}
+	return errs
+}
+
+// validBirth reports whether s is exactly four digits, a hyphen and a month
+// 01 to 12. The value itself is never echoed into an error.
+func validBirth(s string) bool {
+	if len(s) != 7 || s[4] != '-' {
+		return false
+	}
+	for i, c := range s {
+		if i != 4 && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	month := int(s[5]-'0')*10 + int(s[6]-'0')
+	return month >= 1 && month <= 12
+}
+
+func (c ExecutionConfiguration) validate() []error {
+	var errs []error
+	if c.CashRule != CashRuleSettled && c.CashRule != CashRuleTotal {
+		errs = append(errs, fmt.Errorf("execution cash rule %q is not %q or %q", c.CashRule, CashRuleSettled, CashRuleTotal))
+	}
+	if c.ShareQuantity != ShareQuantityMinimumLot {
+		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, the only rule built", c.ShareQuantity, ShareQuantityMinimumLot))
+	}
+	if !isFinite(c.MaxFeesPerOrder) || c.MaxFeesPerOrder < 0 {
+		errs = append(errs, errors.New("execution max fees per order must be finite and not negative"))
+	}
+	return errs
+}
+
+func (l MarginLimits) validate() []error {
+	var errs []error
+	if !isFinite(l.MaxExposure) || l.MaxExposure <= 0 {
+		errs = append(errs, errors.New("limits max exposure must be finite and positive"))
+	}
+	if l.MaxOrdersPerDecision < 1 {
+		errs = append(errs, errors.New("limits max orders per decision must be at least 1"))
+	}
+	if !isFinite(l.MaxOrderFraction) || l.MaxOrderFraction <= 0 {
+		errs = append(errs, errors.New("limits max order fraction must be finite and positive"))
+	}
+	if !isFinite(l.PriceBand) || l.PriceBand <= 0 || l.PriceBand >= 1 {
+		errs = append(errs, errors.New("limits price band must lie strictly between 0 and 1"))
+	}
+	if !l.HasCushion() {
+		return errs
+	}
+	if !isFinite(l.ExcessLiquidityWarning) || !isFinite(l.ExcessLiquidityUrgent) ||
+		!(0 < l.ExcessLiquidityUrgent && l.ExcessLiquidityUrgent < l.ExcessLiquidityWarning && l.ExcessLiquidityWarning < 1) {
+		errs = append(errs, errors.New("limits excess liquidity thresholds must satisfy 0 < urgent < warning < 1"))
+	}
+	if l.ExcessLiquidityStaleMinutes < 1 || l.ExcessLiquidityStaleMinutes > MaxSnapshotAgeCeiling {
+		errs = append(errs, fmt.Errorf("limits excess liquidity stale minutes must be from 1 to %d, one session", MaxSnapshotAgeCeiling))
+	}
+	return errs
+}
+
+// HasCushion reports whether l sets any of the margin-cushion alarm's
+// thresholds. Limits that set one must set all three validly; limits that set
+// none have no alarm, as an IRA's (ADR 0026, point 6).
+func (l MarginLimits) HasCushion() bool {
+	return l.ExcessLiquidityWarning != 0 || l.ExcessLiquidityUrgent != 0 || l.ExcessLiquidityStaleMinutes != 0
+}
+
+// Validate checks every limit against its range.
+func (l MarginLimits) Validate() error {
+	if err := errors.Join(l.validate()...); err != nil {
+		return fmt.Errorf("invalid margin limits: %w", err)
+	}
+	return nil
+}
+
+// PaperAccountPrefix begins every IBKR paper trading account ID, and no live
+// account ID (IBKR: a paper account's ID starts "DU"; ADR 0025, point 3).
+const PaperAccountPrefix = "DU"
+
+// accountMatchesMode binds the account to the mode: a paper configuration
+// must name a paper account and a live one must not, so a configuration
+// cannot send paper orders to a live account or rehearse live on paper. A
+// dry-run sends nothing and may name either.
+func accountMatchesMode(accountID, mode string) []error {
+	paper := strings.HasPrefix(accountID, PaperAccountPrefix)
+	switch {
+	case mode == TradingModePaper && !paper:
+		return []error{fmt.Errorf("mode paper names account %q, but an IBKR paper account ID begins %q", accountID, PaperAccountPrefix)}
+	case mode == TradingModeLive && paper:
+		return []error{fmt.Errorf("mode live names account %q, but an account ID beginning %q is a paper account", accountID, PaperAccountPrefix)}
+	}
+	return nil
+}
+
+// ValidTradingMode reports whether mode is dry-run, paper or live.
+func ValidTradingMode(mode string) bool { return validTradingMode(mode) }
+
+func validTradingMode(mode string) bool {
+	switch mode {
+	case TradingModeDryRun, TradingModePaper, TradingModeLive:
+		return true
+	}
+	return false
+}
+
+// TargetWeightConfigurationHash derives a target-weight run's configuration
+// hash by ADR 0016's derivation: SHA-256 over "target-weight-configuration/v"
+// + the schema version + "\n" + canonicalJSON(payload), hex encoded and
+// prefixed "sha256:". The prefix differs from ConfigurationHash's, so a
+// Turtle configuration and a target-weight one can never share a hash.
+func TargetWeightConfigurationHash(payload TargetWeightConfigurationPayload) string {
+	prefix := fmt.Sprintf("target-weight-configuration/v%d\n", TargetWeightConfigurationSchemaVersion)
+	sum := sha256.Sum256(append([]byte(prefix), canonicalJSON(payload)...))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}

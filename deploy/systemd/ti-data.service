@@ -1,0 +1,50 @@
+[Unit]
+Description=Market-data step: record each day's settled session once and write the Boost engine's stream
+# Massive only: the step needs the network, not IB Gateway.
+After=network-online.target
+Wants=network-online.target
+# No Condition: a missing /opt/trend-investing/bin/ti-data, or a Boost
+# engine not yet started (no run.env), fails the unit with a message, so the
+# owner sees a failed unit, never a silent skip.
+
+[Service]
+Type=oneshot
+# A run that hangs (a stalled fetch) is stopped and shows as failed rather
+# than staying "activating", which would also make the timer skip every
+# later firing. An hour is far more than the worst daily catch-up (a week of
+# sessions at the free plan's 5 requests a minute is a few minutes) plus the
+# re-verification, which encodes the run's history once a run (measured at
+# about 8 seconds for 447 market-sized sessions; docs/manual/market-data.md,
+# "What the check costs").
+TimeoutStartSec=1h
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+Environment=TI_DATA_DIR=/var/lib/trend-investing/data
+# TI_RUN: the Boost engine's current run, whose durable log is read. Optional
+# here ("-") so that its absence reaches the check below, which names it.
+EnvironmentFile=-/var/lib/trend-investing/engines/boost/run.env
+ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/boost/run.env || { echo "ti-data: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the Boost engine once first (it names the run whose durable log the stream is stamped from)" >&2; exit 1; }'
+# MASSIVE_API_KEY, read from %d/secrets and never printed.
+LoadCredential=secrets:/etc/trend-investing/secrets.env
+# Records into TI_DATA_DIR and writes the day's stream to
+# ${TI_DATA_DIR}/streams/boost/${TI_RUN}/boost-<session>.jsonl (after a crash
+# resume, the folder of the run that began it: docs/manual/market-data.md,
+# "A crash resume"). Settle
+# minutes: the close plus this long before a session is recorded; the timer
+# fires after it (ti-data.timer).
+ExecStart=/opt/trend-investing/bin/ti-data --data ${TI_DATA_DIR} --streams ${TI_DATA_DIR}/streams --config /etc/trend-investing/engines/boost.config --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --secrets-file %d/secrets --settle-minutes 60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/data
+ReadOnlyPaths=/var/lib/trend-investing/engines/boost
+# No instruction can come from this unit: it runs as ti-trader, the engine's
+# user, and reads data from outside, so the operator inboxes are hidden from
+# it, and nothing under the engines' state is writable (ProtectSystem=strict;
+# ADR 0026, kill-switch amendment; docs/manual/server.md).
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

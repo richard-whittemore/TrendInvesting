@@ -1,0 +1,481 @@
+package targetweight_test
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
+)
+
+// iraAccount is a paper account: the harness plays the venue, which reports
+// on every order it is sent, and only a paper or live run sends one (ADR 0026,
+// point 3, "Mode").
+const iraAccount = "DUIRA"
+
+// momentumConfiguration is the momentum rule with short lookbacks (a 6-session
+// score skipping 1, 4 returns of volatility, a 5-close trend), a top 2 with
+// one name per sector, and a universe of 5, so a few weeks of invented
+// closes rebalance twice. It is a test configuration, never the backtested one.
+// Its synthetic owner is 29 in 2025, before the glide path's first anchor, so
+// b is 0 and the book is the rule's own; glideBirth puts b on the path.
+func momentumConfiguration() event.TargetWeightConfigurationPayload {
+	return event.TargetWeightConfigurationPayload{
+		StrategyID: event.TargetWeightStrategyMomentum, AccountID: iraAccount, Mode: event.TradingModePaper, Adapter: event.AdapterIBKR,
+		Momentum: event.MomentumConfiguration{
+			Rule: event.MomentumRuleTrend, ListingType: "CS", UniverseSize: 5, MinPrice: 5,
+			ScoreLookback: 6, ScoreSkip: 1, VolatilityReturns: 4, TopN: 2, SectorCap: 1,
+			InverseVolatility: true, Invested: 0.98, TrendInstrument: "SPY", TrendCloses: 5,
+			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
+			UniverseSource: "fixture-universe", SectorSources: []string{"gics", "screener"},
+			UniverseInput: event.UniverseInputBars, MaxUnlabelledShare: 0.20,
+		},
+		Glide: event.GlideConfiguration{
+			Anchors: []event.GlideAnchor{
+				{AgeYears: 38, Share: 0}, {AgeYears: 53, Share: 0.308}, {AgeYears: 65, Share: 0.5}, {AgeYears: 72, Share: 0.7},
+			},
+			RetirementAgeYears: 65,
+			BondFunds:          []event.BondFund{{InstrumentID: "IEF", Fraction: 0.5}, {InstrumentID: "SHY", Fraction: 0.5}},
+			Birth:              "1995-06",
+		},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
+		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 10, MaxOrderFraction: 0.9, PriceBand: 0.05},
+	}
+}
+
+// momentumCalendar is every weekday from 2025-01-02 to 2025-03-04: the
+// sessions of the synthetic run, and one after it.
+func momentumCalendar() []string {
+	var out []string
+	for day := time.Date(2025, time.January, 2, 0, 0, 0, 0, time.UTC); day.Before(time.Date(2025, time.March, 5, 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		if wd := day.Weekday(); wd != time.Saturday && wd != time.Sunday {
+			out = append(out, day.Format(time.DateOnly))
+		}
+	}
+	return out
+}
+
+func closeOf(session string) time.Time {
+	d, err := time.Parse(time.DateOnly, session)
+	if err != nil {
+		panic(err)
+	}
+	return d.Add(21 * time.Hour)
+}
+
+// name is one invented instrument: its listing type, sector label, volume,
+// the first session it trades (and the session it stops, when to is set), and
+// its growth per session in January and in February. A small irregular factor
+// keeps every volatility above zero.
+type name struct {
+	id, listing, sector, source string
+	volume                      float64
+	from                        int
+	base, jan, feb              float64
+	to                          int
+}
+
+func names() []name {
+	return []name{
+		{"AAA", "CS", "Tech", "gics", 3e6, 0, 50, 1.02, 0.98, 0},
+		{"BBB", "CS", "Tech", "gics", 2e6, 0, 40, 1.018, 1.03, 0},
+		{"CCC", "CS", "Health", "screener", 1.5e6, 0, 30, 1.015, 1.015, 0},
+		{"DDD", "CS", "Energy", "gics", 9e6, 0, 4, 1, 1, 0}, // under the $5 floor
+		{"EEE", "ETF", "", "", 9e6, 0, 100, 1.04, 1.04, 0},  // not common stock
+		{"FFF", "CS", "Energy", "gics", 1e5, 0, 20, 0.99, 0.99, 0},
+		{"GGG", "CS", "Utilities", "gics", 4e6, 38, 60, 1.05, 1.05, 0}, // lists late in February
+		{"HHH", "CS", "", "", 5e6, 0, 25, 1.0, 1.001, 0},               // no sector label: ranked uncapped, beyond the book
+		{"III", "CS", "Materials", "gics", 1e4, 0, 10, 1, 1, 5},        // delisted after five sessions
+		{"SPY", "ETF", "", "", 1e8, 0, 500, 1.002, 1.002, 0},
+		{"IEF", "ETF", "", "", 1e7, 0, 95, 1.0005, 1.0005, 0},
+		{"SHY", "ETF", "", "", 1e7, 0, 80, 1.0002, 1.0002, 0},
+	}
+}
+
+// price is n's close on session i: base x growth^i, by month, times an
+// irregular factor; SPY falls 3% a session over February's last six sessions,
+// so February ends risk-off, and over January's last six too when janFall is
+// set, so January ends risk-off as well.
+func (n name) price(cal []string, i int, janFall bool) float64 {
+	p := n.base
+	for k := 1; k <= i; k++ {
+		g := n.jan
+		if cal[k] >= "2025-02-01" {
+			g = n.feb
+		}
+		if n.id == "SPY" && (cal[k] >= "2025-02-21" || janFall && cal[k] >= "2025-01-24" && cal[k] <= "2025-01-31") {
+			g = 0.97
+		}
+		p = float64(p * g)
+	}
+	return math.Round(float64(p*(1+float64(0.002*float64((i*7)%5))))*100) / 100
+}
+
+// ira simulates the IRA at the venue: each order released to send is acknowledged and
+// fills at the next session's open, at that session's close capped by its
+// limit, with a commission of 0.5. A sale's proceeds settle a session later.
+type ira struct {
+	account            string
+	settled, unsettled float64
+	held               map[string]int64
+	pending            []event.OrderReleasedPayload
+}
+
+func (a *ira) snapshot(at time.Time, prices map[string]float64) event.AccountCashSnapshotPayload {
+	net := float64(a.settled + a.unsettled)
+	var positions []event.AccountPosition
+	for _, id := range slices.Sorted(mapsKeys(a.held)) {
+		if a.held[id] != 0 {
+			positions = append(positions, event.AccountPosition{InstrumentID: id, Quantity: a.held[id]})
+			net += float64(float64(a.held[id]) * prices[id])
+		}
+	}
+	return event.AccountCashSnapshotPayload{
+		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{
+			AccountID: a.account, AsOf: at, NetLiquidation: net, Currency: "USD", Positions: positions,
+		},
+		SettledCash: a.settled, TotalCash: float64(a.settled + a.unsettled),
+	}
+}
+
+func mapsKeys[V any](m map[string]V) func(func(string) bool) {
+	return func(yield func(string) bool) {
+		for k := range m {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+type momentumOptions struct {
+	mutate       func(*event.TargetWeightConfigurationPayload)
+	partial      map[string]int64 // instrument -> shares of its sell filled before the rest is cancelled
+	noSnapshot   map[string]bool  // sessions without an account snapshot
+	lateSnapshot map[string]bool  // sessions whose snapshot is taken an hour after the close
+	recorded     []event.Envelope // an earlier run's engine-state records, fed before the first session
+	noBar        map[string]string
+	noMark       map[string]string // session -> instrument without a mark
+	noUniverse   bool
+	silentVenue  bool                                             // the venue never reports on a released order
+	decideFrom   string                                           // first session decided, when not the first session
+	stopAfter    string                                           // last session fed
+	beforeClose  func(s *stream, session string) []event.Envelope // inputs fed just before the session closes
+	neverClosed  map[string]bool                                  // calendar sessions with no bar and no close
+	withdraw     map[string]float64                               // session -> settled cash withdrawn after its close, in a snapshot an hour later
+	withdrawFill map[string]float64                               // instrument -> settled cash withdrawn as its sell fills, in a snapshot read the second after the fill
+	// riskOffJanuary makes SPY fall over January's last six sessions too.
+	riskOffJanuary bool
+	// compact feeds the compact universe stream: bars only for SPY, IEF,
+	// SHY and the names held, and at each universe snapshot one
+	// market.close.history per ranked member (closeHistories).
+	compact bool
+	// heldBarsOnly feeds a run configured for bars the compact stream's
+	// bars (SPY, IEF, SHY and the names held) and no close history.
+	heldBarsOnly bool
+	// valueAtRaw values the account snapshot's positions at the raw close
+	// rawScale gives, as the venue would, instead of at the adjusted close.
+	valueAtRaw bool
+	// retract feeds a market.session.retracted for each session named,
+	// just after the calendar; unlisted leaves sessions off the calendar fed.
+	retract  []string
+	unlisted map[string]bool
+	// lateRetract is a session retracted only after the session before it
+	// closes, so it never closes; in a compact stream that session's close
+	// histories follow the retraction, unless lateHistoriesMissing.
+	lateRetract          string
+	lateHistoriesMissing bool
+	// noHistories names decision sessions whose close histories the compact
+	// stream leaves out.
+	noHistories map[string]bool
+	// rawScale multiplies an instrument's raw close, leaving its adjusted
+	// close, as an unadjusted split would: a stock dear by the share.
+	rawScale map[string]float64
+	// held is the IRA's holdings before the first session.
+	held map[string]int64
+	// unnamed are instruments the compact stream writes no bar for even when
+	// held, as when a holding is not named to the market-data step: only its
+	// close history reaches the run.
+	unnamed map[string]bool
+	// refusals names inputs, by envelope ID, the run must refuse, with what
+	// the refusal says.
+	refusals map[string]string
+	// brokerLast, when set, feeds every mark at version 2 with IBKR's last
+	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
+	// ADR 0026 point 1, amended 2026-10-18).
+	brokerLast float64
+}
+
+type momentumResult struct {
+	run
+	venue  []event.Envelope // the venue reports fed
+	stream *stream
+}
+
+// simulateMomentum feeds the synthetic run through a journal Recorder
+// wrapping a fresh handler, the venue filling released orders as it goes.
+func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
+	t.Helper()
+	cfg := momentumConfiguration()
+	if opts.compact {
+		cfg.Momentum.UniverseInput = event.UniverseInputCompact
+	}
+	if opts.mutate != nil {
+		opts.mutate(&cfg)
+	}
+	cal := momentumCalendar()
+	from := cal[0]
+	if opts.decideFrom != "" {
+		from = opts.decideFrom
+	}
+	handler, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf(from)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := journal.NewRecorder(handler)
+	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
+	res := momentumResult{run: run{recorder: rec, hash: s.hash}, stream: s}
+	acct := &ira{account: cfg.AccountID, settled: 10000, held: map[string]int64{}}
+	for id, q := range opts.held {
+		acct.held[id] = q
+	}
+	apply := func(in event.Envelope) []event.Envelope {
+		t.Helper()
+		out, err := rec.Apply(context.Background(), in)
+		if want, refused := opts.refusals[in.ID]; refused {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("apply %s = %v, want a refusal saying %q", in.ID, err, want)
+			}
+			res.inputs = append(res.inputs, in)
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("apply %s: %v", in.ID, err)
+		}
+		res.inputs = append(res.inputs, in)
+		res.decisions = append(res.decisions, out...)
+		for _, d := range out {
+			if d.Type == event.OrderReleasedEventType {
+				var p event.OrderReleasedPayload
+				decode(t, d, &p)
+				acct.pending = append(acct.pending, p)
+			}
+		}
+		return out
+	}
+	start := closeOf(cal[0]).Add(-12 * time.Hour)
+	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
+	apply(s.envelope(t, event.SessionCalendarEventType, event.SessionCalendarSchemaVersion, "calendar", start,
+		event.SessionCalendarPayload{Source: "fixture", Sessions: slices.DeleteFunc(slices.Clone(cal), func(s string) bool { return opts.unlisted[s] })}))
+	for _, session := range opts.retract {
+		apply(s.envelope(t, event.SessionRetractedEventType, event.SessionRetractedSchemaVersion, "retracted:"+session, start,
+			event.SessionRetractedPayload{Source: "fixture", Session: session, Reason: "the exchange closed"}))
+	}
+	for _, rec := range opts.recorded {
+		apply(s.envelope(t, rec.Type, rec.SchemaVersion, rec.ID, start, rec.Payload))
+	}
+
+	// next is the session after calendar session i on the calendar the run
+	// ends with, which is what decides whether i is a month's last.
+	next := func(i int) string {
+		for _, s := range cal[i+1:] {
+			if !opts.unlisted[s] && !slices.Contains(opts.retract, s) && s != opts.lateRetract {
+				return s
+			}
+		}
+		return ""
+	}
+	for i, session := range cal[:len(cal)-1] {
+		if opts.neverClosed[session] || session == opts.lateRetract {
+			continue
+		}
+		end := closeOf(session)
+		prices := map[string]float64{}
+		for _, n := range names() {
+			if i >= n.from && (n.to == 0 || i < n.to) {
+				prices[n.id] = n.price(cal, i, opts.riskOffJanuary)
+			}
+		}
+		marks := prices // what the snapshot values positions at
+		if opts.valueAtRaw {
+			marks = map[string]float64{}
+			for id, p := range prices {
+				marks[id] = p
+				if k, ok := opts.rawScale[id]; ok {
+					marks[id] = float64(p * k)
+				}
+			}
+		}
+		// The venue: yesterday's proceeds settle, then each released order is
+		// acknowledged and fills at the open; the fill that ends the sell
+		// phase may release buys, which fill in turn.
+		acct.settled, acct.unsettled = float64(acct.settled+acct.unsettled), 0
+		minute := 0
+		venue := func(p any, eventType string, version uint32, id string) {
+			minute++
+			at := end.Add(time.Duration(-390+minute) * time.Minute)
+			e := s.envelope(t, eventType, version, id, at, p)
+			res.venue = append(res.venue, e)
+			apply(e)
+		}
+		for len(acct.pending) > 0 && !opts.silentVenue {
+			o := acct.pending[0]
+			acct.pending = acct.pending[1:]
+			at := end.Add(time.Duration(-390+minute+1) * time.Minute)
+			venue(event.LimitOrderLifecyclePayload{
+				AccountID: cfg.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+				Side: o.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at,
+			}, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+o.ClientOrderID)
+			price := prices[o.InstrumentID]
+			if o.Side == event.OrderSideBuy {
+				price = math.Min(price, o.LimitPrice)
+			} else {
+				price = math.Max(price, o.LimitPrice)
+			}
+			quantity := o.Quantity
+			partial, cancels := opts.partial[o.InstrumentID]
+			if cancels && o.Side == event.OrderSideSell {
+				quantity = partial
+			}
+			if quantity > 0 {
+				at = end.Add(time.Duration(-390+minute+1) * time.Minute)
+				signed := quantity
+				if o.Side == event.OrderSideSell {
+					signed = -quantity
+					acct.unsettled = float64(acct.unsettled+float64(float64(quantity)*price)) - 0.5
+				} else {
+					acct.settled = float64(acct.settled-float64(float64(quantity)*price)) - 0.5
+				}
+				acct.held[o.InstrumentID] += signed
+				venue(event.TargetWeightFillPayload{
+					AccountID: cfg.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					Side: o.Side, Quantity: quantity, Price: price, Commission: 0.5, FilledAt: at,
+				}, event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID)
+				if amount, ok := opts.withdrawFill[o.InstrumentID]; ok && o.Side == event.OrderSideSell {
+					acct.settled = float64(acct.settled - amount)
+					// Read the second after the fill: a fill stamped in a
+					// snapshot's second post-dates it, so a snapshot of that
+					// second holding the fill states holdings no fill explains
+					// (ADR 0019, amended 2026-10-21).
+					venue(acct.snapshot(at.Add(time.Second), marks), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
+				}
+			}
+			if quantity < o.Quantity {
+				at = end.Add(time.Duration(-390+minute+1) * time.Minute)
+				venue(event.LimitOrderLifecyclePayload{
+					AccountID: cfg.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					Side: o.Side, Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at,
+				}, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "cancel:"+o.ClientOrderID)
+			}
+		}
+
+		var ids, marked []string
+		for _, n := range names() {
+			if _, ok := prices[n.id]; ok && opts.compact {
+				marked = append(marked, n.id) // the venue marks what it trades, whatever bars the stream carries
+			}
+			if _, ok := prices[n.id]; !ok || opts.noBar[session] == n.id || (opts.compact || opts.heldBarsOnly) && (!compactBar(n.id, acct.held) || opts.unnamed[n.id]) {
+				continue
+			}
+			ids = append(ids, n.id)
+			bar := adjustedBar(n.id, prices[n.id], n.volume, end)
+			if k, ok := opts.rawScale[n.id]; ok {
+				raw := float64(prices[n.id] * k)
+				bar.Raw.Open, bar.Raw.High, bar.Raw.Low, bar.Raw.Close = raw, raw, raw, raw
+			}
+			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end, bar))
+		}
+		var snap event.UniverseSnapshotPayload
+		if !opts.noUniverse && next(i)[:7] != session[:7] {
+			snap = event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}
+			for _, n := range names() {
+				// A stock with no bar this session, of any listing type, is
+				// left out of the snapshot, as the market-data step writes it
+				// (ADR 0026 point 5).
+				if opts.noBar[session] == n.id {
+					continue
+				}
+				if p, ok := prices[n.id]; ok {
+					snap.Rows = append(snap.Rows, event.UniverseRow{InstrumentID: n.id, Type: n.listing, Close: p, Volume: n.volume, Sector: n.sector, SectorSource: n.source})
+				}
+			}
+			slices.SortFunc(snap.Rows, func(a, b event.UniverseRow) int {
+				if a.InstrumentID < b.InstrumentID {
+					return -1
+				}
+				return 1
+			})
+			apply(s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "universe:"+session, end, snap))
+			// Before a late retraction the session is not yet a decision
+			// session, so the stream sends its histories only after it.
+			if opts.compact && !opts.noHistories[session] && cal[i+1] != opts.lateRetract {
+				for _, h := range closeHistories(t, cfg, cal, i, snap, opts) {
+					apply(s.envelope(t, event.CloseHistoryEventType, event.CloseHistorySchemaVersion, "history:"+h.InstrumentID+":"+session, end, h))
+				}
+			}
+		}
+		if !opts.noSnapshot[session] {
+			asOf := end
+			if opts.lateSnapshot[session] {
+				asOf = end.Add(time.Hour)
+			}
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, marks)))
+		}
+		if !opts.compact {
+			marked = ids
+		}
+		for _, id := range marked {
+			if opts.noMark[session] == id {
+				continue
+			}
+			mark, version := event.MarkRecordedPayload{InstrumentID: id, AsOf: end, Price: prices[id], Source: event.AdapterIBKR}, event.MarkRecordedSchemaVersion
+			if opts.brokerLast != 0 {
+				mark.BrokerLast, mark.BrokerLastSet, version = float64(prices[id]*opts.brokerLast), true, event.MarkRecordedEvidenceVersion
+			}
+			apply(s.envelope(t, event.MarkRecordedEventType, version, fmt.Sprintf("mark:%s:%s", id, session), end, mark))
+		}
+		slices.Sort(ids)
+		if opts.beforeClose != nil {
+			for _, e := range opts.beforeClose(s, session) {
+				apply(e)
+			}
+		}
+		apply(s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "session:"+session, end,
+			event.SessionClosedPayload{PeriodEnd: end, InstrumentIDs: ids}))
+		if cal[i+1] == opts.lateRetract {
+			apply(s.envelope(t, event.SessionRetractedEventType, event.SessionRetractedSchemaVersion, "retracted:"+opts.lateRetract, end,
+				event.SessionRetractedPayload{Source: "fixture", Session: opts.lateRetract, Reason: "the exchange closed"}))
+			if opts.compact && !opts.lateHistoriesMissing && snap.Session == session {
+				for _, h := range closeHistories(t, cfg, cal, i, snap, opts) {
+					apply(s.envelope(t, event.CloseHistoryEventType, event.CloseHistorySchemaVersion, "history:"+h.InstrumentID+":"+session, end, h))
+				}
+			}
+		}
+		if amount, ok := opts.withdraw[session]; ok {
+			acct.settled = float64(acct.settled - amount)
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-after-withdrawal:"+session, end.Add(time.Hour), acct.snapshot(end.Add(time.Hour), marks)))
+		}
+		if session == opts.stopAfter {
+			break
+		}
+	}
+	res.entries = rec.Entries()
+	return res
+}
+
+func released(t *testing.T, es []event.Envelope) []event.OrderReleasedPayload {
+	t.Helper()
+	var out []event.OrderReleasedPayload
+	for _, e := range ofType(es, event.OrderReleasedEventType) {
+		var p event.OrderReleasedPayload
+		decode(t, e, &p)
+		out = append(out, p)
+	}
+	return out
+}

@@ -9,7 +9,9 @@ import ast
 import datetime as _dt
 import difflib
 import importlib.util
+import json
 import os
+import statistics
 import sys
 import tempfile
 import types
@@ -157,6 +159,8 @@ class BuilderTest(unittest.TestCase):
     def test_vol_target_is_refused_where_it_would_be_ignored(self):
         with self.assertRaises(SystemExit):
             build_variants.check_variant("momentum/defensive.py", {"MODE": "mom", "VOL_TARGET": 0.2})
+        with self.assertRaises(SystemExit):
+            build_variants.check_variant("momentum/fresh_universe.py", {"MODE": "mom_trend", "VOL_TARGET": 0.2})
         build_variants.check_variant("momentum/momentum.py", {"MODE": "mom", "VOL_TARGET": 0.2})
 
     def test_an_unknown_constant_is_refused(self):
@@ -1243,6 +1247,15 @@ class MultiBoostTradingTest(unittest.TestCase):
         _multi_day(algo, when=_dt.datetime(1992, 1, 16), missing=("MDY",))
         self.assertEqual(algo.orders[-1], [("SPY", 0.735)])
 
+    def test_bh_holds_a_fund_whose_indicators_are_still_cold(self):
+        # A fund listed after the start date has a price long before 200
+        # bars: "bh" holds it at once, "boost" waits for the warm trend.
+        for mode, expected in (("bh", [[("IEF", 0.98)]]), ("boost", [])):
+            algo = _multi(self.module, {"IEF": 1}, mode=mode)
+            algo.ind["IEF"][0].IsReady = False
+            _multi_day(algo)
+            self.assertEqual(algo.orders, expected, mode)
+
     def test_bh_never_boosts_and_trades_once_a_month(self):
         algo = _multi(self.module, {"SPY": 1, "MDY": 1}, mode="bh")
         algo.ind["SPY"][1].Current.Value = 5.0
@@ -1321,6 +1334,1227 @@ class CountryRotationTest(unittest.TestCase):
                 t.pop(name)
             self.assertEqual(h, t, held)
 
+
+class UniverseParityTest(unittest.TestCase):
+    """momentum/universe_parity.py: the F_COMBO book picked from an ETF's
+    holdings as they stood ETF_LAG_DAYS earlier, with each month's picks
+    logged for the comparison (docs/live-trading/plan.md, section 4)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/universe_parity.py", {})
+        self.module.Universe = types.SimpleNamespace(Unchanged="UNCHANGED")
+
+    def _algo(self, source="etf", lag=7):
+        algo = self.module.MomentumResearch()
+        algo.UNIVERSE_SOURCE, algo.ETF_LAG_DAYS, algo.UNIVERSE_SIZE = source, lag, 2
+        algo.LOG_PICKS = False
+        algo.last_month, algo.etf_snapshots, algo.no_holdings = None, [], 0
+        algo.Time = _dt.datetime(2016, 2, 1)
+        return algo
+
+    @staticmethod
+    def _row(symbol, dollar_volume, price=10.0, fundamentals=True):
+        return types.SimpleNamespace(Symbol=symbol, DollarVolume=dollar_volume, Price=price,
+                                     HasFundamentalData=fundamentals)
+
+    def test_the_holdings_used_are_the_latest_at_least_the_lag_old(self):
+        d = _dt.date
+        snaps = [(d(2016, 1, 20), {"a"}), (d(2016, 1, 25), {"b"}), (d(2016, 1, 26), {"c"})]
+        lagged = self.module.lagged_holdings
+        self.assertEqual(lagged(snaps, d(2016, 2, 1), 7), {"b"})      # 1-25 is 7 days old; 1-26 too new
+        self.assertEqual(lagged(snaps, d(2016, 2, 1), 1), {"c"})
+        self.assertIsNone(lagged(snaps, d(2016, 1, 26), 7))            # nothing old enough yet
+        self.assertIsNone(lagged([], d(2016, 2, 1), 7))
+
+    def test_the_etf_universe_is_its_holdings_ranked_by_dollar_volume(self):
+        algo = self._algo()
+        algo.etf_snapshots = [(_dt.date(2016, 1, 20), {"a", "b", "c"})]
+        rows = [self._row("a", 1.0), self._row("x", 99.0), self._row("b", 3.0), self._row("c", 2.0),
+                self._row("p", 50.0, price=4.0)]
+        self.assertEqual(algo.Coarse(rows), ["b", "c"])                # x is not held by the fund
+        self.assertEqual(algo.Coarse(rows), "UNCHANGED")              # once a month
+
+    def test_a_month_with_no_holdings_old_enough_waits_and_tries_again(self):
+        algo = self._algo()
+        algo.etf_snapshots = [(_dt.date(2016, 1, 28), {"a"})]
+        rows = [self._row("a", 1.0)]
+        self.assertEqual(algo.Coarse(rows), "UNCHANGED")
+        self.assertEqual((algo.last_month, algo.no_holdings), (None, 1))
+        algo.Time = _dt.datetime(2016, 2, 4)
+        self.assertEqual(algo.Coarse(rows), ["a"])
+
+    def test_the_coarse_source_is_the_backtests_own_universe(self):
+        algo = self._algo(source="coarse")
+        rows = [self._row("a", 1.0), self._row("x", 99.0), self._row("b", 3.0)]
+        self.assertEqual(algo.Coarse(rows), ["x", "b"])
+
+    def test_each_day_the_funds_holdings_are_recorded_and_nothing_is_subscribed(self):
+        algo = self._algo()
+        held = [types.SimpleNamespace(Symbol="a"), types.SimpleNamespace(Symbol="b")]
+        self.assertEqual(algo.EtfHoldings(held), [])
+        self.assertEqual(algo.etf_snapshots, [(_dt.date(2016, 2, 1), {"a", "b"})])
+        algo.etf_snapshots.insert(0, (_dt.date(2015, 11, 1), {"old"}))
+        algo.Time = _dt.datetime(2016, 2, 2)
+        algo.EtfHoldings(held)
+        self.assertEqual([day for day, _ in algo.etf_snapshots], [_dt.date(2016, 2, 1), _dt.date(2016, 2, 2)])
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        # Every code line of defensive_v2.py is kept, in order; only comment
+        # lines may change, so with UNIVERSE_SOURCE "coarse" it trades as
+        # defensive_v2 does.
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "universe_parity.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def _fine_row(self, ticker, sector):
+        sym = namedtuple("Sym", "Value")(ticker)
+        row = types.SimpleNamespace(Symbol=sym)
+        row.AssetClassification = types.SimpleNamespace(MorningstarSectorCode=sector)
+        return row
+
+    def test_a_sector_override_relabels_named_tickers_only(self):
+        algo = self._algo(source="coarse")
+        algo.SECTOR_OVERRIDE = {"MARA": 311}
+        algo.sectors, algo.fund_reads, algo.fund_hits = {}, 0, 0
+        rows = [self._fine_row("MARA", 103), self._fine_row("JPM", 103)]
+        algo.Fine(rows)
+        self.assertEqual({s.Value: c for s, c in algo.sectors.items()}, {"MARA": 311, "JPM": 103})
+        self.assertEqual(algo.overridden, 1)
+        algo.Fine(rows)                                        # the next month: same ticker again
+        self.assertEqual((algo.overridden, algo.relabelled), (2, {"MARA"}))
+
+    def test_without_an_override_the_sectors_are_morningstars(self):
+        algo = self._algo(source="coarse")
+        algo.SECTOR_OVERRIDE = {}
+        algo.sectors, algo.fund_reads, algo.fund_hits = {}, 0, 0
+        algo.Fine([self._fine_row("MARA", 103)])
+        self.assertEqual([c for c in algo.sectors.values()], [103])
+
+    def test_the_gics_override_run_differs_from_the_coarse_parity_run_only_in_its_labels(self):
+        base = _class_constants(*build_variants.VARIANTS["OOS_P_COARSE"])
+        c = _class_constants(*build_variants.VARIANTS["OOS_P_GICS"])
+        override = c.pop("SECTOR_OVERRIDE")
+        self.assertEqual(base.pop("SECTOR_OVERRIDE"), {})
+        self.assertEqual(c, base)
+        self.assertEqual(len(override), 20)
+        self.assertTrue(set(override.values()) <= {101, 102, 103, 104, 205, 206, 207, 308, 309, 310, 311})
+
+    def test_the_parity_runs_keep_the_combinations_settings(self):
+        base = _class_constants(*build_variants.VARIANTS["OOS_F_COMBO"])
+        base["END_DATE"] = (2026, 9, 30)
+        expected = {"OOS_P_COARSE": ("coarse", 7), "OOS_P_IWB7": ("etf", 7), "OOS_P_IWB1": ("etf", 1)}
+        for name, (source, lag) in expected.items():
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/universe_parity.py", name)
+            c = _class_constants(template, params)
+            own = {k: c.pop(k) for k in ("UNIVERSE_SOURCE", "ETF_TICKER", "ETF_LAG_DAYS", "SNAPSHOT_DAYS",
+                                         "SECTOR_OVERRIDE")}
+            self.assertEqual(c, base, name)
+            self.assertEqual(own, {"UNIVERSE_SOURCE": source, "ETF_TICKER": "IWB", "ETF_LAG_DAYS": lag,
+                                   "SNAPSHOT_DAYS": 45, "SECTOR_OVERRIDE": {}}, name)
+
+
+class ParityCompareTest(unittest.TestCase):
+    """momentum/parity_compare.py: month-by-month overlap of two runs'
+    holdings, rebuilt from their fills."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "parity_compare", os.path.join(HERE, "momentum", "parity_compare.py"))
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    @staticmethod
+    def _t(y, m, d):
+        return _dt.datetime(y, m, d, 13, tzinfo=_dt.timezone.utc).timestamp()
+
+    def test_the_months_run_from_the_first_to_the_last_inclusive(self):
+        self.assertEqual(self.module.months("2015-11", "2016-02"), ["2015-11", "2015-12", "2016-01", "2016-02"])
+
+    def test_holdings_after_each_months_fills_carry_into_quiet_months(self):
+        t = self._t
+        fills = [[t(2016, 1, 4), "A", 10, 1.0, 0], [t(2016, 1, 4), "B", 5, 1.0, 0],
+                 [t(2016, 1, 6), "C", 3, 1.0, 0],                         # a late buy in the same month
+                 [t(2016, 3, 1), "B", -5, 1.0, 0], [t(2016, 3, 1), "IEF", 7, 1.0, 0]]
+        held = self.module.holdings_by_month(fills, ["2016-01", "2016-02", "2016-03"])
+        self.assertEqual(held["2016-01"], ({"A", "B", "C"}, False))
+        self.assertEqual(held["2016-02"], ({"A", "B", "C"}, False))     # no trades: unchanged
+        self.assertEqual(held["2016-03"], ({"A", "C"}, True))           # the bond fund is held
+
+    def test_fills_before_the_study_count_and_after_it_do_not(self):
+        t = self._t
+        fills = [[t(2015, 6, 1), "A", 10, 1.0, 0], [t(2016, 2, 1), "A", -10, 1.0, 0]]
+        self.assertEqual(self.module.holdings_by_month(fills, ["2016-01"]), {"2016-01": ({"A"}, False)})
+
+    def test_the_bond_fund_is_recognised_by_ticker_or_by_security_id(self):
+        # The tax study's export names each security by QuantConnect's
+        # security ID, "<ticker at first listing> <code>".
+        t = self._t
+        fills = [[t(2016, 1, 4), "IEF SGNUDG1YI9ID", 7, 1.0, 0], [t(2016, 1, 4), "AAPL R735QTJ8XC9X", 3, 1.0, 0],
+                 [t(2016, 1, 4), "IEFA VFL8MXEK1IP1", 2, 1.0, 0]]
+        held = self.module.holdings_by_month(fills, ["2016-01"])
+        self.assertEqual(held["2016-01"], ({"AAPL R735QTJ8XC9X", "IEFA VFL8MXEK1IP1"}, True))
+
+    def test_a_month_with_nothing_held_is_refused(self):
+        # An export that lost its early orders would otherwise look like an
+        # empty book and lower the overlap without saying so.
+        t = self._t
+        fills = [[t(2016, 2, 1), "A", 10, 1.0, 0]]
+        with self.assertRaises(ValueError):
+            self.module.holdings_by_month(fills, ["2016-01", "2016-02"])
+
+    def test_overlap_counts_shared_stocks_and_risk_off_agreement(self):
+        a = {"2016-01": ({"A", "B"}, False), "2016-02": ({"A"}, True)}
+        b = {"2016-01": ({"A", "C"}, False), "2016-02": ({"A"}, False)}
+        rows = self.module.compare(a, b)
+        self.assertEqual([(r["month"], r["common"], r["stocks_a"], r["stocks_b"], r["same_risk_off"])
+                          for r in rows], [("2016-01", 1, 2, 2, True), ("2016-02", 1, 1, 1, False)])
+
+    def test_the_summary_reports_the_mean_and_worst_month(self):
+        rows = [{"month": "2016-02", "common": 20, "stocks_a": 25, "stocks_b": 25, "same_risk_off": True},
+                {"month": "2016-03", "common": 10, "stocks_a": 25, "stocks_b": 25, "same_risk_off": False}]
+        s = self.module.summary(rows)
+        self.assertEqual((s["months"], s["worst_month"], s["risk_off_differs"]), (2, "2016-03", 1))
+        self.assertAlmostEqual(s["mean_common_share"], 0.6)
+        self.assertAlmostEqual(s["worst_common_share"], 0.4)
+
+
+class GlidePathTest(unittest.TestCase):
+    """momentum/glide_path.py: the combination plus a half-IEF/SHY bond
+    sleeve whose share follows the owner's age schedule or stays fixed
+    (docs/live-trading/plan.md, section 2)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/glide_path.py", {})
+
+    def test_the_schedule_meets_its_anchor_points(self):
+        g = self.module.glide_share
+        for age, share in ((37, 0.0), (38, 0.0), (45.5, 0.154), (53, 0.308), (59, 0.404), (65, 0.50),
+                           (68.5, 0.60), (72, 0.70), (80, 0.70)):
+            self.assertAlmostEqual(g(age), share, places=6, msg=age)
+
+    def test_the_schedule_never_holds_more_bonds_than_the_straight_line_through_vanguards_points(self):
+        def vanguard(age):
+            if age <= 40:
+                return 0.10
+            if age <= 65:
+                return 0.10 + 0.016 * (age - 40)
+            return min(0.70, 0.50 + 0.20 * (age - 65) / 7)
+        for months in range(38 * 12, 80 * 12):
+            age = months / 12
+            self.assertLessEqual(self.module.glide_share(age), vanguard(age) + 1e-9, age)
+
+    def test_age_counts_whole_months_from_the_measurement_start(self):
+        age = self.module.age_on
+        start = _dt.date(2002, 8, 1)
+        self.assertEqual(age(_dt.date(2002, 8, 1), 38.0, start), 38.0)
+        self.assertEqual(age(_dt.date(2002, 8, 31), 38.0, start), 38.0)     # not yet a month
+        self.assertEqual(age(_dt.date(2002, 9, 3), 38.0, start), 38.0 + 1 / 12)
+        self.assertEqual(age(_dt.date(2003, 8, 1), 53.0, start), 54.0)
+        self.assertEqual(age(_dt.date(2002, 7, 1), 38.0, start), 38.0 - 1 / 12)  # warm-up
+
+    def test_the_bond_sleeve_takes_its_share_and_merges_with_risk_off_ief(self):
+        book = {"A": 0.49, "IEF": 0.49}                 # a risk-off month's momentum book
+        out = self.module.with_bond_sleeve(book, 0.30, {"IEF": 0.5, "SHY": 0.5})
+        self.assertAlmostEqual(out["A"], 0.49 * 0.7)
+        self.assertAlmostEqual(out["IEF"], 0.49 * 0.7 + 0.98 * 0.3 * 0.5)  # one position, both sleeves
+        self.assertAlmostEqual(out["SHY"], 0.98 * 0.3 * 0.5)
+        self.assertAlmostEqual(sum(out.values()), 0.98)
+
+    def test_no_bond_share_leaves_the_book_unchanged(self):
+        book = {"A": 0.5, "B": 0.48}
+        self.assertEqual(self.module.with_bond_sleeve(book, 0.0, {"IEF": 0.5, "SHY": 0.5}), book)
+
+    def test_the_share_used_each_month(self):
+        algo = self.module.MomentumResearch()
+        algo.MEASURE_FROM, algo.PATH_START_AGE = (2002, 8, 1), 53.0
+        algo.Time = _dt.datetime(2008, 8, 1, 8)
+        algo.GLIDE, algo.BOND_SHARE = "path", 0.0
+        self.assertAlmostEqual(algo._bond_share(), 0.308 + 0.016 * 6)
+        algo.GLIDE, algo.BOND_SHARE = "fixed", 0.6
+        self.assertAlmostEqual(algo._bond_share(), 0.6)
+        algo.GLIDE = "none"
+        self.assertEqual(algo._bond_share(), 0.0)
+
+    def _trading_algo(self, held):
+        """An algorithm whose _trade can run: ``held`` maps symbol -> held
+        fraction of a $1m account; every symbol is priced."""
+        algo = self.module.MomentumResearch()
+        algo.REBALANCE_BAND, algo.resizes, algo.resize_all = 0.25, 0, False
+        algo.pending, algo.pending_tickets = {}, {}
+        equity = 1_000_000.0
+
+        class Securities(dict):
+            def ContainsKey(self, k):
+                return True
+
+            def __getitem__(self, k):
+                return types.SimpleNamespace(HasData=True, Price=100.0)
+
+        def holding(k):
+            w = held.get(k, 0.0)
+            return types.SimpleNamespace(Invested=bool(w), IsLong=w > 0, IsShort=w < 0, HoldingsValue=w * equity)
+
+        class Book(dict):
+            TotalPortfolioValue = equity
+
+            def __iter__(self):
+                # Like LEAN's portfolio: key/value pairs of every holding.
+                return iter([types.SimpleNamespace(Key=k, Value=holding(k)) for k in held])
+
+            def __getitem__(self, k):
+                return holding(k)
+
+        algo.Securities, algo.Portfolio = Securities(), Book()
+        algo.orders = []
+        algo.SetHoldings = lambda sym, w: algo.orders.append((sym, round(w, 6)))
+        algo.Liquidate = lambda sym: algo.orders.append((sym, 0))
+        return algo
+
+    def test_the_sleeve_reaches_trading_as_one_ief_target_and_the_band_uses_it(self):
+        algo = self._trading_algo({"A": 0.343, "IEF": 0.49})
+        algo.GLIDE, algo.BOND_SHARE, algo.MEASURE_FROM = "fixed", 0.30, (2002, 8, 1)
+        algo.Time = _dt.datetime(2010, 3, 1, 8)
+        algo.bond_syms, algo.b_used = {"IEF": "IEF", "SHY": "SHY"}, []
+        book = algo._glide_targets({"A": 0.49, "IEF": 0.49})       # a risk-off month
+        self.assertAlmostEqual(book["IEF"], 0.49)                  # 0.343 + 0.147, one target
+        algo._trade(book)
+        # IEF held at 0.49 is on its summed target, A on its scaled one: only
+        # SHY, not yet held, is bought. Against momentum's IEF share alone
+        # (0.343) the held 0.49 would be 43% off and resized.
+        self.assertEqual(algo.orders, [("SHY", 0.147)])
+        self.assertEqual(algo.b_used, [0.30])
+
+    def test_a_held_stock_the_months_book_drops_is_sold_and_the_sleeve_still_bought(self):
+        algo = self._trading_algo({"A": 0.686, "OLD": 0.30})
+        algo.GLIDE, algo.BOND_SHARE, algo.MEASURE_FROM = "fixed", 0.30, (2002, 8, 1)
+        algo.Time = _dt.datetime(2010, 3, 1, 8)
+        algo.bond_syms, algo.b_used = {"IEF": "IEF", "SHY": "SHY"}, []
+        algo._trade(algo._glide_targets({"A": 0.98}))             # OLD left the momentum book
+        self.assertEqual(algo.orders, [("OLD", 0), ("IEF", 0.147), ("SHY", 0.147)])
+
+    def test_rebalance_passes_its_book_through_the_sleeve_before_trading(self):
+        import inspect
+        src = inspect.getsource(self.module.MomentumResearch.Rebalance)
+        self.assertLess(src.index("self._glide_targets(targets)"), src.index("self._trade(targets)"))
+
+    def test_without_a_glide_the_book_is_untouched(self):
+        algo = self.module.MomentumResearch()
+        algo.GLIDE = "none"
+        book = {"A": 0.98}
+        self.assertIs(algo._glide_targets(book), book)
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "glide_path.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_glide_runs_keep_the_combinations_settings_and_name_their_windows(self):
+        combo = _class_constants(*build_variants.VARIANTS["F_COMBO"])
+        windows = {"G_IS": ((2001, 8, 1), (2002, 8, 1), (2015, 12, 31)),
+                   "G_OOS": ((2015, 1, 1), (2016, 1, 1), (2026, 9, 30))}
+        expected = {"P38": ("path", 0.0, 38.0), "P53": ("path", 0.0, 53.0), "P65": ("path", 0.0, 65.0),
+                    "F00": ("fixed", 0.0, 38.0), "F30": ("fixed", 0.3, 38.0), "F50": ("fixed", 0.5, 38.0),
+                    "F60": ("fixed", 0.6, 38.0), "F70": ("fixed", 0.7, 38.0)}
+        # The *_PARITY runs are these runs exporting for parity, tested in
+        # test_parity_remaining.py.
+        names = [n for n in build_variants.VARIANTS if n.startswith("G_") and not n.endswith("_PARITY")]
+        self.assertEqual(len(names), 15)
+        for name in names:
+            window, kind = name.rsplit("_", 1)
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/glide_path.py", name)
+            c = _class_constants(template, params)
+            self.assertEqual((c.pop("START_DATE"), c.pop("MEASURE_FROM"), c.pop("END_DATE")), windows[window], name)
+            self.assertEqual((c.pop("GLIDE"), c.pop("BOND_SHARE"), c.pop("PATH_START_AGE")), expected[kind], name)
+            self.assertEqual(c.pop("BOND_FUNDS"), {"IEF": 0.5, "SHY": 0.5}, name)
+            self.assertEqual(c, {k: v for k, v in combo.items() if k not in ("START_DATE", "MEASURE_FROM", "END_DATE")},
+                             name)
+        self.assertNotIn("G_OOS_F60", build_variants.VARIANTS)       # no 2016 run reaches 60% bonds
+
+
+class GoldenLogTest(unittest.TestCase):
+    """momentum/golden_log.py: defensive_v2.py logging chosen months' full
+    working, for the Go module's golden cases (ADR 0026, point 7)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/golden_log.py", {})
+
+    def test_golden_lines_mark_picks_and_capped_names_and_carry_the_weights(self):
+        sym = namedtuple("Sym", "Value")
+        a, b, c, d, ief = sym("A"), sym("B"), sym("C"), sym("D"), sym("IEF")
+        ranked = [a, b, c, d]
+        scores = {a: 0.9, b: 0.8, c: 0.7, d: 0.6}
+        vol = {a: 0.02, b: 0.03, c: 0.01, d: 0.04}
+        sectors = {a: 311, b: 311, c: 311, d: None}
+        targets = {a: 0.2, b: 0.2, d: 0.09, ief: 0.49}
+        lines = self.module.golden_lines(_dt.datetime(2020, 4, 1, 8), True, 250.0, 280.0, 400, 380,
+                                         ranked, scores, vol, sectors, targets, top_k=3, sector_cap=2, top_n=2,
+                                         short=[(sym("NEW"), 120)])
+        self.assertTrue(all(l.startswith("GOLD") and l.endswith("|") and len(l) <= 190 for l in lines))
+        self.assertEqual(lines[0], "GOLDH 2020-04-01 risk_off=1 spy=250.0 sma=280.0 members=400 scored=380|")
+        ranks = ";".join(l[l.index(" ", 6) + 1:-1] for l in lines if l.startswith("GOLDR"))
+        self.assertEqual(ranks.split(";"), ["1:A:0.9:0.02:311:P", "2:B:0.8:0.03:311:P", "3:C:0.7:0.01:311:-"])
+        weights = ";".join(l[l.index(" ", 6) + 1:-1] for l in lines if l.startswith("GOLDW"))
+        self.assertEqual(weights.split(";"), ["A:0.2", "B:0.2", "D:0.09", "IEF:0.49"])
+        self.assertIn("GOLDS 2020-04-01 NEW:120|", lines)
+
+    def test_logging_continues_past_top_k_until_the_last_pick(self):
+        sym = namedtuple("Sym", "Value")
+        names = [sym("T%d" % i) for i in range(6)]
+        scores = {s: 1.0 - i / 10 for i, s in enumerate(names)}
+        sectors = {s: 311 for s in names[:4]}
+        sectors.update({names[4]: 101, names[5]: 102})
+        lines = self.module.golden_lines(_dt.datetime(2020, 4, 1, 8), False, 1.0, 1.0, 6, 6, names, scores,
+                                         {s: 0.01 for s in names}, sectors, {}, top_k=2, sector_cap=1, top_n=2)
+        ranks = ";".join(l[l.index(" ", 6) + 1:-1] for l in lines if l.startswith("GOLDR")).split(";")
+        # T0 picked; T1-T3 capped; T4 (rank 5, past top_k 2) is the second pick.
+        self.assertEqual([r.split(":")[-1] for r in ranks], ["P", "C", "C", "C", "P"])
+
+    def test_from_rank_drops_earlier_ranks_but_keeps_their_marks_and_the_rest(self):
+        sym = namedtuple("Sym", "Value")
+        names = [sym("T%d" % i) for i in range(6)]
+        scores = {s: 1.0 - i / 10 for i, s in enumerate(names)}
+        sectors = {s: 311 for s in names[:4]}
+        sectors.update({names[4]: 101, names[5]: 102})
+        args = (_dt.datetime(2020, 4, 1, 8), False, 1.0, 1.0, 6, 6, names, scores,
+                {s: 0.01 for s in names}, sectors, {names[0]: 0.49, names[4]: 0.49})
+        full = self.module.golden_lines(*args, top_k=2, sector_cap=1, top_n=2)
+        part = self.module.golden_lines(*args, top_k=2, sector_cap=1, top_n=2, from_rank=4)
+        ranks = lambda ls: ";".join(l[l.index(" ", 6) + 1:-1] for l in ls if l.startswith("GOLDR")).split(";")
+        # Ranks 4 and 5 keep the marks they get in the full log (T4 is still the second pick).
+        self.assertEqual(ranks(part), ranks(full)[3:])
+        self.assertEqual(part[0], full[0])
+        self.assertEqual([l for l in part if not l.startswith("GOLDR")],
+                         [l for l in full if not l.startswith("GOLDR")])
+
+    def test_numbers_round_trip_beyond_six_decimals(self):
+        sym = namedtuple("Sym", "Value")
+        a = sym("A")
+        v, w = 0.0123456789012345, 0.123456789123456
+        lines = self.module.golden_lines(_dt.datetime(2020, 4, 1, 8), False, 1.0, 1.0, 1, 1, [a], {a: 0.5},
+                                         {a: v}, {}, {a: w}, top_k=1)
+        rank = [l for l in lines if l.startswith("GOLDR")][0][:-1].split(":")
+        weight = [l for l in lines if l.startswith("GOLDW")][0][:-1].split(":")
+        self.assertEqual((float(rank[3]), float(weight[-1])), (v, w))
+
+    def test_only_the_chosen_months_are_logged(self):
+        algo = self.module.MomentumResearch()
+        algo.GOLDEN_MONTHS = ((2020, 4), (2022, 6))
+        algo.Time = _dt.datetime(2020, 4, 1, 8)
+        self.assertTrue(algo._golden_month())
+        algo.Time = _dt.datetime(2020, 5, 1, 8)
+        self.assertFalse(algo._golden_month())
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "golden_log.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_golden_runs_keep_the_combinations_settings_and_end_after_their_month(self):
+        import calendar
+        names = [n for n in build_variants.VARIANTS if "_GOLD_" in n and n.split("_")[0] in ("OOS", "IS")
+                 and not n.endswith("_B")]
+        self.assertEqual(len(names), 9)
+        for name in names:
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/golden_log.py")
+            base = "OOS_F_COMBO" if name.startswith("OOS") else "F_COMBO"
+            c = _class_constants(template, params)
+            months, k, end = c.pop("GOLDEN_MONTHS"), c.pop("GOLDEN_TOP_K"), c.pop("END_DATE")
+            self.assertEqual(c.pop("GOLDEN_FROM_RANK"), 1, name)
+            expected = _class_constants(*build_variants.VARIANTS[base])
+            expected.pop("END_DATE")
+            self.assertEqual(c, expected, name)
+            (y, m), = months
+            self.assertEqual(end, (y, m, calendar.monthrange(y, m)[1]), name)
+            self.assertEqual(k, 40, name)
+
+    def test_each_second_part_is_its_cut_run_starting_after_the_last_rank_logged(self):
+        # The 10 KB log cap cut these two runs after these ranks.
+        for name, start in (("OOS_GOLD_2021_03", 139), ("IS_GOLD_2000_03", 145)):
+            first = _class_constants(*build_variants.VARIANTS[name])
+            second = _class_constants(*build_variants.VARIANTS[name + "_B"])
+            self.assertEqual(second.pop("GOLDEN_FROM_RANK"), start, name)
+            first.pop("GOLDEN_FROM_RANK", None)
+            self.assertEqual(second, first, name)
+
+
+
+class FreshSelectionTest(unittest.TestCase):
+    """momentum/fresh_universe.py: the month's universe chosen at the
+    selection whose next session opens in the new month."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/fresh_universe.py", {})
+        self.module.Universe = types.SimpleNamespace(Unchanged="unchanged")
+
+    def _algo(self, fresh, next_open):
+        algo = self.module.MomentumResearch()
+        algo.FRESH_SELECTION = fresh
+        algo.UNIVERSE_SIZE = 2
+        algo.spy = "SPY"
+        algo.last_month = None
+        algo.early_selections = 0
+        hours = types.SimpleNamespace(GetNextMarketOpen=lambda now, extended: next_open[now])
+        algo.Securities = {"SPY": types.SimpleNamespace(Exchange=types.SimpleNamespace(Hours=hours))}
+        return algo
+
+    @staticmethod
+    def _coarse():
+        row = namedtuple("Coarse", "Symbol HasFundamentalData Price DollarVolume")
+        return [row("A", True, 10.0, 3.0), row("B", True, 10.0, 2.0), row("C", True, 10.0, 1.0)]
+
+    def test_a_month_whose_first_is_a_sunday_is_chosen_after_the_last_friday(self):
+        # 2025-06-01 is a Sunday; Friday 2025-05-30 is the last session before it.
+        sat, tue = _dt.datetime(2025, 5, 31), _dt.datetime(2025, 6, 3)
+        opens = {sat: _dt.datetime(2025, 6, 2, 9, 30), tue: _dt.datetime(2025, 6, 3, 9, 30)}
+        algo = self._algo(True, opens)
+        algo.last_month = (2025, 5)
+        algo.Time = sat
+        self.assertEqual(algo.Coarse(self._coarse()), ["A", "B"])
+        self.assertEqual((algo.last_month, algo.early_selections), ((2025, 6), 1))
+        algo.Time = tue
+        self.assertEqual(algo.Coarse(self._coarse()), "unchanged")
+
+    def test_without_the_switch_the_month_waits_for_a_selection_dated_in_it(self):
+        sat = _dt.datetime(2025, 5, 31)
+        algo = self._algo(False, {sat: _dt.datetime(2025, 6, 2, 9, 30)})
+        algo.last_month = (2025, 5)
+        algo.Time = sat
+        self.assertEqual(algo.Coarse(self._coarse()), "unchanged")
+        algo.Time = _dt.datetime(2025, 6, 3)
+        self.assertEqual(algo.Coarse(self._coarse()), ["A", "B"])
+        self.assertEqual(algo.early_selections, 0)
+
+    def test_a_month_whose_first_is_a_weekday_is_chosen_as_before(self):
+        # 2025-10-01 is a Wednesday: the selection at its midnight uses 09-30.
+        wed = _dt.datetime(2025, 10, 1)
+        algo = self._algo(True, {wed: _dt.datetime(2025, 10, 1, 9, 30)})
+        algo.last_month = (2025, 9)
+        algo.Time = wed
+        self.assertEqual(algo.Coarse(self._coarse()), ["A", "B"])
+        self.assertEqual((algo.last_month, algo.early_selections), ((2025, 10), 0))
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "fresh_universe.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_runs_are_the_combination_plus_the_switch(self):
+        for name, base in (("FU_COMBO", "F_COMBO"), ("OOS_FU_COMBO", "OOS_F_COMBO")):
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/fresh_universe.py", name)
+            c = _class_constants(template, params)
+            self.assertIs(c.pop("FRESH_SELECTION"), True, name)
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
+
+
+class CommissionDrag30kTest(unittest.TestCase):
+    """The $30k commission-drag variants: each is the
+    combination run it is named for with only the starting cash changed.
+    No fee switch: the templates set the Interactive Brokers brokerage
+    model, whose GetFeeModel returns InteractiveBrokersFeeModel."""
+
+    PAIRS = {"FU_COMBO_30K": "FU_COMBO", "OOS_FU_COMBO_30K": "OOS_FU_COMBO",
+             "F_COMBO_30K": "F_COMBO", "OOS_F_COMBO_30K": "OOS_F_COMBO"}
+
+    def test_each_run_differs_from_its_base_only_in_cash(self):
+        for name, base in self.PAIRS.items():
+            template, params = build_variants.VARIANTS[name]
+            base_template, _ = build_variants.VARIANTS[base]
+            self.assertEqual(template, base_template, name)
+            c = _class_constants(template, params)
+            self.assertEqual(c.pop("CASH"), 30_000, name)
+            base_c = _class_constants(*build_variants.VARIANTS[base])
+            self.assertEqual(base_c.pop("CASH"), 1_000_000, name)
+            self.assertEqual(c, base_c, name)
+
+    def test_the_templates_use_the_interactive_brokers_model(self):
+        for template in ("momentum/defensive_v2.py", "momentum/fresh_universe.py"):
+            with open(os.path.join(HERE, template)) as f:
+                self.assertIn("SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage", f.read())
+
+
+class BoostGoldenLogTest(unittest.TestCase):
+    """boost/golden_log.py: template.py logging each day of chosen months,
+    and its first decision, for the Go module's golden cases (ADR 0026)."""
+
+    def setUp(self):
+        self.module = _load_template(self, "boost/golden_log.py", {})
+
+    def test_the_day_line_carries_the_inputs_and_the_state(self):
+        line = self.module.boost_line(_dt.datetime(2019, 5, 13, 16), 280.5, 6.25, 275.0, 285.0, True, 1.47)
+        self.assertEqual(line, "BGOLD 2019-05-13 close=280.500000 rsi2=6.250000 sma200=275.000000 "
+                               "sma5=285.000000 sig=1 want=1.470000|")
+        self.assertLessEqual(len(line), 190)
+
+    def test_an_indicator_not_ready_is_written_as_a_dash(self):
+        line = self.module.boost_line(_dt.datetime(1993, 9, 1, 16), 45.0, None, None, 44.0, False, 0.98)
+        self.assertIn("rsi2=- sma200=-", line)
+
+    def test_ondata_logs_the_first_decision_and_the_chosen_months_days_only(self):
+        algo = _algorithm(self.module, "BoostResearch")
+        algo.GOLDEN_MONTHS = ((1992, 2),)
+        algo.logs, algo.stats = [], {}
+        algo.Log = algo.logs.append
+        algo.SetRuntimeStatistic = lambda k, v: algo.stats.__setitem__(k, v)
+        algo.IsWarmingUp = True
+        _day(algo, when=_dt.datetime(1992, 1, 2))          # warm-up: nothing
+        algo.IsWarmingUp = False
+        _day(algo, when=_dt.datetime(1992, 1, 15))         # the first decision, outside the months
+        _day(algo, when=_dt.datetime(1992, 1, 16))         # skipped
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, when=_dt.datetime(1992, 2, 3))          # chosen month: a boost begins
+        self.assertEqual([l.split()[1] for l in algo.logs], ["1992-01-15", "1992-02-03"])
+        self.assertIn("sig=0 want=0.980000|", algo.logs[0])
+        self.assertIn("rsi2=5.000000", algo.logs[1])
+        self.assertIn("sig=1 want=1.470000|", algo.logs[1])
+        self.assertEqual(algo.orders, [{"SPY": 0.98}, {"SPY": 1.47}])   # trading unchanged
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(algo.stats["Golden"], "months=1 lines=2")
+
+    def test_only_chosen_months_and_the_first_decision_are_logged(self):
+        algo = self.module.BoostResearch()
+        algo.GOLDEN_MONTHS = ((2019, 5),)
+        algo.Time = _dt.datetime(2019, 5, 2, 16)
+        self.assertTrue(algo._golden_day(first=False))
+        algo.Time = _dt.datetime(2019, 6, 3, 16)
+        self.assertFalse(algo._golden_day(first=False))
+        self.assertTrue(algo._golden_day(first=True))
+
+    def test_the_template_only_adds_to_template_py(self):
+        with open(os.path.join(HERE, "boost", "template.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "boost", "golden_log.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_golden_runs_keep_bx_spys_settings(self):
+        for name in ("BX_GOLD", "BX_GOLD_2"):
+            c = _class_constants(*build_variants.VARIANTS[name])
+            months = c.pop("GOLDEN_MONTHS")
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]), name)
+            self.assertTrue(1 <= len(months) <= 3, name)
+
+    def test_the_second_run_holds_the_months_of_bx_spys_next_day_re_entries(self):
+        # BX_SPY (b275c80d) exits and buys again the next session on
+        # 2023-10-02/03 and 2024-07-23/24; BX_GOLD's months hold none.
+        months = _class_constants(*build_variants.VARIANTS["BX_GOLD_2"])["GOLDEN_MONTHS"]
+        self.assertEqual(tuple(map(tuple, months)), ((2023, 10), (2024, 7)))
+
+
+def _additions_only(test, original, derived):
+    """Every code line of ``original`` is kept, in order, in ``derived``;
+    only comment lines may change."""
+    with open(os.path.join(HERE, original)) as f:
+        old = f.read().splitlines()
+    with open(os.path.join(HERE, derived)) as f:
+        new = f.read().splitlines()
+    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+               for line in old[i1:i2]]
+    test.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+
+class _Ticket:
+    def __init__(self, order_id, ok=True, tag=""):
+        self.OrderId, self.ok, self.tags, self.Tag = order_id, ok, [], tag
+
+    def UpdateTag(self, tag):
+        self.tags.append(tag)
+        if self.ok:
+            self.Tag = tag
+        return types.SimpleNamespace(IsSuccess=self.ok)
+
+
+class _Transactions:
+    def __init__(self, tickets=()):
+        self.tickets = list(tickets)
+
+    def GetOpenOrderTickets(self):
+        return list(self.tickets)
+
+
+def _limit_orders(algo, refused=False):
+    """Record LimitOrder calls on ``algo`` and the cancel of each; with
+    ``refused`` QuantConnect refuses each, giving it its placeholder ID."""
+    algo.limits = []
+
+    def limit(sym, qty, price, tag=""):
+        rec = {"sym": sym, "qty": qty, "price": price, "tag": tag, "cancelled": False}
+        algo.limits.append(rec)
+        return types.SimpleNamespace(Cancel=lambda: rec.__setitem__("cancelled", True),
+                                     OrderId=-10 if refused else 1000 + len(algo.limits))
+
+    algo.LimitOrder = limit
+
+
+class ParityLogTest(unittest.TestCase):
+    """momentum/parity_log.py: fresh_universe.py exporting the parity
+    months' inputs in an order tag (ADR 0026, point 7, item 2)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/parity_log.py", {})
+        self.sym = namedtuple("Sym", "Value ID")
+
+    def _record(self, **kw):
+        sym = self.sym
+        a, b, c, d, e, new, spy, ief = (sym("A", "A1"), sym("B", "B1"), sym("C", "C1"), sym("D", "D1"),
+                                        sym("E", "E1"), sym("NEW", "N1"), sym("SPY", "S1"), sym("IEF", "I1"))
+        nan = float("nan")
+        index = ["2020-03-27", "2020-03-30", "2020-03-31"]
+        columns = {spy: [250.0, 251.5, 249.25], a: [1.0, 1.1, 1.2], b: [2.0, nan, 2.2], c: [3.0, 3.1, 3.2],
+                   d: [4.0, 4.1, 4.2], e: [5.0, 5.1, 5.2], new: [nan, nan, 9.5]}
+        counts = {s: sum(1 for x in col if x == x) for s, col in columns.items()}
+        args = dict(month="2020-04", index=index, columns=columns, spy=spy, risk_off=True, spy_close=249.25,
+                    spy_mean=250.1234567890123, spy_n=3, members=[a, b, c, d, e, new], ranked=[a, b, c, d, e],
+                    scores={a: 0.5, b: 0.4, c: 0.3, d: 0.2, e: 0.1},
+                    vol={a: 0.0123456789012345, b: 0.02, c: 0.03, d: 0.04, e: 0.05},
+                    sectors={a: 311, b: 311, c: 311, d: None, e: 206},
+                    targets={a: 0.2, b: 0.2, d: 0.09, ief: 0.49}, counts=counts, top_n=3, sector_cap=2, sample=1)
+        args.update(kw)
+        tag = self.module.parity_record(**args)
+        self.assertTrue(tag.startswith("PARITY1 "))
+        return json.loads(tag[len("PARITY1 "):])
+
+    def test_the_record_carries_the_month_its_inputs_and_its_book(self):
+        r = self._record()
+        self.assertEqual((r["month"], r["risk_off"], r["spy_close"], r["spy_n"], r["members"], r["scored"]),
+                         ("2020-04", True, 249.25, 3, 6, 5))
+        self.assertEqual(r["spy_mean"], 250.1234567890123)                 # repr round-trips
+        self.assertEqual(r["index"], ["2020-03-27", "2020-03-30", "2020-03-31"])
+        self.assertEqual(r["ranked"], [["A", 0.5, 0.0123456789012345, 311, "P"], ["B", 0.4, 0.02, 311, "P"],
+                                       ["C", 0.3, 0.03, 311, "C"], ["D", 0.2, 0.04, None, "P"],
+                                       ["E", 0.1, 0.05, 206, "-"]])
+        self.assertEqual(r["weights"], {"A": 0.2, "B": 0.2, "D": 0.09, "IEF": 0.49})
+        self.assertEqual(r["short"], {"NEW": 1})
+
+    def test_the_sample_is_every_pick_then_each_kind_up_to_its_size_with_spy(self):
+        r = self._record()
+        # Picks A B D; one capped (C), one beyond (E), one short (NEW), one gapped (B, already in).
+        self.assertEqual(sorted(r["closes"]), ["A", "B", "C", "D", "E", "NEW", "SPY"])
+        self.assertEqual(r["closes"]["B"], [2.0, None, 2.2])
+        self.assertEqual(r["closes"]["NEW"], [None, None, 9.5])
+        self.assertEqual(r["closes"]["SPY"], [250.0, 251.5, 249.25])
+
+    def test_a_sample_of_none_keeps_only_the_picks_and_spy(self):
+        self.assertEqual(sorted(self._record(sample=0)["closes"]), ["A", "B", "D", "SPY"])
+
+    def test_a_member_with_no_history_is_short_with_no_closes(self):
+        sym = self.sym
+        ghost = sym("GHOST", "G1")
+        base = self._record()
+        r = self._record(members=[sym("A", "A1"), ghost], sample=5)
+        self.assertEqual(r["short"]["GHOST"], 0)
+        self.assertEqual(r["closes"]["GHOST"], [None] * len(base["index"]))
+
+    def test_a_ticker_two_members_share_is_written_as_its_security_id(self):
+        sym = self.sym
+        a2 = sym("A", "A2")
+        args = dict(members=[sym("A", "A1"), a2], ranked=[sym("A", "A1"), a2])
+        r = self._record(scores={sym("A", "A1"): 0.5, a2: 0.4}, vol={}, sectors=None,
+                         targets={sym("A", "A1"): 0.49, a2: 0.49}, sample=0, **args)
+        self.assertEqual([row[0] for row in r["ranked"]], ["A1", "A2"])
+        self.assertEqual(sorted(r["weights"]), ["A1", "A2"])
+
+    def test_the_marks_are_defensive_books_picks(self):
+        names = ["T%d" % i for i in range(6)]
+        sectors = {n: 311 for n in names[:4]}
+        sectors.update({names[4]: 101, names[5]: 102})
+        marks = self.module.parity_marks(names, sectors, 2, 1)
+        self.assertEqual([marks[n] for n in names], ["P", "C", "C", "C", "P", "-"])
+        targets = self.module.defensive_book(names, 2, sector=sectors, sector_cap=1)
+        self.assertEqual(sorted(n for n in names if marks[n] == "P"), sorted(t for t in targets if t != "IEF"))
+
+    def _algo(self, tickets):
+        algo = self.module.MomentumResearch()
+        algo.Transactions = _Transactions(tickets)
+        algo.spy = "SPY"
+        algo.Securities = {"SPY": types.SimpleNamespace(Price=300.0)}
+        _limit_orders(algo)
+        return algo
+
+    def test_the_tag_goes_on_the_newest_open_order(self):
+        old, new = _Ticket(7), _Ticket(12)
+        algo = self._algo([new, old])
+        algo._parity_attach("PARITY1 {}")
+        self.assertEqual((new.tags, old.tags, algo.limits), (["PARITY1 {}"], [], []))
+        self.assertEqual((algo.parity_logged, algo.parity_bytes), (1, 10))
+
+    def test_with_no_open_order_a_cancelled_one_share_limit_order_carries_it(self):
+        for tickets in ([], [_Ticket(3, ok=False)]):
+            algo = self._algo(tickets)
+            algo._parity_attach("PARITY1 {}")
+            self.assertEqual(algo.limits, [{"sym": "SPY", "qty": 1, "price": 3.0, "tag": "PARITY1 {}",
+                                            "cancelled": True}])
+            self.assertEqual(algo.parity_dummies, 1)
+
+    def test_only_the_parity_months_are_exported(self):
+        algo = self.module.MomentumResearch()
+        algo.PARITY_MONTHS = ((2020, 4),)
+        algo.Time = _dt.datetime(2020, 4, 1, 8)
+        self.assertTrue(algo._parity_month())
+        algo.Time = _dt.datetime(2020, 5, 1, 8)
+        self.assertFalse(algo._parity_month())
+
+    def test_the_end_statistic_counts_the_months_and_bytes(self):
+        algo = self._algo([_Ticket(1)])
+        algo.PARITY_MONTHS = ((2020, 4), (2020, 5))
+        algo._parity_attach("PARITY1 {}")
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        algo.Portfolio, algo.equity_curve, algo.spy_curve, algo.scales = [], [], [], []
+        algo.Transactions.OrdersCount = 1
+        for attr in ("rebalances", "risk_off_months", "borrow_paid", "resizes", "skipped", "retried", "cash_sum",
+                     "cash_days", "fund_reads", "fund_hits", "early_selections"):
+            setattr(algo, attr, 0)
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(stats["Parity"], "months=2 logged=1 bytes=10 dummies=0")
+
+    def test_the_template_only_adds_to_fresh_universe(self):
+        _additions_only(self, "momentum/fresh_universe.py", "momentum/parity_log.py")
+
+    def test_the_template_fits_the_free_plans_file_limit(self):
+        with open(os.path.join(HERE, "momentum", "parity_log.py")) as f:
+            self.assertLess(len(f.read()), 32_000)
+
+    def test_the_runs_are_fu_combo_and_oos_fu_combo_plus_their_months(self):
+        for name, base, months in (("FU_PARITY", "FU_COMBO", build_variants.PARITY_MONTHS_IS),
+                                   ("OOS_FU_PARITY", "OOS_FU_COMBO", build_variants.PARITY_MONTHS_OOS)):
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/parity_log.py", name)
+            c = _class_constants(template, params)
+            self.assertEqual(tuple(map(tuple, c.pop("PARITY_MONTHS"))), months, name)
+            self.assertEqual(c.pop("PARITY_SAMPLE"), 5, name)
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
+
+    def test_the_months_are_at_least_24_a_window_plus_every_golden_month_in_it(self):
+        golden_is, golden_oos = {(2000, 3), (2008, 11), (2009, 6), (2013, 5)}, {(2016, 2), (2020, 4), (2021, 3),
+                                                                                (2022, 6), (2024, 3)}
+        for months, golden, first, last in ((build_variants.PARITY_MONTHS_IS, golden_is, (1999, 1), (2015, 12)),
+                                            (build_variants.PARITY_MONTHS_OOS, golden_oos, (2016, 1), (2026, 6))):
+            self.assertGreaterEqual(len(months) - len(golden), 24)
+            self.assertTrue(golden <= set(months))
+            self.assertEqual(list(months), sorted(set(months)))
+            self.assertTrue(first <= months[0] and months[-1] <= last)
+
+    def test_every_steps_by_months_across_years(self):
+        self.assertEqual(build_variants._every((2015, 11), (2016, 9), 5), [(2015, 11), (2016, 4), (2016, 9)])
+
+
+class BoostParityLogTest(unittest.TestCase):
+    """boost/parity_log.py: template.py exporting every bar's close,
+    indicators and state in order tags (ADR 0026, point 7, item 2)."""
+
+    def setUp(self):
+        self.module = _load_template(self, "boost/parity_log.py", {})
+
+    def test_a_row_carries_the_bar_and_the_ready_indicators(self):
+        row = self.module.parity_row(_dt.datetime(1993, 2, 1), 44.25, _Indicator(50.0), _Indicator(1.0, False),
+                                     _Indicator(44.1))
+        self.assertEqual(row, ["1993-02-01", 44.25, 50.0, None, 44.1, None, None])
+        self.module.set_parity_state(row, True, 1.47)
+        self.assertEqual(row[5:], [1, 1.47])
+        tag = self.module.parity_chunk([row])
+        self.assertTrue(tag.startswith("BPARITY1 "))
+        self.assertEqual(json.loads(tag[9:]), {"rows": [row]})
+
+    def _algo(self):
+        algo = _algorithm(self.module, "BoostResearch")
+        algo.PARITY = True
+        algo.END = (1992, 6, 30)
+        algo.Transactions = _Transactions()
+        _limit_orders(algo)
+        placed = algo.SetHoldings
+
+        def set_holdings(target, size=None):
+            placed(target, size)
+            algo.Transactions.tickets = [_Ticket(len(algo.orders))]
+        algo.SetHoldings = set_holdings
+        return algo
+
+    def test_warm_up_bars_are_rows_without_state_and_each_order_carries_the_rows_before_it(self):
+        algo = self._algo()
+        algo.IsWarmingUp = True
+        _day(algo, 99.0, when=_dt.datetime(1992, 1, 2))
+        algo.IsWarmingUp = False
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))           # first decision: 98%, an order
+        first = algo.Transactions.tickets[0]
+        rows = json.loads(first.tags[0][9:])["rows"]
+        self.assertEqual([r[0] for r in rows], ["1992-01-02", "1992-01-15"])
+        self.assertEqual((rows[0][5:], rows[1][5:]), ([None, None], [0, 0.98]))
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 16))           # no order: kept
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 17))           # a boost: an order with both rows
+        rows = json.loads(algo.Transactions.tickets[0].tags[0][9:])["rows"]
+        self.assertEqual([(r[0], r[5], r[6]) for r in rows], [("1992-01-16", 0, 0.98), ("1992-01-17", 1, 1.47)])
+        self.assertEqual(algo.orders, [{"SPY": 0.98}, {"SPY": 1.47}])  # trading unchanged
+        self.assertEqual(algo.limits, [])
+
+    def test_rows_past_the_chunk_size_and_near_the_end_go_on_a_cancelled_limit_order(self):
+        algo = self._algo()
+        algo.PARITY_CHUNK = 2
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 16))
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 17))
+        self.assertEqual(len(algo.limits), 1)
+        self.assertTrue(algo.limits[0]["cancelled"] and algo.limits[0]["qty"] == 1)
+        self.assertEqual(len(json.loads(algo.limits[0]["tag"][9:])["rows"]), 2)
+        algo.PARITY_CHUNK = 1500
+        _day(algo, 100.0, when=_dt.datetime(1992, 6, 22))           # within 10 days of END
+        self.assertEqual(len(algo.limits), 2)
+
+    def test_the_end_sends_what_is_left_and_counts_it(self):
+        algo = self._algo()
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        algo.curve = algo.px = []
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))           # an order: one tag
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 16))
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(stats["Parity"], "rows=2 tags=2 dummies=1")
+        algo.OnEndOfAlgorithm()                                       # nothing left: no further order
+        self.assertEqual(len(algo.limits), 1)
+
+    def test_without_the_switch_nothing_is_exported(self):
+        algo = self._algo()
+        algo.PARITY = False
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        _day(algo, 100.0, when=_dt.datetime(1992, 1, 15))
+        algo.OnEndOfAlgorithm()
+        self.assertNotIn("Parity", stats)
+        self.assertEqual((algo.limits, algo.Transactions.tickets[0].tags), ([], []))
+
+    def test_the_template_only_adds_to_template_py(self):
+        _additions_only(self, "boost/template.py", "boost/parity_log.py")
+
+    def test_the_run_is_bx_spy_with_the_switch(self):
+        c = _class_constants(*build_variants.VARIANTS["BX_PARITY"])
+        self.assertIs(c.pop("PARITY"), True)
+        self.assertEqual(c.pop("PARITY_CHUNK"), 1500)
+        self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]))
+
+
+class MinimumLotTest(unittest.TestCase):
+    """momentum/minimum_lot.py: ADR 0026's D7-L (point 2, and its 2026-10-17
+    amendment) added to fresh_universe.py, as written ("literal") and with
+    the held-name exception measured for docs/research/d7l-held-name-2026-10.md
+    ("held"). The book cases transcribe internal/targetweight/momentum's
+    minimum_lot_test.go: capCandidates without D (no sector) and G (zero
+    volatility), which the Go tests leave out of the book they value, ranked
+    as Go ranks them (B before C on their tied score), top 3, one name per
+    sector, at a $1,000 account and full scale."""
+
+    RANKED = ["A", "B", "C", "E", "F"]
+    SECTOR = {"A": "X", "B": "X", "C": "Y", "E": "Z", "F": "W"}
+    VOL = {"A": 0.02, "B": 0.05, "C": 0.04, "E": 0.01, "F": 0.03}
+    PRICES = {"A": 100, "B": 100, "C": 100, "E": 100, "F": 50}
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/minimum_lot.py", {})
+        self.module.Universe = types.SimpleNamespace(Unchanged="unchanged")
+
+    def _book(self, prices=None, held=(), nlv=1000.0, risk_off=False):
+        price = dict(self.PRICES, **(prices or {}))
+        return self.module.minimum_lot_book(
+            self.RANKED, 3, price, nlv, held=set(held), sector=self.SECTOR, sector_cap=1, vol=self.VOL,
+            inv_vol=True, risk_off=risk_off, risk_off_fraction=0.5)
+
+    @staticmethod
+    def _names(targets):
+        return sorted(n for n in targets if n != "IEF")
+
+    def test_a_pick_whose_one_share_exceeds_its_target_is_skipped_for_the_next_name(self):
+        # Go: TestMinimumLotSkipsAPickWhoseOneShareExceedsItsTarget. C's
+        # target is 0.98 x 25/175 of $1,000 = $140, below its $150 share.
+        targets, skipped, kept, noprice = self._book({"C": 150})
+        self.assertEqual(self._names(targets), ["A", "E", "F"])
+        self.assertEqual((skipped, kept, noprice), (["C"], set(), 0))
+
+    def test_a_skipped_pick_frees_its_sector_slot(self):
+        # Go: TestMinimumLotFreesTheSectorSlot.
+        targets, skipped, _, _ = self._book({"A": 300})
+        self.assertEqual(self._names(targets), ["B", "C", "E"])
+        self.assertEqual(skipped, ["A"])
+
+    def test_the_selection_repeats_until_every_pick_is_affordable(self):
+        # Go: TestMinimumLotIteratesUntilEveryPickIsAffordable. Taking F for
+        # C lowers A's weight below $270 on the second pass.
+        targets, skipped, _, _ = self._book({"C": 150, "A": 270})
+        self.assertEqual(self._names(targets), ["B", "E", "F"])
+        self.assertEqual(sorted(skipped), ["A", "C"])
+        for n in self._names(targets):
+            self.assertLessEqual(dict(self.PRICES, C=150, A=270)[n], targets[n] * 1000.0)
+
+    def test_with_no_affordable_pick_the_decision_is_withheld(self):
+        # Go: TestMinimumLotWithNoAffordablePickPicksNothing; Decide then
+        # withholds it as all-unaffordable (amendment, case b).
+        targets, skipped, _, _ = self._book({n: 5000 for n in self.RANKED})
+        self.assertIsNone(targets)
+        self.assertEqual(sorted(skipped), self.RANKED)
+
+    def test_the_target_value_is_the_risk_off_books_weight(self):
+        # Half risk-off halves C's target to $70: $100 is then unaffordable.
+        targets, skipped, _, _ = self._book(risk_off=True)
+        self.assertIn("C", skipped)
+        self.assertNotIn("C", targets)
+
+    def test_with_every_pick_affordable_the_book_is_defensive_books(self):
+        targets, skipped, kept, _ = self._book()
+        plain = self.module.defensive_book(self.RANKED, 3, sector=self.SECTOR, sector_cap=1, vol=self.VOL,
+                                           inv_vol=True)
+        self.assertEqual((targets, skipped, kept), (plain, [], set()))
+
+    def test_a_held_unaffordable_pick_keeps_its_place_and_weight(self):
+        targets, skipped, kept, _ = self._book({"C": 150}, held={"C"})
+        plain = self.module.defensive_book(self.RANKED, 3, sector=self.SECTOR, sector_cap=1, vol=self.VOL,
+                                           inv_vol=True)
+        self.assertEqual((targets, skipped, kept), (plain, [], {"C"}))
+
+    def test_only_the_held_pick_is_kept_and_the_rest_substitute(self):
+        targets, skipped, kept, _ = self._book({"C": 180, "A": 300}, held={"C"})
+        self.assertEqual(self._names(targets), ["B", "C", "E"])
+        self.assertEqual((skipped, kept), (["A"], {"C"}))
+
+    def test_a_pick_with_no_raw_close_is_counted_and_left_in_the_book(self):
+        price = dict(self.PRICES)
+        del price["E"]
+        targets, skipped, _, noprice = self.module.minimum_lot_book(
+            self.RANKED, 3, price, 1000.0, sector=self.SECTOR, sector_cap=1, vol=self.VOL, inv_vol=True)
+        self.assertEqual((self._names(targets), skipped, noprice), (["A", "C", "E"], [], 1))
+
+    def _algo(self, mode, held):
+        algo = self.module.MomentumResearch()
+        algo.MIN_LOT, algo.TOP_N, algo.SECTOR_CAP, algo.INV_VOL = mode, 3, 1, True
+        algo.RISK_OFF_FRACTION, algo.SPY_BLEND = 0.5, 0.0
+        algo.bond, algo.spy = "IEF", "SPY"
+        algo.sectors = self.SECTOR
+        algo.raw_close = dict(self.PRICES, C=150)
+        for attr in ("lot_skipped", "lot_held_sold", "lot_kept_n", "lot_withheld", "lot_noprice", "lot_raw_above",
+                     "resizes"):
+            setattr(algo, attr, 0)
+        algo.lot_kept = set()
+        algo.orders = []
+
+        class Book(dict):
+            TotalPortfolioValue = 1000.0
+
+            def __iter__(self):
+                return iter([types.SimpleNamespace(Key=k, Value=v) for k, v in dict.items(self)])
+
+            def __missing__(self, key):
+                return types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
+
+        algo.Portfolio = Book({k: types.SimpleNamespace(Invested=True, IsLong=True, IsShort=False,
+                                                        HoldingsValue=v) for k, v in held.items()})
+        algo.SetHoldings = lambda s, w: algo.orders.append((s, round(w, 6)))
+        algo.Liquidate = lambda s: algo.orders.append((s, 0))
+        algo._priced = lambda s: True
+        return algo
+
+    def test_the_literal_rule_sells_a_held_unaffordable_pick_in_full(self):
+        algo = self._algo("literal", {"C": 150.0})
+        targets = algo._minimum_lot(self.RANKED, self.VOL, None, False)
+        algo._trade(targets)
+        self.assertIn(("C", 0), algo.orders)
+        self.assertEqual((algo.lot_skipped, algo.lot_held_sold, algo.lot_kept_n), (1, 1, 0))
+
+    def test_the_held_exception_places_no_order_in_the_kept_pick(self):
+        # C's $400 holding is far past the 25% band around its $140
+        # target, so without the exception the band would resize it.
+        algo = self._algo("held", {"C": 400.0})
+        targets = algo._minimum_lot(self.RANKED, self.VOL, None, False)
+        algo._trade(targets)
+        self.assertEqual([o for o in algo.orders if o[0] == "C"], [])
+        self.assertEqual(sorted(o[0] for o in algo.orders), ["A", "E"])
+        self.assertEqual((algo.lot_skipped, algo.lot_held_sold, algo.lot_kept_n), (0, 0, 1))
+
+    def test_an_all_unaffordable_month_is_withheld_and_counted(self):
+        algo = self._algo("literal", {})
+        algo.raw_close = {n: 5000 for n in self.RANKED}
+        self.assertIsNone(algo._minimum_lot(self.RANKED, self.VOL, None, False))
+        self.assertEqual(algo.lot_withheld, 1)
+
+    def test_the_month_choosing_selection_records_the_raw_closes(self):
+        # A's raw close is twice its adjusted price (a later 2:1 split), so
+        # rawAbove counts it; B's equal prices and C, outside the universe,
+        # are not counted.
+        row = namedtuple("Coarse", "Symbol HasFundamentalData Price AdjustedPrice DollarVolume")
+        rows = [row("A", True, 10.0, 5.0, 3.0), row("B", True, 20.0, 20.0, 2.0), row("C", True, 30.0, 1.0, 1.0)]
+        algo = self.module.MomentumResearch()
+        algo.MIN_LOT, algo.FRESH_SELECTION, algo.UNIVERSE_SIZE = "literal", False, 2
+        algo.last_month, algo.early_selections, algo.raw_close, algo.lot_raw_above = (2025, 5), 0, {}, 0
+        algo.Time = _dt.datetime(2025, 6, 2)
+        self.assertEqual(algo.Coarse(rows), ["A", "B"])
+        self.assertEqual((algo.raw_close, algo.lot_raw_above), ({"A": 10.0, "B": 20.0}, 1))
+        algo.Time = _dt.datetime(2025, 6, 3)
+        self.assertEqual(algo.Coarse([row("A", True, 99.0, 1.0, 3.0)]), "unchanged")
+        self.assertEqual((algo.raw_close, algo.lot_raw_above), ({"A": 10.0, "B": 20.0}, 1))
+
+    def test_without_the_rule_the_template_records_and_skips_nothing(self):
+        algo = self._algo(None, {"C": 150.0})
+        row = namedtuple("Coarse", "Symbol HasFundamentalData Price DollarVolume")
+        algo.FRESH_SELECTION, algo.UNIVERSE_SIZE, algo.last_month, algo.early_selections = False, 2, None, 0
+        algo.raw_close = {}
+        algo.Time = _dt.datetime(2025, 6, 2)
+        algo.Coarse([row("A", True, 10.0, 3.0)])
+        self.assertEqual(algo.raw_close, {})
+
+    def test_the_end_statistic_reports_the_counts(self):
+        algo = self._algo("held", {})
+        algo.lot_skipped, algo.lot_held_sold, algo.lot_kept_n, algo.lot_withheld, algo.lot_noprice = 5, 2, 3, 0, 0
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        algo.Portfolio, algo.equity_curve, algo.spy_curve, algo.scales = [], [], [], []
+        algo.Transactions = types.SimpleNamespace(OrdersCount=1)
+        algo.MEASURE_FROM, algo.END_DATE = (1999, 1, 1), (2015, 12, 31)
+        for attr in ("rebalances", "risk_off_months", "borrow_paid", "retried", "cash_sum", "cash_days",
+                     "fund_reads", "fund_hits", "early_selections", "skipped"):
+            setattr(algo, attr, 0)
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(stats["MinLot"], "mode=held skipped=5 heldSold=2 kept=3 withheld=0 noPrice=0")
+        self.assertEqual(stats["RawCheck"], "rawAbove=0")
+
+    def test_with_the_rule_off_the_rebalance_orders_match_fresh_universe(self):
+        # The control run's claim: MIN_LOT None trades as fresh_universe.py
+        # does. Both templates run the same rebalance on the same stub
+        # state; minimum_lot.py is also given raw closes that would make
+        # every pick unaffordable if the rule were on.
+        class Series:
+            def __init__(self, values):
+                self.v = list(values)
+                self.iloc = self
+
+            def __getitem__(self, i):
+                return self.v[i] if isinstance(i, int) else Series(self.v[i])
+
+            def __len__(self):
+                return len(self.v)
+
+            def __iter__(self):
+                return iter(self.v)
+
+            def dropna(self):
+                return self
+
+            def mean(self):
+                return sum(self.v) / len(self.v)
+
+            def pct_change(self):
+                return Series(b / a - 1.0 for a, b in zip(self.v, self.v[1:]))
+
+        class Frame:
+            empty = False
+
+            def __init__(self, series, columns=None):
+                self.series, self.columns = series, columns or ["close"]
+
+            def __getitem__(self, name):
+                return Frame(self.series, list(self.series)) if name == "close" else self.series[name]
+
+            def unstack(self, level):
+                return self
+
+        names = ["A", "B", "C", "E", "F"]
+        growth = {"A": 1.004, "B": 1.003, "C": 1.002, "E": 1.001, "F": 1.0005, "SPY": 1.001}
+        series = {n: Series(100.0 * g ** i * (1 + 0.01 * (i % 3)) for i in range(260)) for n, g in growth.items()}
+
+        def run(template, raw_close, mode, stock_trend, held):
+            module = _load_template(self, template, {})
+            module.Resolution = types.SimpleNamespace(Daily=1)
+            module.np = types.SimpleNamespace(std=lambda x: statistics.pstdev(list(x)))
+            algo = module.MomentumResearch()
+            algo.MODE, algo.TOP_N, algo.SECTOR_CAP, algo.INV_VOL = mode, 3, 1, True
+            algo.RISK_OFF_FRACTION, algo.SPY_BLEND, algo.STOCK_TREND_DAYS = 0.5, 0.0, stock_trend
+            algo.bond, algo.spy, algo.members, algo.sectors = "IEF", "SPY", names, self.SECTOR
+            algo.History = lambda symbols, n, res: Frame(series)
+            algo.MIN_LOT, algo.raw_close, algo.lot_kept = None, raw_close, set()
+            for attr in ("names_held", "rebalances", "risk_off_months", "resizes", "lot_skipped", "lot_held_sold",
+                         "lot_kept_n", "lot_withheld", "lot_noprice", "skipped"):
+                setattr(algo, attr, 0)
+            algo.resize_all, algo.pending, algo.pending_tickets = False, {}, {}
+            algo.orders = []
+
+            def holding(value):
+                return types.SimpleNamespace(Invested=True, IsLong=True, IsShort=False, HoldingsValue=value)
+
+            class Book(dict):
+                TotalPortfolioValue = 1000.0
+
+                def __iter__(self):
+                    return iter([types.SimpleNamespace(Key=k, Value=v) for k, v in dict.items(self)])
+
+                def __missing__(self, key):
+                    return types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
+
+            algo.Portfolio = Book({n: holding(v) for n, v in held.items()})
+            algo.SetHoldings = lambda s, w: algo.orders.append((s, round(w, 6)))
+            algo.Liquidate = lambda s: algo.orders.append((s, 0))
+            algo._priced = lambda s: True
+            algo.Rebalance()
+            return algo.orders
+
+        # First month with an empty book, and a later month holding the
+        # top pick (kept or resized) and a name the book no longer wants
+        # (sold), in the plain mode and in the control's mode.
+        for mode, stock_trend in (("mom", 0), ("mom_trend", 100)):
+            for held in ({}, {"A": 500.0, "E": 300.0, "F": 100.0}):
+                with self.subTest(mode=mode, stock_trend=stock_trend, held=sorted(held)):
+                    base = run("momentum/fresh_universe.py", {}, mode, stock_trend, held)
+                    self.assertGreater(len(base), 0)
+                    if held:
+                        self.assertTrue(any(w == 0 for _, w in base), "a held name is sold")
+                    self.assertEqual(run("momentum/minimum_lot.py", {n: 1e9 for n in names}, mode, stock_trend, held), base)
+
+    def test_the_template_only_adds_to_fresh_universe(self):
+        _additions_only(self, "momentum/fresh_universe.py", "momentum/minimum_lot.py")
+
+    def test_the_template_fits_the_free_plans_file_limit(self):
+        with open(os.path.join(HERE, "momentum", "minimum_lot.py")) as f:
+            self.assertLess(len(f.read()), 32_000)
+
+    def test_the_runs_are_the_30k_combination_plus_the_rule(self):
+        for name, base, mode in (("D7L_NONE_30K", "FU_COMBO_30K", None),
+                                 ("D7L_LIT_30K", "FU_COMBO_30K", "literal"),
+                                 ("D7L_HELD_30K", "FU_COMBO_30K", "held"),
+                                 ("OOS_D7L_LIT_30K", "OOS_FU_COMBO_30K", "literal"),
+                                 ("OOS_D7L_HELD_30K", "OOS_FU_COMBO_30K", "held")):
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/minimum_lot.py", name)
+            c = _class_constants(template, params)
+            self.assertEqual(c.pop("MIN_LOT"), mode, name)
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
 
 if __name__ == "__main__":
     unittest.main()

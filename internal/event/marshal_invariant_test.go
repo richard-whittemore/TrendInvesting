@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/quick"
@@ -44,6 +45,16 @@ func marshalPayloads() []validatedPayload {
 		validSymbolChangeAction(), validInstrumentSymbolChanged(),
 		validDividendAction(), validCampaignDividend(),
 		validWatchlistPublished(),
+		validTargetWeightConfiguration(), validAccountPositionsSnapshot(), validMarkRecorded(),
+		validTargetsDecidedWatching(), validTargetsWithheld(), validOrderPlanned(),
+		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
+		validKillSwitch(), validBrokerSnapshot(), postCloseSnapshot(), readTimeSnapshot(), evidencedMark(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
+		validOperatorRunApproved(), validOperatorRunApprovedInIncident(), validRebalanceCleared(),
+		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
+		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
+		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
+		validAdjustedBar(), validCloseHistory(), validSessionRetracted(),
+		validReconciliation(), validReconciliationResult(), validAlertAcknowledged(),
 	}
 }
 
@@ -141,6 +152,12 @@ func payloadLeaves(t *testing.T, v reflect.Value, path string, visit func(string
 		for i := range v.Len() {
 			payloadLeaves(t, v.Index(i), fmt.Sprintf("%s[%d]", path, i), visit)
 		}
+	case reflect.Pointer:
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+			defer v.Set(reflect.Zero(v.Type()))
+		}
+		payloadLeaves(t, v.Elem(), path, visit)
 	case reflect.String, reflect.Int, reflect.Int64, reflect.Bool, reflect.Float64:
 		visit(path, v)
 	default:
@@ -196,7 +213,7 @@ func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
 						}
 					}
 					requirePayloadMarshals(t, candidate.Interface().(validatedPayload))
-					candidate.FieldByName(fieldName(path)).Set(reflect.ValueOf(bad))
+					leafByPath(t, candidate, path).Set(reflect.ValueOf(bad))
 					if _, err := json.Marshal(candidate.Interface()); err == nil {
 						t.Fatal("test timestamp must fail JSON encoding")
 					}
@@ -207,6 +224,33 @@ func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// leafByPath returns the leaf of v that payloadLeaves named path: the
+// payload's type name, then each field name and slice index. Each slice on
+// the way is cloned into v first.
+func leafByPath(t *testing.T, v reflect.Value, path string) reflect.Value {
+	t.Helper()
+	for _, part := range strings.Split(path, ".")[1:] {
+		name, index, indexed := strings.Cut(part, "[")
+		v = v.FieldByName(name)
+		if indexed {
+			i, err := strconv.Atoi(strings.TrimSuffix(index, "]"))
+			if err != nil || v.Kind() != reflect.Slice || i >= v.Len() {
+				t.Fatalf("%s: no element %s in the fixture", path, part)
+			}
+			// The copy shares the fixture's backing array: clone it, so
+			// setting the leaf changes the copy alone.
+			clone := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+			reflect.Copy(clone, v)
+			v.Set(clone)
+			v = clone.Index(i)
+		}
+		if !v.IsValid() {
+			t.Fatalf("%s: no field %s", path, name)
+		}
+	}
+	return v
 }
 
 func fieldName(path string) string {
@@ -228,6 +272,11 @@ func TestPayloadTimestampsAcceptWritableTimes(t *testing.T) {
 							field.Set(reflect.ValueOf(time.Date(year, at.Month(), at.Day(), at.Hour(), at.Minute(), at.Second(), at.Nanosecond(), time.FixedZone("writable", offset))))
 						}
 					})
+					// Keep an adjusted bar's base on or before its moved
+					// session, so only the timestamps are under test.
+					if v.Type() == reflect.TypeFor[event.CompletedBarAdjustedPayload]() {
+						v.FieldByName("AdjustedBase").SetString("0000-01-01")
+					}
 					requirePayloadMarshals(t, v.Interface().(validatedPayload))
 				})
 			}

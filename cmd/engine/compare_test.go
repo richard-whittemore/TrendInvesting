@@ -112,6 +112,7 @@ func TestServerDecisionsMatchBacktestForTheSameBars(t *testing.T) {
 	engineJournal := filepath.Join(dir, "engine.journal.jsonl")
 
 	stop := startEngine(t, options{
+		mode:       modeBacktest,
 		socketPath: socketPath,
 		configPath: testConfigPath,
 		asOf:       testAsOf,

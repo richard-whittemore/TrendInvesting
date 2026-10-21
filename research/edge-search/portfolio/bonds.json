@@ -1,0 +1,173 @@
+{
+ "_runs": "QuantConnect project 37096083: F_COMBO_R4 24bdb0a9, F_HALF_R4 4270416e, OOS_F_COMBO_R4 dd45f8ec, OOS_F_HALF_R4 7b48232b, MB_SPY_BH_R1 08e1ecfa; MB_IEF_BH 9dfd703e, MB_TLT_BH 82361132, MB_SHY_BH 6b4d77d3 (each first holds its fund on 2002-07-29). Each file is that backtest's 'Strategy Equity' chart, Equity series, as [[unix seconds, close], ...]. IEF is the predeclared bond fund; TLT and SHY are a check on that choice, not a tuning step.",
+ "curves": {
+  "MOM_IS": "eq_F_COMBO_R4.json",
+  "HALF_IS": "eq_F_HALF_R4.json",
+  "MOM_OOS": "eq_OOS_F_COMBO_R4.json",
+  "HALF_OOS": "eq_OOS_F_HALF_R4.json",
+  "SPY": "eq_MB_SPY_BH_R1.json",
+  "IEF": "eq_MB_IEF_BH.json",
+  "TLT": "eq_MB_TLT_BH.json",
+  "SHY": "eq_MB_SHY_BH.json"
+ },
+ "periods": [
+  [
+   "Tuning years",
+   [
+    2002,
+    8
+   ],
+   [
+    2015,
+    12
+   ],
+   {
+    "SPY": "SPY",
+    "MOM": "MOM_IS",
+    "HALF": "HALF_IS",
+    "IEF": "IEF",
+    "TLT": "TLT",
+    "SHY": "SHY"
+   }
+  ],
+  [
+   "Held-out years",
+   [
+    2015,
+    12
+   ],
+   [
+    2026,
+    6
+   ],
+   {
+    "SPY": "SPY",
+    "MOM": "MOM_OOS",
+    "HALF": "HALF_OOS",
+    "IEF": "IEF",
+    "TLT": "TLT",
+    "SHY": "SHY"
+   }
+  ]
+ ],
+ "books": [
+  [
+   "SPY held",
+   {
+    "SPY": 1
+   }
+  ],
+  [
+   "Momentum, combination",
+   {
+    "MOM": 1
+   }
+  ],
+  [
+   "IEF held (7-10y Treasuries)",
+   {
+    "IEF": 1
+   }
+  ],
+  [
+   "TLT held (20y+ Treasuries)",
+   {
+    "TLT": 1
+   }
+  ],
+  [
+   "SHY held (1-3y Treasuries)",
+   {
+    "SHY": 1
+   }
+  ],
+  [
+   "90% combination + 10% IEF",
+   {
+    "MOM": 90,
+    "IEF": 10
+   },
+   "monthly"
+  ],
+  [
+   "80% combination + 20% IEF",
+   {
+    "MOM": 80,
+    "IEF": 20
+   },
+   "monthly"
+  ],
+  [
+   "70% combination + 30% IEF",
+   {
+    "MOM": 70,
+    "IEF": 30
+   },
+   "monthly"
+  ],
+  [
+   "60% combination + 40% IEF",
+   {
+    "MOM": 60,
+    "IEF": 40
+   },
+   "monthly"
+  ],
+  [
+   "50% combination + 50% IEF",
+   {
+    "MOM": 50,
+    "IEF": 50
+   },
+   "monthly"
+  ],
+  [
+   "70% combination + 30% TLT",
+   {
+    "MOM": 70,
+    "TLT": 30
+   },
+   "monthly"
+  ],
+  [
+   "70% combination + 30% SHY",
+   {
+    "MOM": 70,
+    "SHY": 30
+   },
+   "monthly"
+  ],
+  [
+   "70% half filter + 30% IEF",
+   {
+    "HALF": 70,
+    "IEF": 30
+   },
+   "monthly"
+  ],
+  [
+   "90% SPY + 10% IEF",
+   {
+    "SPY": 90,
+    "IEF": 10
+   },
+   "monthly"
+  ],
+  [
+   "70% SPY + 30% IEF",
+   {
+    "SPY": 70,
+    "IEF": 30
+   },
+   "monthly"
+  ],
+  [
+   "50% SPY + 50% IEF",
+   {
+    "SPY": 50,
+    "IEF": 50
+   },
+   "monthly"
+  ]
+ ]
+}

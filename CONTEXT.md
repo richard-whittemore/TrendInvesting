@@ -64,8 +64,15 @@ The one sell order a held Unit rests, for that Unit's own shares: at its **Prote
 _Avoid_: exit proposal (the Campaign-level decision to exit, one of the two inputs), stop order.
 
 **Order lifecycle report**:
-A venue's account of a change in an order's lifecycle that is not an execution: acknowledged, amended, pending cancellation, cancelled, or refused, including an order the venue refused before it ever rested (ADR 0022). It moves no position — the only event that may is a **fill** — and the engine records it without deciding anything from it; it exists so reconciliation (ADR 0019) can tell an ordinary cancel-and-replace from an unexplained difference in the broker's own order book.
+A venue's account of a change in an order's lifecycle that is not an execution: acknowledged, amended, pending cancellation, cancelled, or refused, including an order the venue refused before it ever rested (ADR 0022). It moves no position — the only event that may is a **fill** — and the Turtle engine records it without deciding anything from it; it exists so reconciliation (ADR 0019) can tell an ordinary cancel-and-replace from an unexplained difference in the broker's own order book. Two exceptions in the target-weight engine (ADR 0026): a terminal report (canceled or invalid) ends a released sell's pending shares, and a momentum IRA plans its buys only once every sell of the rebalance has a terminal report or fill (point 2, "IRA execution"); and in dry-run only, the engine records a **synthetic** terminal report itself (version 3, `synthetic: true`, canceled, no venue order ID) for each order it releases and never sends, so the rebalance can complete. A synthetic report is the engine's decision, never a venue's account or an input, and is never an execution (ADR 0026, point 3, "Mode", amended 2026-10-17).
 _Avoid_: fill, execution (both change a position; a lifecycle report never does).
+
+**Order lifecycle state**:
+Where a released order stands, read from the durable log alone (ADR 0027, amendment "re-delivery on request"): **committed** once its `risk.order.released` is in a committed group, **released** once a later input is committed (the adapter sends its next input only once it holds the reply to its last), **acknowledged** once the venue's report naming its client order ID is committed. An order to be sent that is not acknowledged in time is an alert (ADR 0019).
+_Avoid_: sent (the log cannot show that an order reached the broker; acknowledged is the evidence it did).
+
+**Committed reply**:
+The one reply an input ever gets: built from the group the durable log committed for it, so it is byte-identical however often the adapter asks for it, before a restart or after one. The adapter asks by sending the input again under its ID; the input is never applied twice (ADR 0027, amendment "re-delivery on request").
 
 **risk-free**:
 A held Unit whose current Protective Stop, after being raised by the Stop Ladder, sits at or above its own entry price — reachable only by raising, never by an initial stop, which must sit strictly below entry. Its contribution to a Campaign's aggregate open risk is exactly zero: `max(0, EntryPrice − ProtectiveStop)`, a per-share price distance, never a negative figure and never a validation failure — sizing.AggregateOpenRisk scales that distance by the Unit's Quantity and by DollarsPerPoint to reach the account-currency figure. A break-even or profit-protecting stop is a legitimate outcome of the Stop Ladder, not a corrupted one (The Turtle Rules p.23–24).
@@ -123,6 +130,16 @@ _Avoid_: reservation (the act, not the record), margin, buying power (the broker
 **Drawdown Step**:
 A 20 % reduction of the Notional Account, triggered each time actual equity falls 10 % below the figure the Notional Account was last measured against.
 
+**Risk-reducing order**:
+A target-weight sell that moves the account's exposure toward 98% of net liquidation or lower, sized within the broker-reported holding net of every working or pending sell (with no readable broker snapshot, within the account snapshot's holding it was sized from). No buy is one. It is exempt from the order count, order size and price band, and is all a Degraded account still sends on instruments its discrepancy does not name (ADR 0026, point 4).
+
+**Sale back to 98%**:
+One sell-only order that brings a margin account's exposure toward 98% of net liquidation and never below it, sized from one broker snapshot's holding, net liquidation, mark and open orders. While Halted, Degraded on the instrument, or under the Kill switch, it is ADR 0019's one sale, attempted once per incident; in Normal and Degraded elsewhere, an urgent Excess Liquidity alarm makes the same sale (ADR 0019, amended 2026-10-15, 2026-10-16 and 2026-10-17; ADR 0026, point 4). Never for an IRA.
+_Avoid_: flatten (it keeps 98%, it does not close the position), D6 sale (the decision's name, not the order's).
+
+**Kill switch**:
+A recorded operator input that refuses every order, routine sells included, except a margin account's Sale back to 98%. It changes no engine state (ADR 0026, point 3).
+
 **Strength**:
 The mechanical ranking measure applied when several instruments signal at once: an instrument's price change over the preceding 63 completed bars, divided by its N.
 
@@ -142,6 +159,20 @@ The cash a broker pays, at a split, for a fraction of a share it cannot deliver.
 
 **Delisting Exit**:
 The forced closing of a Campaign because its instrument ceased to trade, distinct from an Exit-Channel exit or a stop-out.
+
+### Live runs
+
+**Resume**:
+Continuing a crashed engine's run from its durable log: every committed input is applied again and must reproduce its recorded decisions exactly (ADR 0027). Only a crash is resumed, and never across builds.
+
+**Fresh run**:
+Any engine start after an earlier run that is not a Resume: after a deliberate stop, a reboot, leaving Halted, a build upgrade or a cleared rebalance. It begins a new durable log and decides nothing until a Run approval is its input.
+
+**Run approval**:
+The owner's recorded `operator.run.approved` input that lets a Fresh run start: it names the previous run's durable log and that log's final record hash, the incident it clears, if any, and the state in force: Boost's latch, and the incident in force, if any, with the Degraded or Halted state and scope it holds the account in and whether its one sale back to 98% was attempted. Every item is stated, none defaulted. It is the run's second input, straight after the configuration. From schema version 3 it may also state a Starting book; an account's first run in paper or live mode is approved too, with no previous log and its Starting book stated.
+
+**Starting book**:
+The holdings and total cash the owner checked in IBKR and stated in a Run approval: an account's first run's must state one, a fresh run's may (after a change no fill explains). The IBKR adapter compares a run's first reading after a close with the latest of the chain's last account snapshot and this book, adjusted by the fills since, and never adopts IBKR's book unchecked (ADR 0019 and ADR 0027, amended 2026-10-18).
 
 ### Research
 

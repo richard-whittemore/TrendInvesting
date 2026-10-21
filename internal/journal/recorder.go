@@ -84,12 +84,110 @@ func (e *EmissionLimitError) Error() string {
 // is what makes that overshoot finite: a run holds at most maxRecords +
 // MaxEmissionsPerInput records, and an input emitting more than the ceiling
 // is refused whole rather than recorded in part.
+//
+// A durable Recorder (NewDurableRecorder) also appends each input's group to
+// a durable log, flushed, before Apply returns any of its decisions:
+// journal-before-send (ADR 0019, amended 2026-09-24; ADR 0026 §3; ADR 0027).
+// Apply's return is the only path a decision has towards an adapter, so a
+// decision that was not made durable is never returned, and after a
+// durability failure every later input is refused.
 type Recorder struct {
 	handler    replay.Handler
 	entries    []Entry
 	maxRecords int
 
 	outputSequence uint64
+
+	// log is nil for a Recorder that holds its records in memory only.
+	log *LogWriter
+	// expected is the recorded group the next input must reproduce while
+	// Resume rebuilds a run from its durable log, and nil otherwise.
+	expected []Entry
+	// failed is set once a durable Recorder cannot keep its log in step with
+	// its handler, and refuses every later input.
+	failed error
+	// committed indexes each committed group by its input's ID, first
+	// occurrence kept, so the reply to an input can be served again.
+	committed map[string]committedGroup
+}
+
+// committedGroup locates one committed group in entries, with the error the
+// handler returned for its input, if any.
+type committedGroup struct {
+	start, end int
+	refusal    string
+	sent       uint64
+}
+
+// Committed is one input as it was committed, with the decisions recorded
+// for it, in order and stamped, and the refusal its application returned
+// (empty when there was none).
+//
+// Sent is the sequence the input was sent with, as its caller stated it
+// (Recorder.NoteSent), or zero when none was stated. The log holds the input
+// as recorded, not as sent, so a group Resume recovers has none.
+type Committed struct {
+	Input     event.Envelope
+	Decisions []event.Envelope
+	Refusal   string
+	Sent      uint64
+}
+
+// Committed returns the group committed for the input with this ID: made
+// durable for a durable Recorder, recorded for an in-memory one. An input
+// refused before it was recorded (a resume divergence, the emission
+// ceiling) or whose group could not be made durable was never committed,
+// and reports false; an input the handler refused is committed with its
+// refusal. Because the group is the log's own record,
+// the reply built from it is the same however often it is asked for and
+// whether the run was resumed since (ADR 0027, sections 4 and 6).
+func (r *Recorder) Committed(inputID string) (Committed, bool) {
+	g, ok := r.committed[inputID]
+	if !ok {
+		return Committed{}, false
+	}
+	c := Committed{Input: r.entries[g.start].Envelope, Refusal: g.refusal, Sent: g.sent}
+	for _, e := range r.entries[g.start+1 : g.end] {
+		c.Decisions = append(c.Decisions, e.Envelope)
+	}
+	return c, true
+}
+
+// NoteSent states the sequence the input committed under inputID was sent
+// with, for a caller that records inputs of its own ahead of another's and
+// so records that input later than it was sent (ADR 0027, amendment
+// "re-delivery on request"). It is held in memory beside the group, never
+// in the log, and is ignored for an ID with no committed group.
+func (r *Recorder) NoteSent(inputID string, sequence uint64) {
+	if g, ok := r.committed[inputID]; ok {
+		g.sent = sequence
+		r.committed[inputID] = g
+	}
+}
+
+// InputsRecordedBefore returns how many inputs recorded immediately before
+// the input committed under inputID match, counted back, decisions skipped,
+// to the nearest input that does not; 0 when no input with that ID was
+// committed. The log records no boundary between one exchange's inputs and
+// another's, so for a group it recovers this bounds, and does not state,
+// how far inputs a caller recorded ahead of it moved it.
+func (r *Recorder) InputsRecordedBefore(inputID string, match func(event.Envelope) bool) uint64 {
+	g, ok := r.committed[inputID]
+	if !ok {
+		return 0
+	}
+	var n uint64
+	for i := g.start - 1; i >= 0; i-- {
+		e := r.entries[i]
+		if e.Kind != KindInput {
+			continue
+		}
+		if !match(e.Envelope) {
+			break
+		}
+		n++
+	}
+	return n
 }
 
 // NewRecorder returns a Recorder wrapping handler, which is required, holding
@@ -107,12 +205,38 @@ func NewBoundedRecorder(handler replay.Handler, maxRecords int) *Recorder {
 	return &Recorder{handler: handler, maxRecords: maxRecords}
 }
 
-// Apply implements replay.Handler. It returns the wrapped handler's
-// decisions and error unchanged, so the driver sees exactly what it would
-// without the Recorder in the way.
+// NewDurableRecorder returns a Recorder holding up to maxRecords records
+// that also streams every input's group to log before releasing any of its
+// decisions (ADR 0027).
+func NewDurableRecorder(handler replay.Handler, log *LogWriter, maxRecords int) *Recorder {
+	return &Recorder{handler: handler, maxRecords: maxRecords, log: log}
+}
+
+// DurabilityError reports an input whose records could not be made durable,
+// or that a durable Recorder could no longer accept because an earlier one
+// could not. None of its decisions is returned (ADR 0027).
+type DurabilityError struct {
+	Input string
+	Err   error
+}
+
+func (e *DurabilityError) Error() string {
+	return fmt.Sprintf("journal: the records of event %s are not durable, so none of its decisions is released: %v", e.Input, e.Err)
+}
+
+func (e *DurabilityError) Unwrap() error { return e.Err }
+
+// Apply implements replay.Handler. An in-memory Recorder returns the
+// wrapped handler's decisions and error unchanged, so the driver sees
+// exactly what it would without the Recorder in the way. A durable Recorder
+// returns them only once they are durable, and returns no decision with any
+// error of its own (journal-before-send; ADR 0027).
 func (r *Recorder) Apply(ctx context.Context, input event.Envelope) ([]event.Envelope, error) {
 	if r.handler == nil {
 		return nil, errors.New("journal: a recorder requires a handler to record")
+	}
+	if r.failed != nil {
+		return nil, &DurabilityError{Input: input.ID, Err: r.failed}
 	}
 	// Before the input is recorded, so nothing of this input reaches the
 	// journal without the decisions it caused.
@@ -130,22 +254,78 @@ func (r *Recorder) Apply(ctx context.Context, input event.Envelope) ([]event.Env
 		if applyErr != nil {
 			// The handler's error first, so errors.Is still finds it: a
 			// burst too large to journal must not hide why it was emitted.
-			return decisions, fmt.Errorf("%w; %w", applyErr, ceiling)
+			return r.released(decisions), fmt.Errorf("%w; %w", applyErr, ceiling)
 		}
-		return decisions, ceiling
+		return r.released(decisions), ceiling
 	}
 
-	r.entries = append(r.entries, Entry{Kind: KindInput, Envelope: input})
-
+	group := []Entry{{Kind: KindInput, Envelope: input}}
+	var stampErr error
 	for i, decision := range decisions {
 		r.outputSequence++
 		stamped := replay.Stamp(input, decision, r.outputSequence)
 		if err := stamped.Validate(); err != nil {
-			return decisions, fmt.Errorf("journal: emission %d of event %s cannot be journalled: %w", i, input.ID, err)
+			stampErr = fmt.Errorf("journal: emission %d of event %s cannot be journalled: %w", i, input.ID, err)
+			break
 		}
-		r.entries = append(r.entries, Entry{Kind: KindDecision, Envelope: stamped})
+		group = append(group, Entry{Kind: KindDecision, Envelope: stamped})
+	}
+	refusal := applyErr
+	if stampErr != nil {
+		refusal = stampErr
+	}
+	if err := r.record(input, group, refusal); err != nil {
+		return nil, err
+	}
+	if stampErr != nil {
+		return r.released(decisions), stampErr
 	}
 	return decisions, applyErr
+}
+
+// released is what Apply may return alongside an error of the Recorder's
+// own: everything, for an in-memory Recorder; nothing, for a durable one,
+// since some of decisions were never journalled.
+func (r *Recorder) released(decisions []event.Envelope) []event.Envelope {
+	if r.log != nil {
+		return nil
+	}
+	return decisions
+}
+
+// record takes one input's group: checked against the recorded run while
+// resuming, then made durable, then held for the end-of-run journal.
+//
+// A group whose log append failed is still held: the journal written at the
+// end of the run keeps it as evidence of what was decided, while the log a
+// restart reads does not, and nothing of it was released.
+func (r *Recorder) record(input event.Envelope, group []Entry, refusal error) error {
+	if r.expected != nil {
+		if divergence := compareGroup(input.ID, r.expected, group); divergence != nil {
+			r.failed = divergence
+			return divergence
+		}
+		r.expected = nil
+	}
+	start := len(r.entries)
+	r.entries = append(r.entries, group...)
+	if r.log != nil {
+		if err := r.log.Append(group); err != nil {
+			r.failed = err
+			return &DurabilityError{Input: input.ID, Err: err}
+		}
+	}
+	if _, seen := r.committed[input.ID]; !seen {
+		if r.committed == nil {
+			r.committed = map[string]committedGroup{}
+		}
+		g := committedGroup{start: start, end: len(r.entries)}
+		if refusal != nil {
+			g.refusal = refusal.Error()
+		}
+		r.committed[input.ID] = g
+	}
+	return nil
 }
 
 // Entries returns everything recorded, in recording order.
