@@ -252,7 +252,8 @@ class PostCloseReadingTests(unittest.TestCase):
         payload = broker_snapshot_record(reading, market_open=True, why=WHY).payload
         self.assertEqual((payload["net_liquidation"], payload["read_net_liquidation"], payload["cash_drift"]),
                          (8397.7, 8397.7, 0))
-        for kwargs in ({"net_liquidation": Decimal("8530")}, {"cash_drift": Decimal("1")}):
+        for kwargs in ({"net_liquidation": Decimal("8530")}, {"cash_drift": Decimal("1")},
+                       {"unexplained_cash": Decimal("1")}):
             with self.assertRaises(ValueError, msg=kwargs):
                 broker_snapshot_record(reading, market_open=True, why=WHY, **kwargs)
         with self.assertRaises(ValueError, msg="as of the close, its valuation is stated"):
@@ -426,3 +427,24 @@ class ReconciliationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloseStampedFiguresTests(unittest.TestCase):
+    """A snapshot as of the close states the drift added up and IBKR's own net liquidation (ADR 0019, amended 2026-10-18)."""
+
+    def test_the_unexplained_cash_is_stated_beside_the_drift(self):
+        h = scripted()
+        reading = read_account(h.conn)
+        payload = broker_snapshot_record(reading, market_open=False, marks={"SPY": Decimal("90")}, close=CLOSE,
+                                         net_liquidation=close_valuation(reading, {"SPY": 90}),
+                                         cash_drift=Decimal("12.50"), unexplained_cash=Decimal("22.50")).payload
+        self.assertEqual((payload["cash_drift"], payload["unexplained_cash"]), (12.5, 22.5))
+
+    def test_a_non_positive_net_liquidation_at_the_read_is_never_stamped_as_of_the_close(self):
+        # The margin alarm's basis; the engine refuses a close-stamped
+        # snapshot without it, so the adapter never writes one.
+        h = scripted()
+        h.fake.summary = [(a, t, "0.00" if t == "NetLiquidation" else v, c) for a, t, v, c in h.fake.summary]
+        reading = read_account(h.conn)
+        with self.assertRaises(ValueError):
+            broker_snapshot_record(reading, market_open=False, close=CLOSE, net_liquidation=Decimal("8530"))

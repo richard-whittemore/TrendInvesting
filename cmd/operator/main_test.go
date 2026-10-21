@@ -541,3 +541,73 @@ func TestTheApprovalCarriesACashScopeInForce(t *testing.T) {
 		t.Errorf("printed %q, want it to name the cash component %s", out, event.ReconciliationComponentCash)
 	}
 }
+
+// TestTheFirstRunsApprovalStatesTheStartingBook: an account's first run is
+// approved with the holdings and total cash the owner checked in IBKR, which
+// the adapter compares the run's first reading after a close with (ADR 0019
+// and ADR 0027, amended 2026-10-18); a fresh run's approval may state the
+// book the owner confirms after a change no fill explains. What is stated
+// is read strictly: a holding twice, a quantity or cash that is no number,
+// or a first run with a previous log, is refused.
+func TestTheFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.json")
+	out, err := invoke(t, "approve", "-first-run", "-account", "joint", "-by", "owner", "-positions", "SPY=147,IEF=3", "-cash", "-4211.37", "-currency", "USD", "-out", first, "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		t.Fatalf("the engine would refuse the approval: %v", err)
+	}
+	b := p.StartingBook
+	if !p.FirstRun() || *p.Boost.Latched || b == nil || b.TotalCash != -4211.37 || b.Currency != "USD" ||
+		len(b.Positions) != 2 || b.Positions[0] != (event.AccountPosition{InstrumentID: "IEF", Quantity: 3}) || b.Positions[1].Quantity != 147 {
+		t.Fatalf("approval %+v, book %+v", p, b)
+	}
+	for _, want := range []string{"first run", "IEF 3", "SPY 147", "-4211.37", first} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed %q, want it to say %q", out, want)
+		}
+	}
+	empty := filepath.Join(dir, "empty.json")
+	if _, err := invoke(t, "approve", "-first-run", "-account", "joint", "-by", "owner", "-positions", "", "-cash", "4000", "-currency", "USD", "-out", empty, "-at", at); err != nil {
+		t.Fatalf("a first run holding nothing: %v", err)
+	}
+
+	logPath := filepath.Join(dir, "run-1.log")
+	previousLog(t, logPath, event.Envelope{ID: "targets-decided:joint:1", Type: event.TargetsDecidedEventType, SchemaVersion: event.TargetsDecidedSchemaVersion,
+		Payload: encoded(t, event.TargetsDecidedPayload{Boost: event.BoostFigures{LatchedAfter: false}})})
+	stated := filepath.Join(dir, "stated.json")
+	if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-positions", "SPY=100", "-cash", "250.5", "-currency", "USD", "-out", stated, "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(stated)
+	if p, err = event.DecodeOperatorRunApproved(raw); err != nil || p.FirstRun() || p.StartingBook == nil || p.StartingBook.TotalCash != 250.5 {
+		t.Errorf("a fresh run's approval stating the book: %+v %v", p, err)
+	}
+
+	for name, c := range map[string]struct {
+		args []string
+		want string
+	}{
+		"a first run with a log":   {[]string{"-first-run", "-log", logPath, "-positions", "", "-cash", "1", "-currency", "USD"}, "-first-run"},
+		"a first run with no cash": {[]string{"-first-run", "-positions", "", "-currency", "USD"}, "-cash"},
+		"a first run, no holdings": {[]string{"-first-run", "-cash", "1", "-currency", "USD"}, "-positions"},
+		"no currency":              {[]string{"-first-run", "-positions", "", "-cash", "1"}, "-currency"},
+		"a holding twice":          {[]string{"-first-run", "-positions", "SPY=1,SPY=2", "-cash", "1", "-currency", "USD"}, "twice"},
+		"a quantity not a count":   {[]string{"-first-run", "-positions", "SPY=1.5", "-cash", "1", "-currency", "USD"}, "SPY=1.5"},
+		"cash not a number":        {[]string{"-first-run", "-positions", "", "-cash", "lots", "-currency", "USD"}, "lots"},
+		"cash not finite":          {[]string{"-first-run", "-positions", "", "-cash", "NaN", "-currency", "USD"}, "NaN"},
+		"half a book":              {[]string{"-log", logPath, "-cash", "1", "-currency", "USD"}, "-positions"},
+	} {
+		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json"), "-at", at}, c.args...)
+		if _, err := invoke(t, args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want it to mention %q", name, err, c.want)
+		}
+	}
+}

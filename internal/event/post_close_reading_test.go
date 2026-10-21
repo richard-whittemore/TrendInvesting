@@ -27,6 +27,7 @@ func postCloseSnapshot() event.BrokerSnapshotPayload {
 	p.OpenOrders = []event.BrokerOrder{}
 	p.ReadAt = twSession.Add(70 * time.Minute)
 	p.AsOfClose = true
+	p.ReadNetLiquidation = p.NetLiquidation + 12.5
 	return p
 }
 
@@ -240,5 +241,106 @@ func TestRiskFiguresNameTheBandsPriceOnlyWhenAMarkIsSet(t *testing.T) {
 	p.Figures.Mark, p.Figures.MarkSet, p.Figures.MarkDeviation, p.Figures.MarkSource = 0, false, 0, event.MarkSourceOfficialClose
 	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "mark source") {
 		t.Errorf("a mark source with no mark: err = %v", err)
+	}
+}
+
+// TestACloseStampedSnapshotStatesIBKRsNetLiquidationAtTheRead: a snapshot as
+// of the close with a readable net liquidation states IBKR's own at the read
+// as a positive figure, the margin alarm's basis; one left out (zero, as an
+// omitted key decodes) or not positive is refused, so an absent figure never
+// reads as a non-positive balance and never fires the sale back to 98% (ADR
+// 0019, "An unavailable balance is not zero"; ADR 0015, fail closed).
+func TestACloseStampedSnapshotStatesIBKRsNetLiquidationAtTheRead(t *testing.T) {
+	for name, figure := range map[string]float64{"left out": 0, "negative": -1} {
+		p := postCloseSnapshot()
+		p.ReadNetLiquidation = figure
+		if err := p.ValidateSchema(event.BrokerSnapshotReadAtVersion); err == nil || !strings.Contains(err.Error(), "net liquidation at the read") {
+			t.Errorf("%s: err = %v, want IBKR's net liquidation at the read required", name, err)
+		}
+	}
+	p := postCloseSnapshot()
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "read_net_liquidation")
+	raw, _ = json.Marshal(fields)
+	var back event.BrokerSnapshotPayload
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if err := back.ValidateSchema(event.BrokerSnapshotReadAtVersion); err == nil {
+		t.Error("a close-stamped snapshot with no read_net_liquidation key was accepted")
+	}
+	unread := postCloseSnapshot()
+	unread.Unreadable, unread.NetLiquidation, unread.ReadNetLiquidation = []string{event.BrokerComponentNetLiquidation}, 0, 0
+	if err := unread.ValidateSchema(event.BrokerSnapshotReadAtVersion); err != nil {
+		t.Errorf("an unreadable net liquidation states no figure at the read: %v", err)
+	}
+}
+
+// TestACloseStampedSnapshotsCashDriftIsWithinItsBound: the adapter stamps a
+// reading as of the close only when its cash drift since the previous close
+// is within CashDriftBound of its net liquidation, so the engine refuses a
+// close-stamped snapshot that states a larger one (ADR 0019, amended
+// 2026-10-18). The bound is 1%: SPY's largest quarterly dividend on a
+// holding at 147% of net liquidation exceeds 0.5%.
+func TestACloseStampedSnapshotsCashDriftIsWithinItsBound(t *testing.T) {
+	if event.CashDriftBound != 0.01 {
+		t.Fatalf("CashDriftBound = %v, want 0.01", event.CashDriftBound)
+	}
+	p := postCloseSnapshot()
+	p.NetLiquidation = 10000
+	for _, drift := range []float64{100, -100, 0, 3.25} {
+		p.CashDrift = drift
+		if err := p.ValidateSchema(event.BrokerSnapshotReadAtVersion); err != nil {
+			t.Errorf("drift %v of 10000: %v", drift, err)
+		}
+	}
+	for _, drift := range []float64{100.01, -100.01, 10000} {
+		p.CashDrift = drift
+		if err := p.ValidateSchema(event.BrokerSnapshotReadAtVersion); err == nil || !strings.Contains(err.Error(), "cash drift") {
+			t.Errorf("drift %v of 10000: err = %v, want refused beyond the bound", drift, err)
+		}
+	}
+}
+
+// TestACloseStampedSnapshotStatesTheUnexplainedCash: beside the day's drift,
+// a snapshot as of the close states the cash IBKR shows beyond the last
+// reconciliation the engine explained and every fill since
+// (UnexplainedCash), so drift accepted day after day is seen as it adds up;
+// a snapshot at its read time and version 1 state none (ADR 0019, amended
+// 2026-10-18).
+func TestACloseStampedSnapshotStatesTheUnexplainedCash(t *testing.T) {
+	p := postCloseSnapshot()
+	p.CashDrift, p.UnexplainedCash = 3.25, 412.5
+	if err := p.ValidateSchema(event.BrokerSnapshotReadAtVersion); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back event.BrokerSnapshotPayload
+	if err := json.Unmarshal(raw, &back); err != nil || back.UnexplainedCash != 412.5 {
+		t.Errorf("round trip = %+v (%v) from %s", back, err, raw)
+	}
+	p.UnexplainedCash = math.NaN()
+	if err := p.ValidateSchema(event.BrokerSnapshotReadAtVersion); err == nil || !strings.Contains(err.Error(), "unexplained cash must be finite") {
+		t.Errorf("not finite: err = %v", err)
+	}
+	read := readTimeSnapshot()
+	read.UnexplainedCash = 1
+	if err := read.ValidateSchema(event.BrokerSnapshotReadAtVersion); err == nil || !strings.Contains(err.Error(), "unexplained cash") {
+		t.Errorf("read time: err = %v, want refused", err)
+	}
+	v1 := validBrokerSnapshot()
+	v1.UnexplainedCash = 1
+	if err := v1.ValidateSchema(event.BrokerSnapshotSchemaVersion); err == nil {
+		t.Error("version 1 stating unexplained cash: want refused")
 	}
 }

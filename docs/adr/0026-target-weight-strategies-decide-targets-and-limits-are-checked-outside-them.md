@@ -952,10 +952,12 @@ the previous close) and point 3 (the price band). The owner decided on
 IBKR adapter's one reading taken after that close, when ADR 0019's
 conditions (amended 2026-10-18) hold: read after the close on its own New
 York date, no order working or pending at IBKR for the account, no
-execution since the close, and the holdings and cash those of the previous
-account snapshot adjusted by the run's fills since (the cash within 0.5% of
-net liquidation, recorded as `cash_drift`), which catches a corporate action,
-a cash posting or another client's trade that no list shows. The adapter
+execution at or since the close, and the holdings and cash those of the
+previous close's book adjusted by the fills since (the cash within 1% of
+net liquidation, recorded as `cash_drift`; the previous close's book is
+found back through the chain of runs, or is the owner's starting book),
+which catches a corporate action, a cash posting or another client's trade
+that no list shows. The adapter
 then stamps its `account.snapshot` with the close (the broker snapshot
 carries the true read time beside it) and values it at the close: its net
 liquidation is the total cash plus each holding times the delivered bar's
@@ -971,7 +973,8 @@ The `market.mark.recorded` is the delivered bar's official close, the price
 the backtest marks at, at schema version 2 with IBKR's last price beside it
 (`broker_last`). **The price band (point 3) compares a checked order's
 reference price with IBKR's last price when IBKR gave one, and with the
-official close otherwise**, and the order's figures record which
+official close otherwise**, one rule for every checked order, Boost's and
+momentum's alike, and the order's figures record which
 (`mark_source`: `broker-last` or `official-close`). The reference price is
 the same official close, so without IBKR's price the band compares the close
 with itself and can refuse nothing: the band has teeth only when IBKR

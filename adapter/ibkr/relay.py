@@ -1482,7 +1482,8 @@ def run_logs(path, today=None, settled=None):
     A fresh run's log holds one committed Run approval, whose previous_log
     is the run before it in the same directory, with that log's final
     record hash; that run's log may hold one in turn, back to the first run,
-    which holds none. IBKR's lists reach back past a restart (the day's
+    which holds none or a first run's approval naming no previous log
+    (run_chain, which walks the chain). IBKR's lists reach back past a restart (the day's
     executions, the session's open orders), so reconciliation and the
     report journal read the earlier runs of the chain too, but only those
     IBKR's lists can still show: the walk stops at the first earlier run
@@ -1516,22 +1517,48 @@ def run_logs(path, today=None, settled=None):
     with no committed record, or a chain that names a log twice.
     """
     yesterday = _yesterdays_session(today or _session_today())
-    logs = [path]
-    seen = {os.path.realpath(path)}
-    current = path
-    groups = _committed_groups(path).groups
     settled = settled or SettledOrders(frozenset(), {})
-    ended, fills = _order_ends(path, groups, settled.ended, settled.fills)
+    ended, fills = set(settled.ended), dict(settled.fills)
+    logs = []
+    for current, groups, _ in run_chain(path):
+        ended, fills = _order_ends(current, groups, ended, fills)
+        if logs and _last_session(groups) < yesterday and not _open_orders(groups, ended, fills):
+            return logs
+        logs.append(current)
+    return logs
+
+
+def run_chain(path):
+    """Each run of the chain from the engine's durable log at path, newest first: (log path, committed groups, approval).
+
+    approval is the payload of the run's one committed Run approval, or None
+    for a run with none. A fresh run's approval names the run before it
+    (previous_log, a bare file name beside it, with its final record hash),
+    and the walk goes on to it; a first run's approval (schema version 3)
+    names none and states the starting book, and the chain ends there, as it
+    does at a run with no approval. Unlike run_logs, every run of the chain
+    is given, however old: the adapter's comparison of a run's first reading
+    after a close reads back to the last account snapshot or starting book
+    of the chain (ADR 0019 and ADR 0027, amended 2026-10-18). Each log is
+    read only when the walk reaches it. Fail closed (ResolveRefused), as
+    run_logs states.
+    """
+    seen = {os.path.realpath(path)}
+    current, groups = path, _committed_groups(path).groups
     while True:
         approvals = [envelope for group in groups for _, kind, envelope in group
                      if kind == LOG_INPUT and envelope["type"] == RUN_APPROVED]
-        if not approvals:
-            return logs
         if len(approvals) > 1:
             raise ResolveRefused("the engine's durable log {} holds {} Run approvals; a run holds at most one".format(
                 current, len(approvals)))
-        payload = approvals[0]["payload"]
+        payload = approvals[0]["payload"] if approvals else None
+        yield current, groups, payload
+        if payload is None:
+            return
         name = payload.get("previous_log") if isinstance(payload, dict) else None
+        if name == "" and isinstance(payload.get("starting_book"), dict) and not payload.get(
+                "previous_log_final_hash"):
+            return  # a first run's approval: no run before it
         if not _is_text(name) or os.path.basename(name) != name or name in (".", ".."):
             raise ResolveRefused("the Run approval in {} names previous_log {!r}, not a log file name in its "
                                  "directory".format(current, name))
@@ -1547,11 +1574,7 @@ def run_logs(path, today=None, settled=None):
                 "{}: it is not the log the owner approved, so its orders and reports are not taken as this "
                 "engine's (docs/manual/paper-trading.md)".format(current, name, approved_hash,
                                                                  read.final_hash or "none (it holds no commit)"))
-        ended, fills = _order_ends(previous, read.groups, ended, fills)
-        if _last_session(read.groups) < yesterday and not _open_orders(read.groups, ended, fills):
-            return logs
         seen.add(os.path.realpath(previous))
-        logs.append(previous)
         current, groups = previous, read.groups
 
 

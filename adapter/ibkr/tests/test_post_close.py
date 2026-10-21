@@ -44,12 +44,12 @@ tests_dir = Path(__file__).resolve().parent
 if str(tests_dir) not in sys.path:
     sys.path.insert(0, str(tests_dir))
 
-from engine_double import LoggedEngine
+from engine_double import LoggedEngine, final_hash, run_approval
 from fake_tws import ACCOUNT, FakeTWS, contract, execution, order
 from test_connection import Clock, config
 from test_delivery import BAR, CLOSED, FRIDAY, RUN, SPY_CON_ID, session_envelopes, write_stream
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids
-from loop import AdapterLoop
+from loop import AdapterLoop, ReconcileIncomplete
 from relay import RELEASED
 from reports import FILL_TYPE
 from snapshot import BROKER_SNAPSHOT_TYPE
@@ -69,6 +69,9 @@ IBKR_LAST = 401.17
 # IBKR's own net liquidation at the read is SUMMARY's $100,000.
 AT_CLOSE = 100000 + 147 * OFFICIAL
 THURSDAY = date(2027, 1, 13)
+# The book the owner confirmed the account's first run starts from: what
+# the fake shows (ADR 0019 and ADR 0027, amended 2026-10-18).
+STARTING_BOOK = ({"SPY": 147}, 100000.0)
 
 
 class PostCloseTests(unittest.TestCase):
@@ -81,13 +84,18 @@ class PostCloseTests(unittest.TestCase):
         self.streams = root / "streams"
         self.folder = self.streams / RUN
         self.folder.mkdir(parents=True)
-        self.engine = LoggedEngine(self.engine_log)
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(ACCOUNT, starting_book=STARTING_BOOK))
         self.fake = FakeTWS()
         self.fake.summary = list(SUMMARY)
         self.fake.positions = [(ACCOUNT, contract(), Decimal("147"), 312.5)]
         self.fake.marks = {SPY_CON_ID: IBKR_LAST}
         self.fake.server_time = EVENING
         self.new_id = Ids()
+
+    def restart_engine(self, approval):
+        """The run's engine begun afresh, its first run approved with approval (none when None)."""
+        Path(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log, approval=approval)
 
     def loop(self, engine=None):
         clock = Clock()
@@ -150,6 +158,14 @@ class PostCloseTests(unittest.TestCase):
                          (100000.0, 100000.0, 100000.0))
         self.assertEqual(broker["positions"][0]["mark"], IBKR_LAST, "marked at IBKR's price at the read, its basis")
 
+    def test_a_non_positive_net_liquidation_at_the_read_stamps_the_read_time(self):
+        # The margin alarm divides by IBKR's own net liquidation at the read;
+        # one not positive is IBKR's own reading, stamped at the read time,
+        # where the engine's alarm reads it as the most alarming (ADR 0019).
+        self.fake.summary = [(a, t, "-10.00" if t == "NetLiquidation" else v, c) for a, t, v, c in self.fake.summary]
+        self.deliver()
+        self.assert_stamped_at_read_time("net liquidation", "-10")
+
     def test_a_holding_with_no_bar_in_the_batch_cannot_be_valued_at_the_close(self):
         self.fake.positions.append((ACCOUNT, contract(con_id=8314, symbol="IEF"), Decimal("10"), 95.1))
         self.deliver()
@@ -210,10 +226,118 @@ class PostCloseTests(unittest.TestCase):
         self.assertEqual((broker["as_of"], broker["cash_drift"]), (CLOSE, 12.5), broker["not_as_of_close"])
 
     def test_cash_beyond_the_drift_bound_stamps_the_read_time(self):
-        # 0.5% of the close's net liquidation is about $770 here.
-        self.two_closes(lambda loop: self.cash("95000.00"))
-        why = self.assert_stamped_at_read_time("cash", "-5000")
-        self.assertIn("0.5%", why)
+        # 1% of the close's net liquidation is about $1,589 here.
+        self.two_closes(lambda loop: self.cash("98400.00"))
+        why = self.assert_stamped_at_read_time("cash", "-1600")
+        self.assertIn("1%", why)
+
+    def test_a_dividend_within_one_percent_is_drift_not_a_refusal(self):
+        # SPY's largest quarterly dividend on a holding at 147% of net
+        # liquidation is more than 0.5% of it; the bound is 1%.
+        self.two_closes(lambda loop: self.cash("101500.00"))
+        broker = self.sent(BROKER_SNAPSHOT_TYPE)[-1]["payload"]
+        self.assertEqual((broker["as_of"], broker["cash_drift"]), (CLOSE, 1500), broker["not_as_of_close"])
+
+    def test_the_unexplained_cash_adds_up_the_drift_since_the_owners_book(self):
+        # The owner's starting cash, 99,990, is the last cash explained: the
+        # engine compares no cash against a Boost book. THURSDAY's reading
+        # drifts 10 from it, FRIDAY's 12.50 from THURSDAY's.
+        self.restart_engine(run_approval(ACCOUNT, starting_book=({"SPY": 147}, 99990.0)))
+        self.two_closes(lambda loop: self.cash("100012.50"))
+        thursday, friday = [e["payload"] for e in self.sent(BROKER_SNAPSHOT_TYPE)]
+        self.assertEqual((thursday["cash_drift"], thursday["unexplained_cash"]), (10, 10))
+        self.assertEqual((friday["cash_drift"], friday["unexplained_cash"]), (12.5, 22.5))
+
+    # -- a fresh run's first batch (ADR 0019, ADR 0027, amended 2026-10-18) --
+    def fresh_run(self, between=lambda: None):
+        """THURSDAY's batch in the first run, then a fresh run approved after it, whose first batch is FRIDAY's."""
+        envelopes = session_envelopes([THURSDAY])
+        write_stream(self.folder, THURSDAY, envelopes)
+        self.fake.server_time = EVENING - 86400
+        loop = self.loop()
+        loop.start()
+        for _ in range(40):
+            loop.step()
+        loop.close()
+        self.assertTrue(self.sent(BROKER_SNAPSHOT_TYPE)[0]["payload"]["as_of_close"], "setup: THURSDAY as of its close")
+        between()
+        fresh_name = RUN + "-2"
+        self.engine_log = str(Path(self.dir.name) / (fresh_name + ".log"))
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, previous_log=RUN + ".log", previous_log_final_hash=final_hash(self.folder.parent.parent / (RUN + ".log"))))
+        self.fake.server_time = EVENING
+        write_stream(self.streams / fresh_name, FRIDAY, session_envelopes([FRIDAY], run=fresh_name))
+        fresh = self.loop()
+        fresh.start()
+        for _ in range(40):
+            fresh.step()
+        return fresh
+
+    def test_a_fresh_runs_first_batch_is_compared_with_the_previous_runs_last_close(self):
+        self.fresh_run()
+        self.assertEqual([e["type"] for e in self.engine.inputs()],
+                         [ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE, RECONCILIATION, BAR, MARK, CLOSED])
+        self.assertEqual(self.sent(BROKER_SNAPSHOT_TYPE)[0]["payload"]["as_of"], CLOSE)
+
+    def test_a_change_before_a_fresh_runs_first_batch_is_never_adopted(self):
+        # 50 SPY moved in between the runs, with no execution this adapter
+        # saw: the fresh run's first reading differs from the earlier run's
+        # last close, so it is stamped at its read time and its
+        # reconciliation goes ahead of the snapshots, where the engine, with
+        # no book, classifies it unverifiable and halts (ADR 0019).
+        self.fresh_run(lambda: setattr(self.fake, "positions", [(ACCOUNT, contract(), Decimal("197"), 312.5)]))
+        self.assertEqual([e["type"] for e in self.engine.inputs()][:3],
+                         [RECONCILIATION, ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE])
+        why = self.assert_stamped_at_read_time("SPY 197", "SPY 147")
+        self.assertIn(RUN + ".log", why, "names the earlier run whose close it was compared with")
+
+    def test_a_first_runs_first_batch_is_compared_with_the_owners_starting_book(self):
+        self.restart_engine(run_approval(ACCOUNT, starting_book=({"SPY": 100}, 100000.0)))
+        self.deliver()
+        self.assertEqual([e["type"] for e in self.engine.inputs()][:3],
+                         [RECONCILIATION, ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE])
+        why = self.assert_stamped_at_read_time("SPY 147", "SPY 100")
+        self.assertIn("starting book", why)
+
+    def test_a_first_run_with_no_starting_book_is_never_adopted(self):
+        self.restart_engine(None)
+        self.deliver()
+        self.assertEqual([e["type"] for e in self.engine.inputs()][:3],
+                         [RECONCILIATION, ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE])
+        why = self.assert_stamped_at_read_time("starting book")
+        self.assertIn("operator approve -first-run", why)
+
+    # -- the start and reconnect reconciliation stops for a person ----------
+    def test_a_reconciliation_whose_cash_is_never_read_stops_for_a_person(self):
+        # The reconnect's own read is complete, so the link is reconciled;
+        # every later read leaves IBKR's total cash unread. The
+        # reconciliation owed is read again at most SNAPSHOT_ATTEMPTS times,
+        # as the batch's reading is, then the adapter stops for a person
+        # instead of holding the stream behind it in silence.
+        class CashLostAfterTheReconnect(FakeTWS):
+            armed = False
+
+            def req_account_summary(self, req_id, group, tags):
+                if self.armed:
+                    self.armed = False
+                    super().req_account_summary(req_id, group, tags)
+                    self.summary = [row for row in self.summary if row[1] != "TotalCashValue"]
+                    return
+                super().req_account_summary(req_id, group, tags)
+        fake = CashLostAfterTheReconnect()
+        fake.summary, fake.positions, fake.marks, fake.server_time = (self.fake.summary, self.fake.positions,
+                                                                      self.fake.marks, self.fake.server_time)
+        self.fake = fake
+        loop = self.deliver()
+        self.assertEqual(len(self.sent(RECONCILIATION)), 1, "setup: the engine holds a book")
+        fake.armed = True
+        fake.drop()
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            for _ in range(40):
+                loop.step()
+        self.assertIn("3 attempts", str(caught.exception))
+        self.assertIn("total-cash", str(caught.exception))
+        self.assertEqual(len(self.sent(RECONCILIATION)), 1)
 
     # -- the final reads (ADR 0019: one cutoff) -------------------------------
     def test_an_order_in_the_last_open_order_list_stamps_the_read_time(self):
@@ -333,6 +457,22 @@ class PostCloseTests(unittest.TestCase):
         for _ in range(40):
             loop.step()
         self.assert_stamped_at_read_time("execution", "0002.after.01.01")
+
+    def test_an_execution_at_the_close_stamps_the_read_time(self):
+        # A closing-auction fill stamped at the close's second: the engine
+        # applies a fill stamped at or after the book's second, so a
+        # snapshot as of the close would count its shares twice
+        # (internal/reconcile's Classify).
+        loop = self.loop()
+        loop.start()
+        ex = execution(exec_id="0002.auction.01.01", order_id=0, perm_id=5154, order_ref="", client_id=0,
+                       time="20270114 16:00:00 US/Eastern")
+        self.fake.executions.append((contract(), ex))
+        self.fake.commissions[ex.execId] = SimpleNamespace(execId=ex.execId, commission="1.00", currency="USD")
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        for _ in range(40):
+            loop.step()
+        self.assert_stamped_at_read_time("execution", "0002.auction.01.01")
 
     def test_an_execution_before_the_close_does_not(self):
         ex = execution(exec_id="0003.before.01.01", order_id=0, perm_id=5252, order_ref="", client_id=0,

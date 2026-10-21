@@ -29,9 +29,11 @@ const OperatorRunApprovedEventType = "operator.run.approved"
 // OperatorRunApprovedSchemaVersion is the current schema version of
 // OperatorRunApprovedPayload. Version 2 adds the incident in force's cash
 // scope (IncidentInForce.ScopeCashComponents), which version 1 could not
-// state; DecodeRecordedOperatorRunApproved reads either (ADR 0015: a
-// payload's shape is versioned).
-const OperatorRunApprovedSchemaVersion uint32 = 2
+// state; version 3 adds the starting book (StartingBook), and with it a
+// first run's approval, which names no previous log;
+// DecodeRecordedOperatorRunApproved reads each (ADR 0015: a payload's shape
+// is versioned).
+const OperatorRunApprovedSchemaVersion uint32 = 3
 
 // recordHashPattern is a journal record hash as the chain writes it (ADR
 // 0017): "sha256:" and 64 lower-case hex digits.
@@ -60,6 +62,56 @@ type OperatorRunApprovedPayload struct {
 	// attempted; nil (JSON null) when there is none. It is never the
 	// incident the approval clears.
 	IncidentInForce *IncidentInForce `json:"incident_in_force"`
+	StartingBook    *StartingBook    `json:"starting_book"`
+}
+
+// StartingBook is the account's holdings and total cash the owner confirms a
+// run starts from (schema version 3; ADR 0019 and ADR 0027, amended
+// 2026-10-18). The IBKR adapter compares the run's first reading after a
+// close with the latest of the earlier runs' last account snapshot and this
+// book, adjusted by the fills since, and never adopts IBKR's book unchecked.
+// An account's first run must state one, since no earlier run's snapshot
+// exists; a fresh run may, to state the book after a change no fill explains
+// (a transfer, a deposit), which the owner has checked in IBKR.
+type StartingBook struct {
+	// Positions are the holdings in raw shares, strictly ascending by
+	// instrument, none zero; [] when the account holds none.
+	Positions []AccountPosition `json:"positions"`
+	// TotalCash is IBKR's TotalCashValue the owner confirms, in Currency.
+	TotalCash float64 `json:"total_cash"`
+	Currency  string  `json:"currency"`
+}
+
+// Validate checks the holdings and the cash.
+func (b StartingBook) Validate() error {
+	var errs []error
+	if b.Positions == nil {
+		errs = append(errs, errors.New("starting book positions are stated, [] when the account holds none"))
+	}
+	for i, position := range b.Positions {
+		switch {
+		case position.InstrumentID == "":
+			errs = append(errs, fmt.Errorf("starting book position %d names no instrument", i+1))
+		case position.Quantity == 0:
+			errs = append(errs, fmt.Errorf("starting book position %s states a zero quantity; an instrument not held is left out", position.InstrumentID))
+		}
+		if i > 0 && position.InstrumentID <= b.Positions[i-1].InstrumentID {
+			errs = append(errs, fmt.Errorf("starting book positions must be strictly ascending by instrument; %q follows %q", position.InstrumentID, b.Positions[i-1].InstrumentID))
+		}
+	}
+	if !isFinite(b.TotalCash) {
+		errs = append(errs, errors.New("starting book total cash must be finite"))
+	}
+	if b.Currency == "" {
+		errs = append(errs, errors.New("starting book currency is required"))
+	}
+	return errors.Join(errs...)
+}
+
+// FirstRun reports whether p approves an account's first run: it names no
+// previous log, and states the starting book instead.
+func (p OperatorRunApprovedPayload) FirstRun() bool {
+	return p.PreviousLog == "" && p.StartingBook != nil
 }
 
 // BoostStateInForce is Boost's state that a fresh run cannot recompute from
@@ -110,13 +162,20 @@ func (p OperatorRunApprovedPayload) Validate() error {
 		errs = append(errs, errors.New("account id is required"))
 	}
 	switch {
+	case p.FirstRun():
+		errs = append(errs, p.firstRunErrors()...)
 	case p.PreviousLog == "":
-		errs = append(errs, errors.New("previous log is required"))
+		errs = append(errs, errors.New("previous log is required: only a first run's approval names none, and it states the starting book"))
 	case strings.ContainsAny(p.PreviousLog, `/\`) || p.PreviousLog == "." || p.PreviousLog == "..":
 		errs = append(errs, fmt.Errorf("previous log %q must be a file name in the fresh run's log directory, not a path", p.PreviousLog))
 	}
-	if !recordHashPattern.MatchString(p.PreviousLogFinalHash) {
+	if !p.FirstRun() && !recordHashPattern.MatchString(p.PreviousLogFinalHash) {
 		errs = append(errs, fmt.Errorf("previous log final hash %q is not a record hash (sha256: and 64 lower-case hex digits)", p.PreviousLogFinalHash))
+	}
+	if p.StartingBook != nil {
+		if err := p.StartingBook.Validate(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if p.ApprovedBy == "" {
 		errs = append(errs, errors.New("approved by is required"))
@@ -160,6 +219,22 @@ func (p OperatorRunApprovedPayload) Validate() error {
 	return nil
 }
 
+// firstRunErrors checks a first run's approval: no earlier run, so no final
+// hash, no latch and no incident to clear or continue.
+func (p OperatorRunApprovedPayload) firstRunErrors() []error {
+	var errs []error
+	if p.PreviousLogFinalHash != "" {
+		errs = append(errs, errors.New("a first run's approval names no previous log, so no previous log final hash"))
+	}
+	if p.Boost.Latched != nil && *p.Boost.Latched {
+		errs = append(errs, errors.New("a first run's approval states the boost not latched: no earlier run latched it"))
+	}
+	if p.IncidentID != "" || p.IncidentInForce != nil {
+		errs = append(errs, errors.New("a first run's approval clears and continues no incident: no earlier run had one"))
+	}
+	return errs
+}
+
 // ValidateSchema checks p under the schema version it was recorded at (ADR
 // 0015), then validates it. Version 1 could not state an incident's cash
 // scope, so a payload naming one is refused under it; version 2 holds it
@@ -167,13 +242,16 @@ func (p OperatorRunApprovedPayload) Validate() error {
 // read, in DecodeRecordedOperatorRunApproved); any other version is refused.
 func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 	switch version {
-	case 1:
-		if in := p.IncidentInForce; in != nil && len(in.ScopeCashComponents) > 0 {
+	case 1, 2:
+		if in := p.IncidentInForce; version == 1 && in != nil && len(in.ScopeCashComponents) > 0 {
 			return fmt.Errorf("a schema version 1 approval cannot state incident_in_force.%s", incidentCashKey)
+		}
+		if p.StartingBook != nil {
+			return fmt.Errorf("a schema version %d approval cannot state a starting book; version %d states it", version, OperatorRunApprovedSchemaVersion)
 		}
 	case OperatorRunApprovedSchemaVersion:
 	default:
-		return fmt.Errorf("the approval's schema version %d is not one this build reads (1 or %d; ADR 0015)", version, OperatorRunApprovedSchemaVersion)
+		return fmt.Errorf("the approval's schema version %d is not one this build reads (1, 2 or %d; ADR 0015)", version, OperatorRunApprovedSchemaVersion)
 	}
 	return p.Validate()
 }
@@ -181,6 +259,10 @@ func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 // approvalKeys are the keys an approval file must state, null included: a
 // key left out is refused rather than read as its zero value.
 var approvalKeys = []string{"account_id", "previous_log", "previous_log_final_hash", "incident_id", "approved_by", "approved_at", "boost", "incident_in_force"}
+
+// startingBookKey is the starting book, a key from schema version 3, null
+// when the approval states none.
+const startingBookKey = "starting_book"
 
 // incidentKeys are the keys an incident in force must state at schema
 // version 1; the sale's client order ID alone may be left out, when no sale
@@ -206,8 +288,8 @@ func DecodeOperatorRunApproved(raw []byte) (OperatorRunApprovedPayload, error) {
 // not name one; version 2 must state it; any other version is refused (ADR
 // 0015).
 func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (OperatorRunApprovedPayload, error) {
-	if schemaVersion != 1 && schemaVersion != OperatorRunApprovedSchemaVersion {
-		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval's schema version %d is not one this build reads (1 or %d; ADR 0015)", schemaVersion, OperatorRunApprovedSchemaVersion)
+	if schemaVersion < 1 || schemaVersion > OperatorRunApprovedSchemaVersion {
+		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval's schema version %d is not one this build reads (1, 2 or %d; ADR 0015)", schemaVersion, OperatorRunApprovedSchemaVersion)
 	}
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &keys); err != nil {
@@ -218,6 +300,13 @@ func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (Operat
 		if _, ok := keys[key]; !ok {
 			missing = append(missing, key)
 		}
+	}
+	_, statesBook := keys[startingBookKey]
+	switch {
+	case schemaVersion < OperatorRunApprovedSchemaVersion && statesBook:
+		return OperatorRunApprovedPayload{}, fmt.Errorf("a schema version %d approval cannot state %s", schemaVersion, startingBookKey)
+	case schemaVersion == OperatorRunApprovedSchemaVersion && !statesBook:
+		missing = append(missing, startingBookKey)
 	}
 	if len(missing) > 0 {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval states no %s; every key is required, null where there is none", strings.Join(missing, ", "))
@@ -250,7 +339,7 @@ func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (Operat
 	if err := decoder.Decode(&p); err != nil {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("decode the approval: %w", err)
 	}
-	if err := p.Validate(); err != nil {
+	if err := p.ValidateSchema(schemaVersion); err != nil {
 		return OperatorRunApprovedPayload{}, err
 	}
 	return p, nil

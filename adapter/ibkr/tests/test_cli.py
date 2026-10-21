@@ -18,7 +18,7 @@ for p in (str(tests_dir), str(adapter_dir)):
 from cli import _parser, main
 from connection import REQUEST_ID_BASE
 from config import AdapterConfig
-from engine_double import LoggedEngine
+from engine_double import LoggedEngine, run_approval
 from fake_tws import ACCOUNT, FakeTWS
 from test_ibapi_pin import SHA
 from test_loop import SUMMARY
@@ -55,7 +55,8 @@ class CommandTests(unittest.TestCase):
         self.secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT))
         self.versions.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
         self.record.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
-        self.engine = LoggedEngine(str(self.engine_log))
+        # The account's first run, approved with the book the fake shows.
+        self.engine = LoggedEngine(str(self.engine_log), approval=run_approval(ACCOUNT, starting_book=({}, 100000.0)))
         self.fake = FakeTWS()
         self.fake.summary = list(SUMMARY)
         self.made = []

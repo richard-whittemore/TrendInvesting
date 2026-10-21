@@ -16,15 +16,22 @@ read after the close on its own New York date, no order working or pending
 at IBKR, no execution since the close; else at the read time, with the
 reason), and `market.mark.recorded` (version 2) from the delivered bar's
 official close, IBKR's last price beside it (the price band's comparison
-when set). A reading as of the close is also its cash and holdings since
-the previous close adjusted by the run's fills (cash within
-`CASH_DRIFT_BOUND`), and is valued at the close (`snapshot.close_valuation`),
-IBKR's own net liquidation and the cash drift beside it; one at its read
-time is IBKR's own reading, marked at IBKR's last price. Every batch carries
-an `account.reconciliation` of the same reading, ahead of its snapshots once
-the engine holds a book (behind them in a run's first batch); every later
-start and reconnect records one once the engine holds an account snapshot,
-read only when no execution awaits its commission, before any stream entry.
+when set). A reading as of the close is also the previous close's holdings
+and cash adjusted by the fills since (cash within `CASH_DRIFT_BOUND`, 1%):
+the previous close is the latest account snapshot of the run or of the runs
+its Run approvals chain back to, or the latest starting book an approval
+states, an account's first run's included (`book_basis.py`), so a fresh
+run's first batch is never adopted unchecked. It is valued at the close
+(`snapshot.close_valuation`), IBKR's own net liquidation, the cash drift and
+the unexplained cash (the drift added up since the cash was last explained)
+beside it; one at its read time is IBKR's own reading, marked at IBKR's last
+price. Every batch carries an `account.reconciliation` of the same reading,
+ahead of its snapshots once the engine holds a book; in a run's first batch
+behind them when the reading matched the previous close's book, else ahead,
+where the engine, with no book, halts. Every later start and reconnect
+records one once the engine holds an account snapshot, read only when no
+execution awaits its commission, before any stream entry, and stops for a
+person after three reads in a row without positions or cash.
 The durable log is read by the one reader the data job shares,
 `adapter/marketdata/engine_log.py`, loaded by path (`relay.marketdata_module`).
 The whole paper day is rehearsed with the real engine

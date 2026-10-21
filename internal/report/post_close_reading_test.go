@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -79,5 +80,49 @@ func TestABrokerSnapshotThatDoesNotReadRaisesNoAlert(t *testing.T) {
 	}
 	if len(got) != 1 || contains(got[0].Body, "could not stand for the close") {
 		t.Fatalf("alerts = %+v", got)
+	}
+	summary, err := report.Summarize(s.out, day(0).UTC().Format(time.DateOnly), "SPY")
+	if err != nil || summary.RejectedInputs != 1 || summary.CashChecked {
+		t.Fatalf("summary = %+v, %v: want the broker snapshot passed over and counted", summary, err)
+	}
+}
+
+// TestTheDailySummaryShowsTheCashDriftAndTheUnexplainedCash: the summary
+// shows the day's cash drift the adapter accepted and the unexplained cash
+// added up since the last reconciliation the engine explained, from the
+// latest broker snapshot as of a close, so drift within the daily bound is
+// still seen as it accumulates (ADR 0019, amended 2026-10-18). A reading
+// stamped at its read time checked no drift, and the summary says so.
+func TestTheDailySummaryShowsTheCashDriftAndTheUnexplainedCash(t *testing.T) {
+	s := newStream(t)
+	s.snapshot(0, 10000, 0)
+	s.broker(0, "", false)
+	last := &s.out[len(s.out)-1]
+	var p event.BrokerSnapshotPayload
+	if err := json.Unmarshal(last.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.CashDrift, p.UnexplainedCash = -3.25, 412.5
+	s.rewrite(len(s.out)-1, p)
+	got, err := report.Summarize(s.out, day(0).UTC().Format(time.DateOnly), "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CashChecked || got.CashDrift != -3.25 || got.UnexplainedCash != 412.5 {
+		t.Fatalf("summary cash = %+v", got)
+	}
+	text := report.RenderText(got)
+	for _, want := range []string{"Cash drift since the previous close -3.25", "unexplained cash since the last reconciliation the engine explained 412.50"} {
+		if !contains(text, want) {
+			t.Errorf("the summary lacks %q:\n%s", want, text)
+		}
+	}
+	s.broker(1, "IBKR shows 1 open order", false)
+	got, err = report.Summarize(s.out, day(1).UTC().Format(time.DateOnly), "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CashChecked || !got.CashUnchecked || !contains(report.RenderText(got), "Cash drift: not checked") {
+		t.Errorf("after a read-time reading: %+v\n%s", got, report.RenderText(got))
 	}
 }

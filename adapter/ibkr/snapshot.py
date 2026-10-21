@@ -358,17 +358,21 @@ def close_valuation(reading, closes):
 
 
 def broker_snapshot_record(reading, market_open, marks=None, close=None, why="", net_liquidation=None,
-                           cash_drift=None):
+                           cash_drift=None, unexplained_cash=None):
     """The account.broker.snapshot (version 2) of reading, as of close or at its read time (see the module).
 
     With close, an aware datetime before the read, the snapshot is as of
     that close, its read time beside it, valued at the close: net_liquidation
     (close_valuation, which must be given) is its net liquidation, IBKR's
-    own at the read stated beside it as read_net_liquidation, and cash_drift
-    the cash drift the adapter accepted (zero when not given). Otherwise
-    why, which must be stated, says why the reading cannot stand for the
-    close; it is stamped at its read time and is IBKR's own reading, so
-    neither net_liquidation nor cash_drift may be given. market_open is the
+    own at the read stated beside it as read_net_liquidation, cash_drift
+    the cash drift the adapter accepted and unexplained_cash that drift
+    added up (book_basis; each zero when not given). Otherwise why, which
+    must be stated, says why the reading cannot stand for the close; it is
+    stamped at its read time and is IBKR's own reading, so none of
+    net_liquidation, cash_drift and unexplained_cash may be given. A
+    snapshot as of the close with net liquidation read states IBKR's own,
+    a positive figure (the margin alarm's basis; the engine refuses one
+    without it, ADR 0019: an unavailable balance is not zero). market_open is the
     adapter's own statement that the market was open at the stamp, and must
     be a bool. marks maps a symbol to its mark, on the snapshot's own basis;
     a holding with no mark has mark_set false.
@@ -378,10 +382,13 @@ def broker_snapshot_record(reading, market_open, marks=None, close=None, why="",
     as_of, as_of_close = _as_of(reading, close, why)
     if as_of_close and net_liquidation is None:
         raise ValueError("a snapshot as of the close is valued at the close: its net liquidation is stated")
-    if not as_of_close and (net_liquidation is not None or cash_drift is not None):
-        raise ValueError("a snapshot at its read time is IBKR's own reading: no valuation at the close or cash "
-                         "drift is stated")
+    if not as_of_close and (net_liquidation is not None or cash_drift is not None or unexplained_cash is not None):
+        raise ValueError("a snapshot at its read time is IBKR's own reading: no valuation at the close, cash "
+                         "drift or unexplained cash is stated")
     read_net = _amount(reading, NET_LIQUIDATION, NET)
+    if as_of_close and NET not in reading.unread and not read_net > 0:
+        raise ValueError("a snapshot as of the close states IBKR's own net liquidation at the read, a positive "
+                         "figure; IBKR gave {}".format(read_net))
     marks = marks or {}
     positions = []
     for symbol in sorted(reading.positions):
@@ -404,6 +411,7 @@ def broker_snapshot_record(reading, market_open, marks=None, close=None, why="",
         "not_as_of_close": "" if as_of_close else why,
         "read_net_liquidation": read_net,
         "cash_drift": float(cash_drift) if cash_drift is not None else 0,
+        "unexplained_cash": float(unexplained_cash) if unexplained_cash is not None else 0,
     })
 
 
@@ -433,7 +441,10 @@ def mark_record(symbol, as_of, price, source, broker_last=None):
     """The market.mark.recorded (version 2) of symbol at as_of: price, the delivered bar's official close.
 
     source names who reported the price (the data job); broker_last is
-    IBKR's last price beside it, evidence only, None when IBKR gave none.
+    IBKR's last price beside it, None when IBKR gave none. Nothing is sized
+    from it, but the engine's price band compares a checked order's
+    reference price with it when it is set, and with price otherwise (ADR
+    0026 point 3, amended 2026-10-18).
     """
     price = to_decimal(price, "mark")
     if not price > 0:

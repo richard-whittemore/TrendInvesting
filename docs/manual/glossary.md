@@ -32,7 +32,8 @@ See [IBKR adapter](ibkr-adapter.md).
 [alerts and dashboard](alerts-and-dashboard.md).
 
 **Approval.** Your recorded permission for a **fresh run**, naming the
-previous log, the **latch** and the **incident** in force. Written by
+previous log, the **latch** and the **incident** in force, or for an
+account's first run, stating its **starting book**. Written by
 `operator approve`. See [restart](restart.md).
 
 **b** (the bond share). The share of an IRA meant for bonds at your age,
@@ -46,9 +47,12 @@ target before it is traded. See [momentum](momentum.md).
 **As of the close** (a reading). The IBKR adapter's one account reading
 after a session's close, stamped as the account at that close: allowed when
 it is read after the close on the close's own New York date, with no order
-working or pending at IBKR and no execution since the close (your decision
-of 2026-10-18). Otherwise it is stamped at its **read time**, and the engine
-withholds that session. See [paper trading](paper-trading.md#a-paper-day).
+working or pending at IBKR, no execution at or since the close, every
+holding valued at its official close, and the holdings and cash those of
+the previous close (or the **starting book**) adjusted by the fills since,
+the cash within 1% of net liquidation (your decision of 2026-10-18).
+Otherwise it is stamped at its **read time**, and the engine withholds that
+session. See [paper trading](paper-trading.md#a-paper-day).
 
 **Book.** What the engine believes an account holds: the last **account
 snapshot** plus the fills and other events recorded since. The
@@ -288,6 +292,12 @@ early close), from the committed NYSE calendar.
 
 **Sleeve.** One of an IRA's two parts: the momentum sleeve and the bond
 sleeve. See [glide path](glide-path.md).
+
+**Starting book.** The holdings and total cash you checked in IBKR and
+stated in an account's first run's **approval** (or a fresh run's, after you
+moved shares or cash): the book the run's first reading after a close is
+compared with, so IBKR's figures are never taken as the book unchecked. See
+[restart](restart.md).
 
 **Stale episode.** A stretch during which IBKR's latest snapshot is too old
 for a sell to be checked against it; it carries one urgent alert, however

@@ -284,11 +284,27 @@ Order of starting, each on the server, each an explicit step of yours:
    port 4002 listening again. On the Mac: untick Read-Only API in
    Gateway's API settings. From here until you turn it back on (C), the
    Gateway accepts orders from the adapter.
-3. Write the run file the engine reads, exactly as the "Restarting an engine"
+3. **Approve the account's first run with its starting book.** In IBKR
+   (Client Portal or TWS), read the paper account's holdings, share for
+   share, and its total cash (`TotalCashValue`, cash including unsettled
+   proceeds). Write them into the first run's approval on the machine:
+   `operator approve -first-run -account <DU account> -by <your name>
+   -positions SPY=<shares> -cash <total cash> -currency USD -out
+   /var/lib/trend-investing/engines/boost/first-run-approval.json`
+   (`-positions ""` when the account holds nothing). A paper or live first
+   run decides nothing without it: the adapter compares the run's first
+   reading after a close with this book, and a reading that does not match
+   it is never taken as the book (the engine halts on its reconciliation
+   instead; ADR 0019 and ADR 0027, amended 2026-10-18). If you move shares
+   or cash in or out between two runs, approve the fresh run with the book
+   you then check in IBKR the same way (`operator approve -log ...
+   -positions ... -cash ... -currency USD`).
+4. Write the run file the engine reads, exactly as the "Restarting an engine"
    section of `docs/runbooks/durable-log.md` says: a new `TI_RUN`, a
-   `TI_AS_OF`, and an empty `TI_RESTART_ARGS` for a first run. A log is never
-   reused.
-4. Start the engine, then the adapter: `sudo systemctl start ti-engine@boost`,
+   `TI_AS_OF`, and, for a first run, `TI_RESTART_ARGS=-approval
+   /var/lib/trend-investing/engines/boost/first-run-approval.json`. A log is
+   never reused.
+5. Start the engine, then the adapter: `sudo systemctl start ti-engine@boost`,
    then, once the engine's log (`journalctl -u ti-engine@boost`) shows its
    start, `sudo systemctl start ti-adapter-boost`. The adapter refuses to
    start until the engine's socket is open and its durable log exists; for a
@@ -320,7 +336,8 @@ Order of starting, each on the server, each an explicit step of yours:
    the price band compares a buy with it when it is there. If the paper
    login has no market data for SPY, the band compares the close with
    itself and always passes, and nothing else changes.
-5. Confirm the engine's log begins with the paper configuration, and that the
+6. Confirm the engine's log begins with the paper configuration and the
+   first run's approval (its starting book), and that the
    adapter says it connected on 4002, read the account's balances in full
    and matched IBKR's open orders and today's trades to the orders the
    engine released ("[reconciled](../manual/glossary.md)", the adapter's matching) before anything else. The adapter does this on
@@ -621,7 +638,10 @@ commands below are on `main` now **[NOW]**.
   - **No `run.env`**: systemd cannot load
     `/var/lib/trend-investing/engines/boost/run.env`. Create it from
     `deploy/etc/engines/run.env.example` (B4), with `TI_RUN`, `TI_AS_OF` and,
-    for a first run, an empty `TI_RESTART_ARGS`.
+    for a first run, `TI_RESTART_ARGS=-approval <the first run's approval>`.
+  - **A first paper run without its starting book** ("decides nothing until
+    the owner's approval states the starting book"): write the first run's
+    approval as B4 step 3 says and give it with `-approval`.
   - **A repeated start** (the `TI_AS_OF` and configuration an earlier log in
     the folder already opens with): pick a new `TI_AS_OF`, or, if the latest
     log holds nothing past its configuration, resume that log instead
@@ -671,10 +691,12 @@ commands below are on `main` now **[NOW]**.
   was stamped at its read time and the engine decided nothing for that
   session. The reasons: IBKR showed an order still working for the account
   (from any client), IBKR reported an execution in the account since the
-  close, a holding had no official close in the day's file, the holdings
-  were not the previous close's plus or minus the run's own fills (a trade
-  IBKR did not show the adapter, a transfer, a split), the cash moved by
-  more than 0.5% of net liquidation beyond those fills, the reading was on
+  close, a holding had no official close in the day's file, IBKR's own net
+  liquidation was not above zero, the holdings were not the previous
+  close's plus or minus the fills since (a trade IBKR did not show the
+  adapter, a transfer, a split; the previous close may be the last run's,
+  or the starting book you approved the first run with), the cash moved by
+  more than 1% of net liquidation beyond those fills, the reading was on
   a later date than the close (the adapter was not running that evening),
   or the engine already held a snapshot stamped at or after that close.
   Nothing was ordered; the target in force is unchanged.

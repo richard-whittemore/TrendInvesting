@@ -35,5 +35,6 @@
   "as_of_close": true,
   "not_as_of_close": "",
   "read_net_liquidation": 8530.0,
-  "cash_drift": 0
+  "cash_drift": 0,
+  "unexplained_cash": 0
 }

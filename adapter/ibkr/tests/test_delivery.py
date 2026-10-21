@@ -38,7 +38,7 @@ if str(tests_dir) not in sys.path:
 
 from decimal import Decimal
 
-from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine
+from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine, run_approval
 from fake_tws import ACCOUNT, FakeTWS, contract, execution
 from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
@@ -69,6 +69,10 @@ DAY = [BAR, MARK, CLOSED]
 SPY_CON_ID = 756733
 # The fake's server time is 2027-01-15 08:00 UTC, before the open in New York.
 FRIDAY = date(2027, 1, 14)
+# The account's first run is approved with the book the owner checked in
+# IBKR, what the fake shows, so its first batch is compared with it (ADR 0019
+# and ADR 0027, amended 2026-10-18).
+FIRST_RUN = run_approval(ACCOUNT, starting_book=({"SPY": 147}, 100000.0))
 
 
 def _envelope(kind, version, ident, event_time, payload, sequence, run=RUN, configuration_hash=CONFIGURATION_HASH,
@@ -135,7 +139,7 @@ class DeliveryTests(unittest.TestCase):
         self.streams = root / "streams"
         self.folder = self.streams / RUN
         self.folder.mkdir(parents=True)
-        self.engine = LoggedEngine(self.engine_log)
+        self.engine = LoggedEngine(self.engine_log, approval=FIRST_RUN)
         self.fake = FakeTWS()
         self.fake.summary = list(SUMMARY)
         self.fake.positions = [(ACCOUNT, contract(), Decimal("147"), 312.5)]
@@ -176,7 +180,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.types(), FIRST + [BAR, CLOSED] + DAY)
         sent = self.engine.inputs()
         # The engine's sequence, set as each is sent: its configuration is 1.
-        self.assertEqual([e["sequence"] for e in sent], list(range(2, 10)))
+        self.assertEqual([e["sequence"] for e in sent], list(range(3, 11)), "after the configuration and the approval")
         for want, got in zip(written, [e for e in sent if e["source"] == "marketdata"]):
             self.assertEqual({k: v for k, v in got.items() if k not in ("sequence", "recorded_at")},
                              {k: v for k, v in want.items() if k not in ("sequence", "recorded_at")},
@@ -310,7 +314,7 @@ class DeliveryTests(unittest.TestCase):
         # holds, goes ahead of the stream's next line.
         self.assertEqual(self.types(), FIRST + [RECONCILIATION] + [BAR, CLOSED] * 2 + DAY)
         self.assertEqual(len(set(self.ids())), 11)
-        self.assertEqual([e["sequence"] for e in self.engine.inputs()], list(range(2, 13)))
+        self.assertEqual([e["sequence"] for e in self.engine.inputs()], list(range(3, 14)))
 
     def test_a_crash_after_the_record_and_before_the_outbox_write_delivers_once_from_a_fresh_snapshot(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -362,7 +366,7 @@ class DeliveryTests(unittest.TestCase):
         # The engine holds the account snapshot, its book, so the restart
         # reconciles too, ahead of the stream's lines.
         self.assertEqual(self.types(), FIRST + [RECONCILIATION] + DAY)
-        self.assertEqual(read_engine_log(self.engine_log).next_sequence, 9)
+        self.assertEqual(read_engine_log(self.engine_log).next_sequence, 10)
 
     def test_a_file_of_another_run_is_refused_naming_it_and_nothing_is_sent(self):
         for identity in ({"run": "run-other"}, {"configuration_hash": "sha256:" + "2" * 64},
@@ -633,7 +637,7 @@ class DeliveryTests(unittest.TestCase):
         loop.close()
         log = str(Path(self.dir.name) / (earlier + ".log"))
         # The earlier run: another as-of time, so another identity.
-        engine = LoggedEngine(log, started_at="2027-01-13T13:30:00Z")
+        engine = LoggedEngine(log, started_at="2027-01-13T13:30:00Z", approval=FIRST_RUN)
         resumed = self.loop(engine=engine, engine_log=log)
         resumed.start()
         self.settle(resumed)
@@ -684,7 +688,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual([e["id"] for e in engine.inputs() if e["source"] == "marketdata"], [
             e["id"] for e in session_envelopes([date(2027, 1, 12), date(2027, 1, 13), FRIDAY])])
         self.assertEqual(len(set(first + rest)), 11, "each input once, across the crash")
-        self.assertEqual([e["sequence"] for e in engine.inputs()], list(range(4, 13)))
+        self.assertEqual([e["sequence"] for e in engine.inputs()], list(range(5, 14)))
         self.assertEqual(len(self.fake.called("req_mkt_data")), reads, "no second snapshot: the batch continues")
         self.assertEqual(resumed.outbox.load(), [])
         self.assertEqual(self.records(), [(RUN, "queued")], "the batch is the resumed run's, never dropped")
@@ -737,7 +741,7 @@ class DeliveryTests(unittest.TestCase):
         self.queue_unsent()
         log = str(Path(self.dir.name) / "run-b.log")
         # A fresh run after the owner's approval: a new identity.
-        engine = LoggedEngine(log, started_at="2027-01-15T13:30:00Z")
+        engine = LoggedEngine(log, started_at="2027-01-15T13:30:00Z", approval=FIRST_RUN)
         fresh = self.loop(engine=engine, engine_log=log)
         with self.assertRaises(StreamRefused) as caught:
             fresh.start()
@@ -782,6 +786,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn(str(self.streams / "run-c"), str(caught.exception))
 
     def test_an_unapproved_second_start_of_the_first_run_never_takes_its_folder(self):
+        # A first run started without an approval (a dry run's), named by its
+        # configuration and as-of time.
+        Path(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log)
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
         loop.start()

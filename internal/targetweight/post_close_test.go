@@ -106,3 +106,37 @@ func TestBrokerSnapshotsAndMarksAreReadAtEveryVersionWritten(t *testing.T) {
 	mustRefuse(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, "m", at, evidence), "version 1")
 	mustApply(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedEvidenceVersion, "m", at, evidence))
 }
+
+// TestAMomentumOrdersPriceBandComparesIBKRsLastPriceToo: the band's rule is
+// one rule for every checked order (ADR 0026 point 3, amended 2026-10-18):
+// a momentum order, like Boost's, is compared with IBKR's last price beside
+// a version-2 mark, and its figures say so. With IBKR's last price at the
+// mark the run decides as with version-1 marks, the source recorded; with it
+// at twice the mark a checked buy is refused by the band.
+func TestAMomentumOrdersPriceBandComparesIBKRsLastPriceToo(t *testing.T) {
+	plain := simulateMomentum(t, momentumOptions{})
+	same := simulateMomentum(t, momentumOptions{brokerLast: 1})
+	if len(released(t, plain.decisions)) == 0 || len(released(t, same.decisions)) != len(released(t, plain.decisions)) {
+		t.Fatalf("released: %d with IBKR's last at the mark, %d with version-1 marks", len(released(t, same.decisions)), len(released(t, plain.decisions)))
+	}
+	for _, p := range released(t, same.decisions) {
+		if p.Figures.MarkSet && p.Figures.MarkSource != event.MarkSourceBrokerLast {
+			t.Errorf("released %s: mark source %q, want %q", p.ClientOrderID, p.Figures.MarkSource, event.MarkSourceBrokerLast)
+		}
+	}
+	far := simulateMomentum(t, momentumOptions{brokerLast: 2})
+	band := 0
+	for _, e := range ofType(far.decisions, event.OrderRefusedEventType) {
+		var p event.OrderRefusedPayload
+		decode(t, e, &p)
+		if p.Reason == event.RefusedPriceBand {
+			band++
+			if p.Figures.MarkSource != event.MarkSourceBrokerLast {
+				t.Errorf("refused %s: figures %+v, want the band against IBKR's last price", p.ClientOrderID, p.Figures)
+			}
+		}
+	}
+	if band == 0 {
+		t.Fatal("IBKR's last price at twice the mark refused no momentum order: the band compared the close with itself")
+	}
+}

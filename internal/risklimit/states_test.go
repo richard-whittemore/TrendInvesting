@@ -1388,3 +1388,18 @@ func TestAPostCloseSnapshotsAlarmIsOnIBKRsOwnReading(t *testing.T) {
 		t.Fatalf("alarm %+v, want urgent on IBKR's net liquidation at the read", obs.Alarm)
 	}
 }
+
+// TestAPostCloseSnapshotWithoutIBKRsNetLiquidationNeverAlarms: a snapshot
+// as of the close that leaves out IBKR's net liquidation at the read is
+// refused, so the margin alarm never divides by an absent figure and never
+// fires the sale back to 98% for it (ADR 0019, "An unavailable balance is
+// not zero").
+func TestAPostCloseSnapshotWithoutIBKRsNetLiquidationNeverAlarms(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	s := broker(14700)
+	s.MarketOpen = false
+	s.ReadAt, s.AsOfClose = s.AsOf.Add(70*time.Minute), true
+	if obs, err := g.ObserveBroker("broker:1", s); err == nil || obs.Alarm != nil || obs.Urgent {
+		t.Fatalf("observation %+v, err %v: want the snapshot refused with no alarm", obs, err)
+	}
+}

@@ -652,16 +652,27 @@ days), it takes them all, oldest first.
    of the file's last session, on that session's own New York date, with no
    open order for the account at IBKR (working, pending or cancel-pending,
    from any client; in either read of the account and in the last list of
-   open orders, read after both), no execution in the account since the
-   close (IBKR's own list, asked for every client and read last; it reaches
-   back only to midnight, which is why the date must be the close's), every
-   holding with an official close in the file, the holdings exactly the
-   previous account snapshot's plus or minus the run's fills since, and the
-   cash the previous reading's adjusted by those fills within 0.5% of net
-   liquidation (`cash_drift` records the difference; this check needs no
-   client ID, so it catches a trade the adapter is not shown, a split or a
+   open orders, read after both), no execution in the account at or since
+   the close (IBKR's own list, asked for every client and read last; it
+   reaches back only to midnight, which is why the date must be the
+   close's; a closing-auction fill stamped at the close itself counts),
+   every holding with an official close in the file, IBKR's own net
+   liquidation at the read above zero, the holdings exactly the previous
+   close's plus or minus the fills since, and the cash the previous close's
+   adjusted by those fills within **1% of net liquidation** (room for a
+   day's interest or a dividend; `cash_drift` records the difference, and
+   `unexplained_cash` that difference added up since the cash was last
+   explained, both shown in the daily summary; this check needs no client
+   ID, so it catches a trade the adapter is not shown, a split or a
    transfer), and the engine holds no snapshot already stamped at or after
-   that close, both snapshots are stamped **as of the close**, and the
+   that close, both snapshots are stamped **as of the close**. The previous
+   close is the last account snapshot of this run, or of the earlier runs
+   its approvals name, however long ago, or the **starting book** you
+   stated when you approved the account's first run (or a fresh run, after
+   a transfer you checked; `operator approve -first-run`,
+   docs/runbooks/first-paper-order.md), whichever is latest: a fresh run's
+   first reading is compared with the last run's close, never taken as the
+   book unchecked. The
    broker snapshot records the real read time beside it (`read_at`) as
    evidence. If any of that fails, both are stamped with the real read time
    and the broker snapshot says every condition that failed
@@ -723,11 +734,16 @@ days), it takes them all, oldest first.
    book it holds and the fills recorded since, before the new snapshot
    replaces that book, so shares no fill explains are found (Degraded on
    the instrument), never quietly taken over. A run's first file, before
-   which the engine holds no book, carries it behind the snapshots, against
-   the book just recorded. At every later start of the adapter, and every
-   reconnect, the adapter sends one too, read once every trade IBKR
-   replayed has its commission and its fill has reached the engine, and
-   before any of the file's lines.
+   which the engine holds no book, carries it behind the snapshots when the
+   reading matched the previous close or your starting book (above), and
+   **ahead of them when it did not**, or had nothing to be compared with:
+   the engine, holding no book, then finds the reconciliation unverifiable
+   and halts, so the difference is never taken as the book. At every later
+   start of the adapter, and every reconnect, the adapter sends one too,
+   read once every trade IBKR replayed has its commission and its fill has
+   reached the engine, and before any of the file's lines; if IBKR does not
+   give the positions or the cash in three reads in a row, the adapter
+   stops for you rather than hold the day's file behind it.
 3. **The file, line by line, as written**: each session's SPY bar, then that
    session's close, and, between the last session's bar and its close,
    **SPY's mark** (`market.mark.recorded`): the bar's official close, which
@@ -746,12 +762,16 @@ days), it takes them all, oldest first.
    input number in place of the file's own (the file format, above), and
    with the time it is sent as its "recorded" time, as every input the
    adapter sends; nothing else in it changes. ADR 0019 measures the broker
-   snapshot's age at the close's recorded time, from the snapshot's stamp,
-   and counts a negative age as stale: a sale withheld or a sell refused
-   with `stale-broker-snapshot` at every close means the snapshot was not
-   stamped as of the close (its `not_as_of_close` says why) or the server's
-   clock is behind IBKR's: check the clock too (run `clock-check.sh`; [the
-   server](server.md), "The clock"). A fill or a cancellation IBKR
+   snapshot's age at the close itself (the session's end, the time the
+   engine decides at), from the snapshot's stamp, and counts a negative age
+   as stale: a sale withheld or a sell refused with `stale-broker-snapshot`
+   at every close means the snapshot was stamped after the close, at its
+   read time, and its `not_as_of_close` says which condition failed. That
+   comparison uses only the two stamps: the close's comes from the file and
+   the snapshot's from IBKR's clock, so setting the server's clock never
+   clears it. The server's clock matters elsewhere (each input's recorded
+   time, the adapter's own timeouts); check it separately with
+   `clock-check.sh` ([the server](server.md), "The clock"). A fill or a cancellation IBKR
    reports while the engine works through the file goes to the engine
    before the file's next line, so no session is decided on an account
    behind a report already received. A trade IBKR has reported but whose

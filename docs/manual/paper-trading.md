@@ -304,18 +304,26 @@ checks for each, so when, at the moment of the read:
 - IBKR shows no open order for the account, from any client (working,
   pending or cancel-pending), in either read of the account or in the last
   list of open orders it returns;
-- IBKR reports no execution in the account since the close, from any
-  client it shows to the adapter (see the Master API client ID, below);
+- IBKR reports no execution in the account at or since the close, from
+  any client it shows to the adapter (see the Master API client ID, below);
 - every holding has the day's official close in the file, so the account
-  can be valued at the close; and
+  can be valued at the close, and IBKR's own net liquidation is above zero;
+  and
 - **with no help from any client ID**, the holdings are exactly the
-  previous close's account snapshot plus or minus this run's own fills
-  since, and the cash is the previous close's adjusted by those fills,
-  give or take at most **0.5% of net liquidation** (room for a day's
-  interest or a fee; the difference is recorded on the broker snapshot as
-  `cash_drift`). A split, a transfer, a large posting or a trade made by a
-  client IBKR does not show the adapter fails this check. A run's first
-  delivery has no previous close to compare, and starts the book,
+  previous close's plus or minus the fills since, and the cash is the
+  previous close's adjusted by those fills, give or take at most **1% of
+  net liquidation** (room for a day's interest, a fee or a dividend; the
+  difference is recorded on the broker snapshot as `cash_drift`, and that
+  difference added up since the cash was last explained as
+  `unexplained_cash`; the daily summary shows both, so a small posting day
+  after day is still seen). A split, a transfer, a large posting or a trade
+  made by a client IBKR does not show the adapter fails this check. The
+  previous close is the last account snapshot of this run or of the earlier
+  runs its approvals name, or the **starting book** you stated when you
+  approved the account's first run (`operator approve -first-run`), so a
+  fresh run's first delivery is compared with the last run's close and the
+  first run's with your book; a first delivery that does not match is never
+  taken as the book (the engine halts on its reconciliation instead),
 
 the one reading is the account as of the close. The adapter then states
 both snapshots "as of" the close (4:00 p.m.) and records the real read time
@@ -326,6 +334,13 @@ withholds the session (`stale-account-snapshot`) and orders nothing, and
 the reporter pages you once, naming the reason
 ([alerts](alerts-and-dashboard.md)). The target in force stays as it was;
 the next session that passes decides as usual.
+
+One residual you cover by a setting: a sale and a repurchase of the same
+shares by another client after the close leave the holdings unchanged and
+move the cash by little, so only IBKR's list of executions shows them, and
+IBKR shows other clients' executions only to the Gateway's Master API
+client ID. Set it to the adapter's client ID (below, and the runbook's A4);
+the unexplained cash in the daily summary is your check on it.
 
 **Set the Gateway's Master API client ID to the adapter's.** IBKR shows an
 API client the executions of other clients, and of TWS or IBKR's own app,
@@ -494,7 +509,8 @@ order. Still to come, and not needed for it:
   decision): one reading after the close, with no order working or pending
   at IBKR and no execution since the close, is the account as of that
   close, when the account is also the previous close's adjusted by the
-  run's fills (cash within 0.5% of net liquidation), valued at the close;
+  fills since (cash within 1% of net liquidation; the previous close found
+  back through the chain of runs, or your starting book), valued at the close;
   the mark is the delivered bar's official close, with IBKR's last price
   beside it, which the price band compares with when it is set.
 - ADR 0027 and [re-delivery](redelivery.md): journal before send, and each

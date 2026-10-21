@@ -37,9 +37,10 @@ class RehearsalTests(unittest.TestCase):
     def test_the_rehearsal_passes_against_the_fake_gateway(self):
         status, out = self.run_rehearsal(TI_REHEARSAL_ACCOUNT="")
         self.assertEqual(status, 0, out)
-        self.assertEqual(out.count("PASS:"), 12)
+        self.assertEqual(out.count("PASS:"), 13)
         self.assertNotIn("FAIL", out)
-        for line in ("PASS: the warm-up reached the engine behind one reading as of that evening's close, in file "
+        for line in ("PASS: the account's first run began with the owner's approval stating its starting book",
+                     "PASS: the warm-up reached the engine behind one reading as of that evening's close, in file "
                      "order, and the engine matched the start-of-run reconciliation",
                      "PASS: the day's stream reached the engine as its account and broker snapshots as of the close "
                      "(read after it), its bar, its mark from the bar's official close, then its close",
@@ -72,6 +73,15 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("FAIL: the adapter stopped", out)
         self.assertIn("StreamRefused", out)
+
+    def test_a_first_reading_that_is_not_the_starting_book_halts_the_real_engine(self):
+        # ADR 0019 and ADR 0027, amended 2026-10-18: the real engine, holding
+        # no book, classifies the reconciliation the adapter puts ahead of
+        # the snapshots unverifiable and halts.
+        with mock.patch.object(rehearse_paper, "BOOK_MISMATCH", True):
+            status, out = self.run_rehearsal(TI_REHEARSAL_ACCOUNT="")
+        self.assertEqual(status, 0, out)
+        self.assertIn("PASS: a first reading that is not the owner's starting book was never taken as the book", out)
 
     def test_an_adapter_that_stops_fails_the_rehearsal(self):
         class Refusing(FakeTWS):

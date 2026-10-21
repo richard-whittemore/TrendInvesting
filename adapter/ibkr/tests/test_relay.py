@@ -26,7 +26,7 @@ from orders import BrokerOrders
 from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
                    acknowledge_correction, acknowledge_late_fill, earlier_run, journalled_fills, journalled_reports,
-                   main, resolve, resolve_run_ended, run_identity, run_logs)
+                   main, resolve, resolve_run_ended, run_chain, run_identity, run_logs)
 from sender import OrderRequest
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -1343,6 +1343,30 @@ class RunLogsTests(unittest.TestCase):
         third = self.write("c.log", ["b.log"])
         self.assertEqual(run_logs(third, today=TODAY), [third, second, first])
         self.assertEqual(run_logs(first, today=TODAY), [first])
+
+    def test_a_first_runs_approval_ends_the_chain_and_every_run_is_walked(self):
+        # A first run's approval (schema version 3) names no previous log and
+        # states the starting book; the comparison of a fresh run's first
+        # reading walks back however old the runs are (ADR 0019 and ADR
+        # 0027, amended 2026-10-18), where run_logs stops at IBKR's lists.
+        lines = [log_header()] + log_group(1, [("input", "operator.run.approved", 3, {
+            "previous_log": "", "previous_log_final_hash": "",
+            "starting_book": {"positions": [], "total_cash": 1000.0, "currency": "USD"}})], at="2026-10-01T13:30:00Z")
+        first = Path(self.dir.name) / "a.log"
+        first.write_text("".join(lines), encoding="utf-8")
+        second = self.write("b.log", ["a.log"])
+        self.assertEqual(run_logs(second, today=date(2026, 10, 20)), [second])
+        walked = [(path, approval["previous_log"] if approval else None) for path, _, approval in run_chain(second)]
+        self.assertEqual(walked, [(second, "a.log"), (str(first), "")])
+        self.assertEqual(run_identity(str(first)), "e:1", "the first run is named by its approval")
+
+    def test_an_approval_naming_no_log_and_no_starting_book_is_refused(self):
+        lines = [log_header()] + log_group(1, [("input", "operator.run.approved", 3, {
+            "previous_log": "", "previous_log_final_hash": "", "starting_book": None})])
+        path = Path(self.dir.name) / "a.log"
+        path.write_text("".join(lines), encoding="utf-8")
+        with self.assertRaises(ResolveRefused):
+            list(run_chain(str(path)))
 
     def test_the_chain_stops_at_a_run_that_ended_before_yesterdays_session(self):
         # IBKR's lists reach back only to today's session (the day's DAY

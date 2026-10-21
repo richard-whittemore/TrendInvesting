@@ -17,6 +17,11 @@ func RenderText(s Summary) string {
 	} else {
 		b.WriteString("No account snapshot recorded.\n")
 	}
+	if s.CashChecked {
+		fmt.Fprintf(&b, "Cash drift since the previous close %.2f; unexplained cash since the last reconciliation the engine explained %.2f\n", s.CashDrift, s.UnexplainedCash)
+	} else if s.CashUnchecked {
+		b.WriteString("Cash drift: not checked (the latest reading after the close was stamped at its read time)\n")
+	}
 	b.WriteString("Holdings:")
 	if len(s.Holdings) == 0 {
 		b.WriteString(" none")

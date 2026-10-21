@@ -49,7 +49,20 @@ template):
   or Halted, so the new run starts under the same restrictions, and whether
   its one sale back to 98% was already attempted, with
   that sale's client order ID if it was sent. The rule is one attempt per
-  incident (ADR 0019), so a new run told "attempted" never tries it again.
+  incident (ADR 0019), so a new run told "attempted" never tries it again;
+- the **starting book**, or `null`: the holdings and total cash you checked
+  in IBKR. A fresh run's approval states it only after a change no trade
+  explains (you moved shares or cash in or out), and then the adapter
+  compares the fresh run's first reading after a close with it instead of
+  with the previous run's last close (ADR 0019 and ADR 0027, amended
+  2026-10-18).
+
+**An account's first run** has no previous log, so its approval names none
+and states the starting book instead, the boost not latched and no
+incident (`operator approve -first-run`; [operator](operator.md)). A first
+run in paper or live mode does not start without it: the adapter compares
+the run's first reading after a close with that book, and a reading that
+does not match is never taken as the book.
 
 Every item must be written, even when it is "none" (`null`): the engine
 refuses an approval that leaves one out rather than guess, so a forgotten

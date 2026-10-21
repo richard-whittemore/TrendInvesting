@@ -243,7 +243,7 @@ type Handler struct {
 	base       string // the adjusted view's base, fixed by the first bar
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
-	markV2     bool // mark arrived at MarkRecordedEvidenceVersion
+	markAt     uint32 // the schema version the mark arrived at (bandMark)
 	gate       *risklimit.Gate
 	// released holds every order this run released, by client order ID,
 	// so a venue's report about one can be checked against it.
@@ -454,7 +454,9 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 	if h.approved || h.prelude {
 		return errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
 	}
-	p, err := decodeInput[event.OperatorRunApprovedPayload](in, event.OperatorRunApprovedSchemaVersion)
+	// Version 3 adds the starting book, which the IBKR adapter reads (ADR
+	// 0027, amended 2026-10-18); a version 2 approval still replays.
+	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, event.OperatorRunApprovedSchemaVersion})
 	if err != nil {
 		return err
 	}
@@ -551,8 +553,25 @@ func (h *Handler) applyMark(in event.Envelope) error {
 		return fmt.Errorf("targetweight: mark as of %s does not follow the last, %s", p.AsOf, h.mark.AsOf)
 	}
 	h.mark = &p
-	h.markV2 = in.SchemaVersion == event.MarkRecordedEvidenceVersion
+	h.markAt = in.SchemaVersion
 	return nil
+}
+
+// bandMark is the price the gate's price band compares a checked order's
+// reference price with, from a mark recorded at schema version, and the
+// source the order's figures name: IBKR's last price when a version-2 mark
+// carries one, so the band checks the reference price against a price of
+// its own, else the mark, the official close; a version-1 mark names no
+// source, so its figures keep their bytes. One rule for Boost's and
+// momentum's orders alike (ADR 0026 point 3, amended 2026-10-18).
+func bandMark(p event.MarkRecordedPayload, version uint32) (price float64, source string) {
+	switch {
+	case version != event.MarkRecordedEvidenceVersion:
+		return p.Price, ""
+	case p.BrokerLastSet:
+		return p.BrokerLast, event.MarkSourceBrokerLast
+	}
+	return p.Price, event.MarkSourceOfficialClose
 }
 
 func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
@@ -642,16 +661,8 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	}
 	gateOrder := risklimit.Order{Planned: order}
 	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
-		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
-		// ADR 0026 point 3, amended 2026-10-18: the band compares IBKR's
-		// last price when IBKR gave one, so it checks the reference price
-		// against a price of its own; else the official close.
-		if h.markV2 {
-			gateOrder.MarkSource = event.MarkSourceOfficialClose
-			if h.mark.BrokerLastSet {
-				gateOrder.Mark, gateOrder.MarkSource = h.mark.BrokerLast, event.MarkSourceBrokerLast
-			}
-		}
+		gateOrder.MarkSet = true
+		gateOrder.Mark, gateOrder.MarkSource = bandMark(*h.mark, h.markAt)
 	}
 	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}, At: b.at}
 	outcome := b.order(gateOrder, book)

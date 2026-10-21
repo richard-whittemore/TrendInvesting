@@ -35,7 +35,7 @@ It has four commands:
 | `operator kill-switch` | the kill switch engaged or released | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator rebalance-cleared` | your clearance of a rebalance that is stuck | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator acknowledge` | your acknowledgement of one alert, by its alert key | the engine's operator inbox | before the engine's next input from the adapter; the reporter stops repeating the alert at its next run |
-| `operator approve` | your approval of a fresh run | an approval file you pass to the engine with `-approval` | when that fresh run starts, as its second input |
+| `operator approve` | your approval of a fresh run, or of an account's first run with its starting book (`-first-run`) | an approval file you pass to the engine with `-approval` | when that run starts, as its second input |
 
 ## The operator inbox
 
@@ -292,6 +292,23 @@ a fresh run starts with the switch released, so record it again with
 `operator kill-switch -state engaged` before you start the engine. The
 engine reads that record before the fresh run's first input from the
 adapter, before any order is checked.
+
+**An account's first run** is approved too, with the book it starts from,
+since there is no previous log to read. Check the paper account's holdings
+and total cash (`TotalCashValue`) in IBKR, then:
+
+```
+operator approve -first-run -account <IBKR account> -by owner \
+  -positions SPY=<shares> -cash <total cash> -currency USD \
+  -out /var/lib/trend-investing/engines/boost/first-run-approval.json
+```
+
+(`-positions ""` when the account holds nothing). It prints the book and the
+next step. A fresh run's approval takes the same three options when you
+moved shares or cash in or out since the previous run: the fresh run's first
+reading is then compared with the book you state, not with the previous
+run's last close (ADR 0019 and ADR 0027, amended 2026-10-18). A first run in
+paper or live mode does not start without its approval.
 
 The engine checks the approval against the same log when the fresh run
 starts (see [restart](restart.md), "What the engine checks"). One more check

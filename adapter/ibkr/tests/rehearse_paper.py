@@ -101,8 +101,13 @@ RUN = "run-rehearsal"
 # accepts (its longest indicator window, five sessions) and one more.
 WARM_SESSIONS = 6
 # The paper account's synthetic holding before the first day, its net
-# liquidation, and IBKR's synthetic last price for SPY (evidence only).
+# liquidation, and IBKR's synthetic last price for SPY (the price band's comparison).
 HELD = 10
+# The inputs the engine records before the adapter's first: its
+# configuration, then a first run's approval.
+HEAD = 2
+CONFIGURATION_TYPE = "strategy.target-weight.configuration"
+RUN_APPROVED_TYPE = "operator.run.approved"
 NET_LIQUIDATION = "1000000.00"
 IBKR_LAST = 401.17
 # A synthetic stand-in for the Massive key: not a credential.
@@ -113,6 +118,10 @@ GO_TIMEOUT = float(os.environ.get("TI_TEST_GO_TIMEOUT", "300"))
 # Set by the rehearsal's own test: the day's stream is altered after the data
 # job wrote it, which the adapter must refuse.
 STREAM_TAMPER = False
+# Set by the suite (test_rehearsal): the first run's approval states fewer
+# shares than the account holds, a change the owner did not check, so the
+# first reading is never taken as the book and the real engine halts.
+BOOK_MISMATCH = False
 
 
 class SyntheticMassive:
@@ -359,16 +368,45 @@ def rehearse(work, account):
 
     try:
         # -- 1. the warm-up, the evening before the first paper day ----------
-        run_log = engine.start(RUN)
+        # The account's first run, approved with the book the owner checked
+        # in IBKR: the fake gateway's holding and cash, which the first
+        # reading after a close is compared with (ADR 0019 and ADR 0027,
+        # amended 2026-10-18).
+        approval = work / "first-run-approval.json"
+        approval.write_text(json.dumps({
+            "account_id": account, "previous_log": "", "previous_log_final_hash": "", "incident_id": "",
+            "approved_by": "rehearsal", "approved_at": stamp(close_at), "boost": {"latched": False},
+            "incident_in_force": None,
+            "starting_book": {"positions": [{"instrument_id": "SPY", "quantity": HELD - 3 if BOOK_MISMATCH else HELD}],
+                              "total_cash": float(NET_LIQUIDATION), "currency": "USD"}}))
+        run_log = engine.start(RUN, "-approval", str(approval))
         evening(eve)
         warm = data_job(work, config, run_log, settled(eve), "--backfill-from", warm_up_start.isoformat())
         warm_types = [ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, RECONCILIATION_TYPE] + [BAR, CLOSED] * (
             WARM_SESSIONS - 1) + [BAR, MARK_TYPE, CLOSED]
-        run(Phase([(lambda: len(types(run_log)) >= 1 + len(warm_types), None, "the warm-up to reach the engine")]),
+        run(Phase([(lambda: len(types(run_log)) >= HEAD + len(warm_types), None, "the warm-up to reach the engine")]),
             run_log)
         check(warm == streams / RUN / "boost-{}.jsonl".format(eve),
               "the data job wrote the run's warm-up, stamped with the engine's own identity")
-        sent = inputs(run_log)[1:]
+        if BOOK_MISMATCH:
+            sent = inputs(run_log)[HEAD:]
+            first = sent[0]
+            outcome = decisions(run_log, first["id"])
+            result = [d["payload"] for d in outcome if d["type"] == RESULT]
+            state = [d["payload"] for d in outcome if d["type"] == STATE]
+            check([i["type"] for i in sent[:3]] == [RECONCILIATION_TYPE, ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE]
+                  and sent[2]["payload"]["as_of_close"] is False
+                  and "starting book" in sent[2]["payload"]["not_as_of_close"]
+                  and result and result[0]["classification"] == "unverifiable" and result[0]["action"] == "halt"
+                  and state and state[0]["state"] == "halted",
+                  "a first reading that is not the owner's starting book was never taken as the book: its "
+                  "reconciliation went ahead of the snapshots and the engine, holding no book, halted")
+            return
+        check(types(run_log)[:HEAD] == [CONFIGURATION_TYPE, RUN_APPROVED_TYPE]
+              and inputs(run_log)[1]["payload"]["starting_book"]["positions"] == [
+                  {"instrument_id": "SPY", "quantity": HELD}],
+              "the account's first run began with the owner's approval stating its starting book")
+        sent = inputs(run_log)[HEAD:]
         eve_close = stamp(nyse_calendar.session_close(eve))
         result = [d for i in sent if i["type"] == RECONCILIATION_TYPE for d in decisions(run_log, i["id"])]
         check([i["type"] for i in sent] == warm_types
@@ -408,7 +446,7 @@ def rehearse(work, account):
         ]), run_log)
         # The start's and the reconnect's reconciliations go ahead of, or
         # between, the day's own inputs, as the adapter records them.
-        day = [i for i in inputs(run_log)[1 + len(warm_types):]
+        day = [i for i in inputs(run_log)[HEAD + len(warm_types):]
                if i["type"] not in (LIFECYCLE_TYPE, RECONCILIATION_TYPE)][:5]
         account_in, broker_in = (day + [{}, {}])[:2]
         broker = broker_in.get("payload", {})

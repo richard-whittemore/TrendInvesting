@@ -25,7 +25,11 @@ before the batch's snapshots replace it (ADR 0019: a holding no fill
 explains is unexplained, never adopted), then the engine's account.snapshot
 and the broker snapshot; in a run's first batch, when the engine holds no
 book, the start-of-run reconciliation goes behind the snapshots instead
-(ADR 0025 point 5); then every envelope of those files, with each mark
+(ADR 0025 point 5), once the adapter has compared the reading with the
+earlier run's last close or the owner's starting book (book_basis): one
+that differs, or has nothing to compare with, keeps it ahead, where the
+engine, with no book, classifies it unverifiable and halts (ADR 0019 and
+ADR 0027, amended 2026-10-18); then every envelope of those files, with each mark
 (market.mark.recorded, the bar's official close) just before the last
 session's close. The engine therefore journals the account snapshot before
 the bars, the mark before the close, and each session's bars before its
@@ -137,10 +141,14 @@ class DeliveryRecordInvalid(ValueError):
     """The delivery record is not as the adapter writes it; the adapter stops before delivering anything."""
 
 
-PostCloseReading = namedtuple("PostCloseReading", "account broker marks reading")
+PostCloseReading = namedtuple("PostCloseReading", "account broker marks reading unverified", defaults=(False,))
 """One account read for a batch (the adapter's loop.AdapterLoop._post_close_reading): the engine's
 account.snapshot, the broker snapshot, the marks (one per instrument the batch's last session delivers a bar
-for, in instrument order), each a snapshot.Record, and the snapshot.AccountReading they were made from."""
+for, in instrument order), each a snapshot.Record, and the snapshot.AccountReading they were made from.
+unverified is set when the engine holds no book and the reading differs from the book it was compared with
+(an earlier run's last close or the owner's starting book, book_basis), or has none to compare with: its
+reconciliation then goes ahead of its snapshots, so the engine classifies it with no book, unverifiable, and
+halts, never adopting it (ADR 0019 and ADR 0027, amended 2026-10-18)."""
 
 Stream = namedtuple("Stream", "name session first sha256 envelopes")
 """One stream file read strictly: its file name, its last session (which its name gives and its last line
@@ -742,7 +750,11 @@ def _entries(run, snapshot_id, reading, streams, book):
     fills since before the new snapshot replaces it, so holdings no fill
     explains are unexplained (ADR 0019's Degraded or Halted path), never
     adopted. With no book yet, the account.snapshot, the broker snapshot,
-    then the start-of-run reconciliation (ADR 0025 point 5). Then every
+    then the start-of-run reconciliation (ADR 0025 point 5), once the
+    adapter found the reading to be the earlier run's last close or the
+    owner's starting book adjusted by the fills since; a reading that is
+    not (reading.unverified) has its reconciliation first too, which the
+    engine, with no book, classifies unverifiable and halts on. Then every
     envelope of each file in order, with each mark just before the last
     session's close, so the engine reads the account snapshot, the bar, the
     mark, then the close that decides.
@@ -754,7 +766,7 @@ def _entries(run, snapshot_id, reading, streams, book):
     reconciliation = adapter_entry(reconciliation_record(reading.reading, reconciliation_id), reconciliation_id)
     entries = [adapter_entry(reading.account, _derived(snapshot_id, ACCOUNT_SNAPSHOT_TYPE)),
                adapter_entry(reading.broker, snapshot_id)]
-    entries = [reconciliation] + entries if book else entries + [reconciliation]
+    entries = [reconciliation] + entries if book or reading.unverified else entries + [reconciliation]
     last_close = streams[-1].envelopes[-1]["id"]
     # A retraction a later file repeats (_repeats) is recorded once, as the
     # first file wrote it.

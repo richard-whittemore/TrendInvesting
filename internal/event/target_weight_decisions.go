@@ -860,18 +860,18 @@ const (
 	RefusedStaleBrokerSnapshot = "stale-broker-snapshot"
 )
 
-// RiskFigures are the values the gate checked an order against, so the
-// journal alone can check the outcome. Mark is 0 when MarkSet is false.
-// Exposure is account-wide: every holding at its reference price over net
-// liquidation. CashChecked is true for an IRA's buy, whose worst-case BuyCost
-// was checked against CashAvailable; otherwise both are 0.
 // The prices a price band compares an order's reference price with
-// (RiskFigures.MarkSource).
+// (RiskFigures.MarkSource; ADR 0026 point 3, amended 2026-10-18).
 const (
 	MarkSourceBrokerLast    = "broker-last"
 	MarkSourceOfficialClose = "official-close"
 )
 
+// RiskFigures are the values the gate checked an order against, so the
+// journal alone can check the outcome. Mark is 0 when MarkSet is false.
+// Exposure is account-wide: every holding at its reference price over net
+// liquidation. CashChecked is true for an IRA's buy, whose worst-case BuyCost
+// was checked against CashAvailable; otherwise both are 0.
 type RiskFigures struct {
 	NetLiquidation   float64 `json:"net_liquidation"`
 	ReferencePrice   float64 `json:"reference_price"`
