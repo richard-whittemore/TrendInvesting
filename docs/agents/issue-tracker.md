@@ -1,10 +1,12 @@
-# Issue tracker: GitHub Issues (via the GitHub MCP)
+# Issue tracker: GitHub Issues (via `gh` or the GitHub MCP)
 
 Issues and specs for this repo live as **GitHub issues in `richard-whittemore/TrendInvesting`**.
 
-**Use the route `AGENTS.md` names (the GitHub MCP tools).** Whether the `gh` CLI is installed varies by machine: where it is installed and logged in, it performs the same operations (`gh issue …`, `gh pr …`, `gh api …`); where it is not, use the GitHub MCP tools below.
+**Use the `gh` CLI where it is installed and logged in (it is, on the Mac mini), or the GitHub MCP tools below.** `gh` performs the same operations (`gh issue …`, `gh pr …`, `gh api …`); where it is not installed on a machine, use the GitHub MCP.
 
-| Operation | Tool |
+The table below lists the **MCP fallback**. When `gh` is installed and logged in, use the equivalent `gh issue …`, `gh pr …`, or `gh api …` command instead.
+
+| Operation | MCP fallback |
 |---|---|
 | Create / edit an issue | `mcp__github__issue_write` (method `create` / `update`) |
 | Read an issue (with comments) | `mcp__github__issue_read` |
@@ -18,7 +20,7 @@ Issues and specs for this repo live as **GitHub issues in `richard-whittemore/Tr
 Notes and limits:
 
 - **The MCP cannot create labels, and it validates every label before writing.** Passing a label that does not already exist fails the whole call with `failed to resolve label "<name>"` — the issue is not created, so there is no partial state, but the write must be retried. `get_label` checks one label; there is no list-labels tool.
-- **To create a label, use the REST API directly.** The environment carries `GITHUB_MCP_PAT`, the same credential the MCP uses. `POST /repos/{owner}/{repo}/labels` with `Authorization: Bearer $GITHUB_MCP_PAT` creates one (201), or returns 422 if it already exists. `POST /repos/{owner}/{repo}/issues/{n}/labels` adds labels to an existing issue without removing its current ones. Never echo the token; reference it only as an environment variable. Prefer the MCP for everything it supports — this is the documented exception, not a general licence to bypass it.
+- **To create a label, use the REST API directly.** The environment carries `GITHUB_MCP_PAT`, the same credential the MCP uses. `POST /repos/{owner}/{repo}/labels` with `Authorization: Bearer $GITHUB_MCP_PAT` creates one (201), or returns 422 if it already exists. `POST /repos/{owner}/{repo}/issues/{n}/labels` adds labels to an existing issue without removing its current ones. Never echo the token; reference it only as an environment variable. Use `gh` wherever it is installed and logged in (it is on the Mac mini) and the MCP only where it is not; the label-creation REST call is the one exception to that rule, and only for what the MCP cannot do.
 - The MCP exposes no native issue-dependency endpoint. Represent blocking edges as described under **Blocking** below.
 - Paginate in batches of 5–10 and use `minimal_output` when the full body isn't needed.
 
@@ -112,11 +114,11 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue with `mcp__github__issue_write`, using the ticket standard above.
+Create a GitHub issue with `gh` when installed (it is on the Mac mini), else the GitHub MCP (`mcp__github__issue_write`), using the ticket standard above.
 
 ## When a skill says "fetch the relevant ticket"
 
-Read it with `mcp__github__issue_read`, including comments.
+Read it with `gh` when installed (it is on the Mac mini), else the GitHub MCP (`mcp__github__issue_read`), including comments.
 
 ## Wayfinding operations
 
