@@ -40,22 +40,22 @@ systemd never restarts an engine (`Restart=no`), and a reboot leaves every
 engine stopped. Every start is this owner step. First decide which case it is
 (ADR 0027, amendment of 2026-10-17):
 
-- **A crash** (the process died: `systemctl status ti-engine@<account>`
+- **A crash** (the process died: `systemctl status ti-engine@<instance>`
   shows it failed or was killed, and its journal was not written): **resume**.
 - **Anything else** (you stopped it, a reboot, leaving Halted, a build
   upgrade, a cleared rebalance): a **fresh run**, which starts only after your
   recorded approval.
 
 The engine reads its settings from
-`/var/lib/trend-investing/engines/<account>/run.env` (the example is
+`/var/lib/trend-investing/engines/<instance>/run.env` (the example is
 `deploy/etc/engines/run.env.example`). Edit it with `sudo -u ti-trader -e`.
 
 ### Resume after a crash
 
 1. Keep `TI_AS_OF` as it was. Set `TI_RUN` to a new name (a log is never
-   reused) and `TI_RESTART_ARGS=-resume /var/lib/trend-investing/engines/<account>/<crashed TI_RUN>.log`.
-2. `sudo systemctl start ti-engine@<account>`, then
-   `journalctl -u ti-engine@<account> -n 20`. Expect `resumed N record(s)`,
+   reused) and `TI_RESTART_ARGS=-resume /var/lib/trend-investing/engines/<instance>/<crashed TI_RUN>.log`.
+2. `sudo systemctl start ti-engine@<instance>`, then
+   `journalctl -u ti-engine@<instance> -n 20`. Expect `resumed N record(s)`,
    and possibly a torn tail of one input, which the adapter sends again.
    The adapter then asks again for the reply to the input it was waiting
    on, and the engine serves the reply it recorded before the crash,
@@ -171,7 +171,7 @@ The engine reads its settings from
    differ from every earlier run's in the state directory: the engine
    refuses to repeat a start (if the latest log holds nothing past its
    configuration, resume that log instead).
-5. `sudo systemctl start ti-engine@<account>`. Expect `recorded the owner's
+5. `sudo systemctl start ti-engine@<instance>`. Expect `recorded the owner's
    approval ... the adapter's first input carries sequence 3`. A refusal
    names what does not match: a later log than the one approved, a final hash
    that is not the log's, a latch the log does not end with, an incident
@@ -195,7 +195,7 @@ whether it is the crashed run. The message says which case it is.
 
 1. **A permission fault** ("not permitted to read it"): fix the file's owner
    or mode, never quarantine it:
-   `sudo chown ti-trader: /var/lib/trend-investing/engines/<account>/<name>.log`
+   `sudo chown ti-trader: /var/lib/trend-investing/engines/<instance>/<name>.log`
    and `sudo chmod 600` on it. Start again.
 2. **A disk fault on a log that is or may be the latest run** ("it is or may
    be the latest run", given when no log holding a record was modified after
@@ -235,15 +235,12 @@ whether it is the crashed run. The message says which case it is.
       on, record it again with `operator kill-switch`: the engine reads it
       before the fresh run's first input from the adapter
       ([operator](../manual/operator.md), "An approval").
-      **Prerequisite:** this works only if the engine was started with
-      `-operator <inbox>`. The server's service file does not pass it yet,
-      so until it does, recording the file does not make a fresh run read the
-      switch, and a restart can release it. Before relying on this step,
-      confirm that the engine's command line includes `-operator` with the
-      inbox you recorded into ([operator](../manual/operator.md), "The
-      operator inbox"); if it does not, do not start the run until it
-      does, or stop the engine instead. There is no configuration
-      fallback, so:
+      The server's service file passes `-operator` with the account's
+      inbox, `/var/lib/trend-investing/engines/<instance>/operator`, so record
+      the switch there ([operator](../manual/operator.md), "The operator
+      inbox"); an engine that is started some other way must be given the
+      inbox you recorded into, or a restart can release the switch. There is
+      no configuration fallback, so:
       - If the last readable log ended in an incident, carry it Halted
         under that ID.
       - If it ended Normal and you believe the lost log opened an incident,
@@ -262,8 +259,8 @@ whether it is the crashed run. The message says which case it is.
    approval:
 
    ```sh
-   sudo journalctl -u ti-engine@<account> \
-     --since "$(date -r /var/lib/trend-investing/engines/<account>/<name>.log '+%F %T')" \
+   sudo journalctl -u ti-engine@<instance> \
+     --since "$(date -r /var/lib/trend-investing/engines/<instance>/<name>.log '+%F %T')" \
      | grep -E "resumed [0-9]+ record\(s\) from|recorded the owner's approval of a fresh run after"
    ```
 
@@ -279,7 +276,7 @@ whether it is the crashed run. The message says which case it is.
 ## An unrecoverable log
 
 Every `*.log` in the root of the account's state directory,
-`/var/lib/trend-investing/engines/<account>/`, is read to find the latest
+`/var/lib/trend-investing/engines/<instance>/`, is read to find the latest
 run. A log whose content the engine cannot recover (ADR 0027 §5: a damaged file, an old
 log whose bytes rotted after it was superseded and still read back, or a stray file ending in
 `.log`; rot the disk reports as a read error is "A log that cannot be read") refuses every start, resume and fresh run alike, with a message
@@ -289,9 +286,9 @@ ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
 2. **Move it, unchanged, into the quarantine folder** beside the logs:
 
    ```sh
-   sudo -u ti-trader mkdir -p /var/lib/trend-investing/engines/<account>/quarantine
-   sudo -u ti-trader mv /var/lib/trend-investing/engines/<account>/<name>.log \
-     /var/lib/trend-investing/engines/<account>/quarantine/
+   sudo -u ti-trader mkdir -p /var/lib/trend-investing/engines/<instance>/quarantine
+   sudo -u ti-trader mv /var/lib/trend-investing/engines/<instance>/<name>.log \
+     /var/lib/trend-investing/engines/<instance>/quarantine/
    ```
 
    The engine reads only the state directory's root, never the quarantine

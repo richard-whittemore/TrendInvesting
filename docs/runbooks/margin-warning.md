@@ -31,13 +31,14 @@ reporter checks every 5 minutes, around the clock, seven days a week).
 3. **Decide.** At 147% under the standard 25% maintenance requirement the
    ratio is about 63%, so a warning means either a deep fall in SPY or a
    higher house requirement. If the requirement rose, the boost is riskier
-   than the backtest assumed: where the operator inbox exists and the engine
-   was started with `-operator`, you may engage the kill switch to stop the
-   next boost buy (`sudo -u ti-trader operator kill-switch ... -state engaged`),
-   which still lets the sale back to 98% go. Until the inbox exists, stop the
-   engine instead (`sudo systemctl stop ti-engine@<account>`). Selling by hand
-   is your call; if you do, stop new orders first in the same way, so the
-   program sends nothing new while your order works.
+   than the backtest assumed: you may engage the kill switch to stop the
+   next boost buy (`sudo -u ti-operator operator kill-switch ... -state engaged`),
+   which still lets the sale back to 98% go. Selling by
+   hand is your call; if you do, stop the engine and the adapter first
+   (`sudo systemctl stop ti-engine@boost ti-adapter-boost`), as
+   the manual's "Selling by hand safely" says
+   (`docs/manual/states-and-kill-switch.md`): the kill switch does not stop
+   the sale back to 98%, so the program could sell beside you.
 
 ## An urgent alarm
 
@@ -47,24 +48,35 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    or the urgent one that IBKR canceled or refused it ("sale back to 98%
    failed": sell the rest by hand). `journal-query orders` and
    `journal-query fills` show the same.
-2. **If the sale was withheld** (`sale-withheld` in `journal-query
-   refusals`):
+2. **If the sale was withheld or refused** (`sale-withheld` or `refused`
+   in `journal-query refusals`):
    - `broker-values-unreadable` or `unknown-working-sell`: the program will
-     not try again, and the urgent "sale withheld, sell by hand" alert says
-     so. **Act by hand at IBKR now**: sell back to 98% of net liquidation,
-     after checking no other sell is working.
+     not try again for this alarm, and the urgent "sale withheld, sell by
+     hand" alert says so. **Act by hand at IBKR now**: sell back to 98% of
+     net liquidation, following the manual's "Selling by hand safely" (stop
+     the engine and the adapter, cancel and confirm nothing is working in
+     IBKR's app, then sell).
    - `stale-broker-snapshot` or `non-positive-broker-values`: the program
      decides it again from the next good snapshot while the alarm is urgent.
      The first stale one of an outage alerts (once per stale episode); a
-     non-positive one sends no alert, so look for it here.
+     non-positive one pages "sale withheld, sell by hand" once per sale,
+     with the hand-sale steps, since nothing sells until a positive
+     snapshot comes.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
-     by hand.
+     by hand, but stop the engine and the adapter first ("Selling by hand
+     safely"): the attempt is unspent, so the program can still sell from
+     the next good snapshot, beside your sale.
+   - **Refused at the gate as `broker-holding`** (the sale is larger than
+     IBKR's holding): the refusal spends the attempt, and the urgent "sale
+     back to 98% refused, sell by hand" page says so. Check the holding at
+     IBKR and, if still above 98%, sell back to 98% by hand, following the
+     steps the page gives ("Selling by hand safely").
 3. **No reading** (the cause says `no-reading`): the adapter has had no
    Excess Liquidity for the stale period. Check the gateway first
    (`gateway-login.md`).
 4. **After the sale**, the account stays Normal unless something else
    moved it; the boost may buy again when Boost's rule says so. If you want
-   it not to, engage the kill switch (where the inbox exists) or stop the
+   it not to, engage the kill switch or stop the
    engine.
 
 ## Day trades (legacy pattern-day-trader rule)

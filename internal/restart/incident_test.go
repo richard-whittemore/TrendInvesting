@@ -193,6 +193,7 @@ func TestAnApprovalNeverDropsTheCashScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(incident, "scope_cash_components")
+	delete(keys, "starting_book") // version 3's
 	var err error
 	if keys["incident_in_force"], err = json.Marshal(incident); err != nil {
 		t.Fatal(err)

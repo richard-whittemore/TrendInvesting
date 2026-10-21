@@ -32,7 +32,7 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
-| `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
+| `python3 -m marketdata encode --out DIR --first YYYY-MM-DD --asof YYYY-MM-DD --configuration-hash H --strategy-version V --run-id R --stream FILE ...` (all of these but `--asof` are required: the engine's configuration hash, strategy version and run identity come from its durable log; `--run-id` takes the run's name, the value the data job stamps on every envelope as its correlation id: the `TI_RUN` of the run that began the chain, which is its durable log's file name without `.log`, for a paper run and a dry-run first run alike. It is not the run's identity, the Run approval's ID or, for a dry-run first run, the configuration's hash and as-of time, which the job uses only to find the run's folder) | the engines' input stream (below) | no, and it never uses the network |
 | `python3 -m marketdata retract --out DIR --session YYYY-MM-DD --reason TEXT` | that the exchange cancelled a session (below) | no |
 
 If your recordings hold an older 253-session backfill, extend it to 260
@@ -124,8 +124,10 @@ Boost reads only its one instrument's bars and the session closes, and
 refuses any other input, so `--engine boost` writes just those: no calendar
 and no universe snapshot, even where a universe was recorded. It needs
 exactly one `--instruments` entry (for example `SPY`) and no `--optional` or
-`--universe-members`. The account snapshots and marks Boost also reads come
-from the broker side, not from this step.
+`--universe-members`. The account snapshots and the mark Boost also reads are
+the IBKR adapter's, made from one account reading as it delivers the file;
+the mark's price is this step's bar close ("What happens to the file",
+below).
 
 Every bar's time is the session's close: 4 p.m. New York, or 1 p.m. on an
 early close (the day after Thanksgiving, and July 3 and December 24 when they
@@ -315,8 +317,9 @@ session it missed in one file. A run that hangs is stopped after an hour
 1. Picks the latest settled session.
 2. Reads the Boost engine's durable log (the `-log` file of the run named by
    `TI_RUN` in the engine's `run.env`) for the run's configuration hash and
-   strategy version, and uses the run's name as the stream's correlation id,
-   so the stream carries exactly the identity the engine expects. The log's
+   strategy version, and uses the run's name (the log's file name without `.log`; the
+   run's *identity* is a separate thing, used only to find its folder) as the
+   stream's correlation id, so the stream carries exactly the name the engine expects. The log's
    first input is the configuration the engine started with; the job refuses
    if `/etc/trend-investing/engines/boost.config` no longer agrees with it on
    the instrument, `warm_up_start` or an indicator length, since the stream
@@ -411,9 +414,10 @@ days since.
 crash"): a new log that holds a copy of the crashed run's records. It is the
 same run, not a new one, so it needs **no** warm-up and gets no folder of
 its own. The data job and the adapter both find the run's folder by the
-run's identity, not by the log's name: its Run approval (or, for the
-engine's very first run, its configuration and as-of time), which the
-copied log carries. The folder is the one named after the run that began
+run's identity, not by the log's name: its Run approval's ID (a paper run
+always has one, the first run's stating the starting book; a dry-run first
+run, which needs none, is known by its configuration and as-of time), which
+the copied log carries. The folder is the one named after the run that began
 the chain, the `TI_RUN` its warm-up was run for, and stays so through any
 number of resumes:
 
@@ -432,11 +436,11 @@ Keep the first run's log (`<first TI_RUN>.log`) in the engine's folder
 while its resumes run: the folder is matched to the run through it. If it
 is missing, both stop, and say so from the resumed log itself: a log that
 already holds committed delivered inputs (bars, session closes and the
-data job's other inputs, and the adapter's broker snapshots; an operator input such as a kill switch, the
+data job's other inputs, and the adapter's account and broker snapshots and marks; an operator input such as a kill switch, the
 approval and the configuration never count) holds copied history, which a
 fresh run's log cannot, so the message says "the log <path> already holds
 N committed delivered inputs beyond its configuration", N counting delivered
-inputs only (market data and the adapter's broker snapshots), that if it is a crash resume
+inputs only (market data and the adapter's snapshots and marks), that if it is a crash resume
 of an earlier run you restore that run's log beside it and start again, and
 that you do not run a warm-up under this name; if a stream folder with no
 log beside it exists, the message names it as the likely first run's.
@@ -468,7 +472,7 @@ whole warm-up again to a run whose log already holds it. If this run is a
 crash resume, restore its first run's log from the backup as the engine
 wrote it; if the log is an old run's, once that run has ended move its
 folder out of `streams/boost/` and its log out of the engine's log folder
-(`/var/lib/trend-investing/engines/<account>/`, beside the running log),
+(`/var/lib/trend-investing/engines/<instance>/`, beside the running log),
 and keep both as evidence in a folder outside both: a durable log is never
 edited or deleted. A log whose first records name this run is read
 whole: if it cannot be read, both stop, naming it ("names this run in its
@@ -493,13 +497,15 @@ naming both logs ("nothing shows it is that run's crash resume"), the
 message names the three cases below with the remedy for each, and nothing
 is written or sent:
 
-- **the engine's first run started again without an approval** (same
-  `run.env`, same configuration and as-of time): it has the first run's
-  identity but not its records, and is never handed the first run's
-  folder, record of files sent and stream without its own warm-up. Stop
-  it, and start it as a fresh run, with its approval and its warm-up
-  ([paper trading](paper-trading.md), "Never start the engine's first run
-  again without an approval");
+- **a dry-run first run started again without an approval** (same
+  `run.env`, same configuration and as-of time; a paper engine refuses such
+  a start itself, and a paper first run has an approval to tell it by): it
+  has the first run's identity but not its records, and is never handed the
+  first run's folder, record of files sent and stream without its own
+  warm-up. Stop it, and start a fresh run with its own warm-up (a dry run
+  needs no approval; a paper run needs its approval) ([paper
+  trading](paper-trading.md), "Never start a run again without an
+  approval");
 - **a first run that crashed having committed nothing but its
   configuration**: nothing in the two logs tells its resume from a second
   start, so it is not taken for either. Nothing of it needs keeping: start
@@ -561,6 +567,13 @@ carries on from them.
   a recording was removed; restore it from the backup (today that means a
   Lightsail snapshot, if snapshots are on: [server](server.md), "Backups").
 - **A history shorter than the indicators need** at the warm-up.
+- **The configuration is not usable**: "it is not a Boost configuration"
+  (the engine's first input is another strategy's, or the file is), "warm_up_start
+  ... is not an NYSE session" (pick a trading day), "--backfill-from ... is not
+  the configuration's warm_up_start" (the warm-up takes that date only), or
+  "session ... precedes the warm-up start". Correct the date you passed; the
+  configuration is never edited after the engine started (an edited
+  configuration is a new run).
 - **A file already written differs** from what its recordings now give.
   Every run checks every earlier file, so this stops the job the day it
   happens, naming the file. The causes: Massive published a split or
@@ -631,40 +644,92 @@ days), it takes them all, oldest first.
 
 **What it sends, in order.**
 
-1. **The broker snapshot.** Just before the file goes, the adapter reads
-   the account at IBKR (positions, cash, net liquidation, Excess Liquidity
-   and every open order) and asks IBKR for SPY's last traded price, which
-   is the "mark" the snapshot gives each holding. It also says whether the
-   market was open at that moment (by the NYSE calendar the data job uses:
-   9:30 to 4 p.m. New York, 1 p.m. on an early close). After 17:05 that is
-   always "closed". A price counts only if IBKR's answer for it finished in
-   time (IBKR finishes it at the end of an 11-second window, so the adapter
-   waits up to `mark_timeout`, which the configuration sets and the
-   example sets to 15 seconds) and every last price in it was a real price above zero; otherwise
-   the holding is listed with no mark ("mark set false"), as it is when IBKR
-   gives no last price at all (the paper login has no market data for SPY,
-   say). The engine then cannot size the joint account's emergency sale
-   back to 98% from that snapshot, holds that sale back and asks you to act
-   by hand. This mark is read only by that sale. A buy is checked against a
-   different mark, one recorded at or after the session's close
-   (`market.mark.recorded`), and is refused without one (`missing-mark`,
-   which leaves the account Degraded). Nothing records that mark today, so
-   every buy is refused that way in paper; where it will come from (IBKR's
-   last price, as here, or the data job) is still your decision
-   ([paper trading](paper-trading.md), "Not built yet").
+1. **One account reading, as two snapshots.** Just before the file goes,
+   the adapter reads the account at IBKR (positions, cash, net liquidation,
+   Excess Liquidity and every open order) and asks IBKR for SPY's last
+   traded price. From that one reading it sends the engine its **account
+   snapshot** (positions and net liquidation, which orders are valued
+   against) and then the **broker snapshot** (the same holdings, net
+   liquidation, Excess Liquidity, every open order, and whether the market
+   was open, by the NYSE calendar the data job uses: 9:30 to 4 p.m. New
+   York, 1 p.m. on an early close).
 
-   The account read and the marks are one reading. The adapter first
+   **As of the close, when it can stand for it** (your decision of
+   2026-10-18; ADR 0019, ADR 0025 point 5, ADR 0026 point 1). The engine
+   decides a session from the account at that session's close. Between the
+   close and the next open the account changes only through an order still
+   working, an execution, a corporate action IBKR books overnight or a cash
+   posting (interest, a fee), so when the reading is taken after the close
+   of the file's last session, on that session's own New York date, with no
+   open order for the account at IBKR (working, pending or cancel-pending,
+   from any client; in either read of the account and in the last list of
+   open orders, read after both), no execution in the account at or since
+   the close (IBKR's own list, asked for every client and read last; it
+   reaches back only to midnight, which is why the date must be the
+   close's; a closing-auction fill stamped at the close itself counts),
+   every holding with an official close in the file, IBKR's own net
+   liquidation at the read above zero, the holdings exactly the previous
+   close's plus or minus the fills since, and the cash the previous close's
+   adjusted by those fills within **1% of net liquidation** (room for a
+   day's interest or a dividend; `cash_drift` records the difference, and
+   `unexplained_cash` that difference added up since the cash was last
+   explained (for Boost, whose book states no cash, since your starting
+   book), both shown in the daily summary; this check needs no client
+   ID, so it catches a trade the adapter is not shown, a split or a
+   transfer), and the engine holds no snapshot already stamped at or after
+   that close, both snapshots are stamped **as of the close**. The previous
+   close is the last account snapshot of this run, or of the earlier runs
+   its approvals name, however long ago, or the **starting book** you
+   stated when you approved the account's first run (or a fresh run, after
+   a transfer or a sale by hand you checked; `operator approve -first-run` for the first
+   run, docs/runbooks/first-paper-order.md, and `operator approve -log
+   <previous run's log> ... -positions ... -cash ... -currency USD` for a
+   fresh run, [operator](operator.md), "An approval"), whichever is latest: a fresh run's
+   first reading is compared with the last run's close, never taken as the
+   book unchecked. The
+   broker snapshot records the real read time beside it (`read_at`) as
+   evidence. If any of that fails, both are stamped with the real read time
+   and the broker snapshot says every condition that failed
+   (`not_as_of_close`). The engine then has no
+   account snapshot as of the close, so it withholds the session
+   (`stale-account-snapshot`) and orders nothing, and the reporter pages
+   you with the reason. A batch of several files (the adapter was stopped
+   for some days) is read once, after the last session's close, so only
+   that last session can be decided; the earlier ones are withheld the same
+   way.
+
+   **One price basis: a reading as of the close is valued at the close**
+   (ADR 0019, amended 2026-10-18). Each holding's mark in the broker
+   snapshot is the closing price of that instrument's bar in the file's
+   last session, the number the backtest marks at, and the net liquidation
+   of both snapshots is the account's cash plus each holding times that
+   close; IBKR's own net liquidation at the read goes beside it
+   (`read_net_liquidation`), and the margin alarm compares Excess Liquidity
+   (IBKR's, at the read) with that figure, never with the close's. A
+   holding with no bar in the file (anything but SPY) cannot be valued at
+   the close, so the reading is stamped at its read time. A reading stamped
+   at its read time is IBKR's own reading throughout: IBKR's net
+   liquidation, each holding marked at IBKR's last price, or with no mark
+   ("mark set false") when IBKR gave none, and then the engine cannot size
+   the joint account's emergency sale back to 98% from that snapshot,
+   holds that sale back and asks you to act by hand.
+
+   The account read and IBKR's last prices are one reading. The adapter first
    applies every report IBKR has already sent, so a fill or a cancellation
-   received before the read reaches the engine ahead of the snapshot; it
-   does not read while a fill waits for its commission; and after the marks
-   it reads the account a second time. If a fill or an order report
+   received before the read reaches the engine ahead of the snapshots; it
+   does not read while a fill waits for its commission; and after the
+   prices it reads the account a second time. If a fill or an order report
    arrives between the start of the first read and the end of the second
    (an execution of any client's order counts, not only the engine's), if
    the holdings, open orders or cash differ between the two reads (a trade
    you placed in IBKR's own app, which IBKR reports to that app only, still
    shows there), or if any part of the account could not be read (IBKR
    timed out on the balances, say), it reads the whole account again, up
-   to three times. The snapshot is the second read, with its IBKR time.
+   to three times; IBKR's open orders and executions, read after the
+   second read, are inside the same check, so an execution arriving while
+   they are read reads again too (each execution counted once, by its ID,
+   so a replay of the day's list is no change). The snapshots are the
+   second read, with its IBKR time.
    IBKR's answers for the positions and the open orders carry no request
    number, so if IBKR does not finish either list in time, or Gateway
    loses IBKR's servers part-way through (it restores them on the same
@@ -673,41 +738,72 @@ days), it takes them all, oldest first.
    the adapter then drops the link instead of reading again on it, and
    takes the snapshot once the link is back and matched (`ibkr broker
    snapshot: IBKR had not ended its ...` in its log). The log line `ibkr
-   broker snapshot as_of=... cutoff: ...` names the last report recorded
-   before each snapshot.
-2. **The file, line by line, as written**: each session's SPY bar, then that
-   session's close. The engine therefore records the snapshot before the
-   bars, and each session closes only after its bar, before anything for
-   that day is decided (ADR 0019, ADR 0021). Each line goes with the
-   engine's next input number in place of the file's own (the file format,
-   above), and with the time it is sent as its "recorded" time, as every
-   input the adapter sends, so the snapshot is never recorded later than
-   the close it serves while the server's clock keeps time with IBKR's
-   (ADR 0019 measures the snapshot's age at the close's recorded time, from
-   the snapshot's IBKR time); nothing else in it changes. If the server's
-   clock is behind IBKR's by more than the moment it takes to send the
-   file, the snapshot's IBKR time is later than the close's recorded time:
-   the engine counts that negative age as stale (ADR 0019) and blocks
-   every sell at that close (reason `stale-broker-snapshot`) rather than
-   trust it: the sale back to 98% is withheld (`risk.sale.withheld`), and
-   any other sell, such as an ordinary strategy sale, is refused
-   (`risk.order.refused`). Either at every close is the sign: check the
-   server's clock (run `clock-check.sh`; [the server](server.md), "The clock"). A fill or a cancellation IBKR reports
-   while the engine works through the file goes to the engine before the
-   file's next line, so no session is decided on an account behind a
-   report already received. A trade IBKR has reported but whose commission
-   has not come yet holds the file's next line back until the fill is
-   recorded and sent; if the commission never comes, the adapter stops
+   broker snapshot read_at=... as_of=... cutoff: ...` names the read time,
+   the stamp, the last report recorded before each snapshot and, when the
+   stamp is the read time, why.
+2. **The reconciliation, with every file.** From the same reading, IBKR's
+   positions and cash, for the engine to compare against its book (ADR
+   0025 point 5, ADR 0019). Once the engine holds a book it goes **first,
+   before the two snapshots**: the engine compares IBKR's holdings with the
+   book it holds and the fills recorded since, before the new snapshot
+   replaces that book, so shares no fill explains are found (Degraded on
+   the instrument), never quietly taken over. A run's first file, before
+   which the engine holds no book, carries it behind the snapshots when the
+   reading matched the previous close or your starting book (above). When
+   it did not, or had nothing to be compared with, **the reconciliation goes
+   alone and both snapshots are withheld**: the engine, holding no book,
+   finds it unverifiable and halts, so the difference is never taken as the
+   book, and the halted run's log holds no snapshot of that reading for the
+   next run to be compared with. The adapter's log gives the reason. At every later
+   start of the adapter, and every reconnect, the adapter sends one too,
+   read once every trade IBKR replayed has its commission and its fill has
+   reached the engine, and before any of the file's lines; if IBKR does not
+   give the positions or the cash in three reads in a row, the adapter
+   stops for you rather than hold the day's file behind it.
+3. **The file, line by line, as written**: each session's SPY bar, then that
+   session's close, and, between the last session's bar and its close,
+   **SPY's mark** (`market.mark.recorded`): the bar's official close, which
+   the engine checks a buy's price against (a buy with no mark is refused,
+   `missing-mark`), with IBKR's last price beside it (`broker_last`). The
+   price band compares the buy's reference price with IBKR's last price when
+   there is one, and with the official close otherwise (then it always
+   passes: the band has teeth only when IBKR provides a price; ADR 0026
+   point 3, amended 2026-10-18), and the order records which
+   (`mark_source`). Without IBKR market-data permissions on the paper login
+   there is no last price, and nothing else changes: **no decision needs
+   IBKR market data**. The engine therefore records the
+   account snapshot before the bars, the mark before the close, and each
+   session closes only after its bar, before anything for that day is
+   decided (ADR 0019, ADR 0021). Each line goes with the engine's next
+   input number in place of the file's own (the file format, above), and
+   with the time it is sent as its "recorded" time, as every input the
+   adapter sends; nothing else in it changes. ADR 0019 measures the broker
+   snapshot's age at the close itself (the session's end, the time the
+   engine decides at), from the snapshot's stamp, and counts a negative age
+   as stale: a sale withheld or a sell refused with `stale-broker-snapshot`
+   at every close means the snapshot was stamped after the close, at its
+   read time, and its `not_as_of_close` says which condition failed. That
+   comparison uses only the two stamps: the close's comes from the file and
+   the snapshot's from IBKR's clock, so setting the server's clock never
+   clears it. The server's clock matters elsewhere (each input's recorded
+   time, the adapter's own timeouts); check it separately with
+   `clock-check.sh` ([the server](server.md), "The clock"). A fill or a cancellation IBKR
+   reports while the engine works through the file goes to the engine
+   before the file's next line, so no session is decided on an account
+   behind a report already received. A trade IBKR has reported but whose
+   commission has not come yet holds the file's next line back until the
+   fill is recorded and sent; if the commission never comes, the adapter stops
    after `commission_wait` seconds, as it always does
    ([paper trading](paper-trading.md), "What can go wrong").
 
-Several waiting files go behind one snapshot, oldest first. The next day's
-file gets its own snapshot.
+Several waiting files go behind one reading, oldest first. The next day's
+file gets its own.
 
 **Exactly once.** Before anything is sent, the adapter writes down which
 files it is about to hand over, beside its pending file
 (`/var/lib/trend-investing/adapters/boost/pending.json.delivered`). It then
-puts the snapshot and every line of the files in its outbox in one write,
+puts the snapshots (and a first file's reconciliation), the mark and every
+line of the files in its outbox in one write,
 and marks the files handed over. From the outbox each input goes once, as
 every other input does ([re-delivery](redelivery.md)). So:
 
@@ -728,8 +824,8 @@ every other input does ([re-delivery](redelivery.md)). So:
 `ibkr stream queued run=<TI_RUN> files=boost-<date>.jsonl inputs=<n>` when a
 file is handed over, then one `ibkr input=... answered with ...` line per
 input as the engine answers. In the engine's journal (`journal-query`), the
-broker snapshot, the bar and the session close, and whatever the engine
-decided at that close. Never edit the `.delivered` file; the adapter reads
+account and broker snapshots, the bar, the mark and the session close, and
+whatever the engine decided at that close. Never edit the `.delivered` file; the adapter reads
 it strictly and stops on anything it did not write.
 
 **What can go wrong, and what the adapter does.** In every case below it
@@ -767,12 +863,46 @@ which writes the sessions again from its recordings, and start the adapter
   has not been written for this `TI_RUN`. The adapter refuses to start and
   names the warm-up command. Run the warm-up ("The one-time warm-up",
   above), then start the adapter.
+- **The run's stream folder cannot be found or told apart** (the message
+  begins "the run's stream folder is found by the run's identity, from its
+  durable log", and says the log cannot be read or that no earlier folder is
+  a whole copy of this run's history): the adapter stops and delivers
+  nothing, since a wrong folder could feed the engine another run's days.
+  Check the engine's log is whole and readable, then move the unmatched
+  folder aside as the message says and start the adapter again.
+- **The kept bases file does not read** (`pending.json.basis`, a warning in
+  the adapter's log naming it): nothing stops. The adapter walks the earlier
+  runs again to rebuild the previous close and replaces the file; it is only
+  a saving of work. An earlier run's log that cannot be read, or whose record
+  hash chain is broken, does stop it, naming the log: restore it from the
+  backup as the engine wrote it.
 - **The `.delivered` file cannot be read**: something other than the adapter
   changed it. The adapter stops before delivering anything. Restore it from
   the backup as it was ([server](server.md), "Backups"); never edit it.
 - **The link to IB Gateway drops while the snapshot is read**: nothing is
   written down or sent. Once the link is back and matched, the adapter takes
   a fresh snapshot and hands the file over then.
+- **The reading cannot stand for the close**: it was read before the
+  close or on a later New York date than the close (the adapter was not
+  running that evening); IBKR shows an open order for the account from any
+  client (working, pending or cancel-pending); IBKR's executions could not
+  be read in full, or one is at or since the close; a holding has no
+  official close in the file; IBKR's own net liquidation is not above zero;
+  the holdings are not the previous close's plus or minus the fills
+  recorded since; the cash is more than 1% of the net liquidation at the
+  close (IBKR's own at the read when the account cannot be valued at the
+  close) from the previous close's adjusted by those fills; or the engine
+  already holds a snapshot as of this close or later (the conditions
+  above). This stops nothing, except for a run's first reading that is not
+  the book it was compared with: that one sends no snapshot, only its
+  reconciliation, and the account **halts** as unverifiable; the remedy is
+  a fresh run whose approval states the book you read in IBKR
+  ([reconciliation](reconciliation.md), "What can go wrong"). Otherwise
+  the file goes, with both snapshots stamped at the read time and the
+  reason in the broker snapshot (`not_as_of_close`); the engine withholds
+  that session
+  (`stale-account-snapshot`) and you are paged with the reason
+  ([paper trading](paper-trading.md), "What can go wrong").
 - **IBKR cannot give the whole account three times running** (the message
   begins "the account could not be read in full for the broker snapshot"
   and names what could not be read): nothing is written down or sent, and
@@ -805,12 +935,13 @@ which writes the sessions again from its recordings, and start the adapter
   folders, and sends nothing. Move the folder that should not
   be there out of `streams/boost/`, keep it, and start the adapter again.
 - **A run that only shares the identity of the run whose folder it finds**
-  ("nothing shows it is that run's crash resume": the engine's first run
+  ("nothing shows it is that run's crash resume": a dry-run first run
   started again without an approval, a resume of a first run that committed
   only its configuration, or a log that is not a copy of that run's
   records: "A crash resume", above): the adapter refuses to start, naming
   both logs, and sends nothing. For the first two, start a fresh run with
-  its approval and its own warm-up; for the third, resume the crashed run's
+  its own warm-up (a dry run needs no approval; a paper run needs its
+  approval); for the third, resume the crashed run's
   own log with `engine -resume`.
 - **A log beside a stream folder that cannot be read**: one whose first
   records cannot be read cannot be matched to any run. The adapter warns,
@@ -827,8 +958,26 @@ which writes the sessions again from its recordings, and start the adapter
 
 ## What can go wrong, and what the step does
 
-Every failure writes nothing and exits with status 1 and a message on stderr,
-for the scheduler to alert on.
+**The daily job and the delivery, at a glance.** The detail and the steps
+are in the sections named in the last column; the list after the table is
+for the recording and encoding steps.
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| `ti-data refused:` "no secrets file", "cannot read MASSIVE_API_KEY from the secrets file" or "MASSIVE_API_KEY is not set in the secrets file" | No file is written; the unit shows as failed. The key is never printed | Put the key on the `MASSIVE_API_KEY=` line of `/etc/trend-investing/secrets.env`, then `sudo systemctl start ti-data` ("What can go wrong" under "The daily data job") |
+| `ti-data refused:` "run ... has no stream yet: run the warm-up once first" | No file is written | Run the one-time warm-up with the date it names ("The one-time warm-up") |
+| `ti-data refused:` the engine's durable log "cannot be read", "is not an engine durable log", "holds no committed configuration input: start the engine first", "holds no committed input, so it names no run", or the run's first input "is not its configuration" | No file is written | Start the engine once (so `run.env` and its log exist), check `TI_RUN`, and restore a log that cannot be read from the backup as the engine wrote it; never edit it |
+| `ti-data refused:` "it is not a Boost configuration", "warm_up_start ... is not an NYSE session", "--backfill-from ... is not the configuration's warm_up_start", "session ... precedes the warm-up start", or "the Boost configuration ... is not the one the engine's durable log ... holds" | No file is written | Correct the date or put the configuration back as the engine started with it; an edited configuration is a new run |
+| `ti-data refused:` "the history ... holds N sessions; the indicators need M", or Massive returns nothing for a trading day | No file is written; recordings already made are kept | For a history that is too short, choose an earlier `warm_up_start` (more sessions) inside Massive's two-year window; once the engine has started, a changed `warm_up_start` changes the recorded configuration, so it needs a new run. If Massive returned nothing for a day, let the next firing retry it instead |
+| `ti-data refused:` "... differs from the stream its recordings and the engine log ... give now", or "cannot be encoded again from their recordings" | Nothing more is written for the run: the engine has already read the old file | "A file already written differs" under "The daily data job": usually a new run with its own warm-up |
+| `ti-data refused:` "ConflictingActions: dividends <id> differs between recordings" | No file is written | Check the figure against the fund's notice and quarantine the recordings that hold the wrong one ("Two recordings give different figures for one dividend") |
+| `ti-data refused:` "has more than one stream folder", "cannot be matched to any run", "names this run in its first records but cannot be read", "does not follow its record hash chain", or "a second start of a first run" | No file is written | Restore or move aside as "A crash resume" says; never run a warm-up for a resumed run's new name |
+| The adapter stops: "the stream file ... is refused", "the run's stream folder ... does not exist", the same folder and log messages as the row above, or "the delivery record ... cannot be read" | Nothing from any file is sent | "What happens to the file", "What can go wrong, and what the adapter does" |
+| The adapter stops: "could not be read in full for the broker snapshot", or "the reconciliation owed ... could not be read" | Nothing is written down or sent; the file stays | Check IB Gateway's link and the account's currency, then start the adapter again |
+| You are paged: a decision withheld as stale-account-snapshot, "The adapter's reading after the close could not stand for the close" | Both snapshots are stamped at the read time with the reason; the engine orders nothing for that session. A run's first reading that is not your starting book instead halts the account as unverifiable | "The reading cannot stand for the close" under "What happens to the file" |
+
+**The recording and encoding steps.** Every failure writes nothing and
+exits with status 1 and a message on stderr, for the scheduler to alert on.
 
 - **The session has not settled.** A session is refused until an hour after
   its close (`--settle-minutes`, default 60), so an intraday price is never

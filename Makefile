@@ -129,5 +129,9 @@ deploy-test:
 	./deploy/mac-mini/test-programs-lib.sh
 	cd deploy/rehearsal && python3 -m unittest test_twsapi_archive
 	./deploy/rehearsal/test-clock.sh
+	./deploy/rehearsal/test-target.sh
+	./deploy/mac-mini/test-refusals.sh
+	./deploy/rehearsal/test-operator-user.sh
+	./deploy/rehearsal/test-adapter-venv.sh
 
 check: deps lint coverage vuln build adapter-test research-test deploy-test

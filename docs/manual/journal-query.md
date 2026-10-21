@@ -23,7 +23,21 @@ reports anything.
 
 ## Running it
 
-Build or run from the repository root:
+On the server it is installed: `deploy/build-engine.sh` builds it beside
+the engine from the same commit, and `deploy/provision.sh` installs it in
+`/opt/trend-investing/bin` and links it into `/usr/local/bin`. The logs
+belong to the engine's user, so run it as that user:
+
+```
+sudo -u ti-trader journal-query <report> [flags] /var/lib/trend-investing/engines/<instance>/<run>.log
+```
+
+Each run leaves two files in `/var/lib/trend-investing/engines/<instance>/`:
+`<run>.log`, the durable log written as it goes, and `<run>.journal`, the
+journal written when it stops. Name one of them, not both (below). The log
+can be read while the engine is still running.
+
+On the Mac, from the repository root:
 
 ```
 go run ./cmd/journal-query <report> [flags] <journal> [<journal> ...]
@@ -33,13 +47,13 @@ Reports:
 
 | Report | Answers |
 | --- | --- |
-| `orders` | orders planned, released and refused, and order lifecycle changes |
+| `orders` | orders planned, released and refused, trades skipped (sized but not ordered), and order lifecycle changes |
 | `fills` | each fill with quantity, price and commission |
 | `refusals` | refused orders, withheld sales back to 98% and engine-state changes (degraded, halted) |
 | `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row |
 | `positions` | the holding after each fill, rebuilt from the fills; a recorded symbol change moves the holding to the new id |
-| `reconcile` | whether the fills agree with the account snapshots recorded in the journal |
-| `operator` | your own instructions the engine recorded: kill switches, approvals and rebalance clearances (not acknowledgements), kill switches and rebalance clearances show the detail recorded with them, and approvals show the approver and state context rather than a reason ([operator](operator.md), "Seeing what was recorded") |
+| `reconcile` | whether the fills agree with the account snapshots recorded in the journal. This is not the engine's morning reconciliation; the [glossary](glossary.md) ("Reconciled, reconciliation") tells the three apart |
+| `operator` | your own instructions the engine recorded: kill switches and rebalance clearances, with who recorded them and the detail they gave, and fresh-run approvals, with the approver, the latch and the incident cleared or carried. Alert acknowledgements are not listed ([operator](operator.md), "Seeing what was recorded") |
 
 Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 `-to 2026-12-31` (UTC dates, both ends inclusive of the whole day) and
@@ -91,6 +105,35 @@ orders.jsonl 5    2026-03-02  A1       BBB         refused       order-size     
 orders.jsonl 6    2026-03-02  A1       BBB         engine-state  degraded:risk-limit-breached    breach
 ```
 
+Is one of the program's sells still working?
+
+`orders` cannot say on its own. It lists what the program planned
+(`planned`), released (`released`, with `send=true` when it was to be
+sent) and refused (`refused`), and each report IBKR sent back on an order
+(`lifecycle-` and one of the four statuses of
+[order lifecycle](order-lifecycle.md): `lifecycle-submitted`,
+`lifecycle-cancel-pending`, `lifecycle-canceled` or `lifecycle-invalid`), and
+a dry-run engine's own report on an order it never sent
+(`synthetic-lifecycle-canceled`, below), and each trade the program sized
+but did not order (`skipped`, below). It prints no `working` or `pending` value, and it never shows an order you
+placed by hand. A released sell has ended only once it has a
+`lifecycle-canceled` or `lifecycle-invalid` row, or `fills` shows it filled
+in full; `lifecycle-cancel-pending` may still fill. And with the adapter
+stopped, nothing IBKR does reaches the journal. So the check before any sale
+by hand is IBKR's own list of open orders, in its app; use `orders` to see
+which sells the program released and what IBKR last said of them
+([states-and-kill-switch](states-and-kill-switch.md), "Selling by hand
+safely").
+
+```
+$ journal-query orders -instrument SPY boost.log
+journal   seq  time        account  instrument  event                     side  quantity  price  note
+boost.log 41   2026-03-02  joint    SPY         planned                   sell  54        85.50  incident-1
+boost.log 42   2026-03-02  joint    SPY         released                  sell  54        85.50  mode=live,send=true
+boost.log 43   2026-03-02  joint    SPY         lifecycle-submitted       sell  54        85.50  tw-1f2e3d4c5b6a79880a1b2c3d
+boost.log 47   2026-03-02  joint    SPY         lifecycle-canceled        sell  54        85.50  tw-1f2e3d4c5b6a79880a1b2c3d
+```
+
 Do my fills explain the positions the broker reported?
 
 ```
@@ -101,6 +144,20 @@ positions.jsonl  5    2026-01-10  A1       BBB         10     10        ok
 positions.jsonl  7    2026-01-20  A1       AAA         0      20        DISAGREES
 positions.jsonl  7    2026-01-20  A1       BBB         10     10        ok
 1 disagreement(s) between the fills and the account snapshots
+```
+
+Which trades did the program size but not order?
+
+`orders` lists each as `skipped`: the side, a quantity of 0 (nothing was
+ordered), the price the trade was sized at, and in the note the reason
+(`below-one-share`, `scaled-below-one-share` or `held-by-working-sells`,
+explained in [momentum minimum lot](momentum-minimum-lot.md)) and the
+shares the rule asked for, to at most six decimals; a smaller size is shown in scientific notation.
+
+```
+$ journal-query orders -instrument BBB ira.log
+journal  seq  time        account  instrument  event    side  quantity  price  note
+ira.log  12   2026-03-02  A1       BBB         skipped  buy   0         80.00  below-one-share: 0.4 shares wanted
 ```
 
 For a spreadsheet or another program, add `-format csv` or `-format json`.
@@ -131,53 +188,50 @@ adds nothing to `fills`, `totals` or `positions`.
 
 ## What can go wrong, and what the tool does
 
-- **The journal does not verify** (edited, damaged, or a line removed in the
-  middle). The tool refuses the file, prints nothing from it and exits with an
-  error that names the file and the record where the chain breaks, for example
-  `refused, the hash chain does not verify ... broken at record 3`. If you
-  name several journals, one bad file refuses the whole query so you never read
-  a partial answer. Dropping lines from the very end is not detectable by the
-  chain alone; the run registry's recorded final hash covers that (ADR 0017).
-- **The file is missing or unreadable.** The tool stops with the operating
-  system's error and prints nothing.
-- **The fills disagree with an account snapshot.** The `reconcile` table is
-  printed in full, the disagreeing rows say `DISAGREES`, and the command exits
-  with an error counting them. Treat this as a reason to investigate before
-  trusting either the fills or the snapshot; the tool does not decide which
-  is right.
-- **Several accounts in one journal and a fill to place.** The tool refuses
-  `positions` and `reconcile` rather than guess which account a fill belongs
-  to.
-- **A durable log (the live engine's crash-safe log, ADR 0027).** Read the
-  same way as a journal, through the journal package's own log reader, which
-  checks the chain and every commit. Only committed groups are reported: the
-  uncommitted tail a crash can leave holds no trusted figure and is left out.
-  A damaged log (not merely torn) is refused whole, naming the file.
-- **A record whose values are invalid** (for example a fill with a negative
-  quantity or an unknown kind, which a journal can keep as a rejected input).
-  The chain only proves the file was not altered, so the tool also checks each
-  record's values and refuses the file, naming the record, before it prints
-  any figure.
-- **The same fill delivered more than once.** A fill id that appears again
-  with the same execution (an absent and an empty unit list are the same, and
-  one instant is the same in any UTC offset) is one execution and is counted once. The same id
-  with different content is refused, naming both records.
-- **A record from a newer or older build** (a schema version this build does
-  not read, including a newer account snapshot). Refused, naming the record; the
-  tool never guesses at a figure. It reads fills of versions 4 (Turtle) and 5
-  (target-weight), order lifecycle changes of versions 1 (Turtle stop orders),
-  2 (target-weight limit orders) and 3 (a dry-run's synthetic report; a
-  synthetic report at version 2, or a venue's at version 3, is refused), planned orders of versions 1 and 2 (2 is a
-  sale back to 98%), risk-gate releases and refusals of versions 1, 2 and 3
-  (3 adds the broker figures and the kill-switch, broker-holding,
-  sale-attempted and stale-broker-snapshot reasons, and the refusal's
-  alert), withheld sales back to 98% of version 1 (`risk.sale.withheld`,
-  listed by `refusals` with their reason, `lapsed` included), and account
-  snapshots of versions 3 (positions) and 4
-  (positions and cash; the cash is not reported). Only the equity-and-cash
-  snapshot (version 2), which holds no positions, is passed over by design.
-- **A bad flag** (a malformed date, a backwards range, an unknown format or
-  report). Refused before any file is read.
+The tool prints its error on one line and exits with status 1. Apart from
+`reconcile`'s disagreements, it prints no table when it refuses.
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| `usage: journal-query <orders\|fills\|refusals\|totals\|positions\|reconcile\|operator> [flags] journal [journal ...]` | Nothing named: no report given. | Name a report first. |
+| `unknown report "..."` | Refuses before reading any file. | Use one of the seven reports above. |
+| `flag provided but not defined: -...`, followed by the list of flags | Refuses before reading any file. | Use `-account`, `-instrument`, `-from`, `-to` or `-format`. |
+| `name at least one journal to query` | Refuses. | Name a log or journal after the flags. |
+| `format "..." is not text, csv or json` | Refuses before reading any file. | Use one of those. |
+| `from "..." is not a YYYY-MM-DD date` (or `to`), or `the range runs backwards: from ... is after to ...` | Refuses before reading any file. | Write dates as `2026-01-31`, the earlier one first. |
+| `open ...: no such file or directory` or `permission denied` | Stops with the operating system's error; prints nothing. | Check the path. On the server, run it as `sudo -u ti-trader`. |
+| `...: refused, the hash chain does not verify: ... broken at record N` | The journal was edited, damaged or had a line removed in the middle. The file is refused whole, and with several files the whole query is refused, so you never read a partial answer. Dropping lines from the very end is not detectable by the chain alone; the run registry's recorded final hash covers that (ADR 0017). | Keep the file as evidence; never edit it. Use the run's other file (log or journal) and compare. |
+| `...: refused, the journal does not verify: ...` | The journal's header or a line cannot be read (not a chain break). | As above. |
+| `...: refused, the durable log does not verify: ...` | A durable log (the engine's crash-safe log, ADR 0027) is damaged, not merely torn, and is refused whole. Only committed groups are ever reported: the uncommitted tail a crash can leave is left out silently. | Keep it as evidence; see `docs/runbooks/durable-log.md`, "An unrecoverable log". |
+| `... and ... overlap: over the sequences both hold they record the same history ...` | Refuses: a resumed run's log begins with every record of the log it resumed, and a second copy of a journal holds all its records again, so naming both would count that history twice. | Name one file per run ("Running it"). |
+| `...: record N: ... at schema version V, which this build does not read (it reads [...])` | Refuses a record from a newer or older build rather than guess at a figure. | Run the `journal-query` built from the same commit as the engine that wrote the file (on the server they are built together). |
+| `...: record N: ...` naming a value (a fill with a negative quantity or an unknown kind, say) | The chain only proves the file was not altered, so each record's values are checked too; the file is refused before any figure is printed. | Keep the file; open an issue with the record named. |
+| `...: record N: fill "..." conflicts with record M, which used the same fill id differently` | Refuses. The same fill id with the same execution (an absent and an empty unit list are the same, and one instant is the same in any UTC offset) is one execution, counted once; with different content it is a conflict. | Open an issue with both records. |
+| `...: record N: the fill cannot be attributed to an account: the journal names K accounts and a fill names none` | `positions` and `reconcile` refuse rather than guess which account a Turtle fill belongs to. | Nothing for Boost or the IRAs: their fills name their account. |
+| `...: record N: the fill takes ... past the largest position that can be reported (int64 overflow)` (or a rename that overflows) | Refuses rather than print a wrong figure. | Open an issue: no real position is that large. |
+| The `reconcile` table with rows marked `DISAGREES`, then `N disagreement(s) between the fills and the account snapshots` | Prints the whole table, then exits with the error. It does not decide which side is right. | Investigate before trusting either the fills or the snapshot: compare with IBKR (`docs/runbooks/reconciliation.md`). |
+
+## What it reads, and what it does not
+
+It reads fills of versions 4 (Turtle) and 5 (target-weight), order
+lifecycle changes of versions 1 (Turtle stop orders), 2 (target-weight
+limit orders) and 3 (a dry-run's synthetic report; a synthetic report at
+version 2, or a venue's at version 3, is refused), planned orders of
+versions 1 and 2 (2 is a sale back to 98%), risk-gate releases and refusals
+of versions 1, 2 and 3 (3 adds the broker figures, more reasons and the
+refusal's alert), withheld sales back to 98% (`risk.sale.withheld`, listed
+by `refusals` with their reason, `lapsed` included), skipped trades
+(`strategy.order.skipped`, listed by `orders`), engine-state changes,
+kill switches, rebalance clearances, approvals, symbol changes, and account
+snapshots of versions 3 (positions) and 4 (positions and cash; the cash is
+not reported). The equity-and-cash snapshot (version 2), which holds no
+positions, is passed over by design.
+
+It does not report the broker snapshots, the marks, the bars, withheld
+decisions, the morning reconciliation's results (`risk.reconciliation.result`;
+the engine-state change one causes does show in `refusals`) or alert
+acknowledgements. For those, read the alert, the dashboard, or the file
+itself.
 
 ## What backs it
 
@@ -189,6 +243,6 @@ adds nothing to `fills`, `totals` or `positions`.
   tamper refusal, byte-identical files after every report and format,
   date and account filters, CSV and JSON, and a deliberate position
   disagreement. `internal/journalquery/journalquery_test.go` covers the query
-  logic itself.
+  logic itself, among them `TestSkippedTradesAreListedWithTheOrders`.
 - The tool opens journals read-only and its query code receives bytes, never
   a file handle, so it cannot write.

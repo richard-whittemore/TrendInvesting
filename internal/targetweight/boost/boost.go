@@ -57,8 +57,9 @@ func (p Parameters) Target(latched bool) float64 {
 // with a session's close before that session is decided, as QuantConnect
 // updates them before OnData (template.py:52-54, 73-94).
 //
-// Every close must be one session after the last: the indicators never span a
-// gap (plan.md section 2, "Boost"). The caller withholds instead of adding.
+// The closes are those of the sessions with a bar, in order: a session with
+// no bar is skipped and the next close continues the series, with no close
+// filled in for it (ADR 0026, point 5, amended 2026-10-18).
 type Indicators struct {
 	rsi   rsi
 	trend sma

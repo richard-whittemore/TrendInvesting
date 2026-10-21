@@ -35,10 +35,16 @@ rehearsal_arch_matches "$goarch" "$(docker run --rm --platform "$platform" ubunt
 # deploy/, and a durable log the engine wrote for the shipped Boost
 # configuration, which the rehearsal runs the data step and the reporter
 # against. The Go tools are built for the container's pinned platform, as
-# deploy/build-engine.sh builds them for the server's.
+# deploy/build-engine.sh builds them for the server's. The engine is built the
+# same way, stamped (it refuses dry-run on an unstamped build), so the
+# rehearsal runs the real engine against the operator inbox the provisioner
+# created.
 dist=$(mktemp -d)
 "$repo/deploy/build-data.sh" "$dist/ti-data" >/dev/null
 cp "$repo/adapter/marketdata/tests/testdata/boost-fixture.log" "$dist/boost-fixture.log"
+(cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
+  -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=rehearsal" \
+  -o "$dist/ti-engine" ./cmd/engine)
 for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query; do
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
@@ -46,4 +52,6 @@ id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)
 trap 'docker rm -f "$id" >/dev/null 2>&1 || true; rm -rf "$dist"' EXIT
 docker cp "$repo/deploy" "$id:/deploy"
 docker cp "$dist" "$id:/dist"
+# The adapter's pin check, run inside the container against the real install.
+docker cp "$repo/adapter/ibkr/ibapi_pin.py" "$id:/ibapi_pin.py"
 docker start -a "$id"

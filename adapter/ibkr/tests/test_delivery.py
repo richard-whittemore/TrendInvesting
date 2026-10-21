@@ -38,7 +38,7 @@ if str(tests_dir) not in sys.path:
 
 from decimal import Decimal
 
-from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine
+from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine, run_approval
 from fake_tws import ACCOUNT, FakeTWS, contract, execution
 from test_connection import Clock, config
 from test_loop import COMMISSION_WAIT, RECEIVED, SUMMARY, Ids, Unanswered
@@ -52,9 +52,27 @@ from snapshot import BROKER_SNAPSHOT_TYPE
 RUN = "engine"
 BAR = "market.bar.completed"
 CLOSED = "market.session.closed"
+ACCOUNT_SNAPSHOT = "account.snapshot"
+MARK = "market.mark.recorded"
+RECONCILIATION = "account.reconciliation"
+# What one account read puts ahead of a batch's lines: the engine's account
+# snapshot and the broker snapshot, and, in a run's first batch (the engine
+# holding no book yet), the start-of-run reconciliation; and the last
+# session of a batch, its mark between its bar and its close (the owner's
+# decision of 2026-10-18; delivery.py).
+HEAD = [ACCOUNT_SNAPSHOT, BROKER_SNAPSHOT_TYPE]
+FIRST = HEAD + [RECONCILIATION]
+# A later batch: the reading's reconciliation against the engine's book
+# first, then the snapshots that replace it (ADR 0019).
+LATER = [RECONCILIATION] + HEAD
+DAY = [BAR, MARK, CLOSED]
 SPY_CON_ID = 756733
 # The fake's server time is 2027-01-15 08:00 UTC, before the open in New York.
 FRIDAY = date(2027, 1, 14)
+# The account's first run is approved with the book the owner checked in
+# IBKR, what the fake shows, so its first batch is compared with it (ADR 0019
+# and ADR 0027, amended 2026-10-18).
+FIRST_RUN = run_approval(ACCOUNT, starting_book=({"SPY": 147}, 100000.0))
 
 
 def _envelope(kind, version, ident, event_time, payload, sequence, run=RUN, configuration_hash=CONFIGURATION_HASH,
@@ -121,7 +139,7 @@ class DeliveryTests(unittest.TestCase):
         self.streams = root / "streams"
         self.folder = self.streams / RUN
         self.folder.mkdir(parents=True)
-        self.engine = LoggedEngine(self.engine_log)
+        self.engine = LoggedEngine(self.engine_log, approval=FIRST_RUN)
         self.fake = FakeTWS()
         self.fake.summary = list(SUMMARY)
         self.fake.positions = [(ACCOUNT, contract(), Decimal("147"), 312.5)]
@@ -150,27 +168,35 @@ class DeliveryTests(unittest.TestCase):
     def ids(self):
         return [e["id"] for e in self.engine.inputs()]
 
+    def brokers(self):
+        return self.engine.inputs(BROKER_SNAPSHOT_TYPE)
+
     def test_a_stream_file_reaches_the_engine_after_the_broker_snapshot_in_file_order_as_written(self):
         written = session_envelopes([date(2027, 1, 13), FRIDAY])
         write_stream(self.folder, FRIDAY, written)
         loop = self.loop()
         loop.start()
         self.settle(loop)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + [BAR, CLOSED] + DAY)
         sent = self.engine.inputs()
         # The engine's sequence, set as each is sent: its configuration is 1.
-        self.assertEqual([e["sequence"] for e in sent], [2, 3, 4, 5, 6])
-        for want, got in zip(written, sent[1:]):
+        self.assertEqual([e["sequence"] for e in sent], list(range(3, 11)), "after the configuration and the approval")
+        for want, got in zip(written, [e for e in sent if e["source"] == "marketdata"]):
             self.assertEqual({k: v for k, v in got.items() if k not in ("sequence", "recorded_at")},
                              {k: v for k, v in want.items() if k not in ("sequence", "recorded_at")},
                              "sent as written")
-        snapshot = sent[0]["payload"]
+        snapshot = self.brokers()[0]["payload"]
         self.assertEqual(snapshot["account_id"], ACCOUNT)
+        # Read on a later New York date, the snapshot is stamped at its read
+        # time and is IBKR's own reading: the holding is marked at IBKR's
+        # last price, the basis of its net liquidation (ADR 0019, amended
+        # 2026-10-18: one price basis per rule).
+        self.assertFalse(snapshot["as_of_close"])
         self.assertEqual(snapshot["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 401.17,
                                                   "mark_set": True}])
         self.assertIs(snapshot["market_open"], False, "08:00 UTC is before the open")
         self.assertEqual(snapshot["unreadable"], [])
-        self.assertEqual(sent[0]["event_time"], snapshot["as_of"])
+        self.assertEqual(self.brokers()[0]["event_time"], snapshot["as_of"])
         self.assertEqual(loop.outbox.load(), [])
         self.assertIsNone(PendingInput(self.pending).load())
 
@@ -183,24 +209,31 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual([(c[2].conId, c[2].symbol, c[2].secType, c[2].currency, c[2].exchange) for c in asked],
                          [(SPY_CON_ID, "SPY", "STK", "USD", "SMART")])
 
-    def test_a_holding_ibkr_gives_no_mark_for_is_stated_without_one(self):
+    def test_a_holding_ibkr_gives_no_last_price_for_is_still_marked_at_the_official_close(self):
+        # A reading as of the close needs no IBKR market-data permission (the
+        # owner's decision of 2026-10-18): it is marked at the official close.
+        self.fake.server_time = int(datetime(2027, 1, 14, 22, 5, tzinfo=timezone.utc).timestamp())
         self.fake.marks = {}
         self.fake.mark_errors = {SPY_CON_ID: (354, "synthetic: requested market data is not subscribed")}
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
         loop.start()
         self.settle(loop)
-        snapshot = self.engine.inputs()[0]["payload"]
-        self.assertEqual(snapshot["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 0,
-                                                  "mark_set": False}])
+        snapshot = self.brokers()[0]["payload"]
+        self.assertEqual(snapshot["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 400.5,
+                                                  "mark_set": True}])
 
     def test_a_holding_with_no_contract_number_is_stated_without_a_mark_and_not_asked_for(self):
+        Path(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, starting_book=({"IEF": 5, "SPY": 147}, 100000.0)))
         self.fake.positions.append((ACCOUNT, contract(con_id=8314, symbol="IEF"), Decimal("5"), 95.1))
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
         loop.start()
         self.settle(loop)
-        positions = self.engine.inputs()[0]["payload"]["positions"]
+        # IEF has no bar in the stream, so no official close to mark it at.
+        positions = self.brokers()[0]["payload"]["positions"]
         self.assertEqual([(p["instrument_id"], p["mark_set"]) for p in positions], [("IEF", False), ("SPY", True)])
         self.assertEqual([c[2].conId for c in self.fake.called("req_mkt_data")], [SPY_CON_ID])
 
@@ -212,18 +245,23 @@ class DeliveryTests(unittest.TestCase):
         loop = self.loop()
         loop.start()
         self.settle(loop)
+        snapshot = "ibkr:account.broker.snapshot:1"
         self.assertEqual(self.ids(), [
-            "ibkr:account.broker.snapshot:1", "marketdata:bar:SPY:2027-01-12", "marketdata:session-closed:2027-01-12",
-            "marketdata:bar:SPY:2027-01-13", "marketdata:session-closed:2027-01-13"])
+            snapshot + ":account.snapshot", snapshot, snapshot + ":account.reconciliation",
+            "marketdata:bar:SPY:2027-01-12", "marketdata:session-closed:2027-01-12",
+            "marketdata:bar:SPY:2027-01-13", snapshot + ":market.mark.recorded:SPY",
+            "marketdata:session-closed:2027-01-13"])
         loop.close()
         again = self.loop()
         again.start()
         self.settle(again)
-        self.assertEqual(len(self.ids()), 5, "nothing delivered twice across a restart")
+        # The restart reconciles against the engine's book; nothing of the
+        # stream goes twice.
+        self.assertEqual(self.types()[8:], [RECONCILIATION], "nothing delivered twice across a restart")
         self.fake.server_time += 3600
         write_stream(self.folder, third, [dict(e, sequence=n) for n, e in enumerate(envelopes[4:], 1)])
         self.settle(again)
-        self.assertEqual(self.types()[5:], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types()[9:], LATER + DAY)
         snapshots = self.engine.inputs(BROKER_SNAPSHOT_TYPE)
         self.assertLess(snapshots[0]["payload"]["as_of"], snapshots[1]["payload"]["as_of"])
 
@@ -234,7 +272,7 @@ class DeliveryTests(unittest.TestCase):
         loop = self.loop()
         loop.start()
         self.settle(loop)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + DAY)
 
     def test_without_a_streams_folder_nothing_is_delivered(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -275,9 +313,11 @@ class DeliveryTests(unittest.TestCase):
         restarted = self.loop()
         restarted.start()
         self.settle(restarted)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE] + [BAR, CLOSED] * 3)
-        self.assertEqual(len(set(self.ids())), 7)
-        self.assertEqual([e["sequence"] for e in self.engine.inputs()], list(range(2, 9)))
+        # The restart's reconciliation, against the book the engine now
+        # holds, goes ahead of the stream's next line.
+        self.assertEqual(self.types(), FIRST + [RECONCILIATION] + [BAR, CLOSED] * 2 + DAY)
+        self.assertEqual(len(set(self.ids())), 11)
+        self.assertEqual([e["sequence"] for e in self.engine.inputs()], list(range(3, 14)))
 
     def test_a_crash_after_the_record_and_before_the_outbox_write_delivers_once_from_a_fresh_snapshot(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -292,7 +332,7 @@ class DeliveryTests(unittest.TestCase):
         restarted = self.loop()
         restarted.start()
         self.settle(restarted)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + DAY)
 
     def test_a_crash_after_the_outbox_write_and_before_the_record_closes_queues_nothing_twice(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -303,13 +343,35 @@ class DeliveryTests(unittest.TestCase):
                                side_effect=OSError("synthetic: the machine stopped")):
             with self.assertRaises(OSError):
                 loop.step()
-        self.assertEqual(len(loop.outbox.load()), 3)
+        self.assertEqual(len(loop.outbox.load()), 6)
         loop.close()
         restarted = self.loop()
         restarted.start()
         self.settle(restarted)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + DAY)
         self.assertEqual(len(self.fake.called("req_mkt_data")), 1, "one snapshot: the one recorded")
+
+    def test_a_crash_before_the_record_closes_on_a_reading_never_checked_queues_nothing_twice(self):
+        # The reading is not the starting book, so the batch's
+        # reconciliation goes alone, its snapshots withheld (delivery.py):
+        # the reconciliation, not the broker snapshot, shows it was queued.
+        Path(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log, approval=run_approval(
+            ACCOUNT, starting_book=({"SPY": 100}, 100000.0)))
+        write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
+        loop = self.loop()
+        loop.start()
+        import delivery
+        with mock.patch.object(delivery.DeliveryRecord, "mark_queued",
+                               side_effect=OSError("synthetic: the machine stopped")):
+            with self.assertRaises(OSError):
+                loop.step()
+        self.assertEqual(len(loop.outbox.load()), 4)
+        loop.close()
+        restarted = self.loop()
+        restarted.start()
+        self.settle(restarted)
+        self.assertEqual(self.types(), [RECONCILIATION] + DAY)
 
     def test_a_crash_after_the_engine_committed_and_before_the_reply_asks_again_under_the_same_id(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -318,7 +380,7 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(EngineUnavailable):
             loop.step()
         waiting = PendingInput(self.pending).load()
-        self.assertEqual(waiting["type"], BROKER_SNAPSHOT_TYPE)
+        self.assertEqual(waiting["type"], ACCOUNT_SNAPSHOT)
         loop.close()
         restarted = self.loop()
         restarted.start()
@@ -326,8 +388,10 @@ class DeliveryTests(unittest.TestCase):
         # The re-delivery is the committed-reply request: the same envelope,
         # byte for byte, answered from the log and applied once.
         self.assertIn(waiting, self.engine.received[1:])
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
-        self.assertEqual(read_engine_log(self.engine_log).next_sequence, 5)
+        # The engine holds the account snapshot, its book, so the restart
+        # reconciles too, ahead of the stream's lines.
+        self.assertEqual(self.types(), FIRST + [RECONCILIATION] + DAY)
+        self.assertEqual(read_engine_log(self.engine_log).next_sequence, 10)
 
     def test_a_file_of_another_run_is_refused_naming_it_and_nothing_is_sent(self):
         for identity in ({"run": "run-other"}, {"configuration_hash": "sha256:" + "2" * 64},
@@ -388,7 +452,7 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(StreamRefused) as caught:
             self.settle(loop)
         self.assertIn(str(late), str(caught.exception))
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + DAY)
 
     def test_nothing_is_recorded_or_sent_when_the_link_drops_during_the_snapshot_and_all_of_it_goes_once_back(self):
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -401,8 +465,8 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse(Path(self.pending + DELIVERED_SUFFIX).exists())
         self.fake.drop_on_mark = False
         self.settle(loop)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
-        self.assertEqual(self.engine.inputs()[0]["payload"]["unreadable"], [])
+        self.assertEqual(self.types(), FIRST + DAY)
+        self.assertEqual(self.brokers()[0]["payload"]["unreadable"], [])
 
     def test_the_delivery_record_is_read_strictly(self):
         for text in ("{not json", "[]", json.dumps({"batches": [], "extra": 1}),
@@ -442,7 +506,7 @@ class DeliveryTests(unittest.TestCase):
         loop = self.loop()
         loop.start()
         self.settle(loop)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + DAY)
         batches = json.loads(Path(self.pending + DELIVERED_SUFFIX).read_text())["batches"]
         self.assertEqual([(b["run"], b["state"]) for b in batches], [("run-earlier", "dropped"), (RUN, "queued")])
 
@@ -530,10 +594,10 @@ class DeliveryTests(unittest.TestCase):
         loop.start()
         self.settle(loop)
         sent = self.engine.inputs()
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
-        self.assertEqual([e["recorded_at"] for e in sent], ["2027-01-15T08:30:00Z"] * 3)
-        as_of = sent[0]["payload"]["as_of"]
-        for e in sent[1:]:
+        self.assertEqual(self.types(), FIRST + DAY)
+        self.assertEqual([e["recorded_at"] for e in sent], ["2027-01-15T08:30:00Z"] * 6)
+        as_of = self.brokers()[0]["payload"]["as_of"]
+        for e in sent[2:]:
             self.assertLessEqual(as_of, e["recorded_at"], "the snapshot is never after the input it serves")
 
     # -- an earlier run's batch ---------------------------------------------
@@ -545,7 +609,7 @@ class DeliveryTests(unittest.TestCase):
         with mock.patch.object(AdapterLoop, "_drain"):
             loop.step()
         loop.close()
-        self.assertEqual(len(loop.outbox.load()), 3)
+        self.assertEqual(len(loop.outbox.load()), 6)
 
     def fresh_run(self, name="run-b"):
         """A fresh run after this one: its own Run approval, so its own identity, and its warm-up's folder."""
@@ -562,9 +626,9 @@ class DeliveryTests(unittest.TestCase):
         fresh.start()
         self.settle(fresh)
         sent = engine.inputs()[1:]  # after its Run approval
-        self.assertEqual([e["type"] for e in sent], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
-        self.assertEqual([e["id"] for e in sent][1:], ["marketdata:bar:SPY:2027-01-14",
-                                                       "marketdata:session-closed:2027-01-14"])
+        self.assertEqual([e["type"] for e in sent], FIRST + DAY)
+        self.assertEqual([e["id"] for e in sent if e["source"] == "marketdata"],
+                         ["marketdata:bar:SPY:2027-01-14", "marketdata:session-closed:2027-01-14"])
         self.assertEqual(len(engine.inputs(BROKER_SNAPSHOT_TYPE)), 1, "only the fresh run's own snapshot")
         self.assertEqual(self.types(), [], "nothing reached the earlier run either")
         self.assertEqual(fresh.outbox.load(), [])
@@ -579,7 +643,7 @@ class DeliveryTests(unittest.TestCase):
         resumed = self.loop()
         resumed.start()
         self.settle(resumed)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + DAY)
         batches = json.loads(Path(self.pending + DELIVERED_SUFFIX).read_text())["batches"]
         self.assertEqual([(b["run"], b["state"]) for b in batches],
                          [(RUN, "dropped"), ("run-b", "queued"), (RUN, "queued")])
@@ -598,12 +662,12 @@ class DeliveryTests(unittest.TestCase):
         loop.close()
         log = str(Path(self.dir.name) / (earlier + ".log"))
         # The earlier run: another as-of time, so another identity.
-        engine = LoggedEngine(log, started_at="2027-01-13T13:30:00Z")
+        engine = LoggedEngine(log, started_at="2027-01-13T13:30:00Z", approval=FIRST_RUN)
         resumed = self.loop(engine=engine, engine_log=log)
         resumed.start()
         self.settle(resumed)
-        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
-        self.assertEqual(engine.inputs()[1]["id"], "marketdata:bar:SPY:2027-01-13")
+        self.assertEqual([e["type"] for e in engine.inputs()], FIRST + DAY)
+        self.assertEqual(engine.inputs()[3]["id"], "marketdata:bar:SPY:2027-01-13")
 
     # -- a crash resume and a fresh run ------------------------------------
     def crash_resume(self, name="run-c"):
@@ -635,18 +699,21 @@ class DeliveryTests(unittest.TestCase):
             self.settle(loop)
         loop.close()
         first = self.ids()
-        self.assertEqual(len(first), 2, "the snapshot and the first bar")
+        self.assertEqual(self.types(), HEAD, "the account and broker snapshots")
         log, engine = self.crash_resume()
         reads = len(self.fake.called("req_mkt_data"))
         resumed = self.loop(engine=engine, engine_log=log)
         resumed.start()
         self.settle(resumed)
         rest = [e["id"] for e in engine.inputs()]
-        self.assertEqual([e["type"] for e in engine.inputs()], [CLOSED, BAR, CLOSED, BAR, CLOSED])
-        self.assertEqual(rest, [e["id"] for e in session_envelopes(
-            [date(2027, 1, 12), date(2027, 1, 13), FRIDAY])][1:])
-        self.assertEqual(len(set(first + rest)), 7, "each input once, across the crash")
-        self.assertEqual([e["sequence"] for e in engine.inputs()], list(range(4, 9)))
+        # The batch's own reconciliation, then the resume's against the book
+        # the copied log holds, ahead of the stream's next line.
+        self.assertEqual([e["type"] for e in engine.inputs()],
+                         [RECONCILIATION, RECONCILIATION, BAR, CLOSED, BAR, CLOSED] + DAY)
+        self.assertEqual([e["id"] for e in engine.inputs() if e["source"] == "marketdata"], [
+            e["id"] for e in session_envelopes([date(2027, 1, 12), date(2027, 1, 13), FRIDAY])])
+        self.assertEqual(len(set(first + rest)), 11, "each input once, across the crash")
+        self.assertEqual([e["sequence"] for e in engine.inputs()], list(range(5, 14)))
         self.assertEqual(len(self.fake.called("req_mkt_data")), reads, "no second snapshot: the batch continues")
         self.assertEqual(resumed.outbox.load(), [])
         self.assertEqual(self.records(), [(RUN, "queued")], "the batch is the resumed run's, never dropped")
@@ -664,10 +731,10 @@ class DeliveryTests(unittest.TestCase):
 
             def decide(self, envelope):
                 self.n += 1
-                if self.n > 3:
+                if self.n > len(FIRST + DAY):
                     raise EngineUnavailable("synthetic: the engine is down")
                 reply = self.engine.decide(envelope)
-                if self.n == 3:
+                if self.n == len(FIRST + DAY):
                     raise EngineUnavailable("synthetic: the engine crashed after committing, before replying")
                 return reply
         loop = self.loop(engine=CrashesAfterTheLast(self.engine))
@@ -675,15 +742,16 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(EngineUnavailable):
             self.settle(loop)
         loop.close()
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types(), FIRST + DAY)
         self.assertEqual(len(loop.outbox.load()), 1, "the close is committed but not yet struck off")
         log, engine = self.crash_resume()
         reads = len(self.fake.called("req_mkt_data"))
         resumed = self.loop(engine=engine, engine_log=log)
         resumed.start()
         self.settle(resumed)
-        self.assertEqual(engine.inputs(), [], "nothing is committed twice")
-        self.assertEqual([e["id"] for e in engine.received], ["marketdata:session-closed:2027-01-14"],
+        # Only the resume's reconciliation, against the copied book, is new.
+        self.assertEqual([e["type"] for e in engine.inputs()], [RECONCILIATION], "nothing is committed twice")
+        self.assertEqual([e["id"] for e in engine.received][:1], ["marketdata:session-closed:2027-01-14"],
                          "only the input awaiting its reply is asked for again, answered from the copied log")
         self.assertEqual(len(self.fake.called("req_mkt_data")), reads, "no new snapshot")
         self.assertEqual(resumed.outbox.load(), [])
@@ -691,14 +759,14 @@ class DeliveryTests(unittest.TestCase):
         # The next day's file goes to the resumed run from the same folder.
         write_stream(self.folder, date(2027, 1, 15), session_envelopes([date(2027, 1, 15)]))
         self.settle(resumed)
-        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual([e["type"] for e in engine.inputs()], [RECONCILIATION] + LATER + DAY)
         self.assertEqual(self.records(), [(RUN, "queued"), (RUN, "queued")])
 
     def test_a_fresh_run_drops_the_earlier_runs_batch_and_needs_its_own_warm_up_folder(self):
         self.queue_unsent()
         log = str(Path(self.dir.name) / "run-b.log")
         # A fresh run after the owner's approval: a new identity.
-        engine = LoggedEngine(log, started_at="2027-01-15T13:30:00Z")
+        engine = LoggedEngine(log, started_at="2027-01-15T13:30:00Z", approval=FIRST_RUN)
         fresh = self.loop(engine=engine, engine_log=log)
         with self.assertRaises(StreamRefused) as caught:
             fresh.start()
@@ -708,7 +776,7 @@ class DeliveryTests(unittest.TestCase):
         fresh = self.loop(engine=engine, engine_log=log)
         fresh.start()
         self.settle(fresh)
-        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual([e["type"] for e in engine.inputs()], FIRST + DAY)
         self.assertEqual(self.types(), [])
         self.assertEqual(self.records(), [(RUN, "dropped"), ("run-b", "queued")])
 
@@ -743,6 +811,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn(str(self.streams / "run-c"), str(caught.exception))
 
     def test_an_unapproved_second_start_of_the_first_run_never_takes_its_folder(self):
+        # A first run started without an approval (a dry run's), named by its
+        # configuration and as-of time.
+        Path(self.engine_log).unlink()
+        self.engine = LoggedEngine(self.engine_log)
         write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
         loop = self.loop()
         loop.start()
@@ -776,7 +848,7 @@ class DeliveryTests(unittest.TestCase):
         loop.start()
         self.settle(loop)
         self.assertEqual(loop.delivery.run, "run-b")
-        self.assertEqual([e["type"] for e in engine.inputs()], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual([e["type"] for e in engine.inputs()], FIRST + DAY)
         self.assertFalse((self.streams / "run-c").exists())
 
     # -- the account read the snapshot is made from -----------------------
@@ -796,8 +868,8 @@ class DeliveryTests(unittest.TestCase):
         loop = self.loop(fake=fake)
         loop.start()
         self.settle(loop)
-        self.assertEqual(self.types(), [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
-        self.assertEqual(self.engine.inputs()[0]["payload"]["unreadable"], [])
+        self.assertEqual(self.types(), FIRST + DAY)
+        self.assertEqual(self.brokers()[0]["payload"]["unreadable"], [])
         # The start's reconciliation, the partial read, then a complete read
         # and the read after the marks that confirms nothing changed.
         self.assertEqual(fake.reads, 4)
@@ -876,7 +948,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.types().count(BROKER_SNAPSHOT_TYPE), 1, "no snapshot overtaken by a fill is sent")
         self.assertEqual(self.types().count(FILL_TYPE), 3)
         self.settle(loop)
-        self.assertEqual(self.types()[-3:], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types()[-6:], LATER + DAY)
 
     def test_no_snapshot_is_taken_while_an_execution_awaits_its_commission(self):
         self.place_the_days_order()
@@ -892,8 +964,8 @@ class DeliveryTests(unittest.TestCase):
                                                         currency="USD"))
         self.settle(loop)
         types = self.types()
-        self.assertLess(types.index(FILL_TYPE), len(types) - 3)
-        self.assertEqual(types[-3:], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertLess(types.index(FILL_TYPE), len(types) - 5)
+        self.assertEqual(types[-6:], LATER + DAY)
 
     def test_a_file_naming_an_input_the_outbox_already_holds_is_refused(self):
         path = write_stream(self.folder, FRIDAY, session_envelopes([FRIDAY]))
@@ -945,7 +1017,7 @@ class DeliveryTests(unittest.TestCase):
         loop.start()
         self.settle(loop)
         self.assertEqual(len(self.fake.placed), 1)
-        self.assertEqual(self.types()[:3], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED])
+        self.assertEqual(self.types()[:6], FIRST + DAY)
 
 
     # -- an execution whose commission is still to come ---------------------
@@ -1039,7 +1111,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(fake.reads, 4, "read, confirm, then read and confirm again: the reads differed")
         self.assertEqual(snapshots[1]["payload"]["positions"],
                          [{"instrument_id": "SPY", "quantity": 156, "mark": 402.5, "mark_set": True}],
-                         "the snapshot is the second attempt's, its marks read for the holdings after the trade")
+                         "the snapshot is the second attempt's, holding the trade; stamped at its read time, it is "
+                         "marked at IBKR's last price of that attempt")
+        self.assertEqual(self.engine.inputs(MARK)[1]["payload"]["broker_last"], 402.5,
+                         "IBKR's last price beside the mark is the second attempt's")
 
     def test_an_execution_of_another_clients_order_between_the_snapshots_reads_makes_it_read_again(self):
         class ForeignExecutionDuringMarks(FakeTWS):
@@ -1182,14 +1257,15 @@ class DeliveryTests(unittest.TestCase):
                 pass
         fresh.close()
         left = [e["id"] for e in Outbox(self.pending + ".outbox").load()]
-        self.assertIn(left, [[], ["ibkr:account.broker.snapshot:1", "marketdata:bar:SPY:2027-01-14",
+        snapshot = "ibkr:account.broker.snapshot:1"
+        self.assertIn(left, [[], [snapshot + ":account.snapshot", snapshot, snapshot + ":account.reconciliation",
+                                  "marketdata:bar:SPY:2027-01-14", snapshot + ":market.mark.recorded:SPY",
                                   "marketdata:session-closed:2027-01-14"]],
                       "the earlier batch is whole in the outbox or wholly gone")
         resumed = self.loop()
         resumed.start()
         self.settle(resumed)
-        self.assertEqual(self.types()[:3], [BROKER_SNAPSHOT_TYPE, BAR, CLOSED],
-                         "the resumed run gets its stream behind its snapshot")
+        self.assertEqual(self.types()[:6], FIRST + DAY, "the resumed run gets its stream behind its snapshot")
 
     # -- a compact stream repeats each retraction its calendar covers --------
     def compact_files(self, reason=None):
@@ -1599,8 +1675,12 @@ class StreamFolderRuleTests(unittest.TestCase):
     def test_the_delivered_kinds_are_one_table_for_both_readers(self):
         import snapshot
         from delivery import DELIVERED_KINDS, kinds
-        self.assertEqual(set(DELIVERED_KINDS), set(kinds.KINDS) | {(snapshot.BROKER_SNAPSHOT_TYPE,
-                                                                     snapshot.BROKER_SNAPSHOT_VERSION)})
+        # The adapter's own inputs in a batch: the account snapshot, the
+        # broker snapshot (at either version a log may hold) and the mark.
+        self.assertEqual(set(DELIVERED_KINDS), set(kinds.KINDS) | {
+            (snapshot.BROKER_SNAPSHOT_TYPE, 1), (snapshot.BROKER_SNAPSHOT_TYPE, snapshot.BROKER_SNAPSHOT_VERSION),
+            (snapshot.ACCOUNT_SNAPSHOT_TYPE, snapshot.ACCOUNT_SNAPSHOT_VERSION),
+            (snapshot.MARK_TYPE, snapshot.MARK_VERSION)})
         self.assertIs(kinds.DELIVERED_KINDS, DELIVERED_KINDS)
 
     def test_a_true_fresh_run_with_no_folder_is_still_told_to_run_the_warm_up(self):
@@ -1669,8 +1749,19 @@ class LogChainTests(unittest.TestCase):
              payloads[2]),
         ]
 
+    def test_both_readers_are_one_module(self):
+        # The data job and the adapter read the durable log with one reader
+        # (adapter/marketdata/engine_log.py): the adapter loads it by its
+        # path, the data job from its package.
+        import relay
+        from marketdata import tidata
+        self.assertEqual(os.path.realpath(relay.engine_log.__file__), os.path.realpath(tidata.engine_log.__file__))
+        self.assertIs(relay.log_chain_next, relay.engine_log.chain_next)
+        self.assertIs(relay.CommittedLog, relay.engine_log.CommittedLog)
+
     def assert_canonical_bytes(self, cases, wants):
-        """Both Python readers hash and render each case as wants (dicts of canonical text and sha256) say."""
+        """Both Python readers (one module, loaded by each) hash and render each case as wants (dicts of canonical
+        text and sha256) say."""
         import relay
         from marketdata import tidata
         previous = bytes(32)
@@ -1679,12 +1770,13 @@ class LogChainTests(unittest.TestCase):
             with self.subTest(envelope["id"]):
                 digest = hashlib.sha256(previous + b"input" + want["canonical"].encode("utf-8")).digest()
                 self.assertEqual(relay.log_chain_next(previous, "input", envelope, payload.encode("utf-8")), digest)
-                self.assertEqual(tidata._record_digest(previous, "input", envelope, payload), digest)
+                self.assertEqual(tidata.engine_log.chain_next(previous, "input", envelope, payload.encode("utf-8")),
+                                 digest)
                 fields = {k: envelope.get(k, "") for k in (relay.ENVELOPE_FIELDS | relay.ENVELOPE_OPTIONAL) - {"payload"}}
                 fields.update(event_time=relay._utc(envelope["event_time"]), recorded_at=relay._utc(envelope["recorded_at"]),
                               payload=payload)
                 self.assertEqual(relay._canonical_bytes(fields).decode("utf-8"), want["canonical"])
-                self.assertEqual(tidata._canonical_bytes(fields).decode("utf-8"), want["canonical"])
+                self.assertEqual(tidata.engine_log.canonical_bytes(fields).decode("utf-8"), want["canonical"])
                 self.assertEqual(hashlib.sha256(relay._canonical_bytes(fields)).hexdigest(), want["sha256"])
 
     def test_the_canonical_envelope_bytes_are_the_engines_own_output(self):
@@ -1709,7 +1801,7 @@ class LogChainTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             relay._canonical_bytes({"x": 1.5})
         with self.assertRaises(TypeError):
-            tidata._canonical_bytes({"x": True})
+            tidata.engine_log.canonical_bytes({"x": True})
 
     def test_the_canonical_envelope_bytes_match_a_vector_frozen_from_the_engine(self):
         # Printed once by adapter/ibkr/tests/testdata/canonical_vector.go (internal/event
@@ -1741,8 +1833,7 @@ class LogChainTests(unittest.TestCase):
             with self.subTest(bad):
                 envelope = dict(base, event_time=bad)
                 self.assertIsNone(relay.log_chain_next(previous, "input", envelope, b"{}"))
-                with self.assertRaises(ValueError):
-                    tidata._record_digest(previous, "input", envelope, "{}")
+                self.assertIsNone(tidata.engine_log.chain_next(previous, "input", envelope, b"{}"))
                 self.assertFalse(relay._is_time(bad, relay.TIME))
         self.assertTrue(relay._is_time("2026-10-16T13:30:00+23:59", relay.TIME))
 
@@ -1767,15 +1858,22 @@ class LogChainTests(unittest.TestCase):
             with self.subTest(name):
                 Path(engine.path).write_text(text, encoding="utf-8")
                 self.assertEqual(self.breaks(engine.path), (want, want))
-        # A time no engine writes, which the adapter refuses outright (its
-        # envelope check) and the data job, reading less, finds unchained.
+        # A time no engine writes, which both readers (one module) refuse
+        # outright: its envelope is not one the engine writes.
         from marketdata import tidata
+        from relay import ResolveRefused
         Path(engine.path).write_text(good.replace('"event_time":"2027-01-14T22:05:00Z"',
                                                   '"event_time":"2027-13-14T22:05:00Z"', 1), encoding="utf-8")
-        self.assertEqual(tidata.read_engine_log(str(engine.path)).chain_break, 2)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.read_engine_log(str(engine.path))
+        with self.assertRaises(ResolveRefused) as adapter:
+            read_engine_log(str(engine.path))
+        for refusal in (str(data.exception), str(adapter.exception)):
+            self.assertIn("its envelope is not an event envelope as the engine writes one", refusal)
 
-    def test_the_data_job_finds_no_chain_in_a_record_whose_payload_is_not_last(self):
+    def test_both_readers_refuse_a_record_whose_payload_is_not_last(self):
         from marketdata import tidata
+        from relay import ResolveRefused
         engine = LoggedEngine(str(self.root / "run-a.log"), configuration=json.loads(
             (tests_dir.parents[2] / "deploy" / "etc" / "engines" / "boost.config").read_text()))
         lines = Path(engine.path).read_text(encoding="utf-8").splitlines()
@@ -1783,7 +1881,12 @@ class LogChainTests(unittest.TestCase):
         record["record"]["envelope"] = dict(reversed(list(record["record"]["envelope"].items())))
         lines[1] = json.dumps(record, separators=(",", ":"))
         Path(engine.path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertEqual(tidata.read_engine_log(str(engine.path)).chain_break, 1)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.read_engine_log(str(engine.path))
+        with self.assertRaises(ResolveRefused) as adapter:
+            read_engine_log(str(engine.path))
+        for refusal in (str(data.exception), str(adapter.exception)):
+            self.assertIn("its payload does not match its payload hash", refusal)
 
 
 class RealEngineResumeTests(unittest.TestCase):

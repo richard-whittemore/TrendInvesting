@@ -22,9 +22,14 @@ type stream struct {
 }
 
 func newStream(t *testing.T) *stream {
+	return newStreamFor(t, "joint")
+}
+
+// newStreamFor is newStream for the named account.
+func newStreamFor(t *testing.T, account string) *stream {
 	s := &stream{t: t}
 	s.add(event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", day(0).Add(-time.Hour),
-		event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR, Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10, TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02"},
+		event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: account, Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR, Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10, TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02"},
 			Limits:    event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05, ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30},
 			Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30}})
 	return s
@@ -61,8 +66,13 @@ func (s *stream) snapshot(n int, netLiquidation float64, held int64) {
 }
 
 func (s *stream) decided(n int, weight float64) {
+	s.decidedFor("joint", n, weight)
+}
+
+// decidedFor is decided for the named account.
+func (s *stream) decidedFor(account string, n int, weight float64) {
 	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, fmt.Sprintf("targets:%d", n), day(n),
-		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
+		event.TargetsDecidedPayload{AccountID: account, StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
 			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: weight}},
 			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100}})
 }

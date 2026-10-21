@@ -119,6 +119,7 @@ type momentumRun struct {
 	universe *event.UniverseSnapshotPayload
 	snapshot *event.AccountCashSnapshotPayload
 	marks    map[string]event.MarkRecordedPayload
+	markAt   map[string]uint32 // each mark's schema version (bandMark)
 
 	// orders reads the venue's reports on the orders released, by the rule
 	// the reporter reads the log by (event.OrderReports).
@@ -191,6 +192,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		bars:     map[string]event.CompletedBarAdjustedPayload{},
 		bases:    map[string]string{},
 		marks:    map[string]event.MarkRecordedPayload{},
+		markAt:   map[string]uint32{},
 		orders:   event.NewOrderReports(),
 
 		histories: map[string]event.CloseHistoryPayload{},
@@ -218,7 +220,7 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	case event.SessionRetractedEventType:
 		return r.applyRetraction(in)
 	case event.AccountSnapshotEventType:
-		return nil, r.applySnapshot(in)
+		return r.applySnapshot(in)
 	case event.MarkRecordedEventType:
 		return nil, r.applyMark(in)
 	case event.SessionClosedEventType:
@@ -329,24 +331,23 @@ func (r *momentumRun) applyUniverse(in event.Envelope) error {
 	return nil
 }
 
-func (r *momentumRun) applySnapshot(in event.Envelope) error {
+func (r *momentumRun) applySnapshot(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeInput[event.AccountCashSnapshotPayload](in, event.AccountSnapshotCashVersion)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if p.AccountID != r.h.cfg.AccountID {
-		return fmt.Errorf("targetweight: snapshot for account %q; this run decides %q", p.AccountID, r.h.cfg.AccountID)
+		return nil, fmt.Errorf("targetweight: snapshot for account %q; this run decides %q", p.AccountID, r.h.cfg.AccountID)
 	}
 	if r.snapshot != nil && !p.AsOf.After(r.snapshot.AsOf) {
-		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, r.snapshot.AsOf)
+		return nil, fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, r.snapshot.AsOf)
 	}
 	r.snapshot = &p
-	r.h.gate.SetBook(reconcile.CashBook(in.ID, p))
-	return nil
+	return r.h.checkBook(in, reconcile.CashBook(in.ID, p), p.AsOf)
 }
 
 func (r *momentumRun) applyMark(in event.Envelope) error {
-	p, err := decodeInput[event.MarkRecordedPayload](in, event.MarkRecordedSchemaVersion)
+	p, err := decodeVersions[event.MarkRecordedPayload](in, event.MarkRecordedVersions())
 	if err != nil {
 		return err
 	}
@@ -354,6 +355,7 @@ func (r *momentumRun) applyMark(in event.Envelope) error {
 		return fmt.Errorf("targetweight: mark for %s as of %s does not follow the last, %s", p.InstrumentID, p.AsOf, last.AsOf)
 	}
 	r.marks[p.InstrumentID] = p
+	r.markAt[p.InstrumentID] = in.SchemaVersion
 	return nil
 }
 
@@ -852,7 +854,8 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 	for i, o := range orders {
 		plan[i] = risklimit.Order{PlanID: "order-planned:" + o.ClientOrderID, Planned: o}
 		if mark, ok := r.marks[o.InstrumentID]; ok && !mark.AsOf.Before(reb.session) {
-			plan[i].Mark, plan[i].MarkSet = mark.Price, true
+			plan[i].MarkSet = true
+			plan[i].Mark, plan[i].MarkSource = bandMark(mark, r.markAt[o.InstrumentID])
 		}
 		b.add(plan[i].PlanID, event.OrderPlannedEventType, o.SchemaVersion(), o)
 	}

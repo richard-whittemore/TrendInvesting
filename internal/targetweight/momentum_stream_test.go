@@ -169,7 +169,7 @@ type momentumOptions struct {
 	beforeClose  func(s *stream, session string) []event.Envelope // inputs fed just before the session closes
 	neverClosed  map[string]bool                                  // calendar sessions with no bar and no close
 	withdraw     map[string]float64                               // session -> settled cash withdrawn after its close, in a snapshot an hour later
-	withdrawFill map[string]float64                               // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
+	withdrawFill map[string]float64                               // instrument -> settled cash withdrawn as its sell fills, in a snapshot read the second after the fill
 	// riskOffJanuary makes SPY fall over January's last six sessions too.
 	riskOffJanuary bool
 	// compact feeds the compact universe stream: bars only for SPY, IEF,
@@ -206,6 +206,10 @@ type momentumOptions struct {
 	// refusals names inputs, by envelope ID, the run must refuse, with what
 	// the refusal says.
 	refusals map[string]string
+	// brokerLast, when set, feeds every mark at version 2 with IBKR's last
+	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
+	// ADR 0026 point 1, amended 2026-10-18).
+	brokerLast float64
 }
 
 type momentumResult struct {
@@ -355,7 +359,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				}, event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID)
 				if amount, ok := opts.withdrawFill[o.InstrumentID]; ok && o.Side == event.OrderSideSell {
 					acct.settled = float64(acct.settled - amount)
-					venue(acct.snapshot(at, marks), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
+					// Read the second after the fill: a fill stamped in a
+					// snapshot's second post-dates it, so a snapshot of that
+					// second holding the fill states holdings no fill explains
+					// (ADR 0019, amended 2026-10-21).
+					venue(acct.snapshot(at.Add(time.Second), marks), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
 				}
 			}
 			if quantity < o.Quantity {
@@ -426,8 +434,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			if opts.noMark[session] == id {
 				continue
 			}
-			apply(s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%s:%s", id, session), end,
-				event.MarkRecordedPayload{InstrumentID: id, AsOf: end, Price: prices[id], Source: event.AdapterIBKR}))
+			mark, version := event.MarkRecordedPayload{InstrumentID: id, AsOf: end, Price: prices[id], Source: event.AdapterIBKR}, event.MarkRecordedSchemaVersion
+			if opts.brokerLast != 0 {
+				mark.BrokerLast, mark.BrokerLastSet, version = float64(prices[id]*opts.brokerLast), true, event.MarkRecordedEvidenceVersion
+			}
+			apply(s.envelope(t, event.MarkRecordedEventType, version, fmt.Sprintf("mark:%s:%s", id, session), end, mark))
 		}
 		slices.Sort(ids)
 		if opts.beforeClose != nil {

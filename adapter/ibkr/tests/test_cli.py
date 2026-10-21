@@ -18,9 +18,9 @@ for p in (str(tests_dir), str(adapter_dir)):
 from cli import _parser, main
 from connection import REQUEST_ID_BASE
 from config import AdapterConfig
-from engine_double import LoggedEngine
+from engine_double import LoggedEngine, run_approval
 from fake_tws import ACCOUNT, FakeTWS
-from test_ibapi_pin import SHA
+from test_ibapi_pin import PINS, SHA, record
 from test_loop import SUMMARY
 
 CONFIG = dict(host="127.0.0.1", port=4002, client_id=11, mode="paper", paper_sending_enabled=True,
@@ -53,9 +53,10 @@ class CommandTests(unittest.TestCase):
         self.engine_log = self.dir / "run-1.log"
         self.write_config(dict(CONFIG))
         self.secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT))
-        self.versions.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
-        self.record.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
-        self.engine = LoggedEngine(str(self.engine_log))
+        self.versions.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA) + PINS)
+        self.record.write_text(record())
+        # The account's first run, approved with the book the fake shows.
+        self.engine = LoggedEngine(str(self.engine_log), approval=run_approval(ACCOUNT, starting_book=({}, 100000.0)))
         self.fake = FakeTWS()
         self.fake.summary = list(SUMMARY)
         self.made = []
@@ -78,7 +79,8 @@ class CommandTests(unittest.TestCase):
 
     def run_main(self, argv, steps=3):
         return main(argv, api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
-                    should_stop=Steps(steps), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1))
+                    should_stop=Steps(steps), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                    protobuf_version=lambda: "5.29.5")
 
     def test_run_connects_reconciles_and_stops_cleanly(self):
         self.assertEqual(self.run_main(self.argv()), 0, self.err.getvalue())
@@ -97,7 +99,7 @@ class CommandTests(unittest.TestCase):
             self.assertIn(word, out)
 
     def test_an_ibapi_other_than_the_pinned_build_refuses_to_start_before_connecting(self):
-        self.record.write_text("TWSAPI_VERSION=10.50.02\nTWSAPI_SHA256={}\n".format(SHA))
+        self.record.write_text(record(version="10.50.02"))
         self.assertEqual(self.run_main(self.argv()), 1)
         self.assertIn("provision.sh twsapi", self.err.getvalue())
         self.assertEqual(self.made, [])
@@ -209,15 +211,14 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("DU0000002", self.err.getvalue(), "nor the login's other accounts")
 
     def test_the_runs_stream_folder_is_delivered_from(self):
-        from test_delivery import session_envelopes, write_stream
+        from test_delivery import DAY, FIRST, session_envelopes, write_stream
         from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION
         streams = self.dir / "streams"
         envelopes = session_envelopes([__import__("datetime").date(2027, 1, 14)], run="run-1",
                                       configuration_hash=CONFIGURATION_HASH, strategy_version=STRATEGY_VERSION)
         write_stream(streams / "run-1", __import__("datetime").date(2027, 1, 14), envelopes)
         self.assertEqual(self.run_main(self.argv("--streams", str(streams)), steps=10), 0, self.err.getvalue())
-        self.assertEqual([e["type"] for e in self.engine.inputs()],
-                         ["account.broker.snapshot", "market.bar.completed", "market.session.closed"])
+        self.assertEqual([e["type"] for e in self.engine.inputs()], FIRST + DAY)
 
     def test_a_run_with_no_stream_folder_stops_and_names_the_warm_up(self):
         streams = self.dir / "streams"
@@ -271,11 +272,11 @@ class DeployTests(unittest.TestCase):
             self.assertIn("--engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log", unit)
         self.assertIn("ReadOnlyPaths=/var/lib/trend-investing/engines/boost -" + read, adapter)
 
-    def test_the_adapter_is_installed_with_the_calendar_and_the_input_table_it_reads(self):
+    def test_the_adapter_is_installed_with_the_calendar_the_input_table_and_the_log_reader_it_reads(self):
         provision = (repo / "deploy" / "provision.sh").read_text()
         body = provision[provision.index("step_adapter() {"):]
         body = body[:body.index("\n}\n")]
-        for name in ("nyse_calendar.py", "kinds.py"):
+        for name in ("nyse_calendar.py", "kinds.py", "engine_log.py"):
             self.assertIn('"$here/../adapter/marketdata/{}" "$adapter_root.new/adapter/marketdata/"'.format(name), body)
 
     def test_the_adapter_is_handed_its_own_account_file_and_nothing_else(self):

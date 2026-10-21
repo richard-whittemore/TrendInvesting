@@ -70,6 +70,9 @@ scenario() {
     # fetched is recorded.
     python3() { record python3 "$@"; return 1; }
     runuser() { record runuser "$@"; return 1; }
+    # The service users are test-target.sh's subject, not this test's.
+    ensure_user() { record ensure_user "$@"; }
+    ensure_operator_user() { record ensure_operator_user "$@"; }
     # The clock check reads the machine's time daemon, which the stand-ins do not model.
     if test "${FAKE_NO_CLOCK:-0}" = 1; then step_clock() { record step_clock; }; fi
     etc=$work/etc

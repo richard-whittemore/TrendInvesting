@@ -30,7 +30,8 @@ gate (plan section 9, Phase 5).
 ## Built today and not built yet
 
 This is the one list for the whole program. Other chapters link here
-rather than keep their own. As of `main` on 2026-10-18:
+rather than keep their own. As of `main` on 2026-10-18, after the adapter
+began delivering the data job's daily file to the engine:
 
 | Piece | Built today | Not built yet |
 | --- | --- | --- |
@@ -38,13 +39,14 @@ rather than keep their own. As of `main` on 2026-10-18:
 | Momentum rule, order planner, minimum lot, glide path | Yes; parity checked for the rule (passed once the owner's 2026-10-18 decisions were applied: `docs/research/parity-2026-10.md`) | Parity of the glide path, the minimum lot, the IRA buy delay and buy scaling; the engine program refuses a momentum configuration; no IRA configuration exists |
 | Risk gate: hard limits, Normal, Degraded, Halted, kill switch, sale back to 98%, margin alarm | Yes | The adapter's second check of the limits before calling IBKR |
 | Durable log, crash resume, approved fresh run | Yes | — |
-| Engine on the server | Boost in dry-run, started by hand | Paper (waits for the adapter) |
+| Engine on the server | Boost in dry-run, started by hand; paper rehearsed end to end with the real engine (`deploy/rehearse-paper.sh`) | A paper run on the server |
 | Daily data job | Boost's stream, installed with its timer | A job for the IRAs |
-| IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind a broker snapshot with SPY's mark, all against a stand-in gateway | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed; the account snapshot as of the close and the recorded mark the Boost engine decides from ([paper trading](paper-trading.md), "A paper day") |
-| Morning reconciliation | The engine's comparison, states and alert | The adapter's read delivered to the engine; the checks at startup, after fills and before orders; open orders; the joint account's cash; any command to record a missed event |
+| IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind one account reading after the close: the account snapshot and broker snapshot as of the close when nothing is working at IBKR and nothing has executed since (else at the read time, with the reason), and SPY's mark from the official close; all against a stand-in gateway, rehearsed with the real engine ([paper trading](paper-trading.md), "A paper day") | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed |
+| Morning reconciliation | The engine's comparison, states and alert; the adapter's read delivered to the engine at a run's first delivery, every start and every reconnect | The checks after fills and before orders, and on a timer; open orders; the joint account's cash (the Boost book states none, so cash is not compared); any command to record a missed event |
 | Reporter and dashboard | Both programs, installed on the server; the reporter checks every 5 minutes, around the clock | The outside heartbeat |
-| Operator tool and journal-query | Both programs, installed on the server | The engine's operator inbox in its service file |
+| Operator tool and journal-query | Both programs, installed on the server, and the engine's operator inbox, created by the provisioner and passed by the service file | — |
 | Server | Provisioning, the Gateway unit, the firewall, pinned downloads | Backups; a real server run |
+| Mac mini rehearsal container | A local rehearsal of the server with a real systemd (`deploy/mac-mini/up.sh`): four volumes that survive a restart and a re-creation, the Gateway unit masked, the service users at fixed IDs, the clock checked every 15 minutes, not privileged, refusals of a Desktop or iCloud checkout and of a container it did not make | The arm64 programs and the adapter in it; the dashboard reachable from the Mac; the `ti` command; the operator inbox, and so the kill switch, in it ([mac-mini](mac-mini.md), "What is not built yet") |
 | Day-trade counter for the joint account | — | Counted by hand ([margin warning](../runbooks/margin-warning.md)) |
 
 **Current versions** (each chapter's "since version x" is history; these
@@ -52,14 +54,15 @@ are what this build runs):
 
 | What | Version |
 | --- | --- |
-| Target-weight rules (Boost and momentum), `RulesVersion` | 1.17.0 |
+| Target-weight rules (Boost and momentum), `RulesVersion` | 1.19.0 |
+| IBKR broker snapshot (`account.broker.snapshot`) and mark (`market.mark.recorded`) the adapter writes | 2 |
 | Target-weight configuration schema | 7 |
-| Decision record (`strategy.targets.decided`) | 5 |
-| Fresh-run approval (`operator.run.approved`) | 2 |
+| Decision record (`strategy.targets.decided`) | 6 |
+| Fresh-run approval (`operator.run.approved`); version 3 states the starting book | 3 |
 | IB Gateway, pinned | 10.50.1f |
 | IBKR TWS API (`ibapi`), pinned | 10.51.01 |
 | IBC, pinned | 3.24.2 |
-| Go | 1.27.2 |
+| Go | 1.27.3 |
 
 ## Reading order
 
@@ -109,6 +112,10 @@ are what this build runs):
    - [journal-query](journal-query.md): asking a run's log what happened.
 7. **The server.** [server](server.md): what runs where, the units and
    timers, configuration and secrets, backups, what you start by hand.
+   [mac-mini](mac-mini.md): the Mac mini's rehearsal container, a local
+   copy of the server with a real systemd (paper trading runs on the
+   server): its four volumes, why the checkout is not on the Desktop, what
+   a restart does, what the container may do on your Mac.
 8. **Trust.** [parity](parity.md): the check that the Go code decides what
    the backtests decided.
 9. **Runbooks**, for when something has happened (in `docs/runbooks/`):
@@ -126,6 +133,8 @@ are what this build runs):
      log in;
    - [lightsail-deployment](../runbooks/lightsail-deployment.md): setting up
      the server, and the restart and reconnect drills;
+   - [mac-mini](../runbooks/mac-mini.md): creating the Mac mini's rehearsal
+     container, or re-attaching to it;
    - last, [first-paper-order](../runbooks/first-paper-order.md): the
      checklist for the first order the program sends to IBKR's paper
      servers.

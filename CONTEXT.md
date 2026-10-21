@@ -169,7 +169,10 @@ Continuing a crashed engine's run from its durable log: every committed input is
 Any engine start after an earlier run that is not a Resume: after a deliberate stop, a reboot, leaving Halted, a build upgrade or a cleared rebalance. It begins a new durable log and decides nothing until a Run approval is its input.
 
 **Run approval**:
-The owner's recorded `operator.run.approved` input that lets a Fresh run start: it names the previous run's durable log and that log's final record hash, the incident it clears, if any, and the state in force: Boost's latch, and the incident in force, if any, with the Degraded or Halted state and scope it holds the account in and whether its one sale back to 98% was attempted. Every item is stated, none defaulted. It is the run's second input, straight after the configuration.
+The owner's recorded `operator.run.approved` input that lets a Fresh run start: it names the previous run's durable log and that log's final record hash, the incident it clears, if any, and the state in force: Boost's latch, and the incident in force, if any, with the Degraded or Halted state and scope it holds the account in and whether its one sale back to 98% was attempted. Every item is stated, none defaulted. It is the run's second input, straight after the configuration. From schema version 3 it may also state a Starting book; an account's first run in paper or live mode is approved too, with no previous log and its Starting book stated.
+
+**Starting book**:
+The holdings and total cash the owner checked in IBKR and stated in a Run approval: an account's first run's must state one, a fresh run's may (after a change no fill explains). The IBKR adapter compares a run's first reading after a close with the latest of the chain's last account snapshot and this book, adjusted by the fills since, and never adopts IBKR's book unchecked (ADR 0019 and ADR 0027, amended 2026-10-18).
 
 ### Research
 

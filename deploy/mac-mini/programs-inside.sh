@@ -11,17 +11,13 @@
 #     runs here natively; the engine, started in dry-run, writes that stamp
 #     into its durable log's strategy version, and journal-query reads the
 #     journal it wrote;
-#  2. the paper rehearsal (deploy/rehearse-paper.sh, unchanged) passes;
+#  2. the paper rehearsal (adapter/ibkr/tests/rehearse_paper.py, unchanged) passes;
 #  3. provision.sh twsapi refuses a tampered download and a download that is
 #     not the pinned file, changing nothing already installed;
-#  4. it unpacks ibapi from the pinned Mac/Unix archive and, if ibapi
-#     imports, records the pinned version and the archive's pinned SHA-256,
-#     and, after provision.sh adapter, the adapter's own pin check passes
-#     from its environment. Today ibapi 10.51.01 does not import (its
-#     protobuf 5.29.5 is not pinned: adapter/ibkr/README.md), so the step
-#     stops with "ibapi did not import" and records nothing; the rehearsal
-#     checks that fail-closed stop, says so, and does not claim the install
-#     record or the pin check;
+#  4. it unpacks ibapi from the pinned Mac/Unix archive, installs it with the
+#     pinned protobuf, records the pinned version and the archive's pinned
+#     SHA-256 (and protobuf's), and, after provision.sh adapter, the
+#     adapter's own pin check passes from its environment;
 #  5. no x86_64 ELF file is on the container's disk outside /proc, /sys and /dev
 #     (none was installed, none left behind), and none is running once every
 #     step has finished. It cannot see a short-lived x86_64 helper that ran
@@ -52,6 +48,10 @@ test "${TI_TARGET:-}" = mac-mini || fail "TI_TARGET is not mac-mini"
 # above): its package list, service users, automatic updates and persistent
 # journal, run for real. TI_REHEARSAL=1 skips only what needs a running
 # systemd. Idempotent.
+# The container image here is plain Ubuntu; the Mac mini's own image carries
+# systemd (deploy/mac-mini/Dockerfile), whose systemd-tmpfiles the journal
+# step runs.
+apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends systemd >/dev/null
 TI_REHEARSAL=1 /src/deploy/provision.sh base >/dev/null
 
 # ELF e_machine of a file: 62 x86-64, 183 AArch64; empty if not ELF.
@@ -93,9 +93,11 @@ esac
 /dist/journal-query totals "$work/run.journal" >"$work/totals" || fail "journal-query did not read the engine's journal"
 pass "the five Go programs are arm64 and run here; the engine's log names $version"
 
-# 2. The paper rehearsal, unchanged.
-(cd /src && deploy/rehearse-paper.sh) | tee "$work/paper.out"
-grep -q "^rehearsal passed" "$work/paper.out" || fail "the paper rehearsal did not pass"
+# 2. The paper rehearsal, unchanged, with the arm64 engine built above. The
+# container has no Go or make, so deploy/rehearse-paper.sh's own `make engine`
+# is skipped by running the script it ends in, with the engine it would build.
+(cd /src && TI_REHEARSAL_ACCOUNT= TI_REHEARSAL_ENGINE=/dist/ti-engine python3 adapter/ibkr/tests/rehearse_paper.py) | tee "$work/paper.out"
+grep -q "rehearsal passed" "$work/paper.out" || fail "the paper rehearsal did not pass"
 pass "the paper rehearsal passed inside the container"
 
 # 3. The TWS API step refuses what is not the pinned file, changing nothing
@@ -130,27 +132,17 @@ grep -q "checksum mismatch" "$work/err" || fail "the mismatched download failed 
 unchanged || fail "a mismatched download changed what is installed"
 pass "provision.sh twsapi on arm64 refuses a tampered and a mismatched download; nothing installed changed"
 
-# 4. The pinned archive unpacked; recorded and checked by the adapter only
-# if ibapi imports.
-installed=0
-if "$p" twsapi 2>"$work/err"; then
-  installed=1
-else
-  grep -q "ibapi did not import" "$work/err" || fail "provision.sh twsapi failed for another reason: $(cat "$work/err")"
-  test ! -e "$twsapi/INSTALLED" || fail "ibapi did not import, yet an install record was written"
-  test -f "$twsapi/$TWSAPI_VERSION/pythonclient/setup.py" || test -f "$twsapi/$TWSAPI_VERSION/pythonclient/pyproject.toml" \
-    || fail "the archive's Python client was not unpacked"
-  pass "the pinned archive's Python client unpacked; ibapi did not import (protobuf not pinned) and nothing was recorded"
-fi
-if test "$installed" = 1; then
-  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\n' "$TWSAPI_VERSION" "$TWSAPI_ARCHIVE_SHA256" >"$work/expected"
-  cmp -s "$work/expected" "$twsapi/INSTALLED" || fail "the install record is not the pinned version and archive SHA-256: $(cat "$twsapi/INSTALLED")"
-  "$p" adapter
-  checked=$(cd /opt/trend-investing/adapter && "$venv/bin/python3" -c 'from adapter.ibkr import ibapi_pin
+# 4. The pinned archive unpacked and ibapi installed; recorded and checked by
+# the adapter.
+"$p" twsapi || fail "provision.sh twsapi failed on the pinned archive"
+printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
+  "$TWSAPI_VERSION" "$TWSAPI_ARCHIVE_SHA256" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$work/expected"
+cmp -s "$work/expected" "$twsapi/INSTALLED" || fail "the install record is not the pinned version, archive and protobuf SHA-256s: $(cat "$twsapi/INSTALLED")"
+"$p" adapter
+checked=$(cd /opt/trend-investing/adapter && "$venv/bin/python3" -c 'from adapter.ibkr import ibapi_pin
 print(ibapi_pin.check_installed("/opt/trend-investing/twsapi/INSTALLED", "/opt/trend-investing/adapter/versions.env"))')
-  test "$checked" = "$TWSAPI_VERSION" || fail "the adapter's pin check returned $checked"
-  pass "ibapi from TWS API $TWSAPI_VERSION's archive installed and recorded; the adapter's pin check passes"
-fi
+test "$checked" = "$TWSAPI_VERSION" || fail "the adapter's pin check returned $checked"
+pass "ibapi from TWS API $TWSAPI_VERSION's archive installed and recorded; the adapter's pin check passes"
 
 # 5. Nothing x86_64 on disk, and nothing running once every step finished
 # (the engine was stopped and reaped in section 1).
@@ -177,8 +169,4 @@ for exe in /proc/[0-9]*/exe; do
   test "$(elf_machine "$real" 2>/dev/null || true)" != 62 || fail "an x86_64 program is running: $real"
 done
 pass "no x86_64 file is on the container's disk (outside /proc, /sys and /dev) and none is running"
-if test "$installed" = 1; then
-  echo "programs rehearsal passed"
-else
-  echo "programs rehearsal passed up to the ibapi import: ibapi does not import until protobuf is pinned, so the install record and the adapter's pin check are not yet verified"
-fi
+echo "programs rehearsal passed"

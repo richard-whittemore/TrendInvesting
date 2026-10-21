@@ -177,10 +177,17 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		"-secrets-file": credentials + "/secrets",
 		"-channel":      "ntfy,pagerduty",
 		"-account":      "boost",
+		"-clock-state":  reports + "/host-clock.json",
 	} {
 		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
 			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)
 		}
+	}
+	if i := indexOf(args, "-clock-check"); i < 0 || i+1 >= len(args) || args[i+1] != "/usr/local/libexec/trend-investing/clock-check.sh" {
+		t.Errorf("ExecStart %v does not run the installed clock check", args)
+	} else {
+		// The server's script is not on this machine: a stand-in that passes.
+		args[i+1] = newStandInCheck(t).path()
 	}
 	if indexOf(args, "-summary") < 0 {
 		t.Errorf("ExecStart %v does not send the daily summary", args)
@@ -246,19 +253,21 @@ func TestTheSecretsFileSuppliesTheChannelSecrets(t *testing.T) {
 	}
 }
 
-// TestASecretsFileThatCannotBeReadStopsTheRunWithoutPrintingIt: a missing
+// TestASecretsFileThatCannotBeReadIsReportedWithoutPrintingIt: a missing
 // file or a line that is not KEY=VALUE is an error, and the error never
-// carries the file's text, which may be a secret.
-func TestASecretsFileThatCannotBeReadStopsTheRunWithoutPrintingIt(t *testing.T) {
+// carries the file's text, which may be a secret. With no channel left that
+// can deliver, the run stops; a channel whose secrets are intact still
+// delivers (TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset).
+func TestASecretsFileThatCannotBeReadIsReportedWithoutPrintingIt(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad")
-	if err := os.WriteFile(bad, []byte("TI_NTFY_TOPIC=ok\ns3cr3t-without-equals\n"), 0o600); err != nil {
+	if err := os.WriteFile(bad, []byte("TI_PAGERDUTY_URL=https://example.org\ns3cr3t-without-equals\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for name, path := range map[string]string{"missing": filepath.Join(dir, "none"), "malformed": bad} {
 		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", path}
 		err := run(args, env(nil), time.Now, &bytes.Buffer{}, http.DefaultClient)
-		if err == nil || !strings.Contains(err.Error(), "secrets file") || strings.Contains(err.Error(), "s3cr3t") {
+		if err == nil || !strings.Contains(err.Error(), "secrets file") || strings.Contains(err.Error(), "s3cr3t") || !strings.Contains(err.Error(), "no delivery channel") {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -276,8 +285,8 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 		}
 		return "x"
 	}
-	if _, err := buildSenders("ntfy,pagerduty", recording, http.DefaultClient, io.Discard); err != nil {
-		t.Fatal(err)
+	if _, faults, err := buildSenders("ntfy,pagerduty", recording, http.DefaultClient, io.Discard); err != nil || len(faults) != 0 {
+		t.Fatal(err, faults)
 	}
 	example := readAssignments(t, secretsExample)
 	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY"} {
@@ -415,7 +424,7 @@ func TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves(t *testing.T) {
 	}
 	at("systemctl stop ti-reporter.service || true")
 	disable := at("systemctl disable ti-reporter.timer")
-	remove := at("rm -f \"$unit_dir/ti-reporter.service")
+	remove := at(`rm -f "$unit_dir/ti-reporter.service"`)
 	if active >= 0 && disable >= 0 && remove >= 0 && (remove < active || remove < disable) {
 		t.Error("the old single reporter's files are removed before it is stopped and disabled")
 	}

@@ -246,3 +246,34 @@ func TestAnIncidentDegradedOnCashIsCarriedInForceWithItsCashScope(t *testing.T) 
 		t.Errorf("CheckIncidentInForce = %v, want the proposed approval accepted", err)
 	}
 }
+
+// TestProposeApprovalStatesAHandSaleAsAttempted: for an incident whose sale
+// the log does not record, the owner's hand sale is stated attempted; the
+// statement is refused where there is no such sale to state (ADR 0019,
+// amended 2026-10-15).
+func TestProposeApprovalStatesAHandSaleAsAttempted(t *testing.T) {
+	request := restart.ApprovalRequest{
+		AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("a", 64),
+		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 15, 0, 0, 0, time.UTC), SaleAttempted: true,
+	}
+	halted := restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted}
+	p, err := restart.ProposeApproval(halted, request)
+	if err != nil || p.IncidentInForce == nil || !*p.IncidentInForce.SaleAttempted || p.IncidentInForce.SaleClientOrderID != "" {
+		t.Errorf("stated: %+v %v", p, err)
+	}
+	cleared := request
+	cleared.ClearIncident = incidentID
+	for name, c := range map[string]struct {
+		end  restart.EndState
+		req  restart.ApprovalRequest
+		want string
+	}{
+		"clearing the incident":      {halted, cleared, "-clear-incident"},
+		"a log that ended normal":    {restart.EndState{}, request, "no incident"},
+		"an attempt the log records": {restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true}, request, "already records"},
+	} {
+		if _, err := restart.ProposeApproval(c.end, c.req); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want it to mention %q", name, err, c.want)
+		}
+	}
+}

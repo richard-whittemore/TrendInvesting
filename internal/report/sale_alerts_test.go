@@ -231,9 +231,9 @@ func TestOrdinaryOrdersRaiseNoSaleAlerts(t *testing.T) {
 // as broker-values-unreadable or unknown-working-sell counts as attempted
 // and is never tried again automatically, so the alert asks the owner to act
 // by hand (ADR 0019, amended 2026-10-15, "No order when it cannot be
-// checked"; docs/manual/states-and-kill-switch.md). The other reasons decide
-// again or have nothing to sell, and send no such alert; a lapse goes in the
-// daily summary.
+// checked"; docs/manual/states-and-kill-switch.md). Nothing to sell and a
+// lapse send no such alert; a lapse goes in the daily summary. A
+// non-positive withhold pages too (TestANonPositiveWithheldSalePagesSellByHand).
 func TestAWithheldSaleTheOwnerMustMakeByHandIsAlertedUrgently(t *testing.T) {
 	for _, reason := range []string{event.SaleWithheldUnreadable, event.SaleWithheldUnknownWorkingSell} {
 		s := newStream(t)
@@ -247,7 +247,7 @@ func TestAWithheldSaleTheOwnerMustMakeByHandIsAlertedUrgently(t *testing.T) {
 	if !strings.Contains(byHandBody(t, event.SaleWithheldUnknownWorkingSell), "CONTAINMENT REQUIRED") {
 		t.Error("an unknown working sell's alert does not say CONTAINMENT REQUIRED")
 	}
-	for _, reason := range []string{event.SaleWithheldNothingToSell, event.SaleWithheldNotPositive, event.SaleWithheldLapsed} {
+	for _, reason := range []string{event.SaleWithheldNothingToSell, event.SaleWithheldLapsed} {
 		s := newStream(t)
 		s.saleWithheld(0, "sale-1", reason)
 		if got := alertsOf(t, s); len(got) != 0 {

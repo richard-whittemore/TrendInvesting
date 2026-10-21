@@ -6,9 +6,14 @@
 // optionally the daily summary (docs/live-trading/plan.md section 3; ADR
 // 0019, "Alerting"). A Degraded, Halted or reconciliation alert is sent
 // again every -repeat-interval until the journal records the owner's
-// acknowledgement of it. It only reads the journal. The one file it writes
-// is its own state file of delivered incident keys and when each channel last
-// took each. Every rule lives in internal/report; this is composition.
+// acknowledgement of it. Each delivery channel is validated on its own: one
+// whose secret is empty or malformed is set aside, named in the run's error,
+// in an urgent alert on the other channels and in the daily summary, and the
+// others still deliver. It only reads the journal. It writes its own state
+// file of delivered incident keys and when each channel last took each and,
+// with -clock-check, the host's clock state and its lock, shared by every
+// reporter on the host. Every rule lives in internal/report; this is
+// composition.
 //
 // It runs once per invocation, from a timer. The heartbeat it checks is the
 // journal file's modification time, with silence counted in NYSE sessions; a
@@ -71,6 +76,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets, read for any not set in the environment (under systemd: %d/secrets, the credential file)")
 	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
+	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
+	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -95,18 +102,26 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// the state file.
 	bounded := *client
 	bounded.Timeout = *sendTimeout
+	// A fault in the secrets file or in one channel's secrets sets aside only
+	// what it touches: every other channel still delivers, and the run fails
+	// naming each fault (ADR 0019, "Alerting").
+	var failures []error
 	if *secretsFile != "" {
-		if getenv, err = withSecretsFile(getenv, *secretsFile); err != nil {
-			return err
+		var secretsErr error
+		if getenv, secretsErr = withSecretsFile(getenv, *secretsFile); secretsErr != nil {
+			failures = append(failures, secretsErr)
 		}
 	}
-	senders, err := buildSenders(*channels, getenv, &bounded, out)
+	senders, setAside, err := buildSenders(*channels, getenv, &bounded, out)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
+	}
+	for _, f := range setAside {
+		failures = append(failures, f.err)
 	}
 	seen, sent, repeats, err := loadState(*statePath)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
 	}
 	label := *accountName
 	if label == "" {
@@ -117,7 +132,6 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if account != "" {
 		label = account
 	}
-	var failures []error
 	// The heartbeat is checked first so a refused journal's alert can say
 	// whether liveness is monitored.
 	var heartbeat []report.Alert
@@ -145,16 +159,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, unchecked, now())}
 	}
 	alerts = append(alerts, heartbeat...)
-	// A summary that cannot be built is reported, but never holds back the
-	// incident alerts: they are what ADR 0019 requires to reach a person.
-	if *summary && refused == nil {
-		a, due, err := summaryAlert(envelopes, *date, *benchmark)
-		switch {
-		case err != nil:
-			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
-		case due:
-			alerts = append(alerts, a)
-		}
+	for _, f := range setAside {
+		alerts = append(alerts, report.ChannelRefusedAlert(label, f.channel, f.err, now()))
 	}
 
 	// Each delivery is saved as soon as a channel takes it, so a run stopped
@@ -169,6 +175,36 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	for _, a := range report.Fresh(alerts, nil) {
 		if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
+		}
+	}
+	// The clock check comes after every incident alert is sent, so a slow or
+	// hung check never holds one back (ADR 0019, "Alerting"; its bounds are in
+	// clock.go). The clock is the host's: its state is shared by every
+	// reporter instance on the host.
+	var clock *report.ClockCheck
+	if *clockCheck != "" {
+		path := *clockState
+		if path == "" {
+			path = filepath.Join(filepath.Dir(*statePath), "host-clock.json")
+		}
+		c, err := clockStep(path, *clockCheck, hostName(), senders, setAside, now, *repeat)
+		clock = c
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	// A summary that cannot be built is reported, but never holds back the
+	// incident alerts: they are what ADR 0019 requires to reach a person.
+	if *summary && refused == nil {
+		a, due, err := summaryAlert(envelopes, *date, *benchmark, clock)
+		switch {
+		case err != nil:
+			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
+		case due:
+			a.Body += notDelivering(setAside)
+			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
+				failures = append(failures, err)
+			}
 		}
 	}
 	if err := saveState(*statePath, seen, sent, repeats); err != nil {
@@ -228,8 +264,9 @@ func deliveredAnywhere(seen map[string]bool, key string) bool {
 // orders are written with that close: a summary sent earlier would be
 // incomplete and, being keyed by the day, never replaced. With no date it is
 // the latest closed session's day, and it is not yet due when none has
-// closed. A stated date whose session has not closed is an error.
-func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Alert, bool, error) {
+// closed. A stated date whose session has not closed is an error. A clock
+// check run in this firing adds its time and result as the summary's last line.
+func summaryAlert(envelopes []event.Envelope, date, benchmark string, clock *report.ClockCheck) (report.Alert, bool, error) {
 	if date == "" {
 		last, ok := report.ClosedSessionDate(envelopes)
 		if !ok {
@@ -244,10 +281,27 @@ func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Al
 	if !report.SessionClosedOn(envelopes, date) {
 		return report.Alert{}, false, fmt.Errorf("the log records no session closed on %s, so that day is not complete; it is sent once it is", date)
 	}
+	body := report.RenderText(s)
+	if clock != nil {
+		body += report.ClockSummaryLine(*clock) + "\n"
+	}
 	return report.Alert{
 		Key: "summary:" + s.AccountID + ":" + s.Date, Kind: kindSummary, Severity: report.Routine, AccountID: s.AccountID,
-		Title: fmt.Sprintf("%s: daily summary %s", s.AccountID, s.Date), Body: report.RenderText(s),
+		Title: fmt.Sprintf("%s: daily summary %s", s.AccountID, s.Date), Body: body,
 	}, true, nil
+}
+
+// notDelivering is the daily summary's line naming each channel set aside
+// this run, and why; empty when every channel named delivers.
+func notDelivering(setAside []channelFault) string {
+	if len(setAside) == 0 {
+		return ""
+	}
+	names := make([]string, len(setAside))
+	for i, f := range setAside {
+		names[i] = fmt.Sprintf("%s (%s)", f.channel, f.err)
+	}
+	return "Channels not delivering: " + strings.Join(names, "; ") + "\n"
 }
 
 // loadState reads the delivered channel keys, when each was last sent and
@@ -287,15 +341,26 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // that, a power cut can leave an empty state file, which loadState refuses,
 // and every later run then fails.
 func saveState(path string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
+	raw, err := json.Marshal(deliveredOf(seen, sent, repeats))
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, raw)
+}
+
+// deliveredOf is the state file's form of the delivered keys, their send
+// times and repeat counts.
+func deliveredOf(seen map[string]bool, sent map[string]time.Time, repeats map[string]int) delivered {
 	d := delivered{Keys: make([]string, 0, len(seen)), Sent: sent, Repeats: repeats}
 	for k := range seen {
 		d.Keys = append(d.Keys, k)
 	}
 	sort.Strings(d.Keys)
-	raw, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
+	return d
+}
+
+// writeAtomic replaces the file at path with raw, atomically and durably.
+func writeAtomic(path string, raw []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".reporter-state-*")
 	if err != nil {
 		return fmt.Errorf("reporter: write state: %w", err)

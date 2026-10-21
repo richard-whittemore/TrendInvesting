@@ -17,6 +17,11 @@ func RenderText(s Summary) string {
 	} else {
 		b.WriteString("No account snapshot recorded.\n")
 	}
+	if s.CashChecked {
+		fmt.Fprintf(&b, "Cash drift since the previous close %.2f; unexplained cash since the cash was last explained (a reconciliation the engine explained, else the starting book, always Boost's as its book carries no cash; the day's drift when the run's chain holds neither) %.2f\n", s.CashDrift, s.UnexplainedCash)
+	} else if s.CashUnchecked {
+		b.WriteString("Cash drift: not checked (the latest reading after the close was stamped at its read time)\n")
+	}
 	b.WriteString("Holdings:")
 	if len(s.Holdings) == 0 {
 		b.WriteString(" none")
@@ -64,6 +69,12 @@ func RenderText(s Summary) string {
 	}
 	for _, w := range s.SalesWithheld {
 		fmt.Fprintf(&b, "  %s %s: %s (%s). %s\n", w.ClientOrderID, w.InstrumentID, w.Reason, w.Trigger, w.Detail)
+	}
+	if len(s.Skipped) > 0 {
+		b.WriteString("Trades skipped:\n")
+	}
+	for _, k := range s.Skipped {
+		fmt.Fprintf(&b, "  %s %s %s %s shares: %s\n", k.ClientOrderID, k.Side, k.InstrumentID, event.FormatSkippedShares(k.Shares), k.Reason)
 	}
 	if s.Equity.Available {
 		e := s.Equity

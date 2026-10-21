@@ -13,11 +13,15 @@ approve.
 ## First, in every case
 
 1. **Do not trade by hand while a sale of the program's is working.** If you
-   must act at IBKR first, record the kill switch so the program sends
-   nothing new but the sale back to 98%:
-   `sudo -u ti-trader operator kill-switch -inbox <inbox> -account <account> -state engaged -by owner -detail "halted: investigating"`
-   (always run the tool as `ti-trader`, the engine's user, so the engine
-   can read what it writes).
+   must sell at IBKR, stop the engine and the adapter first, as the manual's
+   "Selling by hand safely" says (`docs/manual/states-and-kill-switch.md`):
+   the kill switch does not stop the sale back to 98%. To investigate
+   without trading, record the kill switch so the program sends nothing new
+   but the sale back to 98%:
+   `sudo -u ti-operator operator kill-switch -inbox <inbox> -account <account> -state engaged -by owner -detail "halted: investigating"`
+   (run the tool as `ti-operator`, the user that writes your instructions;
+   the engine reads them through its group, docs/manual/operator.md,
+   "Who can write an instruction").
 2. **Read what happened.** On the server:
    - `journal-query refusals <durable log>`: the refusal that moved the
      account, its reason and detail, and the `engine-state` row naming the
@@ -34,9 +38,10 @@ approve.
    orders`), or withheld (`sale-withheld` in `journal-query refusals`). A
    withhold with reason `broker-values-unreadable` or `unknown-working-sell`
    counts as the attempt: the program will not try again, so you act by
-   hand. No alert tells you so yet
-   ([alerts-and-dashboard](../manual/alerts-and-dashboard.md), "Alerts the
-   reporter does not send").
+   hand. The reporter tells you so with the urgent alert
+   `<account>: sale of <instrument> withheld, sell by hand (<reason>)`
+   ([states and kill switch](../manual/states-and-kill-switch.md), "The sale
+   back to 98%"); sell as "Selling by hand safely" in that chapter says.
 
 ## Find the cause
 
@@ -56,7 +61,7 @@ approve.
 2. **Reconcile** positions, cash and open orders against the journal
    (`reconciliation.md`, *Recover*). Explain every difference; never edit a
    number to make it match.
-3. **Stop the engine** (`sudo systemctl stop ti-engine@<account>`). It writes
+3. **Stop the engine** (`sudo systemctl stop ti-engine@<instance>`). It writes
    its journal.
 4. **Write the approval** from the stopped run's log. To leave the incident
    behind, clear it by its ID:
@@ -71,7 +76,7 @@ approve.
    incident in force, in the same state and scope, with whether its sale was
    attempted, and the new run starts under it.
 5. If the tool warns the kill switch was engaged, and you still want it on,
-   record it again now (`sudo -u ti-trader operator kill-switch ... -state engaged`): a fresh
+   record it again now (`sudo -u ti-operator operator kill-switch ... -state engaged`): a fresh
    run starts with it released.
 6. **Start the fresh run** as `durable-log.md`, "Start a fresh run after an
    earlier one", steps 4 and 5, with `-approval` the file from step 4.
@@ -81,8 +86,11 @@ approve.
 
 - **The approval is refused for the sale attempt**: the log records an
   attempt of the incident's sale and the approval says it was not attempted.
-  Write the approval with the tool (it reads the attempt from the log), or,
-  if you sold by hand, an approval saying attempted is always accepted.
+  Write the approval with the tool, without `-sale-attempted`: it reads the
+  attempt from the log and carries it attempted. The flag is refused when the
+  log already records the attempt; it is only for an incident whose hand sale
+  the log does not record, with the book after the sale (step 6 of "Selling
+  by hand safely", `docs/manual/states-and-kill-switch.md`).
 - **The approval is refused for the incident**: you named an incident that is
   not the one the log ended in, or tried to carry it looser (Degraded when
   the log ended Halted, or on fewer instruments). A restart never loosens

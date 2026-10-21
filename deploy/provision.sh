@@ -6,8 +6,9 @@
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
 #   sudo deploy/provision.sh clock      enable time syncing and refuse to finish unless the clock is good
 #   sudo deploy/provision.sh gateway    IBC and IB Gateway (pinned, checksummed)
-#   sudo deploy/provision.sh twsapi     IBKR's TWS API: fetched, verified, its ibapi installed into the
-#                                       adapter's environment (not part of all)
+#   sudo deploy/provision.sh twsapi     IBKR's TWS API and the protobuf wheel it imports: fetched,
+#                                       verified, installed into the adapter's environment
+#                                       (not part of all)
 #   sudo deploy/provision.sh adapter    the IBKR adapter's code and pin file (not part of all)
 #   sudo deploy/provision.sh services   systemd units, directories, config stubs
 #   sudo deploy/provision.sh firewall   close everything except Tailscale
@@ -22,14 +23,14 @@
 # systemd, a kernel firewall or a network identity.
 #
 # TI_TARGET selects the machine: lightsail (the default) or mac-mini, the
-# long-running arm64 Ubuntu 24.04 container under Docker Desktop on the Mac
-# (docs/manual/mac-mini.md; docs/runbooks/mac-mini-paper.md). There IB Gateway
-# is IBKR's macOS app outside the container and nothing listens beyond the
-# Mac's loopback, so the target accepts arm64, installs no Tailscale, firewall
-# or Linux Gateway (the gateway step does nothing and the Gateway's unit is
-# not installed; services masks it), makes systemd's journal persistent, and
-# installs the TWS API from its pinned Mac/Unix archive. Every other step is
-# the same.
+# local rehearsal container with a real systemd that deploy/mac-mini/up.sh
+# creates under Docker Desktop on the owner's Mac (docs/manual/mac-mini.md;
+# docs/runbooks/mac-mini.md). There IB Gateway is IBKR's macOS app outside the
+# container and nothing listens beyond the Mac's loopback, so the target
+# accepts arm64, installs no Tailscale, firewall or Linux Gateway, masks the
+# Gateway unit, makes systemd's journal persistent, creates the service users
+# at fixed IDs, and checks the clock against a reference, at provisioning and
+# every 15 minutes, instead of syncing it. Every other step is the same.
 set -euo pipefail
 set +x
 
@@ -38,11 +39,12 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/versions.env"
 
 rehearsal=${TI_REHEARSAL:-0}
-ti_target=${TI_TARGET:-lightsail}
+target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
-dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
-# Where systemd reads the units the services step installs.
 unit_dir=/etc/systemd/system
+dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
+# The Mac mini's volumes that hold files owned by the service users.
+volume_roots=(/etc/trend-investing /var/lib/trend-investing /opt/trend-investing)
 
 log() { printf 'provision: %s\n' "$*"; }
 die() { printf 'provision: %s\n' "$*" >&2; exit 1; }
@@ -58,12 +60,12 @@ read_os_release() {
 # Whether systemd is the running init (it creates this directory at boot).
 systemd_running() { test -d /run/systemd/system; }
 
-mac_mini() { test "$ti_target" = mac-mini; }
+mac_mini() { test "$target" = mac-mini; }
 
 check_target() {
-  case $ti_target in
+  case $target in
     lightsail | mac-mini) ;;
-    *) die "TI_TARGET must be lightsail (the default) or mac-mini, not '$ti_target'" ;;
+    *) die "TI_TARGET must be lightsail (the default) or mac-mini, not '$target'" ;;
   esac
 }
 
@@ -99,10 +101,77 @@ fetch() {
   mv "$dest.part" "$dest"
 }
 
+# The user that writes the owner's instructions into the operator inboxes
+# (ADR 0026, kill-switch amendment): not the engine's user, and no unit runs
+# as it, so no network-facing unit can write an instruction. Its group is
+# the engine's, so it reaches the engines' state directories (0750), and
+# the engine reads its records through that group. The base and services
+# steps both ensure it, so a server provisioned before it existed gains it
+# on a services upgrade. The tool gives each record the inbox's group, which
+# the process may do for any group it belongs to; the step checks the
+# primary group is ti-trader anyway, so a record's default group is the
+# engine's even where the tool did not set it, and so the user is a member
+# on a server where it was made another way. Another primary group is set,
+# or the step stops naming the mismatch.
+#
+# ensure_operator_user [UID]: with UID (the Mac mini, whose /etc/passwd is
+# made anew with each container while the inboxes it owns are in a volume),
+# ti-operator is created at that UID, and an account already holding it, or a
+# ti-operator at another UID, is refused as ensure_user refuses its own.
+ensure_operator_user() {
+  local want=${1:-} holder uid
+  if ! id ti-operator >/dev/null 2>&1; then
+    if test -n "$want"; then
+      holder=$(getent passwd "$want" | cut -d: -f1) || true
+      test -z "$holder" || die "UID $want is held by the account '$holder' in this image, so ti-operator cannot be created at it; the operator inboxes in the volumes are owned by $want. Remove that account from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
+      useradd --system --uid "$want" --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator
+    else
+      useradd --system --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator
+    fi
+  elif test -n "$want"; then
+    uid=$(id -u ti-operator)
+    test "$uid" = "$want" || die "ti-operator is UID $uid here, not $want: this container was provisioned before the IDs were fixed. Re-creating it does not re-own the files already in the volumes, which stay $uid. Run up.sh --recreate, then re-own them in the new container: docker exec --env TI_TARGET=mac-mini CONTAINER /root/deploy/provision.sh reown ti-operator $uid (CONTAINER is ti unless TI_MAC_NAME is set), then run up.sh again (docs/manual/mac-mini.md, 'What can go wrong')"
+  fi
+  local group
+  group=$(id -gn ti-operator)
+  if test "$group" != ti-trader; then
+    log "ti-operator's primary group is $group; setting it to ti-trader"
+    usermod -g ti-trader ti-operator || die "ti-operator's primary group is $group, not ti-trader, and usermod -g ti-trader ti-operator failed; fix it by hand and run again"
+    group=$(id -gn ti-operator)
+    test "$group" = ti-trader || die "ti-operator's primary group is still $group, not ti-trader; fix it with usermod -g ti-trader ti-operator and run again"
+  fi
+}
+
+# ensure_user NAME HOME [ID]: the service user NAME, with its own group, and
+# its home. With ID, the user and its group are created at that UID and GID,
+# and a user already there at another ID, or another account holding ID, is
+# refused rather than adopted.
 ensure_user() {
-  local name=$1 home=$2
+  local name=$1 home=$2 want=${3:-} holder
   if ! id "$name" >/dev/null 2>&1; then
-    useradd --system --user-group --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
+    if test -n "$want"; then
+      holder=$(getent passwd "$want" | cut -d: -f1) || true
+      test -z "$holder" || die "UID $want is held by the account '$holder' in this image, so $name cannot be created at it; the files in the volumes are owned by $want. Remove that account from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
+      # A group of this name at this GID is one an earlier run made before
+      # it was cut off: reused, so that a re-run converges.
+      holder=$(getent group "$want" | cut -d: -f1) || true
+      if test "$holder" != "$name"; then
+        test -z "$holder" || die "GID $want is held by the group '$holder' in this image, so $name's group cannot be created at it. Remove that group from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
+        groupadd --system --gid "$want" "$name"
+      fi
+      useradd --system --uid "$want" --gid "$want" --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
+    else
+      useradd --system --user-group --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
+    fi
+  elif test -n "$want"; then
+    # A container provisioned before the IDs were fixed: its files in the
+    # volumes are owned by the old IDs, and a re-creation, which only makes
+    # /etc/passwd anew, leaves them so. The remedy names the re-owning pass,
+    # by number, which needs no account to exist.
+    local uid gid
+    uid=$(id -u "$name")
+    gid=$(id -g "$name")
+    test "$uid:$gid" = "$want:$want" || die "$name is $uid:$gid here, not $want:$want: this container was provisioned before the IDs were fixed. Re-creating it does not re-own the files already in the volumes, which stay $uid:$gid. Run up.sh --recreate, then re-own them in the new container: docker exec --env TI_TARGET=mac-mini CONTAINER /root/deploy/provision.sh reown $name $uid $gid (CONTAINER is ti unless TI_MAC_NAME is set), then run up.sh again (docs/manual/mac-mini.md, 'What can go wrong')"
   fi
   install -d -o "$name" -g "$name" -m 0750 "$home"
 }
@@ -111,18 +180,12 @@ step_base() {
   log "packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  # tzdata-legacy, on both targets: IBKR states execution times in
-  # "US/Eastern", a name Ubuntu 24.04 moved out of tzdata; without it the
-  # adapter refuses to start (adapter/ibkr/cli.py, require_zones), as it
-  # could not read an execution report (adapter/ibkr/orders.py,
-  # parse_execution_time). A server provisioned before this package was
-  # listed gets it by running this step again.
   if mac_mini; then
     # No Gateway, firewall or X display in the container; sudo for running
     # the owner's tools as ti-trader, and nano for editing the configuration
     # and secret files in place.
     apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl unzip unattended-upgrades python3 tzdata tzdata-legacy sudo nano systemd >/dev/null
+      ca-certificates curl unzip unattended-upgrades python3 tzdata tzdata-legacy sudo nano >/dev/null
   else
     apt-get install -y -qq --no-install-recommends \
       ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
@@ -130,8 +193,20 @@ step_base() {
   fi
 
   log "service users (non-root, no login shell)"
-  ensure_user ti-gateway /var/lib/ti-gateway
-  ensure_user ti-trader /var/lib/trend-investing
+  if mac_mini; then
+    # /etc/passwd is on the container's own disk, not in a volume, so a
+    # container created again (up.sh --recreate, onto a changed image) creates
+    # these users again. Fixed IDs, above the range the image's packages take
+    # (system users are 100 to 999, the image's own user 1000), keep them the
+    # owners of their files in the volumes.
+    ensure_user ti-gateway /var/lib/ti-gateway 2001
+    ensure_user ti-trader /var/lib/trend-investing 2002
+    ensure_operator_user 2003
+  else
+    ensure_user ti-gateway /var/lib/ti-gateway
+    ensure_user ti-trader /var/lib/trend-investing
+    ensure_operator_user
+  fi
 
   log "automatic security updates"
   install -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'CONF'
@@ -166,7 +241,7 @@ CONF
   install -m 0755 "$tmp/tailscale" "$tmp/tailscaled" /usr/local/bin/
   if test "$rehearsal" != 1; then
     # tailscaled's own unit, from the pinned tarball, pointed at /usr/local/bin.
-    sed 's|/usr/sbin/tailscaled|/usr/local/bin/tailscaled|' "$tmp/systemd/tailscaled.service" >/etc/systemd/system/tailscaled.service
+    sed 's|/usr/sbin/tailscaled|/usr/local/bin/tailscaled|' "$tmp/systemd/tailscaled.service" >"$unit_dir/tailscaled.service"
     install -m 0644 "$tmp/systemd/tailscaled.defaults" /etc/default/tailscaled
     systemctl daemon-reload
     systemctl enable --now tailscaled
@@ -176,7 +251,7 @@ CONF
 
 # systemd's journal kept on disk, in /var/log/journal (a volume of its own on
 # the Mac mini), so the reason a unit stopped survives a restart of the
-# container and its removal and re-creation (Mac mini plan, section 5, item 1).
+# container and its removal and re-creation (docs/manual/mac-mini.md).
 step_journal() {
   log "persistent journal"
   install -d -m 0755 /etc/systemd/journald.conf.d
@@ -203,7 +278,17 @@ step_clock() {
   install -d -m 0755 /usr/local/libexec/trend-investing
   install -d -m 0755 /etc/trend-investing # holds clock.conf, which the check reads
   install -m 0755 "$here"/libexec/clock-check.sh /usr/local/libexec/trend-investing/
-  if test "$rehearsal" != 1 && test -d /run/systemd/system; then
+  if mac_mini; then
+    # Docker's Linux VM keeps the time (Docker Desktop resynchronises it with
+    # the Mac) and the container shares it, so no time daemon runs here even
+    # though systemd does; the check always compares the clock with an outside
+    # reference (TI_CLOCK_VERIFY=1), since "synchronised" inside the container
+    # would describe the VM. ti-clock-check.timer repeats it every 15 minutes.
+    log "Mac mini: the Mac keeps the time; checking the clock against a reference"
+    TI_CLOCK_VERIFY=1 "$here/libexec/clock-check.sh" || die "the clock is not good: turn on the Mac's automatic date and time, then run 'provision.sh clock' again"
+    return 0
+  fi
+  if test "$rehearsal" != 1 && systemd_running; then
     log "time syncing"
     "$here/libexec/time-sync.sh"
   fi
@@ -251,6 +336,33 @@ step_gateway() {
   fi
 }
 
+# verify_adapter_venv VENV PINNED_PROTOBUF: the twsapi step's last gate, before
+# it records INSTALLED. -I: the venv's own packages only, nothing from the
+# current directory. The modules must import; the interpreter must be a real
+# venv (sys.prefix is not sys.base_prefix, as the adapter checks at start);
+# google.protobuf and ibapi must resolve under the realpath of VENV itself;
+# and google.protobuf must be the pinned version. The venv is made with
+# --system-site-packages, so a system google/__init__.py (a regular package)
+# can shadow the venv's namespace google; the location checks run before the
+# version check so that is reported as the shadow it is, not as a version
+# mismatch (ibapi_pin.py; ADR 0025).
+verify_adapter_venv() {
+  local venv=$1 want=$2 py="$1/bin/python3" out real prefix base version pb ib
+  real=$(cd "$venv" && pwd -P) || die "$venv does not exist; not recording it"
+  "$py" -I -c 'import google.protobuf, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
+    || die "ibapi did not import from $venv after installing it; not recording it"
+  out=$("$py" -I -c 'import os, sys, google.protobuf, ibapi
+print(os.path.realpath(sys.prefix)); print(os.path.realpath(sys.base_prefix))
+print(google.protobuf.__version__)
+print(os.path.realpath(google.protobuf.__file__)); print(os.path.realpath(ibapi.__file__))') \
+    || die "could not read where protobuf and ibapi resolve in $venv; not recording it"
+  { read -r prefix; read -r base; read -r version; read -r pb; read -r ib; } <<<"$out"
+  test "$prefix" != "$base" || die "$venv is not a venv (its interpreter's sys.prefix is the base prefix $base); not recording it"
+  case $pb in "$real"/*) ;; *) die "google.protobuf resolves to $pb, outside $venv; not recording it" ;; esac
+  case $ib in "$real"/*) ;; *) die "ibapi resolves to $ib, outside $venv; not recording it" ;; esac
+  test "$version" = "$want" || die "protobuf $version in $venv, pinned $want; not recording it"
+}
+
 # IBKR's TWS API (the adapter's ibapi), fetched and verified against its
 # pinned checksum (ADR 0025 point 4, amended 2026-10-16); a mismatch stops
 # the step before anything is installed. Its own step, run with the
@@ -265,13 +377,13 @@ step_gateway() {
 # (owner decision 2026-10-18: no emulation). Either way it installs the Python client
 # (source/pythonclient) as root under $twsapi_root/<version>, then
 # into the adapter's own
-# environment, $adapter_venv, offline (--no-index, --no-deps), checks that
-# ibapi imports there, and only then writes the install record, naming the
-# pinned file it installed from, that the adapter checks
+# environment, $adapter_venv, offline (--no-index, --no-deps: ibapi declares
+# no dependencies, but imports protobuf, so the pinned pure-Python protobuf
+# wheel is fetched and verified beside the installer, before anything is
+# installed, and installed first), and only then writes the install record
+# the adapter checks
 # at start against the pin installed with its code (adapter/ibkr/ibapi_pin.py):
-# a different or missing record and the adapter refuses to start. TWS API
-# 10.51.01's ibapi imports protobuf (5.29.5), which nothing installs yet, so
-# today the import check fails and nothing is recorded (adapter/ibkr/README.md).
+# a different or missing record and the adapter refuses to start.
 twsapi_root=/opt/trend-investing/twsapi
 adapter_venv=/opt/trend-investing/adapter-venv
 adapter_root=/opt/trend-investing/adapter
@@ -285,10 +397,13 @@ step_twsapi() {
   else
     installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
     fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
-    if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
-      log "rehearsal: checksum verified, installer not executed (TI_REHEARSAL_SKIP_INSTALLER)"
-      return 0
-    fi
+  fi
+  # Both downloads are verified before any file is removed or installed.
+  local protobuf="$dl_cache/protobuf-${PROTOBUF_VERSION}-py3-none-any.whl"
+  fetch "$PROTOBUF_URL" "$PROTOBUF_SHA256" "$protobuf"
+  if ! mac_mini && test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
+    log "rehearsal: checksum verified, installer not executed (TI_REHEARSAL_SKIP_INSTALLER)"
+    return 0
   fi
   log "the adapter's Python environment"
   export DEBIAN_FRONTEND=noninteractive
@@ -336,10 +451,11 @@ step_twsapi() {
   # offline.
   rm -rf "$adapter_venv"
   python3 -m venv --system-site-packages "$adapter_venv"
+  "$adapter_venv/bin/pip" install --quiet --no-index --no-deps "$protobuf"
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
-  "$adapter_venv/bin/python3" -c 'import ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
-    || die "ibapi did not import from $adapter_venv after installing it; not recording it"
-  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\n' "$TWSAPI_VERSION" "$pinned_sha" >"$twsapi_root/INSTALLED.tmp"
+  verify_adapter_venv "$adapter_venv" "$PROTOBUF_VERSION"
+  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
+    "$TWSAPI_VERSION" "$pinned_sha" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
   chmod 0644 "$twsapi_root/INSTALLED.tmp"
   mv "$twsapi_root/INSTALLED.tmp" "$twsapi_root/INSTALLED"
   log "ibapi from TWS API ${TWSAPI_VERSION} installed into $adapter_venv; recorded in $twsapi_root/INSTALLED"
@@ -359,13 +475,15 @@ step_adapter() {
   rm -rf "$adapter_root.new"
   install -d -m 0755 "$adapter_root.new/adapter/ibkr"
   install -m 0644 "$src"/*.py "$adapter_root.new/adapter/ibkr/"
-  # The NYSE calendar and the table of inputs the data job writes, in the
-  # same layout, so the adapter states the market's hours from the same
-  # committed calendar and refuses any input type the data job does not
-  # write (delivery.py).
+  # The NYSE calendar, the table of inputs the data job writes and the
+  # reader of the engine's durable log, in the same layout, so the adapter
+  # states the market's hours from the same committed calendar, refuses any
+  # input type the data job does not write (delivery.py) and reads the log
+  # exactly as the data job does (relay.py).
   install -d -m 0755 "$adapter_root.new/adapter/marketdata"
   install -m 0644 "$here/../adapter/marketdata/nyse_calendar.py" "$adapter_root.new/adapter/marketdata/"
   install -m 0644 "$here/../adapter/marketdata/kinds.py" "$adapter_root.new/adapter/marketdata/"
+  install -m 0644 "$here/../adapter/marketdata/engine_log.py" "$adapter_root.new/adapter/marketdata/"
   install -m 0644 "$here/versions.env" "$adapter_root.new/versions.env"
   rm -rf "$adapter_root"
   mv "$adapter_root.new" "$adapter_root"
@@ -437,9 +555,11 @@ CONF
   # The reporter, the dashboard and the owner's two tools, built for the
   # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
   # and copied to dist/ beside deploy/. A missing one is named here, and its
-  # unit fails when it runs, so the gap is seen. The owner runs the tools as
-  # `sudo -u ti-trader operator ...` and `sudo -u ti-trader journal-query ...`:
-  # sudo's PATH includes /usr/local/bin, where each is linked.
+  # unit fails when it runs, so the gap is seen. The owner records instructions
+  # as `sudo -u ti-operator operator ...` and runs `sudo -u ti-trader
+  # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
+  # PATH includes /usr/local/bin, where each is linked.
+  local dist=${TI_DIST:-$here/../dist} b
   for b in ti-reporter ti-dashboard operator journal-query; do
     if test -f "$dist/$b"; then
       install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
@@ -459,19 +579,33 @@ CONF
   # adapter (ADR 0026 point 8: one engine per account).
   install -d -o root -g root -m 0700 "$etc/accounts"
   write_stub "$etc/accounts/boost.env" "$here/etc/accounts/boost.env.example"
+  if mac_mini; then ensure_operator_user 2003; else ensure_operator_user; fi
   install -d -o ti-trader -g ti-trader -m 0750 \
     /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines
   local a
   for a in boost trad-ira roth-ira; do
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a"
+    # The operator inbox (ti-engine@.service passes it as -operator). The owner
+    # records into it as ti-operator (sudo -u ti-operator operator ...); the
+    # engine reads it through its group and cannot write it, and no other user
+    # can (ADR 0026, kill-switch amendment; docs/manual/operator.md).
+    install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
   done
   # The adapter's configuration carries no secret (the account number comes
   # from accounts/boost.env): created once from the example, never overwritten, so
   # the owner's paper settings survive a re-run.
+  # On the Mac mini the Gateway listens on the Mac, which the container
+  # reaches as host.docker.internal; the adapter accepts any host name.
   install -d -m 0755 "$etc/adapters"
   if ! test -e "$etc/adapters/boost.json"; then
-    install -m 0644 "$here/etc/adapters/boost.json.example" "$etc/adapters/boost.json"
+    if mac_mini; then
+      sed 's/"host": "127.0.0.1"/"host": "host.docker.internal"/' "$here/etc/adapters/boost.json.example" >"$etc/adapters/boost.json.new"
+    else
+      cat "$here/etc/adapters/boost.json.example" >"$etc/adapters/boost.json.new"
+    fi
+    chmod 0644 "$etc/adapters/boost.json.new"
+    mv "$etc/adapters/boost.json.new" "$etc/adapters/boost.json"
     log "created $etc/adapters/boost.json (owner step: set paper mode before the paper test)"
   fi
 
@@ -505,6 +639,12 @@ CONF
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
   fi
+  # On the Mac mini no time daemon runs in the container (step_clock), so the
+  # clock is compared with a reference every 15 minutes too, not only when
+  # provisioning runs (ADR 0019); a failed check is a failed unit.
+  if mac_mini; then
+    install -m 0644 "$here/mac-mini/systemd/ti-clock-check.service" "$here/mac-mini/systemd/ti-clock-check.timer" "$unit_dir/"
+  fi
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
     # The Boost account's reporter only: the IRA engines have no
@@ -524,6 +664,9 @@ CONF
       systemctl enable ti-gateway.service
     fi
     systemctl enable --now ti-data.timer ti-reporter@boost.timer
+    if mac_mini; then
+      systemctl enable --now ti-clock-check.timer
+    fi
     systemctl enable ti-dashboard.service
     if ! systemctl restart ti-dashboard.service; then
       log "ti-dashboard did not start (see journalctl -u ti-dashboard); it fails until the Boost engine has run once"
@@ -573,6 +716,92 @@ step_firewall() {
   log "also close port 22 in the Lightsail firewall tab (owner step)"
 }
 
+# reown NAME OLD_UID [OLD_GID] [--force-id] (the Mac mini only): after a container
+# provisioned before the service users had fixed IDs is re-created, its
+# volumes' files still carry the old numbers. Each file in the volumes owned
+# by OLD_UID goes to NAME's fixed UID, and each of group OLD_GID to its fixed
+# GID, links themselves and not their targets, within each volume. Only
+# once NAME is at its fixed ID, so the pass cannot hand files to a number no
+# account holds. ti-operator has no group of its own (it is ti-trader's).
+# An old ID that root (0) or a service user's fixed ID (2001 to 2003) holds
+# is always refused: those files are that account's own (root's secret stubs
+# and installed programs among them), and handing them to a service user
+# would expose them. An old ID that only collides with another account the
+# new image has (a system account its packages added, at the ID the old
+# service user had) is refused too, naming the account, unless --force-id says
+# the files at that ID are the old service user's: the pass only ever touches
+# the provisioner's own volumes, so they are left-behind files.
+step_reown() {
+  mac_mini || die "reown is for the Mac mini's container only (TI_TARGET=mac-mini)"
+  local name=${1:-} old_uid=${2:-} old_gid=${3:-} want arg
+  local -a rest=()
+  force_id=0
+  for arg in "$@"; do
+    if test "$arg" = --force-id; then force_id=1; else rest+=("$arg"); fi
+  done
+  set -- ${rest[@]+"${rest[@]}"}
+  name=${1:-} old_uid=${2:-} old_gid=${3:-}
+  case $name in
+    ti-gateway) want=2001 ;;
+    ti-trader) want=2002 ;;
+    ti-operator) want=2003; test -z "$old_gid" || die "ti-operator has no group of its own; give only its old UID" ;;
+    *) die "usage: provision.sh reown ti-gateway|ti-trader|ti-operator OLD_UID [OLD_GID] [--force-id]" ;;
+  esac
+  test "$(id -u "$name" 2>/dev/null || echo none)" = "$want" \
+    || die "$name is not at its fixed UID $want in this container: run up.sh --recreate first, then reown"
+  old_uid=$(reown_old_id UID passwd "$old_uid") || exit 1
+  if test -n "$old_gid"; then old_gid=$(reown_old_id GID group "$old_gid") || exit 1; fi
+  local root owned=0 grouped=0 n
+  for root in "${volume_roots[@]}"; do
+    test -d "$root" || continue
+    # find's own failure fails the pipeline (pipefail), so a listing that
+    # stopped part way is reported, never counted as nothing left to re-own.
+    n=$(find "$root" -xdev -uid "$old_uid" -print0 | reown_listed chown "$want") \
+      || die "could not list or re-own the files of UID $old_uid under $root (see find's message above); some of them may have been changed already, and running reown again is safe once the cause is fixed"
+    owned=$((owned + n))
+    if test -n "$old_gid"; then
+      n=$(find "$root" -xdev -gid "$old_gid" -print0 | reown_listed chgrp "$want") \
+        || die "could not list or re-group the files of GID $old_gid under $root (see find's message above); some of them may have been changed already, and running reown again is safe once the cause is fixed"
+      grouped=$((grouped + n))
+    fi
+  done
+  log "re-owned $owned file(s) from UID $old_uid to $name ($want)${old_gid:+, and $grouped from GID $old_gid to $want}"
+}
+
+# reown_old_id KIND DB ID: prints ID as a plain number (leading zeros taken
+# out), or dies if it is not a number up to 4294967294 or if root, a fixed
+# service ID (2001 to 2003) holds it now, or if another entry of DB (passwd or
+# group) holds it and force_id is not 1 (when it is, the holder is named and
+# the ID accepted).
+reown_old_id() {
+  local kind=$1 db=$2 id=$3 holder
+  case $id in '' | *[!0-9]*) die "the old $kind must be a number, not '$id'" ;; esac
+  id=${id#"${id%%[!0]*}"}
+  id=${id:-0}
+  test "${#id}" -le 10 && test "$id" -le 4294967294 || die "the old $kind must be at most 4294967294, not '$3'"
+  case $id in
+    0 | 2001 | 2002 | 2003) die "the old $kind $id is held now (by root or a service user's fixed ID); its files are that account's own, not files left behind" ;;
+  esac
+  if holder=$(getent "$db" "$id"); then
+    if test "${force_id:-0}" != 1; then
+      die "the old $kind $id is held now by '${holder%%:*}' in this container, which the new image may have given that number; if the files at $id under /var/lib/trend-investing, /opt/trend-investing and /etc/trend-investing are the old service user's, run the same reown again with --force-id to move them, otherwise remove or renumber '${holder%%:*}' in the image and run up.sh --recreate"
+    fi
+    log "the old $kind $id is held by '${holder%%:*}' in this container; --force-id: its files in the volumes are taken as the old service user's" >&2
+  fi
+  printf '%s\n' "$id"
+}
+
+# reown_listed CMD ID: runs CMD -h ID on each NUL-separated path read from
+# its input, and prints how many.
+reown_listed() {
+  local f n=0
+  while IFS= read -r -d '' f; do
+    "$1" -h "$2" "$f" || return 1
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
 main() {
   check_target
   need_root
@@ -585,14 +814,15 @@ main() {
     adapter) step_adapter ;;
     services) step_services ;;
     firewall) step_firewall ;;
+    reown) shift; step_reown "$@" ;;
     all) step_base; step_clock; step_gateway; step_services; step_firewall ;;
-    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all" ;;
+    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all, or reown NAME OLD_UID [OLD_GID] [--force-id] on the Mac mini" ;;
   esac
   log "done: ${1}"
 }
 
-# Run as a program; sourced (by deploy/rehearsal/test-provision-arch.sh), it
-# only defines the steps.
+# Run as a program; sourced (by deploy/rehearsal/test-target.sh), it only
+# defines the steps.
 if test "${BASH_SOURCE[0]}" = "$0"; then
   main "$@"
 fi

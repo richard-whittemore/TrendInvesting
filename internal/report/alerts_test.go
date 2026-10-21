@@ -196,6 +196,169 @@ func TestAWithheldRunIsOneIncidentAndADecisionEndsIt(t *testing.T) {
 	}
 }
 
+// TestABoostGapPagesOnceAndSaysDecisionsContinue: a Boost session with no
+// SPY bar is skipped and the next bar decides again (ADR 0026, point 5,
+// amended 2026-10-18), so one urgent page covers the whole gap, names its
+// first missing session and says decisions continue over the closes
+// received; a later gap is another page.
+func TestABoostGapPagesOnceAndSaysDecisionsContinue(t *testing.T) {
+	s := newStream(t)
+	s.withheld(0, event.WithheldMissingBars)
+	s.withheld(1, event.WithheldMissingBars)
+	s.decided(2, 0.98)
+	s.withheld(3, event.WithheldMissingBars)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("kinds = %v, want one page per gap", kinds(got))
+	}
+	a := got[0]
+	if a.Kind != report.KindMissingData || a.Severity != report.Urgent {
+		t.Errorf("gap page: %s %v", a.Kind, a.Severity)
+	}
+	for _, want := range []string{day(0).Format(time.DateOnly), "skipped", "decides again at the next session with a bar", "not filled in"} {
+		if !contains(a.Body, want) {
+			t.Errorf("gap page lacks %q: %q", want, a.Body)
+		}
+	}
+}
+
+// TestAWithheldRejectionReplanPagesOnce: a Boost decision that records a
+// re-plan withheld after the venue rejected the re-planned order again
+// (ADR 0026, point 2, "Boost", amended 2026-10-18) is one urgent page naming
+// the order and its shares and saying the program sends no more buys until
+// the owner approves a fresh run, while its sells still go; the decisions
+// after it page nothing more.
+func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
+	s := newStreamFor(t, "joint")
+	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
+		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2,
+				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-6"}, {ClientOrderID: "tw-7"}},
+				ReplanWithheld: event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-7", Released: 37}}})
+	s.decidedFor("joint", 1, 0.98)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("kinds = %v, want one page", kinds(got))
+	}
+	a := got[0]
+	if a.Kind != report.KindRefusal || a.Severity != report.Urgent {
+		t.Errorf("page: %s %v", a.Kind, a.Severity)
+	}
+	// Two orders rejected in a row stop Boost's buys until the owner
+	// approves a fresh run, whatever the target does, while its sells, the
+	// exit and the margin alarm's sale back to 98%, still go (ADR 0026,
+	// points 2, "Boost", amended 2026-10-18, and 4), and the page says so,
+	// so the owner never sells by hand into a program sale.
+	// It names both rejections that stopped the buys, the other by its
+	// venue order ID too, so the owner finds both in IBKR's order log.
+	for _, want := range []string{"tw-7", "37", "rejected", "two orders in a row", "after order tw-6 (IBKR order ib-6)", "sends no more buys", "exit", "sale back to 98%", "still go",
+		"operator approve", "-clear-incident", "fresh run"} {
+		if !contains(a.Body, want) {
+			t.Errorf("page lacks %q: %q", want, a.Body)
+		}
+	}
+	requireHandSale(t, a.Body, "joint")
+}
+
+// handSale is the hand-sale procedure a page sends the owner to while the
+// program's sells may still be working, in the order of "Selling by hand
+// safely" (docs/manual/states-and-kill-switch.md): stop the engine and the
+// adapter of the account (the kill switch does not stop the sale back to
+// 98%), cancel every open order on the instrument, the program's and the
+// owner's own, confirm none is open, sell, then start the fresh run only once
+// the sale has filled or been cancelled, its approval stating the book as it
+// is after the sale (read in IBKR right before approving; otherwise the
+// run's first reading is not the book it is compared with and the account
+// halts as unverifiable), and the adapter only after that run's engine is
+// running, never resuming the stopped one.
+//
+// The units are the Boost program's, named by its engine instance, not by
+// the account it decides: the shipped Boost configuration decides account
+// "joint" under ti-engine@boost, and ti-adapter-boost is the only adapter
+// unit, wired to that engine's socket and log (deploy/systemd).
+func handSale(account string) []string {
+	return []string{"stop the engine and the adapter", "sudo systemctl stop ti-engine@boost ti-adapter-boost",
+		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
+		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve",
+		"only once your sale has filled or been cancelled", "states the book as it is after your sale",
+		"-positions", "-cash", "-currency USD", "right after reading the book in IBKR", "halts as unverifiable",
+		"start the adapter only after the fresh run's engine is running",
+		"never resume the stopped run"}
+}
+
+// requireHandSale fails unless body carries the manual's hand-sale steps in
+// the manual's order, naming the real account and leaving no placeholder.
+func requireHandSale(t *testing.T, body, account string) {
+	t.Helper()
+	if strings.Contains(body, "<account>") {
+		t.Errorf("placeholder left: %q", body)
+	}
+	if strings.Contains(body, "ti-engine@"+account) || strings.Contains(body, "ti-adapter-"+account) {
+		t.Errorf("units named by the account %q, not the engine instance: %q", account, body)
+	}
+	if !strings.Contains(body, "operator approve -log <previous run's log> -account "+account+" ") {
+		t.Errorf("approval does not name the account %q: %q", account, body)
+	}
+	last := -1
+	for _, want := range handSale(account) {
+		i := strings.Index(body, want)
+		if i < 0 {
+			t.Errorf("steps lack %q: %q", want, body)
+			continue
+		}
+		if i < last {
+			t.Errorf("%q is out of order in %q", want, body)
+		}
+		last = i
+	}
+}
+
+// TestARejectionWhileBuysAreStoppedPagesAsSuch: a sell the venue rejects
+// after two rejections in a row stopped Boost's buys is recorded once, with
+// the count of rejections since the stop (ADR 0026, points 2, "Boost",
+// amended 2026-10-18, and 4), and paged once per order as another rejection
+// while buys are stopped, saying which one it is, not as the stop.
+func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
+	s := newStreamFor(t, "joint")
+	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
+		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: 3,
+				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-1"}, {ClientOrderID: "tw-2", VenueOrderID: "ib-2"}},
+				RejectedWhileStopped: []event.BoostReplan{
+					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6},
+					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-9", Released: 5},
+				}}})
+	s.decidedFor("joint", 1, 0.98)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("kinds = %v, want one page per rejected order", kinds(got))
+	}
+	for i, c := range []struct{ id, count string }{{"tw-8", "2nd"}, {"tw-9", "3rd"}} {
+		a := got[i]
+		if a.Kind != report.KindRefusal || a.Severity != report.Urgent || contains(a.Title, "two orders in a row") {
+			t.Errorf("page %d: %s %v %q", i, a.Kind, a.Severity, a.Title)
+		}
+		for _, want := range []string{c.id, "another rejection while Boost's buys are stopped", c.count + " since the stop", "planned again", "fresh run",
+			"stopped by the rejections of orders tw-1 and tw-2 (IBKR order ib-2)"} {
+			if !contains(a.Title+" "+a.Body, want) {
+				t.Errorf("page %d lacks %q: %q %q", i, want, a.Title, a.Body)
+			}
+		}
+		requireHandSale(t, a.Body, "joint")
+	}
+}
+
 // TestAnAllUnaffordableWithholdIsUrgent: a book D7-L found wholly
 // unaffordable may rest on a bad net liquidation or bad raw closes, so the
 // owner is paged now, with the detail naming the valuation, not left to the
@@ -455,4 +618,25 @@ func TestOnlyAnAcknowledgementTheEngineDeliveredStopsTheRepeats(t *testing.T) {
 			t.Fatal("the delivered acknowledgement still counts")
 		}
 	})
+}
+
+// TestARejectionWhileBuysAreStoppedNamesItsPlace: the page names the
+// rejection's place since the stop in plain English.
+func TestARejectionWhileBuysAreStoppedNamesItsPlace(t *testing.T) {
+	for count, want := range map[int]string{1: "1st", 4: "4th", 11: "11th", 12: "12th", 13: "13th", 21: "21st", 22: "22nd", 23: "23rd"} {
+		s := newStream(t)
+		s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
+			event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+				Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+				Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: count,
+					RejectedInARow:       []event.BoostRejectedOrder{{ClientOrderID: "tw-1"}, {ClientOrderID: "tw-2"}},
+					RejectedWhileStopped: []event.BoostReplan{{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6}}}})
+		got, err := report.Alerts(s.out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || !contains(got[0].Body, "the "+want+" since the stop") {
+			t.Errorf("count %d: pages %+v, want the %s", count, got, want)
+		}
+	}
 }

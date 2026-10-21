@@ -78,6 +78,18 @@ type SaleWithheldLine struct {
 	Detail        string
 }
 
+// SkippedLine is one strategy.order.skipped record: a trade the order
+// planner sized but could not order, the shares the rule asked for
+// and why none is ordered (ADR 0026, point 8).
+type SkippedLine struct {
+	At            time.Time
+	ClientOrderID string
+	InstrumentID  string
+	Side          string
+	Reason        string
+	Shares        float64
+}
+
 // Equity compares the account's net liquidation with the benchmark's close
 // over the points where both are recorded on one date. Returns are simple
 // price returns: the benchmark's dividends are not included.
@@ -116,8 +128,24 @@ type Summary struct {
 	Refusals       int
 	Fills          []FillLine
 	SalesWithheld  []SaleWithheldLine
+	Skipped        []SkippedLine
 	EngineState    string
 	Equity         Equity
+	// CashChecked is set when the latest broker snapshot is the IBKR
+	// adapter's reading as of a close (version 2): CashDrift is then the
+	// cash drift since the previous close it accepted, within its daily
+	// bound, and UnexplainedCash that drift added up since the cash was
+	// last explained: a reconciliation the engine explained, else the
+	// owner's starting book, which is always the basis for Boost, whose
+	// book carries no cash; a run whose chain holds neither (a dry run's
+	// first run, which has no approval) takes the daily basis, so the
+	// figure is the day's drift (ADR 0019, amended 2026-10-18).
+	// CashUnchecked is set instead when that snapshot is a version-2 reading
+	// stamped at its read time, which checked no drift.
+	CashChecked     bool
+	CashUnchecked   bool
+	CashDrift       float64
+	UnexplainedCash float64
 	// RejectedInputs counts the inputs the summary would have read (bars,
 	// snapshots, the day's fills) that are at a schema version this build
 	// does not read or that fail validation. None of them moves a figure.
@@ -128,14 +156,16 @@ type Summary struct {
 // envelopes, in recording order. Holdings, engine state and equity are as of
 // the end of that date; decisions, orders, fills and withheld sales back to
 // 98% (a lapse among them, which goes here rather than in an urgent alert:
-// ADR 0019, amendment of 2026-10-17, reading 1) are those of the date.
+// ADR 0019, amendment of 2026-10-17, reading 1) and skipped trades (ADR 0026,
+// point 8) are those of the date.
 // Events after the date are ignored, so a past day's summary does not change
 // when the journal grows.
 //
 // A journal keeps the inputs the engine refused, so an input that does not
 // read or validate is skipped and counted in RejectedInputs: refusing the
 // whole report for it would silence every later alert. A decision the
-// engine recorded (targets, orders, engine state, withheld sales) that does not read or
+// engine recorded (targets, orders, engine state, withheld sales, skipped
+// trades) that does not read or
 // validate refuses the summary, as journalquery does.
 func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, error) {
 	end, err := time.Parse(time.DateOnly, date)
@@ -169,6 +199,15 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 			}
 			s.HaveSnapshot, s.HoldingsAsOf, s.NetLiquidation, s.Holdings = true, p.AsOf, p.NetLiquidation, p.Positions
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
+		case event.BrokerSnapshotEventType:
+			var p event.BrokerSnapshotPayload
+			if read(e, brokerSnapshotVersions, &p) != nil {
+				s.RejectedInputs++
+				continue
+			}
+			v2 := e.SchemaVersion == event.BrokerSnapshotReadAtVersion
+			s.CashChecked, s.CashUnchecked = v2 && p.AsOfClose, v2 && !p.AsOfClose
+			s.CashDrift, s.UnexplainedCash = p.CashDrift, p.UnexplainedCash
 		case event.CompletedBarEventType:
 			p, err := readBar(e)
 			if err != nil {
@@ -245,6 +284,16 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 			}
 			s.SalesWithheld = append(s.SalesWithheld, SaleWithheldLine{At: e.EventTime, ClientOrderID: p.ClientOrderID,
 				InstrumentID: p.InstrumentID, Trigger: p.Trigger, Reason: p.Reason, Detail: p.Detail})
+		case event.OrderSkippedEventType:
+			if !today {
+				continue
+			}
+			var p event.OrderSkippedPayload
+			if err := read(e, skippedVersions, &p); err != nil {
+				return Summary{}, err
+			}
+			s.Skipped = append(s.Skipped, SkippedLine{At: e.EventTime, ClientOrderID: p.ClientOrderID, InstrumentID: p.InstrumentID,
+				Side: p.Side, Reason: p.Reason, Shares: p.Shares})
 		}
 	}
 	for d, net := range netBy {

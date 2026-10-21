@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -480,10 +481,11 @@ func TestEachClearedOrderIDIsTrimmed(t *testing.T) {
 	}
 }
 
-// TestARecordTheEngineCouldNotReadIsRefused: the tool writes a record only
-// its own user can read, so run as anyone but the inbox's owner (the
-// engine's user) it would leave a record the engine never reads; it refuses
-// instead, naming the user to run it as.
+// TestARecordTheEngineCouldNotReadIsRefused: the inbox belongs to the user
+// that writes the owner's instructions (ti-operator on the server), and a
+// record is readable through the inbox's group only, so run as anyone but
+// the inbox's owner the tool would leave a record in the wrong hands; it
+// refuses instead, naming the user to run it as.
 func TestARecordTheEngineCouldNotReadIsRefused(t *testing.T) {
 	originalOwner, originalUser := inboxOwner, effectiveUser
 	t.Cleanup(func() { inboxOwner, effectiveUser = originalOwner, originalUser })
@@ -506,6 +508,36 @@ func TestARecordTheEngineCouldNotReadIsRefused(t *testing.T) {
 	effectiveUser = func() int { return 4242 }
 	if _, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at); err != nil {
 		t.Errorf("the inbox's owner: %v", err)
+	}
+}
+
+// TestARecordIsReadableThroughTheInboxsGroup: the engine reads the inbox
+// through its group and runs as a user other than the record's writer
+// (ADR 0026, kill-switch amendment; docs/manual/operator.md, "Who can write
+// an instruction"), so each record is mode 0640 in the inbox's group: the
+// engine can read it, and only its writer can change it.
+func TestARecordIsReadableThroughTheInboxsGroup(t *testing.T) {
+	inbox := t.TempDir()
+	if _, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Stat(inbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(inbox)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("the inbox holds %v (%v), want one record", entries, err)
+	}
+	info, err := os.Stat(filepath.Join(inbox, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Errorf("the record is mode %o, want 0640", info.Mode().Perm())
+	}
+	if got, want := info.Sys().(*syscall.Stat_t).Gid, dir.Sys().(*syscall.Stat_t).Gid; got != want {
+		t.Errorf("the record's group is %d, want the inbox's %d", got, want)
 	}
 }
 
@@ -539,5 +571,191 @@ func TestTheApprovalCarriesACashScopeInForce(t *testing.T) {
 	}
 	if !strings.Contains(out, event.ReconciliationComponentCash) {
 		t.Errorf("printed %q, want it to name the cash component %s", out, event.ReconciliationComponentCash)
+	}
+}
+
+// TestTheFirstRunsApprovalStatesTheStartingBook: an account's first run is
+// approved with the holdings and total cash the owner checked in IBKR, which
+// the adapter compares the run's first reading after a close with (ADR 0019
+// and ADR 0027, amended 2026-10-18); a fresh run's approval may state the
+// book the owner confirms after a change no fill explains. What is stated
+// is read strictly: a holding twice, a quantity or cash that is no number,
+// or a first run with a previous log, is refused.
+func TestTheFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.json")
+	out, err := invoke(t, "approve", "-first-run", "-account", "joint", "-by", "owner", "-positions", "SPY=147,IEF=3", "-cash", "-4211.37", "-currency", "USD", "-out", first, "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		t.Fatalf("the engine would refuse the approval: %v", err)
+	}
+	b := p.StartingBook
+	if !p.FirstRun() || *p.Boost.Latched || b == nil || b.TotalCash != -4211.37 || b.Currency != "USD" ||
+		len(b.Positions) != 2 || b.Positions[0] != (event.AccountPosition{InstrumentID: "IEF", Quantity: 3}) || b.Positions[1].Quantity != 147 {
+		t.Fatalf("approval %+v, book %+v", p, b)
+	}
+	for _, want := range []string{"first run", "IEF 3", "SPY 147", "-4211.37", first} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed %q, want it to say %q", out, want)
+		}
+	}
+	empty := filepath.Join(dir, "empty.json")
+	if _, err := invoke(t, "approve", "-first-run", "-account", "joint", "-by", "owner", "-positions", "", "-cash", "4000", "-currency", "USD", "-out", empty, "-at", at); err != nil {
+		t.Fatalf("a first run holding nothing: %v", err)
+	}
+
+	logPath := filepath.Join(dir, "run-1.log")
+	previousLog(t, logPath, event.Envelope{ID: "targets-decided:joint:1", Type: event.TargetsDecidedEventType, SchemaVersion: event.TargetsDecidedSchemaVersion,
+		Payload: encoded(t, event.TargetsDecidedPayload{Boost: event.BoostFigures{LatchedAfter: false}})})
+	stated := filepath.Join(dir, "stated.json")
+	out, err = invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-positions", "SPY=100", "-cash", "250.5", "-currency", "USD", "-out", stated, "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The book the owner typed is echoed back, as a first run's is, so a
+	// typo is seen before the run starts rather than at the next halt.
+	for _, want := range []string{"SPY 100", "250.5 USD"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed %q, want it to echo %q", out, want)
+		}
+	}
+	raw, _ = os.ReadFile(stated)
+	if p, err = event.DecodeOperatorRunApproved(raw); err != nil || p.FirstRun() || p.StartingBook == nil || p.StartingBook.TotalCash != 250.5 {
+		t.Errorf("a fresh run's approval stating the book: %+v %v", p, err)
+	}
+
+	for name, c := range map[string]struct {
+		args []string
+		want string
+	}{
+		"a first run with a log":   {[]string{"-first-run", "-log", logPath, "-positions", "", "-cash", "1", "-currency", "USD"}, "-first-run"},
+		"a first run with no cash": {[]string{"-first-run", "-positions", "", "-currency", "USD"}, "-cash"},
+		"a first run, no holdings": {[]string{"-first-run", "-cash", "1", "-currency", "USD"}, "-positions"},
+		"no currency":              {[]string{"-first-run", "-positions", "", "-cash", "1"}, "-currency"},
+		"a holding twice":          {[]string{"-first-run", "-positions", "SPY=1,SPY=2", "-cash", "1", "-currency", "USD"}, "twice"},
+		"a quantity not a count":   {[]string{"-first-run", "-positions", "SPY=1.5", "-cash", "1", "-currency", "USD"}, "SPY=1.5"},
+		"cash not a number":        {[]string{"-first-run", "-positions", "", "-cash", "lots", "-currency", "USD"}, "lots"},
+		"cash not finite":          {[]string{"-first-run", "-positions", "", "-cash", "NaN", "-currency", "USD"}, "NaN"},
+		"half a book":              {[]string{"-log", logPath, "-cash", "1", "-currency", "USD"}, "-positions"},
+		// A first run has no incident to clear; the flag is refused, never
+		// dropped in silence.
+		"a first run clearing an incident": {[]string{"-first-run", "-clear-incident", "engine-state:joint:1", "-positions", "", "-cash", "1", "-currency", "USD"}, "-clear-incident"},
+		// The adapter reads IBKR's cash in the account's currency, USD
+		// (adapter/ibkr snapshot.BASE_CURRENCY): a book in another is never
+		// compared, so it is refused here.
+		"a first run's book in another currency": {[]string{"-first-run", "-positions", "", "-cash", "134000", "-currency", "CAD"}, "USD"},
+		"a fresh run's book in another currency": {[]string{"-log", logPath, "-positions", "", "-cash", "134000", "-currency", "CAD"}, "USD"},
+		// A starting book's approval time is its cutoff (ADR 0019: a book
+		// and the movements that explain it share one cutoff), so it is
+		// never later than the owner's approving it.
+		"a first run's book approved in the future": {[]string{"-first-run", "-positions", "", "-cash", "1", "-currency", "USD", "-at", "2999-01-01T00:00:00Z"}, "-at"},
+		"a fresh run's book approved in the future": {[]string{"-log", logPath, "-positions", "", "-cash", "1", "-currency", "USD", "-at", "2999-01-01T00:00:00Z"}, "-at"},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", path, "-at", at}, c.args...)
+		if _, err := invoke(t, args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want it to mention %q", name, err, c.want)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: an approval was written (%v); every input is validated before anything is written", name, err)
+		}
+	}
+}
+
+// TestTheApprovalStatesAHandSaleAsTheIncidentsAttempt: after the owner sells
+// back to 98% by hand, a sale the log does not know about, -sale-attempted
+// carries the incident in force with its one sale stated attempted, so the
+// fresh run never makes it (ADR 0019, amended 2026-10-15). The engine
+// accepts it, since stating an attempt is always accepted, and the tool
+// says it stated it.
+func TestTheApprovalStatesAHandSaleAsTheIncidentsAttempt(t *testing.T) {
+	dir := t.TempDir()
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encoded(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})}
+	logPath := filepath.Join(dir, "run-1.log")
+	recovery := previousLog(t, logPath, halted)
+
+	stated := filepath.Join(dir, "stated.json")
+	out, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", stated, "-sale-attempted", "-positions", "SPY=9", "-cash", "100", "-currency", "USD", "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(stated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		t.Fatalf("the engine would refuse the approval: %v", err)
+	}
+	in := p.IncidentInForce
+	if in == nil || in.IncidentID != "engine-state:joint:1" || in.State != event.EngineStateHalted || !*in.SaleAttempted || in.SaleClientOrderID != "" ||
+		p.PreviousLogFinalHash != recovery.FinalRecordHash {
+		t.Errorf("approval %+v", p)
+	}
+	if !strings.Contains(out, "attempted true") || !strings.Contains(out, "-sale-attempted") {
+		t.Errorf("printed %q, want it to say the sale was stated attempted by -sale-attempted", out)
+	}
+
+	plain := filepath.Join(dir, "plain.json")
+	if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", plain, "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(plain)
+	if p, err = event.DecodeOperatorRunApproved(raw); err != nil || *p.IncidentInForce.SaleAttempted {
+		t.Errorf("without the flag the approval states what the log records, not attempted: %+v %v", p, err)
+	}
+}
+
+// TestSaleAttemptedIsRefusedWhenThereIsNoSaleToState: -sale-attempted is
+// refused unless an incident is in force whose sale the log does not record
+// as attempted, and nothing is written (ADR 0019, amended 2026-10-15).
+func TestSaleAttemptedIsRefusedWhenThereIsNoSaleToState(t *testing.T) {
+	dir := t.TempDir()
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encoded(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})}
+	sale := event.Envelope{ID: "order-planned:joint-sale-1", Type: event.OrderPlannedEventType, SchemaVersion: event.OrderPlannedSafetyVersion,
+		Payload: encoded(t, event.OrderPlannedPayload{AccountID: "joint", Tag: "engine-state:joint:1", ClientOrderID: "joint-sale-1", InstrumentID: "SPY",
+			Side: event.OrderSideSell, Phase: event.OrderSideSell, OrderType: event.OrderTypeLimit, Quantity: 1, LimitPrice: 99,
+			NetLiquidation: 4000, HeldQuantity: 10, ReferencePrice: 100, PriceBand: 0.05,
+			Sale: event.SaleFigures{Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit}})}
+	attempted := filepath.Join(dir, "attempted", "run-1.log")
+	normal := filepath.Join(dir, "normal", "run-1.log")
+	unsold := filepath.Join(dir, "unsold", "run-1.log")
+	for _, d := range []string{filepath.Dir(attempted), filepath.Dir(normal), filepath.Dir(unsold)} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousLog(t, attempted, halted, sale)
+	previousLog(t, unsold, halted)
+	normalLog := killSwitchLog(t, filepath.Dir(normal), "joint")
+
+	for name, c := range map[string]struct {
+		args []string
+		want string
+	}{
+		"the log already records the attempt": {[]string{"-log", attempted, "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "already records"},
+		"the log ended normal":                {[]string{"-log", normalLog, "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "no incident"},
+		"clearing the incident":               {[]string{"-log", attempted, "-clear-incident", "engine-state:joint:1", "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "-clear-incident"},
+		"a first run":                         {[]string{"-first-run", "-positions", "", "-cash", "1", "-currency", "USD"}, "-first-run"},
+		"no starting book":                    {[]string{"-log", unsold}, "state the book after it"},
+		"half a starting book":                {[]string{"-log", unsold, "-positions", "SPY=9", "-cash", "100"}, "state the book after it"},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", path, "-sale-attempted", "-at", at}, c.args...)
+		if _, err := invoke(t, args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want it to mention %q", name, err, c.want)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: an approval was written (%v)", name, err)
+		}
 	}
 }

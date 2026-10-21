@@ -7,10 +7,8 @@
 # both modes below): the programs run natively, the engine names the stamp,
 # the paper rehearsal passes, provision.sh twsapi refuses a tampered or
 # unpinned download and unpacks ibapi from the pinned Mac/Unix archive, and
-# no x86_64 file is installed. Until ibapi's protobuf is pinned, ibapi does
-# not import, so the run ends "programs rehearsal passed up to the ibapi
-# import" and the install record and the adapter's pin check are not
-# verified (programs-inside.sh, section 4). Needs Docker and Go; downloads
+# no x86_64 file is installed. ibapi imports, the install record is written
+# and the adapter's pin check passes (programs-inside.sh, section 4). Needs Docker and Go; downloads
 # the pinned archive (about 11 MB). Sends nothing to IBKR or Massive and uses
 # no credential.
 #

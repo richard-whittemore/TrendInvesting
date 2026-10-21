@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352))
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490))
 - Date: 2026-09-17
 
 ## In plain English
@@ -578,3 +578,234 @@ Rule 2 changes what the gate decides from a journalled input, so it is a
 rules change under ADR 0016: target-weight RulesVersion 1.12.0 (1.10.0 was
 reserved for it, but 1.11.0 landed first). The owner's manual states the rule
 in [the operator chapter](../manual/operator.md).
+
+## Amendment (2026-10-18, owner decision): the reading after the close counts as the close
+
+The owner decided on 2026-10-18 that one IBKR account reading taken after a
+session's close and before the next open stands for the account **as of that
+close**, when the conditions below hold. Why it can equal the close: between
+the close and the next open the account's positions and open orders change
+only through an order that is still working, an execution or a corporate
+action IBKR books overnight (a split, a spin-off), and its cash also through
+postings that need no order at all (interest, a fee, a dividend). An order
+or an execution shows in IBKR's lists, but only to a client that can see it:
+IBKR shows other clients' and TWS's executions only to the Gateway's Master
+API client ID. A corporate action or a posting shows in neither. So the
+adapter checks both kinds of change, the second without relying on any
+client ID:
+
+1. **IBKR's lists.** No order is working or pending at IBKR for the account
+   (from any client, cancel-pending included), in either account read or in
+   the last open-order list IBKR returns, which the reading's cutoff covers:
+   an order report or an execution arriving during that last list makes the
+   adapter read again. No execution has reached the account at or since the
+   close (IBKR's executions, asked for every client, reach back only to
+   midnight, so the read must also be on the close's own New York date). An
+   execution stamped at the close's own second counts: the engine applies a
+   fill stamped in a book's second to that book, so a closing-auction fill
+   the close's snapshot already showed would be counted twice.
+2. **The previous close, with no client ID.** The holdings read are the
+   previous close's book adjusted by the journalled fills since it, share
+   for share, and the total cash is that book's cash adjusted by those
+   fills' values and commissions, within a bound: **1% of the net
+   liquidation at the close**, room for a posting such as a day's interest
+   or a dividend (SPY's largest quarterly dividend on a holding at 147% of
+   net liquidation exceeds 0.5%). The previous close's book is the latest
+   of two, found back through the chain of runs the Run approvals name
+   (however old, never only the run now running): the last committed
+   `account.snapshot`, its cash the reconciliation recorded from the same
+   reading; or the **starting book** a Run approval states (schema version
+   3; ADR 0027, amended 2026-10-18), the holdings and total cash the owner
+   checked in IBKR. An account's first run must be approved with one; a
+   fresh run's approval may state one, the book after a change no fill
+   explains (a transfer, a deposit) that the owner has checked. So a fresh
+   run's first batch is compared with the previous run's last close, and a
+   first run's with the owner's book; IBKR's book is never adopted
+   unchecked. The day's difference is recorded on the broker snapshot as
+   `cash_drift`, and beside it `unexplained_cash`: IBKR's total cash less
+   the cash last explained (the latest reconciliation whose cash the engine
+   compared and explained, or the starting book) and every fill since, so a
+   posting within the bound each day is still seen as it adds up; the daily
+   summary shows both. Any difference in holdings, or cash beyond the
+   bound, fails the condition. This catches a trade another client made
+   that IBKR did not show this client, a transfer, a split booked overnight
+   and a large cash posting.
+3. **A valuation at the close.** Every holding has an official close in the
+   batch (below), IBKR's own net liquidation at the read is positive (the
+   margin alarm's basis, stated beside the valuation), and the engine holds
+   no snapshot already stamped at or after that close.
+
+**Residual risk, and its mitigation.** A round trip another client makes
+after the close (a sale and a repurchase of the same shares) leaves the
+holdings unchanged and shows only as cash drift: a loss and commissions
+within the bound pass condition 2, and only IBKR's execution list
+(condition 1) shows the trades. The adapter asks IBKR for the executions of
+every client, and IBKR shows other clients' executions only to the
+Gateway's Master API client ID, so the runbook's precondition is that the
+Gateway's Master API client ID is set to the adapter's client ID
+(`docs/runbooks/first-paper-order.md`, A4); with it, such a round trip is an
+execution since the close and fails condition 1. IBKR's API offers no way
+to confirm that setting, so it stays a precondition, and the unexplained
+cash in the daily summary is the owner's check on it.
+
+**The engine checks the stamp it is given.** A version 2 snapshot stamped
+as of the close is refused unless it states IBKR's own net liquidation at
+the read as a positive figure whenever net liquidation was read (an absent
+figure is not zero, so it can never fire the sale back to 98%), and unless
+its `cash_drift` is within the same 1% of its net liquidation
+(`event.CashDriftBound`): a snapshot that states contradictory evidence is
+never a usable close.
+
+Then the adapter stamps the `account.broker.snapshot` (schema version 2) with
+the close as its as-of time and records the true read time beside it
+(`read_at`) as evidence, so this ADR's snapshot rule (reading 1's age,
+measured at the trigger's journalled time) finds it fresh for the sell
+planned at that close.
+
+**One price basis per rule.** A snapshot as of the close is valued at the
+close: each holding is marked at the delivered bar's official close, and its
+net liquidation, in both the broker snapshot and the engine's
+`account.snapshot`, is the total cash plus each holding times that close.
+This keeps "One price basis" (amendment of 2026-10-15) for the sale back to
+98%, which takes net liquidation and mark together, and for Boost's sizing
+and limits, which take the account snapshot's net liquidation with the
+previous close as the reference price. IBKR's own net liquidation at the
+read is recorded beside it (`read_net_liquidation`) as evidence. Excess
+Liquidity stays IBKR's reading at the read, recorded as such: only the
+margin alarm uses it, and the alarm divides it by IBKR's own net liquidation
+at the same read (`read_net_liquidation`), never by the close's. A snapshot
+stamped at its read time is IBKR's own reading throughout: net liquidation
+IBKR's, each holding marked at IBKR's last price at the read (no mark when
+IBKR gives none, so the sale back to 98% is withheld and the owner acts by
+hand).
+
+If a condition fails, the adapter stamps the true read time and states every
+reason (`not_as_of_close`); the snapshot is then later than the close, which
+the rule counts as stale (a negative age), and the engine's own account
+snapshot, stamped the same way, withholds the session
+(`stale-account-snapshot`): fail closed, and the reporter pages the owner
+once with the reason.
+
+**Reconciliation with every reading.** The adapter sends an
+`account.reconciliation` from the same reading with every daily batch, ahead
+of the batch's account snapshot once the engine holds a book: the engine
+classifies IBKR's positions against the book it holds and the fills
+journalled since, before the new snapshot replaces that book, so holdings no
+fill explains are unexplained (Degraded on the instrument, or Halted when
+unverifiable), never adopted by the next snapshot. A run's first batch,
+before which the engine holds no book, carries it behind its snapshots, as
+the start-of-run reconciliation (ADR 0025 point 5), once the adapter has
+found the reading to be the previous close's book (condition 2): a reading
+that differs from an earlier run's last close or from the starting book, or
+has neither to compare with, sends its reconciliation alone instead, its
+snapshots withheld, where the engine, holding no book, classifies it
+unverifiable and halts, so the difference is never adopted, and no account
+snapshot of that reading is committed for a fresh run's first reading to be
+compared with later. The reconciliation of a start or
+a reconnect is read only once every execution IBKR replayed has its
+commission and its fill is recorded, and goes to the engine before any
+stream input, so no fill reaches the engine after a reconciliation that
+already shows its shares; a read whose positions or cash IBKR does not give
+is tried again at most three times in a row, as the batch's reading is, and
+then the adapter stops for a person rather than hold the day's stream behind
+it in silence. Every reconciliation is stamped with its true read time,
+never earlier than the book it is compared with.
+
+Target-weight rules version 1.19.0 reads the new schema versions, and with
+them the margin alarm's basis above and the price band's comparison (ADR
+0026, point 3, amended 2026-10-18), so a journal holding one does not replay
+under 1.18.0.
+
+## Amendment (2026-10-21, #490): the engine checks every close snapshot's holdings against its own fills
+
+**Why.** The book a reconciliation starts from is the latest
+`account.snapshot` (*Reconcile with every reading*, above). Until this
+amendment the engine took each new snapshot as its book without checking it,
+so holdings that changed during a session through a trade the engine did not
+place (one made by hand, or by another client), or through a fill it was never
+given (a late execution the adapter passed over), arrived in that session's
+close snapshot as if they had always been so. Every later reconciliation then
+compared IBKR with a book that already held the difference. A difference that
+only the owner's acknowledgement records is not a check.
+
+**What the IBKR adapter already checks (the amendment of 2026-10-18), and
+what it leaves to the engine.** The adapter checks a reading taken after the
+close before it stamps it as the close: its holdings must be the previous
+close's book (the latest committed account snapshot back through the chain
+of runs, or the starting book a Run approval states) adjusted by the
+journalled fills since, share for share (condition 2). A reading that fails
+is stamped at its read time and the session is withheld; a run's first
+reading that fails is sent as its reconciliation alone, which the engine,
+holding no book, classifies unverifiable. Every batch also carries an
+`account.reconciliation` from the same reading, ahead of its snapshots once
+the engine holds a book, which the engine classifies against its book and the
+fills since. Together these catch an intra-session trade in the IBKR flow.
+But they are the adapter's checks: the engine adopted whatever snapshot it was
+given, so its safety rested on the adapter sending a reconciliation with every
+snapshot, from the same reading, and on the adapter's own comparison being
+right.
+
+**Decision: the engine checks the snapshot itself.** Every
+`account.snapshot` after a run's first is compared, before it becomes the
+book, with the book in force adjusted by every change journalled since it
+(fills, dividends and splits; *Explained means*), exactly as a reconciliation
+is classified, with the snapshot's holdings as the observation:
+
+1. **The same window and the same zero tolerance.** A change counts when it
+   is stamped from the book's second up to, not including, the snapshot's: a
+   fill stamped in a snapshot's second post-dates it, the convention every
+   book follows, so a snapshot that already holds such a fill states holdings
+   no fill explains, and is a difference (the safe side). The positions
+   compared are the union of the book's, the snapshot's and those a change
+   touched. One share counts.
+2. **Holdings only.** The snapshot's cash is not compared: it moves with
+   postings no event records yet (interest, fees), which the adapter's drift
+   bound (condition 2, 1% of net liquidation) and the daily summary's
+   unexplained cash watch.
+3. **A difference is unexplained.** The engine journals a
+   `risk.reconciliation.result` (schema version 1, unchanged) whose input is
+   the snapshot (`input_id` its envelope ID) and whose reconciliation ID is
+   `close-snapshot:<snapshot envelope ID>`, and the account goes Degraded on
+   exactly the instruments that differ (`strategy.engine.state`, reason
+   `reconciliation-unexplained`), as for any unexplained reconciliation. A
+   change no book can apply (a delisting, a merger, a symbol change) makes the
+   check unverifiable, and the account Halted (`reconciliation-unverifiable`).
+   The reporter's reconciliation alert pages the owner, urgent and repeated
+   until acknowledged, and the engine-state record the check caused is the
+   same incident. Recovery is the runbook's, as for any reconciliation.
+4. **The snapshot still becomes the book.** It is the book the planner sizes
+   from (ADR 0026, point 2), as before; the Degraded scope is what stops the
+   engine acting on the difference, and leaving it is never automatic.
+5. **Nothing is journalled for a check that continues**: a snapshot the fills
+   explain is the ordinary close, and every such journal keeps its bytes.
+6. **One difference, one report.** A snapshot whose holdings are exactly the
+   positions a reconciliation already classified against the same book and
+   the same journalled changes is not classified again: the adapter sends
+   each reading's reconciliation ahead of its snapshot, and that result,
+   matched or not, already stands for those holdings. A new book, or a fill
+   or corporate action journalled after that reconciliation, or dated between
+   the reconciliation's reading and the snapshot's (whichever came first) so
+   that only one of the two checks would apply it, ends its standing: the
+   two did not apply the same changes, so the snapshot is checked even when
+   it holds the same shares. A difference already reported is not reported
+   again with the same residual; one a reconciliation read at or after the one
+   that reported it, against the same book, finds explained is forgotten, so
+   its recurrence is a new difference. An unverifiable snapshot halts and is
+   journalled, neither rule suppressing it, unless the account is already
+   Halted on every reason it gives: the same unapplicable change is not
+   halted or paged twice, and a Halt for a new change always is.
+7. **Not the run's first book.** A run's first snapshot has no book in the
+   engine to be checked against; the adapter checks that reading against the
+   previous close or the starting book (condition 2), and the Run approval
+   states the starting book.
+
+**What this does not cover.** A difference that arises and is reversed within
+one session (a round trip by another client) leaves the holdings unchanged and
+shows only in cash, which this check does not compare (the residual risk of
+the amendment of 2026-10-18). The after-fill, pre-order and scheduled
+reconciliations, the comparison of open orders and cash activity matching
+remain unbuilt.
+
+This changes what the engine decides from journalled inputs, so it is a rules
+change under ADR 0016: target-weight RulesVersion 1.20.0. No schema changes.
+

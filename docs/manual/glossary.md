@@ -10,9 +10,14 @@ takes a particular one:
 | Name | Example | Used by |
 | --- | --- | --- |
 | The configuration's `account_id` | `joint` in the shipped dry-run file; your IBKR paper account number (`DU…`) in a paper configuration | the engine, and every `operator` command's `-account` (an instruction for any other name is refused or has no effect), and an approval's `account_id` |
-| The server's account label | `boost`, `trad-ira`, `roth-ira` | the service name (`ti-engine@boost`), the state folder (`/var/lib/trend-investing/engines/boost/`), the `.env` and `.config` file names, `TI_ACCOUNT` |
+| The server's account label (the engine **instance**, `<instance>` in paths and unit names) | `boost`, `trad-ira`, `roth-ira` | the service names (`ti-engine@boost`, `ti-adapter-boost`, `ti-reporter@boost`), the state folder (`/var/lib/trend-investing/engines/boost/`), the `.env` and `.config` file names, `TI_ACCOUNT` in the `.env` file |
 | The IBKR account number | `DU…` for paper; a live number never begins `DU` | IBKR, the adapter's configuration, and the paper configuration's `account_id` |
 | The plan's name | "the joint account", "the Traditional IRA", "the Roth IRA" | the chapters and the plan |
+
+In an alert's title, `<account>` is the first of these (the name in the
+configuration, such as `joint`), read from the log. The reporter's own
+`-account` setting, which the server sets to the second, is only used when
+the log cannot name its account.
 
 **Acknowledged** (an order). IBKR has reported on the order (accepted,
 refused, cancelled or filled), and the engine read the report. The third of
@@ -27,12 +32,18 @@ and changes nothing else. See [operator](operator.md).
 IBKR's figures and reports for the engine and sends its released orders.
 See [IBKR adapter](ibkr-adapter.md).
 
+**Alert.** A message from the reporter. An **urgent** one pages you; a
+**routine** one only informs. Most are sent once; reconciliation and
+engine-state alerts repeat every 30 minutes until you **acknowledge** them.
+See [alerts and dashboard](alerts-and-dashboard.md).
+
 **Alert key.** The name at the end of each alert's text, which an
 **acknowledgement** must quote exactly. See
 [alerts and dashboard](alerts-and-dashboard.md).
 
 **Approval.** Your recorded permission for a **fresh run**, naming the
-previous log, the **latch** and the **incident** in force. Written by
+previous log, the **latch** and the **incident** in force, or for an
+account's first run, stating its **starting book**. Written by
 `operator approve`. See [restart](restart.md).
 
 **b** (the bond share). The share of an IRA meant for bonds at your age,
@@ -43,16 +54,34 @@ reference price may be from the **mark**, which also sets the limit price;
 and the **rebalance band** (25%), how far an IRA holding may drift from its
 target before it is traded. See [momentum](momentum.md).
 
+**As of the close** (a reading). The IBKR adapter's one account reading
+after a session's close, stamped as the account at that close: allowed when
+it is read after the close on the close's own New York date, with no open
+order for the account at IBKR from any client (working, pending or
+cancel-pending), IBKR's executions read in full and none at or since the
+close, every holding with an official close in the file, IBKR's own net
+liquidation above zero, the holdings those of the previous close (or the
+**starting book**) adjusted by the fills recorded since, the cash the
+previous close's adjusted by those fills within 1% of the net liquidation
+at the close, and no snapshot the engine holds as of this close or later
+(your decision of 2026-10-18). Otherwise it is stamped at its **read
+time**, and the engine withholds that session; a run's first reading that
+is not the book sends no snapshot and halts the account as unverifiable
+([reconciliation](reconciliation.md)). See
+[market data](market-data.md) and [paper trading](paper-trading.md#a-paper-day).
+
 **Book.** What the engine believes an account holds: the last **account
-snapshot** plus the fills and other events recorded since. The morning
-**reconciliation** compares it with IBKR's figures. See
+snapshot** plus the fills and other events recorded since. The
+**reconciliation** at each start compares it with IBKR's figures. See
 [reconciliation](reconciliation.md).
 
 **Broker snapshot** (`account.broker.snapshot`). One read of IBKR's
 positions, net liquidation, total cash, **Excess Liquidity** and open
 orders. The risk gate sizes sells from it. Different from the **account
 snapshot** (`account.snapshot`), the positions and value as of a close that
-the strategy decides from. See [states and kill switch](states-and-kill-switch.md).
+the strategy decides from; the IBKR adapter makes both from one reading,
+stamped **as of the close** when it can be, with the **read time** beside
+the broker snapshot. See [states and kill switch](states-and-kill-switch.md).
 
 **Build stamp.** The git commit a program was built from, recorded in every
 decision. An unstamped build ("dev") cannot run dry-run, paper or live. See
@@ -72,7 +101,7 @@ is on disk is **committed**: it may or may not have reached the adapter.
 See [order lifecycle](order-lifecycle.md).
 
 **Configuration.** One account's settings file: strategy, account, mode,
-rule figures and hard limits (`/etc/trend-investing/engines/<account>.config`).
+rule figures and hard limits (`/etc/trend-investing/engines/<instance>.config`).
 It is the first record of every run.
 
 **Configuration hash.** A fingerprint (SHA-256) of the configuration and
@@ -82,6 +111,14 @@ configuration is always a new run (ADR 0016).
 **D7-L** (minimum lot). The IRAs' whole-share rule: a pick one share of
 which costs more than its target is replaced by the next stock. See
 [minimum lot](momentum-minimum-lot.md).
+
+**Dashboard.** A web page, `ti-dashboard`, listening on `127.0.0.1:8088` on
+the server only, that shows the daily summary, one section per account. See
+[alerts and dashboard](alerts-and-dashboard.md).
+
+**Data job.** `ti-data`, the scheduled job that records the day's market data
+and writes the files an engine's input **stream** is made from. See
+[market data](market-data.md).
 
 **Decision.** A record the engine writes from its inputs: a target
 (`strategy.targets.decided`), a planned order, a release or refusal, a
@@ -116,12 +153,18 @@ that answers like IBKR with invented accounts and prices.
 **Fee allowance.** The $2.00 per order the IRA planner adds to a buy's
 worst-case cost. See [momentum](momentum.md).
 
+**Fill.** One execution of an order at IBKR: some or all of its shares at a
+price. A fill is a separate report from an order's status. See
+[order lifecycle](order-lifecycle.md).
+
 **Fresh run.** Any start that is not a crash **resume**: after you stopped
 the engine, a reboot, a new build, leaving Degraded or Halted. It needs your
 **approval**. See [restart](restart.md).
 
-**Gap.** A session missing from a price series. Boost never computes across
-one; momentum leaves out a stock not held with a gap. See [boost](boost.md)
+**Gap.** A session missing from a price series. Boost skips a session with
+no SPY bar (that session is withheld, nothing trades) and computes its
+readings over the closes it has; the next decision names the gap
+(`gap_sessions`). Momentum leaves out a stock not held with a gap. See [boost](boost.md)
 and [momentum universe](momentum-universe.md).
 
 **Golden case.** A month (momentum) or a session (Boost) logged from
@@ -137,6 +180,10 @@ by itself. See [states and kill switch](states-and-kill-switch.md).
 **Hand-over.** The adapter's "about to send" and "sent" marks for an order,
 written on disk before and after it hands the order to IB Gateway, in the
 file ending `.handover`. See [re-delivery](redelivery.md).
+
+**IB Gateway, IBC.** IB Gateway is IBKR's own login-and-connection program;
+IBC keeps it logged in. All the adapters connect through the one on the
+server. See [IBKR adapter](ibkr-adapter.md).
 
 **Incident.** The span from an account's first move out of Normal until
 your recovery. Degraded to Halted is the same incident. Each incident gets
@@ -158,9 +205,19 @@ while running. `journal-query` reads both. See
 except the joint account's sale back to 98%. It does not cancel orders
 already at IBKR. See [states and kill switch](states-and-kill-switch.md).
 
+**Lapse, lapsed.** A withheld sale back to 98% that is given up: what fired it
+ended before a good **broker snapshot** could size it, so the sale is not
+tried again. The log records one more withheld sale with the reason `lapsed`;
+it goes in the daily summary, not an urgent alert. See
+[states and kill switch](states-and-kill-switch.md).
+
 **Latch.** Whether Boost's boost is on. It turns on after a sharp drop in
 an uptrend and off at a close above the 5-day average, and is taken from
 the record after a restart, never recomputed. See [boost](boost.md).
+
+**Limit order.** An order that may not trade at a worse price than its limit.
+Every order the engines release is a whole-share DAY limit order. See
+[paper trading](paper-trading.md).
 
 **Live.** The mode that would send real orders to a real account. Refused
 until the limited-live gate (plan section 9, Phase 5).
@@ -170,9 +227,15 @@ Liquidity**: warning below 40% of net liquidation, urgent below 20% (or no
 reading for 30 minutes while the market is open), which fires the sale
 back to 98%.
 
-**Mark.** IBKR's latest recorded price for an instrument
-(`market.mark.recorded`), recorded at or after the close. The **price band**
-compares the order's reference price with it.
+**Mark.** An instrument's recorded price at a close (`market.mark.recorded`):
+the delivered bar's official close, the price the backtest marks at, with
+IBKR's last traded price beside it (`broker_last`). The **price band**
+compares an order's reference price with IBKR's last price when there is one,
+else with the official close, and the order says which (`mark_source`); no
+decision needs IBKR market-data permissions. Each holding's price in the
+**broker snapshot** is on that snapshot's own basis: the official close for a
+snapshot as of the close, IBKR's last price for one stamped at its read time.
+See [market data](market-data.md).
 
 **MaxSnapshotAge.** How old IBKR's latest **broker snapshot** may be when a
 sell is checked against it (30 minutes for Boost).
@@ -185,6 +248,15 @@ sell is checked against it (30 minutes for Boost).
 **Operator inbox.** The folder an engine reads your instructions from,
 written by the `operator` tool. See [operator](operator.md).
 
+**Order status.** What IBKR reports about an order that is not a **fill**:
+submitted (working), cancel-pending, canceled or invalid (refused). See
+[order lifecycle](order-lifecycle.md).
+
+**Outbox.** The adapter's file of inputs it has taken but not yet sent to the
+engine (IBKR's reports, and a day's market data behind its **broker
+snapshot**), each sent once, in order. It sits beside the **pending file**.
+See [re-delivery](redelivery.md).
+
 **Paper.** The mode that sends orders, but only to an IBKR paper account
 (numbers beginning `DU`). See [paper trading](paper-trading.md).
 
@@ -193,27 +265,41 @@ QuantConnect backtests from the same data, within thresholds fixed in
 advance (ADR 0026, point 7). See [parity](parity.md).
 
 **Pending file.** The adapter's small file holding the input it is waiting
-for the engine's reply to; the hand-over and decision files sit beside it.
+for the engine's reply to. The hand-over file (`.handover`), the file of your
+resolve decisions (`.handover.decisions`), the lock (`.lock`) and the outbox
+sit beside it with the same name plus an ending.
 See [re-delivery](redelivery.md).
 
 **Quarantine.** A folder beside the logs (or the recordings) where a file
 the program cannot use is moved, unchanged, as evidence. The program never
 reads it.
 
+**Read time** (`read_at`). When the IBKR adapter actually read the account
+for a **broker snapshot**: beside the stamp when the reading is **as of the
+close**, and the stamp itself, with the reason (`not_as_of_close`), when it
+is not.
+
 **Re-delivery.** The adapter asking the engine again for the reply to an
 input, by sending the same input again; the engine answers from its log,
 so an order is never lost or doubled. See [re-delivery](redelivery.md).
 
-**Re-plan.** Boost planning again, at its next decided session, an order
-the gate refused while the account stayed Normal. See
-[boost](boost.md#a-refused-order-is-planned-again-re-plan).
+**Re-plan.** Boost planning again, at its next decided session, the
+difference to its target after its last order did not get there: the gate
+refused it while the account stayed Normal (`refused`), it ended with
+shares unfilled (`part-filled`, or `unfilled` when none filled), or IBKR
+rejected it (`rejected`, planned once more only; two orders rejected in a
+row stop Boost's buys until a fresh run, while its sells still go). The
+`unfilled` re-plan, the one retry of a rejection and the stop after two
+were confirmed by the owner on 2026-10-18. The decision records the
+cause (`replan`). See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Reconciled, reconciliation.** Three different things carry this word:
 
 | Meaning | What it is | Can it put the account in Degraded or Halted? |
 | --- | --- | --- |
 | (a) The adapter's matching | On every connect and reconnect, the adapter matches IBKR's open orders, trades and balances with its own records before it sends anything. Its messages call this "reconciled" | No |
-| (b) The morning reconciliation | The engine compares IBKR's positions and cash with its **book**: matched, explained, unexplained or unverifiable ([reconciliation](reconciliation.md)) | Yes |
+| (b) The morning reconciliation | The engine compares IBKR's positions and cash with its **book**: matched, explained, unexplained or unverifiable ([reconciliation](reconciliation.md)). The adapter sends IBKR's figures at a run's first delivery and at every later start and reconnect | Yes |
 | (c) `journal-query reconcile` | A read of a log that checks the recorded fills against the recorded account snapshots ([journal-query](journal-query.md)) | No: it only reads |
 
 When a runbook says "reconcile the account" it means a fourth thing: you
@@ -224,9 +310,21 @@ compare IBKR's positions, cash and open orders with the journal yourself
 meets a state that stops it (`risk.order.refused`, with a reason). A
 refused order is never sent.
 
+**Rejections in a row.** Boost's count of its orders IBKR rejected since
+the last one IBKR accepted, each counted when IBKR's first word on it
+arrives, however late (`venue_rejections`). At two Boost's buys stop until
+a fresh run, while its sells still go; each decision names the orders
+counted (`rejected_in_a_row`), so at the stop the two that stopped buys,
+and the page names them too. See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
+
 **Release, released.** The risk gate's answer to an order that passes
 (`risk.order.released`). In the order's lifecycle, **released** also means
 a later input proves the adapter received it.
+
+**Reporter.** `ti-reporter`, which reads an account's log every 5 minutes,
+around the clock, and sends its **alerts** and the daily summary. It only
+reads. See [alerts and dashboard](alerts-and-dashboard.md).
 
 **Resume.** Restarting a crashed run from its own durable log, carrying on
 exactly where it stopped. Needs no approval. See [restart](restart.md).
@@ -244,7 +342,7 @@ lower: exempt from the order count, order size and price band.
 **RulesVersion.** A version number declared in the code that changes only
 when a rule changes, so two builds with the same rules version replay each
 other's logs exactly (ADR 0016). The target-weight strategies are at
-**1.17.0**; a log written under an earlier one does not replay. Each
+**1.19.0**; a log written under an earlier one does not replay. Each
 chapter's "since version x" notes say when a rule arrived.
 
 **Run.** One start of an engine to its stop, with its own name (`TI_RUN`),
@@ -269,12 +367,22 @@ early close), from the committed NYSE calendar.
 **Sleeve.** One of an IRA's two parts: the momentum sleeve and the bond
 sleeve. See [glide path](glide-path.md).
 
+**Starting book.** The holdings and total cash you checked in IBKR and
+stated in an account's first run's **approval** (or a fresh run's, after you
+moved shares or cash): the book the run's first reading after a close is
+compared with, so IBKR's figures are never taken as the book unchecked. See
+[restart](restart.md).
+
 **Stale episode.** A stretch during which IBKR's latest snapshot is too old
 for a sell to be checked against it; it carries one urgent alert, however
 many sells it refuses.
 
+**Stream.** The market-data files the **data job** writes for a run, which the
+adapter hands to the engine in order, each input once, behind a fresh
+**broker snapshot**. See [market data](market-data.md).
+
 **Strategy version.** `<strategy>/<rules version>+<build>`, carried on every
-record, for example `boost/1.17.0+<commit>`.
+record, for example `boost/1.19.0+<commit>`.
 
 **Synthetic report.** In dry-run only, the engine's own "never sent,
 cancelled" record for each order a momentum IRA releases, so the next month
@@ -283,12 +391,30 @@ is not held back. It is never an execution. See [engine](engine.md).
 **Torn tail.** A partial group at the end of a log, left by a crash in the
 middle of a write. A resume leaves it out; nothing from it was released.
 
+**Undecided order.** An order Boost released that IBKR has neither
+accepted nor rejected yet: no fill, and no report but "submitted". Each
+decision lists them (`undecided_orders`), so IBKR's late word on any of
+them counts after a restart as it would have without one. An order leaves
+the list at its first word beyond "submitted" (a fill, an expiry or
+cancellation, or a rejection), or, if the adapter never sent it,
+when you record `operator rebalance-cleared` for it; a dry-run lists none
+(`no_venue: "dry-run"`), since no order reaches IBKR. See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
+
 **Universe.** For momentum, the 500 US common stocks with the highest
 dollar volume (at $5 or more) on the decision session. See
 [momentum universe](momentum-universe.md).
 
+**Unreadable.** A figure IBKR did not deliver, or delivered in a form the
+engine cannot hold exactly. It is marked unreadable and never sent as zero.
+See [reconciliation](reconciliation.md).
+
 **Warm-up.** The history a run reads before its first decision, so its
 averages are ready. For Boost, from the configuration's `warm_up_start`.
+
+**Working** (an order). Open at IBKR and still able to fill. In a momentum run the engine
+treats a released order as working until a report or your clearance ends it. See
+[order lifecycle](order-lifecycle.md).
 
 **Withheld.** A decision that sets no targets, with a reason
 (`missing-bars`, `stale-account-snapshot`, `labels-missing` and so on), so a

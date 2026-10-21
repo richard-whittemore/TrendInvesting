@@ -98,6 +98,19 @@ expect "a container that cannot reach a reference fails closed" 1 "$(run FAKE_CO
 expect "a wider tolerance admits a 5 second skew" 0 "$(run FAKE_CONTAINER=1 FAKE_OFFSET=5 TI_CLOCK_TOLERANCE_SECONDS=10)"
 expect "the default tolerance refuses a 5 second skew" 1 "$(run FAKE_CONTAINER=1 FAKE_OFFSET=5)"
 
+# The output contract the reporter reads (the script's header, "Output"): a
+# measured skew is "skew <N>s" on a pass and "skew of <N>s" on a failure, and
+# a failure with no measurement begins "clock: not synchronised" or
+# "clock: no reference clock could be measured".
+run FAKE_CONTAINER=1 FAKE_OFFSET=60 >/dev/null
+grep -Eq '^clock: skew of -[0-9]+s against ' "$work/err" || expect "a refused skew is 'clock: skew of <N>s against'" yes "$(cat "$work/err")"
+run FAKE_CONTAINER=1 FAKE_OFFSET=0 >/dev/null
+grep -Eq '^clock: ok, skew -?[0-9]+s against ' "$work/out" || expect "a passing skew is 'clock: ok, skew <N>s against'" yes "$(cat "$work/out")"
+run FAKE_CONTAINER=1 FAKE_OFFLINE=1 >/dev/null
+grep -q '^clock: no reference clock could be measured' "$work/err" || expect "no reference reads 'clock: no reference clock could be measured'" yes "$(cat "$work/err")"
+run FAKE_SYNC=no FAKE_CONTAINER=0 >/dev/null
+grep -q '^clock: not synchronised' "$work/err" || expect "a VM refusal reads 'clock: not synchronised'" yes "$(cat "$work/err")"
+
 # The request's own latency must not bias the skew: the local clock is read
 # either side of the request and compared with the reference at the midpoint.
 expect "a 3 second round trip does not bias a 1 second tolerance" 0 \
@@ -269,6 +282,12 @@ check_line=$(printf '%s\n' "$clock_body" | grep -nF 'clock-check.sh" ||' | head 
 order=no
 if test -n "$dir_line" && test -n "$check_line" && test "$dir_line" -lt "$check_line"; then order=yes; fi
 expect "inside step_clock the directory is created before the clock check" yes "$order"
+
+# The reporter runs the installed check as ti-trader, the engine's user: the
+# check and its directory are installed readable and executable by all.
+grep -q 'install -d -m 0755 /usr/local/libexec/trend-investing' "$here/../provision.sh" || expect "step_clock creates the libexec directory 0755" yes no
+# shellcheck disable=SC2016 # the literal text of provision.sh
+grep -q 'install -m 0755 "$here"/libexec/clock-check.sh /usr/local/libexec/trend-investing/' "$here/../provision.sh" || expect "step_clock installs the check 0755" yes no
 
 test "$failures" -eq 0 || exit 1
 echo "clock tests ok"
