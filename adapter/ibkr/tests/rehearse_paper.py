@@ -104,6 +104,7 @@ WARM_SESSIONS = 6
 # The paper account's synthetic holding before the first day, its net
 # liquidation, and IBKR's synthetic last price for SPY (the price band's comparison).
 HELD = 10
+BEFORE_APPROVAL = 1  # shares of the order struck before the approval
 # The inputs the engine records before the adapter's first: its
 # configuration, then a first run's approval.
 HEAD = 2
@@ -522,12 +523,21 @@ def rehearse(work, account):
 
         def late_fills():
             evening(second)
-            first = quantity // 2
+            # One share was struck before the owner stated the book, which
+            # already holds it: IBKR replays it among the day's executions,
+            # and it is not counted again (ADR 0019: a book and the
+            # movements that explain it share one cutoff).
+            first = (quantity - BEFORE_APPROVAL) // 2
+            gateway.fill(7, shares=str(BEFORE_APPROVAL), price=fill_price, exec_id="0001f4e8.rehearsal.00.01",
+                         cum_qty=str(BEFORE_APPROVAL), commission="0.50",
+                         time="{} 10:00:00 US/Eastern".format(eve.strftime("%Y%m%d")))
             gateway.fill(7, shares=str(first), price=fill_price, exec_id="0001f4e8.rehearsal.01.01",
-                         cum_qty=str(first), commission="1.00", time="{} 16:30:01 US/Eastern".format(stamp_day))
-            gateway.fill(7, shares=str(quantity - first), price=fill_price, exec_id="0001f4e8.rehearsal.02.01",
-                         cum_qty=str(quantity), commission="0.35", time="{} 16:30:04 US/Eastern".format(stamp_day))
-            gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity), 395.0)]
+                         cum_qty=str(BEFORE_APPROVAL + first), commission="1.00",
+                         time="{} 16:30:01 US/Eastern".format(stamp_day))
+            gateway.fill(7, shares=str(quantity - BEFORE_APPROVAL - first), price=fill_price,
+                         exec_id="0001f4e8.rehearsal.02.01", cum_qty=str(quantity), commission="0.35",
+                         time="{} 16:30:04 US/Eastern".format(stamp_day))
+            gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity - BEFORE_APPROVAL), 395.0)]
             written["second"] = data_job(work, config, run_log, settled(second))
 
         run(Phase([
@@ -535,9 +545,10 @@ def rehearse(work, account):
             (lambda: second_close in [i["id"] for i in inputs(run_log)], None, "the next day's close"),
         ]), run_log)
         fills = of(run_log, FILL_TYPE)
-        check([f["payload"]["fill_id"] for f in fills] == ["0001f4e8.rehearsal.01.01", "0001f4e8.rehearsal.02.01"]
+        check([f["payload"]["fill_id"] for f in fills] == ["0001f4e8.rehearsal.00.01", "0001f4e8.rehearsal.01.01",
+                                                         "0001f4e8.rehearsal.02.01"]
               and sum(f["payload"]["quantity"] for f in fills) == quantity,
-              "both fills reached the engine with their commissions, the whole order in all")
+              "all three fills reached the engine with their commissions, the whole order in all")
         late = of(run_log, BROKER_SNAPSHOT_TYPE)[-1]["payload"]
         late_account = of(run_log, ACCOUNT_SNAPSHOT_TYPE)[-1]["payload"]
         withheld = [d["payload"] for d in decisions(run_log, second_close) if d["type"] == DECIDED]
@@ -562,10 +573,11 @@ def rehearse(work, account):
         run(Phase([(lambda: third_close in [i["id"] for i in inputs(resumed_log)], None,
                     "the next day's stream to reach the resumed run")]), resumed_log)
         new = inputs(resumed_log)[copied:]
-        # The fake gateway's cash never moves, so the order's fills, after
-        # the approval's cutoff, are cash the book cannot explain: their
+        # The fake gateway's cash never moves, so the order's fills after
+        # the approval's cutoff (not the one struck before it, which the
+        # book already counts) are cash the book cannot explain: their
         # value and commissions, added up since the starting book.
-        cost = -cash_change([f["payload"] for f in fills])
+        cost = -cash_change([f["payload"] for f in fills if f["payload"]["fill_id"] != "0001f4e8.rehearsal.00.01"])
         resumed_broker = new[3]["payload"] if len(new) > 3 else {}
         resumed_decided = [d["payload"] for d in decisions(resumed_log, third_close) if d["type"] == DECIDED]
         check(nxt == streams / RUN / "boost-{}.jsonl".format(third) and sorted(os.listdir(streams)) == [RUN]
@@ -580,7 +592,7 @@ def rehearse(work, account):
               "cash unexplained, and the resumed engine decided it; nothing earlier was sent again")
 
         # -- 7. a holding no order explains --------------------------------
-        gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity + 5), 395.0)]
+        gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity - BEFORE_APPROVAL + 5), 395.0)]
         reconciled = len(of(resumed_log, RECONCILIATION_TYPE))
         run(Phase([(lambda: len(of(resumed_log, RECONCILIATION_TYPE)) > reconciled, None,
                     "the start's reconciliation")]), resumed_log)

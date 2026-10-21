@@ -264,12 +264,12 @@ def _kept(cache_path, key):
     adapter's log learns the file was discarded.
     """
     try:
-        with open(cache_path, encoding="utf-8") as f:
-            text = f.read()
+        with open(cache_path, "rb") as f:
+            data = f.read()
     except OSError:
         return None
     try:
-        raw = json.loads(text)
+        raw = json.loads(data.decode("utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("not an object")
         if raw.get("version") != CACHE_VERSION or raw.get("key") != key:

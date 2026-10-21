@@ -174,6 +174,17 @@ class BookBasisTests(unittest.TestCase):
                 self.assertIn(str(cache), "\n".join(logged.output), "the file discarded is named")
                 self.assertEqual(json.loads(cache.read_text()), good, "and it is replaced")
 
+    def test_a_kept_basis_that_is_not_utf8_is_logged_walked_again_and_replaced(self):
+        self.chain()
+        cache = self.root / "pending.json.basis"
+        walked = previous_close(str(self.root / "b.log"), str(cache))
+        good = cache.read_text()
+        cache.write_bytes(b"\xff\xfe{\x80")
+        with self.assertLogs("ibkr", level="WARNING") as logged:
+            self.assertEqual(previous_close(str(self.root / "b.log"), str(cache)), walked)
+        self.assertIn(str(cache), "\n".join(logged.output), "the file discarded is named")
+        self.assertEqual(cache.read_text(), good, "and it is replaced")
+
     def test_a_missing_earlier_log_stops_naming_it(self):
         self.chain()
         (self.root / "a.log").unlink()
