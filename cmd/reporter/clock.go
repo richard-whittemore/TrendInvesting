@@ -116,13 +116,14 @@ func loadHostClock(path string) (hostClock, error) {
 // clockStep checks the host's clock, under an exclusive lock on the shared
 // clock state so that the host's reporters page and clear once between them.
 // An instance that finds the lock held skips the check, since another is
-// making it now, and reports the last one recorded. A check made within
-// clockCheckFresh of now, or dated after it (a sibling's clock reading a
-// moment later, or this clock gone back), is this period's and is reused
-// rather than made again or counted again. A failure pages once
-// clockPagesAfter checks in a row have failed; a passing check resolves the incident on PagerDuty and
-// forgets it, so the next failure pages anew. It returns the check the
-// summary shows, if any.
+// making it now, and reports the last one recorded. A check lying within
+// clockCheckFresh of now, before or after it (a sibling's clock reading a
+// moment later), is this period's and is reused rather than made again or
+// counted again. A check dated further ahead than that means the clock went
+// back: it is stale, a new check is made, and the stale one is not counted
+// with it. A failure pages once clockPagesAfter checks in a row have failed;
+// a passing check resolves the incident on PagerDuty and forgets it, so the
+// next failure pages anew. It returns the check the summary shows, if any.
 func clockStep(path, command, host string, senders []sender, clock func() time.Time, every time.Duration) (*report.ClockCheck, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -162,7 +163,14 @@ func clockStep(path, command, host string, senders []sender, clock func() time.T
 		}
 		return writeAtomic(path, raw)
 	}
-	if h.Last == nil || now.Sub(h.Last.At) >= clockCheckFresh {
+	age := time.Duration(0)
+	if h.Last != nil {
+		age = now.Sub(h.Last.At)
+	}
+	if h.Last == nil || age >= clockCheckFresh || age <= -clockCheckFresh {
+		if h.Last != nil && age <= -clockCheckFresh {
+			h.Failures = 0
+		}
 		c := runClockCheck(command, now)
 		h.Last = &c
 		h.Failures++

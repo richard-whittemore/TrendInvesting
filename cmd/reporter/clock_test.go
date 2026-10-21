@@ -166,9 +166,37 @@ func TestChecksWithinOneTimerPeriodRunOnceAndCountOnce(t *testing.T) {
 	}
 }
 
-func TestACheckRecordedInTheFutureIsThisPeriodsAndIsReusedNotCounted(t *testing.T) {
+// clockPages counts the PagerDuty events sent for the clock alert.
+func clockPages(r *relay) int {
+	n := 0
+	for _, m := range r.to("events.pagerduty.test") {
+		if strings.Contains(m, "clock-drift:") {
+			n++
+		}
+	}
+	return n
+}
+
+// failuresRecorded is the consecutive-failure count in the host's clock state.
+func failuresRecorded(t *testing.T, dir string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "host-clock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"0", "1", "2", "3"} {
+		if strings.Contains(string(raw), `"consecutive_failures":`+n+`,`) || strings.Contains(string(raw), `"consecutive_failures":`+n+`}`) {
+			return n
+		}
+	}
+	t.Fatalf("no failure count in %s", raw)
+	return ""
+}
+
+func TestACheckRecordedAMomentInTheFutureIsThisPeriodsAndIsReusedNotCounted(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	check := newStandInCheck(t)
+	check.fail(clockFailure)
 	dir := t.TempDir()
 	at := t0.Add(time.Hour)
 	for _, d := range []time.Duration{0, -time.Minute} {
@@ -178,6 +206,37 @@ func TestACheckRecordedInTheFutureIsThisPeriodsAndIsReusedNotCounted(t *testing.
 	}
 	if check.runs() != 1 {
 		t.Errorf("a check dated after this firing was made again: %d runs, want 1", check.runs())
+	}
+	if n := failuresRecorded(t, dir); n != "1" {
+		t.Errorf("the reuse moved the failure count to %s, want 1", n)
+	}
+	if got := clockPages(r); got != 0 {
+		t.Errorf("%d clock pages went out after one failed check, want 0", got)
+	}
+}
+
+// A clock set back by hours: the check recorded while it ran ahead is not this
+// period's, so a new one runs, and the old one is not counted with it (ADR
+// 0019: a wrong clock makes the engine withhold sells).
+func TestACheckRecordedHoursAheadMeansTheClockWentBackAndIsCheckedAgainWithoutCountingTheOldOne(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	check := newStandInCheck(t)
+	check.fail(clockFailure)
+	dir := t.TempDir()
+	at := t0.Add(5 * time.Hour)
+	for _, d := range []time.Duration{0, -3 * time.Hour} {
+		if err := clockRun(t, r, dir, check.path(), at.Add(d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if check.runs() != 2 {
+		t.Errorf("a check dated 3 hours ahead was reused: %d runs, want 2", check.runs())
+	}
+	if n := failuresRecorded(t, dir); n != "1" {
+		t.Errorf("the stale check was counted with the new one: failure count %s, want 1", n)
+	}
+	if got := clockPages(r); got != 0 {
+		t.Errorf("%d clock pages went out on a stale failure and a new one, want 0", got)
 	}
 }
 
