@@ -580,6 +580,12 @@ CONF
   # adapter (ADR 0026 point 8: one engine per account).
   install -d -o root -g root -m 0700 "$etc/accounts"
   write_stub "$etc/accounts/boost.env" "$here/etc/accounts/boost.env.example"
+  # Each IRA's file too, named only: its Flex reader's unit loads it as a
+  # credential, and a missing file would end the start at systemd's credential
+  # setup ("Failed to set up credentials") before anything says why; present
+  # and empty, the reader names the line to fill in (ti-flex@.service).
+  write_stub "$etc/accounts/trad-ira.env" "$here/etc/accounts/trad-ira.env.example"
+  write_stub "$etc/accounts/roth-ira.env" "$here/etc/accounts/roth-ira.env.example"
   if mac_mini; then ensure_operator_user 2003; else ensure_operator_user; fi
   install -d -o ti-trader -g ti-trader -m 0750 \
     /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines \

@@ -8,10 +8,14 @@ After=network-online.target
 Wants=network-online.target
 # Skipped, not failed, until the adapter's code is installed (provision.sh
 # adapter), as ti-adapter-boost.service is. Once installed, a missing token,
-# a rejected one, a missing account file, a statement refused or a service
-# error fails the unit with a message, so the owner sees a failed unit, never
-# a silent skip (docs/manual/reconciliation.md, "Deposits and withdrawals,
-# read from IBKR").
+# a rejected one, an account file with its line not filled in, a statement
+# refused or a service error fails the unit with a message, so the owner sees
+# a failed unit, never a silent skip (docs/manual/reconciliation.md,
+# "Deposits and withdrawals, read from IBKR"). provision.sh writes every
+# account's file, named only, so the reader is the one to say which line is
+# empty; an account file deleted after that fails the unit earlier, at
+# systemd's credential setup ("Failed to set up credentials", status
+# 243/CREDENTIALS), which names no line.
 ConditionFileIsExecutable=/opt/trend-investing/adapter-venv/bin/python3
 ConditionPathExists=/opt/trend-investing/adapter/adapter/ibkr/flex.py
 

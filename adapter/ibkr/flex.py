@@ -22,9 +22,20 @@ read from IBKR"). One reading:
    approval (ADR 0027, starting-book amendment), so the approval's
    approved_at is the cutoff: a transfer dated before it is in that book and
    is not written (counted as in_first_book); one at or after it is always
-   written, or the reading is set aside. Postings other than transfers are
+   written, or the reading is set aside. A transfer IBKR dates by day alone
+   on the approval's own New York day is taken as after it (counted as
+   date_only_on_approval_day): the owner read the book before approving, so
+   the book cannot hold it. Postings other than transfers are
    parsed, and kept on the Statement, but not written; a type KINDS does not
    know is counted in the status file (unknown_types) and said.
+
+Each reading's period (the statement's fromDate and toDate) is kept beside
+the ledger (COVERAGE_SUFFIX). A statement that starts later than the day
+after the last accepted reading ended leaves days in neither, and a transfer
+on them would be lost when it drops out of the query's window: the reading
+is refused as a coverage gap (state "coverage-gap", both days named),
+nothing is written, and the kept period is not moved on. The first reading
+has no period before it and is accepted.
 
 The equity before a transfer (equity_before) is, in order:
 
@@ -46,7 +57,18 @@ The equity before a transfer (equity_before) is, in order:
 
 Both approximations assume the close snapshot was read after the transfer,
 as the post-close reading is (17:05 New York or later); a transfer IBKR
-times later that evening is taken as held by it.
+times later that evening is taken as held by it. A close snapshot is one
+stamped as of its session's official close (snapshot.py: 4 p.m., 1 p.m. on
+an early close), found by the data job's NYSE calendar, the one the adapter
+stamps by (adapter/marketdata/nyse_calendar.py).
+
+A record once written is never changed. A transfer IBKR adds a reading late
+can belong in a figure already written from the same snapshot (a transfer
+before it, when its figure adds those since the snapshot; one after it,
+when its figure takes those from it on off the snapshot): it is written,
+and its record says so (note, LATER_WRITTEN_FIRST or
+EARLIER_WRITTEN_FIRST; counted as out_of_order), the earlier-written
+record's equity_before not revised.
 
 The ledger is the instance's own file of cash movements, one JSON record a
 line, beside its status file (STATUS_SUFFIX). It is the seen-IDs state: a
@@ -83,7 +105,9 @@ from datetime import datetime, time as clock, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
-from relay import LOG_INPUT, RUN_APPROVED, ResolveRefused, run_chain
+from relay import LOG_INPUT, RUN_APPROVED, ResolveRefused, marketdata_module, run_chain
+
+nyse_calendar = marketdata_module("nyse_calendar")
 
 CASH_MOVEMENT = ("account.cash-movement", 2)   # internal/event CashMovementTransferVersion
 ACCOUNT_SNAPSHOT = ("account.snapshot", 3)      # internal/event AccountSnapshotPositionsVersion
@@ -95,6 +119,8 @@ BASES = (NEXT_SNAPSHOT_LESS_AMOUNT, SAME_DAY_SNAPSHOT_LESS_AMOUNT)
 SOURCE = "ibkr-flex"
 ID_PREFIX = "ibkr-flex:"
 STATUS_SUFFIX = ".status.json"
+COVERAGE_SUFFIX = ".coverage.json"
+COVERAGE_FIELDS = ("from_date", "to_date")
 LOCK_SUFFIX = ".lock"
 
 # IBKR's Flex Web Service, version 3. GetStatement's address comes from
@@ -127,10 +153,11 @@ REJECTED_CODES = frozenset(("1010", "1011", "1012", "1013", "1014", "1015", "101
 # query's default formats, which the owner keeps. That it is New York time
 # is an assumption until the first live statement is checked against the
 # owner's activity statement (docs/manual/reconciliation.md). A date alone
-# is taken as the start of that New York day.
+# is taken as the start of that New York day, and the posting is marked as
+# dated by day alone (Posting.dated_only).
 NEW_YORK = ZoneInfo("America/New_York")
-CLOSE = clock(16, 0)  # the US close, New York time: a close snapshot's as-of (ADR 0019)
 FLEX_DATE = re.compile(r"([0-9]{4})([0-9]{2})([0-9]{2})(?:;([0-9]{2})([0-9]{2})([0-9]{2}))?")
+FLEX_DAY = re.compile(r"[0-9]{8}")
 
 # The kinds of posting, from IBKR's Cash Transactions type. Only TRANSFER is
 # written; the others are kept on the Statement for a costs ledger.
@@ -155,21 +182,35 @@ KINDS = {
     "Advisor Fees": FEE,
 }
 
-Posting = namedtuple("Posting", "transaction_id kind ibkr_type as_of amount currency")
+Posting = namedtuple("Posting", "transaction_id kind ibkr_type as_of amount currency dated_only")
 """One Cash Transactions row: IBKR's transaction ID, the kind (KINDS, else OTHER), IBKR's own type, when (UTC,
-a whole second), the amount (a Decimal, signed as IBKR states it) and its currency."""
+a whole second), the amount (a Decimal, signed as IBKR states it), its currency, and whether IBKR dated it by day
+alone (as_of then the start of that New York day)."""
 
 Statement = namedtuple("Statement", "account_id from_date to_date postings")
-"""The instance's Flex statement: its account, the period IBKR states, and every detail posting in order."""
+"""The instance's Flex statement: its account, the period IBKR states (yyyyMMdd, from_date not after to_date), and
+every detail posting in order."""
 
 ACCOUNT_NUMBER = re.compile(r"\b[A-Z]{1,2}[0-9]{5,9}\b")
 RECORD_FIELDS = ("id", "type", "schema_version", "event_time", "source", "payload")
+OPTIONAL_RECORD_FIELDS = ("note",)
+# A record's note, beside the engine's payload (internal/event CashMovementPayload, which has no field for it):
+# the transfer was added a reading late, after a record from the same snapshot whose figure it belongs in.
+LATER_WRITTEN_FIRST = ("a later transfer in the same interval was written first; its equity_before omits this one "
+                       "and is not revised")
+EARLIER_WRITTEN_FIRST = ("an earlier transfer in the same interval was written first; its equity_before omits this "
+                         "one and is not revised")
+NOTES = (LATER_WRITTEN_FIRST, EARLIER_WRITTEN_FIRST)
 PAYLOAD_FIELDS = ("as_of", "amount", "equity_before", "currency", "transaction_id")
 OPTIONAL_PAYLOAD_FIELDS = ("equity_before_basis",)
 
 
 class StatementRefused(ValueError):
     """The statement, or the ledger beside it, cannot be read as written; nothing of it is taken."""
+
+
+class CoverageGap(StatementRefused):
+    """The statement starts later than the day after the last accepted reading ended: days are in neither."""
 
 
 class FlexRejected(Exception):
@@ -208,7 +249,17 @@ def _flex_time(text, where):
         local = datetime(*parts, tzinfo=NEW_YORK)
     except ValueError:
         raise StatementRefused("{} has the date {!r}, which is not a date".format(where, text)) from None
-    return local.astimezone(timezone.utc)
+    return local.astimezone(timezone.utc), len(parts) == 3
+
+
+def _flex_day(text):
+    """The date of a yyyyMMdd text, or None."""
+    if not FLEX_DAY.fullmatch(text or ""):
+        return None
+    try:
+        return datetime.strptime(text, "%Y%m%d").date()
+    except ValueError:
+        return None
 
 
 def parse_statement(data, account_id):
@@ -259,11 +310,15 @@ def parse_statement(data, account_id):
                 where, transaction_id)) from None
         if not amount.is_finite():
             raise StatementRefused("{} (transaction {}) has an amount that is not finite".format(where, transaction_id))
-        when = row.get("dateTime")
-        postings.append(Posting(transaction_id, KINDS.get(ibkr_type, OTHER), ibkr_type,
-                                _flex_time(when, "{} (transaction {})".format(where, transaction_id)), amount,
-                                currency))
-    return Statement(account_id, statement.get("fromDate"), statement.get("toDate"), postings)
+        as_of, dated_only = _flex_time(row.get("dateTime"), "{} (transaction {})".format(where, transaction_id))
+        postings.append(Posting(transaction_id, KINDS.get(ibkr_type, OTHER), ibkr_type, as_of, amount, currency,
+                                dated_only))
+    from_date, to_date = statement.get("fromDate"), statement.get("toDate")
+    first, last = _flex_day(from_date), _flex_day(to_date)
+    if first is None or last is None or first > last:
+        raise StatementRefused("the Flex statement does not state its period as fromDate and toDate (yyyyMMdd, the "
+                               "first not after the last), so the days it covers cannot be checked")
+    return Statement(account_id, from_date, to_date, postings)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -408,8 +463,16 @@ def _number(value):
 
 
 def _is_close_stamp(moment):
+    """Whether moment is its New York session's official close (4 p.m., 1 p.m. on an early close), the as-of a close
+    snapshot is stamped with (snapshot.py; ADR 0019, amended 2026-10-18), by the adapter's NYSE calendar."""
     local = moment.astimezone(NEW_YORK)
-    return local.time() == CLOSE
+    try:
+        if not nyse_calendar.is_trading_day(local.date()):
+            return False
+        return local == nyse_calendar.session_close(local.date())
+    except nyse_calendar.OutOfRange:
+        raise StatementRefused("the snapshot as of {} is in a year the NYSE calendar does not hold, so whether it is "
+                               "a close is not known".format(_stamp(moment))) from None
 
 
 def _held_until(snapshot_as_of):
@@ -421,43 +484,58 @@ def _held_until(snapshot_as_of):
     return datetime.combine(day, clock(0), tzinfo=NEW_YORK).astimezone(timezone.utc)
 
 
+def _interval(snapshots, at):
+    """(snapshot, basis) a transfer at the moment at takes its equity before from: the last snapshot before it (basis
+    None), that day's close snapshot (SAME_DAY_SNAPSHOT_LESS_AMOUNT), or with neither the first after it
+    (NEXT_SNAPSHOT_LESS_AMOUNT; snapshot None when there is none yet)."""
+    before = [s for s in snapshots if s[0] < at]
+    # A transfer at the close's own second is after it, as one later that evening is.
+    before += [s for s in snapshots if s[0] == at and _is_close_stamp(s[0])]
+    if before:
+        snapshot = before[-1]
+        if _is_close_stamp(snapshot[0]) and snapshot[0].astimezone(NEW_YORK).date() == at.astimezone(NEW_YORK).date():
+            return snapshot, SAME_DAY_SNAPSHOT_LESS_AMOUNT
+        return snapshot, None
+    after = [s for s in snapshots if s[0] >= at]  # none is the close at at's own second
+    return (after[0] if after else None), NEXT_SNAPSHOT_LESS_AMOUNT
+
+
 def _equity_before(snapshots, transfers, posting):
     """(equity before posting, its currency, basis) from snapshots and transfers [(as_of, transaction ID, amount)];
     StatementRefused when no snapshot is committed yet."""
     key = (posting.as_of, posting.transaction_id)
     day = posting.as_of.astimezone(NEW_YORK).date()
-    before = [s for s in snapshots if s[0] < posting.as_of]
-    # A transfer at the close's own second is after it, as one later that evening is.
-    before += [s for s in snapshots if s[0] == posting.as_of and _is_close_stamp(s[0])]
-    if before:
-        as_of, value, currency = before[-1]
-        if _is_close_stamp(as_of) and as_of.astimezone(NEW_YORK).date() == day:
-            # At or after the close: that day's close snapshot, read later, already holds it.
-            evening = sum((amount for at, ident, amount in transfers
-                           if (at, ident) >= key and at >= as_of and at.astimezone(NEW_YORK).date() == day),
-                          Decimal(0))
-            return value - evening, currency, SAME_DAY_SNAPSHOT_LESS_AMOUNT
-        since = sum((amount for at, ident, amount in transfers if at >= _held_until(as_of) and (at, ident) < key),
-                    Decimal(0))
-        return value + since, currency, None
-    after = [s for s in snapshots if s[0] >= posting.as_of]  # none is the close at posting's own second
-    if not after:
+    snapshot, basis = _interval(snapshots, posting.as_of)
+    if snapshot is None:
         raise StatementRefused("transfer {}, dated {}, is after the first run's approval, but no close snapshot is "
                                "committed yet to give the equity before it; the first reading after the first close "
                                "snapshot writes it".format(posting.transaction_id, _stamp(posting.as_of)))
-    as_of, value, currency = after[0]
+    as_of, value, currency = snapshot
+    if basis == SAME_DAY_SNAPSHOT_LESS_AMOUNT:
+        # At or after the close: that day's close snapshot, read later, already holds it.
+        evening = sum((amount for at, ident, amount in transfers
+                       if (at, ident) >= key and at >= as_of and at.astimezone(NEW_YORK).date() == day),
+                      Decimal(0))
+        return value - evening, currency, basis
+    if basis is None:
+        since = sum((amount for at, ident, amount in transfers if at >= _held_until(as_of) and (at, ident) < key),
+                    Decimal(0))
+        return value + since, currency, None
     upto = sum((amount for at, ident, amount in transfers if (at, ident) >= key and at < _held_until(as_of)),
                Decimal(0))
     return value - upto, currency, NEXT_SNAPSHOT_LESS_AMOUNT
 
 
-def _record(posting, equity, currency, basis):
+def _record(posting, equity, currency, basis, note=None):
     payload = {"as_of": _stamp(posting.as_of), "amount": float(posting.amount), "equity_before": float(equity),
                "currency": currency, "transaction_id": posting.transaction_id}
     if basis is not None:
         payload["equity_before_basis"] = basis
-    return {"id": ID_PREFIX + posting.transaction_id, "type": CASH_MOVEMENT[0], "schema_version": CASH_MOVEMENT[1],
-            "event_time": payload["as_of"], "source": SOURCE, "payload": payload}
+    record = {"id": ID_PREFIX + posting.transaction_id, "type": CASH_MOVEMENT[0], "schema_version": CASH_MOVEMENT[1],
+              "event_time": payload["as_of"], "source": SOURCE, "payload": payload}
+    if note is not None:
+        record["note"] = note
+    return record
 
 
 def _payload_as_written(payload):
@@ -494,7 +572,8 @@ def read_ledger(path):
         except ValueError:
             record = None
         payload = record.get("payload") if isinstance(record, dict) else None
-        if (not isinstance(record, dict) or tuple(sorted(record)) != tuple(sorted(RECORD_FIELDS))
+        if (not isinstance(record, dict) or set(record) - set(OPTIONAL_RECORD_FIELDS) != set(RECORD_FIELDS)
+                or record.get("note", NOTES[0]) not in NOTES
                 or (record["type"], record["schema_version"], record["source"]) != CASH_MOVEMENT + (SOURCE,)
                 or not isinstance(payload, dict) or not _payload_as_written(payload)
                 or record["id"] != ID_PREFIX + payload["transaction_id"] or record["id"] in records
@@ -505,18 +584,44 @@ def read_ledger(path):
     return records
 
 
+def _after_approval(posting, approved_at):
+    """Whether posting is after the first run's approval: dated at or after it, or dated by day alone on its New York
+    day, which the book the owner read before approving cannot hold (ADR 0027, starting-book amendment)."""
+    if posting.as_of >= approved_at:
+        return True
+    return posting.dated_only and (posting.as_of.astimezone(NEW_YORK).date()
+                                   == approved_at.astimezone(NEW_YORK).date())
+
+
+def _written_first(snapshots, written, posting, basis_snapshot, basis):
+    """The note for posting when a record already written from the same snapshot holds a figure posting belongs in
+    (see the module), else None."""
+    key = (posting.as_of, posting.transaction_id)
+    for at, ident, _ in written:
+        snapshot, their_basis = _interval(snapshots, at)
+        if snapshot is None or snapshot[0] != basis_snapshot[0] or their_basis != basis:
+            continue
+        if basis is None and (at, ident) > key:
+            return LATER_WRITTEN_FIRST
+        if basis is not None and (at, ident) < key:
+            return EARLIER_WRITTEN_FIRST
+    return None
+
+
 def new_movements(statement, ledger, approved_at, snapshots):
-    """(records to write, transfers not written as in the first book and why): each transfer of statement not yet in
-    ledger, dated at or after approved_at, the first run's approval; StatementRefused when one cannot be written."""
+    """(records to write, transfers not written as in the first book and why, IDs of transfers dated by day alone on
+    the approval's day): each transfer of statement not yet in ledger and after the first run's approval
+    (_after_approval); StatementRefused when one cannot be written."""
     transfers = sorted((p for p in statement.postings if p.kind == TRANSFER), key=lambda p: (p.as_of, p.transaction_id))
     known = {r["payload"]["transaction_id"]: (_parse_stamp(r["payload"]["as_of"]), r["payload"]["transaction_id"],
                                               Decimal(repr(float(r["payload"]["amount"]))))
              for r in ledger.values()}
+    already = sorted(known.values())
     for posting in transfers:
-        if posting.as_of >= approved_at and posting.transaction_id not in known:
+        if _after_approval(posting, approved_at) and posting.transaction_id not in known:
             known[posting.transaction_id] = (posting.as_of, posting.transaction_id, posting.amount)
     moved = sorted(known.values())
-    written, skipped = [], []
+    written, skipped, date_only = [], [], []
     for posting in transfers:
         recorded = ledger.get(ID_PREFIX + posting.transaction_id)
         if recorded is not None:
@@ -529,7 +634,7 @@ def new_movements(statement, ledger, approved_at, snapshots):
                         posting.transaction_id, stated["amount"], stated["currency"], stated["as_of"],
                         posting.amount, posting.currency, _stamp(posting.as_of)))
             continue
-        if posting.as_of < approved_at:
+        if not _after_approval(posting, approved_at):
             skipped.append((posting.transaction_id, "dated {}, before the first run's approval at {}, so it is in the "
                                                     "starting book".format(_stamp(posting.as_of),
                                                                            _stamp(approved_at))))
@@ -543,8 +648,12 @@ def new_movements(statement, ledger, approved_at, snapshots):
         if not equity > 0 or not equity + posting.amount > 0:
             raise StatementRefused("transfer {} of {} would take the equity before it, {}, to zero or below".format(
                 posting.transaction_id, posting.amount, equity))
-        written.append(_record(posting, equity, currency, basis))
-    return written, skipped
+        if posting.as_of < approved_at:
+            date_only.append(posting.transaction_id)
+        basis_snapshot, _ = _interval(snapshots, posting.as_of)
+        written.append(_record(posting, equity, currency, basis,
+                               _written_first(snapshots, already, posting, basis_snapshot, basis)))
+    return written, skipped, date_only
 
 
 def _write_whole(path, text):
@@ -566,6 +675,41 @@ def _line(record):
     return json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n"
 
 
+def read_coverage(path):
+    """{"from_date", "to_date"} of the last accepted reading, kept at path (None when there is none yet);
+    StatementRefused when the file is not as this reader writes it."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise StatementRefused("the coverage file {} cannot be read: {}".format(path, err.strerror or err)) from None
+    try:
+        coverage = json.loads(text)
+    except ValueError:
+        coverage = None
+    if (not isinstance(coverage, dict) or set(coverage) != set(COVERAGE_FIELDS)
+            or not all(isinstance(coverage[k], str) and _flex_day(coverage[k]) for k in COVERAGE_FIELDS)):
+        raise StatementRefused("the coverage file {} is not as this reader writes it, so the days the last reading "
+                               "covered are not known; put it back from a backup".format(path))
+    return coverage
+
+
+def _check_coverage(statement, coverage):
+    """CoverageGap when statement starts later than the day after coverage (the last accepted reading) ended."""
+    if coverage is None:
+        return
+    covered_to = _flex_day(coverage["to_date"])
+    first = _flex_day(statement.from_date)
+    if first > covered_to + timedelta(days=1):
+        raise CoverageGap("the Flex statement starts on {}, but the last reading covered up to {}: the days between "
+                          "are in neither, so a transfer on them would be lost. Nothing is written; widen the Flex "
+                          "query's period in Client Portal to reach back to {} and start this reader again "
+                          "(docs/manual/reconciliation.md)".format(statement.from_date, coverage["to_date"],
+                                                                   coverage["to_date"]))
+
+
 def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_get, sleep=time.sleep,
               now=lambda: datetime.now(timezone.utc), err=None):
     """One reading (see the module): True when the statement was read and every new transfer written, False when
@@ -576,6 +720,7 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
 
     checked_at = _stamp(now())
     status_path = ledger_path + STATUS_SUFFIX
+    coverage_path = ledger_path + COVERAGE_SUFFIX
     status = {"state": "read", "checked_at": checked_at}
     with open(ledger_path + LOCK_SUFFIX, "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -584,11 +729,20 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         _write_whole(status_path, json.dumps({"state": "running", "checked_at": checked_at}, sort_keys=True) + "\n")
         try:
             ledger = read_ledger(ledger_path)
+            coverage = read_coverage(coverage_path)
             statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep), account_id)
+            _check_coverage(statement, coverage)
             approved_at, snapshots = read_chain(engine_log_path)
-            written, skipped = new_movements(statement, ledger, approved_at, snapshots)
+            written, skipped, date_only = new_movements(statement, ledger, approved_at, snapshots)
             for transaction_id, why in skipped:
                 say("flex: transfer {} not written: {}".format(transaction_id, why))
+            for transaction_id in date_only:
+                say("flex: transfer {} is dated by day alone on the first run's approval day, so taken as after "
+                    "the approval and written".format(transaction_id))
+            out_of_order = [r for r in written if "note" in r]
+            for record in out_of_order:
+                say("flex: transfer {} written with the note: {}".format(record["payload"]["transaction_id"],
+                                                                        record["note"]))
             unknown = {}
             for posting in statement.postings:
                 if posting.kind == OTHER:
@@ -602,8 +756,17 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
                     with open(ledger_path, encoding="utf-8") as f:
                         kept = f.read()
                 _write_whole(ledger_path, kept + "".join(_line(r) for r in written))
+            # After the ledger: a reading stopped between the two leaves the period behind, which only asks the
+            # next reading to cover more, and a transfer written twice is never possible (its ID is in the ledger).
+            covered_to = statement.to_date
+            if coverage is not None and coverage["to_date"] > covered_to:
+                covered_to = coverage["to_date"]
+            _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "to_date": covered_to},
+                                                   sort_keys=True) + "\n")
             status.update(written=len(written), period=[statement.from_date, statement.to_date],
-                          postings=len(statement.postings), in_first_book=len(skipped), unknown_types=unknown)
+                          covered_to=covered_to, postings=len(statement.postings), in_first_book=len(skipped),
+                          date_only_on_approval_day=len(date_only), out_of_order=len(out_of_order),
+                          unknown_types=unknown)
             say("flex: read {} postings for {} to {}; wrote {} cash movement(s)".format(
                 len(statement.postings), statement.from_date, statement.to_date, len(written)))
             ok = True
@@ -613,7 +776,8 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             if isinstance(refused, FlexRejected):
                 reason += "; check the token and query ID in the secrets file (TI_IBKR_FLEX_TOKEN, " \
                           "TI_IBKR_FLEX_QUERY_ID) and the token's expiry in Client Portal"
-            status.update(state="set-aside", reason=reason, code=getattr(refused, "code", None))
+            status.update(state="coverage-gap" if isinstance(refused, CoverageGap) else "set-aside", reason=reason,
+                          code=getattr(refused, "code", None))
             say("flex: set aside: " + reason)
             ok = False
         _write_whole(status_path, json.dumps(status, sort_keys=True) + "\n")

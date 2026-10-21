@@ -54,7 +54,7 @@ for u in ti-gateway ti-trader; do
   test "$(getent passwd "$u" | cut -d: -f7)" = /usr/sbin/nologin || fail "$u has a login shell"
   test "$(id -u "$u")" -ne 0 || fail "$u is uid 0"
 done
-for f in ibkr-login.env secrets.env accounts/boost.env; do
+for f in ibkr-login.env secrets.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
   test "$(mode_of "/etc/trend-investing/$f")" = 600 || fail "$f is not mode 600"
   test "$(stat -c %U:%G "/etc/trend-investing/$f")" = root:root || fail "$f is not root-owned"
 done
