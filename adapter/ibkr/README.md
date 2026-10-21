@@ -132,7 +132,22 @@ the Python client it unpacks, as root, under
 `/opt/trend-investing/twsapi/10.51.01/pythonclient`, installs that
 Python client (`source/pythonclient`) offline into a fresh
 environment, `/opt/trend-investing/adapter-venv` (protobuf first, offline),
-checks that `ibapi` imports there, and only then writes `/opt/trend-investing/twsapi/INSTALLED`.
+checks that `google.protobuf` and the `ibapi` modules import there, and only then writes `/opt/trend-investing/twsapi/INSTALLED`.
+
+The import check is the step's last gate, and it tests imports only: it runs
+`python3 -I -c 'import google.protobuf, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper'`
+with the adapter venv's Python, and does not compare versions (the adapter does
+that at start, below). The step removes any earlier `INSTALLED` before it
+installs, so a failed run leaves no record. If the import fails, the step stops
+with `provision: ibapi did not import from /opt/trend-investing/adapter-venv after installing it; not recording it`
+and writes nothing. The remedy is to re-run `sudo deploy/provision.sh twsapi`,
+which rebuilds the venv from the verified wheels. If it fails again, the venv
+itself is at fault: run the same import by hand with
+`/opt/trend-investing/adapter-venv/bin/python3 -I -c 'import google.protobuf, ibapi.client'`
+to see the error, fix the environment, and re-run the step. Do not write
+`INSTALLED` by hand; the adapter then refuses to start with `IbapiNotPinned`
+until the step passes.
+
 `sudo deploy/provision.sh adapter` installs this directory's code (not its
 tests) and `versions.env` under `/opt/trend-investing/adapter`. The adapter
 refuses to start unless the install record equals that pin and the `ibapi`
