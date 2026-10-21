@@ -948,6 +948,124 @@ func TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt(t *testing.T) {
 	}
 }
 
+// TestAnApprovalMayStateAHandSaleAsTheIncidentsAttempt: the previous run
+// ended Halted without attempting the incident's one sale, and the owner sold
+// by hand, so the approval states it attempted (operator approve
+// -sale-attempted) though the log records none; the fresh run starts, since
+// stating an attempt is always accepted (ADR 0019, amended 2026-10-15).
+func TestAnApprovalMayStateAHandSaleAsTheIncidentsAttempt(t *testing.T) {
+	dir := t.TempDir()
+	comp, err := compose(boostConfigPath, "test-build", boostSession(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion, Payload: raw}
+	previous := craftedLog(t, filepath.Join(dir, "run-1.log"), comp, halted)
+
+	approval, err := json.Marshal(event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: previous.FinalRecordHash,
+		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+		Boost:           event.BoostStateInForce{Latched: new(false)},
+		IncidentInForce: &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath, fresh.asOf = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal"), laterAsOf
+	fresh.approvalPath = filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(fresh.approvalPath, approval, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stop := startEngine(t, fresh)
+	if err := stop(); err != nil {
+		t.Fatalf("the approved run: %v", err)
+	}
+}
+
+// TestAStatedHandSaleKeepsTheFreshRunFromMakingTheIncidentsSale: the
+// previous run ended Halted without attempting the incident's one sale, and
+// the approval states it attempted (operator approve -sale-attempted) for a
+// sale the owner made by hand. Fed a broker snapshot above 98% exposure, the
+// fresh run plans no incident sale; the same input under an approval stating
+// it not attempted plans one (ADR 0019, amended 2026-10-15: one attempt per
+// incident, never retried).
+func TestAStatedHandSaleKeepsTheFreshRunFromMakingTheIncidentsSale(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		attempted bool
+		want      int
+	}{
+		{"stated attempted", true, 0},
+		{"stated not attempted", false, 1},
+	} {
+		dir := t.TempDir()
+		comp, err := compose(boostConfigPath, "test-build", boostSession(0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion, Payload: raw}
+		previous := craftedLog(t, filepath.Join(dir, "run-1.log"), comp, halted)
+		approval, err := json.Marshal(event.OperatorRunApprovedPayload{
+			AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: previous.FinalRecordHash,
+			ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+			Boost:           event.BoostStateInForce{Latched: new(false)},
+			IncidentInForce: &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(c.attempted)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fresh := boostOptions(t, dir)
+		fresh.logPath, fresh.outPath, fresh.asOf = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal"), laterAsOf
+		fresh.approvalPath = filepath.Join(t.TempDir(), "approval.json")
+		if err := os.WriteFile(fresh.approvalPath, approval, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stop := startEngine(t, fresh)
+		feed := newBoostFeed(t, fresh.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 3)
+		// Boosted by hand: 15 shares at about 400 against 4,000 of net liquidation.
+		feed.held, feed.cash = 15, 4000-float64(15*boostClose(3))
+		feed.beforeClose = func(i int) {
+			at, price := boostSession(i), boostClose(i)
+			netLiq := feed.cash + float64(float64(feed.held)*price)
+			feed.send(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("broker:%d", i), at, event.BrokerSnapshotPayload{
+				AccountID: feed.account, AsOf: at, MarketOpen: true, NetLiquidation: netLiq, ExcessLiquidity: netLiq - float64(0.25*float64(float64(feed.held)*price)),
+				Positions:  []event.BrokerPosition{{InstrumentID: "SPY", Quantity: feed.held, Mark: price, MarkSet: true}},
+				OpenOrders: []event.BrokerOrder{},
+			})
+		}
+		feed.sessions(3, 4)
+		_ = feed.client.Close()
+		if err := stop(); err != nil {
+			t.Fatalf("%s: the approved run: %v", c.name, err)
+		}
+		sold := 0
+		for _, e := range recoverFile(t, fresh.logPath).Entries {
+			if e.Kind != journal.KindDecision || e.Envelope.Type != event.OrderPlannedEventType {
+				continue
+			}
+			var p event.OrderPlannedPayload
+			if err := json.Unmarshal(e.Envelope.Payload, &p); err != nil {
+				t.Fatalf("decode %s: %v", e.Envelope.ID, err)
+			}
+			if p.Sale.Kind == event.SaleKindIncident {
+				sold++
+			}
+		}
+		if sold != c.want {
+			t.Errorf("%s: the fresh run planned %d incident sale(s), want %d", c.name, sold, c.want)
+		}
+	}
+}
+
 // writeFirstRunApproval writes a first run's approval for account, stating
 // the starting book, and returns its path.
 func writeFirstRunApproval(t *testing.T, account string) string {

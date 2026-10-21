@@ -668,3 +668,94 @@ func TestTheFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
 		}
 	}
 }
+
+// TestTheApprovalStatesAHandSaleAsTheIncidentsAttempt: after the owner sells
+// back to 98% by hand, a sale the log does not know about, -sale-attempted
+// carries the incident in force with its one sale stated attempted, so the
+// fresh run never makes it (ADR 0019, amended 2026-10-15). The engine
+// accepts it, since stating an attempt is always accepted, and the tool
+// says it stated it.
+func TestTheApprovalStatesAHandSaleAsTheIncidentsAttempt(t *testing.T) {
+	dir := t.TempDir()
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encoded(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})}
+	logPath := filepath.Join(dir, "run-1.log")
+	recovery := previousLog(t, logPath, halted)
+
+	stated := filepath.Join(dir, "stated.json")
+	out, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", stated, "-sale-attempted", "-positions", "SPY=9", "-cash", "100", "-currency", "USD", "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(stated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		t.Fatalf("the engine would refuse the approval: %v", err)
+	}
+	in := p.IncidentInForce
+	if in == nil || in.IncidentID != "engine-state:joint:1" || in.State != event.EngineStateHalted || !*in.SaleAttempted || in.SaleClientOrderID != "" ||
+		p.PreviousLogFinalHash != recovery.FinalRecordHash {
+		t.Errorf("approval %+v", p)
+	}
+	if !strings.Contains(out, "attempted true") || !strings.Contains(out, "-sale-attempted") {
+		t.Errorf("printed %q, want it to say the sale was stated attempted by -sale-attempted", out)
+	}
+
+	plain := filepath.Join(dir, "plain.json")
+	if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", plain, "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(plain)
+	if p, err = event.DecodeOperatorRunApproved(raw); err != nil || *p.IncidentInForce.SaleAttempted {
+		t.Errorf("without the flag the approval states what the log records, not attempted: %+v %v", p, err)
+	}
+}
+
+// TestSaleAttemptedIsRefusedWhenThereIsNoSaleToState: -sale-attempted is
+// refused unless an incident is in force whose sale the log does not record
+// as attempted, and nothing is written (ADR 0019, amended 2026-10-15).
+func TestSaleAttemptedIsRefusedWhenThereIsNoSaleToState(t *testing.T) {
+	dir := t.TempDir()
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encoded(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})}
+	sale := event.Envelope{ID: "order-planned:joint-sale-1", Type: event.OrderPlannedEventType, SchemaVersion: event.OrderPlannedSafetyVersion,
+		Payload: encoded(t, event.OrderPlannedPayload{AccountID: "joint", Tag: "engine-state:joint:1", ClientOrderID: "joint-sale-1", InstrumentID: "SPY",
+			Side: event.OrderSideSell, Phase: event.OrderSideSell, OrderType: event.OrderTypeLimit, Quantity: 1, LimitPrice: 99,
+			NetLiquidation: 4000, HeldQuantity: 10, ReferencePrice: 100, PriceBand: 0.05,
+			Sale: event.SaleFigures{Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit}})}
+	attempted := filepath.Join(dir, "attempted", "run-1.log")
+	normal := filepath.Join(dir, "normal", "run-1.log")
+	unsold := filepath.Join(dir, "unsold", "run-1.log")
+	for _, d := range []string{filepath.Dir(attempted), filepath.Dir(normal), filepath.Dir(unsold)} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousLog(t, attempted, halted, sale)
+	previousLog(t, unsold, halted)
+	normalLog := killSwitchLog(t, filepath.Dir(normal), "joint")
+
+	for name, c := range map[string]struct {
+		args []string
+		want string
+	}{
+		"the log already records the attempt": {[]string{"-log", attempted, "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "already records"},
+		"the log ended normal":                {[]string{"-log", normalLog, "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "no incident"},
+		"clearing the incident":               {[]string{"-log", attempted, "-clear-incident", "engine-state:joint:1", "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "-clear-incident"},
+		"a first run":                         {[]string{"-first-run", "-positions", "", "-cash", "1", "-currency", "USD"}, "-first-run"},
+		"no starting book":                    {[]string{"-log", unsold}, "state the book after it"},
+		"half a starting book":                {[]string{"-log", unsold, "-positions", "SPY=9", "-cash", "100"}, "state the book after it"},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", path, "-sale-attempted", "-at", at}, c.args...)
+		if _, err := invoke(t, args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want it to mention %q", name, err, c.want)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: an approval was written (%v)", name, err)
+		}
+	}
+}

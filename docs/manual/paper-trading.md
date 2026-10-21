@@ -209,16 +209,18 @@ sudo deploy/provision.sh adapter   # install the adapter's code and its pin file
 sudo deploy/provision.sh services  # the unit, the adapter's directory and configuration
 ```
 
-`twsapi` downloads IBKR's TWS API 10.51.01 installer, refuses it unless its
-SHA-256 matches `deploy/versions.env`, runs it as an unprivileged user
+`twsapi` downloads IBKR's TWS API 10.51.01 installer and the pinned
+protobuf 5.29.5 wheel (`ibapi` imports it; a dependency proposed to the
+owner 2026-10-20), refuses either unless its SHA-256 matches
+`deploy/versions.env` (nothing is installed on a mismatch), runs it as an unprivileged user
 (never as root) into a scratch directory, copies only its Python client
 into a root-owned directory, installs that client into the adapter's own
-environment (`/opt/trend-investing/adapter-venv`, offline), checks that it
-imports, and only then writes `/opt/trend-investing/twsapi/INSTALLED`. Run
+environment (`/opt/trend-investing/adapter-venv`, offline, protobuf first),
+checks that both import, and only then writes `/opt/trend-investing/twsapi/INSTALLED`. Run
 `adapter` again after every pull you mean to run. If the pin in the
 adapter's code ever differs from what was installed, or the `ibapi` the
-adapter's Python actually imports is another version (or does not import
-at all), the adapter refuses to start ("install the pinned build with
+adapter's Python actually imports, or its protobuf, is another version
+(or does not import at all), the adapter refuses to start ("install the pinned build with
 `sudo deploy/provision.sh twsapi`"). Neither step has been run on the
 server yet; if `twsapi` stops with "has not exactly one
 source/pythonclient", IBKR changed the installer's layout: stop and report

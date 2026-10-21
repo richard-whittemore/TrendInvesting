@@ -140,8 +140,9 @@ func CheckSaleAttempt(entries []journal.Entry, approval event.OperatorRunApprove
 }
 
 // ApprovalRequest is what the owner supplies for an approval: which log,
-// who approves and when, and, to clear the incident the log ended in under
-// ADR 0019's recovery procedure, that incident's ID.
+// who approves and when, to clear the incident the log ended in under
+// ADR 0019's recovery procedure, that incident's ID, or, for a sale made by
+// hand that the log does not record, SaleAttempted.
 type ApprovalRequest struct {
 	AccountID            string
 	PreviousLog          string
@@ -149,6 +150,10 @@ type ApprovalRequest struct {
 	ApprovedBy           string
 	ApprovedAt           time.Time
 	ClearIncident        string
+	// SaleAttempted states the incident held in force as having had its one
+	// sale back to 98% attempted, for a sale the owner made by hand that the
+	// log does not record.
+	SaleAttempted bool
 }
 
 // ProposeApproval builds the approval of a fresh run after a log ending in
@@ -156,13 +161,23 @@ type ApprovalRequest struct {
 // force with its state, scope (instruments and cash components) and sale
 // attempt, or, when the owner clears it, that incident cleared by its ID and
 // none in force (ADR 0027, amended 2026-10-17; ADR 0019, amended
-// 2026-09-24, "The state survives a restart"). Clearing an incident other than the one end holds is refused.
+// 2026-09-24, "The state survives a restart"). Clearing an incident other
+// than the one end holds is refused. req.SaleAttempted states an unrecorded
+// hand sale as the incident's one attempt, carried attempted with the
+// recorded one; it is refused with ClearIncident, on a log ending Normal,
+// and where end already records the attempt (ADR 0019, amended 2026-10-15).
 func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprovedPayload, error) {
 	p := event.OperatorRunApprovedPayload{
 		AccountID: req.AccountID, PreviousLog: req.PreviousLog, PreviousLogFinalHash: req.PreviousLogFinalHash,
 		ApprovedBy: req.ApprovedBy, ApprovedAt: req.ApprovedAt, Boost: event.BoostStateInForce{Latched: new(end.Latched)},
 	}
 	switch {
+	case req.SaleAttempted && req.ClearIncident != "":
+		return event.OperatorRunApprovedPayload{}, errors.New("restart: -sale-attempted states the sale of an incident left in force, and -clear-incident leaves none in force: use one or the other")
+	case req.SaleAttempted && end.IncidentID == "":
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s records no incident, so there is no sale to state as attempted: it ended normal", req.PreviousLog)
+	case req.SaleAttempted && end.SaleAttempted:
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s already records an attempt of incident %s's one sale back to 98%%, so the approval carries it attempted without -sale-attempted", req.PreviousLog, end.IncidentID)
 	case req.ClearIncident != "" && end.IncidentID == "":
 		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s records no incident, so there is none to clear: it ended normal", req.PreviousLog)
 	case req.ClearIncident != "" && req.ClearIncident != end.IncidentID:
@@ -172,7 +187,7 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 	case end.IncidentID != "":
 		p.IncidentInForce = &event.IncidentInForce{
 			IncidentID: end.IncidentID, State: end.State, ScopeInstrumentIDs: end.Scope, ScopeCashComponents: end.ScopeCash,
-			SaleAttempted: new(end.SaleAttempted), SaleClientOrderID: end.SaleClientOrderID,
+			SaleAttempted: new(end.SaleAttempted || req.SaleAttempted), SaleClientOrderID: end.SaleClientOrderID,
 		}
 	}
 	if err := p.Validate(); err != nil {

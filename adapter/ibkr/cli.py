@@ -172,10 +172,10 @@ def _engine_connect(path, timeout):
 
 
 def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL,
-         ibapi_version=None, today=None, now=None):
+         ibapi_version=None, protobuf_version=None, today=None, now=None):
     """Run the command; returns the process exit status.
 
-    api_factory, engine_connect, should_stop and ibapi_version replace the
+    api_factory, engine_connect, should_stop, ibapi_version and protobuf_version replace the
     real IBKR client, the engine's socket, the signal handlers and the
     imported ibapi's version (for the tests and the rehearsal, which run
     without ibapi); today replaces the session's date (the rehearsal's
@@ -188,7 +188,8 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     try:
         cfg = load_config(args)
         version = check_installed(args.ibapi_record, args.versions,
-                                  **({"installed_version": ibapi_version} if ibapi_version else {}))
+                                  **({"installed_version": ibapi_version} if ibapi_version else {}),
+                                  **({"installed_protobuf": protobuf_version} if protobuf_version else {}))
     except (Refused, IbapiNotPinned) as refusal:
         print("refused: {}".format(refusal), file=err)
         return 1
