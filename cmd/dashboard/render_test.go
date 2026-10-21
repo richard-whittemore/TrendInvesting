@@ -68,12 +68,12 @@ func TestDashboardShowsTheDaysWithheldSalesAndFillSides(t *testing.T) {
 func TestDashboardShowsTheDaysSkippedTrades(t *testing.T) {
 	var buf bytes.Buffer
 	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
-		Skipped: []report.SkippedLine{{ClientOrderID: "tw-a", InstrumentID: "SPY", Side: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: 0.4}}}
+		Skipped: []report.SkippedLine{{ClientOrderID: "tw-a", InstrumentID: "SPY", Side: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: 0.004}}}
 	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
 		t.Fatal(err)
 	}
 	body := buf.String()
-	for _, want := range []string{"<h3>Trades skipped</h3>", "<td>tw-a</td><td>buy</td><td>SPY</td><td>0.40 shares</td><td>below-one-share</td>"} {
+	for _, want := range []string{"<h3>Trades skipped</h3>", "<td>tw-a</td><td>buy</td><td>SPY</td><td>0.004 shares</td><td>below-one-share</td>"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q:\n%s", want, body)
 		}

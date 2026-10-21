@@ -60,9 +60,11 @@ const (
 	KindSaleSent   Kind = "sale-sent"
 	KindSaleFilled Kind = "sale-filled"
 	KindSaleFailed Kind = "sale-failed"
-	// KindSaleByHand is a sale back to 98% withheld for a reason that counts
-	// as the attempt, which the owner makes by hand (ADR 0019, amended
-	// 2026-10-15, "No order when it cannot be checked").
+	// KindSaleByHand is a sale back to 98% the owner must make by hand:
+	// withheld for a reason that spends the attempt, withheld for values
+	// that are not positive, or refused at the gate as broker-holding (ADR
+	// 0019, amended 2026-10-15, "No order when it cannot be checked";
+	// docs/manual/states-and-kill-switch.md, "Selling by hand safely").
 	KindSaleByHand Kind = "sale-by-hand"
 	// KindChannelRefused is the reporter's own failure to use one delivery
 	// channel, an empty or malformed secret: that channel is set aside and

@@ -45,7 +45,7 @@ func TestTheSummaryListsTheDaysSkippedTrades(t *testing.T) {
 		}
 	}
 	text := report.RenderText(got)
-	for _, line := range []string{"Trades skipped:", "tw-1 buy SPY 0.25 shares: scaled-below-one-share", "tw-2 sell SPY 3.00 shares: held-by-working-sells"} {
+	for _, line := range []string{"Trades skipped:", "tw-1 buy SPY 0.25 shares: scaled-below-one-share", "tw-2 sell SPY 3 shares: held-by-working-sells"} {
 		if !contains(text, line) {
 			t.Errorf("the summary text does not say %q:\n%s", line, text)
 		}

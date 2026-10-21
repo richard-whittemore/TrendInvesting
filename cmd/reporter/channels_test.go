@@ -165,6 +165,38 @@ func TestTheChannelSetAsideIsAlertedOnceAndTheRestDeliveredOnce(t *testing.T) {
 	if again, _ := n.posted(); len(again) != len(first) {
 		t.Errorf("the second run sent %v again", again[len(first):])
 	}
+	// The secret is fixed: the channel that was set aside takes everything it
+	// missed, and the working channel takes nothing again.
+	pd := &pagerDuty{status: http.StatusAccepted, body: `{"status":"success"}`}
+	pdServer := httptest.NewServer(http.HandlerFunc(pd.handler))
+	defer pdServer.Close()
+	fixed := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": pdServer.URL})
+	if err := run(args, fixed, now, &bytes.Buffer{}, server.Client()); err != nil {
+		t.Fatalf("the repaired run failed: %v", err)
+	}
+	summaries, _ := pagerDutySummaries(pd)
+	if !anyContains(summaries, "engine halted") || !anyContains(summaries, "refused") {
+		t.Errorf("the repaired channel took %v, want the alerts it missed", summaries)
+	}
+	if after, _ := n.posted(); len(after) != len(first) {
+		t.Errorf("the working channel took %v again", after[len(first):])
+	}
+}
+
+// TestAnUnreadableStateFileStillNamesTheChannelsSetAside: the run's error
+// carries every fault found before the state was read, not only the state's
+// (ADR 0019, "Alerting").
+func TestAnUnreadableStateFileStillNamesTheChannelsSetAside(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "s.json")
+	if err := os.WriteFile(state, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "ntfy,pagerduty"}
+	err := run(args, env(map[string]string{"TI_NTFY_TOPIC": "t"}), time.Now, &bytes.Buffer{}, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "TI_PAGERDUTY_ROUTING_KEY") || !strings.Contains(err.Error(), "state") {
+		t.Fatalf("err = %v, want the state fault and the channel set aside", err)
+	}
 }
 
 // TestNoChannelThatCanDeliverStopsTheRunAndRecordsNothing: when every

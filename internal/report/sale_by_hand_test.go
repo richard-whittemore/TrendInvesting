@@ -70,6 +70,23 @@ func TestANonPositiveWithheldSalePagesSellByHand(t *testing.T) {
 	carriesHandSaleSteps(t, "non-positive", a.Body)
 }
 
+// TestANonPositiveWithholdUnderANewAlarmPagesAgain: the once-per-sale rule
+// is per alarm, so a later alarm's non-positive withhold of the same
+// instrument is a new incident and pages again with its own key (ADR 0026,
+// amended 2026-10-17: a new alarm is minted on every change of the alarm's
+// level into urgent).
+func TestANonPositiveWithholdUnderANewAlarmPagesAgain(t *testing.T) {
+	s := newStream(t)
+	s.saleWithheld(0, "sale-1", event.SaleWithheldNotPositive)
+	s.add(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, "sale-withheld:other-alarm", day(3),
+		event.SaleWithheldPayload{AccountID: "joint", Tag: "alarm:v", ClientOrderID: "sale-2", InstrumentID: "SPY",
+			Kind: event.SaleKindUrgent, Trigger: event.SaleTriggerMarginUrgent, Reason: event.SaleWithheldNotPositive, Detail: "zero again", SnapshotID: "broker:w"})
+	got := ofKind(alertsOf(t, s), report.KindSaleByHand)
+	if len(got) != 2 || got[0].Key == got[1].Key {
+		t.Fatalf("by-hand alerts = %+v, want one per alarm with distinct keys", got)
+	}
+}
+
 // TestASaleRefusedAsBrokerHoldingPagesSellByHand: the sale back to 98%
 // refused at the gate as broker-holding spends its one attempt (ADR 0019,
 // amended 2026-10-15), so beside the refusal alert the owner is paged to

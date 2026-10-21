@@ -117,7 +117,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	seen, sent, repeats, err := loadState(*statePath)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
 	}
 	label := *accountName
 	if label == "" {
