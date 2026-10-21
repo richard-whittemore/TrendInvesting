@@ -294,8 +294,13 @@ if test "$exists" = 1 && test "$recreate" = 1; then
       refuse "cannot ask systemd in $name which units run, so it is not removed: an engine might be running. Nothing was changed. See: docker logs $name"
     fi
     running=${running% }
+    # The adapter first, then the engines (docs/manual/restart.md).
+    stop_order=
+    for u in $running; do case $u in ti-adapter-*) stop_order="$stop_order $u" ;; esac; done
+    for u in $running; do case $u in ti-adapter-*) ;; *) stop_order="$stop_order $u" ;; esac; done
+    stop_order=${stop_order# }
     if test -n "$running"; then
-      refuse "refusing to remove $name while $running runs: stop it first (docker exec $name systemctl stop ${running%% *}; the adapter before its engine), then run up.sh --recreate again"
+      refuse "refusing to remove $name while $running runs: stop it first (docker exec $name systemctl stop $stop_order; the adapter before its engine), then run up.sh --recreate again"
     fi
     # systemd shuts its units down in order on the image's STOPSIGNAL; the
     # bound is the container's --stop-timeout.
@@ -402,7 +407,16 @@ say "copying deploy/ and the built programs in"
 docker exec "$name" rm -rf /root/deploy /root/dist
 docker cp "$repo/deploy" "$name:/root/deploy"
 if test -d "$dist"; then
-  docker cp "$dist" "$name:/root/dist"
+  # docker cp copies a symbolic link as the link, which dangles in the
+  # container: copy the folder it names, then check the programs arrived.
+  real_dist=$(cd "$dist" && pwd -P)
+  docker cp "$real_dist" "$name:/root/dist"
+  for b in ti-data ti-engine ti-reporter ti-dashboard operator journal-query; do
+    if test -f "$real_dist/$b"; then
+      docker exec "$name" test -x "/root/dist/$b" \
+        || refuse "the program $b did not arrive in $name at /root/dist/$b from $dist, so it would not be installed; see the build folder and: docker exec $name ls -l /root/dist"
+    fi
+  done
 else
   say "no build folder at $dist: the programs are not installed (deploy/build-engine.sh and deploy/build-data.sh build them)"
 fi

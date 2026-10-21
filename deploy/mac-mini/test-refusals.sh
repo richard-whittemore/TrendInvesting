@@ -49,6 +49,7 @@ mkdir -p "$fake_home" "$work/bin"
 #   FAKE_SYSTEM           what is-system-running says (default running)
 #   FAKE_FAILED           the failed units it lists
 #   FAKE_MOUNT_SHARED=1   mount-shared.service is not active
+#   FAKE_TEST_X_FAILS=1   `test -x` inside the container fails (a program did not arrive)
 #   FAKE_PROPAGATION      the propagation of / (default shared)
 cat >"$work/bin/docker" <<'STUB'
 #!/bin/bash
@@ -69,6 +70,7 @@ case "$*" in
   *"systemctl list-units --state=failed"*) test -z "${FAKE_FAILED:-}" || printf '%s\n' $FAKE_FAILED ;;
   *"systemctl is-system-running"*) echo "${FAKE_SYSTEM:-running}" ;;
   *"systemctl is-active --quiet mount-shared.service"*) test "${FAKE_MOUNT_SHARED:-0}" = 0 ;;
+  *"test -x "*) test "${FAKE_TEST_X_FAILS:-0}" = 0 ;;
   *"findmnt"*) echo "${FAKE_PROPAGATION:-shared}" ;;
   *) exit 0 ;;
 esac
@@ -370,6 +372,9 @@ done
 # --recreate while an engine or the adapter runs: refused, naming the unit.
 refused_after "--recreate while the engine runs" "ti-engine@boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service"
 refused_after "--recreate while the adapter runs" "ti-adapter-boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-adapter-boost.service"
+# Every running unit is named in the remedy, the adapter before its engine,
+# not only the first listed.
+refused_after "--recreate while both run" "stop ti-adapter-boost.service ti-engine@boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service ti-adapter-boost.service"
 # systemd not answering which units run: refused, saying so, before anything
 # is stopped.
 refused_after "--recreate when systemd does not list its units" "cannot ask systemd" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_LIST_FAILS=1
@@ -393,6 +398,20 @@ case $create in *"--label org.trend-investing.mac-mini=ti"*"--label org.trend-in
 # Its own container, reused: provisioned.
 run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" || fail "re-provisioning up.sh's own container failed: $(cat "$work/out")"
 grep -q 'provision.sh all' "$work/calls" || fail "up.sh's own container was not provisioned: $(cat "$work/calls")"
+
+# A build folder that is a symbolic link: docker cp copies the link itself
+# unless given the folder it names, which is a dangling link in the container.
+# up.sh copies the resolved folder and checks the programs arrived.
+mkdir -p "$work/real-dist"
+touch "$work/real-dist/ti-data"
+ln -s "$work/real-dist" "$work/link-dist"
+run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" TI_DIST="$work/link-dist" || fail "a build folder that is a symbolic link failed: $(cat "$work/out")"
+cp_src=$(grep '^docker cp .* ti:/root/dist$' "$work/calls" | sed -e 's/^docker cp //' -e 's/ ti:\/root\/dist$//' || true)
+test -n "$cp_src" || fail "the build folder was not copied in: $(cat "$work/calls")"
+if test -L "$cp_src"; then fail "docker cp was given the symbolic link $cp_src, not the folder it names"; fi
+if run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" TI_DIST="$work/link-dist" FAKE_TEST_X_FAILS=1; then fail "programs that did not arrive were accepted"; fi
+grep -qF "/root/dist/ti-data" "$work/out" || fail "the refusal does not name the missing program: $(cat "$work/out")"
+if grep -q 'provision.sh' "$work/calls"; then fail "it provisioned with the programs missing: $(cat "$work/calls")"; fi
 
 # A degraded system: accepted only when every failed unit is one that fails
 # until the first engine run, and listed either way.
