@@ -317,9 +317,10 @@ def rehearse(work, account):
         "heartbeat_timeout": 10.0, "restore_timeout": 60.0, "backoff_initial": 0.01, "backoff_max": 0.05,
         "max_connect_attempts": 3, "commission_wait": 30.0, "con_ids": {"SPY": SPY_CON_ID}}, indent=2))
     versions = repo / "deploy" / "versions.env"
-    version, sha = read_pin(str(versions))
+    version, sha, protobuf, protobuf_sha = read_pin(str(versions))
     record = work / "INSTALLED"
-    record.write_text("TWSAPI_VERSION={}\nTWSAPI_SHA256={}\n".format(version, sha))
+    record.write_text("TWSAPI_VERSION={}\nTWSAPI_SHA256={}\nPROTOBUF_VERSION={}\nPROTOBUF_SHA256={}\n".format(
+        version, sha, protobuf, protobuf_sha))
 
     gateway = FakeTWS()
     gateway.managed_accounts = (account,)
@@ -345,7 +346,7 @@ def rehearse(work, account):
     def run(phase, engine_log):
         status = adapter_main(argv(engine_log), api_factory=lambda cfg: gateway, should_stop=phase, err=log,
                               poll=0.01,
-                              ibapi_version=lambda: tuple(int(p) for p in version.split(".")),
+                              ibapi_version=lambda: tuple(int(p) for p in version.split(".")), protobuf_version=lambda: protobuf,
                               today=lambda: calendar["day"],
                               now=lambda: datetime.fromtimestamp(gateway.server_time, timezone.utc))
         log.flush()

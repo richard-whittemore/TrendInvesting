@@ -56,7 +56,7 @@ yet been sent to IBKR's real paper servers.
 | `relay.py` | `Relay`: the adapter's side of re-delivery (ADR 0027 section 4). It keeps the input awaiting its reply on disk (`PendingInput`), asks for that input's committed reply again by sending it again under its ID after the engine or the adapter restarts, and hands each released order marked `send` to the sender once: it records "about to send" on disk before each hand-over and never sends a recorded order again, skips one IBKR shows open or executed, and stops (`HandoverUnconfirmed`) rather than resend one it was handing over when it stopped that IBKR shows neither open nor executed. A changed retry under the waiting input's ID is refused (`InputChanged`) after the original is settled. The "about to send" record is read strictly (`HandoverRecordInvalid` on any unknown mark), and a person settles a stopped hand-over with `python3 relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent \| --resend \| --never-sent \| --not-handed-over --reason TEXT`, which writes only a known mark (`--never-sent` only for an order with no mark while an input awaits its reply: the sender refused it for good, and the relay then passes over it), settles an order marked about to be sent or holding a resend permission (`--sent` withdraws a permission; an unknown or already sent order is refused), allows a resend only for an order committed in today's session and only on that day (a later start stops with `ResendExpired`), refuses while the adapter holds the pending file (each relay holds its own lock on `PENDING_FILE.lock` from construction until close, and re-checks it before every mark and send; a second adapter, or a closed relay, stops with `PendingInUse`; `close` from another thread waits for the step in flight, at most `close_timeout` seconds, then raises `RelayCloseTimeout`), and keeps each decision, its reason, its UTC time and session date in the `.handover.decisions` file. The relay takes a sender with `check` and `send` and calls `check` before every mark, whatever `to_request` does. `--never-sent` is accepted only for the order the relay recorded it is refusing for the waiting input (`PENDING_FILE.refused`), `--not-handed-over` only for an order marked about to be sent whose sender raised a `HandoverUnconfirmed` with `handed_over` false (the real client's socket closed before placeOrder), which the relay records in `PENDING_FILE.not-handed-over` for that order and input and removes before every hand-over; it settles the order as never sent on any day. A never-sent order is passed over only while IBKR shows no open order or execution under its tag; otherwise the relay stops (`NeverSentAtBroker`, a `HandoverUnconfirmed`) and the owner marks it `--sent`. An input awaiting its reply that the adapter sent to an earlier engine run (it records the run, `run_identity`: the run's Run approval ID, else its log's first committed input, the configuration, which a resume copies, and never nothing, in `PENDING_FILE.run` before it first sends an input) is never sent to a fresh run: `AdapterLoop` stops with `EarlierRunInput` (`earlier_run`), naming the input, the earlier run's log, whether it committed the input and the orders its reply released unsent, and `relay.py resolve --run-ended PENDING_FILE INPUT_ID --journal ENGINE_LOG --reason TEXT` (`resolve_run_ended`) records the input and those orders as refused, "run ended", in `PENDING_FILE.run-ended` (never sent or journalled again), with each lifecycle or fill report the outbox holds on an order a run of the chain before `ENGINE_LOG` released, struck off unsent (the loop also strikes any a settlement names); every other entry stays for the fresh run. It then clears the pending file; it is refused for an input of the run whose log is `ENGINE_LOG`, for an input whose `recorded_at` cannot be read (so the session it was recorded in is unknown), and for an input with no `PENDING_FILE.run` record of its run (missing, or naming another input), since the settlement would name no run. A `.run-ended` line with no run stops the start (`HandoverRecordInvalid`). The decisions file (`PENDING_FILE.handover.decisions`) is read strictly, like the other records: a line that cannot be read stops the start (`HandoverRecordInvalid`). `relay.py acknowledge-correction PENDING_FILE --journal ENGINE_LOG EXEC_ID --corrects ORIGINAL --reason TEXT` reads the engine's durable log (its `-log` file, streamed as the engine runs; ADR 0027) strictly, counting only committed fill inputs and refusing a log it cannot read as the engine writes it (never read as holding no fills), and refuses a correction of an execution that log does not hold as a fill (the original was never recorded: reconcile by hand), and otherwise records the owner's acknowledgement of IBKR's correction of an execution in `PENDING_FILE.corrections`, read strictly at start and passed to `OrderReportJournal`. `relay.py acknowledge-late-fill PENDING_FILE --journal ENGINE_LOG EXEC_ID --after CLIENT_ORDER_ID --reason TEXT` reads the same log (`journalled_reports`: committed fills, and the orders a committed lifecycle input cancelled or refused), refuses a trade that log holds as a fill or one after an order neither it nor the input awaiting its reply (`PENDING_FILE`) holds ended, and otherwise records the acknowledgement in `PENDING_FILE.late-fills`, read strictly at start and passed to `OrderReportJournal` as `late_fills`; the trade is never a fill, so the next start's reconciliation reports its shares as a difference and the engine goes Degraded until the reconciliation runbook's recovery (ADR 0019) |
 | `loop.py` | `AdapterLoop`, the adapter's main loop. At start: takes the pending file's lock (the relay), connects to the engine's socket (`Relay.connect_engine`; `EngineUnavailable` if it is not listening, before anything is read: the engine opens its socket only after recording its start, a fresh run's Run approval included), reads the engine's durable log for the run's identity and the inputs it has committed (`relay.read_engine_log`; it refuses to start without it), with `--streams` finds the run's stream folder from it (`Deliverer.check`), connects, reconciles, then asks again for the input a stop left awaiting its reply. Reconciling is `snapshot.read_account` in full (anything unread stops with `ReconcileIncomplete`: an unavailable balance is not zero), IBKR's open orders and executions (`collect_broker_orders`) matched against the orders the engine's log, and the logs of the earlier runs its Run approvals chain back to (`relay.run_logs`: each approval's `previous_log_final_hash` must be the named log's last committed record hash, and the walk stops at the first earlier run whose committed inputs all predate yesterday's session (the weekday before today) and whose released orders have all ended, by a committed cancellation or refusal input or fill inputs for their whole quantity in that log or a later one, or by the adapter's own records (`PendingInput.settled_orders`: an order settled never sent or not handed over, left unsent by a run-ended settlement (one marked handing-over may have reached IBKR, and reconciliation stops on it if IBKR still shows it), or ended by reports settled there, as the input or struck off with it); every run of today's or yesterday's session is read, and an earlier day's run with an order not ended is kept; the dry-run engine's synthetic reports are decisions and never read as reports), released to be sent (`relay.released_client_order_ids`, plus any hand-over mark) by `orders.match_on_reconnect`, then `mark_reconciled`; an open order or execution none of them explains stops for a person (`ReconcileMismatch`), and a released order IBKR no longer shows is left to the relay's own check of the order it sends. Positions and balances are read in full, not matched: that is the engine's reconciliation. It is repeated after every reconnect or restoration. Each step: `maintain()`, one `pump()`, `check_overdue()`, then, while the link is up and reconciled, the outbox drained into the engine through the relay; while the engine decides, the exchange runs on its own thread and the loop keeps pumping IB Gateway's callbacks and checking overdue commissions. A link lost while an order is due holds the input (`NotConnected`, `NotReconciled`, or the broker read cut short by the drop). Every input is recorded first in the outbox (`PENDING_FILE.outbox`, rewritten atomically under an exclusive lock on `PENDING_FILE.outbox.lock`, which any other producer writing it through `Outbox.append` takes too), with its input ID; its sequence (one past the last committed input's) and the run's identity come from the engine's log when it is sent, with source `ibkr`. An entry is struck off once its reply has been acted on and before the input awaiting its reply is cleared (`Relay`'s `settled`), so a stop between the two leaves that input awaiting its reply and a fresh run never takes it. An outbox entry the log already holds with the same type, schema version and payload is struck off unsent, and one with other content under that ID stops for a person (`OutboxInvalid`); the committed records of this run and the earlier runs of the chain, and the outboxed and awaiting records, seed the report journal in the order they were made, never by their times (a lifecycle report's time is the adapter's clock at receipt, whole seconds only): each run of the chain oldest first, its committed inputs and then the run-ended settlements of that run (a settlement of a run older than the chain first; one with no recorded run has no place that can be known, so it stops the start, `HandoverRecordInvalid`), then the input awaiting its reply (the outbox's head while it is exchanged), then the outbox in order, so each order keeps its latest status (a status struck at a settlement never outlives a later run's report, of the same second or stamped later by a clock set back); a report whose event time cannot be read stops the start (`ReportRecordInvalid`), so a restart, or a fresh run the same day, records nothing twice. The held reports file is `PENDING_FILE.held`; the bases the runs before this one give its readings after a close (`book_basis.previous_close`) are kept once per run in `PENDING_FILE.basis`, under the run's approval's `previous_log` and `previous_log_final_hash`, so only the run's own log is walked at each reading; one that does not read, or names another approval, is walked again, and an earlier run's log that cannot be read stops the adapter naming it |
 | `engine_client.py` | `EngineClient`, the adapter's side of the engine's socket: one exchange at a time; a reply is used only if it names the input sent, is the run's own (configuration hash, strategy version), is `engine.decisions` in envelope version 1 and schema version 1 (`ACCEPTED_ENVELOPE_VERSIONS`, `ACCEPTED_SCHEMA_VERSIONS`), and its payload's exact bytes match its hash; anything else is `relay.EngineUnavailable` and the connection is abandoned. An error the engine states is `EngineRejected`, which stops the adapter |
-| `ibapi_pin.py` | `check_installed`: the adapter starts only if the install record `provision.sh twsapi` writes (`TWSAPI_VERSION` and `TWSAPI_SHA256`, nothing else) equals the pin in the `versions.env` installed with the adapter's code, and the `ibapi` Python imports reports that version (`ibapi.VERSION`) and is the adapter venv's own (its file under `sys.prefix`, in a venv); anything else, or an `ibapi` that does not import, raises `IbapiNotPinned` |
+| `ibapi_pin.py` | `check_installed`: the adapter starts only if the install record `provision.sh twsapi` writes (`TWSAPI_VERSION`, `TWSAPI_SHA256`, `PROTOBUF_VERSION` and `PROTOBUF_SHA256`, nothing else) equals the pin in the `versions.env` installed with the adapter's code, and the `ibapi` Python imports reports that version (`ibapi.VERSION`, `{"major": 1051, "minor": 1}` for 10.51.01) and the `google.protobuf` it imports is the pinned one; both are the adapter venv's own (its file under `sys.prefix`, in a venv); anything else, or an `ibapi` that does not import, raises `IbapiNotPinned` |
 | `cli.py`, `__main__.py` | `python3 -m adapter.ibkr run --config FILE --pending FILE --engine-log FILE --socket PATH --ibapi-record FILE --versions FILE [--secrets FILE --account-key NAME] [--streams DIR]`, run from the directory that holds `adapter/`. Reads the configuration strictly, the account number from exactly one place (the configuration's `account_id`, or the named `KEY=VALUE` line of the adapter's own account file, read bare: surrounding whitespace dropped, quotes or inner spaces refused), checks the ibapi pin, then runs the loop until SIGTERM or SIGINT. Exit 0 for a requested stop, 1 for a refusal or a stop for a person (its reason on standard error, any account number masked), 2 for a usage error. The account number is never logged |
 
 ## Rules this code keeps
@@ -119,17 +119,81 @@ yet been sent to IBKR's real paper servers.
 
 ADR 0025 point 4 (amended 2026-10-16 and 2026-10-18) pins IBKR's own
 `ibapi` to one released build, the TWS API 10.51.01 Linux installer, by its
-SHA-256 in `deploy/versions.env`. It is never committed and not needed for
+SHA-256 in `deploy/versions.env`, together with the protobuf 5.29.5 wheel it
+imports (a new runtime dependency, `docs/dependency-policy.md`, proposed to
+the owner 2026-10-20). Neither is ever committed and not needed for
 the tests. `real_client.py` imports it only if present.
 
 On the server, `sudo deploy/provision.sh twsapi` (its own step, not run by
-`all`) fetches the installer, verifies its SHA-256 and stops on a mismatch,
+`all`) fetches the installer and the protobuf wheel, verifies both SHA-256s
+and stops on a mismatch with nothing installed,
 runs it unprivileged (as `nobody`) into a scratch directory, installs only
 the Python client it unpacks, as root, under
 `/opt/trend-investing/twsapi/10.51.01/pythonclient`, installs that
 Python client (`source/pythonclient`) offline into a fresh
-environment, `/opt/trend-investing/adapter-venv`, checks that `ibapi`
-imports there, and only then writes `/opt/trend-investing/twsapi/INSTALLED`.
+environment, `/opt/trend-investing/adapter-venv` (protobuf first, offline),
+checks that `google.protobuf` and the `ibapi` modules import from that environment, resolve under it and that `google.protobuf` is the pinned version, and only then writes `/opt/trend-investing/twsapi/INSTALLED`.
+
+The venv check is the step's last gate, and `verify_adapter_venv` in
+`deploy/provision.sh` runs its checks in this order, stopping at the first
+failure:
+
+1. The venv directory must exist; its real path (symbolic links resolved) is
+   taken for the location checks below.
+2. With the adapter venv's Python (`python3 -I`, so nothing from the current
+   directory), `google.protobuf`, `ibapi.client`, `ibapi.contract`,
+   `ibapi.order` and `ibapi.wrapper` must import.
+3. The interpreter must be a real venv: its `sys.prefix` must differ from its
+   `sys.base_prefix`, as the adapter checks at start.
+4. `google.protobuf` must resolve under the real path of the venv directory.
+5. `ibapi` must resolve under the real path of the venv directory.
+6. `google.protobuf.__version__` must equal the `PROTOBUF_VERSION` pinned in
+   `versions.env`.
+
+The locations are checked before the version because the venv is built with
+`--system-site-packages`: a system `google/__init__.py` (a regular package) can
+shadow the venv's namespace `google`, and the shadowing system protobuf then
+has the system's version. A location refusal names the shadowing path; a
+version refusal would point at the wheel, which is the wrong remedy.
+
+Every refusal writes nothing, prints one line prefixed `provision: ` on
+standard error, and leaves no `INSTALLED` record (the step removes any earlier
+one before it installs). The messages, with `VENV` the venv argument as given,
+are:
+
+- `VENV does not exist; not recording it`: step 1 found no directory. Remedy:
+  re-run `sudo deploy/provision.sh twsapi`, which builds the venv afresh.
+- `ibapi did not import from VENV after installing it; not recording it`:
+  step 2 failed. The message does not name the module; run the import by hand
+  (below) to see the error. Remedy: fix the environment, then re-run the step.
+- `could not read where protobuf and ibapi resolve in VENV; not recording it`:
+  the venv's Python imported the modules but could not report their paths and
+  version (step 2's read-back failed). Remedy: run the import by hand (below),
+  fix the environment, and re-run the step.
+- `VENV is not a venv (its interpreter's sys.prefix is the base prefix BASE);
+  not recording it`: step 3 found the interpreter is not in a venv. Remedy:
+  re-run `sudo deploy/provision.sh twsapi`, which rebuilds the venv.
+- `google.protobuf resolves to PATH, outside VENV; not recording it`: step 4
+  found protobuf imported from outside the venv. `PATH` is the shadowing
+  package. Re-running the step rebuilds only the venv and cannot remove a
+  system package, so remove or move the package at `PATH` (or its system
+  `google` package), then re-run the step.
+- `ibapi resolves to PATH, outside VENV; not recording it`: as the protobuf
+  message, for `ibapi`.
+- `protobuf X in VENV, pinned Y; not recording it`: step 6 found protobuf `X`
+  where the pin is `Y`. Remedy: re-run `sudo deploy/provision.sh twsapi`, which
+  rebuilds the venv from the verified wheels. If it fails again, the venv or
+  the system packages are at fault: run the import by hand, fix the
+  environment, and re-run the step.
+
+If a re-run fails again, the venv or the system packages are at fault: run the
+same import by hand with
+`/opt/trend-investing/adapter-venv/bin/python3 -I -c 'import google.protobuf, ibapi.client; print(google.protobuf.__file__)'`
+to see the error or the path, fix the environment, and re-run the step. Do not
+write `INSTALLED` by hand; the adapter then refuses to start with
+`IbapiNotPinned` until the step passes. The adapter re-checks the same things
+at start (below).
+
 `sudo deploy/provision.sh adapter` installs this directory's code (not its
 tests) and `versions.env` under `/opt/trend-investing/adapter`. The adapter
 refuses to start unless the install record equals that pin and the `ibapi`

@@ -5,8 +5,9 @@
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
 #   sudo deploy/provision.sh clock      enable time syncing and refuse to finish unless the clock is good
 #   sudo deploy/provision.sh gateway    IBC and IB Gateway (pinned, checksummed)
-#   sudo deploy/provision.sh twsapi     IBKR's TWS API: fetched, verified, its ibapi installed into the
-#                                       adapter's environment (not part of all)
+#   sudo deploy/provision.sh twsapi     IBKR's TWS API and the protobuf wheel it imports: fetched,
+#                                       verified, installed into the adapter's environment
+#                                       (not part of all)
 #   sudo deploy/provision.sh adapter    the IBKR adapter's code and pin file (not part of all)
 #   sudo deploy/provision.sh services   systemd units, directories, config stubs
 #   sudo deploy/provision.sh firewall   close everything except Tailscale
@@ -200,6 +201,33 @@ step_gateway() {
   fi
 }
 
+# verify_adapter_venv VENV PINNED_PROTOBUF: the twsapi step's last gate, before
+# it records INSTALLED. -I: the venv's own packages only, nothing from the
+# current directory. The modules must import; the interpreter must be a real
+# venv (sys.prefix is not sys.base_prefix, as the adapter checks at start);
+# google.protobuf and ibapi must resolve under the realpath of VENV itself;
+# and google.protobuf must be the pinned version. The venv is made with
+# --system-site-packages, so a system google/__init__.py (a regular package)
+# can shadow the venv's namespace google; the location checks run before the
+# version check so that is reported as the shadow it is, not as a version
+# mismatch (ibapi_pin.py; ADR 0025).
+verify_adapter_venv() {
+  local venv=$1 want=$2 py="$1/bin/python3" out real prefix base version pb ib
+  real=$(cd "$venv" && pwd -P) || die "$venv does not exist; not recording it"
+  "$py" -I -c 'import google.protobuf, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
+    || die "ibapi did not import from $venv after installing it; not recording it"
+  out=$("$py" -I -c 'import os, sys, google.protobuf, ibapi
+print(os.path.realpath(sys.prefix)); print(os.path.realpath(sys.base_prefix))
+print(google.protobuf.__version__)
+print(os.path.realpath(google.protobuf.__file__)); print(os.path.realpath(ibapi.__file__))') \
+    || die "could not read where protobuf and ibapi resolve in $venv; not recording it"
+  { read -r prefix; read -r base; read -r version; read -r pb; read -r ib; } <<<"$out"
+  test "$prefix" != "$base" || die "$venv is not a venv (its interpreter's sys.prefix is the base prefix $base); not recording it"
+  case $pb in "$real"/*) ;; *) die "google.protobuf resolves to $pb, outside $venv; not recording it" ;; esac
+  case $ib in "$real"/*) ;; *) die "ibapi resolves to $ib, outside $venv; not recording it" ;; esac
+  test "$version" = "$want" || die "protobuf $version in $venv, pinned $want; not recording it"
+}
+
 # IBKR's TWS API (the adapter's ibapi), fetched and verified against its
 # pinned checksum (ADR 0025 point 4, amended 2026-10-16); a mismatch stops
 # the step before anything is installed. Its own step, run with the
@@ -210,8 +238,11 @@ step_gateway() {
 # Runs the verified installer unprivileged, installs the Python client it
 # bundles (source/pythonclient) as root under $twsapi_root/<version>, then
 # into the adapter's own
-# environment, $adapter_venv, offline (--no-index, --no-deps: ibapi has no
-# dependencies), and only then writes the install record the adapter checks
+# environment, $adapter_venv, offline (--no-index, --no-deps: ibapi declares
+# no dependencies, but imports protobuf, so the pinned pure-Python protobuf
+# wheel is fetched and verified beside the installer, before anything is
+# installed, and installed first), and only then writes the install record
+# the adapter checks
 # at start against the pin installed with its code (adapter/ibkr/ibapi_pin.py):
 # a different or missing record and the adapter refuses to start.
 twsapi_root=/opt/trend-investing/twsapi
@@ -221,6 +252,9 @@ step_twsapi() {
   log "TWS API ${TWSAPI_VERSION}"
   local installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
   fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
+  # Both downloads are verified before any file is removed or installed.
+  local protobuf="$dl_cache/protobuf-${PROTOBUF_VERSION}-py3-none-any.whl"
+  fetch "$PROTOBUF_URL" "$PROTOBUF_SHA256" "$protobuf"
   if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
     log "rehearsal: checksum verified, installer not executed (not x86_64)"
     return 0
@@ -263,10 +297,11 @@ step_twsapi() {
   # offline.
   rm -rf "$adapter_venv"
   python3 -m venv --system-site-packages "$adapter_venv"
+  "$adapter_venv/bin/pip" install --quiet --no-index --no-deps "$protobuf"
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
-  "$adapter_venv/bin/python3" -c 'import ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
-    || die "ibapi did not import from $adapter_venv after installing it; not recording it"
-  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\n' "$TWSAPI_VERSION" "$TWSAPI_SHA256" >"$twsapi_root/INSTALLED.tmp"
+  verify_adapter_venv "$adapter_venv" "$PROTOBUF_VERSION"
+  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
+    "$TWSAPI_VERSION" "$TWSAPI_SHA256" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
   chmod 0644 "$twsapi_root/INSTALLED.tmp"
   mv "$twsapi_root/INSTALLED.tmp" "$twsapi_root/INSTALLED"
   log "ibapi from TWS API ${TWSAPI_VERSION} installed into $adapter_venv; recorded in $twsapi_root/INSTALLED"
