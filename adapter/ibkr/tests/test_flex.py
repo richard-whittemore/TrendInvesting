@@ -6,6 +6,7 @@ check stays the cross-check). Every statement here is synthetic: a made-up
 account, amounts and IDs, never a real statement. No network: the Flex Web
 Service is a fake that answers from the files in testdata/flex.
 """
+import fcntl
 import http.server
 import io
 import json
@@ -390,8 +391,15 @@ class ReadOnceTests(unittest.TestCase):
         self.assertFalse(self.ledger.exists())
         self.assertFalse(Path(str(self.ledger) + flex.COVERAGE_SUFFIX).exists())
 
-    def test_an_ambiguous_transfer_resolved_after_the_approval_is_written(self):
+    def set_aside_as_ambiguous(self):
+        """The evening approval's statement, read once and set aside as ambiguous: the state a decision answers."""
         statement = self.evening_approval()
+        self.assertFalse(self.read(FakeFlex(statements=(statement,))))
+        self.assertEqual(self.status()["ambiguous"], ["900000230"])
+        return statement
+
+    def test_an_ambiguous_transfer_resolved_after_the_approval_is_written(self):
+        statement = self.set_aside_as_ambiguous()
         flex.record_resolutions(str(self.ledger), {"900000230": flex.AFTER_APPROVAL})
         self.assertTrue(self.read(FakeFlex(statements=(statement,))))
         self.assertEqual(self.payloads()["900000230"], {
@@ -402,7 +410,7 @@ class ReadOnceTests(unittest.TestCase):
         self.assertTrue(self.read(FakeFlex(statements=(statement,))), "the decision is kept for later readings")
 
     def test_an_ambiguous_transfer_resolved_in_the_first_book_is_not_written(self):
-        statement = self.evening_approval()
+        statement = self.set_aside_as_ambiguous()
         flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
         self.assertTrue(self.read(FakeFlex(statements=(statement,))))
         self.assertFalse(self.ledger.exists())
@@ -413,6 +421,7 @@ class ReadOnceTests(unittest.TestCase):
         self.assertFalse(self.ledger.exists())
 
     def test_a_resolution_is_never_changed(self):
+        self.set_aside_as_ambiguous()
         flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
         flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
         with self.assertRaises(flex.StatementRefused) as caught:
@@ -420,6 +429,55 @@ class ReadOnceTests(unittest.TestCase):
         self.assertIn("900000230", str(caught.exception))
         self.assertEqual(flex.read_resolutions(str(self.ledger) + flex.RESOLUTIONS_SUFFIX),
                          {"900000230": flex.IN_FIRST_BOOK})
+
+    def test_a_decision_for_a_transfer_already_in_the_ledger_is_refused(self):
+        self.assertTrue(self.read(FakeFlex()))
+        self.assertIn("900000101", self.payloads())
+        Path(str(self.ledger) + flex.STATUS_SUFFIX).write_text(json.dumps(
+            {"state": "ambiguous-transfer", "ambiguous": ["900000101"]}))
+        with self.assertRaises(flex.StatementRefused) as caught:
+            flex.record_resolutions(str(self.ledger), {"900000101": flex.IN_FIRST_BOOK})
+        self.assertIn("already journalled as ibkr-flex:900000101", str(caught.exception))
+        self.assertFalse(Path(str(self.ledger) + flex.RESOLUTIONS_SUFFIX).exists())
+
+    def test_a_decision_is_refused_unless_the_last_reading_set_that_transfer_aside_as_ambiguous(self):
+        self.set_aside_as_ambiguous()
+        with self.assertRaises(flex.StatementRefused) as caught:
+            flex.record_resolutions(str(self.ledger), {"900000999": flex.IN_FIRST_BOOK})
+        self.assertIn("waiting on", str(caught.exception))
+        self.assertIn("900000230", str(caught.exception))
+        Path(str(self.ledger) + flex.STATUS_SUFFIX).write_text(json.dumps({"state": "read"}))
+        with self.assertRaises(flex.StatementRefused) as caught:
+            flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        self.assertIn("not waiting on a decision", str(caught.exception))
+        Path(str(self.ledger) + flex.STATUS_SUFFIX).unlink()
+        with self.assertRaises(flex.StatementRefused):
+            flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        self.assertFalse(Path(str(self.ledger) + flex.RESOLUTIONS_SUFFIX).exists())
+
+    def test_a_decision_waits_a_short_while_for_a_reading_then_says_so(self):
+        self.set_aside_as_ambiguous()
+        waits = []
+        with open(str(self.ledger) + flex.LOCK_SUFFIX, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with self.assertRaises(flex.StatementRefused) as caught:
+                flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK}, wait=3,
+                                        sleep=waits.append)
+        self.assertIn("a reading is running, try again in a few minutes", str(caught.exception))
+        self.assertTrue(waits and sum(waits) >= 3)
+        self.assertFalse(Path(str(self.ledger) + flex.RESOLUTIONS_SUFFIX).exists())
+
+    def test_a_recorded_decision_the_statement_now_contradicts_sets_the_reader_aside(self):
+        # Recorded while the transfer was dated by day alone; IBKR later gives it a time after the approval.
+        self.set_aside_as_ambiguous()
+        flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        restated = self.statement(("900000230", "20270114;180000", "2500"), period=("20270114", "20270115"))
+        self.assertFalse(self.read(FakeFlex(statements=(restated,))))
+        status = self.status()
+        self.assertEqual(status["state"], "set-aside")
+        self.assertIn("900000230", status["reason"])
+        self.assertIn("in-first-book", status["reason"])
+        self.assertFalse(self.ledger.exists())
 
     def test_a_resolutions_file_not_as_the_reader_writes_it_sets_the_reader_aside(self):
         Path(str(self.ledger) + flex.RESOLUTIONS_SUFFIX).write_text('{"900000230": "maybe"}\n')
@@ -824,6 +882,8 @@ class CommandTests(unittest.TestCase):
     def test_resolve_records_the_owners_decision_and_reads_nothing(self):
         err = io.StringIO()
         service = FakeFlex()
+        Path(str(self.ledger) + flex.STATUS_SUFFIX).write_text(json.dumps(
+            {"state": "ambiguous-transfer", "ambiguous": ["900000230", "900000231"]}))
         code = main(["flex", "--ledger", str(self.ledger), "--resolve", "900000230=after-approval",
                      "--resolve", "900000231=in-first-book"], err=err, flex_get=service)
         self.assertEqual((code, service.calls), (0, []), err.getvalue())

@@ -239,6 +239,10 @@ class AmbiguousTransfer(StatementRefused):
     """A transfer dated by day alone on the day of a first-run approval given after that session's close, with no
     decision recorded by the owner: whether the starting book holds it is not known."""
 
+    def __init__(self, message, ids=()):
+        super().__init__(message)
+        self.ids = tuple(ids)
+
 
 class FlexRejected(Exception):
     """IBKR rejected the token, its account or the query: code and IBKR's message, never the token."""
@@ -629,18 +633,28 @@ def _after_approval(posting, approved_at, resolutions):
     """(after, resolved) for posting against the first run's approval (ADR 0027, starting-book amendment), or None
     when it cannot be told: dated at or after the approval is after it; dated by day alone on the approval's New York
     day is after it when the approval came before that session's close (the book the owner read then cannot hold
-    it), and otherwise on the side the owner recorded in resolutions (resolved), or not known."""
-    if posting.as_of >= approved_at:
-        return True, False
-    if not (posting.dated_only and posting.as_of.astimezone(NEW_YORK).date()
-            == approved_at.astimezone(NEW_YORK).date()):
-        return False, False
-    if not _after_the_close(approved_at):
-        return True, False
+    it), and otherwise on the side the owner recorded in resolutions (resolved), or not known. A recorded decision
+    the statement now contradicts (the transfer is dated otherwise than when it was decided) is StatementRefused:
+    the owner's word and IBKR's date cannot both stand."""
     decision = resolutions.get(posting.transaction_id)
-    if decision is None:
-        return None
-    return decision == AFTER_APPROVAL, True
+    if posting.as_of >= approved_at:
+        after, ambiguous = True, False
+    elif not (posting.dated_only and posting.as_of.astimezone(NEW_YORK).date()
+              == approved_at.astimezone(NEW_YORK).date()):
+        after, ambiguous = False, False
+    elif not _after_the_close(approved_at):
+        after, ambiguous = True, False
+    else:
+        after, ambiguous = None, True
+    if ambiguous:
+        return None if decision is None else (decision == AFTER_APPROVAL, True)
+    if decision is not None and (decision == AFTER_APPROVAL) != after:
+        raise StatementRefused(
+            "transfer {} was recorded by the owner as {}, but IBKR now dates it {}, {} the first run's approval at "
+            "{}; nothing is written. Tell the developer (docs/manual/reconciliation.md)".format(
+                posting.transaction_id, decision, _stamp(posting.as_of), "after" if after else "before",
+                _stamp(approved_at)))
+    return after, False
 
 
 def _written_first(snapshots, written, posting):
@@ -686,7 +700,8 @@ def new_movements(statement, ledger, approved_at, snapshots, resolutions=None):
                 _stamp(approved_at),
                 "; ".join("transfer {} of {} {}".format(p.transaction_id, p.amount, p.currency) for p in unknown),
                 "; ".join("--resolve {0}={1} (the book you stated holds it) or --resolve {0}={2}".format(
-                    p.transaction_id, IN_FIRST_BOOK, AFTER_APPROVAL) for p in unknown)))
+                    p.transaction_id, IN_FIRST_BOOK, AFTER_APPROVAL) for p in unknown)),
+            ids=[p.transaction_id for p in unknown])
     for posting in transfers:
         if posting.transaction_id in sides and sides[posting.transaction_id][0]:
             known[posting.transaction_id] = (posting.as_of, posting.transaction_id, posting.amount)
@@ -815,14 +830,42 @@ def read_resolutions(path):
     return resolutions
 
 
-def record_resolutions(ledger_path, decisions):
+LOCK_WAIT = 10
+
+
+def _status_of(ledger_path):
+    """The status file beside ledger_path as a dict, or {} when there is none or it is not one."""
+    try:
+        with open(ledger_path + STATUS_SUFFIX, encoding="utf-8") as f:
+            status = json.loads(f.read())
+    except (OSError, ValueError):
+        return {}
+    return status if isinstance(status, dict) else {}
+
+
+def record_resolutions(ledger_path, decisions, wait=LOCK_WAIT, sleep=time.sleep):
     """decisions ({transaction ID: IN_FIRST_BOOK or AFTER_APPROVAL}) added to the resolutions file beside
-    ledger_path, under the ledger's lock; StatementRefused, nothing recorded, when one would change a decision
-    already recorded (a transfer written as after the approval stays so)."""
+    ledger_path, under the ledger's lock (waited for at most wait seconds: StatementRefused when a reading holds it
+    longer); StatementRefused, nothing recorded, when one would change a decision already recorded (a transfer
+    written as after the approval stays so), names a transfer already in the ledger, or names one the last
+    reading did not set aside as ambiguous (a decision no later reading would consult)."""
     path = ledger_path + RESOLUTIONS_SUFFIX
     with open(ledger_path + LOCK_SUFFIX, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        waited = 0
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if waited >= wait:
+                    raise StatementRefused("a reading is running, try again in a few minutes") from None
+                sleep(1)
+                waited += 1
         resolutions = read_resolutions(path)
+        ledger = read_ledger(ledger_path)
+        status = _status_of(ledger_path)
+        waiting = status.get("ambiguous") if status.get("state") == "ambiguous-transfer" else None
+        waiting = [i for i in waiting if isinstance(i, str)] if isinstance(waiting, list) else []
         for transaction_id, decision in sorted(decisions.items()):
             if decision not in DECISIONS:
                 raise StatementRefused("{} is not a decision ({} or {})".format(decision, IN_FIRST_BOOK,
@@ -831,6 +874,16 @@ def record_resolutions(ledger_path, decisions):
                 raise StatementRefused("transfer {} is already recorded as {}; a recorded decision is never "
                                        "changed (docs/manual/reconciliation.md)".format(
                                            transaction_id, resolutions[transaction_id]))
+            if ID_PREFIX + transaction_id in ledger:
+                raise StatementRefused("transfer {} is already journalled as {}{}; a decision now would change "
+                                       "nothing (docs/manual/reconciliation.md)".format(
+                                           transaction_id, ID_PREFIX, transaction_id))
+            if transaction_id not in waiting and resolutions.get(transaction_id) != decision:
+                raise StatementRefused(
+                    "the reader is {}; transfer {} is not one it set aside as ambiguous, so a decision on it would "
+                    "never be consulted (docs/manual/reconciliation.md)".format(
+                        "waiting on a decision for " + ", ".join(waiting) if waiting
+                        else "not waiting on a decision", transaction_id))
         merged = dict(resolutions, **decisions)
         if merged != resolutions:
             _write_whole(path, json.dumps(merged, sort_keys=True) + "\n")
@@ -911,6 +964,8 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             state = ("coverage-gap" if isinstance(refused, CoverageGap)
                      else "ambiguous-transfer" if isinstance(refused, AmbiguousTransfer) else "set-aside")
             status.update(state=state, reason=reason, code=getattr(refused, "code", None))
+            if isinstance(refused, AmbiguousTransfer):
+                status["ambiguous"] = sorted(refused.ids)
             say("flex: set aside: " + reason)
             ok = False
         _write_whole(status_path, json.dumps(status, sort_keys=True) + "\n")
