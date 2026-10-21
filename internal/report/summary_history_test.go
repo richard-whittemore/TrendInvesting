@@ -117,7 +117,7 @@ func TestABrokenChainNamesBothLogsInTheEquityComparison(t *testing.T) {
 	// with the break named above it.
 	text := report.RenderText(got)
 	broke := strings.Index(text, "Equity vs SPY: history unavailable: the chain of runs is broken between run2.log and run1.log\n")
-	over := strings.Index(text, "Equity vs SPY, from run2.log, the first intact run, "+day(3).Format("2006-01-02")+" to "+day(4).Format("2006-01-02")+": account ")
+	over := strings.Index(text, "Equity vs SPY, from run2.log, the first intact run it includes, "+day(3).Format("2006-01-02")+" to "+day(4).Format("2006-01-02")+": account ")
 	if broke < 0 || over < broke || !strings.Contains(text, "Day, "+day(3).Format("2006-01-02")) {
 		t.Fatalf("text:\n%s", text)
 	}
@@ -132,14 +132,14 @@ func TestABrokenChainNamesBothLogsInTheEquityComparison(t *testing.T) {
 // not match, is another incident.
 func TestHistoryUnavailableAlertIsOneIncidentPerBreak(t *testing.T) {
 	broken := &restart.ChainError{Run: "run2.log", Previous: "run1.log", Cause: restart.CauseUnreadable, Reason: "that log cannot be read"}
-	a := report.HistoryUnavailableAlert("joint", broken, day(1))
-	again := report.HistoryUnavailableAlert("joint", broken, day(2))
+	a := report.HistoryUnavailableAlert("joint", report.History{Broken: broken}, day(1))
+	again := report.HistoryUnavailableAlert("joint", report.History{Broken: broken}, day(2))
 	if a.Key != again.Key || a.Repeat || a.Kind != report.KindHistoryUnavailable || a.Severity != report.Routine {
 		t.Fatalf("alert = %+v, again = %+v", a, again)
 	}
 	mismatch := *broken
 	mismatch.Cause = restart.CauseHashMismatch
-	if other := report.HistoryUnavailableAlert("joint", &mismatch, day(2)); other.Key == a.Key {
+	if other := report.HistoryUnavailableAlert("joint", report.History{Broken: &mismatch}, day(2)); other.Key == a.Key {
 		t.Fatalf("a break of another cause at the same link shares the key %q", a.Key)
 	}
 	if !strings.HasPrefix(a.Key, report.HistoryUnavailableKeyPrefix("joint")) {
@@ -181,5 +181,22 @@ func TestARestoredLogNewerThanTheCurrentRunIsOneRoutineAlert(t *testing.T) {
 	line := "run1.log looks newer than the current run run3.log; fix its modification time before the next restart"
 	if report.RestoredLogNewer("run1.log", "run3.log") != line || !strings.Contains(a.Body, line) || !strings.Contains(a.Title, "joint") {
 		t.Fatalf("alert = %+v", a)
+	}
+}
+
+// TestAStartInProgressIsNamedInTheComparison: a run still starting has no
+// history yet, and the page and the summary say so.
+func TestAStartInProgressIsNamedInTheComparison(t *testing.T) {
+	_, second := twoRuns(t)
+	got, err := report.SummarizeWithHistory(report.History{Starting: true}, second, day(4).Format("2006-01-02"), "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "the run is starting; no history yet"
+	if got.Equity.HistoryStarting != want || got.Equity.HistoryUnavailable != "" {
+		t.Fatalf("equity = %+v", got.Equity)
+	}
+	if text := report.RenderText(got); !strings.Contains(text, "Equity vs SPY: "+want+"\n") {
+		t.Fatalf("text:\n%s", text)
 	}
 }

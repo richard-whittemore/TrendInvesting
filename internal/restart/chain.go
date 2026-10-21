@@ -85,9 +85,12 @@ func PreviousLogApproved(recovery journal.Recovery, approval event.OperatorRunAp
 // states the starting book, or a dry run's log holding no approval, since a
 // dry run's first run is started with none (ADR 0027, the restart model). A
 // paper or live log with no approval states no starting book, so it is a
-// broken link, as is a dry-run log holding nothing past its configuration,
-// which cannot be told from a fresh run's start cut short before its
-// approval was recorded. Each earlier log must be the one the approval names,
+// broken link, as is an earlier dry-run log holding nothing past its
+// configuration, which cannot be told from a fresh run's start cut short
+// before its approval was recorded. The current log is the head of the
+// chain, named by no other log, so the current log holding only its
+// configuration, in any mode, is a start in progress, not a break: it is
+// returned as the chain's one link (StartInProgress). Each earlier log must be the one the approval names,
 // by PreviousLogApproved, and of the current log's account, so no other
 // account's records join the history. Its mode may differ: the engine
 // accepts a fresh run's approval naming the latest log whatever its mode,
@@ -120,7 +123,8 @@ func FollowChain(current string, read LogReader) ([]Link, error) {
 		if refused != nil {
 			return refuse(refused)
 		}
-		if approval == nil && (mode != event.TradingModeDryRun || CutShort(recovery)) {
+		starting := name == current && approval == nil && CutShort(recovery)
+		if approval == nil && !starting && (mode != event.TradingModeDryRun || CutShort(recovery)) {
 			return refuse(unapprovedLink(current, name, newestFirst, mode))
 		}
 		newestFirst = append(newestFirst, Link{Name: name, Recovery: recovery, Mode: mode, Approval: approval})
@@ -136,7 +140,7 @@ func FollowChain(current string, read LogReader) ([]Link, error) {
 		seen[previous] = true
 		earlier, err := read(previous)
 		if err != nil {
-			return refuse(&ChainError{Run: name, Previous: previous, Cause: CauseUnreadable, Reason: fmt.Sprintf("that log cannot be read (%v): restore it from a backup of the log as the engine wrote it, keeping its modification time (cp -p or rsync -a) so it stays older than the current log; if it cannot be recovered, the history starts at the first intact run, and a log moved into quarantine is never put back", err)})
+			return refuse(&ChainError{Run: name, Previous: previous, Cause: CauseUnreadable, Reason: fmt.Sprintf("that log cannot be read (%v): restore it from a backup of the log as the engine wrote it, keeping its modification time (cp -p or rsync -a) so it stays older than the current log, owned by the engine's user; if it cannot be recovered, the history starts at the first intact run, and a log moved into quarantine is never put back", err)})
 		}
 		if !PreviousLogApproved(earlier, *approval) {
 			return refuse(&ChainError{Run: name, Previous: previous, Cause: CauseHashMismatch, Reason: fmt.Sprintf("the approval names final record hash %s, but that log's final record hash is %s: it is not the log the owner approved", approval.PreviousLogFinalHash, earlier.FinalRecordHash)})
@@ -396,4 +400,13 @@ func sameStart(a, b journal.Recovery) bool {
 		}
 	}
 	return true
+}
+
+// StartInProgress reports whether chain, as FollowChain returns it, is a
+// start in progress: the current log alone, holding no approval and nothing
+// past its configuration. A run records its configuration, then its
+// approval or, a dry run's first run, its first input (ADR 0027, the restart
+// model), so such a run has no earlier run yet and no history to show.
+func StartInProgress(chain []Link) bool {
+	return len(chain) == 1 && chain[0].Approval == nil && CutShort(chain[0].Recovery)
 }

@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -141,6 +142,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		// break after a repair is a new incident (ADR 0019, "Alerting":
 		// once per incident).
 		forget(report.HistoryUnavailableKeyPrefix(account), seen, sent, repeats)
+	}
+	if refused == nil && !slices.ContainsFunc(alerts, func(a report.Alert) bool { return a.Kind == report.KindRestoredLogNewer }) {
+		// No log newer than the current run clears the restored-log alerts
+		// delivered for the account, so the same log restored wrongly again
+		// is a new incident (ADR 0019, "Alerting": once per incident).
+		forget(report.RestoredLogNewerKeyPrefix(account), seen, sent, repeats)
 	}
 	// The heartbeat is checked first so a refused journal's alert can say
 	// whether liveness is monitored.
@@ -259,7 +266,7 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 	alerts = append(alerts, report.UnacknowledgedAlerts(orders, now, ackWithin, func(key string) bool { return deliveredAnywhere(seen, key) })...)
 	history = report.EarlierRunsOf(path, raw, recoverLogFile)
 	if history.Broken != nil {
-		alerts = append(alerts, report.HistoryUnavailableAlert(account, history.Broken, now))
+		alerts = append(alerts, report.HistoryUnavailableAlert(account, history, now))
 	}
 	if restored, current := restoredLogNewer(path); restored != "" {
 		alerts = append(alerts, report.RestoredLogNewerAlert(account, restored, current, now))

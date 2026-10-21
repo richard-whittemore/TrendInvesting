@@ -316,7 +316,10 @@ func currentLogIn(dir string, logs *logCache) (path, warning string, err error) 
 	logs.sweep(dir, files)
 	head, newer, err := restart.ChainHead(files,
 		func(name string) (journal.Recovery, error) { return logs.start(filepath.Join(dir, name)) },
-		func(name string) (journal.Recovery, error) { return logs.whole(filepath.Join(dir, name)) })
+		func(name string) (journal.Recovery, error) { return logs.tiedWhole(filepath.Join(dir, name)) })
+	if head != "" {
+		logs.forgetTied(filepath.Join(dir, head))
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -336,8 +339,11 @@ func currentLogIn(dir string, logs *logCache) (path, warning string, err error) 
 // log is only ever appended to, so a log whose size and time are unchanged
 // holds what it held: an earlier run's log is read again only when its size
 // or modification time changes, and the current log, never kept whole, is
-// read and verified afresh on every request. An entry whose file is gone is
-// dropped.
+// read and verified afresh on every request. A log that ties with the
+// current run for the chain's head (the log a resumed run copied) is read
+// whole by the engine's latest-run rule; it is kept whole by its size and
+// modification time, so it too is read again only when it changes, and the
+// head is never kept whole. An entry whose file is gone is dropped.
 type logCache struct {
 	stat      func(string) (fs.FileInfo, error)
 	readFile  func(string) ([]byte, error)
@@ -346,12 +352,13 @@ type logCache struct {
 	mu        sync.Mutex
 	starts    map[string]cachedLog
 	histories map[string]cachedLog
+	tied      map[string]cachedLog
 }
 
 // newLogCache is an empty cache reading whole logs with readFile and the
 // first records of a log through open.
 func newLogCache(readFile func(string) ([]byte, error), open func(string) (io.ReadCloser, error)) *logCache {
-	return &logCache{stat: os.Stat, readFile: readFile, open: open, starts: map[string]cachedLog{}, histories: map[string]cachedLog{}}
+	return &logCache{stat: os.Stat, readFile: readFile, open: open, starts: map[string]cachedLog{}, histories: map[string]cachedLog{}, tied: map[string]cachedLog{}}
 }
 
 // cachedLog is what is kept of one log, or the reason it does not recover,
@@ -431,8 +438,8 @@ func (c *logCache) earlier(path string) (journal.Recovery, error) {
 // since a reader of the page is not told the server's paths.
 var errUnreadable = errors.New("cannot be read")
 
-// whole reads and recovers the log at path, keeping nothing: the engine's
-// latest-run rule reads whole only the logs that tie for the chain's head.
+// whole reads and recovers the log at path, keeping nothing; earlier and
+// tiedWhole keep what they need of it.
 func (c *logCache) whole(path string) (journal.Recovery, error) {
 	raw, err := c.readFile(path)
 	if err != nil {
@@ -441,11 +448,44 @@ func (c *logCache) whole(path string) (journal.Recovery, error) {
 	return journal.RecoverLog(bytes.NewReader(raw))
 }
 
+// tiedWhole is whole for a log that ties for the chain's head, kept by its
+// size and modification time. A file that cannot be read is not kept.
+func (c *logCache) tiedWhole(path string) (journal.Recovery, error) {
+	info, err := c.stat(path)
+	if err != nil {
+		c.drop(path)
+		return journal.Recovery{}, errUnreadable
+	}
+	c.mu.Lock()
+	hit, ok := c.tied[path]
+	c.mu.Unlock()
+	if ok && hit.current(info) {
+		return hit.recovery, hit.err
+	}
+	recovery, err := c.whole(path)
+	if errors.Is(err, errUnreadable) {
+		return journal.Recovery{}, err
+	}
+	c.mu.Lock()
+	c.tied[path] = cachedLog{size: info.Size(), modified: info.ModTime(), recovery: recovery, err: err}
+	c.mu.Unlock()
+	return recovery, err
+}
+
+// forgetTied drops the whole log kept for path, the chain's head: the
+// current log is never kept whole.
+func (c *logCache) forgetTied(path string) {
+	c.mu.Lock()
+	delete(c.tied, path)
+	c.mu.Unlock()
+}
+
 // drop forgets the log at path.
 func (c *logCache) drop(path string) {
 	c.mu.Lock()
 	delete(c.starts, path)
 	delete(c.histories, path)
+	delete(c.tied, path)
 	c.mu.Unlock()
 }
 
@@ -457,7 +497,7 @@ func (c *logCache) sweep(dir string, files []restart.LoggedFile) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, m := range []map[string]cachedLog{c.starts, c.histories} {
+	for _, m := range []map[string]cachedLog{c.starts, c.histories, c.tied} {
 		for path := range m {
 			if filepath.Dir(path) == filepath.Clean(dir) && !listed[path] {
 				delete(m, path)
@@ -470,7 +510,7 @@ func (c *logCache) sweep(dir string, files []restart.LoggedFile) {
 func (c *logCache) retained(path string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.starts[path].recovery.Entries) + len(c.histories[path].recovery.Entries)
+	return len(c.starts[path].recovery.Entries) + len(c.histories[path].recovery.Entries) + len(c.tied[path].recovery.Entries)
 }
 
 // held reports whether the cache keeps anything of the log at path.
@@ -479,7 +519,8 @@ func (c *logCache) held(path string) bool {
 	defer c.mu.Unlock()
 	_, start := c.starts[path]
 	_, earlier := c.histories[path]
-	return start || earlier
+	_, tied := c.tied[path]
+	return start || earlier || tied
 }
 
 func view(history report.History, envelopes []event.Envelope, benchmark string) (account, error) {

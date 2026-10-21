@@ -82,7 +82,10 @@ func RenderText(s Summary) string {
 	from := ""
 	if e := s.Equity; e.HistoryUnavailable != "" {
 		fmt.Fprintf(&b, "Equity vs %s: %s\n", s.Benchmark, e.HistoryUnavailable)
-		from = fmt.Sprintf(" from %s, the first intact run,", e.HistoryStartsAt)
+		from = fmt.Sprintf(" from %s, the first intact run it includes,", e.HistoryStartsAt)
+	}
+	if s.Equity.HistoryStarting != "" {
+		fmt.Fprintf(&b, "Equity vs %s: %s\n", s.Benchmark, s.Equity.HistoryStarting)
 	}
 	if s.Equity.HistorySince != "" {
 		fmt.Fprintf(&b, "Equity vs %s: %s\n", s.Benchmark, s.Equity.HistorySince)

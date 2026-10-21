@@ -118,14 +118,17 @@ type Equity struct {
 	Points             []EquityPoint
 	// HistoryUnavailable is set when the chain of runs is broken
 	// (HistoryUnavailable, the function): the comparison then runs from
-	// HistoryStartsAt, the log of the first intact run, not from the
-	// account's first run.
+	// HistoryStartsAt, the log of the first intact run it includes, not
+	// from the account's first run.
 	HistoryUnavailable string
 	HistoryStartsAt    string
 	// HistorySince is set when earlier runs of another mode come before
 	// the current mode's (HistorySince, the function): the comparison then
 	// runs from the first run of the current mode.
 	HistorySince string
+	// HistoryStarting is set when the current run is still starting
+	// (HistoryStarting, the function): it has no history yet.
+	HistoryStarting string
 }
 
 // EquityPoint is one date on which the account's net liquidation and the
@@ -342,9 +345,10 @@ func SummarizeWithHistory(history History, envelopes []event.Envelope, date, ben
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
 	s.Equity = equityOf(points, date)
 	if history.Broken != nil {
-		s.Equity.HistoryUnavailable, s.Equity.HistoryStartsAt = HistoryUnavailable(history.Broken), historyStartsAt(history.Broken)
+		s.Equity.HistoryUnavailable, s.Equity.HistoryStartsAt = HistoryUnavailable(history.Broken), historyStartsAt(history)
 	}
 	s.Equity.HistorySince = HistorySince(history)
+	s.Equity.HistoryStarting = HistoryStarting(history)
 	return s, nil
 }
 

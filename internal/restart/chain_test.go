@@ -116,7 +116,7 @@ func TestFollowChainRefusesALinkWithNeitherApprovalNorStartingBook(t *testing.T)
 		current, want string
 	}{
 		"earlier paper link": {map[string]journal.Recovery{"a.log": run(t, "a.log", ""), "b.log": unapproved(t, "b.log", event.TradingModePaper), "c.log": run(t, "c.log", "b.log")}, "c.log", "b.log"},
-		"current live log":   {map[string]journal.Recovery{"a.log": unapproved(t, "a.log", event.TradingModeLive)}, "a.log", "a.log"},
+		"current live log":   {map[string]journal.Recovery{"a.log": pastItsConfiguration(t, unapproved(t, "a.log", event.TradingModeLive))}, "a.log", "a.log"},
 		"cut-short dry run":  {map[string]journal.Recovery{"a.log": runOf(t, "a.log", "", "joint", event.TradingModeDryRun), "b.log": unapproved(t, "b.log", event.TradingModeDryRun), "c.log": runOf(t, "c.log", "b.log", "joint", event.TradingModeDryRun)}, "c.log", "b.log"},
 	}
 	for name, c := range cases {
@@ -130,6 +130,40 @@ func TestFollowChainRefusesALinkWithNeitherApprovalNorStartingBook(t *testing.T)
 				t.Fatalf("err = %v, want it to name %s and its missing approval", err, c.want)
 			}
 		})
+	}
+}
+
+// pastItsConfiguration is recovery with one more input after its
+// configuration, so it is not a start in progress.
+func pastItsConfiguration(t *testing.T, recovery journal.Recovery) journal.Recovery {
+	t.Helper()
+	recovery.Entries = append(recovery.Entries, recorded(t, journal.KindInput, "other", event.KillSwitchEventType, event.KillSwitchSchemaVersion, struct{}{}))
+	return recovery
+}
+
+// TestFollowChainTakesACurrentLogHoldingOnlyItsConfigurationForAStart: the
+// current log is the head of the chain, named by no other log, so one that
+// holds only its configuration is a start in progress, in any mode, not a
+// break: its run is the chain's one link and has no earlier run
+// (StartInProgress). An earlier link holding only its configuration is
+// still a broken link (TestFollowChainRefusesALinkWithNeitherApprovalNorStartingBook).
+func TestFollowChainTakesACurrentLogHoldingOnlyItsConfigurationForAStart(t *testing.T) {
+	for _, mode := range []string{event.TradingModeDryRun, event.TradingModePaper, event.TradingModeLive} {
+		t.Run(mode, func(t *testing.T) {
+			logs := map[string]journal.Recovery{"a.log": run(t, "a.log", ""), "b.log": unapproved(t, "b.log", mode)}
+			chain, err := restart.FollowChain("b.log", reader(logs))
+			if err != nil || !slices.Equal(names(chain), []string{"b.log"}) || !restart.StartInProgress(chain) {
+				t.Fatalf("chain = %v, err = %v; want b.log alone, a start in progress", names(chain), err)
+			}
+		})
+	}
+	whole, err := restart.FollowChain("b.log", reader(map[string]journal.Recovery{"a.log": run(t, "a.log", ""), "b.log": run(t, "b.log", "a.log")}))
+	if err != nil || restart.StartInProgress(whole) {
+		t.Fatalf("a run past its approval is a start in progress: %v, %v", names(whole), err)
+	}
+	dry, err := restart.FollowChain("a.log", reader(map[string]journal.Recovery{"a.log": pastItsConfiguration(t, unapproved(t, "a.log", event.TradingModeDryRun))}))
+	if err != nil || restart.StartInProgress(dry) {
+		t.Fatalf("a dry run's first run past its configuration is a start in progress: %v, %v", names(dry), err)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // writeChainedLog writes haltedEntries as a durable log with a run approval
@@ -193,5 +194,87 @@ func TestARestoredLogNewerThanTheCurrentRunIsReportedOnce(t *testing.T) {
 	}
 	if strings.Contains(again.String(), "looks newer") {
 		t.Fatalf("reported twice:\n%s", again.String())
+	}
+}
+
+// TestARunStillStartingCostsNoHistoryAlert: the current log holding only its
+// configuration is a start in progress: the summary says the run is
+// starting, and no history alert is sent, since nothing is to be restored.
+func TestARunStillStartingCostsNoHistoryAlert(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	dir := t.TempDir()
+	writeChainedLog(t, filepath.Join(dir, "run1.log"), approvalNaming("", ""))
+	current := filepath.Join(dir, "run2.log")
+	var buf syncBuffer
+	log, err := journal.CreateLog(&buf, journal.NewLogHeader("h", "v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append(haltedEntries(t)[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(current, bytes.Clone(buf.Bytes()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	history, _, _, alerts, err := readJournal(current, t0, time.Minute, map[string]bool{})
+	if err != nil || history.Broken != nil || !history.Starting {
+		t.Fatalf("history = %+v, err = %v; want a start in progress", history, err)
+	}
+	for _, a := range alerts {
+		if a.Kind == report.KindHistoryUnavailable {
+			t.Fatalf("a run still starting alerted: %+v", a)
+		}
+	}
+	var out bytes.Buffer
+	args := []string{"-journal", current, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy"}
+	if err := run(args, fakeEnv, func() time.Time { return t0.Add(time.Hour) }, &out, fakeClient); err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "history of earlier runs") {
+		t.Fatalf("a run still starting alerted:\n%s", out.String())
+	}
+}
+
+// TestARestoredLogNewerAgainAfterAFixAlertsAgain: the restored-log alert is
+// forgotten once a firing finds no log newer than the current run, so the
+// same log restored wrongly again is a new incident.
+func TestARestoredLogNewerAgainAfterAFixAlertsAgain(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "run1.log")
+	hash := writeChainedLog(t, first, approvalNaming("", ""))
+	current := filepath.Join(dir, "run2.log")
+	writeChainedLog(t, current, approvalNaming("run1.log", hash))
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(current, base, base); err != nil {
+		t.Fatal(err)
+	}
+	stamp := func(at time.Time) {
+		t.Helper()
+		if err := os.Chtimes(first, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := []string{"-journal", current, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy"}
+	fire := func() string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := run(args, fakeEnv, func() time.Time { return t0.Add(time.Hour) }, &out, fakeClient); err != nil {
+			t.Fatalf("run: %v\n%s", err, out.String())
+		}
+		return out.String()
+	}
+	const title = "joint: a restored log looks newer than the current run"
+	stamp(base.Add(time.Hour))
+	if out := fire(); !strings.Contains(out, title) {
+		t.Fatalf("the restored log was not reported:\n%s", out)
+	}
+	stamp(base.Add(-time.Hour))
+	if out := fire(); strings.Contains(out, title) {
+		t.Fatalf("a log with its time fixed was reported:\n%s", out)
+	}
+	stamp(base.Add(2 * time.Hour))
+	if out := fire(); !strings.Contains(out, title) {
+		t.Fatalf("the same log restored wrongly again after a fix was not reported:\n%s", out)
 	}
 }

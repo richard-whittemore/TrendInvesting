@@ -8,7 +8,6 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
-	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
 // Severity is how loudly an alert is delivered.
@@ -723,12 +722,13 @@ func Fresh(alerts []Alert, seen map[string]bool) []Alert {
 // keys when a later firing finds the chain whole, so a break after a repair
 // alerts again. It is routine: no figure the engine trades by depends on
 // the history.
-func HistoryUnavailableAlert(account string, broken *restart.ChainError, at time.Time) Alert {
+func HistoryUnavailableAlert(account string, h History, at time.Time) Alert {
+	broken := h.Broken
 	return Alert{
 		Key: HistoryUnavailableKeyPrefix(account) + broken.Run + ":" + broken.Previous + ":" + broken.Cause, Kind: KindHistoryUnavailable, Severity: Routine, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: the history of earlier runs is unavailable", account),
-		Body: fmt.Sprintf("%s (%v). The equity comparison, on the dashboard and in the daily summary, runs from %s, the first intact run, until the chain is whole; the incident alerts, the engine state and the day's figures are the current run's and are unaffected. Restore the named earlier log from a backup of it as the engine wrote it, keeping its modification time (sudo rsync -a or sudo cp -p), before any restart, and check with ls -l --time-style=full-iso that it is older than the current log; if it cannot be recovered, the history starts at the first intact run from now on. Never put back a log moved into quarantine.",
-			HistoryUnavailable(broken), broken, historyStartsAt(broken)),
+		Body: fmt.Sprintf("%s (%v). The equity comparison, on the dashboard and in the daily summary, runs from %s, the first intact run it includes, until the chain is whole; the incident alerts, the engine state and the day's figures are the current run's and are unaffected. Restore the named earlier log from a backup of it as the engine wrote it, keeping its modification time and owned by ti-trader (sudo rsync -a --chown=ti-trader:ti-trader, or sudo cp -p then sudo chown ti-trader:ti-trader), before any restart, and check with ls -l --time-style=full-iso that it is older than the current log and owned by ti-trader; if it cannot be recovered, the history starts at the first intact run from now on. Never put back a log moved into quarantine.",
+			HistoryUnavailable(broken), broken, historyStartsAt(h)),
 	}
 }
 
@@ -747,12 +747,22 @@ func RestoredLogNewer(restored, current string) string {
 }
 
 // RestoredLogNewerAlert tells the owner, once per account and pair of logs,
-// what RestoredLogNewer says. It is routine: the running engine is
-// unaffected, and only its next start would read the wrong run.
+// what RestoredLogNewer says; the reporter forgets the account's keys when a
+// later firing finds no log newer than the current run, so the same log
+// restored wrongly again alerts again (ADR 0019, "Alerting": once per
+// incident). It is routine: the running engine is unaffected, and only its
+// next start would read the wrong run.
 func RestoredLogNewerAlert(account, restored, current string, at time.Time) Alert {
 	return Alert{
-		Key: "restored-log-newer:" + account + ":" + restored + ":" + current, Kind: KindRestoredLogNewer, Severity: Routine, AccountID: account, At: at,
+		Key: RestoredLogNewerKeyPrefix(account) + restored + ":" + current, Kind: KindRestoredLogNewer, Severity: Routine, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: a restored log looks newer than the current run", account),
-		Body:  RestoredLogNewer(restored, current) + ". The engine finds the latest run by modification time, so at its next start it would take the restored log for the latest run. Restore the log again from its backup keeping its modification time (sudo rsync -a or sudo cp -p), and check with ls -l --time-style=full-iso that it is older than the current log, before any restart.",
+		Body:  RestoredLogNewer(restored, current) + ". The engine finds the latest run by modification time, so at its next start it would take the restored log for the latest run. Restore the log again from its backup keeping its modification time and owned by ti-trader (sudo rsync -a --chown=ti-trader:ti-trader, or sudo cp -p then sudo chown ti-trader:ti-trader), and check with ls -l --time-style=full-iso that it is older than the current log, before any restart. If the engine already refused a start saying the latest earlier run is the restored log, do not approve that log: fix its time and start again with the approval naming the current log.",
 	}
+}
+
+// RestoredLogNewerKeyPrefix begins the key of every restored-log-newer alert
+// of account, so the reporter can forget them once no log is newer than the
+// current run.
+func RestoredLogNewerKeyPrefix(account string) string {
+	return "restored-log-newer:" + account + ":"
 }

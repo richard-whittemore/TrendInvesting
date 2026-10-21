@@ -24,17 +24,24 @@ import (
 // mode's: the engine accepts a paper run approved against a dry-run log and
 // a live run against a paper log, so such a chain is whole, but Earlier then
 // holds only the current mode's runs, from the earliest contiguous one.
+//
+// Starting is set when the current log holds only its configuration, a
+// start in progress (restart.StartInProgress): no history yet, and no break.
 type History struct {
-	Earlier []event.Envelope
-	Broken  *restart.ChainError
-	Since   *ModeStart
+	Earlier  []event.Envelope
+	Broken   *restart.ChainError
+	Since    *ModeStart
+	Starting bool
 }
 
 // ModeStart is where a history of one mode starts: the log of the first run
-// in the current mode, that mode, and the date (YYYY-MM-DD) the run's
-// configuration was recorded.
+// in the current mode since the mode last changed, that mode, and the date
+// (YYYY-MM-DD) the run's configuration was recorded. Returned is set when
+// runs of that mode also come before the change, so the mode returned to it:
+// those runs are left out too.
 type ModeStart struct {
 	Log, Mode, Date string
+	Returned        bool
 }
 
 // HistorySince is the line the equity comparison gives for a history that
@@ -43,7 +50,19 @@ func HistorySince(h History) string {
 	if h.Since == nil {
 		return ""
 	}
+	if h.Since.Returned {
+		return fmt.Sprintf("history since %s, the first %s run since the mode last changed; the %s runs before that change are not included", h.Since.Date, h.Since.Mode, h.Since.Mode)
+	}
 	return fmt.Sprintf("history since %s, the first %s run", h.Since.Date, h.Since.Mode)
+}
+
+// HistoryStarting is the line the equity comparison gives for a run still
+// starting, "" for any other.
+func HistoryStarting(h History) string {
+	if !h.Starting {
+		return ""
+	}
+	return "the run is starting; no history yet"
 }
 
 // EarlierRuns returns the history of the run whose durable log is at path:
@@ -101,6 +120,9 @@ func EarlierRunsOfRecovery(path string, currentRecovery journal.Recovery, recove
 		}
 		return recoverLog(dir + name)
 	})
+	if err == nil && restart.StartInProgress(chain) {
+		return History{Starting: true}
+	}
 	// Every error FollowChain returns is a *restart.ChainError.
 	var broken *restart.ChainError
 	if errors.As(err, &broken) {
@@ -137,6 +159,9 @@ func currentModeOf(chain []restart.Link) ([]restart.Link, *ModeStart) {
 		return chain, nil
 	}
 	start := ModeStart{Log: chain[first].Name, Mode: mode}
+	for _, link := range chain[:first] {
+		start.Returned = start.Returned || link.Mode == mode
+	}
 	if entries := chain[first].Recovery.Entries; len(entries) > 0 {
 		start.Date = entries[0].Envelope.EventTime.UTC().Format(time.DateOnly)
 	}
@@ -163,11 +188,16 @@ func HistoryUnavailable(broken *restart.ChainError) string {
 	return fmt.Sprintf("history unavailable: the chain of runs is broken between %s and %s", broken.Run, broken.Previous)
 }
 
-// historyStartsAt is the log of the first intact run, the run the equity
-// comparison starts from when the chain is broken.
-func historyStartsAt(broken *restart.ChainError) string {
-	if len(broken.Intact) > 0 {
-		return broken.Intact[0].Name
+// historyStartsAt is the log of the first run the equity comparison
+// includes when the chain is broken: the first intact run of the current
+// mode, never an intact run of another mode it leaves out.
+func historyStartsAt(h History) string {
+	switch {
+	case h.Since != nil:
+		return h.Since.Log
+	case len(h.Broken.Intact) > 0:
+		return h.Broken.Intact[0].Name
+	default:
+		return h.Broken.Run
 	}
-	return broken.Run
 }

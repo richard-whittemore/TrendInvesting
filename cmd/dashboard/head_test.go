@@ -162,3 +162,80 @@ func TestDashboardOfAThousandRunsReadsEachEarlierLogOnce(t *testing.T) {
 		}
 	}
 }
+
+// writeStart writes a durable log holding only its configuration: a run
+// still starting.
+func writeStart(t *testing.T, dir, name string, modified time.Time) {
+	t.Helper()
+	var file memoryFile
+	log, err := journal.CreateLog(&file, journal.NewLogHeader("h", "v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append([]journal.Entry{configurationOf(t, name, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, file.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDashboardOfARunStillStartingSaysSo: the current run holding only its
+// configuration is a start in progress: the equity card says the run is
+// starting and has no history yet, and names no broken chain.
+func TestDashboardOfARunStillStartingSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	writeStart(t, dir, "run1.log", time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC))
+	h := newHandlerFor(nil, []string{dir}, "SPY")
+	got := summaryOf(t, h)
+	if got.Summary.Equity.HistoryUnavailable != "" || got.Summary.Equity.HistoryStarting != "the run is starting; no history yet" {
+		t.Fatalf("equity = %+v", got.Summary.Equity)
+	}
+	body := get(h, http.MethodGet, "/").Body.String()
+	if !strings.Contains(body, "the run is starting; no history yet") || strings.Contains(body, "history unavailable") {
+		t.Fatalf("page:\n%s", body)
+	}
+}
+
+// TestDashboardOfAResumedRunReadsTheLogItCopiedOnce: a resumed run's log
+// begins with the records of the log it copied, so the two tie for the
+// current run and the engine's rule reads both whole; the copied log, which
+// no longer changes, is read whole once, not on every request.
+func TestDashboardOfAResumedRunReadsTheLogItCopiedOnce(t *testing.T) {
+	dir, scratch := t.TempDir(), t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	writeRun(t, dir, "run1.log", approval("", ""), 0, base)
+	// The resume: run1.log's records, then the resumed run's own.
+	writeRun(t, scratch, "run1.log", approval("", ""), 0, base, halted(t, 2))
+	resumed, err := os.ReadFile(filepath.Join(scratch, "run1.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run2.log"), resumed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "run2.log"), base.Add(time.Hour), base.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	c := newCounted()
+	logs := newLogCache(c.readFile, c.open)
+	h := newHandlerCached(source{dirs: []string{dir}}, "SPY", logs)
+	if got := summaryOf(t, h); len(got.Alerts) == 0 {
+		t.Fatalf("the page does not show the resumed run: %+v", got)
+	}
+	if c.whole["run1.log"] != 1 {
+		t.Fatalf("the first request read run1.log whole %d times, want once", c.whole["run1.log"])
+	}
+	c.reset()
+	summaryOf(t, h)
+	if c.whole["run1.log"] != 0 {
+		t.Fatalf("a later request read the copied log whole again: %v", c.whole)
+	}
+	if n := logs.retained(filepath.Join(dir, "run2.log")); n > startGroups {
+		t.Fatalf("the cache keeps %d of the current log's records, want only its start", n)
+	}
+}

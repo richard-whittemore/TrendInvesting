@@ -197,7 +197,12 @@ func TestEarlierRunsOfAnotherAccountsLogAreBroken(t *testing.T) {
 // modeRun is a run of account joint in mode, started on session from (its
 // configuration's time) with a close on that session.
 func modeRun(t *testing.T, mode string, from int) []event.Envelope {
-	s := newStream(t)
+	return modeRunOf(t, "joint", mode, from)
+}
+
+// modeRunOf is modeRun for the named account.
+func modeRunOf(t *testing.T, account, mode string, from int) []event.Envelope {
+	s := newStreamFor(t, account)
 	setMode(t, s, mode)
 	s.out[0].EventTime, s.out[0].RecordedAt = day(from).Add(-time.Hour), day(from).Add(-time.Hour)
 	s.bar(from, "SPY", 100+float64(from))
@@ -380,5 +385,72 @@ func TestEarlierRunsOfACurrentLogWithNoApprovalHoldNoRun(t *testing.T) {
 	h := report.EarlierRuns(filepath.Join(dir, "run1.log"), os.ReadFile)
 	if h.Broken == nil || h.Broken.Run != "run1.log" || h.Broken.Cause != restart.CauseUnapproved || len(h.Earlier) != 0 || h.Since != nil {
 		t.Fatalf("history = %+v", h)
+	}
+}
+
+// TestEarlierRunsOfACurrentLogHoldingOnlyItsConfigurationAreAStart: the
+// current log holding only its configuration, in any mode, is a start in
+// progress, not a break: no history yet, and nothing to restore.
+func TestEarlierRunsOfACurrentLogHoldingOnlyItsConfigurationAreAStart(t *testing.T) {
+	for _, mode := range []string{event.TradingModeDryRun, event.TradingModePaper} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			writeRun(t, dir, "run1.log", approvalOf("", ""), runStream(t, 0))
+			s := newStream(t)
+			setMode(t, s, mode)
+			writeRun(t, dir, "run2.log", nil, s.out)
+			h := report.EarlierRuns(filepath.Join(dir, "run2.log"), os.ReadFile)
+			if h.Broken != nil || !h.Starting || len(h.Earlier) != 0 || h.Since != nil {
+				t.Fatalf("history = %+v, want a start in progress", h)
+			}
+			if got := report.HistoryStarting(h); got != "the run is starting; no history yet" {
+				t.Fatalf("line = %q", got)
+			}
+		})
+	}
+	if got := report.HistoryStarting(report.EarlierRuns(threeRuns(t, t.TempDir()), os.ReadFile)); got != "" {
+		t.Fatalf("a run past its start reads %q", got)
+	}
+}
+
+// TestABrokenChainAcrossAModeChangeStartsAtTheFirstRunItIncludes: the
+// comparison over the intact runs holds only the current mode's, so where it
+// starts is the first of those, never an intact run of another mode it
+// leaves out.
+func TestABrokenChainAcrossAModeChangeStartsAtTheFirstRunItIncludes(t *testing.T) {
+	dir := t.TempDir()
+	const account = "DU1234567" // an IBKR paper account
+	h2 := writeRun(t, dir, "dry2.log", approvalOf("dry1.log", "sha256:"+strings.Repeat("0", 64)), modeRunOf(t, account, event.TradingModeDryRun, 1))
+	h3 := writeRun(t, dir, "paper1.log", approvalOf("dry2.log", h2), modeRunOf(t, account, event.TradingModePaper, 2))
+	current := modeRunOf(t, account, event.TradingModePaper, 3)
+	writeRun(t, dir, "paper2.log", approvalOf("paper1.log", h3), current)
+	h := report.EarlierRuns(filepath.Join(dir, "paper2.log"), os.ReadFile)
+	if h.Broken == nil || h.Since == nil || h.Since.Log != "paper1.log" {
+		t.Fatalf("history = %+v, want a break and a history of paper runs", h)
+	}
+	got, err := report.SummarizeWithHistory(h, current, day(3).Format("2006-01-02"), "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Equity.HistoryStartsAt != "paper1.log" {
+		t.Fatalf("starts at %q, want paper1.log, the first run the comparison includes", got.Equity.HistoryStartsAt)
+	}
+	if a := report.HistoryUnavailableAlert(account, h, day(3)); !strings.Contains(a.Body, "runs from paper1.log") {
+		t.Fatalf("alert body: %s", a.Body)
+	}
+}
+
+// TestAHistoryAfterTheModeReturnsSaysTheEarlierRunsOfThatModeAreLeftOut:
+// paper, then live, then paper again: the history starts at the latest
+// change of mode, and the line says the paper runs before it are left out.
+func TestAHistoryAfterTheModeReturnsSaysTheEarlierRunsOfThatModeAreLeftOut(t *testing.T) {
+	dir := t.TempDir()
+	h1 := writeRun(t, dir, "run1.log", approvalOf("", ""), modeRun(t, event.TradingModePaper, 0))
+	h2 := writeRun(t, dir, "run2.log", approvalOf("run1.log", h1), modeRun(t, event.TradingModeLive, 1))
+	writeRun(t, dir, "run3.log", approvalOf("run2.log", h2), modeRun(t, event.TradingModePaper, 2))
+	h := report.EarlierRuns(filepath.Join(dir, "run3.log"), os.ReadFile)
+	want := "history since " + day(2).Format("2006-01-02") + ", the first paper run since the mode last changed; the paper runs before that change are not included"
+	if h.Broken != nil || report.HistorySince(h) != want {
+		t.Fatalf("broken = %v, since = %q, want %q", h.Broken, report.HistorySince(h), want)
 	}
 }

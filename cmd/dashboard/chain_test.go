@@ -40,11 +40,8 @@ func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApproved
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR, Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10, TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02"},
-		Limits:    event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05, ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30},
-		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30}}
 	entries := []journal.Entry{
-		input(t, 1, at(first), event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "cfg:"+name, cfg),
+		configurationOf(t, name, first),
 		input(t, 2, at(first), event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approved:"+name, approval),
 	}
 	for n := first; n < first+2; n++ {
@@ -81,6 +78,15 @@ func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApproved
 		t.Fatal(err)
 	}
 	return log.FinalRecordHash()
+}
+
+// configurationOf is the run's configuration input, its first record.
+func configurationOf(t *testing.T, name string, first int) journal.Entry {
+	t.Helper()
+	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR, Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10, TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02"},
+		Limits:    event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05, ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30},
+		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30}}
+	return input(t, 1, at(first), event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "cfg:"+name, cfg)
 }
 
 // memoryFile is a log file held in memory and written out whole: a test's
