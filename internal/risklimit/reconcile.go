@@ -181,7 +181,10 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 		return Reconciliation{}, fmt.Errorf("risklimit: reconciliation for account %q; this gate is %q", p.AccountID, g.accountID)
 	}
 	r := reconcile.Classify(g.book, g.changes, id, p)
-	if g.book != nil && p.Readable(event.ReconciliationComponentPositions) {
+	// A reading taken before the latest classified one is older knowledge: it
+	// does not replace that verdict (ADR 0019, amended 2026-10-21, point 6).
+	if g.book != nil && p.Readable(event.ReconciliationComponentPositions) &&
+		(g.classified == nil || !p.AsOf.Before(g.classifiedAsOf)) {
 		g.classified = map[string]int64{}
 		for _, position := range p.Positions {
 			g.classified[position.InstrumentID] = position.Quantity

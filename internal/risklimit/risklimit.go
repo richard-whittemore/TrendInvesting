@@ -155,14 +155,15 @@ type Gate struct {
 	// order; the classifier applies those inside its window (reconcile).
 	book    *reconcile.Book
 	changes []reconcile.Change
-	// classified is the positions of the latest reconciliation classified
-	// against book, when its positions were read; nil when none has been
+	// classified is the positions of the latest-read reconciliation classified
+	// against book, when its positions were read (a reading taken before it,
+	// delivered later, does not replace it); nil when none has been
 	// since book was set or a fill or corporate action was recorded
 	// (CheckBook).
 	classified map[string]int64
 	// classifiedAsOf is the reading time of the reconciliation whose
 	// positions classified holds: it applied only the changes dated before
-	// it (CheckBook).
+	// it (CheckBook). Only a reading at or after it replaces classified.
 	classifiedAsOf time.Time
 	// reported is the residual of each instrument a journalled result found
 	// unexplained against book, so the same difference is not reported

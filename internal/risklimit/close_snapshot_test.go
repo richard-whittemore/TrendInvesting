@@ -513,3 +513,24 @@ func TestAReadingLaterThanAResolutionRecordsItsResidual(t *testing.T) {
 		t.Fatalf("the later reading's residual stands: %+v", r.Result)
 	}
 }
+
+// TestADelayedEarlierReadingDoesNotReplaceTheLatestClassifiedVerdict: a book
+// of 10 read as 12, then 10, then a delayed reading of 12 taken between them
+// is older knowledge than the 10: it must not become the verdict a later
+// snapshot of 12 is de-duplicated against (ADR 0019, amended 2026-10-21,
+// point 6).
+func TestADelayedEarlierReadingDoesNotReplaceTheLatestClassifiedVerdict(t *testing.T) {
+	g := booked(t)
+	first := morningOf(1000, 12)
+	first.AsOf = at.Add(time.Hour)
+	reconcileWith(t, g, "reconciliation:1", first)
+	second := morningOf(1000, 10)
+	second.AsOf = at.Add(2 * time.Hour)
+	reconcileWith(t, g, "reconciliation:2", second)
+	delayed := morningOf(1000, 12)
+	delayed.AsOf = at.Add(90 * time.Minute)
+	reconcileWith(t, g, "reconciliation:3", delayed)
+	if r, journal := checkBookWith(t, g, closeSnapshot(12, 180)); !journal {
+		t.Fatalf("the latest verdict was 10, so a snapshot of 12 is a new difference: %+v", r.Result)
+	}
+}
