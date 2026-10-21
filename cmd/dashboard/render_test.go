@@ -86,3 +86,19 @@ func TestDashboardShowsTheDaysSkippedTrades(t *testing.T) {
 		t.Error("a day with no skipped trade shows the section")
 	}
 }
+
+// TestDashboardBoundsSkippedSharesDecimals: the recorded shares are the
+// planner's unrounded float (ADR 0026, point 8), so 0.1+0.2 shows to the
+// schema's six decimals, not as binary noise.
+func TestDashboardBoundsSkippedSharesDecimals(t *testing.T) {
+	a, b := 0.1, 0.2
+	var buf bytes.Buffer
+	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
+		Skipped: []report.SkippedLine{{ClientOrderID: "tw-n", InstrumentID: "SPY", Side: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: a + b}}}
+	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "<td>0.3 shares</td>") || strings.Contains(buf.String(), "0.30000000000000004") {
+		t.Errorf("the page prints noise:\n%s", buf.String())
+	}
+}

@@ -2,7 +2,6 @@ package report
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -75,7 +74,7 @@ func RenderText(s Summary) string {
 		b.WriteString("Trades skipped:\n")
 	}
 	for _, k := range s.Skipped {
-		fmt.Fprintf(&b, "  %s %s %s %s shares: %s\n", k.ClientOrderID, k.Side, k.InstrumentID, strconv.FormatFloat(k.Shares, 'f', -1, 64), k.Reason)
+		fmt.Fprintf(&b, "  %s %s %s %s shares: %s\n", k.ClientOrderID, k.Side, k.InstrumentID, event.FormatSkippedShares(k.Shares), k.Reason)
 	}
 	if s.Equity.Available {
 		e := s.Equity

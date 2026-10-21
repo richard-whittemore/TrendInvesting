@@ -1045,3 +1045,22 @@ func TestSkippedTradesAreListedWithTheOrders(t *testing.T) {
 		}
 	}
 }
+
+// TestSkippedSharesInTheOrdersNoteAreBounded: the recorded shares are the
+// planner's unrounded float (ADR 0026, point 8), so 0.1+0.2 is noted to the
+// schema's six decimals, not as binary noise.
+func TestSkippedSharesInTheOrdersNoteAreBounded(t *testing.T) {
+	d := at(time.March, 2)
+	a, b := 0.1, 0.2
+	skipped := event.OrderSkippedPayload{AccountID: "A", Tag: "t", ClientOrderID: "c-1", InstrumentID: "AAA", Side: event.OrderSideBuy,
+		Phase: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: a + b, TargetWeight: 0.5, NetLiquidation: 1, ReferencePrice: 3}
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input, dec(event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, d, skipped)))}
+	o, err := journalquery.Orders(js, journalquery.Filter{})
+	if err != nil || len(o.Rows) != 1 {
+		t.Fatalf("orders: %v %+v", err, o)
+	}
+	if got, want := cell(o, 0, "note"), "below-one-share: 0.3 shares wanted"; got != want {
+		t.Errorf("note = %q, want %q", got, want)
+	}
+}

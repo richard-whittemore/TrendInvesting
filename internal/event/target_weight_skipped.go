@@ -3,6 +3,8 @@ package event
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // OrderSkippedEventType identifies a trade the order planner sized but could
@@ -32,8 +34,9 @@ const (
 )
 
 // OrderSkippedPayload is one skipped trade: the order it would have been,
-// its unrounded size in Shares (the budget's Scale applied for a scaled buy,
-// Scale 0 otherwise) and the figures it was sized from.
+// its size in Shares as the planner computed it, a float64 recorded without
+// rounding (the budget's Scale applied for a scaled buy, Scale 0 otherwise)
+// and the figures it was sized from.
 type OrderSkippedPayload struct {
 	AccountID      string  `json:"account_id"`
 	Tag            string  `json:"tag"`
@@ -89,3 +92,24 @@ func (p OrderSkippedPayload) Validate() error {
 	}
 	return nil
 }
+
+// SkippedSharesDecimals is the most decimals a skipped trade's shares are
+// shown with.
+const SkippedSharesDecimals = 6
+
+// FormatSkippedShares is the one text of a skipped trade's Shares, used by
+// the summary, the dashboard and the journal query. The record keeps the
+// planner's float64 unrounded (ADR 0026, point 8), so a sum such as 0.1+0.2
+// would print as 0.30000000000000004; the text is bounded to
+// SkippedSharesDecimals decimals with trailing zeros dropped. Only the text
+// is bounded; the record is untouched.
+func FormatSkippedShares(v float64) string {
+	s := strconv.FormatFloat(v, 'f', SkippedSharesDecimals, 64)
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	}
+	return s
+}
+
+// SharesText is FormatSkippedShares of the record's own Shares.
+func (p OrderSkippedPayload) SharesText() string { return FormatSkippedShares(p.Shares) }

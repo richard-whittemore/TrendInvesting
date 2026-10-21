@@ -79,7 +79,7 @@ type SaleWithheldLine struct {
 }
 
 // SkippedLine is one strategy.order.skipped record: a trade the order
-// planner sized but could not order, the unrounded shares the rule asked for
+// planner sized but could not order, the shares the rule asked for
 // and why none is ordered (ADR 0026, point 8).
 type SkippedLine struct {
 	At            time.Time

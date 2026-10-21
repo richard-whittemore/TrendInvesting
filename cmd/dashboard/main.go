@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -248,7 +247,7 @@ func view(envelopes []event.Envelope, benchmark string) (account, error) {
 
 var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	"weight": func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) },
-	"shares": func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) },
+	"shares": event.FormatSkippedShares,
 	"pct":    func(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) },
 }).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

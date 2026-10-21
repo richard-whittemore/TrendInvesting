@@ -8,7 +8,7 @@ import (
 
 // Orders lists the orders the run planned, released and refused, the trades
 // it skipped (ADR 0026, point 8: sized but not ordered, so no share is
-// ordered and the note gives the reason and the unrounded shares the rule
+// ordered and the note gives the reason and the shares the rule
 // asked for), and the order lifecycle changes it recorded, for the records
 // that pass f.
 func Orders(journals []Journal, f Filter) (Table, error) {
@@ -39,7 +39,7 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 			case it.skipped != nil:
 				p := it.skipped
 				instrument, event, side, price = p.InstrumentID, "skipped", p.Side, p.ReferencePrice
-				note = p.Reason + ": " + strconv.FormatFloat(p.Shares, 'f', -1, 64) + " shares wanted"
+				note = p.Reason + ": " + p.SharesText() + " shares wanted"
 			case it.lifecycle != nil:
 				p := it.lifecycle
 				instrument, event, side, quantity, price, note = p.InstrumentID, "lifecycle-"+p.Status, p.Side, p.Quantity, p.Price, p.Note

@@ -119,3 +119,31 @@ func TestHeldOneLotShortNamesValidate(t *testing.T) {
 	}
 	expectInvalid(t, "holding on a pick", validMomentumDecided(), func(p *P) { p.Momentum.Names[0].HeldValue = 10 }, "only a held name kept one lot short")
 }
+
+// TestFormatSkippedSharesBoundsTheDecimals: Shares is the planner's
+// unrounded float64 (ADR 0026, point 8), so the sum 0.1+0.2 reaches a reader
+// as 0.30000000000000004 unless the text is bounded to the schema's six
+// decimals, with the trailing zeros dropped.
+func TestFormatSkippedSharesBoundsTheDecimals(t *testing.T) {
+	a, b := 0.1, 0.2
+	for _, c := range []struct {
+		in   float64
+		want string
+	}{
+		{a + b, "0.3"}, {0.25, "0.25"}, {3, "3"}, {0, "0"}, {0.004, "0.004"},
+		{1.0 / 3, "0.333333"}, {2.9999999, "3"}, {1234567.5, "1234567.5"},
+	} {
+		if got := event.FormatSkippedShares(c.in); got != c.want {
+			t.Errorf("FormatSkippedShares(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestOrderSkippedSharesTextIsTheBoundedShares(t *testing.T) {
+	v := validOrderSkipped()
+	a, b := 0.1, 0.2
+	v.Shares = a + b
+	if got := v.SharesText(); got != "0.3" {
+		t.Errorf("SharesText = %q, want 0.3", got)
+	}
+}

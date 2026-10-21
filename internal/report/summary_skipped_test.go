@@ -70,3 +70,15 @@ func TestAnUnreadableSkippedTradeRefusesTheSummary(t *testing.T) {
 		t.Fatal("Summarize accepted a corrupt skipped trade")
 	}
 }
+
+// TestTheSummaryBoundsSkippedSharesDecimals: the recorded shares are the
+// planner's unrounded float (ADR 0026, point 8), so a sum such as 0.1+0.2 is
+// printed to the schema's six decimals, not as binary noise.
+func TestTheSummaryBoundsSkippedSharesDecimals(t *testing.T) {
+	a, b := 0.1, 0.2
+	text := report.RenderText(report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
+		Skipped: []report.SkippedLine{{ClientOrderID: "tw-n", InstrumentID: "SPY", Side: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: a + b}}})
+	if !contains(text, "tw-n buy SPY 0.3 shares: below-one-share") || contains(text, "0.30000000000000004") {
+		t.Errorf("the summary prints noise:\n%s", text)
+	}
+}
