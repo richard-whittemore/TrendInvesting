@@ -117,7 +117,13 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     the re-planned order again is one urgent refusal incident, keyed by
 //     the order (ADR 0026, point 2, "Boost", amended 2026-10-18).
 //   - A run of consecutive withheld decisions with one reason is one
-//     incident; a decided outcome ends it. Reasons that name absent inputs
+//     incident; a decided outcome ends it. A stale-account-snapshot withhold
+//     whose latest account.broker.snapshot before it is a version-2 reading
+//     stamped at its read time names that snapshot and the reason it states:
+//     why the IBKR adapter's reading after the close could not stand for the
+//     close (the owner's decision of 2026-10-18; ADR 0019, amended). A broker
+//     snapshot that does not read is an input passed over, as a venue's
+//     report is. Reasons that name absent inputs
 //     (missing bars, stale snapshot, missing universe, missing close
 //     histories) and a refusal for a missing mark are missing data; every
 //     other withheld reason is a withheld decision, routine except
@@ -158,8 +164,20 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	// of that reason earlier in the journal carried the flag.
 	flagged := map[string]bool{}
 	pending := sales{}
+	// notAtClose is the latest broker snapshot stamped at its read time, if
+	// the latest one is: its ID and why it was not as of the close.
+	var notAtClose [2]string
 	for _, e := range envelopes {
 		switch e.Type {
+		case event.BrokerSnapshotEventType:
+			var p event.BrokerSnapshotPayload
+			if read(e, brokerSnapshotVersions, &p) != nil {
+				continue
+			}
+			notAtClose = [2]string{}
+			if e.SchemaVersion == event.BrokerSnapshotReadAtVersion && !p.AsOfClose {
+				notAtClose = [2]string{e.ID, p.NotAsOfClose}
+			}
 		case event.OperatorRunApprovedEventType:
 			var p event.OperatorRunApprovedPayload
 			if err := read(e, approvalVersions, &p); err != nil {
@@ -293,7 +311,11 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				continue
 			}
 			runReason, runStart = p.WithheldReason, e.EventTime
-			out = append(out, withheldAlert(account, e, p, runStart))
+			a := withheldAlert(account, e, p, runStart)
+			if p.WithheldReason == event.WithheldStaleAccountSnapshot && notAtClose[0] != "" {
+				a.Body += fmt.Sprintf(" The adapter's reading after the close could not stand for the close (broker snapshot %s): %s. It was stamped at its read time, so the session was withheld and nothing was ordered: docs/runbooks/first-paper-order.md, \"A session withheld after the close\".", notAtClose[0], notAtClose[1])
+			}
+			out = append(out, a)
 		}
 	}
 	for i := range out {

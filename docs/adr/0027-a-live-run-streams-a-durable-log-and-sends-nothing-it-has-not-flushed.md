@@ -399,3 +399,35 @@ owner decision: the engine still never resends anything on its own.*
   "Alerting"): the reporter raises one urgent alert per order marked `send`
   that is not acknowledged within its configured bound of its commit, and,
   once it is acknowledged, a routine notice that it cleared.
+
+## Amendment (2026-10-18, owner decision: the starting book in the Run approval)
+
+A fresh run's first reading after a close must never be adopted as the book
+unchecked (ADR 0019, amended 2026-10-18): the IBKR adapter compares it with
+the previous close's book, found back through the chain of runs the Run
+approvals name. An account's first run has no earlier run, so its book is
+stated by the owner instead:
+
+- **`operator.run.approved` schema version 3** adds `starting_book`: the
+  holdings in raw shares (strictly ascending, none zero; `[]` when none),
+  IBKR's total cash and its currency, as the owner checked them in IBKR. The
+  key is required, `null` when the approval states none. Versions 1 and 2
+  stay readable and state none.
+- **A first run's approval.** It names no previous log and no final hash,
+  states the starting book, and states the boost not latched and no
+  incident, since no earlier run had either. Its input ID is
+  `operator-run-approved:first-run:<the run's -as-of>:<the payload's
+  hash>`, so the run's identity is its approval's, as a fresh run's is. In
+  `-mode paper` or `live` an account's first run decides nothing without it
+  (`operator approve -first-run -positions ... -cash ... -currency ...`);
+  another first run may be given one. A first run cut short before its
+  approval was recorded resumes with the same approval, as a fresh run's
+  does. A first run's approval given to a directory that holds an earlier
+  run, or a fresh run's given to one that holds none, is refused.
+- **A fresh run's approval** may state a starting book too: the book the
+  owner confirms after a change no fill explains (a transfer, a deposit),
+  which then is the latest book the first reading is compared with.
+- **The chain.** It ends at a first run's approval or at a run with none;
+  the adapter's comparison walks it to its end, however old the runs, while
+  its reconciliation of IBKR's lists still reads only the runs those lists
+  can show (relay.run_logs).

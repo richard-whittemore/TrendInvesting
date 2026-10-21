@@ -1,0 +1,12 @@
+{
+  "account_id": "DU0000001",
+  "as_of": "2027-01-14T21:00:00Z",
+  "net_liquidation": 8530.0,
+  "currency": "USD",
+  "positions": [
+    {
+      "instrument_id": "SPY",
+      "quantity": 147
+    }
+  ]
+}

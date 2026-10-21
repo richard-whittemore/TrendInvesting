@@ -330,10 +330,10 @@ From `deploy/etc/engines/boost.config`, `limits` and `execution`:
 
 | Limit | Value | In plain words |
 | --- | --- | --- |
-| `max_exposure` | 1.5 | A buy is refused if it would leave SPY above 150% of net liquidation, valued at the previous close. A sell is never refused by it, and nothing is sold because the market moved the account above 150% |
+| `max_exposure` | 1.5 | A buy is refused if it would leave SPY above 150% of net liquidation, valued at the previous close (the account snapshot's net liquidation is valued at that close too: its cash plus SPY at the official close). A sell is never refused by it, and nothing is sold because the market moved the account above 150% |
 | `max_orders_per_decision` | 1 | At most one order that is not risk-reducing per decision |
 | `max_order_fraction` | 1 | No single order larger than 100% of net liquidation (Boost's step from 98% to 147% is about 49%) |
-| `price_band` | 0.05 | The order's reference price (the raw previous close) must be within 5% of IBKR's latest recorded price for SPY (the **mark**); also sets the limit price above |
+| `price_band` | 0.05 | The order's reference price (the raw previous close) must be within 5% of **IBKR's last price** for SPY, read after the close and recorded beside the mark (`broker_last`); when IBKR gives no price, it is compared with the mark itself (the delivered bar's official close), which is the reference price, so it always passes. The order's figures say which was used (`mark_source`: `broker-last` or `official-close`). Plainly: **the band has teeth only when IBKR provides a price**; without IBKR market data the limit price is the only bound on the fill. This is the orchestrator's reading of your decision, put to you (ADR 0026, point 3, amended 2026-10-18). Also sets the limit price above |
 | `excess_liquidity_warning`, `_urgent`, `_stale_minutes` | 0.40, 0.20, 30 | The margin-cushion alarm ([states-and-kill-switch](states-and-kill-switch.md#the-margin-cushion-alarm)) |
 | `execution.max_snapshot_age_minutes` | 30 | How old IBKR's latest snapshot may be when a sell is checked against it |
 
@@ -345,20 +345,21 @@ limit once for both strategies.
 
 ## One Boost day, from the data to IBKR and back
 
-This is the path a normal paper day will take. **Stops here today** marks
-the first step that is not on `main` yet: up to that point the pieces run
-and are tested; from there on, they are built only in parts, or not at all.
+This is the path a normal paper day takes. Every step is built; the whole
+day runs in `deploy/rehearse-paper.sh` with the real engine against a
+stand-in for IB Gateway, and is still to be run against IBKR's paper
+servers ([first paper order](../runbooks/first-paper-order.md)).
 
 | # | When (New York) | What happens | Where it is explained | Built? |
 | --- | --- | --- | --- | --- |
 | 1 | 16:00 | The market closes (13:00 on an early close). | [market data](market-data.md) | — |
 | 2 | 17:05 (retries 18:05, 20:05) | `ti-data` fetches the day's whole-market bars and recent splits and dividends from Massive, records them, and writes the engine's input for the session: SPY's bar, then "the session closed", to `/var/lib/trend-investing/data/streams/boost/<TI_RUN>/boost-<date>.jsonl`. | [market data](market-data.md), "The daily data job" | Built |
-| 3 | after 17:05 | **Stops here today.** Something must read that file, add IBKR's account snapshot (SPY held and net liquidation, as of the close) and IBKR's latest SPY price (the mark), number each input in the engine's one series, and send them over the engine's socket. That is the adapter's job, and the adapter does not yet talk to the engine's socket, read the data files, or send account snapshots and marks. | [IBKR adapter](ibkr-adapter.md) | **Not built** |
+| 3 | after 17:05 | The adapter reads the file and the account at IBKR once. That reading is the account as of the close when it is taken on the close's own date with nothing working at IBKR, nothing executed at or since the close, and the holdings and cash those of the previous close adjusted by the fills since (cash within 1% of net liquidation; the previous close is the last run's if this run has none yet, or the starting book you approved the account's first run with; your decision of 2026-10-18), and it is then valued at the close (cash plus SPY at the official close); otherwise it is stamped at its read time and step 4 withholds the session. It sends, numbered in the engine's one series: the reconciliation of that reading (against the engine's book, before it is replaced), the account snapshot (SPY held and net liquidation), the broker snapshot, SPY's bar, the mark (the bar's official close, IBKR's last price beside it, which the price band compares with when it is set), then "the session closed". | [IBKR adapter](ibkr-adapter.md), [paper trading](paper-trading.md#a-paper-day) | Built |
 | 4 | at the input | The engine writes each input to its durable log, flushed to disk, then decides: updates RSI(2) and the averages, moves the latch, plans at most one order and checks it against the hard limits. A released order is written down before anything is told about it. | [engine](engine.md), this chapter, [states-and-kill-switch](states-and-kill-switch.md) | Built (tested against recorded inputs and `make demo-boost-dry-run`) |
-| 5 | same evening | The adapter writes "about to send", hands the order to IB Gateway as a DAY limit order under its client order ID, and writes "sent". | [paper trading](paper-trading.md), [re-delivery](redelivery.md) | Built against a stand-in gateway only; the real IBKR client still refuses to place orders, and the adapter's main loop is not on `main` |
-| 6 | next session | IBKR works the order. Each status change and each fill (with IBKR's commission) comes back; the adapter records them as the engine's inputs. | [paper trading](paper-trading.md), [order lifecycle](order-lifecycle.md) | Records built against the stand-in; not yet delivered to the engine |
+| 5 | same evening | The adapter writes "about to send", hands the order to IB Gateway as a DAY limit order under its client order ID, and writes "sent". | [paper trading](paper-trading.md), [re-delivery](redelivery.md) | Built; the real IBKR client places it only in paper with sending switched on; not yet run against IBKR's paper servers |
+| 6 | next session | IBKR works the order. Each status change and each fill (with IBKR's commission) comes back; the adapter records them as the engine's inputs. | [paper trading](paper-trading.md), [order lifecycle](order-lifecycle.md) | Built |
 | 7 | every 5 minutes | The reporter reads the durable log and sends any alert, and the daily summary. | [alerts and dashboard](alerts-and-dashboard.md) | Built and installed; its alerts need your ntfy and PagerDuty entries in `secrets.env` ([server](server.md)) |
-| 8 | next morning, before the open | The adapter reads IBKR's positions and cash; the engine compares them with its book. | [reconciliation](reconciliation.md) | Engine side built; the adapter's record is not delivered |
+| 8 | at every start and reconnect of the adapter | The adapter reads IBKR's positions and cash; the engine compares them with its book. | [reconciliation](reconciliation.md) | Built |
 
 In dry-run, step 5 never sends (every order says `send: false`); see the
 [engine](engine.md), "What dry-run simulates", for what that leaves out.

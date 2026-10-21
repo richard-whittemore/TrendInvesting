@@ -18,11 +18,20 @@ if str(tests_dir) not in sys.path:
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order
 from test_account import connected, full_summary
-from snapshot import (BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION, LAST_PRICE_TICK, RECONCILIATION_TYPE,
-                      RECONCILIATION_VERSION, broker_snapshot_record, read_account, read_marks,
-                      reconciliation_record)
+from datetime import datetime, timezone
+
+from snapshot import (ACCOUNT_SNAPSHOT_TYPE, ACCOUNT_SNAPSHOT_VERSION, BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION,
+                      LAST_PRICE_TICK, MARK_TYPE, MARK_VERSION, RECONCILIATION_TYPE, RECONCILIATION_VERSION,
+                      account_snapshot_record, broker_snapshot_record, close_valuation, mark_record, read_account,
+                      read_marks, reconciliation_record)
 
 TESTDATA = tests_dir / "testdata"
+# The close of the session 2027-01-14, which the scripted read (IBKR's clock
+# 2027-01-15 08:00 UTC) follows.
+CLOSE = datetime(2027, 1, 14, 21, 0, tzinfo=timezone.utc)
+# Why a reading stamped at its read time is not as of the close (the tests
+# below that do not concern the stamp).
+WHY = "the reading is not on the session's own New York date"
 
 
 def state(status):
@@ -60,7 +69,7 @@ def fixture(name):
 class BrokerSnapshotTests(unittest.TestCase):
     def test_every_field_is_stated_from_one_read(self):
         h = scripted()
-        record = broker_snapshot_record(read_account(h.conn), market_open=True, marks={"SPY": Decimal("90")})
+        record = broker_snapshot_record(read_account(h.conn), market_open=True, marks={"SPY": Decimal("90")}, why=WHY)
         self.assertEqual((record.event_type, record.schema_version), (BROKER_SNAPSHOT_TYPE, BROKER_SNAPSHOT_VERSION))
         # The fixture is the contract: internal/event's test decodes and
         # validates this same file as the engine would.
@@ -70,7 +79,7 @@ class BrokerSnapshotTests(unittest.TestCase):
     def test_none_held_and_none_working_are_stated_as_empty_lists(self):
         h = connected()
         h.fake.summary = full_summary()
-        payload = broker_snapshot_record(read_account(h.conn), market_open=False).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=False, why=WHY).payload
         self.assertEqual(payload["positions"], [])
         self.assertEqual(payload["open_orders"], [])
         self.assertEqual(payload["unreadable"], [])
@@ -81,7 +90,7 @@ class BrokerSnapshotTests(unittest.TestCase):
         h.fake.summary = full_summary()
         h.fake.end_positions = False
         h.fake.end_open_orders = False
-        payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
         self.assertEqual(payload["unreadable"], ["open-orders", "positions"])
         self.assertEqual(payload["positions"], [])
         self.assertEqual(payload["open_orders"], [])
@@ -89,14 +98,14 @@ class BrokerSnapshotTests(unittest.TestCase):
     def test_a_failed_summary_marks_both_balances_unreadable_and_carries_no_value(self):
         h = connected()
         h.fake.summary_error = 321
-        payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
         self.assertEqual(payload["unreadable"], ["excess-liquidity", "net-liquidation"])
         self.assertEqual((payload["net_liquidation"], payload["excess_liquidity"]), (0, 0))
 
     def test_a_missing_or_foreign_currency_balance_is_unreadable(self):
         h = connected()
         h.fake.summary = [(ACCOUNT, "NetLiquidation", "8530.00", "EUR"), (ACCOUNT, "TotalCashValue", "1", "USD")]
-        payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
         self.assertEqual(payload["unreadable"], ["excess-liquidity", "net-liquidation"])
 
     def test_a_position_the_engine_cannot_name_makes_positions_unreadable(self):
@@ -110,7 +119,7 @@ class BrokerSnapshotTests(unittest.TestCase):
                 h = connected()
                 h.fake.summary = full_summary()
                 h.fake.positions = [(ACCOUNT, contract(), Decimal("2"), 1.0), row] if name == "a duplicate symbol" else [row]
-                payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+                payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
                 self.assertIn("positions", payload["unreadable"])
                 self.assertEqual(payload["positions"], [])
 
@@ -126,7 +135,7 @@ class BrokerSnapshotTests(unittest.TestCase):
                 h = connected()
                 h.fake.summary = full_summary()
                 h.fake.open_orders = [row]
-                payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+                payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
                 self.assertIn("open-orders", payload["unreadable"])
                 self.assertEqual(payload["open_orders"], [])
 
@@ -138,7 +147,7 @@ class BrokerSnapshotTests(unittest.TestCase):
             (8, contract(), order(action="SELL"), state("Inactive")),
             (9, contract(), order(action="SELL"), state("PendingSubmit")),
         ]
-        payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
         self.assertEqual([o["status"] for o in payload["open_orders"]], ["cancel-pending", "pending", "pending"])
 
     def test_a_dropped_link_reads_nothing_and_says_so(self):
@@ -146,7 +155,7 @@ class BrokerSnapshotTests(unittest.TestCase):
         h.fake.summary = full_summary()
         h.fake.drop()
         reading = read_account(h.conn)
-        payload = broker_snapshot_record(reading, market_open=True).payload
+        payload = broker_snapshot_record(reading, market_open=True, why=WHY).payload
         self.assertEqual(payload["unreadable"], ["excess-liquidity", "net-liquidation", "open-orders", "positions"])
         self.assertRegex(payload["as_of"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         rec = reconciliation_record(reading, "morning:1").payload
@@ -172,26 +181,135 @@ class BrokerSnapshotTests(unittest.TestCase):
     def test_no_server_time_after_the_read_leaves_it_unbounded_and_unreadable(self):
         h = scripted()
         h.fake.answer_current_time = False
-        payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
         self.assertEqual(payload["unreadable"], ["excess-liquidity", "net-liquidation", "open-orders", "positions"])
         self.assertEqual((payload["positions"], payload["open_orders"], payload["net_liquidation"]), ([], [], 0))
 
     def test_a_balance_reported_twice_with_different_values_is_unreadable(self):
         h = connected()
         h.fake.summary = full_summary() + [(ACCOUNT, "ExcessLiquidity", "1.00", "USD")]
-        payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
         self.assertEqual(payload["unreadable"], ["excess-liquidity"])
         self.assertEqual(payload["excess_liquidity"], 0)
 
     def test_market_open_must_be_stated_as_a_boolean(self):
         h = scripted()
         with self.assertRaises(TypeError):
-            broker_snapshot_record(read_account(h.conn), market_open=None)
+            broker_snapshot_record(read_account(h.conn), market_open=None, why=WHY)
 
     def test_a_mark_not_supplied_is_not_set(self):
         h = scripted()
-        payload = broker_snapshot_record(read_account(h.conn), market_open=True).payload
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
         self.assertEqual(payload["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 0, "mark_set": False}])
+
+
+class PostCloseReadingTests(unittest.TestCase):
+    """The owner's decision of 2026-10-18 (ADR 0019, ADR 0025 point 5, ADR 0026 point 1, amended).
+
+    One reading after the close, with nothing working at IBKR and no
+    execution since, is the account as of that close: the broker snapshot
+    (version 2) states the close as its as-of time and the true read time
+    beside it, or, when the reading cannot stand for the close, its read time
+    and why. From the same reading come the engine's account.snapshot
+    (version 3) and the mark (version 2), the delivered bar's official close
+    with IBKR's last price beside it as evidence only.
+    """
+
+    def test_a_snapshot_as_of_the_close_states_its_read_time_beside_it(self):
+        h = scripted()
+        reading = read_account(h.conn)
+        record = broker_snapshot_record(reading, market_open=False, marks={"SPY": Decimal("90")}, close=CLOSE,
+                                        net_liquidation=close_valuation(reading, {"SPY": Decimal("90")}))
+        self.assertEqual((record.event_type, record.schema_version), (BROKER_SNAPSHOT_TYPE, 2))
+        payload = record.payload
+        self.assertEqual((payload["as_of"], payload["read_at"], payload["as_of_close"], payload["not_as_of_close"]),
+                         ("2027-01-14T21:00:00Z", "2027-01-15T08:00:00Z", True, ""))
+        # The contract with the engine: internal/event's test validates this
+        # file at version 2.
+        self.assertEqual(payload, fixture("broker_snapshot_close.json"))
+
+    def test_a_snapshot_as_of_the_close_is_valued_at_the_official_close(self):
+        # ADR 0019, amended 2026-10-18: one price basis per rule. ADR 0019's
+        # worked example, 147 SPY and $4,700 borrowed, read after SPY traded
+        # below its $90 close: IBKR's own net liquidation is $8,397.70 at
+        # the read, the close's $8,530.
+        h = scripted()
+        h.fake.summary = [(a, t, "8397.70" if t == "NetLiquidation" else v, c) for a, t, v, c in h.fake.summary]
+        reading = read_account(h.conn)
+        at_close = close_valuation(reading, {"SPY": 90})
+        self.assertEqual(at_close, Decimal("8530.00"), "cash plus each holding times its official close")
+        payload = broker_snapshot_record(reading, market_open=False, marks={"SPY": Decimal("90")}, close=CLOSE,
+                                         net_liquidation=at_close, cash_drift=Decimal("-0.25")).payload
+        self.assertEqual((payload["net_liquidation"], payload["read_net_liquidation"], payload["excess_liquidity"],
+                          payload["cash_drift"]), (8530.0, 8397.7, 5222.5, -0.25))
+        account = account_snapshot_record(reading, CLOSE, net_liquidation=at_close).payload
+        self.assertEqual(account["net_liquidation"], 8530.0)
+
+    def test_a_snapshot_at_its_read_time_is_ibkrs_own_valuation(self):
+        h = scripted()
+        h.fake.summary = [(a, t, "8397.70" if t == "NetLiquidation" else v, c) for a, t, v, c in h.fake.summary]
+        reading = read_account(h.conn)
+        payload = broker_snapshot_record(reading, market_open=True, why=WHY).payload
+        self.assertEqual((payload["net_liquidation"], payload["read_net_liquidation"], payload["cash_drift"]),
+                         (8397.7, 8397.7, 0))
+        for kwargs in ({"net_liquidation": Decimal("8530")}, {"cash_drift": Decimal("1")},
+                       {"unexplained_cash": Decimal("1")}):
+            with self.assertRaises(ValueError, msg=kwargs):
+                broker_snapshot_record(reading, market_open=True, why=WHY, **kwargs)
+        with self.assertRaises(ValueError, msg="as of the close, its valuation is stated"):
+            broker_snapshot_record(reading, market_open=False, close=CLOSE)
+
+    def test_a_holding_with_no_official_close_cannot_be_valued_at_the_close(self):
+        h = scripted()
+        reading = read_account(h.conn)
+        with self.assertRaises(ValueError):
+            close_valuation(reading, {})
+        h = scripted()
+        h.fake.summary = [row for row in h.fake.summary if row[1] != "TotalCashValue"]
+        with self.assertRaises(ValueError):
+            close_valuation(read_account(h.conn), {"SPY": 90})
+
+    def test_a_snapshot_at_its_read_time_says_why(self):
+        h = scripted()
+        payload = broker_snapshot_record(read_account(h.conn), market_open=True, why=WHY).payload
+        self.assertEqual((payload["as_of"], payload["read_at"], payload["as_of_close"], payload["not_as_of_close"]),
+                         ("2027-01-15T08:00:00Z", "2027-01-15T08:00:00Z", False, WHY))
+
+    def test_a_snapshot_is_either_as_of_a_close_or_says_why_not(self):
+        h = scripted()
+        reading = read_account(h.conn)
+        for kwargs in ({}, {"close": CLOSE, "why": WHY}, {"close": datetime(2027, 1, 15, 8, 0, tzinfo=timezone.utc)},
+                       {"close": datetime(2027, 1, 14, 21, 0)}):
+            with self.assertRaises(ValueError, msg=kwargs):
+                broker_snapshot_record(reading, market_open=False, **kwargs)
+
+    def test_the_engines_account_snapshot_is_the_same_reading_as_of_its_stamp(self):
+        h = scripted()
+        record = account_snapshot_record(read_account(h.conn), CLOSE)
+        self.assertEqual((record.event_type, record.schema_version), (ACCOUNT_SNAPSHOT_TYPE, ACCOUNT_SNAPSHOT_VERSION))
+        self.assertEqual((ACCOUNT_SNAPSHOT_TYPE, ACCOUNT_SNAPSHOT_VERSION), ("account.snapshot", 3))
+        self.assertEqual(record.payload, fixture("account_snapshot.json"))
+
+    def test_an_account_snapshot_needs_its_positions_and_net_liquidation(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        h.fake.end_positions = False
+        with self.assertRaises(ValueError):
+            account_snapshot_record(read_account(h.conn), CLOSE)
+        h = connected()
+        h.fake.summary = [row for row in full_summary() if row[1] != "NetLiquidation"]
+        with self.assertRaises(ValueError):
+            account_snapshot_record(read_account(h.conn), CLOSE)
+
+    def test_the_mark_is_the_official_close_with_ibkrs_last_price_beside_it(self):
+        record = mark_record("SPY", CLOSE, 401.5, "marketdata", Decimal("401.17"))
+        self.assertEqual((record.event_type, record.schema_version, MARK_TYPE, MARK_VERSION),
+                         ("market.mark.recorded", 2, "market.mark.recorded", 2))
+        self.assertEqual(record.payload, fixture("mark.json"))
+        self.assertEqual(mark_record("SPY", CLOSE, 401.5, "marketdata").payload,
+                         dict(fixture("mark.json"), broker_last=0, broker_last_set=False))
+        with self.assertRaises(ValueError):
+            mark_record("SPY", CLOSE, 0, "marketdata")
 
 
 class MarkTests(unittest.TestCase):
@@ -269,7 +387,8 @@ class MarkTests(unittest.TestCase):
         h = scripted()
         h.fake.marks = {756733: 401.17}
         reading = read_account(h.conn)
-        payload = broker_snapshot_record(reading, market_open=False, marks=read_marks(h.conn, {"SPY": 756733})).payload
+        payload = broker_snapshot_record(reading, market_open=False, marks=read_marks(h.conn, {"SPY": 756733}),
+                                         why=WHY).payload
         self.assertEqual(payload["positions"], [{"instrument_id": "SPY", "quantity": 147, "mark": 401.17,
                                                  "mark_set": True}])
 
@@ -308,3 +427,24 @@ class ReconciliationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloseStampedFiguresTests(unittest.TestCase):
+    """A snapshot as of the close states the drift added up and IBKR's own net liquidation (ADR 0019, amended 2026-10-18)."""
+
+    def test_the_unexplained_cash_is_stated_beside_the_drift(self):
+        h = scripted()
+        reading = read_account(h.conn)
+        payload = broker_snapshot_record(reading, market_open=False, marks={"SPY": Decimal("90")}, close=CLOSE,
+                                         net_liquidation=close_valuation(reading, {"SPY": 90}),
+                                         cash_drift=Decimal("12.50"), unexplained_cash=Decimal("22.50")).payload
+        self.assertEqual((payload["cash_drift"], payload["unexplained_cash"]), (12.5, 22.5))
+
+    def test_a_non_positive_net_liquidation_at_the_read_is_never_stamped_as_of_the_close(self):
+        # The margin alarm's basis; the engine refuses a close-stamped
+        # snapshot without it, so the adapter never writes one.
+        h = scripted()
+        h.fake.summary = [(a, t, "0.00" if t == "NetLiquidation" else v, c) for a, t, v, c in h.fake.summary]
+        reading = read_account(h.conn)
+        with self.assertRaises(ValueError):
+            broker_snapshot_record(reading, market_open=False, close=CLOSE, net_liquidation=Decimal("8530"))

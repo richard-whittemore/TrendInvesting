@@ -16,17 +16,31 @@ and sends every other field as written.
 
 While the link is up and reconciled, the adapter (Deliverer.deliver) picks
 up the files of its run it has not delivered, oldest session first, reads
-each strictly (read_stream), takes one broker snapshot (the account read,
-snapshot.read_account, with IBKR's mark for each holding, snapshot.
-read_marks, and the market's state at its time, market_open), and records
-the snapshot and then every envelope of those files in the outbox in one
-write (relay.Outbox.extend), so the engine journals the snapshot before the
-bars, and each session's bars before its close: ADR 0019's snapshot rule
-(the latest snapshot at or before the trigger, by journal sequence) and ADR
-0021 (a session closes before its entries are decided). The outbox then
-sends each once, in order (loop.AdapterLoop._drain), every input stamped
-with its send time as its recorded time, so the snapshot is never recorded
-after an input it serves. The snapshot's entry names the run it was read
+each strictly (read_stream), takes one account reading for the batch's last
+session (loop.AdapterLoop._post_close_reading, given that session's close
+and each of its bars' official close, last_session) and records, in the
+outbox in one write (relay.Outbox.extend, _entries): the reconciliation
+of the same reading, for the engine to classify against the book it holds
+before the batch's snapshots replace it (ADR 0019: a holding no fill
+explains is unexplained, never adopted), then the engine's account.snapshot
+and the broker snapshot; in a run's first batch, when the engine holds no
+book, the start-of-run reconciliation goes behind the snapshots instead
+(ADR 0025 point 5), once the adapter has compared the reading with the
+earlier run's last close or the owner's starting book (book_basis): one
+that differs, or has nothing to compare with, keeps it ahead, where the
+engine, with no book, classifies it unverifiable and halts (ADR 0019 and
+ADR 0027, amended 2026-10-18); then every envelope of those files, with each mark
+(market.mark.recorded, the bar's official close) just before the last
+session's close. The engine therefore journals the account snapshot before
+the bars, the mark before the close, and each session's bars before its
+close: ADR 0019's snapshot rule (the latest snapshot at or before the
+trigger, by journal sequence) and ADR 0021 (a session closes before its
+entries are decided). The owner's decision of 2026-10-18 (ADR 0019, ADR
+0025 point 5, ADR 0026 point 1, amended) stamps both snapshots as of that
+close when the reading stands for it, else at the read time with the
+reason (snapshot.py). The outbox then sends each once, in order
+(loop.AdapterLoop._drain), every input stamped with its send time as its
+recorded time. Each of the adapter's own entries names the run it was read
 for, as every stream entry's envelope does, so an earlier run's batch is
 never sent to a fresh run.
 
@@ -72,7 +86,6 @@ does not exist yet stops the start: its warm-up has not been written; so do
 two folders of one run (stream_run).
 """
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -81,8 +94,8 @@ from collections import namedtuple
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 
 from relay import (ENVELOPE_VERSION, LOG_INPUT, PAYLOAD_HASH, TIME, ResolveRefused, _committed_groups, _is_count, _is_text,
-                   _is_time, head_identity, read_engine_log, run_identity)
-from snapshot import BROKER_SNAPSHOT_TYPE
+                   _is_time, head_identity, marketdata_module, read_engine_log, run_identity)
+from snapshot import ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, RECONCILIATION_TYPE, reconciliation_record
 
 log = logging.getLogger("ibkr")
 
@@ -109,22 +122,10 @@ SETTLE = ("with the adapter stopped, move the file out of the run's stream folde
           "(sudo systemctl start ti-adapter-boost) (docs/manual/market-data.md, \"What happens to the file\")")
 
 
-def _marketdata(name):
-    """The data job's module adapter/marketdata/<name>.py, loaded from its file.
-
-    The adapter is installed beside it in the same layout (provision.sh
-    adapter), so both read one NYSE calendar (nyse_calendar.py) and one
-    table of the inputs the data job writes (kinds.py).
-    """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "marketdata", name + ".py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-nyse_calendar = _marketdata("nyse_calendar")
-kinds = _marketdata("kinds")
+# The data job's calendar and table of the inputs it writes, loaded by path
+# from the layout the adapter is installed in beside it (provision.sh adapter).
+nyse_calendar = marketdata_module("nyse_calendar")
+kinds = marketdata_module("kinds")
 DELIVERED_KINDS = kinds.DELIVERED_KINDS
 
 
@@ -139,6 +140,15 @@ class SnapshotRefused(StreamRefused):
 class DeliveryRecordInvalid(ValueError):
     """The delivery record is not as the adapter writes it; the adapter stops before delivering anything."""
 
+
+PostCloseReading = namedtuple("PostCloseReading", "account broker marks reading unverified", defaults=(False,))
+"""One account read for a batch (the adapter's loop.AdapterLoop._post_close_reading): the engine's
+account.snapshot, the broker snapshot, the marks (one per instrument the batch's last session delivers a bar
+for, in instrument order), each a snapshot.Record, and the snapshot.AccountReading they were made from.
+unverified is set when the engine holds no book and the reading differs from the book it was compared with
+(an earlier run's last close or the owner's starting book, book_basis), or has none to compare with: its
+reconciliation then goes alone, its snapshots withheld, so the engine classifies it with no book,
+unverifiable, and halts, never adopting it (ADR 0019 and ADR 0027, amended 2026-10-18)."""
 
 Stream = namedtuple("Stream", "name session first sha256 envelopes")
 """One stream file read strictly: its file name, its last session (which its name gives and its last line
@@ -608,13 +618,13 @@ class Deliverer:
                                "its session {} is not after {}, the last session already delivered".format(
                                    session, latest))
         streams = self._read_batch([name for _, name in new], latest)
-        snapshot = self._snapshot()
+        snapshot = self._snapshot(*last_session(streams, self.folder))
         if snapshot is None:
             return
         batch = {"run": self.run, "snapshot": self._new_id(BROKER_SNAPSHOT_TYPE),
                  "files": [{"name": s.name, "sha256": s.sha256, "lines": len(s.envelopes)} for s in streams]}
         self.record.begin(batch)
-        entries = _entries(self.run, batch["snapshot"], snapshot, streams)
+        entries = _entries(self.run, batch["snapshot"], snapshot, streams, self._holds_book())
         self._outbox.extend(entries)
         self.record.mark_queued()
         log.info("ibkr stream queued run=%s files=%s inputs=%d", self.run, ",".join(s.name for s in streams),
@@ -650,11 +660,18 @@ class Deliverer:
             previous = stream.session
         return streams
 
+    def _holds_book(self):
+        """Whether the engine has committed an account snapshot: its book, which a reconciliation is classified against."""
+        return any(i.event_type == ACCOUNT_SNAPSHOT_TYPE for i in read_engine_log(self._engine_log_path).inputs)
+
     def _finish(self, batch):
         """Settle a batch a stop left QUEUING; True once it is QUEUED (or DROPPED, an earlier run's)."""
         recorded = {e["id"] for e in self._outbox.load()}
-        if batch["snapshot"] not in recorded and batch["snapshot"] not in {
-                i.id for i in read_engine_log(self._engine_log_path).inputs}:
+        # The reconciliation is in every batch, its snapshots withheld when
+        # the reading is unverified (_entries), so it marks a batch queued.
+        queued_by = (batch["snapshot"], _derived(batch["snapshot"], RECONCILIATION_TYPE))
+        committed = {i.id for i in read_engine_log(self._engine_log_path).inputs}
+        if not any(i in recorded or i in committed for i in queued_by):
             if batch["run"] != self.run:
                 # Never recorded or sent, and its run is not running: the run
                 # now running has its own stream from its warm-up.
@@ -671,10 +688,10 @@ class Deliverer:
                 if stream.sha256 != entry["sha256"]:
                     raise _refused(os.path.join(self.folder, entry["name"]),
                                    "it changed since the adapter recorded it for delivery")
-            snapshot = self._snapshot()
+            snapshot = self._snapshot(*last_session(streams, self.folder))
             if snapshot is None:
                 return False
-            self._outbox.extend(_entries(self.run, batch["snapshot"], snapshot, streams))
+            self._outbox.extend(_entries(self.run, batch["snapshot"], snapshot, streams, self._holds_book()))
         self.record.mark_queued()
         return True
 
@@ -697,10 +714,71 @@ def _session_of(name):
     return date.fromisoformat(STREAM_FILE.fullmatch(name).group(1))
 
 
-def _entries(run, snapshot_id, snapshot, streams):
-    """The outbox entries of one batch: the broker snapshot, naming the run it was read for, then every envelope of each file, in order."""
-    entries = [{"id": snapshot_id, "event_type": snapshot.event_type, "schema_version": snapshot.schema_version,
-                "event_time": snapshot.payload["as_of"], "payload": snapshot.payload, "run": run}]
+def last_session(streams, folder=""):
+    """(close, closes) of a batch's last session: its close (an aware datetime) and each bar's official close.
+
+    closes maps each instrument the last file delivers a bar for, in that
+    session, to the bar's raw close: the price the backtest marks at, which
+    the adapter states as the mark (the owner's decision of 2026-10-18; ADR
+    0026 point 1, amended). A bar with no raw close that is a positive number
+    is refused, as a file not as the data job writes it (StreamRefused).
+    """
+    last = streams[-1]
+    closes = {}
+    for envelope in last.envelopes:
+        payload = envelope["payload"]
+        if (envelope["type"], envelope["schema_version"]) != kinds.BAR or _closed_session(payload) != last.session:
+            continue
+        raw = payload.get("raw")
+        price = raw.get("close") if isinstance(raw, dict) else None
+        if (not isinstance(price, (int, float)) or isinstance(price, bool) or not price > 0
+                or not _is_text(payload.get("instrument_id"))):
+            raise _refused(os.path.join(folder, last.name), "its bar {} carries no instrument and raw close the mark can be taken from".format(
+                envelope["id"]))
+        closes[payload["instrument_id"]] = price
+    return nyse_calendar.session_close(last.session), closes
+
+
+def _derived(snapshot_id, event_type, instrument=""):
+    """The input ID of a batch's account snapshot, reconciliation or mark: its broker snapshot's, extended."""
+    return "{}:{}{}".format(snapshot_id, event_type, ":" + instrument if instrument else "")
+
+
+def _entries(run, snapshot_id, reading, streams, book):
+    """The outbox entries of one batch, each naming the run it was read for (see the module).
+
+    The reconciliation of the same read, then the engine's account.snapshot
+    and the broker snapshot, when the engine holds a book (book true): the
+    engine classifies the reading against the book it holds and this run's
+    fills since before the new snapshot replaces it, so holdings no fill
+    explains are unexplained (ADR 0019's Degraded or Halted path), never
+    adopted. With no book yet, the account.snapshot, the broker snapshot,
+    then the start-of-run reconciliation (ADR 0025 point 5), once the
+    adapter found the reading to be the earlier run's last close or the
+    owner's starting book adjusted by the fills since. A reading that is
+    not (reading.unverified) sends its reconciliation alone, its snapshots
+    withheld: the engine, with no book, classifies it unverifiable and
+    halts on it, and no account.snapshot of a reading never checked is
+    committed, so the halted run's latest snapshot, which a fresh run's
+    first reading is compared with (book_basis), is never IBKR's unchecked
+    book (ADR 0019, amended 2026-10-18: IBKR's book is never adopted
+    unchecked). Then every
+    envelope of each file in order, with each mark just before the last
+    session's close, so the engine reads the account snapshot, the bar, the
+    mark, then the close that decides.
+    """
+    def adapter_entry(record, input_id):
+        return {"id": input_id, "event_type": record.event_type, "schema_version": record.schema_version,
+                "event_time": record.payload["as_of"], "payload": record.payload, "run": run}
+    reconciliation_id = _derived(snapshot_id, RECONCILIATION_TYPE)
+    reconciliation = adapter_entry(reconciliation_record(reading.reading, reconciliation_id), reconciliation_id)
+    entries = [adapter_entry(reading.account, _derived(snapshot_id, ACCOUNT_SNAPSHOT_TYPE)),
+               adapter_entry(reading.broker, snapshot_id)]
+    if reading.unverified:
+        entries = [reconciliation]
+    else:
+        entries = [reconciliation] + entries if book else entries + [reconciliation]
+    last_close = streams[-1].envelopes[-1]["id"]
     # A retraction a later file repeats (_repeats) is recorded once, as the
     # first file wrote it.
     seen = set()
@@ -709,6 +787,9 @@ def _entries(run, snapshot_id, snapshot, streams):
             if e["id"] in seen:
                 continue
             seen.add(e["id"])
+            if e["id"] == last_close:
+                entries.extend(adapter_entry(m, _derived(snapshot_id, m.event_type, m.payload["instrument_id"]))
+                               for m in reading.marks)
             entries.append({"id": e["id"], "event_type": e["type"], "schema_version": e["schema_version"],
                             "event_time": e["event_time"], "payload": e["payload"], "envelope": e})
     return entries

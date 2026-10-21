@@ -80,7 +80,7 @@ def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/
     header = {"chain_algorithm": CHAIN, "configuration_hash": configuration_hash, "log_version": 1,
               "strategy_version": strategy_version}
     lines = [json.dumps(header, sort_keys=True, separators=(",", ":"))]
-    chain = tidata._chain_seed(header)
+    chain = tidata.engine_log.chain_seed(header)
     for n in range(1, inputs + 1):
         if n == 1:
             ident, kind, payload = "configuration:" + configuration_hash, tidata.CONFIGURATION_TYPE, config or shipped_config()
@@ -94,7 +94,7 @@ def write_log(path, configuration_hash="hash-boost", strategy_version="boost/r1/
                     "source": "engine", "strategy_version": strategy_version,
                     "configuration_hash": configuration_hash,
                     "payload_hash": hashlib.sha256(raw.encode()).hexdigest(), "payload": payload}
-        chain = tidata._record_digest(chain, "input", envelope, raw)
+        chain = tidata.engine_log.chain_next(chain, "input", envelope, raw.encode("utf-8"))
         digest = "sha256:" + chain.hex()
         lines.append(json.dumps({"record": {"sequence": n, "kind": "input", "envelope": envelope,
                                             "record_hash": digest}}, separators=(",", ":")))

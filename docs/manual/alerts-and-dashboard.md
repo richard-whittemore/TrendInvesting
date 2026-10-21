@@ -71,6 +71,7 @@ account.
 | The engine went Degraded or Halted | urgent, repeated until acknowledged | change of state, reason and scope; the same state coming back after another is a new alert |
 | A reconciliation did not match: an unexplained difference (Degraded) or evidence that could not be compared (Halted); see [reconciliation](reconciliation.md) | urgent, repeated until acknowledged | reconciliation; the state change it caused is part of the same alert, not a second one |
 | A decision was withheld for missing data (bars, account snapshot, universe, the close histories of the stocks ranked) | urgent | run of the same reason |
+| The same page, for a Boost session withheld as `stale-account-snapshot` because the IBKR adapter's reading after the close could not stand for the close: it adds "The adapter's reading after the close could not stand for the close (broker snapshot ...)" and the reason the snapshot states (an order still working at IBKR, an execution since the close, a reading on a later date than the close). See [paper trading](paper-trading.md), "A paper day" | urgent | run of the same reason: one page, however many sessions it covers |
 | Boost had no SPY bar for a session. The page names the first missing session and says Boost skipped it and traded nothing, and decides again at the next session with a bar, its readings computed over the closes it has (the missing close is not filled in). Check the daily data job ([market data](market-data.md)); the run carries on by itself ([boost](boost.md#a-session-with-no-spy-bar)) | urgent | the gap: one page however many sessions in a row are missing; a later gap pages again |
 | A momentum decision was withheld because no stock with a target was affordable (`all-unaffordable`; the net liquidation or prices may be wrong) | urgent | run of the same reason |
 | A momentum decision was withheld because more than the configured share (20%) of the ranked stocks had no sector label (`labels-missing`; a sector-label source or its mapping may have failed, see [momentum universe](momentum-universe.md)) | urgent | run of the same reason |
@@ -357,6 +358,16 @@ read is answered "method not allowed". If a log does not verify the page says
   withheld", with its reason, what fired it and the engine's detail. A lapse
   (`lapsed`: what fired the sale ended before a good snapshot came) appears
   only here, never as an alert.
+- With the IBKR adapter, the summary shows the cash checks of the latest
+  reading after the close (ADR 0019, amended 2026-10-18): "Cash drift since
+  the previous close", the day's difference the adapter accepted (at most 1%
+  of net liquidation), and "unexplained cash since the cash was last
+  explained", that difference added up since a reconciliation the engine
+  explained, or since the latest starting book you approved (for Boost
+  always that starting book, since its book carries no cash; approving a
+  fresh run with a new starting book starts the figure again from it). A figure that keeps growing is a posting no trade
+  explains: check the account in IBKR. When the latest reading was stamped
+  at its read time it says "Cash drift: not checked".
 
 ## What can go wrong
 

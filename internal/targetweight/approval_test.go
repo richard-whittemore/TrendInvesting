@@ -41,7 +41,7 @@ func TestApprovalInputRules(t *testing.T) {
 	at := sessionEnd(0)
 	h, s := configured(t)
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 1, "x", at, approval(false)), "schema version")
-	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 3, "x", at, approval(false)), "schema version")
+	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 4, "x", at, approval(false)), "schema version")
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "x", at, event.OperatorRunApprovedPayload{}), "invalid")
 	other := approval(false)
 	other.AccountID = "ira"
@@ -219,4 +219,21 @@ func TestAnApprovalIsTheFirstInputAfterTheConfiguration(t *testing.T) {
 	p := approval(false)
 	p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:recorded", State: event.EngineStateHalted, SaleAttempted: new(false)}
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p), "straight after the configuration")
+}
+
+// TestAFirstRunsApprovalAndAnEarlierVersionApply: an approval stating the
+// starting book (schema version 3), a first run's included, applies as a
+// fresh run's does, and a version 2 approval an earlier build recorded still
+// replays (ADR 0015; ADR 0027, amended 2026-10-18).
+func TestAFirstRunsApprovalAndAnEarlierVersionApply(t *testing.T) {
+	at := sessionEnd(0)
+	first := approval(false)
+	first.PreviousLog, first.PreviousLogFinalHash = "", ""
+	first.StartingBook = &event.StartingBook{Positions: []event.AccountPosition{}, TotalCash: 4000, Currency: "USD"}
+	h, s := configured(t)
+	mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "first", at, first))
+	earlier, es := configured(t)
+	mustApply(t, earlier, es.envelope(t, event.OperatorRunApprovedEventType, 2, "v2", at, approval(true)))
+	stated, ss := configured(t)
+	mustRefuse(t, stated, ss.envelope(t, event.OperatorRunApprovedEventType, 2, "v2-book", at, first), "starting book")
 }

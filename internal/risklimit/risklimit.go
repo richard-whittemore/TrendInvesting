@@ -36,6 +36,10 @@ type Order struct {
 	Planned event.OrderPlannedPayload
 	Mark    float64
 	MarkSet bool
+	// MarkSource names the price Mark is (event.MarkSourceBrokerLast or
+	// event.MarkSourceOfficialClose), recorded on the figures; empty for a
+	// mark that does not say.
+	MarkSource string
 }
 
 // Outcome is the gate's answer for one order: exactly one of Released and
@@ -650,7 +654,7 @@ func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, 
 		OrdersInDecision: planSize,
 	}
 	if o.MarkSet {
-		f.Mark, f.MarkSet = o.Mark, true
+		f.Mark, f.MarkSet, f.MarkSource = o.Mark, true, o.MarkSource
 		f.MarkDeviation = math.Abs(p.ReferencePrice-o.Mark) / o.Mark
 	}
 	if g.ira && p.Side == event.OrderSideBuy {

@@ -23,10 +23,10 @@ if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 
 from orders import BrokerOrders
-from relay import (MAX_CLOSE_TIMEOUT, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
+from relay import (MAX_CLOSE_TIMEOUT, log_chain_next, log_chain_seed, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
                    NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
                    acknowledge_correction, acknowledge_late_fill, earlier_run, journalled_fills, journalled_reports,
-                   main, resolve, resolve_run_ended, run_identity, run_logs)
+                   main, resolve, resolve_run_ended, run_chain, run_identity, run_logs)
 from sender import OrderRequest
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -51,6 +51,10 @@ class FakeEngine:
         self.decisions = decisions
         self.crash_before_reply = set(crash_before_reply)
         self.asked = []
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def decide(self, envelope):
         self.asked.append(envelope["id"])
@@ -168,8 +172,9 @@ def log_group(sequence, entries, committed=True, at="2026-10-17T13:30:00Z"):
     """One group of the engine's durable log from sequence on: (kind, type, schema version, payload) lines, then its commit.
 
     The record hashes are stand-ins: the relay reads the log's shape and each
-    payload against its hash, and the chain is the engine's to verify
-    (testdata/engine_log.jsonl is a log the engine's own writer made).
+    payload against its hash; chained gives a log the real chain, for the
+    readers that verify it (testdata/engine_log.jsonl is a log the engine's
+    own writer made).
     """
     lines = []
     for n, (kind, event_type, schema_version, payload) in enumerate(entries, sequence):
@@ -186,6 +191,37 @@ def log_group(sequence, entries, committed=True, at="2026-10-17T13:30:00Z"):
         lines.append(json.dumps({"commit": {"sequence": sequence + len(entries) - 1, "record_hash": record_hash}},
                                 separators=(",", ":")) + "\n")
     return lines
+
+
+def chained(lines):
+    """The log lines joined, each record's stand-in hash replaced by the one LOG_CHAIN_ALGORITHM gives, commits too.
+
+    For a reader that verifies the record hash chain (relay.run_chain, ADR
+    0027); a line that is not a record as log_group writes one is kept as it
+    is, and the chain past it is left unverifiable, as a tampered log is.
+    """
+    text = "".join(lines)
+    out = text.splitlines(keepends=True)
+    if not out:
+        return text
+    try:
+        chain = log_chain_seed(json.loads(out[0]))
+    except (ValueError, KeyError, TypeError):
+        return text
+    real = {}
+    for line in out[1:]:
+        try:
+            record = json.loads(line)["record"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        payload = json.dumps(record["envelope"]["payload"], separators=(",", ":")).encode("utf-8")
+        chain = log_chain_next(chain, record["kind"], record["envelope"], payload)
+        if chain is None:
+            break
+        real[record["record_hash"]] = "sha256:" + chain.hex()
+    for stand_in, actual in real.items():
+        text = text.replace(stand_in, actual)
+    return text
 
 
 def write_engine_journal(path, fill_ids):
@@ -544,6 +580,16 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.sent, [], "a closed relay sends nothing")
         self.assertIsNone(self.pending.load(), "and edits nothing")
         second.close()
+
+    def test_close_closes_the_engine_connection_so_the_next_adapter_can_connect(self):
+        # The engine takes one connection at a time (cmd/engine), so an
+        # adapter that stops closes its own before another starts.
+        connect = Restarts({}, {})
+        relay = self.relay(connect)
+        relay.exchange(envelope(0))
+        self.assertFalse(connect.engines[0].closed)
+        relay.close()
+        self.assertTrue(connect.engines[0].closed)
 
     def test_a_relay_closed_mid_settlement_sends_no_further_order(self):
         decisions = {"session:0": [released("tw-1"), released("tw-2")]}
@@ -1311,7 +1357,7 @@ class RunLogsTests(unittest.TestCase):
             "previous_log": p, "previous_log_final_hash": final_hash or self.final_hash(p)}) for p in previous]
                            or [("input", "market.session.closed", 1, {"session": "2026-10-16"})], at=at)
         path = Path(self.dir.name) / name
-        path.write_text("".join(lines), encoding="utf-8")
+        path.write_text(chained(lines), encoding="utf-8")
         return str(path)
 
     def final_hash(self, name):
@@ -1329,6 +1375,51 @@ class RunLogsTests(unittest.TestCase):
         third = self.write("c.log", ["b.log"])
         self.assertEqual(run_logs(third, today=TODAY), [third, second, first])
         self.assertEqual(run_logs(first, today=TODAY), [first])
+
+    def test_every_reader_of_the_chain_refuses_a_log_whose_record_hash_chain_is_broken(self):
+        # A record changed in place keeps its log's stored final record hash,
+        # so only the recomputed chain finds it (ADR 0027): the start
+        # reconciliation and the report journal read run_logs every start,
+        # long after the engine checked the chain at the run's own start.
+        first = self.write("a.log")
+        second = self.write("b.log", ["a.log"])
+        for tampered, name in ((first, "a.log"), (second, "b.log")):
+            with self.subTest(name):
+                path = Path(tampered)
+                text = path.read_text(encoding="utf-8")
+                changed = text.replace('"envelope_version":1,"schema_version":', '"envelope_version":1,"schema_version":9', 1)
+                self.assertNotEqual(changed, text, "setup: a record changed")
+                path.write_text(changed, encoding="utf-8")
+                for read in (lambda: run_logs(second, today=TODAY), lambda: list(run_chain(second))):
+                    with self.assertRaises(ResolveRefused) as caught:
+                        read()
+                    self.assertIn(name, str(caught.exception))
+                    self.assertIn("record hash chain", str(caught.exception))
+                path.write_text(text, encoding="utf-8")
+
+    def test_a_first_runs_approval_ends_the_chain_and_every_run_is_walked(self):
+        # A first run's approval (schema version 3) names no previous log and
+        # states the starting book; the comparison of a fresh run's first
+        # reading walks back however old the runs are (ADR 0019 and ADR
+        # 0027, amended 2026-10-18), where run_logs stops at IBKR's lists.
+        lines = [log_header()] + log_group(1, [("input", "operator.run.approved", 3, {
+            "previous_log": "", "previous_log_final_hash": "",
+            "starting_book": {"positions": [], "total_cash": 1000.0, "currency": "USD"}})], at="2026-10-01T13:30:00Z")
+        first = Path(self.dir.name) / "a.log"
+        first.write_text(chained(lines), encoding="utf-8")
+        second = self.write("b.log", ["a.log"])
+        self.assertEqual(run_logs(second, today=date(2026, 10, 20)), [second])
+        walked = [(path, approval["previous_log"] if approval else None) for path, _, approval in run_chain(second)]
+        self.assertEqual(walked, [(second, "a.log"), (str(first), "")])
+        self.assertEqual(run_identity(str(first)), "e:1", "the first run is named by its approval")
+
+    def test_an_approval_naming_no_log_and_no_starting_book_is_refused(self):
+        lines = [log_header()] + log_group(1, [("input", "operator.run.approved", 3, {
+            "previous_log": "", "previous_log_final_hash": "", "starting_book": None})])
+        path = Path(self.dir.name) / "a.log"
+        path.write_text(chained(lines), encoding="utf-8")
+        with self.assertRaises(ResolveRefused):
+            list(run_chain(str(path)))
 
     def test_the_chain_stops_at_a_run_that_ended_before_yesterdays_session(self):
         # IBKR's lists reach back only to today's session (the day's DAY
@@ -1358,7 +1449,7 @@ class RunLogsTests(unittest.TestCase):
             lines += log_group(n, entries, at=at)
             n += len(entries)
         path = Path(self.dir.name) / name
-        path.write_text("".join(lines), encoding="utf-8")
+        path.write_text(chained(lines), encoding="utf-8")
         return str(path)
 
     def test_a_run_of_yesterdays_session_with_nothing_open_never_hides_an_earlier_one_with_an_order_working(self):
@@ -1580,7 +1671,7 @@ class RunLogsTests(unittest.TestCase):
         for n, (event_type, version, payload) in enumerate(reports, 3):
             lines += log_group(n, [("input", event_type, version, payload)], at="2026-10-15T21:00:00Z")
         path = Path(self.dir.name) / name
-        path.write_text("".join(lines), encoding="utf-8")
+        path.write_text(chained(lines), encoding="utf-8")
         return str(path)
 
     def test_the_chain_keeps_an_earlier_day_run_whose_released_order_has_no_terminal_report(self):
@@ -1622,7 +1713,7 @@ class RunLogsTests(unittest.TestCase):
                 for n, (event_type, version, payload) in enumerate(b_reports, 3):
                     lines += log_group(n, [("input", event_type, version, payload)], at="2026-10-16T21:00:00Z")
                 second = Path(self.dir.name) / "b.log"
-                second.write_text("".join(lines), encoding="utf-8")
+                second.write_text(chained(lines), encoding="utf-8")
                 third = self.write("c.log", ["b.log"])
                 self.assertEqual(run_logs(third, today=TODAY),
                                  [third, str(second), first] if kept else [third, str(second)])
@@ -1636,7 +1727,7 @@ class RunLogsTests(unittest.TestCase):
         for bad in ("", "f" * 64, 7, None):
             with self.subTest(final_hash=bad):
                 path = Path(self.dir.name) / "bad.log"
-                path.write_text("".join([log_header()] + log_group(1, [("input", "operator.run.approved", 2, {
+                path.write_text(chained([log_header()] + log_group(1, [("input", "operator.run.approved", 2, {
                     "previous_log": "a.log", "previous_log_final_hash": bad})])), encoding="utf-8")
                 with self.assertRaises(ResolveRefused):
                     run_logs(str(path), today=TODAY)
