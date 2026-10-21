@@ -135,7 +135,7 @@ pass "provision.sh twsapi on arm64 refuses a tampered and a mismatched download;
 # 4. The pinned archive unpacked and ibapi installed; recorded and checked by
 # the adapter.
 "$p" twsapi || fail "provision.sh twsapi failed on the pinned archive"
-printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
+printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nTWSAPI_ARTEFACT=archive\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
   "$TWSAPI_VERSION" "$TWSAPI_ARCHIVE_SHA256" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$work/expected"
 cmp -s "$work/expected" "$twsapi/INSTALLED" || fail "the install record is not the pinned version, archive and protobuf SHA-256s: $(cat "$twsapi/INSTALLED")"
 "$p" adapter

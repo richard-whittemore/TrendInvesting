@@ -284,8 +284,11 @@ step downloads the archive, checks its SHA-256 against the pin and stops on
 any difference, with nothing installed. It then unpacks only the archive's
 Python client, installs it with the pinned protobuf into the adapter's own
 environment and writes the install record, which on the Mac mini names the
-archive's SHA-256. The adapter starts only if that record names a pinned file
-of the pinned version and the `ibapi` it imports is that version. No emulated
+archive's SHA-256 and says it came from the archive. The adapter starts only
+if that record names the archive (the artefact an arm64 machine installs from;
+a record naming the Linux installer is refused there, as is one without an
+artefact, written by an earlier step: run `provision.sh twsapi` again), the
+pinned archive's SHA-256 and version, and the `ibapi` it imports is that version. No emulated
 helper is used (your decision, 2026-10-18).
 
 **How it is checked.** `deploy/mac-mini/rehearse-programs.sh` builds both

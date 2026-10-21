@@ -389,8 +389,9 @@ adapter_venv=/opt/trend-investing/adapter-venv
 adapter_root=/opt/trend-investing/adapter
 step_twsapi() {
   log "TWS API ${TWSAPI_VERSION}"
-  local installer pinned_sha=$TWSAPI_SHA256
+  local installer pinned_sha=$TWSAPI_SHA256 artefact=installer
   if mac_mini; then
+    artefact=archive
     installer="$dl_cache/twsapi-macunix-${TWSAPI_VERSION}.zip"
     pinned_sha=$TWSAPI_ARCHIVE_SHA256
     fetch "$TWSAPI_ARCHIVE_URL" "$TWSAPI_ARCHIVE_SHA256" "$installer"
@@ -421,7 +422,7 @@ step_twsapi() {
     # The vendor installer runs unprivileged (as nobody), into a scratch
     # directory it owns, as step_gateway runs the Gateway's installer as its
     # service user; only the Python client it unpacks is then installed, as
-    # root, under $target. -q: unattended; -dir: where to put the tree. The
+    # root, under $tree. -q: unattended; -dir: where to put the tree. The
     # install4j installer writes under HOME, so it gets a scratch one.
     local scratch
     scratch=$(mktemp -d)
@@ -454,8 +455,8 @@ step_twsapi() {
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps "$protobuf"
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
   verify_adapter_venv "$adapter_venv" "$PROTOBUF_VERSION"
-  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
-    "$TWSAPI_VERSION" "$pinned_sha" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
+  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nTWSAPI_ARTEFACT=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
+    "$TWSAPI_VERSION" "$pinned_sha" "$artefact" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
   chmod 0644 "$twsapi_root/INSTALLED.tmp"
   mv "$twsapi_root/INSTALLED.tmp" "$twsapi_root/INSTALLED"
   log "ibapi from TWS API ${TWSAPI_VERSION} installed into $adapter_venv; recorded in $twsapi_root/INSTALLED"

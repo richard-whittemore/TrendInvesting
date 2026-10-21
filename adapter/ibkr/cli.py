@@ -89,6 +89,12 @@ def require_zones(lookup=ZoneInfo):
                           "content cannot be parsed); reinstall the package that provides it with `sudo "
                           "apt-get install --reinstall tzdata-legacy tzdata` (or restore the zone database "
                           "from a good copy) and start the adapter again".format(name)) from None
+        except OSError as err:
+            # An unreadable zone file (permissions, a directory in its place) is refused like a missing one.
+            raise Refused("the time zone {} that IBKR's execution times name cannot be read ({}); restore the "
+                          "zone database's permissions or reinstall it with `sudo apt-get install --reinstall "
+                          "tzdata-legacy tzdata` and start the adapter again".format(
+                              name, err.strerror or type(err).__name__)) from None
 
 
 def _parser():

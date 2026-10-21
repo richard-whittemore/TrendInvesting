@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 tests_dir = Path(__file__).resolve().parent
@@ -20,6 +21,7 @@ from connection import REQUEST_ID_BASE
 from config import AdapterConfig
 from engine_double import LoggedEngine, run_approval
 from fake_tws import ACCOUNT, FakeTWS
+import ibapi_pin
 from test_ibapi_pin import PINS, SHA, record
 from test_loop import SUMMARY
 
@@ -55,6 +57,10 @@ class CommandTests(unittest.TestCase):
         self.secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT))
         self.versions.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA) + PINS)
         self.record.write_text(record())
+        # The record names the installer, the artefact an x86_64 machine installs from.
+        machine = mock.patch.object(ibapi_pin.platform, "machine", return_value="x86_64")
+        machine.start()
+        self.addCleanup(machine.stop)
         # The account's first run, approved with the book the fake shows.
         self.engine = LoggedEngine(str(self.engine_log), approval=run_approval(ACCOUNT, starting_book=({}, 100000.0)))
         self.fake = FakeTWS()
@@ -145,6 +151,24 @@ class CommandTests(unittest.TestCase):
         self.assertIn("reinstall", message)
         self.assertIn("restore the zone database", message)
         self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
+
+    def test_an_unreadable_ibkr_time_zone_file_is_refused_not_a_traceback(self):
+        for error in (PermissionError(13, "Permission denied"), IsADirectoryError(21, "Is a directory"),
+                      OSError(5, "Input/output error")):
+            with self.subTest(error=type(error).__name__):
+                def unreadable_zone(name, error=error):
+                    raise error
+
+                self.err = io.StringIO()
+                status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                              should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                              zone_lookup=unreadable_zone)
+                self.assertEqual(status, 1)
+                message = self.err.getvalue()
+                self.assertIn("US/Eastern", message)
+                self.assertIn(error.strerror, message)
+                self.assertIn("cannot be read", message)
+                self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
 
     def test_the_account_comes_from_one_place_only_and_is_never_echoed(self):
         both = dict(CONFIG, account_id=ACCOUNT)
