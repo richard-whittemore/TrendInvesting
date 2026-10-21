@@ -64,11 +64,7 @@ const wcgwHeader = "| What you see | What the program does | What you do |"
 // reason they alone explain is still explained, and one they repeat from its
 // owning chapter is not counted twice). Remove a chapter from this list when
 // its table adopts wcgwHeader and names only the reasons it owns.
-var ownTableLayout = map[string]bool{
-	"ibkr-adapter.md":  true,
-	"market-data.md":   true,
-	"paper-trading.md": true,
-}
+var ownTableLayout = map[string]bool{}
 
 // notAChapter are the manual's pages that describe no program, so they have
 // no "What can go wrong" section: the reading order and the glossary.
@@ -873,13 +869,15 @@ func TestTitlePatternReadsPlaceholders(t *testing.T) {
 }
 
 func TestAChapterAwaitingItsPassCountsOnlyWhenAloneInExplainingAReason(t *testing.T) {
+	ownTableLayout["awaiting.md"] = true
+	defer delete(ownTableLayout, "awaiting.md")
 	owner := chapter{name: "states-and-kill-switch.md", rows: []string{"| `a` | x | y |"}}
-	pending := chapter{name: "ibkr-adapter.md", rows: []string{"| `a` | x | y |", "| `b` | x | y |"}}
+	pending := chapter{name: "awaiting.md", rows: []string{"| `a` | x | y |", "| `b` | x | y |"}}
 	other := chapter{name: "momentum.md", rows: []string{"| `b` | x | y |"}}
 	if got := rowsMatching([]chapter{owner, pending}, reasonCell("a")); !slices.Equal(got, []string{"states-and-kill-switch.md"}) {
 		t.Errorf("a: %v; want only the chapter that has had its pass", got)
 	}
-	if got := rowsMatching([]chapter{pending}, reasonCell("b")); !slices.Equal(got, []string{"ibkr-adapter.md"}) {
+	if got := rowsMatching([]chapter{pending}, reasonCell("b")); !slices.Equal(got, []string{"awaiting.md"}) {
 		t.Errorf("b alone: %v; want the awaiting chapter", got)
 	}
 	if got := rowsMatching([]chapter{owner, other}, reasonCell("b")); !slices.Equal(got, []string{"momentum.md"}) {
