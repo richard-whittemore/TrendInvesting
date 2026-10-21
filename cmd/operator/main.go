@@ -342,6 +342,14 @@ func approve(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A starting book's approval time is its cutoff: the adapter counts
+	// only the fills at or after it (ADR 0019, amended 2026-10-18: a book
+	// and the movements that explain it share one cutoff). A time later
+	// than now would leave out fills already in the account, so it is
+	// refused; the owner approves right after reading the book.
+	if book != nil && at.After(time.Now()) {
+		return fmt.Errorf("operator: -at %s is later than now: a starting book's approval time is its cutoff, so approve right after reading the book in IBKR, leaving out -at (docs/runbooks/first-paper-order.md)", at.Format(time.RFC3339))
+	}
 	if *firstRun {
 		approval := event.OperatorRunApprovedPayload{
 			AccountID: *account, ApprovedBy: *by, ApprovedAt: at,

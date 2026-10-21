@@ -18,7 +18,7 @@ func RenderText(s Summary) string {
 		b.WriteString("No account snapshot recorded.\n")
 	}
 	if s.CashChecked {
-		fmt.Fprintf(&b, "Cash drift since the previous close %.2f; unexplained cash since the cash was last explained (a reconciliation the engine explained, or the starting book; for Boost, whose book carries no cash, the starting book) %.2f\n", s.CashDrift, s.UnexplainedCash)
+		fmt.Fprintf(&b, "Cash drift since the previous close %.2f; unexplained cash since the cash was last explained (a reconciliation the engine explained, else the starting book, always Boost's as its book carries no cash; the day's drift when the run's chain holds neither) %.2f\n", s.CashDrift, s.UnexplainedCash)
 	} else if s.CashUnchecked {
 		b.WriteString("Cash drift: not checked (the latest reading after the close was stamped at its read time)\n")
 	}

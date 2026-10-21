@@ -652,6 +652,11 @@ func TestTheFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
 		// compared, so it is refused here.
 		"a first run's book in another currency": {[]string{"-first-run", "-positions", "", "-cash", "134000", "-currency", "CAD"}, "USD"},
 		"a fresh run's book in another currency": {[]string{"-log", logPath, "-positions", "", "-cash", "134000", "-currency", "CAD"}, "USD"},
+		// A starting book's approval time is its cutoff (ADR 0019: a book
+		// and the movements that explain it share one cutoff), so it is
+		// never later than the owner's approving it.
+		"a first run's book approved in the future": {[]string{"-first-run", "-positions", "", "-cash", "1", "-currency", "USD", "-at", "2999-01-01T00:00:00Z"}, "-at"},
+		"a fresh run's book approved in the future": {[]string{"-log", logPath, "-positions", "", "-cash", "1", "-currency", "USD", "-at", "2999-01-01T00:00:00Z"}, "-at"},
 	} {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
 		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", path, "-at", at}, c.args...)

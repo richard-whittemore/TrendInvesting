@@ -365,7 +365,10 @@ operator approve -first-run -account <IBKR account> -by owner \
 next step. The cash is IBKR's `TotalCashValue` in USD, the currency the
 adapter reads IBKR's cash in: any other `-currency` is refused. A first
 run has no incident to clear, so `-clear-incident` with `-first-run` is
-refused too. A fresh run's approval takes the same three options when you
+refused too. Approve right after you read the book: the approval's time is
+the book's cutoff (a trade before it is taken as in the book, one after it
+as a change since), so an `-at` later than now is refused whenever a
+starting book is stated. A fresh run's approval takes the same three options when you
 moved shares or cash in or out since the previous run, or to clear a halt
 on a run's first reading (see [restart](restart.md)): the fresh run's first
 reading is then compared with the book you state, not with the previous

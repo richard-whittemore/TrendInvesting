@@ -295,7 +295,8 @@ Order of starting, each on the server, each an explicit step of yours:
    (`-positions ""` when the account holds nothing). Approve right after
    you read the book, with no order working: the approval's time is the
    book's cutoff, so a trade before it is taken as in the book you typed
-   and one after it as a change since. A paper or live first
+   and one after it as a change since (`operator approve` refuses an
+   `-at` later than now with a starting book). A paper or live first
    run decides nothing without it: the adapter compares the run's first
    reading after a close with this book, and a reading that does not match
    it is never taken as the book (the engine halts on its reconciliation

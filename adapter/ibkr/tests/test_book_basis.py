@@ -6,6 +6,7 @@ with every fill since; and, for the unexplained cash, the latest
 reconciliation whose cash the engine explained or the starting book.
 Synthetic figures only.
 """
+import json
 import sys
 import tempfile
 import unittest
@@ -140,6 +141,38 @@ class BookBasisTests(unittest.TestCase):
         cache.write_text("{not json")
         daily, _ = previous_close(str(self.root / "b.log"), str(cache))
         self.assertEqual(daily.positions, {"SPY": 2})
+
+    def test_a_kept_basis_whose_fields_are_malformed_is_logged_walked_again_and_replaced(self):
+        self.chain()
+        cache = self.root / "pending.json.basis"
+        walked = previous_close(str(self.root / "b.log"), str(cache))
+        good = json.loads(cache.read_text())
+        broken = {
+            "a fill missing its fields": lambda kept: kept["daily"]["fills"].append({}),
+            "a fill on no side": lambda kept: kept["daily"]["fills"].append(dict(FILL, side="hold")),
+            "a fill of no shares": lambda kept: kept["daily"]["fills"].append(dict(FILL, quantity=0)),
+            "a fill at a time that is no time": lambda kept: kept["daily"]["fills"].append(
+                dict(FILL, filled_at="yesterday")),
+            "a fill priced at nothing": lambda kept: kept["daily"]["fills"].append(dict(FILL, price=0)),
+            "a fill with a negative commission": lambda kept: kept["daily"]["fills"].append(
+                dict(FILL, commission=-1)),
+            "a cash that is not a number": lambda kept: kept["daily"].update(cash="NaN"),
+            "a cash that is infinite": lambda kept: kept["unexplained"].update(cash="Infinity"),
+            "a cash that is not text": lambda kept: kept["daily"].update(cash=90),
+            "a position held as true": lambda kept: kept["daily"].update(positions={"SPY": True}),
+            "a time that is not text": lambda kept: kept["daily"].update(as_of=5),
+            "a basis that is not an object": lambda kept: kept.update(daily=[]),
+        }
+        for name, spoil in broken.items():
+            with self.subTest(name):
+                kept = json.loads(json.dumps(good))
+                spoil(kept)
+                cache.write_text(json.dumps(kept))
+                with self.assertLogs("ibkr", level="WARNING") as logged:
+                    self.assertEqual(previous_close(str(self.root / "b.log"), str(cache)), walked,
+                                     "a malformed kept file is walked again, never crashes a reading")
+                self.assertIn(str(cache), "\n".join(logged.output), "the file discarded is named")
+                self.assertEqual(json.loads(cache.read_text()), good, "and it is replaced")
 
     def test_a_missing_earlier_log_stops_naming_it(self):
         self.chain()

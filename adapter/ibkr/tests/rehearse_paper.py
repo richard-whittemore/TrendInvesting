@@ -77,6 +77,7 @@ for p in (str(tests_dir), str(adapter_dir), str(adapter_dir.parent)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from book_basis import cash_change  # noqa: E402
 from cli import main as adapter_main  # noqa: E402
 from config import is_paper_account  # noqa: E402
 from fake_tws import FakeTWS, contract as fake_contract  # noqa: E402
@@ -371,11 +372,15 @@ def rehearse(work, account):
         # The account's first run, approved with the book the owner checked
         # in IBKR: the fake gateway's holding and cash, which the first
         # reading after a close is compared with (ADR 0019 and ADR 0027,
-        # amended 2026-10-18).
+        # amended 2026-10-18). The owner approves right after reading the
+        # book, the evening before, ahead of the warm-up's reading
+        # (docs/runbooks/first-paper-order.md): the approval's time is the
+        # book's cutoff, so every fill after it is counted against the book.
         approval = work / "first-run-approval.json"
+        approved_at = settled(eve)
         approval.write_text(json.dumps({
             "account_id": account, "previous_log": "", "previous_log_final_hash": "", "incident_id": "",
-            "approved_by": "rehearsal", "approved_at": stamp(close_at), "boost": {"latched": False},
+            "approved_by": "rehearsal", "approved_at": stamp(approved_at), "boost": {"latched": False},
             "incident_in_force": None,
             "starting_book": {"positions": [{"instrument_id": "SPY", "quantity": HELD - 3 if BOOK_MISMATCH else HELD}],
                               "total_cash": float(NET_LIQUIDATION), "currency": "USD"}}))
@@ -459,13 +464,15 @@ def rehearse(work, account):
               and account_in["payload"]["positions"] == [{"instrument_id": "SPY", "quantity": HELD}]
               and (broker["as_of"], broker["as_of_close"], broker["not_as_of_close"]) == (stamp(close_at), True, "")
               and broker["read_at"] > stamp(close_at)
+              and (broker["cash_drift"], broker["unexplained_cash"]) == (0, 0)
               and broker["positions"] == [{"instrument_id": "SPY", "quantity": HELD,
                                            "mark": official_close(session), "mark_set": True}]
               and (mark["price"], mark["broker_last"], mark["source"]) == (official_close(session), IBKR_LAST,
                                                                            "marketdata")
               and day[4]["id"] == day_close,
               "the day's stream reached the engine as its account and broker snapshots as of the close (read after "
-              "it), its bar, its mark from the bar's official close, then its close")
+              "it, its cash that of the starting book: no drift, none unexplained), its bar, its mark from the "
+              "bar's official close, then its close")
         decided = decisions(run_log, day_close)
         releases = [d["payload"] for d in decided if d["type"] == RELEASED]
         targets = [d["payload"] for d in decided if d["type"] == DECIDED]
@@ -555,16 +562,22 @@ def rehearse(work, account):
         run(Phase([(lambda: third_close in [i["id"] for i in inputs(resumed_log)], None,
                     "the next day's stream to reach the resumed run")]), resumed_log)
         new = inputs(resumed_log)[copied:]
+        # The fake gateway's cash never moves, so the order's fills, after
+        # the approval's cutoff, are cash the book cannot explain: their
+        # value and commissions, added up since the starting book.
+        cost = -cash_change([f["payload"] for f in fills])
+        resumed_broker = new[3]["payload"] if len(new) > 3 else {}
         resumed_decided = [d["payload"] for d in decisions(resumed_log, third_close) if d["type"] == DECIDED]
         check(nxt == streams / RUN / "boost-{}.jsonl".format(third) and sorted(os.listdir(streams)) == [RUN]
               and [i["type"] for i in new] == [RECONCILIATION_TYPE, RECONCILIATION_TYPE, ACCOUNT_SNAPSHOT_TYPE,
                                                BROKER_SNAPSHOT_TYPE, BAR, MARK_TYPE, CLOSED]
               and new[2]["payload"]["as_of"] == stamp(nyse_calendar.session_close(third))
+              and (resumed_broker.get("cash_drift"), resumed_broker.get("unexplained_cash")) == (0, float(cost))
               and resumed_decided and resumed_decided[0]["outcome"] == "decided"
               and len({i["id"] for i in inputs(resumed_log)}) == len(inputs(resumed_log)),
               "after a crash resume under a new run name, the next day's stream went from the run's own folder "
-              "to the resumed run, once, as of its close, and the resumed engine decided it; nothing earlier was "
-              "sent again")
+              "to the resumed run, once, as of its close, with the order's fills since the approval counted as "
+              "cash unexplained, and the resumed engine decided it; nothing earlier was sent again")
 
         # -- 7. a holding no order explains --------------------------------
         gateway.positions = [(account, fake_contract(), Decimal(HELD + quantity + 5), 395.0)]

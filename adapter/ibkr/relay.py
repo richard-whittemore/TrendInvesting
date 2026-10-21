@@ -1517,7 +1517,8 @@ def run_logs(path, today=None, settled=None):
     bare file name, a previous_log_final_hash that is not the named log's
     last committed record hash (the engine checks the same at the fresh
     run's start; a log that differs is not the one approved), a named log
-    with no committed record, or a chain that names a log twice.
+    with no committed record, a chain that names a log twice, or a log
+    whose committed records break their record hash chain (run_chain).
     """
     yesterday = _yesterdays_session(today or _session_today())
     settled = settled or SettledOrders(frozenset(), {})
@@ -1531,7 +1532,7 @@ def run_logs(path, today=None, settled=None):
     return logs
 
 
-def run_chain(path, verify_chain=False):
+def run_chain(path):
     """Each run of the chain from the engine's durable log at path, newest first: (log path, committed groups, approval).
 
     approval is the payload of the run's one committed Run approval, or None
@@ -1544,17 +1545,20 @@ def run_chain(path, verify_chain=False):
     after a close reads back to the last account snapshot or starting book
     of the chain (ADR 0019 and ADR 0027, amended 2026-10-18). Each log is
     read only when the walk reaches it. Fail closed (ResolveRefused), as
-    run_logs states. With verify_chain, each log's committed records must
-    also hold their record hash chain (LOG_CHAIN_ALGORITHM) before its groups
-    are given: a log's final record hash binds its history only when every
-    record's own hash is the one the chain gives (ADR 0027), so a record
-    changed in place is refused, naming the log, never read as approved
-    history. (The comparison's walk, book_basis, verifies it; the chain is
-    otherwise the engine's to verify at a fresh run's start.)
+    run_logs states. Each log's committed records must also hold their
+    record hash chain (LOG_CHAIN_ALGORITHM) before its groups are given: a
+    log's final record hash binds its history only when every record's own
+    hash is the one the chain gives (ADR 0027), so a record changed in place
+    is refused, naming the log, never read as approved history. Every reader
+    of the chain verifies it, each time it reads: the comparison's walk
+    (book_basis), and run_logs, so the start reconciliation's order matching
+    and the report journal it seeds, which run at every adapter start long
+    after the engine checked the chain at the run's own start (AGENTS.md:
+    fail closed).
     """
     def read(log):
         found = _committed_groups(log)
-        if verify_chain and found.chain_break is not None and found.chain_break <= len(found.record_hashes):
+        if found.chain_break is not None and found.chain_break <= len(found.record_hashes):
             raise ResolveRefused(
                 "the engine's durable log {} breaks its record hash chain at sequence {}: a record there is not "
                 "the one the engine wrote, so its history is not read as approved (docs/runbooks/durable-log.md)"
@@ -1742,16 +1746,20 @@ _utc = engine_log.utc
 def _fill_id(path, n, kind, envelope):
     """The fill ID of a committed fill input exactly as the engine reads one, else ResolveRefused."""
     payload = envelope["payload"]
-    if (kind != LOG_INPUT or envelope["schema_version"] != FILL_VERSION or not isinstance(payload, dict)
-            or tuple(sorted(payload)) != FILL_FIELDS
-            or not all(_is_text(payload[k]) for k in ("account_id", "client_order_id", "fill_id", "instrument_id"))
-            or payload["side"] not in ("buy", "sell") or not _is_count(payload["quantity"])
-            or not _is_number(payload["price"]) or payload["price"] <= 0
-            or not _is_number(payload["commission"]) or payload["commission"] < 0
-            or not _is_time(payload["filled_at"], WHOLE_SECOND)):
+    if kind != LOG_INPUT or envelope["schema_version"] != FILL_VERSION or not is_fill(payload):
         raise _unreadable(path, n, "it is a fill but not an input {} version {} as the engine reads one".format(
             FILL_TYPE, FILL_VERSION))
     return payload["fill_id"]
+
+
+def is_fill(payload):
+    """Whether payload is a fill input's payload exactly as the engine reads one (internal/event TargetWeightFillPayload)."""
+    return (isinstance(payload, dict) and tuple(sorted(payload)) == FILL_FIELDS
+            and all(_is_text(payload[k]) for k in ("account_id", "client_order_id", "fill_id", "instrument_id"))
+            and payload["side"] in ("buy", "sell") and _is_count(payload["quantity"])
+            and _is_number(payload["price"]) and payload["price"] > 0
+            and _is_number(payload["commission"]) and payload["commission"] >= 0
+            and _is_time(payload["filled_at"], WHOLE_SECOND))
 
 
 def _lifecycle(path, n, kind, envelope):

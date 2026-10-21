@@ -114,7 +114,7 @@ func TestTheDailySummaryShowsTheCashDriftAndTheUnexplainedCash(t *testing.T) {
 		t.Fatalf("summary cash = %+v", got)
 	}
 	text := report.RenderText(got)
-	for _, want := range []string{"Cash drift since the previous close -3.25", "unexplained cash since the cash was last explained (a reconciliation the engine explained, or the starting book; for Boost, whose book carries no cash, the starting book) 412.50"} {
+	for _, want := range []string{"Cash drift since the previous close -3.25", "unexplained cash since the cash was last explained (a reconciliation the engine explained, else the starting book, always Boost's as its book carries no cash; the day's drift when the run's chain holds neither) 412.50"} {
 		if !contains(text, want) {
 			t.Errorf("the summary lacks %q:\n%s", want, text)
 		}

@@ -43,7 +43,8 @@ class RehearsalTests(unittest.TestCase):
                      "PASS: the warm-up reached the engine behind one reading as of that evening's close, in file "
                      "order, and the engine matched the start-of-run reconciliation",
                      "PASS: the day's stream reached the engine as its account and broker snapshots as of the close "
-                     "(read after it), its bar, its mark from the bar's official close, then its close",
+                     "(read after it, its cash that of the starting book: no drift, none unexplained), its bar, its "
+                     "mark from the bar's official close, then its close",
                      "PASS: the engine decided the day and its durable log shows one buy released to be sent",
                      "PASS: the order went out once, only after the day's close released it, as released",
                      "PASS: the reconnect and a restart reconciled the account again, the engine matched every "
@@ -51,8 +52,8 @@ class RehearsalTests(unittest.TestCase):
                      "PASS: with an execution since the close, the reading was stamped at its read time with the "
                      "reason, and the engine withheld the session as stale-account-snapshot, ordering nothing",
                      "PASS: after a crash resume under a new run name, the next day's stream went from the run's own "
-                     "folder to the resumed run, once, as of its close, and the resumed engine decided it; nothing "
-                     "earlier was sent again",
+                     "folder to the resumed run, once, as of its close, with the order's fills since the approval "
+                     "counted as cash unexplained, and the resumed engine decided it; nothing earlier was sent again",
                      "PASS: a holding no journalled order explains was found at the next start's reconciliation, and "
                      "the engine left Normal: Degraded on SPY (ADR 0019)"):
             self.assertIn(line, out)

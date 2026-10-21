@@ -39,7 +39,9 @@ bases their walk finds are kept, once per run, in the adapter's own file
 beside its pending file (cache_path), under the approval's previous_log and
 previous_log_final_hash, and read from there on every later reading of the
 run; only the run's own log is walked each time. A kept file that does not
-read, or names another approval, is walked again and replaced.
+read, or names another approval, is walked again and replaced; a file reads
+only when every field is as the adapter writes it (each fill as the engine
+reads one, a finite cash), and one that does not is logged, naming it.
 
 A basis's fills are those committed after it and stamped, to the second,
 at or after its as-of time (an account snapshot's or reconciliation's as_of,
@@ -52,12 +54,13 @@ be read raises relay.ResolveRefused (run_chain), an earlier run's naming
 that log.
 """
 import json
+import logging
 import os
 from collections import namedtuple
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
-from relay import LOG_DECISION, LOG_INPUT, RUN_APPROVED, run_chain
+from relay import LOG_DECISION, LOG_INPUT, RUN_APPROVED, is_fill, run_chain
 from reports import FILL_TYPE
 from snapshot import ACCOUNT_SNAPSHOT_TYPE, BASE_CURRENCY, RECONCILIATION_TYPE
 
@@ -69,6 +72,8 @@ TOTAL_CASH_COMPONENT = "total-cash"
 CENT = Decimal("0.01")
 # The kept bases' file format (see the module).
 CACHE_VERSION = 1
+
+log = logging.getLogger("ibkr")
 
 Basis = namedtuple("Basis", "positions cash fills source own refused as_of", defaults=("", None))
 """A book a reading is compared with: positions (symbol to shares), cash (a Decimal, or None when it was not
@@ -216,32 +221,64 @@ def _to_json(basis):
             "as_of": basis.as_of.isoformat()}
 
 
+BASIS_FIELDS = ("as_of", "cash", "fills", "positions", "refused", "source")
+
+
 def _from_json(raw):
+    """The Basis _to_json wrote as raw, every field checked, else ValueError (see the module: walked again)."""
     if raw is None:
         return None
+    if not isinstance(raw, dict) or tuple(sorted(raw)) != BASIS_FIELDS:
+        raise ValueError("not a kept basis")
     positions = raw["positions"]
-    if not isinstance(positions, dict) or not all(isinstance(q, int) for q in positions.values()):
+    if not isinstance(positions, dict) or not all(
+            isinstance(s, str) and s != "" and isinstance(q, int) and not isinstance(q, bool) for s, q in positions.items()):
         raise ValueError("positions")
-    if not isinstance(raw["fills"], list) or not isinstance(raw["source"], str) or not isinstance(
-            raw["refused"], str):
-        raise ValueError("fills, source or refused")
+    # Each fill as the engine reads one (relay.is_fill), so fills_since and
+    # cash_change never meet a field they cannot count.
+    if not isinstance(raw["fills"], list) or not all(is_fill(fill) for fill in raw["fills"]):
+        raise ValueError("fills")
+    if not isinstance(raw["source"], str) or not isinstance(raw["refused"], str):
+        raise ValueError("source or refused")
+    cash = raw["cash"]
+    if cash is not None:
+        if not isinstance(cash, str):
+            raise ValueError("cash")
+        cash = Decimal(cash)
+        if not cash.is_finite():  # Decimal reads "NaN" and "Infinity"; a book's cash is neither
+            raise ValueError("cash")
+    if not isinstance(raw["as_of"], str):
+        raise ValueError("as_of")
     as_of = datetime.fromisoformat(raw["as_of"])
     if as_of.tzinfo is None:
         raise ValueError("as_of")
-    return Basis(positions, None if raw["cash"] is None else Decimal(raw["cash"]), raw["fills"], raw["source"], False,
-                 raw["refused"], as_of)
+    return Basis(positions, cash, raw["fills"], raw["source"], False, raw["refused"], as_of)
 
 
 def _kept(cache_path, key):
-    """The (daily, unexplained) kept at cache_path under key, or None when there are none that read."""
+    """The (daily, unexplained) kept at cache_path under key, or None when there are none that read.
+
+    A file that is missing, or kept for another approval, is simply walked
+    again; one that is there but malformed is logged, naming it, before it
+    is walked again and replaced (see the module), so a person reading the
+    adapter's log learns the file was discarded.
+    """
     try:
         with open(cache_path, encoding="utf-8") as f:
-            raw = json.load(f)
+            text = f.read()
+    except OSError:
+        return None
+    try:
+        raw = json.loads(text)
+        if not isinstance(raw, dict):
+            raise ValueError("not an object")
         if raw.get("version") != CACHE_VERSION or raw.get("key") != key:
             return None
         return _from_json(raw["daily"]), _from_json(raw["unexplained"])
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, ArithmeticError):
-        return None  # walked again and replaced (see the module)
+    except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError) as err:
+        log.warning("the kept bases file %s does not read (%s): walking the runs before this one again and "
+                    "replacing it", cache_path, err)
+        return None
 
 
 def _keep(cache_path, key, bases):
@@ -266,7 +303,7 @@ def previous_close(engine_log_path, cache_path=None):
     cache_path, when given, is where the bases of the runs before this one
     are kept (see the module).
     """
-    runs = run_chain(engine_log_path, verify_chain=True)
+    runs = run_chain(engine_log_path)
     path, groups, approval = next(runs)
     daily, unexplained, later = _walk([(path, groups, approval)], own=True)
     if daily is None or unexplained is None:
