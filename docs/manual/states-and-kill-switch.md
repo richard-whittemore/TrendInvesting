@@ -91,8 +91,9 @@ again at each decided close while it is due. So a check of IBKR's open
 orders that finds none working is not enough: the next close may send the
 exit again, sized without a hand sale IBKR has not yet listed. Sell by
 hand only as this chapter's hand-sale rule says (below, and the failed-sale
-bullet): first stop the engine and the adapter (`sudo systemctl stop
-ti-engine@boost ti-adapter-boost`; the kill switch is not enough), cancel
+bullet): first stop the adapter, then the engine (`sudo systemctl stop
+ti-adapter-boost`, then `sudo systemctl stop ti-engine@boost`; the kill
+switch is not enough), cancel
 every open SPY order in IBKR's app, confirm in IBKR's app that none is open
 and that no `working`, `pending` or `cancel-pending` sell remains, and only
 then sell, starting again only as a fresh run
@@ -418,8 +419,11 @@ shares again. The kill switch does not prevent that in the margin account:
 it refuses Boost's orders but not the sale back to 98%, and a Boost exit it
 refuses fires that sale. So before any sale by hand in the margin account:
 
-1. **Stop the program.** Stop the engine and the adapter:
-   `sudo systemctl stop ti-engine@boost ti-adapter-boost`. Stopping only the
+1. **Stop the program.** Stop the adapter, then the engine, as two commands
+   (systemd does not order the units when one command names both):
+   `sudo systemctl stop ti-adapter-boost`, then
+   `sudo systemctl stop ti-engine@boost`. If the first fails, stop there and
+   read `journalctl -u ti-adapter-boost` before going on. Stopping only the
    engine is not enough: an order it has already released waits in the
    adapter.
 2. **Keep a released order from going.** An order the engine released that

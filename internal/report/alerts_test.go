@@ -284,7 +284,8 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 // "joint" under ti-engine@boost, and ti-adapter-boost is the only adapter
 // unit, wired to that engine's socket and log (deploy/systemd).
 func handSale(account string) []string {
-	return []string{"stop the engine and the adapter", "sudo systemctl stop ti-engine@boost ti-adapter-boost",
+	return []string{"stop the engine and the adapter", "the adapter first: sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost",
+		"if the first fails, stop there and read journalctl -u ti-adapter-boost before going on",
 		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
 		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve",
 		"only once your sale has filled or been cancelled", "states the book as it is after your sale",
