@@ -458,7 +458,7 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 // snapshot lists it, and the kill switch does not stop the sale back to 98%,
 // so the owner stops the engine and the adapter before selling by hand.
 func handSaleSteps(account string) string {
-	return fmt.Sprintf("Before you sell anything by hand, stop the engine and the adapter (sudo systemctl stop ti-engine@%[1]s ti-adapter-%[1]s); the kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start again only as a fresh run you approve, and never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account)
+	return fmt.Sprintf("Before you sell anything by hand, stop the engine and the adapter (sudo systemctl stop ti-engine@%[1]s ti-adapter-%[1]s); the kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start the fresh run you approve only once your sale has filled or been cancelled, and start the adapter only after the fresh run's engine is running; never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account)
 }
 
 // rejectionAlert states the rejection that brought the account's Boost

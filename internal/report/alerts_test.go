@@ -232,14 +232,14 @@ func TestABoostGapPagesOnceAndSaysDecisionsContinue(t *testing.T) {
 // the owner approves a fresh run, while its sells still go; the decisions
 // after it page nothing more.
 func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
-	s := newStream(t)
+	s := newStreamFor(t, "boost")
 	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
-		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+		event.TargetsDecidedPayload{AccountID: "boost", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
 			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
 			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2,
 				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-6"}, {ClientOrderID: "tw-7"}},
 				ReplanWithheld: event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-7", Released: 37}}})
-	s.decided(1, 0.98)
+	s.decidedFor("boost", 1, 0.98)
 	got, err := report.Alerts(s.out)
 	if err != nil {
 		t.Fatal(err)
@@ -258,13 +258,13 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 	// so the owner never sells by hand into a program sale.
 	// It names both rejections that stopped the buys, the other by its
 	// venue order ID too, so the owner finds both in IBKR's order log.
-	for _, want := range append([]string{"tw-7", "37", "rejected", "two orders in a row", "after order tw-6 (IBKR order ib-6)", "sends no more buys", "exit", "sale back to 98%", "still go",
-		"operator approve", "-clear-incident", "fresh run"}, nil...) {
+	for _, want := range []string{"tw-7", "37", "rejected", "two orders in a row", "after order tw-6 (IBKR order ib-6)", "sends no more buys", "exit", "sale back to 98%", "still go",
+		"operator approve", "-clear-incident", "fresh run"} {
 		if !contains(a.Body, want) {
 			t.Errorf("page lacks %q: %q", want, a.Body)
 		}
 	}
-	requireHandSale(t, a.Body, "joint")
+	requireHandSale(t, a.Body, "boost")
 }
 
 // handSale is the hand-sale procedure a page sends the owner to while the
@@ -272,12 +272,15 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 // safely" (docs/manual/states-and-kill-switch.md): stop the engine and the
 // adapter of the account (the kill switch does not stop the sale back to
 // 98%), cancel every open order on the instrument, the program's and the
-// owner's own, confirm none is open, sell, then start again only as a fresh
-// run, never resuming the stopped one.
+// owner's own, confirm none is open, sell, then start the fresh run only once
+// the sale has filled or been cancelled, and the adapter only after that
+// run's engine is running, never resuming the stopped one.
 func handSale(account string) []string {
 	return []string{"stop the engine and the adapter", "ti-engine@" + account + " ti-adapter-" + account,
 		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
-		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve", "never resume the stopped run"}
+		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve",
+		"only once your sale has filled or been cancelled", "start the adapter only after the fresh run's engine is running",
+		"never resume the stopped run"}
 }
 
 // requireHandSale fails unless body carries the manual's hand-sale steps in
@@ -307,9 +310,9 @@ func requireHandSale(t *testing.T, body, account string) {
 // amended 2026-10-18, and 4), and paged once per order as another rejection
 // while buys are stopped, saying which one it is, not as the stop.
 func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
-	s := newStream(t)
+	s := newStreamFor(t, "boost")
 	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
-		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+		event.TargetsDecidedPayload{AccountID: "boost", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
 			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
 			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: 3,
 				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-1"}, {ClientOrderID: "tw-2", VenueOrderID: "ib-2"}},
@@ -317,7 +320,7 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6},
 					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-9", Released: 5},
 				}}})
-	s.decided(1, 0.98)
+	s.decidedFor("boost", 1, 0.98)
 	got, err := report.Alerts(s.out)
 	if err != nil {
 		t.Fatal(err)
@@ -330,13 +333,13 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 		if a.Kind != report.KindRefusal || a.Severity != report.Urgent || contains(a.Title, "two orders in a row") {
 			t.Errorf("page %d: %s %v %q", i, a.Kind, a.Severity, a.Title)
 		}
-		for _, want := range append([]string{c.id, "another rejection while Boost's buys are stopped", c.count + " since the stop", "planned again", "fresh run",
-			"stopped by the rejections of orders tw-1 and tw-2 (IBKR order ib-2)"}, nil...) {
+		for _, want := range []string{c.id, "another rejection while Boost's buys are stopped", c.count + " since the stop", "planned again", "fresh run",
+			"stopped by the rejections of orders tw-1 and tw-2 (IBKR order ib-2)"} {
 			if !contains(a.Title+" "+a.Body, want) {
 				t.Errorf("page %d lacks %q: %q %q", i, want, a.Title, a.Body)
 			}
 		}
-		requireHandSale(t, a.Body, "joint")
+		requireHandSale(t, a.Body, "boost")
 	}
 }
 
