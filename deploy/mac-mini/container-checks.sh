@@ -36,7 +36,7 @@ wait_system() {
 # the reporter's timer can fire. It records each request's path; GET /posts
 # lists them and GET /reset clears them.
 sink=http://host.docker.internal:${SINK_PORT:-0}
-sink_posts() { curl -fsS "$sink/posts"; }
+sink_posts() { curl -fsS --connect-timeout 2 --max-time 10 "$sink/posts"; }
 
 case ${1:-} in
   # T1: systemd is PID 1 and the system is up. ALLOWED names the units that
@@ -157,9 +157,9 @@ ENGINE
 
     # The dashboard, live.
     systemctl restart ti-dashboard.service
-    for _ in $(seq 30); do systemctl is-active --quiet ti-dashboard.service && curl -fsS -o /dev/null http://127.0.0.1:8088/ && break; sleep 1; done
+    for _ in $(seq 30); do systemctl is-active --quiet ti-dashboard.service && curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null http://127.0.0.1:8088/ && break; sleep 1; done
     systemctl is-active --quiet ti-dashboard.service || fail "ti-dashboard is not active: $(journalctl -u ti-dashboard -n 5 --no-pager -o cat)"
-    curl -fsS -o /dev/null http://127.0.0.1:8088/ || fail "the dashboard does not answer on 127.0.0.1:8088"
+    curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null http://127.0.0.1:8088/ || fail "the dashboard does not answer on 127.0.0.1:8088"
     pid=$(systemctl show ti-dashboard.service -p MainPID --value)
     grep -q '^NoNewPrivs:[[:space:]]*1' "/proc/$pid/status" || fail "the dashboard's process may gain privileges"
     awk '$5 == "/" {print $6}' "/proc/$pid/mountinfo" | grep -q '^ro' || fail "the dashboard sees / writable"
@@ -167,7 +167,7 @@ ENGINE
     pass "ti-dashboard runs as ti-trader, answers on loopback, with / read-only and no new privileges in its namespace"
 
     # The reporter, fired by hand: its credential is handed over and used.
-    curl -fsS -o /dev/null "$sink/reset" || fail "the stand-in on the Mac does not answer at $sink"
+    curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null "$sink/reset" || fail "the stand-in on the Mac does not answer at $sink"
     systemctl start ti-reporter@boost.service || fail "ti-reporter@boost failed: $(journalctl -u ti-reporter@boost -n 10 --no-pager -o cat)"
     posts=$(sink_posts) || fail "the stand-in on the Mac does not list its requests"
     grep -q '^/rehearsal$' <<<"$posts" || fail "the reporter reached no ntfy stand-in: $posts"

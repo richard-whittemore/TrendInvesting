@@ -25,7 +25,9 @@
 #        the Desktop, Documents or iCloud Drive; the container is not
 #        privileged and has only CAP_SYS_ADMIN added.
 #
-# And up.sh refuses --recreate while the engine runs, leaving it running.
+# And up.sh refuses --recreate while the engine runs, leaving it running;
+# provision.sh reown moves files of an old UID and GID in the volumes to the
+# fixed IDs, links themselves, and leaves root's alone.
 #
 # And the container leaves the Docker VM's binfmt handlers alone: they are
 # listed before it is created and after every boot and must not change, and
@@ -89,6 +91,10 @@ import http.server, sys
 posts = []
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    # A connection that sends nothing, or a body shorter than it declares, is
+    # dropped after 5 s rather than holding this one-at-a-time server.
+    timeout = 5
+
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         posts.append(self.path)
@@ -113,8 +119,10 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 SINK
 python3 -I "$work/sink.py" "$sink_port" &
 sink_pid=$!
-for _ in $(seq 50); do curl -fsS -o /dev/null "http://127.0.0.1:$sink_port/posts" 2>/dev/null && break; sleep 0.1; done
-curl -fsS -o /dev/null "http://127.0.0.1:$sink_port/posts" || fail "the stand-in did not start"
+# Every request to it is bounded, so a port held by something that never
+# answers fails the test instead of hanging it.
+for _ in $(seq 50); do curl -fsS --connect-timeout 1 --max-time 2 -o /dev/null "http://127.0.0.1:$sink_port/posts" 2>/dev/null && break; sleep 0.1; done
+curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null "http://127.0.0.1:$sink_port/posts" || fail "the stand-in did not start"
 
 image="trend-investing-mac-mini:$(shasum -a 256 "$repo/deploy/mac-mini/Dockerfile" | cut -c1-12)"
 docker image inspect "$image" >/dev/null 2>&1 || docker build --platform linux/arm64 --tag "$image" - <"$repo/deploy/mac-mini/Dockerfile" >/dev/null
@@ -235,6 +243,7 @@ test "$(docker container inspect --format '{{.Config.Image}}' "$name")" = "$shif
 shift_id=$(docker exec "$name" id -u ti-shift) || fail "the changed image has no ti-shift"
 echo "the changed image's ti-shift took UID $shift_id"
 inside boot
+binfmt_unchanged "after the re-creation onto a changed image"
 inside provision-manifest | grep -E '^ti-(trader|gateway|operator):' >"$work/users-2"
 diff "$work/users-1" "$work/users-2" || fail "the service users' IDs changed on the changed image (above)"
 grep -q '^ti-operator:x:2003:2002:' "$work/users-2" || fail "ti-operator is not 2003 in ti-trader's group: $(cat "$work/users-2")"
@@ -242,5 +251,23 @@ inside state-manifest >"$work/state-5"
 diff "$work/state-1" "$work/state-5" || fail "the state changed across the re-creation onto a changed image (above)"
 inside tools
 echo "service users at the same IDs ($(cut -d: -f1,3,4 "$work/users-2" | tr '\n' ' ')), state byte-identical, journal-query reads the log"
+
+step "re-owning volumes provisioned before the fixed IDs (provision.sh reown)"
+# Files a ti-trader at a dynamic UID left in the volumes, and one of root's
+# beside them: the step moves the first to 2002:2002 and leaves root's alone.
+docker exec "$name" sh -c 'install -d -o 1998 -g 1998 -m 0750 /var/lib/trend-investing/reown-test &&
+  install -o 1998 -g 1998 -m 0640 /dev/null /var/lib/trend-investing/reown-test/run.env &&
+  ln -s /etc/hostname /var/lib/trend-investing/reown-test/link && chown -h 1998:1998 /var/lib/trend-investing/reown-test/link &&
+  install -o 1998 -g 1998 -m 0640 /dev/null /etc/trend-investing/reown-test.env &&
+  install -o root -g root -m 0600 /dev/null /var/lib/trend-investing/reown-test/root-own'
+docker exec --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh reown ti-trader 1998 1998
+owners=$(docker exec "$name" stat -c '%u:%g %n' /var/lib/trend-investing/reown-test /var/lib/trend-investing/reown-test/run.env /etc/trend-investing/reown-test.env /var/lib/trend-investing/reown-test/root-own)
+owners=$owners$'\n'$(docker exec "$name" stat -c '%u:%g %n' /var/lib/trend-investing/reown-test/link /etc/hostname)
+printf '%s\n' "$owners"
+test "$(printf '%s\n' "$owners" | grep -c '^2002:2002 ')" = 4 || fail "reown did not move every file of 1998 to 2002:2002 (above)"
+printf '%s\n' "$owners" | grep -q '^0:0 /var/lib/trend-investing/reown-test/root-own$' || fail "reown changed root's file (above)"
+printf '%s\n' "$owners" | grep -q '^0:0 /etc/hostname$' || fail "reown followed a link out of the volumes (above)"
+docker exec "$name" rm -rf /var/lib/trend-investing/reown-test /etc/trend-investing/reown-test.env
+echo "reown moved the old UID's files to 2002:2002, links themselves, and left root's alone"
 
 step "REAL CONTAINER TEST COMPLETE"

@@ -42,6 +42,8 @@ target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
 unit_dir=/etc/systemd/system
 dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
+# The Mac mini's volumes that hold files owned by the service users.
+volume_roots=(/etc/trend-investing /var/lib/trend-investing /opt/trend-investing)
 
 log() { printf 'provision: %s\n' "$*"; }
 die() { printf 'provision: %s\n' "$*" >&2; exit 1; }
@@ -127,7 +129,7 @@ ensure_operator_user() {
     fi
   elif test -n "$want"; then
     uid=$(id -u ti-operator)
-    test "$uid" = "$want" || die "ti-operator is UID $uid here, not $want: this container was provisioned before the IDs were fixed. Re-creating it does not re-own the files already in the volumes, which stay $uid. Run up.sh --recreate, then re-own them inside the new container (docker exec <name> sh -c '...', <name> being ti unless TI_MAC_NAME is set): find /etc/trend-investing /var/lib/trend-investing /opt/trend-investing -xdev -uid $uid -exec chown -h $want {} + ; then run up.sh again (docs/manual/mac-mini.md, 'What can go wrong')"
+    test "$uid" = "$want" || die "ti-operator is UID $uid here, not $want: this container was provisioned before the IDs were fixed. Re-creating it does not re-own the files already in the volumes, which stay $uid. Run up.sh --recreate, then re-own them in the new container: docker exec --env TI_TARGET=mac-mini CONTAINER /root/deploy/provision.sh reown ti-operator $uid (CONTAINER is ti unless TI_MAC_NAME is set), then run up.sh again (docs/manual/mac-mini.md, 'What can go wrong')"
   fi
   local group
   group=$(id -gn ti-operator)
@@ -149,9 +151,13 @@ ensure_user() {
     if test -n "$want"; then
       holder=$(getent passwd "$want" | cut -d: -f1) || true
       test -z "$holder" || die "UID $want is held by the account '$holder' in this image, so $name cannot be created at it; the files in the volumes are owned by $want. Remove that account from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
+      # A group of this name at this GID is one an earlier run made before
+      # it was cut off: reused, so that a re-run converges.
       holder=$(getent group "$want" | cut -d: -f1) || true
-      test -z "$holder" || die "GID $want is held by the group '$holder' in this image, so $name's group cannot be created at it. Remove that group from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
-      groupadd --system --gid "$want" "$name"
+      if test "$holder" != "$name"; then
+        test -z "$holder" || die "GID $want is held by the group '$holder' in this image, so $name's group cannot be created at it. Remove that group from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
+        groupadd --system --gid "$want" "$name"
+      fi
       useradd --system --uid "$want" --gid "$want" --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
     else
       useradd --system --user-group --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
@@ -164,7 +170,7 @@ ensure_user() {
     local uid gid
     uid=$(id -u "$name")
     gid=$(id -g "$name")
-    test "$uid:$gid" = "$want:$want" || die "$name is $uid:$gid here, not $want:$want: this container was provisioned before the IDs were fixed. Re-creating it does not re-own the files already in the volumes, which stay $uid:$gid. Run up.sh --recreate, then re-own them inside the new container (docker exec <name> sh -c '...', <name> being ti unless TI_MAC_NAME is set): find /etc/trend-investing /var/lib/trend-investing /opt/trend-investing -xdev -uid $uid -exec chown -h $want {} + ; find /etc/trend-investing /var/lib/trend-investing /opt/trend-investing -xdev -gid $gid -exec chgrp -h $want {} + ; then run up.sh again (docs/manual/mac-mini.md, 'What can go wrong')"
+    test "$uid:$gid" = "$want:$want" || die "$name is $uid:$gid here, not $want:$want: this container was provisioned before the IDs were fixed. Re-creating it does not re-own the files already in the volumes, which stay $uid:$gid. Run up.sh --recreate, then re-own them in the new container: docker exec --env TI_TARGET=mac-mini CONTAINER /root/deploy/provision.sh reown $name $uid $gid (CONTAINER is ti unless TI_MAC_NAME is set), then run up.sh again (docs/manual/mac-mini.md, 'What can go wrong')"
   fi
   install -d -o "$name" -g "$name" -m 0750 "$home"
 }
@@ -625,6 +631,39 @@ step_firewall() {
   log "also close port 22 in the Lightsail firewall tab (owner step)"
 }
 
+# reown NAME OLD_UID [OLD_GID] (the Mac mini only): after a container
+# provisioned before the service users had fixed IDs is re-created, its
+# volumes' files still carry the old numbers. Each file in the volumes owned
+# by OLD_UID goes to NAME's fixed UID, and each of group OLD_GID to its fixed
+# GID, links themselves and not their targets, within each volume. Only
+# once NAME is at its fixed ID, so the pass cannot hand files to a number no
+# account holds. ti-operator has no group of its own (it is ti-trader's).
+step_reown() {
+  mac_mini || die "reown is for the Mac mini's container only (TI_TARGET=mac-mini)"
+  local name=${1:-} old_uid=${2:-} old_gid=${3:-} want
+  case $name in
+    ti-gateway) want=2001 ;;
+    ti-trader) want=2002 ;;
+    ti-operator) want=2003; test -z "$old_gid" || die "ti-operator has no group of its own; give only its old UID" ;;
+    *) die "usage: provision.sh reown ti-gateway|ti-trader|ti-operator OLD_UID [OLD_GID]" ;;
+  esac
+  case $old_uid in '' | *[!0-9]*) die "the old UID must be a number, not '$old_uid'" ;; esac
+  case $old_gid in *[!0-9]*) die "the old GID must be a number, not '$old_gid'" ;; esac
+  test "$(id -u "$name" 2>/dev/null || echo none)" = "$want" \
+    || die "$name is not at its fixed UID $want in this container: run up.sh --recreate first, then reown"
+  local root f owned=0 grouped=0
+  for root in "${volume_roots[@]}"; do
+    test -d "$root" || continue
+    while IFS= read -r -d '' f; do chown -h "$want" "$f"; owned=$((owned + 1)); done \
+      < <(find "$root" -xdev -uid "$old_uid" -print0)
+    if test -n "$old_gid"; then
+      while IFS= read -r -d '' f; do chgrp -h "$want" "$f"; grouped=$((grouped + 1)); done \
+        < <(find "$root" -xdev -gid "$old_gid" -print0)
+    fi
+  done
+  log "re-owned $owned file(s) from UID $old_uid to $name ($want)${old_gid:+, and $grouped from GID $old_gid to $want}"
+}
+
 main() {
   check_target
   need_root
@@ -637,8 +676,9 @@ main() {
     adapter) step_adapter ;;
     services) step_services ;;
     firewall) step_firewall ;;
+    reown) shift; step_reown "$@" ;;
     all) step_base; step_clock; step_gateway; step_services; step_firewall ;;
-    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all" ;;
+    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all, or reown NAME OLD_UID [OLD_GID] on the Mac mini" ;;
   esac
   log "done: ${1}"
 }

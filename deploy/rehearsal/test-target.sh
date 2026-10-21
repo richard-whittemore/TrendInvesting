@@ -132,6 +132,11 @@ scenario() {
   # Each user's primary group, named after the first user that has it (ti-operator
   # shares ti-trader's).
   awk -F: '!seen[$4]++ {print $1 ":x:" $4 ":"}' "$work/passwd" >"$work/group"
+  # FAKE_GROUP_EXTRA: group lines with no user (a run cut off between
+  # groupadd and useradd).
+  if test -n "${FAKE_GROUP_EXTRA:-}"; then printf '%s\n' "$FAKE_GROUP_EXTRA" >>"$work/group"; fi
+  # The volumes' roots, kept across cases (a case's files are set up first).
+  mkdir -p "$work/vol/state" "$work/vol/opt"
   if test -n "${FAKE_BOOST_JSON:-}"; then printf '%s\n' "$FAKE_BOOST_JSON" >"$work/etc/adapters/boost.json"; fi
   local status=0
   (
@@ -282,8 +287,11 @@ scenario() {
     twsapi_root=$work/opt/twsapi
     adapter_venv=$work/opt/adapter-venv
     adapter_root=$work/opt/adapter
+    volume_roots=("$etc" "$work/vol/state" "$work/vol/opt")
     if test -n "${TEST_LEAK:-}"; then eval "$TEST_LEAK"; fi
-    main "$step"
+    # STEP may carry the step's arguments (reown NAME UID GID).
+    # shellcheck disable=SC2086
+    main $step
   ) >"$work/out" 2>&1 || status=$?
   if test -z "${TEST_LEAK:-}" && grep -q '^REFUSED' "$work/calls"; then
     fail "provision.sh $step (TI_TARGET=${target:-unset}) ran a file command outside the test's tree: $(grep '^REFUSED' "$work/calls")"
@@ -463,7 +471,17 @@ if called "useradd --system --uid 2003"; then fail "Mac mini created ti-operator
 oldop="$nooperator
 ti-operator:x:997:2002::/nonexistent:/usr/sbin/nologin"
 if FAKE_PASSWD=$oldop FAKE_SYSTEMD=1 scenario mac-mini aarch64 base; then fail "Mac mini accepted ti-operator at UID 997"; fi
-said "-uid 997 -exec chown -h 2003" || fail "the refusal of ti-operator at another UID does not name the chown pass: $(cat "$work/out")"
+said "provision.sh reown ti-operator 997" || fail "the refusal of ti-operator at another UID does not name the re-owning step: $(cat "$work/out")"
+# A run cut off between groupadd and useradd left ti-trader's group at 2002
+# and no user: the next run reuses that group and creates the user, rather
+# than refusing (the provisioner is safe to run again after any partial
+# failure). A group of another name at 2002 is still refused.
+halfway='ti-gateway:x:2001:2001::/var/lib/ti-gateway:/usr/sbin/nologin'
+FAKE_PASSWD=$halfway FAKE_GROUP_EXTRA='ti-trader:x:2002:' FAKE_SYSTEMD=1 scenario mac-mini aarch64 base || fail "Mac mini base after a run cut off between groupadd and useradd failed: $(cat "$work/out")"
+called "useradd --system --uid 2002 --gid 2002" || fail "Mac mini did not create ti-trader in its existing group: $(grep -E 'useradd|groupadd' "$work/calls")"
+if called "groupadd --system --gid 2002"; then fail "Mac mini created ti-trader's group a second time"; fi
+if FAKE_PASSWD=$halfway FAKE_GROUP_EXTRA='ti-other:x:2002:' FAKE_SYSTEMD=1 scenario mac-mini aarch64 base; then fail "Mac mini accepted GID 2002 held by another group"; fi
+said "ti-other" || fail "the refusal of a taken GID does not name its holder: $(cat "$work/out")"
 # A ti-trader already there at another UID: refused, since the volumes' files
 # are owned by 2002.
 moved='ti-gateway:x:2001:2001::/var/lib/ti-gateway:/usr/sbin/nologin
@@ -473,8 +491,28 @@ said "998" || fail "the refusal of ti-trader at another UID does not say which: 
 # Its remedy: re-creating the container leaves the volumes' files at the old
 # IDs, so the refusal says so and names the re-owning pass.
 said "does not re-own" || fail "the refusal of ti-trader at another UID does not say a re-creation leaves the volumes' files: $(cat "$work/out")"
-said "-uid 998 -exec chown -h 2002" || fail "the refusal of ti-trader at another UID does not name the chown pass: $(cat "$work/out")"
-said "-gid 998 -exec chgrp -h 2002" || fail "the refusal of ti-trader at another UID does not name the chgrp pass: $(cat "$work/out")"
+said "provision.sh reown ti-trader 998 998" || fail "the refusal of ti-trader at another UID does not name the re-owning step: $(cat "$work/out")"
+# The re-owning step, after the re-creation: every file in the volumes
+# owned by the old UID goes to the fixed one and every file of the old GID to
+# the fixed group, links not followed; nothing else is touched.
+me=$(command id -u)
+mygid=$(command id -g)
+rm -rf "${work:?}/vol"
+mkdir -p "$work/vol/state/engines/boost"
+: >"$work/vol/state/engines/boost/durable.log"
+scenario mac-mini aarch64 "reown ti-trader $me $mygid" || fail "the reown step failed: $(cat "$work/out")"
+called "chown -h 2002 $work/vol/state/engines/boost/durable.log" || fail "the reown step did not re-own a file of UID $me: $(cat "$work/calls")"
+called "chgrp -h 2002 $work/vol/state/engines/boost/durable.log" || fail "the reown step did not re-group a file of GID $mygid: $(cat "$work/calls")"
+said "re-owned" || fail "the reown step does not say what it changed: $(cat "$work/out")"
+# Refused: before the re-creation (ti-trader not yet at its fixed ID), on
+# Lightsail, for another user name, and with an ID that is not a number.
+if FAKE_PASSWD=$moved scenario mac-mini aarch64 "reown ti-trader 998 998"; then fail "reown ran with ti-trader not yet at 2002"; fi
+said "up.sh --recreate" || fail "reown before the re-creation does not say to re-create first: $(cat "$work/out")"
+if called "chown"; then fail "reown before the re-creation changed a file"; fi
+if scenario "" x86_64 "reown ti-trader $me $mygid"; then fail "reown ran on Lightsail"; fi
+if called "chown"; then fail "reown on Lightsail changed a file"; fi
+if scenario mac-mini aarch64 "reown root 0 0"; then fail "reown accepted root"; fi
+if scenario mac-mini aarch64 "reown ti-trader 99x 998"; then fail "reown accepted a UID that is not a number"; fi
 # Lightsail is unchanged: the users are created as before, at no fixed ID.
 FAKE_PASSWD='' TEST_REHEARSAL=1 scenario "" x86_64 base || fail "Lightsail base with no service users failed: $(cat "$work/out")"
 called "useradd --system --user-group --home-dir /var/lib/trend-investing" || fail "Lightsail no longer creates ti-trader as before: $(grep useradd "$work/calls")"

@@ -146,12 +146,27 @@ for i in $(seq 1 3000); do : >"$clean/many/file-$i 2.txt"; done
 refused "a checkout holding 3000 duplicates" "sync duplicates" "$clean"
 rm -rf "$clean/many"
 # A folder the scan cannot read through: refused, saying so, rather than
-# passed unseen or ended in silence.
-mkdir -p "$clean/locked/inner"
-chmod 000 "$clean/locked"
-refused "a checkout with a folder it cannot read" "could not read" "$clean"
-chmod 755 "$clean/locked"
-rm -rf "$clean/locked"
+# passed unseen or ended in silence. The scan's failure is made by a
+# stand-in find, which fails as find does on a folder it cannot open, so the
+# case holds when the suite runs as root too (root reads a mode 000 folder).
+mkdir -p "$work/badfind"
+cat >"$work/badfind/find" <<'STUB'
+#!/bin/bash
+echo "find: '$1/locked': Permission denied" >&2
+exit 1
+STUB
+chmod +x "$work/badfind/find"
+refused "a checkout whose scan fails" "could not read" "$clean" PATH="$work/badfind:$work/bin:$PATH"
+# And for real, where the permission takes effect: not as root.
+if test "$(id -u)" != 0; then
+  mkdir -p "$clean/locked/inner"
+  chmod 000 "$clean/locked"
+  refused "a checkout with a folder it cannot read" "could not read" "$clean"
+  chmod 755 "$clean/locked"
+  rm -rf "$clean/locked"
+else
+  echo "test-refusals: running as root, so a mode 000 folder is readable; its case is covered by the stand-in find above"
+fi
 
 # One up.sh at a time for a container: a second one, while the first holds
 # the lock, refuses before Docker. A lock left by a process no longer running

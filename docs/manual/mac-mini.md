@@ -278,7 +278,7 @@ restart ti`) has the server's rules:
 | `provision: the clock is not good` during `up.sh` | The clock step refuses, and `up.sh` stops before the services step | Turn on the Mac's "Set time and date automatically", then run `up.sh` again ([server](server.md), "The clock") |
 | `ti-clock-check` failed (`systemctl --failed` inside) | The engine is not stopped by it; a clock behind IBKR's makes it withhold every sell | Read `journalctl -u ti-clock-check`; fix the Mac's time (or wait for Docker Desktop to correct it after sleep); `systemctl start ti-clock-check` to check again |
 | `provision: UID 2002 (or 2001, 2003) is held by the account '...' in this image` | Stops before creating the service users | A changed image took the ID; remove that account from the image, then `up.sh --recreate` |
-| `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the two `find ... -exec chown` / `chgrp` passes the message gives, inside the container (`docker exec ti sh -c '...'`), then `up.sh` again |
+| `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the `reown` step the message gives, inside the container (`docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh reown ti-trader 998 998`): it moves every file in the volumes of the old UID and GID to the fixed ones and says how many. Then run `up.sh` again |
 | `up: note: ti runs the image ..., not ...` | Keeps the running container and provisions it as before | Run `up.sh --recreate` when it suits you; every volume is kept |
 | After a Mac or Docker Desktop restart, the engine and the adapter are stopped | Nothing: this is the rule, and the timers and dashboard are back | Start the engine as a fresh approved run and then the adapter ([restart](restart.md)) |
 | `systemctl is-system-running` inside says `degraded`, with `ti-reporter@boost` failed | The reporter fails every 5 minutes until the Boost engine has run once and `secrets.env` holds its channels | Expected before the first run; otherwise read `journalctl -u ti-reporter@boost` ([alerts and dashboard](alerts-and-dashboard.md)) |
@@ -311,6 +311,9 @@ restart ti`) has the server's rules:
   engine start with their restrictions and their secrets. The chosen files
   keep their bytes, owners and modes after a restart, a re-creation and a
   re-creation onto a changed image, and the service users keep their IDs.
+  The `reown` step moves files left at an old UID and GID in the volumes to
+  the fixed IDs, the links themselves and not what they point to, and
+  leaves root's files alone.
   `--recreate` is refused while the engine runs. The reporter fires within 5
   minutes. The engine stays stopped. The clock step and the clock check's
   unit pass and the step refuses a clock an hour off. Docker's program
@@ -318,4 +321,4 @@ restart ti`) has the server's rules:
   after every boot, and must not change. It also checks that an Intel
   (amd64) container still runs, unless that was already broken before the
   test; then it says "amd64 check NOT RUN" and compares only the listing.
-  In the run of 2026-10-20 the amd64 check ran and passed before the test and after every boot.
+  In the run of 2026-10-20 the amd64 check ran and passed before the test and after every boot, the re-creation onto a changed image included.
