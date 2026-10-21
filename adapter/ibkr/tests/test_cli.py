@@ -153,8 +153,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
 
     def test_an_unreadable_ibkr_time_zone_file_is_refused_not_a_traceback(self):
-        for error in (PermissionError(13, "Permission denied"), IsADirectoryError(21, "Is a directory"),
-                      OSError(5, "Input/output error")):
+        for error in (PermissionError(13, "Permission denied"), OSError(5, "Input/output error")):
             with self.subTest(error=type(error).__name__):
                 def unreadable_zone(name, error=error):
                     raise error
@@ -169,6 +168,34 @@ class CommandTests(unittest.TestCase):
                 self.assertIn(error.strerror, message)
                 self.assertIn("cannot be read", message)
                 self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
+
+    def test_a_directory_where_an_ibkr_zone_file_should_be_is_refused_as_not_installed(self):
+        # zoneinfo skips anything that is not a regular file, so a directory at
+        # the zone's path reads as a missing zone, not as an unreadable one.
+        import zoneinfo as zoneinfo_module
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        saved = zoneinfo_module.TZPATH
+        self.addCleanup(zoneinfo_module.reset_tzpath, to=saved)
+        zone_root = self.dir / "zoneinfo"
+        (zone_root / "US" / "Eastern").mkdir(parents=True)
+        zoneinfo_module.reset_tzpath(to=[str(zone_root)])
+        # With no tzdata pip package installed, a host has no fallback for the zone; a
+        # machine that has one would resolve the name from it, so the fallback is switched off here.
+        no_fallback = mock.patch("zoneinfo._common.load_tzdata",
+                                 side_effect=ZoneInfoNotFoundError("US/Eastern"))
+        no_fallback.start()
+        self.addCleanup(no_fallback.stop)
+
+        status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                      should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                      protobuf_version=lambda: "5.29.5", zone_lookup=ZoneInfo.no_cache)
+        self.assertEqual(status, 1)
+        message = self.err.getvalue()
+        for word in ("US/Eastern", "is not installed", "tzdata-legacy", "provision.sh base"):
+            self.assertIn(word, message)
+        self.assertNotIn("cannot be read", message)
+        self.assertEqual(self.made, [], "nothing connects when a zone IBKR names is a directory")
 
     def test_the_account_comes_from_one_place_only_and_is_never_echoed(self):
         both = dict(CONFIG, account_id=ACCOUNT)

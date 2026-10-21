@@ -90,7 +90,8 @@ def require_zones(lookup=ZoneInfo):
                           "apt-get install --reinstall tzdata-legacy tzdata` (or restore the zone database "
                           "from a good copy) and start the adapter again".format(name)) from None
         except OSError as err:
-            # An unreadable zone file (permissions, a directory in its place) is refused like a missing one.
+            # OSError covers PermissionError and other read errors; each is refused as an unreadable zone.
+            # A directory in the zone's place never gets here: zoneinfo skips non-regular files, so it is refused above as not installed.
             raise Refused("the time zone {} that IBKR's execution times name cannot be read ({}); restore the "
                           "zone database's permissions or reinstall it with `sudo apt-get install --reinstall "
                           "tzdata-legacy tzdata` and start the adapter again".format(
