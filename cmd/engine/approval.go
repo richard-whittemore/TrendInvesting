@@ -4,15 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
@@ -268,7 +266,7 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 	if err != nil {
 		return nil, err
 	}
-	if recovery.FinalRecordHash != approval.PreviousLogFinalHash {
+	if !restart.PreviousLogApproved(recovery, approval) {
 		return nil, fmt.Errorf("engine: the approval in %s names %s with final record hash %s, but that log's final record hash is %s; the approval must be of the log as it stands",
 			opts.approvalPath, latest, approval.PreviousLogFinalHash, recovery.FinalRecordHash)
 	}
@@ -399,8 +397,8 @@ func readLogs(opts options) ([]string, []journal.Recovery, error) {
 	recovered := make([]journal.Recovery, len(logs))
 	failed := make([]error, len(logs))
 	for i, log := range logs {
-		names[i] = log.name
-		recovered[i], failed[i] = recoverLogFile(prefix + log.name)
+		names[i] = log.Name
+		recovered[i], failed[i] = recoverLogFile(prefix + log.Name)
 	}
 	for i, err := range failed {
 		var unrecoverable *unrecoverableLogError
@@ -422,12 +420,12 @@ func readLogs(opts options) ([]string, []journal.Recovery, error) {
 // run, never set aside while the disk may yet be fixed, and given up only by
 // the runbook's give-up steps; or a superseded log, set aside only after the
 // check the runbook gives.
-func readFault(err error, prefix string, logs []loggedFile, recovered []journal.Recovery, failed []error, i int) error {
+func readFault(err error, prefix string, logs []restart.LoggedFile, recovered []journal.Recovery, failed []error, i int) error {
 	read := make([]restart.ReadLog, len(logs))
 	for j, log := range logs {
-		read[j] = restart.ReadLog{Name: log.name, Modified: log.modified, Recovery: recovered[j], Err: failed[j]}
+		read[j] = restart.ReadLog{Name: log.Name, Modified: log.Modified, Recovery: recovered[j], Err: failed[j]}
 	}
-	name := logs[i].name
+	name := logs[i].Name
 	switch kind, newer := restart.ClassifyReadFault(read, i); kind {
 	case restart.PermissionFault:
 		return fmt.Errorf("%w; %s could not be read, as the engine is not permitted to read it, not for damage to what it holds: fix its owner or mode and start again, leaving the log where it is (docs/runbooks/durable-log.md, \"A log that cannot be read\")",
@@ -446,41 +444,13 @@ func logHeader(comp composition) journal.LogHeader {
 	return journal.NewLogHeader(comp.configurationHash, comp.strategyVersion)
 }
 
-// loggedFile is a durable log in the directory of -log and when it was last
-// modified.
-type loggedFile struct {
-	name     string
-	modified time.Time
-}
-
-// logsByAge returns the durable logs in dir, least recently modified first.
-// Two logs modified at the same instant are ordered by name, the later name
-// being the later log.
-func logsByAge(dir string) ([]loggedFile, error) {
-	entries, err := os.ReadDir(dir)
+// logsByAge returns the durable logs in dir, least recently modified first
+// (journalquery.ListLogs, the listing the dashboard finds the latest run by).
+func logsByAge(dir string) ([]restart.LoggedFile, error) {
+	logs, err := journalquery.ListLogs(dir, durableLogSuffix)
 	if err != nil {
-		return nil, fmt.Errorf("engine: list the durable log's directory %s: %w", dir, err)
+		return nil, fmt.Errorf("engine: %w", err)
 	}
-	var logs []loggedFile
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), durableLogSuffix) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			return nil, fmt.Errorf("engine: examine %s in %s: %w", entry.Name(), dir, err)
-		}
-		logs = append(logs, loggedFile{entry.Name(), info.ModTime()})
-	}
-	sort.Slice(logs, func(i, j int) bool {
-		if !logs[i].modified.Equal(logs[j].modified) {
-			return logs[i].modified.Before(logs[j].modified)
-		}
-		return logs[i].name < logs[j].name
-	})
 	return logs, nil
 }
 

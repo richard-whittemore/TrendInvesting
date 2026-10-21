@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
 // Engine states a summary reports.
@@ -115,6 +116,19 @@ type Equity struct {
 	DayAccountReturn   float64
 	DayBenchmarkReturn float64
 	Points             []EquityPoint
+	// HistoryUnavailable is set when the chain of runs is broken
+	// (HistoryUnavailable, the function): the comparison then runs from
+	// HistoryStartsAt, the log of the first intact run it includes, not
+	// from the account's first run.
+	HistoryUnavailable string
+	HistoryStartsAt    string
+	// HistorySince is set when earlier runs of another mode come before
+	// the current mode's (HistorySince, the function): the comparison then
+	// runs from the first run of the current mode.
+	HistorySince string
+	// HistoryStarting is set when the current run is still starting
+	// (HistoryStarting, the function): it has no history yet.
+	HistoryStarting string
 }
 
 // EquityPoint is one date on which the account's net liquidation and the
@@ -180,6 +194,20 @@ type Summary struct {
 // trades) that does not read or
 // validate refuses the summary, as journalquery does.
 func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	return SummarizeWithHistory(History{}, envelopes, date, benchmark)
+}
+
+// SummarizeWithHistory is Summarize for a run that follows others: history
+// holds the envelopes of the runs before it, oldest first (EarlierRuns is how
+// a caller finds them). Only the equity comparison reads them: its
+// paired points, chart and returns run from the first run's first close, so a
+// restart or an upgrade does not restart the history. Everything else is the
+// current run's alone: a fresh run starts in the state its own approval
+// states, not the state an earlier run ended in, and its inputs are counted
+// as its own. A broken history is named in the comparison, which then runs
+// over the intact runs alone.
+func SummarizeWithHistory(history History, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	earlier := history.Earlier
 	end, err := time.Parse(time.DateOnly, date)
 	if err != nil {
 		return Summary{}, fmt.Errorf("report: date %q is not YYYY-MM-DD: %w", date, err)
@@ -194,6 +222,7 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 	closes := map[string]float64{}
 	var points []equityPoint
 	netBy := map[string]float64{}
+	pairEarlier(earlier, end, account, benchmark, netBy, closes)
 	for _, e := range envelopes {
 		if !e.EventTime.Before(end) {
 			continue
@@ -315,7 +344,73 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
 	s.Equity = equityOf(points, date)
+	if history.Broken != nil {
+		s.Equity.HistoryUnavailable, s.Equity.HistoryStartsAt = HistoryUnavailable(history.Broken), historyStartsAt(history)
+	}
+	s.Equity.HistorySince = HistorySince(history)
+	s.Equity.HistoryStarting = HistoryStarting(history)
 	return s, nil
+}
+
+// pairEarlier adds to netBy and closes the net liquidation and benchmark
+// closes the earlier runs recorded before end, by the rules the current run
+// reads its own by: a positions snapshot names this account and is later than
+// the last taken, and a bar or snapshot that does not read is skipped. The
+// current run's own records then replace a date both hold.
+func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark string, netBy, closes map[string]float64) {
+	var last time.Time
+	taken := false
+	for _, e := range earlier {
+		if !e.EventTime.Before(end) {
+			continue
+		}
+		switch e.Type {
+		case event.AccountSnapshotEventType:
+			if e.SchemaVersion == event.AccountSnapshotSchemaVersion {
+				continue
+			}
+			var p event.AccountPositionsSnapshotPayload
+			if read(e, snapshotVersions, &p) != nil || p.AccountID != account || (taken && !p.AsOf.After(last)) {
+				continue
+			}
+			taken, last = true, p.AsOf
+			netBy[dateOf(p.AsOf)] = p.NetLiquidation
+		case event.CompletedBarEventType:
+			if p, err := readBar(e); err == nil && p.InstrumentID == benchmark {
+				closes[dateOf(p.PeriodEnd)] = p.SplitAdjusted.Close
+			}
+		}
+	}
+}
+
+// ForHistory returns what of an earlier run's recovery the chain of runs and
+// the equity history read, for a caller that keeps earlier logs between
+// reads: its header and final record hash, its first two records (its
+// configuration and approval, ADR 0027), every configuration and approval
+// input after them (FollowChain refuses a second approval), every account
+// snapshot and every bar of benchmark (pairEarlier). A log holding nothing
+// past its configuration keeps that one record, so restart.CutShort reads it
+// as it reads the whole log.
+func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
+	kept := recovery
+	kept.Entries = nil
+	for i, e := range recovery.Entries {
+		env := e.Envelope
+		keep := i < 2
+		switch {
+		case e.Kind != journal.KindInput:
+		case env.Type == event.TargetWeightConfigurationEventType, env.Type == event.OperatorRunApprovedEventType, env.Type == event.AccountSnapshotEventType:
+			keep = true
+		case env.Type == event.CompletedBarEventType:
+			if p, err := readBar(env); err == nil && p.InstrumentID == benchmark {
+				keep = true
+			}
+		}
+		if keep {
+			kept.Entries = append(kept.Entries, e)
+		}
+	}
+	return kept
 }
 
 // readFill decodes a fill at either version this build reads: the Turtle

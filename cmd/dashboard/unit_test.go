@@ -60,8 +60,8 @@ func serviceSettings(t *testing.T, path string) (env map[string]string, execStar
 }
 
 // TestTheServiceFileServesTheBoostLogOnTheOnePort: the dashboard takes its
-// settings as flags (it reads no environment), so the unit passes -journal,
-// the Boost engine's current durable log, and -addr, a loopback address
+// settings as flags (it reads no environment), so the unit passes -engine-dir,
+// the Boost engine's log directory, and -addr, a loopback address
 // whose port is the one the Lightsail runbook publishes to the tailnet with
 // `tailscale serve`. One port everywhere: the program's default, the unit
 // and the runbook.
@@ -86,8 +86,11 @@ func TestTheServiceFileServesTheBoostLogOnTheOnePort(t *testing.T) {
 		}
 		return ""
 	}
-	if got, want := flag("-journal"), "/var/lib/trend-investing/engines/boost/"+env["TI_RUN"]+".log"; got != want {
-		t.Errorf("-journal %q, want the Boost engine's durable log %q", got, want)
+	if got, want := flag("-engine-dir"), "/var/lib/trend-investing/engines/boost"; got != want {
+		t.Errorf("-engine-dir %q, want the Boost engine's log directory %q, so the page finds the latest run on each request", got, want)
+	}
+	if flag("-journal") != "" {
+		t.Errorf("-journal names one log, which would pin the page to a run: a restart would show the previous run")
 	}
 	addr := flag("-addr")
 	if err := checkListenAddr(addr, host); err != nil {
