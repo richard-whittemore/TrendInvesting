@@ -160,6 +160,10 @@ type Gate struct {
 	// since book was set or a fill or corporate action was recorded
 	// (CheckBook).
 	classified map[string]int64
+	// classifiedAsOf is the reading time of the reconciliation whose
+	// positions classified holds: it applied only the changes dated before
+	// it (CheckBook).
+	classifiedAsOf time.Time
 	// reported is the residual of each instrument a journalled result found
 	// unexplained against book, so the same difference is not reported
 	// twice (CheckBook); nil once book is set.

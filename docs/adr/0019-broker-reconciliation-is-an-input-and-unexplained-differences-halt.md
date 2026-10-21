@@ -783,9 +783,14 @@ is classified, with the snapshot's holdings as the observation:
    the same journalled changes is not classified again: the adapter sends
    each reading's reconciliation ahead of its snapshot, and that result,
    matched or not, already stands for those holdings. A new book, or a fill
-   or corporate action journalled after that reconciliation, ends its
-   standing: the reconciliation did not see the change, so the next snapshot
-   is checked even when it holds the same shares.
+   or corporate action journalled after that reconciliation or dated at or
+   after the reconciliation's reading, ends its standing: the reconciliation
+   did not apply the change, so the next snapshot is checked even when it
+   holds the same shares. A difference already reported is not reported
+   again with the same residual; one a later reconciliation against the same
+   book finds explained is forgotten, so its recurrence is a new difference.
+   An unverifiable snapshot halts and is always journalled: neither rule
+   suppresses a Halt.
 7. **Not the run's first book.** A run's first snapshot has no book in the
    engine to be checked against; the adapter checks that reading against the
    previous close or the starting book (condition 2), and the Run approval
