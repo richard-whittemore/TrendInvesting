@@ -65,8 +65,8 @@ reporter checks every 5 minutes, around the clock, seven days a week).
      snapshot comes.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
      by hand, but stop the adapter, then the engine, first ("Selling by hand
-     safely", step 1, with its guard): the attempt is unspent, so the program can still sell from
-     the next good snapshot, beside your sale.
+     safely", step 1, with its guard): the attempt is unspent, so the program
+     can still sell from the next good snapshot, beside your sale.
    - **Refused at the gate as `broker-holding`** (the sale is larger than
      IBKR's holding): the refusal spends the attempt, and the urgent "sale
      back to 98% refused, sell by hand" page says so. Check the holding at

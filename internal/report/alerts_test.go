@@ -290,7 +290,7 @@ func handSale(account string) []string {
 		"if the first fails, stop there and read journalctl -u ti-adapter-boost before going on",
 		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
 		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve",
-		"only once your sale has filled or been cancelled", "states the book as it is after your sale",
+		"only once your sale has filled or been cancelled", "approved with the post-sale book and, when this sale was the incident's own, -sale-attempted", "states the book as it is after your sale",
 		"-positions", "-cash", "-currency USD", "right after reading the book in IBKR", "halts as unverifiable",
 		"start the adapter only after the fresh run's engine is running",
 		"never resume the stopped run"}
