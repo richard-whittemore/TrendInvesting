@@ -55,7 +55,7 @@ reporter checks every 5 minutes, around the clock, seven days a week).
      not try again for this alarm, and the urgent "sale withheld, sell by
      hand" alert says so. **Act by hand at IBKR now**: sell back to 98% of
      net liquidation, following the manual's "Selling by hand safely" (stop
-     the engine and the adapter, cancel and confirm nothing is working in
+     the adapter, then the engine, cancel and confirm nothing is working in
      IBKR's app, then sell).
    - `stale-broker-snapshot` or `non-positive-broker-values`: the program
      decides it again from the next good snapshot while the alarm is urgent.
@@ -64,8 +64,8 @@ reporter checks every 5 minutes, around the clock, seven days a week).
      with the hand-sale steps, since nothing sells until a positive
      snapshot comes.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
-     by hand, but stop the engine and the adapter first ("Selling by hand
-     safely"): the attempt is unspent, so the program can still sell from
+     by hand, but stop the adapter, then the engine, first ("Selling by hand
+     safely", step 1, with its guard): the attempt is unspent, so the program can still sell from
      the next good snapshot, beside your sale.
    - **Refused at the gate as `broker-holding`** (the sale is larger than
      IBKR's holding): the refusal spends the attempt, and the urgent "sale

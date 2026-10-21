@@ -499,22 +499,23 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 // so the owner stops the adapter, then the engine, before selling by hand
 // (one command per unit, so a failed adapter stop ends the procedure before
 // the engine is stopped; the adapter unit declares After= the engine, the
-// engine unit declares nothing about the adapter, so one command would
-// order the stops but not end on a failure). The
-// fresh run's approval states the book after the sale: no fill of a hand
-// sale is committed, so the previous close adjusted by the fills is not the
-// book, and a first reading that is not the book halts the account as
-// unverifiable (ADR 0019, amended 2026-10-18).
+// engine unit declares nothing about the adapter, so one command would order
+// the stops but not end on a failure). The fresh run's approval states the
+// book after the sale: no fill of a hand sale is committed, so the previous
+// close adjusted by the fills is not the book, and a first reading that is
+// not the book halts the account as unverifiable (ADR 0019, amended
+// 2026-10-18).
 //
 // The units are named by the engine instance, not by the account it
 // decides, which the journal records: the steps come only from Boost's
 // rejections and the sale back to 98%, which only the margin account makes
-// (ADR 0019, amended 2026-10-15), and Boost runs as ti-engine@boost with ti-adapter-boost, the
-// only adapter unit, wired to that engine's socket and log, whatever account
-// its configuration decides (the shipped one decides "joint";
-// deploy/systemd, docs/manual/server.md). The approval names the account.
+// (ADR 0019, amended 2026-10-15), and Boost runs as ti-engine@boost with
+// ti-adapter-boost, the only adapter unit, wired to that engine's socket and
+// log, whatever account its configuration decides (the shipped one decides
+// "joint"; deploy/systemd, docs/manual/server.md). The approval names the
+// account.
 func handSaleSteps(account string) string {
-	return fmt.Sprintf("Before you sell anything by hand, stop the engine and the adapter, the adapter first: sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost (two commands, so a failed adapter stop ends the procedure before the engine is stopped); if the first fails, stop there and read journalctl -u ti-adapter-boost before going on. The kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start the fresh run you approve only once your sale has filled or been cancelled; its approval states the book as it is after your sale (operator approve -log <previous run's log> -account %[1]s -by <you> -positions SYM=shares,... -cash <IBKR's TotalCashValue> -currency USD -out <approval>), typed right after reading the book in IBKR, or the fresh run's first reading is not the book it is compared with and the account halts as unverifiable. Then start the adapter only after the fresh run's engine is running; never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account)
+	return fmt.Sprintf("Before you sell anything by hand, stop the adapter, then the engine: sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost (two commands, so a failed adapter stop ends the procedure before the engine is stopped); if the first fails, stop there and read journalctl -u ti-adapter-boost before going on. The kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start the fresh run you approve only once your sale has filled or been cancelled; its approval states the book as it is after your sale (operator approve -log <previous run's log> -account %[1]s -by <you> -positions SYM=shares,... -cash <IBKR's TotalCashValue> -currency USD -out <approval>), typed right after reading the book in IBKR, or the fresh run's first reading is not the book it is compared with and the account halts as unverifiable. Then start the adapter only after the fresh run's engine is running; never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account)
 }
 
 // rejectionAlert states the rejection that brought the account's Boost

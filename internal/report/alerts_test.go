@@ -271,20 +271,21 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 // program's sells may still be working, in the order of "Selling by hand
 // safely" (docs/manual/states-and-kill-switch.md): stop the adapter, then the
 // engine, of the account (one command each; stop if the first fails; the
-// kill switch does not stop the sale back to 98%), cancel every open order on the instrument, the program's and the
-// owner's own, confirm none is open, sell, then start the fresh run only once
-// the sale has filled or been cancelled, its approval stating the book as it
-// is after the sale (read in IBKR right before approving; otherwise the
-// run's first reading is not the book it is compared with and the account
-// halts as unverifiable), and the adapter only after that run's engine is
-// running, never resuming the stopped one.
+// kill switch does not stop the sale back to 98%), cancel every open order
+// on the instrument, the program's and the owner's own, confirm none is
+// open, sell, then start the fresh run only once the sale has filled or been
+// cancelled, its approval stating the book as it is after the sale (read in
+// IBKR right before approving; otherwise the run's first reading is not the
+// book it is compared with and the account halts as unverifiable), and the
+// adapter only after that run's engine is running, never resuming the
+// stopped one.
 //
 // The units are the Boost program's, named by its engine instance, not by
 // the account it decides: the shipped Boost configuration decides account
 // "joint" under ti-engine@boost, and ti-adapter-boost is the only adapter
 // unit, wired to that engine's socket and log (deploy/systemd).
 func handSale(account string) []string {
-	return []string{"stop the engine and the adapter", "the adapter first: sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost",
+	return []string{"stop the adapter, then the engine", "sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost",
 		"two commands, so a failed adapter stop ends the procedure before the engine is stopped",
 		"if the first fails, stop there and read journalctl -u ti-adapter-boost before going on",
 		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
@@ -310,6 +311,12 @@ func requireHandSale(t *testing.T, body, account string) {
 	}
 	if strings.Contains(body, "does not order") {
 		t.Errorf("a reason the units' ordering does not support: %q", body)
+	}
+	if !strings.Contains(body, "Before you sell anything by hand, stop the adapter, then the engine:") {
+		t.Errorf("the page does not open with the adapter-first order: %q", body)
+	}
+	if strings.Contains(body, "stop the engine and the adapter") {
+		t.Errorf("the page names the engine first in the hand-sale steps: %q", body)
 	}
 	last := -1
 	for _, want := range handSale(account) {
