@@ -335,10 +335,13 @@ test -n "$stop_line" || fail "--recreate does not stop the container with a 60 s
 test -n "$rm_line" && test -n "$stop_line" && test "$stop_line" -lt "$rm_line" || fail "--recreate does not remove the container after stopping it: $(cat "$work/calls")"
 if grep -Eq '^docker (kill|rm (-f|--force))' "$work/calls"; then fail "--recreate kills or force-removes the container: $(cat "$work/calls")"; fi
 # The container it creates: labelled with its name and this checkout, and
-# given only the capability systemd needs, not --privileged.
+# given only the capabilities systemd needs (all others dropped), not --privileged.
 create=$(grep '^docker create' "$work/calls" || true)
 case $create in *--privileged*) fail "the container is created --privileged: $create" ;; esac
-case $create in *"--cap-add SYS_ADMIN"*"--cgroupns private"*) ;; *) fail "the container is not created with --cap-add SYS_ADMIN --cgroupns private: $create" ;; esac
+case $create in *"--cap-drop ALL"*) ;; *) fail "the container does not drop Docker's default capabilities (--cap-drop ALL): $create" ;; esac
+added=$(grep -o -- '--cap-add [A-Z_]*' <<<"$create" | cut -d' ' -f2 | sort | tr '\n' ' ')
+test "$added" = "CHOWN DAC_OVERRIDE FOWNER SETGID SETPCAP SETUID SYS_ADMIN SYS_CHROOT " || fail "the container's added capabilities are '$added', not the eight systemd needs: $create"
+case $create in *"--cgroupns private"*) ;; *) fail "the container is not created with --cgroupns private: $create" ;; esac
 case $create in *"--label org.trend-investing.mac-mini=ti"*"--label org.trend-investing.checkout=$co"*) ;; *) fail "the container is not labelled with its name and checkout: $create" ;; esac
 # Its own container, reused: provisioned.
 run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" || fail "re-provisioning up.sh's own container failed: $(cat "$work/out")"

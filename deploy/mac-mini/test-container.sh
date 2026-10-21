@@ -23,7 +23,9 @@
 #        within 5 minutes.
 #   T10  every mount is a named volume inside Docker's VM; nothing is under
 #        the Desktop, Documents or iCloud Drive; the container is not
-#        privileged and has only CAP_SYS_ADMIN added.
+#        privileged, drops every default capability and adds back only eight
+#        (SYS_ADMIN, SYS_CHROOT, CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID,
+#        SETPCAP), whose bounding set the container's PID 1 shows.
 #
 # And up.sh refuses --recreate while the engine runs, leaving it running;
 # provision.sh reown moves files of an old UID and GID in the volumes to the
@@ -174,10 +176,11 @@ test "$(docker container inspect --format '{{.HostConfig.RestartPolicy.Name}}' "
 docker exec "$name" grep -q '"host": "host.docker.internal"' /etc/trend-investing/adapters/boost.json || fail "the adapter's configuration does not point at host.docker.internal"
 test "$(docker exec "$name" uname -m)" = aarch64 || fail "the container is not arm64"
 test "$(docker container inspect --format '{{.HostConfig.Privileged}}' "$name")" = false || fail "the container is privileged"
-caps=$(docker container inspect --format '{{json .HostConfig.CapAdd}}' "$name")
-test "$caps" = '["SYS_ADMIN"]' || test "$caps" = '["CAP_SYS_ADMIN"]' || fail "the container's added capabilities are $caps, not SYS_ADMIN alone"
+test "$(docker container inspect --format '{{json .HostConfig.CapDrop}}' "$name")" = '["ALL"]' || test "$(docker container inspect --format '{{json .HostConfig.CapDrop}}' "$name")" = '["CAP_ALL"]' || fail "the container does not drop every default capability"
+caps=$(docker container inspect --format '{{range .HostConfig.CapAdd}}{{.}} {{end}}' "$name" | tr ' ' '\n' | sed 's/^CAP_//' | sort | tr '\n' ' ')
+test "$caps" = "CHOWN DAC_OVERRIDE FOWNER SETGID SETPCAP SETUID SYS_ADMIN SYS_CHROOT " || fail "the container's added capabilities are '$caps', not the eight systemd needs"
 test "$(docker container inspect --format '{{.HostConfig.CgroupnsMode}}' "$name")" = private || fail "the container has no cgroup namespace of its own"
-echo "four named volumes in Docker's VM, no bind mount, dashboard on 127.0.0.1:$port only, host.docker.internal resolves, restart unless-stopped, arm64, not privileged (SYS_ADMIN added, private cgroup namespace)"
+echo "four named volumes in Docker's VM, no bind mount, dashboard on 127.0.0.1:$port only, host.docker.internal resolves, restart unless-stopped, arm64, not privileged (all capabilities dropped, eight added, private cgroup namespace)"
 
 step "the test's files, then T1 against the running systemd"
 inside fixtures

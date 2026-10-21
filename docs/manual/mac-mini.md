@@ -145,13 +145,20 @@ It is careful with what it did not make:
 
 ## What the container may do on your Mac
 
-The container is **not privileged**. systemd as its first program needs two
-things a normal container lacks, and it is given only those:
+The container is **not privileged**. systemd as its first program needs a
+few things a normal container lacks, and it is given only those:
 
-- **One added capability, `CAP_SYS_ADMIN`.** systemd needs it to give each
-  unit its own view of the files (a read-only system, private temporary
-  folders, a private folder for the engine's socket) and to hand a unit its
-  secrets.
+- **Every default capability is dropped, and eight are added back.** The
+  eight are `CAP_SYS_ADMIN` (systemd gives each unit its own view of the
+  files, a read-only system, private temporary folders, a private folder
+  for the engine's socket, and hands a unit its secrets), `CAP_SYS_CHROOT`
+  (the same private views), `CAP_CHOWN` and `CAP_FOWNER` (the units' runtime
+  folders), `CAP_DAC_OVERRIDE` (handing a unit its secrets), `CAP_SETUID`
+  and `CAP_SETGID` (running a unit as `ti-trader`), and `CAP_SETPCAP`
+  (systemd's journal and login services fail without it). The list was found
+  by removing each in turn until the container no longer started its units;
+  Docker's other defaults (`KILL`, `NET_BIND_SERVICE`, `AUDIT_WRITE`,
+  `MKNOD`, `NET_RAW`, `SETFCAP`, `FSETID`) are not needed and are gone.
 - **A cgroup namespace of its own** (`--cgroupns private`), whose cgroup
   tree the image makes writable at each start. That tree is the container's
   own; the rest of the virtual machine's is hidden from it.
@@ -171,8 +178,9 @@ and the device rules. A compromised root program inside has a much better
 chance of breaking out into that virtual machine than in an ordinary
 container. From there it could reach every container and volume on this Mac
 and the Mac folders Docker Desktop shares into that virtual machine. The
-container test checks that it is not privileged and has that one capability
-added; it does not, and cannot, check that root inside stays within these
+container test checks that it is not privileged, drops every default
+capability, adds back only those eight, and that the container's capability
+limit is exactly them; it does not, and cannot, check that root inside stays within these
 defaults.
 
 So the container is a rehearsal tool on a machine you control, and its
