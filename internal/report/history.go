@@ -27,11 +27,15 @@ import (
 //
 // Starting is set when the current log holds only its configuration, a
 // start in progress (restart.StartInProgress): no history yet, and no break.
+// StartingMode is that run's mode: a paper or live engine records its
+// approval itself straight after its configuration (ADR 0027), so such a log
+// that stays at its configuration is a start cut short, not a start waiting.
 type History struct {
-	Earlier  []event.Envelope
-	Broken   *restart.ChainError
-	Since    *ModeStart
-	Starting bool
+	Earlier      []event.Envelope
+	Broken       *restart.ChainError
+	Since        *ModeStart
+	Starting     bool
+	StartingMode string
 }
 
 // ModeStart is where a history of one mode starts: the log of the first run
@@ -57,10 +61,15 @@ func HistorySince(h History) string {
 }
 
 // HistoryStarting is the line the equity comparison gives for a run still
-// starting, "" for any other.
+// starting, "" for any other. A paper or live run records its approval
+// itself at once, so one that holds only its configuration crashed before
+// recording it, and the line says to resume it with its approval (ADR 0027).
 func HistoryStarting(h History) string {
 	if !h.Starting {
 		return ""
+	}
+	if h.StartingMode == event.TradingModePaper || h.StartingMode == event.TradingModeLive {
+		return "the run started but recorded no approval; if the engine is not running, resume it with its approval (see the states chapter)"
 	}
 	return "the run is starting; no history yet"
 }
@@ -121,7 +130,7 @@ func EarlierRunsOfRecovery(path string, currentRecovery journal.Recovery, recove
 		return recoverLog(dir + name)
 	})
 	if err == nil && restart.StartInProgress(chain) {
-		return History{Starting: true}
+		return History{Starting: true, StartingMode: chain[0].Mode}
 	}
 	// Every error FollowChain returns is a *restart.ChainError.
 	var broken *restart.ChainError

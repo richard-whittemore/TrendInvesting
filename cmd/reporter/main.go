@@ -137,15 +137,23 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if account != "" {
 		label = account
 	}
+	examined := false
+	if refused == nil {
+		var restored, current string
+		restored, current, examined = restoredLogNewer(*journalPath)
+		if restored != "" {
+			alerts = append(alerts, report.RestoredLogNewerAlert(account, restored, current, now()))
+		}
+	}
 	if refused == nil && history.Broken == nil {
 		// A whole chain clears every break delivered for the account, so a
 		// break after a repair is a new incident (ADR 0019, "Alerting":
 		// once per incident).
 		forget(report.HistoryUnavailableKeyPrefix(account), seen, sent, repeats)
 	}
-	if refused == nil && !slices.ContainsFunc(alerts, func(a report.Alert) bool { return a.Kind == report.KindRestoredLogNewer }) {
-		// No log newer than the current run clears the restored-log alerts
-		// delivered for the account, so the same log restored wrongly again
+	if refused == nil && examined && !slices.ContainsFunc(alerts, func(a report.Alert) bool { return a.Kind == report.KindRestoredLogNewer }) {
+		// A folder examined with no log newer than the current run clears
+		// the restored-log alerts delivered for the account, so the same log restored wrongly again
 		// is a new incident (ADR 0019, "Alerting": once per incident).
 		forget(report.RestoredLogNewerKeyPrefix(account), seen, sent, repeats)
 	}
@@ -268,9 +276,6 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 	if history.Broken != nil {
 		alerts = append(alerts, report.HistoryUnavailableAlert(account, history, now))
 	}
-	if restored, current := restoredLogNewer(path); restored != "" {
-		alerts = append(alerts, report.RestoredLogNewerAlert(account, restored, current, now))
-	}
 	return history, envelopes, account, alerts, nil
 }
 
@@ -281,15 +286,17 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 // latest run by modification time, so it would take such a log, restored
 // without its time, for the latest run at its next start. Only the logs'
 // first records are read. A directory that cannot be listed or read here
-// warns of nothing: the journal itself was read, and its alerts stand.
-func restoredLogNewer(path string) (restored, current string) {
+// warns of nothing and is not examined: the journal itself was read, and its
+// alerts stand. examined is true only when every log's start was read, so
+// that no restored log was found is known and not merely unseen.
+func restoredLogNewer(path string) (restored, current string, examined bool) {
 	if filepath.Ext(path) != ".log" {
-		return "", ""
+		return "", "", false
 	}
 	dir := filepath.Dir(path)
 	files, err := restart.ListLogs(dir, ".log")
 	if err != nil {
-		return "", ""
+		return "", "", false
 	}
 	open := func(name string, groups int) (journal.Recovery, error) {
 		f, err := os.Open(filepath.Join(dir, name))
@@ -305,10 +312,10 @@ func restoredLogNewer(path string) (restored, current string) {
 	head, newer, err := restart.ChainHead(files,
 		func(name string) (journal.Recovery, error) { return open(name, 2) },
 		func(name string) (journal.Recovery, error) { return open(name, -1) })
-	if err != nil || newer == "" {
-		return "", ""
+	if err != nil {
+		return "", "", false
 	}
-	return newer, head
+	return newer, head, true
 }
 
 // forget removes from the delivery state every channel's record of the

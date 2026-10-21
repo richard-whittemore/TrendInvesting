@@ -403,8 +403,12 @@ func TestEarlierRunsOfACurrentLogHoldingOnlyItsConfigurationAreAStart(t *testing
 			if h.Broken != nil || !h.Starting || len(h.Earlier) != 0 || h.Since != nil {
 				t.Fatalf("history = %+v, want a start in progress", h)
 			}
-			if got := report.HistoryStarting(h); got != "the run is starting; no history yet" {
-				t.Fatalf("line = %q", got)
+			want := "the run is starting; no history yet"
+			if mode != event.TradingModeDryRun {
+				want = "the run started but recorded no approval; if the engine is not running, resume it with its approval (see the states chapter)"
+			}
+			if got := report.HistoryStarting(h); got != want {
+				t.Fatalf("line = %q, want %q", got, want)
 			}
 		})
 	}

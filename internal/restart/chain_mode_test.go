@@ -204,3 +204,24 @@ func TestChainHeadOfUnrelatedStartsReadsNoLogWhole(t *testing.T) {
 		t.Fatal("a tied log that cannot be read whole must refuse")
 	}
 }
+
+// TestChainHeadSetsAsideAnAbandonedCopyOfALogAFreshRunNamed: a copy that was
+// abandoned of a log, restored with a newer time after a fresh run approved
+// that log, is a prefix of a log the chain names; the engine's rule sets it
+// aside, so the head is the fresh run, not the abandoned copy.
+func TestChainHeadSetsAsideAnAbandonedCopyOfALogAFreshRunNamed(t *testing.T) {
+	at := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	other := func(id string) journal.Entry {
+		return recorded(t, journal.KindInput, id, event.KillSwitchEventType, event.KillSwitchSchemaVersion, struct{}{})
+	}
+	a := run(t, "a.log", "", other("1"), other("2"))
+	copied := run(t, "a.log", "", other("1"))
+	copied.FinalRecordHash = hashOf("b.log")
+	logs := map[string]journal.Recovery{"a.log": a, "b.log": copied, "c.log": run(t, "c.log", "a.log")}
+	files := []restart.LoggedFile{{Name: "a.log", Modified: at}, {Name: "c.log", Modified: at.Add(time.Minute)}, {Name: "b.log", Modified: at.Add(2 * time.Minute)}}
+	full := func(name string) (journal.Recovery, error) { return logs[name], nil }
+	head, _, err := restart.ChainHead(files, starts(t, logs, map[string]int{}), full)
+	if err != nil || head != "c.log" {
+		t.Fatalf("head = %q, err = %v; want c.log, the fresh run", head, err)
+	}
+}

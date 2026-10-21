@@ -370,9 +370,15 @@ approval was recorded.
 
 The current run is different: no other log names it, so a current log holding
 only its configuration is a run still starting (a dry run's first run waits
-there for its first input). The card and the daily summary say "the run is
-starting; no history yet", and nothing is alerted: there is nothing to
-restore.
+there for its first input). The equity card says "the run is starting; no
+history yet", and nothing is alerted: there is nothing to restore (the daily
+summary is not due until a session closes). In paper or live the engine
+records the approval itself at once, straight after the configuration, so a
+log that stays at its configuration is a start that crashed before its
+approval was recorded: the card then says "the run started but recorded no
+approval; if the engine is not running, resume it with its approval (see the
+states chapter)". Resume it with `-resume` and the `-approval` it was
+started with ([restart](restart.md)).
 
 The mode (dry-run, paper or live) may change along the chain: the engine
 accepts a paper run approved against a dry-run log, and a live run against a
@@ -444,19 +450,33 @@ modification time before the next restart" above the account's figures, and
 the reporter sends that once in a routine alert, "<account>: a restored log
 looks newer than the current run". Restore it again with `rsync -a --chown=ti-trader:ti-trader`
 (or `cp -p` then `chown`) from the backup, or set its time back with
-`sudo touch -d '<a time before the current log's>' <restored log>`, and check again before you
-restart anything.
+`sudo touch -d '<the backup's own time>' <restored log>`, where the backup's own time is the
+modification time `ls -l --time-style=full-iso /path/to/backup/run1.log` shows for the backup
+copy, for example `sudo touch -d '2026-10-01 12:00:00.000000000 -0400' <restored log>`. That
+time must fall between the times of the logs on either side of it, so that the folder is in
+its true order: list the folder sorted by time, oldest first, with
+`ls -lrt --time-style=full-iso /var/lib/trend-investing/engines/boost/`, and check the
+restored log stands where its run belongs, older than every log written after it, not only
+the current one. Check again before you restart anything.
 
 If the engine was already restarted after such a restore, it refuses to start
 with "the approval in <file> names <current log>, but the latest earlier run
 in <folder> is <restored log>; approve the latest run". **Do not approve the
 restored log**: that would start a new run against an old one and leave the
 runs after it out of the chain. Fix the restored log's time instead, with
-`sudo touch -d '<a time before the current log's>' <restored log>` (or
+`sudo touch -d '<the backup's own time>' <restored log>` (or
 restore it again with `sudo rsync -a --chown=ti-trader:ti-trader`), check with
-`ls -l --time-style=full-iso` that it is now older than the current log, and
+`ls -lrt --time-style=full-iso` that it now stands before every log written after it, and
 start the engine again with the approval you already have, the one naming the
 current log.
+
+If you restarted the engine with `-resume` instead, after the same bad restore,
+it refuses with "-resume names <current log>, but the latest run in <folder> is
+<restored log>: only a crash is resumed, and the crashed run is the latest one;
+resume that log, or start a fresh run with -approval". **Do not resume the
+restored log either**: that would copy an old run's records into a new log and
+continue from its state, leaving every run after it out of the chain. Fix the
+restored log's time the same way first, then resume the current log again.
 
 If it cannot be recovered, the history starts at the first intact run from
 then on, and the page says so. Never put back a log the engine told you to
@@ -711,10 +731,11 @@ passes `-clock-check`.
 | The page says "journal unavailable" | The log could not be read: missing, not readable, or a record that fails its checks. The page and `/api/summary.json` show no figure | `systemctl status ti-dashboard`; check the engine's log folder (`/var/lib/trend-investing/engines/boost`) holds the logs. The reporter's "cannot read the journal" alert names the reason when a record is bad |
 | The page says "journal does not verify" | The log's fingerprints fail, or its records name different runs. No figure is shown | Never edit the log. Runbook `docs/runbooks/durable-log.md`, "A log that cannot be read" |
 | The equity card says "history unavailable: the chain of runs is broken between <log A> and <log B>" | The page follows each run's approval back to the first run, and one link fails: an earlier log is missing, is not the log the approval named, is another account's, holds no approval outside a dry run, is a dry-run log holding nothing past its configuration, or the approvals loop. The rest of the page is the current run's, as always; the equity comparison is drawn from the first intact run, and the card says where it starts | Before any restart, restore the named earlier log from a backup of it as the engine wrote it, beside the others, keeping its modification time and owned by `ti-trader` (`sudo rsync -a --chown=ti-trader:ti-trader`, or `sudo cp -p` then `sudo chown ti-trader:ti-trader`; "The history across restarts", above, and `docs/runbooks/durable-log.md`), and check with `ls -l --time-style=full-iso` that it is older than the current log and owned by `ti-trader`. If it cannot be recovered, the history starts at the first intact run from then on, and the page says so. Never put back a log moved into `quarantine/`, and never edit or delete a log |
-| The page says "<restored log> looks newer than the current run <log>; fix its modification time before the next restart" | A log the chain names as an earlier run is newer by modification time than the current run, usually restored with the time of the restore. The page still shows the current run, found by the chain; the engine, which finds the latest run by modification time, would take the restored log for the latest run at its next start | Before any restart, restore it again with `sudo rsync -a --chown=ti-trader:ti-trader` (or `sudo cp -p` then `sudo chown ti-trader:ti-trader`) from the backup, or `sudo touch -d '<a time before the current log's>' <restored log>`, and check with `ls -l --time-style=full-iso` |
+| The page says "<restored log> looks newer than the current run <log>; fix its modification time before the next restart" | A log the chain names as an earlier run is newer by modification time than the current run, usually restored with the time of the restore. The page still shows the current run, found by the chain; the engine, which finds the latest run by modification time, would take the restored log for the latest run at its next start | Before any restart, restore it again with `sudo rsync -a --chown=ti-trader:ti-trader` (or `sudo cp -p` then `sudo chown ti-trader:ti-trader`) from the backup, or `sudo touch -d '<the backup's own time>' <restored log>` (the time `ls -l --time-style=full-iso` shows for the backup copy, so the folder is back in its true order), and check with `ls -lrt --time-style=full-iso` |
 | The equity card says "history since <date>, the first <mode> run" | The chain of runs holds runs of another mode (a dry run before paper, or paper before live) before the current mode's. The chain is whole; the comparison holds only the current mode's runs, from the first of them | Nothing: a live account's figures are compared from its first live run |
 | The equity card says "history since <date>, the first <mode> run since the mode last changed; the <mode> runs before that change are not included" | The mode changed and came back (paper, then live, then paper again). The chain is whole; the comparison holds only the current mode's runs since the latest change, so the earlier runs of the same mode, before the run of another mode, are left out | Nothing, if you meant to return to that mode: the comparison starts again at the return |
-| The equity card says "the run is starting; no history yet" | The current log holds only its configuration: a run still starting, such as a dry run's first run waiting for its first input. No other log names it, so it is no break, and nothing is alerted | Nothing: the line goes once the run records its next input. If it stays, check the engine and the adapter are running (`systemctl status`) |
+| The equity card says "the run is starting; no history yet" | The current log holds only its configuration: a dry run still starting, such as its first run waiting for its first input. No other log names it, so it is no break, and nothing is alerted | Nothing: the line goes once the run records its next input. If it stays, check the engine and the adapter are running (`systemctl status`) |
+| The equity card says "the run started but recorded no approval; if the engine is not running, resume it with its approval (see the states chapter)" | In paper or live the engine records the run's approval itself, straight after its configuration, so a log that stays at its configuration is a start that crashed before its approval was recorded. Nothing is alerted for it | Check the engine (`systemctl status`). If it is not running, resume it with `-resume` and the `-approval` it was started with ([restart](restart.md)) |
 | The page shows a previous run after a restart | It should not: the page finds the current run, the newest link of the chain, on every request. If it does, the dashboard is an older build that still reads `TI_RUN` at start | Install the current build and restart the dashboard once (`sudo systemctl restart ti-dashboard`); after that no restart is needed |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 

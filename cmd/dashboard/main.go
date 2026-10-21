@@ -314,12 +314,19 @@ func currentLogIn(dir string, logs *logCache) (path, warning string, err error) 
 		return "", "", errors.New("read the engine directory")
 	}
 	logs.sweep(dir, files)
+	read := map[string]bool{}
 	head, newer, err := restart.ChainHead(files,
 		func(name string) (journal.Recovery, error) { return logs.start(filepath.Join(dir, name)) },
-		func(name string) (journal.Recovery, error) { return logs.tiedWhole(filepath.Join(dir, name)) })
+		func(name string) (journal.Recovery, error) {
+			read[filepath.Join(dir, name)] = true
+			return logs.tiedWhole(filepath.Join(dir, name))
+		})
 	if head != "" {
-		logs.forgetTied(filepath.Join(dir, head))
+		delete(read, filepath.Join(dir, head))
 	}
+	// Only the logs this request's tie read stay whole; a log the tie no
+	// longer reaches, and the head, are dropped.
+	logs.keepTied(dir, read)
 	if err != nil {
 		return "", "", err
 	}
@@ -472,12 +479,17 @@ func (c *logCache) tiedWhole(path string) (journal.Recovery, error) {
 	return recovery, err
 }
 
-// forgetTied drops the whole log kept for path, the chain's head: the
-// current log is never kept whole.
-func (c *logCache) forgetTied(path string) {
+// keepTied drops every whole log kept from dir except those in keep, the logs
+// the latest request's tie read: a log the tie no longer reaches, or that
+// became the chain's head, is not kept whole.
+func (c *logCache) keepTied(dir string, keep map[string]bool) {
 	c.mu.Lock()
-	delete(c.tied, path)
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	for path := range c.tied {
+		if filepath.Dir(path) == filepath.Clean(dir) && !keep[path] {
+			delete(c.tied, path)
+		}
+	}
 }
 
 // drop forgets the log at path.

@@ -239,3 +239,35 @@ func TestDashboardOfAResumedRunReadsTheLogItCopiedOnce(t *testing.T) {
 		t.Fatalf("the cache keeps %d of the current log's records, want only its start", n)
 	}
 }
+
+// TestDashboardForgetsTheCopiedLogOnceAFreshRunEndsTheTie: the log a resume
+// copied is kept whole only while it ties for the chain's head; once a fresh
+// run names the resumed run's log, the copied log is no longer read and is
+// dropped from the whole logs the cache keeps.
+func TestDashboardForgetsTheCopiedLogOnceAFreshRunEndsTheTie(t *testing.T) {
+	dir, scratch := t.TempDir(), t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	writeRun(t, dir, "run1.log", approval("", ""), 0, base)
+	hash := writeRun(t, scratch, "run1.log", approval("", ""), 0, base, halted(t, 2))
+	resumed, err := os.ReadFile(filepath.Join(scratch, "run1.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run2.log"), resumed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "run2.log"), base.Add(time.Hour), base.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	logs := newLogCache(os.ReadFile, func(p string) (io.ReadCloser, error) { return os.Open(p) })
+	h := newHandlerCached(source{dirs: []string{dir}}, "SPY", logs)
+	summaryOf(t, h)
+	if len(logs.tied) != 1 {
+		t.Fatalf("while the tie lasts the cache keeps %d whole logs, want the copied one", len(logs.tied))
+	}
+	writeRun(t, dir, "run3.log", approval("run2.log", hash), 2, base.Add(2*time.Hour))
+	summaryOf(t, h)
+	if len(logs.tied) != 0 {
+		t.Fatalf("after a fresh run named the resumed log the cache still keeps %d whole logs", len(logs.tied))
+	}
+}

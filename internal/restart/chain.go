@@ -360,15 +360,17 @@ func ChainHead(files []LoggedFile, start, read LogReader) (head, newer string, e
 
 // latestOfTied is the engine's latest run among the tied logs, sorted[i] for
 // each i in tied, oldest first. The newest is the latest run unless it is an
-// abandoned attempt, a prefix of an older log, which can only be a log
-// sharing its start; those are read whole and classified together, and the
+// abandoned attempt, a prefix of an older log, named by a later approval or
+// not, which can only be a log sharing its start; those are read whole and classified together, and the
 // next newest is tried when every such log is set aside.
 func latestOfTied(sorted []LoggedFile, starts []journal.Recovery, tied []int, read LogReader) (string, error) {
 	// The oldest tied log has no older one to be an attempt of.
 	for k := len(tied) - 1; k > 0; k-- {
 		newest := tied[k]
 		var group []LoggedFile
-		for _, i := range tied[:k] {
+		// Every older log is a possible source, a named one too: a copy
+		// abandoned of a log that a later run approved is still a prefix of it.
+		for i := range newest {
 			if sameStart(starts[i], starts[newest]) {
 				group = append(group, sorted[i])
 			}
