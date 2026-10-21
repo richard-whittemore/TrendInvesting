@@ -76,7 +76,14 @@ func RenderText(s Summary) string {
 	for _, k := range s.Skipped {
 		fmt.Fprintf(&b, "  %s %s %s %s shares: %s\n", k.ClientOrderID, k.Side, k.InstrumentID, event.FormatSkippedShares(k.Shares), k.Reason)
 	}
-	if s.Equity.Available {
+	switch {
+	case s.Equity.HistoryUnavailable != "":
+		e := s.Equity
+		fmt.Fprintf(&b, "Equity vs %s: %s\n", s.Benchmark, e.HistoryUnavailable)
+		if e.DayAvailable {
+			fmt.Fprintf(&b, "Day, %s to %s: account %+.2f%%, %s %+.2f%%\n", e.DayStartDate, e.EndDate, e.DayAccountReturn*100, s.Benchmark, e.DayBenchmarkReturn*100)
+		}
+	case s.Equity.Available:
 		e := s.Equity
 		fmt.Fprintf(&b, "Equity vs %s, %s to %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",
 			s.Benchmark, e.StartDate, e.EndDate, e.AccountReturn*100, s.Benchmark, e.BenchmarkReturn*100, e.Excess*100)
@@ -85,7 +92,7 @@ func RenderText(s Summary) string {
 		} else {
 			fmt.Fprintf(&b, "Day: not available (no paired snapshot and %s close on %s)\n", s.Benchmark, s.Date)
 		}
-	} else {
+	default:
 		fmt.Fprintf(&b, "Equity vs %s: not enough paired snapshots and bars yet.\n", s.Benchmark)
 	}
 	if s.RejectedInputs > 0 {

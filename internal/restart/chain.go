@@ -1,9 +1,14 @@
 package restart
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -28,6 +33,9 @@ type Link struct {
 type ChainError struct {
 	Run, Previous string
 	Reason        string
+	// Intact is the runs newer than the break, oldest first, the current
+	// run last: the part of the chain that was followed.
+	Intact []Link
 }
 
 func (e *ChainError) Error() string {
@@ -48,25 +56,43 @@ func PreviousLogApproved(recovery journal.Recovery, approval event.OperatorRunAp
 // FollowChain returns every run of the chain that ends at the log named
 // current, oldest first, the current run last. It follows each run's
 // operator.run.approved to the log it names, as the IBKR adapter's run_chain
-// does, and stops at a first run (an approval that names no previous log and
-// states the starting book) or at a run holding no approval. Each earlier
-// log must be the one the approval names, by PreviousLogApproved. A chain
-// that cannot be followed is refused whole with a *ChainError naming the
-// link, never cut short: a history that silently starts late would read as
-// the whole one. The current log's own final hash is named by no approval,
-// so it is not checked.
+// does, and stops at a first run: an approval that names no previous log and
+// states the starting book, or a dry run's log holding no approval, since a
+// dry run's first run is started with none (ADR 0027, the restart model). A
+// paper or live log with no approval states no starting book, so it is a
+// broken link, as is a dry-run log holding nothing past its configuration,
+// which cannot be told from a fresh run's start cut short before its
+// approval was recorded. Each earlier log must be the one the approval names,
+// by PreviousLogApproved, and of the current log's account and mode, so no
+// other account's or mode's records join the history. A chain that cannot be
+// followed is refused with a *ChainError naming the link, never cut short: a
+// history that silently starts late would read as the whole one. The error
+// holds the intact runs newer than the break, for a reader that shows those
+// alone and says where they start. The current log's own final hash is
+// named by no approval, so it is not checked.
 func FollowChain(current string, read LogReader) ([]Link, error) {
 	recovery, err := read(current)
 	if err != nil {
 		return nil, &ChainError{Run: current, Reason: fmt.Sprintf("that log cannot be read (%v)", err)}
 	}
+	want, refused := identityOf(current, recovery)
+	if refused != nil {
+		return nil, refused
+	}
 	seen := map[string]bool{current: true}
 	var newestFirst []Link
+	refuse := func(e *ChainError) ([]Link, error) {
+		e.Intact = oldestFirst(newestFirst)
+		return nil, e
+	}
 	name := current
 	for {
-		approval, err := approvalOf(name, recovery)
-		if err != nil {
-			return nil, err
+		approval, refused := approvalOf(name, recovery)
+		if refused != nil {
+			return refuse(refused)
+		}
+		if approval == nil && (want.Mode != event.TradingModeDryRun || CutShort(recovery)) {
+			return refuse(unapprovedLink(current, name, newestFirst, want.Mode))
 		}
 		newestFirst = append(newestFirst, Link{Name: name, Recovery: recovery, Approval: approval})
 		if approval == nil || approval.FirstRun() {
@@ -76,28 +102,77 @@ func FollowChain(current string, read LogReader) ([]Link, error) {
 		// does not decode (Validate), so it is refused in approvalOf.
 		previous := approval.PreviousLog
 		if seen[previous] {
-			return nil, &ChainError{Run: name, Previous: previous, Reason: fmt.Sprintf("the approvals from %s name %s twice; the chain of runs must end at the first run", current, previous)}
+			return refuse(&ChainError{Run: name, Previous: previous, Reason: fmt.Sprintf("the approvals from %s name %s twice; the chain of runs must end at the first run", current, previous)})
 		}
 		seen[previous] = true
 		earlier, err := read(previous)
 		if err != nil {
-			return nil, &ChainError{Run: name, Previous: previous, Reason: fmt.Sprintf("that log cannot be read (%v): every earlier run's log stays beside the engine's, so put it back as the engine wrote it", err)}
+			return refuse(&ChainError{Run: name, Previous: previous, Reason: fmt.Sprintf("that log cannot be read (%v): restore it from a backup of the log as the engine wrote it; if it cannot be recovered, the history starts at the first intact run, and a log moved into quarantine is never put back", err)})
 		}
 		if !PreviousLogApproved(earlier, *approval) {
-			return nil, &ChainError{Run: name, Previous: previous, Reason: fmt.Sprintf("the approval names final record hash %s, but that log's final record hash is %s: it is not the log the owner approved", approval.PreviousLogFinalHash, earlier.FinalRecordHash)}
+			return refuse(&ChainError{Run: name, Previous: previous, Reason: fmt.Sprintf("the approval names final record hash %s, but that log's final record hash is %s: it is not the log the owner approved", approval.PreviousLogFinalHash, earlier.FinalRecordHash)})
+		}
+		got, refused := identityOf(previous, earlier)
+		if refused != nil {
+			refused.Run, refused.Previous = name, previous
+			return refuse(refused)
+		}
+		if got != want {
+			return refuse(&ChainError{Run: name, Previous: previous, Reason: fmt.Sprintf("that log is of account %q in mode %q, but %s is of account %q in mode %q: a chain of runs is one account's in one mode", got.AccountID, got.Mode, current, want.AccountID, want.Mode)})
 		}
 		name, recovery = previous, earlier
 	}
+	return oldestFirst(newestFirst), nil
+}
+
+// unapprovedLink is the refusal of name, a log holding no approval that is
+// not a dry run's first run, named with the run whose approval names it.
+func unapprovedLink(current, name string, newestFirst []Link, mode string) *ChainError {
+	reason := fmt.Sprintf("it holds no run approval, so it states no starting book and is not a first run: a %s run is started with an approval, and a log without one is a start cut short before it was recorded", mode)
+	if mode == event.TradingModeDryRun {
+		reason = "it holds no run approval and nothing past its configuration, so it cannot be told from a fresh run's start cut short before its approval was recorded"
+	}
+	if name == current {
+		return &ChainError{Run: name, Reason: reason}
+	}
+	return &ChainError{Run: newestFirst[len(newestFirst)-1].Name, Previous: name, Reason: reason}
+}
+
+// oldestFirst returns the links of newestFirst in the opposite order.
+func oldestFirst(newestFirst []Link) []Link {
 	chain := make([]Link, len(newestFirst))
 	for i, l := range newestFirst {
 		chain[len(newestFirst)-1-i] = l
 	}
-	return chain, nil
+	return chain
+}
+
+// identity is what a chain of runs is matched on: one account in one mode.
+type identity struct{ AccountID, Mode string }
+
+// identityOf returns the account and mode the run's configuration input
+// records. Every version of the target-weight configuration records both.
+func identityOf(name string, recovery journal.Recovery) (identity, *ChainError) {
+	for _, entry := range recovery.Entries {
+		env := entry.Envelope
+		if entry.Kind != journal.KindInput || env.Type != event.TargetWeightConfigurationEventType {
+			continue
+		}
+		var id struct {
+			AccountID string `json:"account_id"`
+			Mode      string `json:"mode"`
+		}
+		if err := json.Unmarshal(env.Payload, &id); err != nil || id.AccountID == "" || !event.ValidTradingMode(id.Mode) {
+			return identity{}, &ChainError{Run: name, Reason: "its configuration does not name its account and a mode of dry-run, paper or live"}
+		}
+		return identity{id.AccountID, id.Mode}, nil
+	}
+	return identity{}, &ChainError{Run: name, Reason: "it records no target-weight configuration, so its account and mode are unknown"}
 }
 
 // approvalOf returns the run's one committed approval, nil when it holds
 // none; two, or one that does not decode, refuse.
-func approvalOf(name string, recovery journal.Recovery) (*event.OperatorRunApprovedPayload, error) {
+func approvalOf(name string, recovery journal.Recovery) (*event.OperatorRunApprovedPayload, *ChainError) {
 	var found *event.OperatorRunApprovedPayload
 	for _, entry := range recovery.Entries {
 		env := entry.Envelope
@@ -131,6 +206,38 @@ func OlderLog(a, b LoggedFile) bool {
 		return a.Modified.Before(b.Modified)
 	}
 	return a.Name < b.Name
+}
+
+// ListLogs returns the durable logs in dir, the regular files named with
+// suffix, in OlderLog order. A log that vanishes while it is listed is
+// skipped; one that cannot be examined for any other reason refuses, so the
+// latest run is never passed over silently.
+func ListLogs(dir, suffix string) ([]LoggedFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("list the durable log's directory %s: %w", dir, err)
+	}
+	return listed(dir, suffix, entries)
+}
+
+// listed is ListLogs of the entries read from dir.
+func listed(dir, suffix string, entries []fs.DirEntry) ([]LoggedFile, error) {
+	var logs []LoggedFile
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), suffix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("examine %s in %s: %w", entry.Name(), dir, err)
+		}
+		logs = append(logs, LoggedFile{Name: entry.Name(), Modified: info.ModTime()})
+	}
+	sort.Slice(logs, func(i, j int) bool { return OlderLog(logs[i], logs[j]) })
+	return logs, nil
 }
 
 // LatestRun returns the name of the latest run among the logs of one

@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -160,18 +162,23 @@ type alertView struct {
 	Body     string
 }
 
-// newHandler serves the journals read-only. Every request re-reads and
-// re-verifies them, so the page is never staler than the file.
 // newHandlerFor serves the journals and, for each engine directory, the
 // latest run in it, resolved afresh on every request, so a restart that
 // starts a new run is shown without restarting the dashboard. Each is shown
 // with the runs before it, followed back to the first (report.EarlierRuns).
+// Every request re-reads and re-verifies the current log, so the page is
+// never staler than the file.
 func newHandlerFor(journals, engineDirs []string, benchmark string) http.Handler {
-	sources := source{journals: journals, dirs: engineDirs}
+	return newHandlerWith(source{journals: journals, dirs: engineDirs}, benchmark, os.ReadFile)
+}
+
+// newHandlerWith is newHandlerFor reading each file with readFile.
+func newHandlerWith(sources source, benchmark string, readFile func(string) ([]byte, error)) http.Handler {
+	logs := &logCache{stat: os.Stat, readFile: readFile, logs: map[string]cachedLog{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok\n") })
 	mux.HandleFunc("/api/summary.json", func(w http.ResponseWriter, _ *http.Request) {
-		accounts, err := load(sources, benchmark)
+		accounts, err := load(sources, benchmark, logs)
 		if err != nil {
 			fail(w, err)
 			return
@@ -180,7 +187,7 @@ func newHandlerFor(journals, engineDirs []string, benchmark string) http.Handler
 		_ = json.NewEncoder(w).Encode(accounts)
 	})
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
-		accounts, err := load(sources, benchmark)
+		accounts, err := load(sources, benchmark, logs)
 		if err != nil {
 			fail(w, err)
 			return
@@ -230,13 +237,10 @@ func readOnly(next http.Handler) http.Handler {
 	})
 }
 
-// fail answers without naming the server's paths.
+// fail answers without naming the server's paths. A broken chain of runs
+// never reaches it: the page shows it on the equity card (load).
 func fail(w http.ResponseWriter, err error) {
 	message := "journal unavailable"
-	var broken *restart.ChainError
-	if errors.As(err, &broken) {
-		message = "journal chain of runs is broken: " + broken.Error()
-	}
 	if strings.Contains(err.Error(), "does not verify") {
 		message = "journal does not verify"
 	}
@@ -247,10 +251,15 @@ func fail(w http.ResponseWriter, err error) {
 // directories whose latest run is found on each request.
 type source struct{ journals, dirs []string }
 
-func load(src source, benchmark string) ([]account, error) {
+// load reads each account's current log afresh, and its earlier runs and the
+// engine directories' other logs through logs. Only the equity comparison
+// reads the earlier runs, so a broken chain of them is shown on the equity
+// card, naming both logs, and never refuses the page: the current run's
+// holdings, state, alerts and day's figures do not depend on it.
+func load(src source, benchmark string, logs *logCache) ([]account, error) {
 	paths := slices.Clone(src.journals)
 	for _, dir := range src.dirs {
-		path, err := latestLogIn(dir)
+		path, err := latestLogIn(dir, logs)
 		if err != nil {
 			return nil, err
 		}
@@ -258,7 +267,7 @@ func load(src source, benchmark string) ([]account, error) {
 	}
 	var out []account
 	for _, path := range paths {
-		raw, err := os.ReadFile(path)
+		raw, err := logs.readFile(path)
 		if err != nil {
 			return nil, errors.New("read journal")
 		}
@@ -266,11 +275,7 @@ func load(src source, benchmark string) ([]account, error) {
 		if err != nil {
 			return nil, err
 		}
-		earlier, err := report.EarlierRuns(path, os.ReadFile)
-		if err != nil {
-			return nil, err
-		}
-		a, err := view(earlier, envelopes, benchmark)
+		a, err := view(report.EarlierRunsOf(path, raw, logs.recover), envelopes, benchmark)
 		if err != nil {
 			return nil, err
 		}
@@ -280,29 +285,15 @@ func load(src source, benchmark string) ([]account, error) {
 }
 
 // latestLogIn returns the path of the latest run in an engine's log
-// directory, by the engine's own rule (restart.LatestRun).
-func latestLogIn(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
+// directory, by the engine's own rule: the engine's listing
+// (restart.ListLogs) and its choice of the latest run (restart.LatestRun).
+func latestLogIn(dir string, logs *logCache) (string, error) {
+	files, err := restart.ListLogs(dir, ".log")
 	if err != nil {
 		return "", errors.New("read the engine directory")
 	}
-	var files []restart.LoggedFile
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".log") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		files = append(files, restart.LoggedFile{Name: entry.Name(), Modified: info.ModTime()})
-	}
 	latest, err := restart.LatestRun(files, func(name string) (journal.Recovery, error) {
-		raw, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			return journal.Recovery{}, errors.New("cannot be read")
-		}
-		return journal.RecoverLog(bytes.NewReader(raw))
+		return logs.recover(filepath.Join(dir, name))
 	})
 	if err != nil {
 		return "", err
@@ -313,12 +304,56 @@ func latestLogIn(dir string) (string, error) {
 	return filepath.Join(dir, latest), nil
 }
 
-func view(earlier, envelopes []event.Envelope, benchmark string) (account, error) {
+// logCache keeps each log's recovery by its path, size and modification
+// time. A durable log is only ever appended to, so a log whose size and
+// time are unchanged holds what it held, and a request recovers only the
+// logs that changed, never every byte the engine has written.
+type logCache struct {
+	stat     func(string) (fs.FileInfo, error)
+	readFile func(string) ([]byte, error)
+	mu       sync.Mutex
+	logs     map[string]cachedLog
+}
+
+// cachedLog is one log's recovery, or the reason it does not recover, as
+// of its size and modification time.
+type cachedLog struct {
+	size     int64
+	modified time.Time
+	recovery journal.Recovery
+	err      error
+}
+
+// recover returns the recovery of the log at path. A file that cannot be
+// read is not kept, so a fault fixed at the file is seen on the next request.
+func (c *logCache) recover(path string) (journal.Recovery, error) {
+	info, err := c.stat(path)
+	if err != nil {
+		return journal.Recovery{}, errors.New("cannot be read")
+	}
+	c.mu.Lock()
+	hit, ok := c.logs[path]
+	c.mu.Unlock()
+	if ok && hit.size == info.Size() && hit.modified.Equal(info.ModTime()) {
+		return hit.recovery, hit.err
+	}
+	raw, err := c.readFile(path)
+	if err != nil {
+		return journal.Recovery{}, errors.New("cannot be read")
+	}
+	recovery, err := journal.RecoverLog(bytes.NewReader(raw))
+	c.mu.Lock()
+	c.logs[path] = cachedLog{size: info.Size(), modified: info.ModTime(), recovery: recovery, err: err}
+	c.mu.Unlock()
+	return recovery, err
+}
+
+func view(history report.History, envelopes []event.Envelope, benchmark string) (account, error) {
 	date, err := report.LastDate(envelopes)
 	if err != nil {
 		return account{}, err
 	}
-	summary, err := report.SummarizeWithHistory(earlier, envelopes, date, benchmark)
+	summary, err := report.SummarizeWithHistory(history, envelopes, date, benchmark)
 	if err != nil {
 		return account{}, err
 	}

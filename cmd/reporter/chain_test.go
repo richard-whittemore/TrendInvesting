@@ -65,19 +65,45 @@ func TestReadJournalFollowsTheChainOfRunsForTheSummary(t *testing.T) {
 	first := writeChainedLog(t, filepath.Join(dir, "run1.log"), approvalNaming("", ""))
 	current := filepath.Join(dir, "run2.log")
 	writeChainedLog(t, current, approvalNaming("run1.log", first))
-	earlier, envelopes, _, _, err := readJournal(current, t0, time.Minute, map[string]bool{})
-	if err != nil || len(envelopes) == 0 || len(earlier) == 0 {
-		t.Fatalf("earlier = %d, envelopes = %d, err = %v", len(earlier), len(envelopes), err)
+	history, envelopes, _, _, err := readJournal(current, t0, time.Minute, map[string]bool{})
+	if err != nil || history.Broken != nil || len(envelopes) == 0 || len(history.Earlier) == 0 {
+		t.Fatalf("earlier = %d, broken = %v, envelopes = %d, err = %v", len(history.Earlier), history.Broken, len(envelopes), err)
 	}
 }
 
-func TestReadJournalRefusesABrokenChainNamingTheLink(t *testing.T) {
+// TestABrokenChainCostsNoAlertAndIsReportedOnce: the earlier runs feed only
+// the equity comparison, so a chain broken between two earlier logs never
+// holds back the current log's incident alerts or its summary (ADR 0019,
+// "Alerting"). The summary's equity comparison is one line naming both
+// logs, and the break itself is one alert, delivered once.
+func TestABrokenChainCostsNoAlertAndIsReportedOnce(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
 	dir := t.TempDir()
 	writeChainedLog(t, filepath.Join(dir, "run1.log"), approvalNaming("", ""))
 	current := filepath.Join(dir, "run2.log")
 	writeChainedLog(t, current, approvalNaming("run1.log", "sha256:"+strings.Repeat("0", 64)))
-	_, _, _, _, err := readJournal(current, t0, time.Minute, map[string]bool{})
-	if err == nil || !strings.Contains(err.Error(), "run2.log") || !strings.Contains(err.Error(), "run1.log") {
-		t.Fatalf("err = %v, want the link between run2.log and run1.log", err)
+	args := []string{"-journal", current, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-summary"}
+	now := func() time.Time { return t0.Add(time.Hour) }
+
+	var first, second bytes.Buffer
+	if err := run(args, fakeEnv, now, &first, fakeClient); err != nil {
+		t.Fatalf("first run: %v\n%s", err, first.String())
+	}
+	out := first.String()
+	if strings.Contains(out, "cannot read the journal") {
+		t.Fatalf("the broken chain refused the journal:\n%s", out)
+	}
+	for _, want := range []string{"engine halted", "order refused", "daily summary, 2024-01-02",
+		"Equity vs SPY: history unavailable: the chain of runs is broken between run2.log and run1.log\n",
+		"joint: the history of earlier runs is unavailable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("first run lacks %q:\n%s", want, out)
+		}
+	}
+	if err := run(args, fakeEnv, now, &second, fakeClient); err != nil {
+		t.Fatalf("second run: %v\n%s", err, second.String())
+	}
+	if strings.Contains(second.String(), "history of earlier runs") {
+		t.Fatalf("the break was reported twice:\n%s", second.String())
 	}
 }

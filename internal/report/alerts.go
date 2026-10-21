@@ -8,6 +8,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
+	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
 // Severity is how loudly an alert is delivered.
@@ -70,6 +71,9 @@ const (
 	// channel, an empty or malformed secret: that channel is set aside and
 	// the others still deliver.
 	KindChannelRefused Kind = "channel-refused"
+	// KindHistoryUnavailable is a chain of runs that cannot be followed back
+	// to the first run: only the equity comparison's history is lost.
+	KindHistoryUnavailable Kind = "history-unavailable"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
@@ -705,4 +709,17 @@ func Fresh(alerts []Alert, seen map[string]bool) []Alert {
 		out = append(out, a)
 	}
 	return out
+}
+
+// HistoryUnavailableAlert tells the owner, once, that the chain of runs is
+// broken, so the equity comparison runs over the intact runs alone. The key
+// is the account and the break, so one break is one incident. It is
+// routine: no figure the engine trades by depends on the history.
+func HistoryUnavailableAlert(account string, broken *restart.ChainError, at time.Time) Alert {
+	return Alert{
+		Key: "history-unavailable:" + account + ":" + broken.Run + ":" + broken.Previous, Kind: KindHistoryUnavailable, Severity: Routine, AccountID: account, At: at,
+		Title: fmt.Sprintf("%s: the history of earlier runs is unavailable", account),
+		Body: fmt.Sprintf("%s (%v). The equity comparison runs from %s, the first intact run, until the chain is whole; the incident alerts, the engine state and the day's figures are the current run's and are unaffected. Restore the named earlier log from a backup of it as the engine wrote it; if it cannot be recovered, the history starts at the first intact run from now on. Never put back a log moved into quarantine.",
+			HistoryUnavailable(broken), broken, historyStartsAt(broken)),
+	}
 }

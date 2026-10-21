@@ -115,6 +115,12 @@ type Equity struct {
 	DayAccountReturn   float64
 	DayBenchmarkReturn float64
 	Points             []EquityPoint
+	// HistoryUnavailable is set when the chain of runs is broken
+	// (HistoryUnavailable, the function): the comparison then runs from
+	// HistoryStartsAt, the log of the first intact run, not from the
+	// account's first run.
+	HistoryUnavailable string
+	HistoryStartsAt    string
 }
 
 // EquityPoint is one date on which the account's net liquidation and the
@@ -180,18 +186,20 @@ type Summary struct {
 // trades) that does not read or
 // validate refuses the summary, as journalquery does.
 func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, error) {
-	return SummarizeWithHistory(nil, envelopes, date, benchmark)
+	return SummarizeWithHistory(History{}, envelopes, date, benchmark)
 }
 
-// SummarizeWithHistory is Summarize for a run that follows others: earlier
-// holds the envelopes of the runs before it, oldest first (restart.FollowChain
-// is how a caller finds them). Only the equity comparison reads them: its
+// SummarizeWithHistory is Summarize for a run that follows others: history
+// holds the envelopes of the runs before it, oldest first (EarlierRuns is how
+// a caller finds them). Only the equity comparison reads them: its
 // paired points, chart and returns run from the first run's first close, so a
 // restart or an upgrade does not restart the history. Everything else is the
 // current run's alone: a fresh run starts in the state its own approval
 // states, not the state an earlier run ended in, and its inputs are counted
-// as its own.
-func SummarizeWithHistory(earlier, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+// as its own. A broken history is named in the comparison, which then runs
+// over the intact runs alone.
+func SummarizeWithHistory(history History, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	earlier := history.Earlier
 	end, err := time.Parse(time.DateOnly, date)
 	if err != nil {
 		return Summary{}, fmt.Errorf("report: date %q is not YYYY-MM-DD: %w", date, err)
@@ -328,6 +336,9 @@ func SummarizeWithHistory(earlier, envelopes []event.Envelope, date, benchmark s
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
 	s.Equity = equityOf(points, date)
+	if history.Broken != nil {
+		s.Equity.HistoryUnavailable, s.Equity.HistoryStartsAt = HistoryUnavailable(history.Broken), historyStartsAt(history.Broken)
+	}
 	return s, nil
 }
 

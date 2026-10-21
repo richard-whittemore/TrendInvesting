@@ -31,7 +31,7 @@ func input(t *testing.T, seq uint64, when time.Time, eventType string, version u
 // writeRun writes a durable log of one run: its configuration, its approval
 // and a close on each session in sessionsOf with synthetic figures. It
 // returns the log's final record hash.
-func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApprovedPayload, first int, modified time.Time) string {
+func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApprovedPayload, first int, modified time.Time, extra ...journal.Entry) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	file, err := os.Create(path)
@@ -60,10 +60,21 @@ func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApproved
 			input(t, uint64(len(entries)+2), at(n), event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "snap:"+name+string(rune('0'+n)),
 				event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: at(n), Currency: "USD", NetLiquidation: 4000 + float64(10*n), Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 39}}}))
 	}
-	for _, e := range entries {
-		if err := log.Append([]journal.Entry{e}); err != nil {
+	for _, e := range extra {
+		e.Envelope.Sequence = uint64(len(entries) + 1)
+		entries = append(entries, e)
+	}
+	// Each input is its own group, with the decisions recorded after it.
+	var group []journal.Entry
+	for i, e := range entries {
+		group = append(group, e)
+		if i+1 < len(entries) && entries[i+1].Kind == journal.KindDecision {
+			continue
+		}
+		if err := log.Append(group); err != nil {
 			t.Fatal(err)
 		}
+		group = nil
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
@@ -124,16 +135,96 @@ func TestDashboardFollowsARestartAndShowsTheWholeHistory(t *testing.T) {
 	}
 }
 
-// TestDashboardRefusesABrokenChainNamingTheLink: the page does not show a
-// history that silently starts late.
-func TestDashboardRefusesABrokenChainNamingTheLink(t *testing.T) {
+// halted is an engine state decision holding the engine Halted: an alert.
+func halted(t *testing.T, n int) journal.Entry {
+	t.Helper()
+	e := input(t, 0, at(n), event.EngineStateEventType, event.EngineStateScopedVersion, "state:halted",
+		event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "figures"})
+	e.Kind = journal.KindDecision
+	return e
+}
+
+// TestDashboardShowsTheCurrentRunWhenTheChainIsBroken: only the equity
+// history reads the earlier runs, so a broken chain never blanks the page:
+// the current run's holdings, state, alerts and day's figures are shown, and
+// the equity card names both logs of the broken link and where the intact
+// runs start.
+func TestDashboardShowsTheCurrentRunWhenTheChainIsBroken(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	writeRun(t, dir, "run1.log", approval("", ""), 0, base)
-	writeRun(t, dir, "run2.log", approval("run1.log", "sha256:"+strings.Repeat("0", 64)), 2, base.Add(time.Hour))
-	rec := get(newHandlerFor(nil, []string{dir}, "SPY"), http.MethodGet, "/")
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "run2.log") || !strings.Contains(rec.Body.String(), "run1.log") {
-		t.Fatalf("status %d body %q, want a refusal naming run2.log and run1.log", rec.Code, rec.Body)
+	writeRun(t, dir, "run2.log", approval("run1.log", "sha256:"+strings.Repeat("0", 64)), 2, base.Add(time.Hour), halted(t, 3))
+	h := newHandlerFor(nil, []string{dir}, "SPY")
+	got := summaryOf(t, h)
+	s := got.Summary
+	if s.EngineState != "halted" || !s.HaveSnapshot || len(s.Holdings) != 1 || len(got.Alerts) == 0 || s.Date != at(3).Format(time.DateOnly) {
+		t.Fatalf("the current run is not shown: %+v, alerts %v", s, got.Alerts)
+	}
+	const message = "history unavailable: the chain of runs is broken between run2.log and run1.log"
+	if s.Equity.HistoryUnavailable != message || s.Equity.HistoryStartsAt != "run2.log" || len(s.Equity.Points) != 2 {
+		t.Fatalf("equity = %+v, want the broken link named and the intact run's two points", s.Equity)
+	}
+	rec := get(h, http.MethodGet, "/")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), message) || !strings.Contains(rec.Body.String(), "engine halted") {
+		t.Fatalf("status %d body %q", rec.Code, rec.Body)
+	}
+}
+
+// TestDashboardKeepsBothLogNamesForADamagedEarlierLog: a damaged earlier
+// log, whatever its recovery error reads, is shown as the broken link
+// between the two logs, never relabelled as the current journal failing.
+func TestDashboardKeepsBothLogNamesForADamagedEarlierLog(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	h1 := writeRun(t, dir, "run1.log", approval("", ""), 0, base)
+	writeRun(t, dir, "run2.log", approval("run1.log", h1), 2, base.Add(time.Hour))
+	path := filepath.Join(dir, "run1.log")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.Replace(string(raw), `"net_liquidation":4000`, `"net_liquidation":4001`, 1))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := summaryOf(t, newHandlerFor([]string{filepath.Join(dir, "run2.log")}, nil, "SPY"))
+	if got.Summary.Equity.HistoryUnavailable != "history unavailable: the chain of runs is broken between run2.log and run1.log" {
+		t.Fatalf("equity = %+v", got.Summary.Equity)
+	}
+}
+
+// TestDashboardRereadsOnlyTheCurrentLog: each earlier log's recovery is kept
+// by its path, size and modification time, so a second request reads only
+// the current log, and a log that changed is read again.
+func TestDashboardRereadsOnlyTheCurrentLog(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	h1 := writeRun(t, dir, "run1.log", approval("", ""), 0, base)
+	h2 := writeRun(t, dir, "run2.log", approval("run1.log", h1), 2, base.Add(time.Hour))
+	writeRun(t, dir, "run3.log", approval("run2.log", h2), 4, base.Add(2*time.Hour))
+	opens := map[string]int{}
+	readFile := func(path string) ([]byte, error) {
+		opens[filepath.Base(path)]++
+		return os.ReadFile(path)
+	}
+	h := newHandlerWith(source{dirs: []string{dir}}, "SPY", readFile)
+	if got := summaryOf(t, h); len(got.Summary.Equity.Points) != 6 {
+		t.Fatalf("first request: %d points", len(got.Summary.Equity.Points))
+	}
+	clear(opens)
+	if got := summaryOf(t, h); len(got.Summary.Equity.Points) != 6 {
+		t.Fatalf("second request: %d points", len(got.Summary.Equity.Points))
+	}
+	if len(opens) != 1 || opens["run3.log"] != 1 {
+		t.Fatalf("second request opened %v, want run3.log once", opens)
+	}
+	clear(opens)
+	writeRun(t, dir, "run3.log", approval("run2.log", h2), 4, base.Add(3*time.Hour), halted(t, 5))
+	if got := summaryOf(t, h); got.Summary.EngineState != "halted" {
+		t.Fatalf("the changed current log was not read again: %+v", got.Summary)
+	}
+	if opens["run1.log"] != 0 || opens["run2.log"] != 0 {
+		t.Fatalf("after the current log changed, opened %v", opens)
 	}
 }
 

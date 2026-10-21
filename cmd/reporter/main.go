@@ -22,11 +22,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +37,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
@@ -128,7 +131,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		label = filepath.Base(*journalPath)
 	}
 	info, statErr := os.Stat(*journalPath)
-	earlier, envelopes, account, alerts, refused := readJournal(*journalPath, now(), *ackWithin, seen)
+	history, envelopes, account, alerts, refused := readJournal(*journalPath, now(), *ackWithin, seen)
 	if account != "" {
 		label = account
 	}
@@ -196,7 +199,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
 	if *summary && refused == nil {
-		a, due, err := summaryAlert(earlier, envelopes, *date, *benchmark, clock)
+		a, due, err := summaryAlert(history, envelopes, *date, *benchmark, clock)
 		switch {
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
@@ -213,42 +216,60 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	return errors.Join(failures...)
 }
 
-// readJournal reads, verifies and decodes the journal, returning its
-// envelopes, its account and its alerts, including every venue report the
-// engine did not read and every order to be sent not acknowledged within
-// ackWithin of its commit by now, or the reason it was refused.
-func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) (earlier, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
+// readJournal reads and verifies the journal and returns the history of the
+// runs before it, its envelopes, its account and its alerts, including every
+// venue report the engine did not read and every order to be sent not
+// acknowledged within ackWithin of its commit by now, or the reason it was
+// refused. Only the summary's equity comparison reads the earlier runs, so a
+// broken chain of them refuses nothing: it is one more alert, delivered once
+// (ADR 0019, "Alerting").
+func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) (history report.History, envelopes []event.Envelope, account string, alerts []report.Alert, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("reporter: read journal: %w", err)
+		return report.History{}, nil, "", nil, fmt.Errorf("reporter: read journal: %w", err)
 	}
 	_, entries, err := report.LoadEntries(raw)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return report.History{}, nil, "", nil, err
 	}
 	envelopes = make([]event.Envelope, len(entries))
 	for i, e := range entries {
 		envelopes[i] = e.Envelope
 	}
-	earlier, err = report.EarlierRuns(path, os.ReadFile)
-	if err != nil {
-		return nil, nil, "", nil, err
-	}
 	account, strategy, err := report.AccountOf(envelopes)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return report.History{}, nil, "", nil, err
 	}
 	alerts, err = report.Alerts(envelopes)
 	if err != nil {
-		return nil, nil, account, nil, err
+		return report.History{}, nil, account, nil, err
 	}
 	orders, unread, err := report.OrderLifecycles(entries, strategy)
 	if err != nil {
-		return nil, nil, account, nil, err
+		return report.History{}, nil, account, nil, err
 	}
 	alerts = append(alerts, report.UnreadReportAlerts(account, unread)...)
 	alerts = append(alerts, report.UnacknowledgedAlerts(orders, now, ackWithin, func(key string) bool { return deliveredAnywhere(seen, key) })...)
-	return earlier, envelopes, account, alerts, nil
+	history = report.EarlierRunsOf(path, raw, recoverLogFile)
+	if history.Broken != nil {
+		alerts = append(alerts, report.HistoryUnavailableAlert(account, history.Broken, now))
+	}
+	return history, envelopes, account, alerts, nil
+}
+
+// recoverLogFile recovers the durable log at path.
+func recoverLogFile(path string) (journal.Recovery, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		// The reason reaches the alert channels, which are not told the
+		// host's paths.
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			err = pathErr.Err
+		}
+		return journal.Recovery{}, err
+	}
+	return journal.RecoverLog(bytes.NewReader(raw))
 }
 
 // deliveredAnywhere reports whether any channel took the alert keyed key, so
@@ -270,7 +291,7 @@ func deliveredAnywhere(seen map[string]bool, key string) bool {
 // the latest closed session's day, and it is not yet due when none has
 // closed. A stated date whose session has not closed is an error. A clock
 // check run in this firing adds its time and result as the summary's last line.
-func summaryAlert(earlier, envelopes []event.Envelope, date, benchmark string, clock *report.ClockCheck) (report.Alert, bool, error) {
+func summaryAlert(history report.History, envelopes []event.Envelope, date, benchmark string, clock *report.ClockCheck) (report.Alert, bool, error) {
 	if date == "" {
 		last, ok := report.ClosedSessionDate(envelopes)
 		if !ok {
@@ -278,7 +299,7 @@ func summaryAlert(earlier, envelopes []event.Envelope, date, benchmark string, c
 		}
 		date = last
 	}
-	s, err := report.SummarizeWithHistory(earlier, envelopes, date, benchmark)
+	s, err := report.SummarizeWithHistory(history, envelopes, date, benchmark)
 	if err != nil {
 		return report.Alert{}, false, err
 	}

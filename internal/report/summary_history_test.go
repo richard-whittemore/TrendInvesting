@@ -1,10 +1,12 @@
 package report_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
+	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
 // twoRuns is a first run closing on sessions 0 to 2 and the run after it,
@@ -30,7 +32,7 @@ func twoRuns(t *testing.T) (first, second []event.Envelope) {
 // and the day's figures still compare the last two points.
 func TestSummarizeAcrossRunsPairsPointsFromTheFirstRun(t *testing.T) {
 	first, second := twoRuns(t)
-	got, err := report.SummarizeWithHistory(first, second, day(4).Format("2006-01-02"), "SPY")
+	got, err := report.SummarizeWithHistory(report.History{Earlier: first}, second, day(4).Format("2006-01-02"), "SPY")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestSummarizeAcrossRunsPairsPointsFromTheFirstRun(t *testing.T) {
 // history's: a fresh run starts Normal even if the one before ended Halted.
 func TestSummarizeAcrossRunsKeepsTheCurrentRunsOwnMeaning(t *testing.T) {
 	first, second := twoRuns(t)
-	got, err := report.SummarizeWithHistory(first, second, day(4).Format("2006-01-02"), "SPY")
+	got, err := report.SummarizeWithHistory(report.History{Earlier: first}, second, day(4).Format("2006-01-02"), "SPY")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,11 +86,55 @@ func TestEarlierRunsFeedOnlyWhatTheCurrentRunWouldRead(t *testing.T) {
 	own.add(event.AccountSnapshotEventType, event.AccountSnapshotSchemaVersion, "equity-only", day(1), event.AccountSnapshotPayload{})
 	history := append(append([]event.Envelope{}, first...), noise.out[1:]...)
 	history = append(history, own.out[1:]...)
-	got, err := report.SummarizeWithHistory(history, second, day(4).Format("2006-01-02"), "SPY")
+	got, err := report.SummarizeWithHistory(report.History{Earlier: history}, second, day(4).Format("2006-01-02"), "SPY")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Equity.Points) != 5 || !near(got.Equity.AccountReturn, 4300.0/4000-1) {
 		t.Fatalf("equity = %+v", got.Equity)
+	}
+}
+
+// TestABrokenChainNamesBothLogsInTheEquityComparison: the comparison runs
+// over the intact runs and says where the chain broke, naming both logs;
+// the text summary gives that one line in place of the comparison, and the
+// day's figures as before.
+func TestABrokenChainNamesBothLogsInTheEquityComparison(t *testing.T) {
+	_, second := twoRuns(t)
+	broken := &restart.ChainError{Run: "run2.log", Previous: "run1.log", Reason: "that log cannot be read", Intact: []restart.Link{{Name: "run2.log"}}}
+	got, err := report.SummarizeWithHistory(report.History{Broken: broken}, second, day(4).Format("2006-01-02"), "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := got.Equity
+	if e.HistoryUnavailable != "history unavailable: the chain of runs is broken between run2.log and run1.log" || e.HistoryStartsAt != "run2.log" {
+		t.Fatalf("equity = %+v", e)
+	}
+	if !e.Available || e.StartDate != day(3).Format("2006-01-02") || got.NetLiquidation != 4300 {
+		t.Fatalf("the intact run's figures are gone: %+v", got)
+	}
+	text := report.RenderText(got)
+	if !strings.Contains(text, "Equity vs SPY: history unavailable: the chain of runs is broken between run2.log and run1.log\n") ||
+		strings.Contains(text, "Equity vs SPY, ") || !strings.Contains(text, "Day, "+day(3).Format("2006-01-02")) {
+		t.Fatalf("text:\n%s", text)
+	}
+	if line := report.HistoryUnavailable(&restart.ChainError{Run: "run2.log"}); line != "history unavailable: the chain of runs is broken at run2.log" {
+		t.Fatalf("a break at one log reads %q", line)
+	}
+}
+
+// TestHistoryUnavailableAlertIsOneIncidentPerBreak: the owner learns of a
+// broken chain once, by the reporter's once-only delivery, with the remedy.
+func TestHistoryUnavailableAlertIsOneIncidentPerBreak(t *testing.T) {
+	broken := &restart.ChainError{Run: "run2.log", Previous: "run1.log", Reason: "that log cannot be read"}
+	a := report.HistoryUnavailableAlert("joint", broken, day(1))
+	again := report.HistoryUnavailableAlert("joint", broken, day(2))
+	if a.Key != again.Key || a.Repeat || a.Kind != report.KindHistoryUnavailable || a.Severity != report.Routine {
+		t.Fatalf("alert = %+v, again = %+v", a, again)
+	}
+	for _, w := range []string{"run2.log", "run1.log", "backup", "quarantine", "incident alerts"} {
+		if !strings.Contains(a.Title+" "+a.Body, w) {
+			t.Errorf("alert lacks %q: %s / %s", w, a.Title, a.Body)
+		}
 	}
 }
