@@ -69,12 +69,37 @@ func TestClockDriftAlertSaysWhenNoSkewWasMeasured(t *testing.T) {
 		"clock: TI_CLOCK_TOLERANCE_SECONDS must be whole seconds from 1 to 60, not 'x'",
 		"the check could not be run: /x/clock-check.sh is missing",
 		"the check timed out after 40s",
-		"the clock stepped back by about 3h0m0s: the last check was recorded that far ahead of now.",
 	} {
 		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: out}, 2)
 		if !strings.Contains(a.Body, "No skew was measured") || !strings.Contains(a.Body, strings.SplitN(out, "\n", 2)[0]) {
 			t.Errorf("%q: body:\n%s", out, a.Body)
 		}
+	}
+}
+
+func TestClockDriftAlertSaysTheClockWasFoundSetBackAndWhatTheFreshCheckSaid(t *testing.T) {
+	const stepPrefix = "the clock stepped back by about 3h0m0s: the last check was recorded that far ahead of now."
+	passed := stepPrefix
+	failed := stepPrefix + " The check also fails now: the check could not be run: /x/clock-check.sh is missing"
+	for _, out := range []string{passed, failed} {
+		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: out}, 2)
+		if strings.Contains(a.Body, "check failed before it could compare") {
+			t.Errorf("%q: the step back is not a check that failed before comparing: body:\n%s", out, a.Body)
+		}
+		if !strings.Contains(a.Body, "found set back by about 3h0m0s") {
+			t.Errorf("%q: the body does not say the clock was found set back: body:\n%s", out, a.Body)
+		}
+	}
+	if a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: passed}, 2); !strings.Contains(a.Body, "the fresh check then passed") {
+		t.Errorf("a passing fresh check must be said to pass: body:\n%s", a.Body)
+	}
+	if a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: failed}, 2); !strings.Contains(a.Body, "the fresh check then failed: the check could not be run: /x/clock-check.sh is missing") {
+		t.Errorf("a failing fresh check must be said to fail, with its text: body:\n%s", a.Body)
+	}
+	measured := stepPrefix + " The check also fails now: clock: skew -7s against https://x"
+	a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: measured}, 2)
+	if strings.Contains(a.Body, "No skew was measured") || !strings.Contains(a.Body, "its reading is quoted below") {
+		t.Errorf("a failing fresh check that measured a skew must not say none was measured: body:\n%s", a.Body)
 	}
 }
 

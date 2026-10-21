@@ -121,9 +121,10 @@ func loadHostClock(path string) (hostClock, error) {
 // moment later), is this period's and is reused rather than made again or
 // counted again. A check dated further ahead than that means the clock went
 // back, which is itself a failed check: it is counted, a new check is made
-// for the evidence, and the two are one failure. A failure pages once clockPagesAfter checks in a row have failed;
-// a passing check resolves the incident on PagerDuty and forgets it, so the
-// next failure pages anew. It returns the check the summary shows, if any.
+// for the evidence, and the two are one failure. A failure pages once
+// clockPagesAfter checks in a row have failed; a passing check resolves the
+// incident on PagerDuty and forgets it, so the next failure pages anew. It
+// returns the check the summary shows, if any.
 func clockStep(path, command, host string, senders []sender, clock func() time.Time, every time.Duration) (*report.ClockCheck, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -199,10 +200,10 @@ func clockStep(path, command, host string, senders []sender, clock func() time.T
 	return h.Last, nil
 }
 
-// steppedBack is the failed check for a clock found set back by about by:
-// the new check's evidence under the words for the step. A passing new check
-// says nothing about the skew, since the clock now agrees with the reference
-// only after the step.
+// steppedBack is the failed check for a clock found set back by about the
+// given duration: the new check's evidence under the words for the step. A
+// passing new check says nothing about the skew, since the clock now agrees
+// with the reference only after the step.
 func steppedBack(c report.ClockCheck, by time.Duration) report.ClockCheck {
 	said := fmt.Sprintf("the clock stepped back by about %s: the last check was recorded that far ahead of now.", by.Round(time.Minute))
 	if !c.Passed {
