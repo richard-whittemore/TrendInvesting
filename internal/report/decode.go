@@ -97,7 +97,9 @@ var (
 	clearedVersions = []uint32{event.RebalanceClearedSchemaVersion}
 	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
 	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
-	acknowledgedVersions   = []uint32{event.AlertAcknowledgedSchemaVersion}
+	// A reconciliation input, for the day a pending cash read names.
+	reconciliationInputVersions = []uint32{event.ReconciliationSchemaVersion}
+	acknowledgedVersions        = []uint32{event.AlertAcknowledgedSchemaVersion}
 	// A fresh run's approval, for the incident it carries in force: version
 	// 1, which could not state a cash scope, and the current version.
 	approvalVersions = []uint32{1, 2, event.OperatorRunApprovedSchemaVersion}

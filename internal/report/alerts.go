@@ -160,7 +160,10 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     state after the reconciliation, as the gate holds it: the record the
 //     reconciliation caused, or, when it caused none (the state did not
 //     move), the state already in force, from the latest engine-state record
-//     or the incident a fresh run's approval carried in force.
+//     or the incident a fresh run's approval carried in force. A pending
+//     cash read moves no state, so its alert says the account stays in the
+//     state in force, Normal when none is, and states the difference, its
+//     day and when it becomes Degraded instead.
 //
 // Engine-state and reconciliation alerts repeat until acknowledged; an
 // operator.alert.acknowledged anywhere in the journal acknowledges the alert
@@ -193,8 +196,18 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	// notAtClose is the latest broker snapshot stamped at its read time, if
 	// the latest one is: its ID and why it was not as of the close.
 	var notAtClose [2]string
+	// readAt holds each reconciliation input's observation time, by its ID:
+	// the day a pending cash read names.
+	readAt := map[string]time.Time{}
 	for _, e := range envelopes {
 		switch e.Type {
+		case event.ReconciliationEventType:
+			// An input that does not read is passed over, as a broker
+			// snapshot is; its result names the day by its own time.
+			var p event.ReconciliationPayload
+			if read(e, reconciliationInputVersions, &p) == nil {
+				readAt[e.ID] = p.AsOf
+			}
 		case event.BrokerSnapshotEventType:
 			var p event.BrokerSnapshotPayload
 			if read(e, brokerSnapshotVersions, &p) != nil {
@@ -222,10 +235,25 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			if p.Action != event.ReconciliationActionContinue {
 				reconciled[e.CausationID] = true
 				after, ok := caused[e.CausationID]
-				if !ok {
-					after = inForce.with(p)
-				}
-				if p.RepeatOf == "" {
+				switch {
+				case p.RepeatOf != "":
+				case p.Action == event.ReconciliationActionAlert:
+					// A pending cash read moves no state: the account stays
+					// in the state already in force (ADR 0019, amended
+					// 2026-10-21).
+					stays := !ok
+					if stays && inForce != nil {
+						after = *inForce
+					}
+					at, found := readAt[p.InputID]
+					if !found {
+						at = e.EventTime
+					}
+					out = append(out, pendingCashAlert(account, e, p, at, after, stays))
+				default:
+					if !ok {
+						after = inForce.with(p)
+					}
 					out = append(out, reconciliationAlert(account, e, p, after))
 				}
 			}
@@ -442,6 +470,67 @@ func reconciliationAlert(account string, e event.Envelope, p event.Reconciliatio
 			p.ReconciliationID, when, publicDoubt, effect, recovery),
 	}
 }
+
+// pendingCashAlert states a pending cash read (ADR 0019, amended
+// 2026-10-21, "a cash difference the reader has not yet read"): how far the
+// cash differs from the book and which way, on the New York day it was read,
+// that the Flex reader has not covered that day, the state the account is in
+// (it moves none: stays tells it stayed), what buys do, and when it becomes
+// Degraded. A decrease withholds every buy, since it may be a withdrawal; an
+// increase withholds none, sized without it. Its public text carries no
+// figure (owner decision 2026-10-17, docs/live-trading/plan.md section 7).
+func pendingCashAlert(account string, e event.Envelope, p event.ReconciliationResultPayload, at time.Time, after gateState, stays bool) Alert {
+	key := "reconciliation:" + e.ID + "@" + account
+	var residual int64
+	for _, c := range p.Components {
+		if c.Component == event.ReconciliationComponentCash {
+			residual = c.Residual
+		}
+	}
+	direction, buys := "an increase, like a deposit", "buys continue, sized without the increase until the reader explains it"
+	if residual < 0 {
+		direction, buys = "a decrease, like a withdrawal", "buys are withheld until the reader explains it, and sells and exits continue"
+	}
+	day := at.In(nysecalendar.NewYork).Format(time.DateOnly)
+	verb := "is"
+	if stays {
+		verb = "stays"
+	}
+	rest := fmt.Sprintf("(%s) on %s; the Flex reader has not covered that day yet; the account %s %s; %s; it becomes Degraded if unexplained after the Flex reader covers %s or more than %d sessions close since, whichever comes first.",
+		direction, day, verb, after.name(), buys, day, event.PendingCashReadSessions)
+	end := " Check IBKR's activity for the transfer if you made none that day: docs/manual/reconciliation.md, \"A deposit or withdrawal you make\"." + acknowledgeLine(key)
+	return Alert{
+		Key: key, Kind: KindReconciliation, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
+		Title:      fmt.Sprintf("%s: reconciliation %s (%s)", account, p.Classification, p.ReconciliationID),
+		Body:       fmt.Sprintf("%s: cash differs from the book by %s %s %s Reconciliation %s: %s.%s", account, cents(abs(residual)), p.Currency, rest, p.ReconciliationID, p.Detail, end),
+		PublicBody: fmt.Sprintf("%s: cash differs from the book %s Figures are in the journal (journal-query) and the dashboard.%s", account, rest, end),
+	}
+}
+
+// name is the state as the alert names it: Normal, Halted, or Degraded on
+// the scope's non-empty parts (a Degraded record and an incident in force
+// always name a scope: ADR 0019, amended 2026-09-24).
+func (g gateState) name() string {
+	switch g.state {
+	case event.EngineStateHalted:
+		return "Halted"
+	case event.EngineStateDegraded:
+		var parts []string
+		if len(g.instruments) > 0 {
+			parts = append(parts, "instruments ["+strings.Join(g.instruments, ",")+"]")
+		}
+		if len(g.cash) > 0 {
+			parts = append(parts, "cash ["+strings.Join(g.cash, ",")+"]")
+		}
+		return "Degraded on " + strings.Join(parts, " and ")
+	}
+	return "Normal"
+}
+
+func abs(c int64) int64 { return max(c, -c) }
+
+// cents formats whole cents as dollars and cents.
+func cents(c int64) string { return fmt.Sprintf("%d.%02d", c/100, c%100) }
 
 func slicesConcat(a, b []string) []string { return append(append([]string{}, a...), b...) }
 

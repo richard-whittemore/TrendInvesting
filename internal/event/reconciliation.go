@@ -171,6 +171,12 @@ const (
 	ReconciliationPendingCashRead = "pending-cash-read"
 )
 
+// PendingCashReadSessions is how many sessions may close after a pending
+// cash read before it is decided whatever the Flex reader says: a reader set
+// aside for longer never keeps a difference pending, and the reporter's
+// alert names this cap (ADR 0019, amended 2026-10-21).
+const PendingCashReadSessions = 2
+
 // The actions (ADR 0019, amended 2026-09-24: "continue, degrade or halt";
 // amended 2026-10-21: alert, for a pending cash read, which moves no state).
 const (

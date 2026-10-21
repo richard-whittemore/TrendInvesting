@@ -253,10 +253,9 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 }
 
 // pendingSessions is how many sessions may close after a pending cash read
-// before it is decided whatever the Flex reader says: a reader set aside
-// for longer never keeps a difference pending (ADR 0019, amended
+// before it is decided whatever the Flex reader says (ADR 0019, amended
 // 2026-10-21).
-const pendingSessions = 2
+const pendingSessions = event.PendingCashReadSessions
 
 // pendingCash is one cash difference reported as a pending cash read: the
 // reconciliation that found it, its cash component, and its window, the

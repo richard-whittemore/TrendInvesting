@@ -332,3 +332,139 @@ func TestAnApprovalIsReadAtItsRecordedSchemaVersion(t *testing.T) {
 		t.Errorf("a version 1 approval naming a cash scope was read: %v", err)
 	}
 }
+
+// pendingRead records an IRA-style reconciliation at day(n) that found only
+// the cash different, by residual cents, on a day the Flex reader has not
+// read, and its pending-cash-read result, which alerts and moves no state
+// (ADR 0019, amended 2026-10-21). repeatOf, when set, names the reading that
+// first found the same difference.
+func (s *stream) pendingRead(n int, input string, residual int64, repeatOf string) {
+	s.add(event.ReconciliationEventType, event.ReconciliationSchemaVersion, input, day(n), event.ReconciliationPayload{
+		AccountID: "joint", ReconciliationID: "close:" + input, Trigger: event.ReconciliationTriggerMorning, AsOf: day(n),
+		Unreadable: []string{}, Positions: []event.AccountPosition{}, TotalCash: float64(100000+residual) / 100, Currency: "USD",
+	})
+	s.add(event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, "reconciliation-result:joint:"+input, day(n), event.ReconciliationResultPayload{
+		AccountID: "joint", ReconciliationID: "close:" + input, InputID: input, AnchorID: "snapshot:0",
+		Classification: event.ReconciliationPendingCashRead, Action: event.ReconciliationActionAlert, CashCompared: true, Currency: "USD",
+		Components: []event.ReconciliationComponent{
+			{Component: event.ReconciliationComponentCash, Book: 100000, Expected: 100000, Observed: 100000 + residual, Residual: residual, Explanations: []string{}},
+		},
+		Detail: "pending-cash-read: total cash: the gate's detail", RepeatOf: repeatOf,
+	})
+	s.caused(input)
+}
+
+// TestAPendingCashReadStatesTheTruth: a pending cash read moves no state
+// (ADR 0019, amended 2026-10-21), so its alert says how far the cash differs
+// and which way, on what day, that the Flex reader has not covered that day,
+// the state the account stays in, whether buys continue, and when it becomes
+// Degraded; never that the account is Degraded. Its public text carries no
+// figure (owner decision 2026-10-17).
+func TestAPendingCashReadStatesTheTruth(t *testing.T) {
+	increase := newStream(t)
+	increase.pendingRead(1, "reconciliation:1", 50000, "")
+	got, err := report.Alerts(increase.out)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("alerts = %+v, %v", got, err)
+	}
+	want := "joint: cash differs from the book by 500.00 USD (an increase, like a deposit) on 2024-01-03; the Flex reader has not covered that day yet; the account stays Normal; buys continue, sized without the increase until the reader explains it; it becomes Degraded if unexplained after the Flex reader covers 2024-01-03 or more than 2 sessions close since, whichever comes first."
+	a := got[0]
+	if !strings.HasPrefix(a.Body, want) {
+		t.Errorf("body:\n%s\nwant it to start:\n%s", a.Body, want)
+	}
+	if a.Title != "joint: reconciliation pending-cash-read (close:reconciliation:1)" || a.Kind != report.KindReconciliation {
+		t.Errorf("title %q, kind %q", a.Title, a.Kind)
+	}
+	publicWant := "joint: cash differs from the book (an increase, like a deposit) on 2024-01-03; the Flex reader has not covered that day yet; the account stays Normal; buys continue"
+	if !strings.HasPrefix(a.PublicBody, publicWant) || strings.Contains(a.PublicBody, "500") || !strings.Contains(a.PublicBody, a.Key) {
+		t.Errorf("public body:\n%s", a.PublicBody)
+	}
+	for _, body := range []string{a.Body, a.PublicBody} {
+		if strings.Contains(body, "Degraded on") || strings.Contains(body, "is Degraded") {
+			t.Errorf("a pending cash read says the account is Degraded:\n%s", body)
+		}
+	}
+
+	decrease := newStream(t)
+	decrease.engineState(0, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "TLT")
+	decrease.pendingRead(1, "reconciliation:1", -25050, "")
+	got, err = report.Alerts(decrease.out)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("alerts = %+v, %v", got, err)
+	}
+	want = "joint: cash differs from the book by 250.50 USD (a decrease, like a withdrawal) on 2024-01-03; the Flex reader has not covered that day yet; the account stays Degraded on instruments [TLT]; buys are withheld until the reader explains it, and sells and exits continue; it becomes Degraded if unexplained after the Flex reader covers 2024-01-03 or more than 2 sessions close since, whichever comes first."
+	if !strings.HasPrefix(got[1].Body, want) {
+		t.Errorf("body:\n%s\nwant it to start:\n%s", got[1].Body, want)
+	}
+
+	// A Degraded state names each part of its scope; a result whose input
+	// this build does not read names its own day.
+	cash := newStream(t)
+	cash.add(event.EngineStateEventType, event.EngineStateScopedVersion, "state:0", day(0), event.EngineStatePayload{
+		State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "figures",
+		ScopeInstrumentIDs: []string{"SPY"}, ScopeCashComponents: []string{event.ReconciliationComponentCash},
+	})
+	cash.pendingRead(4, "reconciliation:1", -100, "")
+	cash.out[len(cash.out)-2].SchemaVersion = 9
+	cash.out[len(cash.out)-1].EventTime = day(1)
+	got, err = report.Alerts(cash.out)
+	if err != nil || len(got) != 2 || !strings.Contains(got[1].Body, "on 2024-01-03; the Flex reader has not covered that day yet; the account stays Degraded on instruments [SPY] and cash [total-cash]; buys are withheld") {
+		t.Errorf("a Degraded scope with cash, and an unread input: %+v, %v", got, err)
+	}
+
+	halted := newStream(t)
+	halted.engineState(0, event.EngineStateHalted, event.EngineStateReasonReconciliationUnverifiable)
+	halted.pendingRead(1, "reconciliation:1", -100, "")
+	if got, err = report.Alerts(halted.out); err != nil || len(got) != 2 || !strings.Contains(got[1].Body, "; the account stays Halted;") {
+		t.Errorf("an account already Halted stays Halted: %+v, %v", got, err)
+	}
+}
+
+// TestAPendingCashDifferenceIsDecidedWithItsOwnBody: a later reading of the
+// same pending difference stays silent, the decision that explains it sends
+// nothing (an explained result continues), and the decision that degrades
+// it keeps the Degraded reconciliation alert (ADR 0019, amended 2026-10-21:
+// one difference, one reconciliation alert).
+func TestAPendingCashDifferenceIsDecidedWithItsOwnBody(t *testing.T) {
+	s := newStream(t)
+	s.pendingRead(1, "reconciliation:1", 50000, "")
+	s.pendingRead(2, "reconciliation:2", 50000, "close:reconciliation:1")
+	s.add(event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, "reconciliation-result:joint:3:pending-cash:reconciliation:1", day(3), event.ReconciliationResultPayload{
+		AccountID: "joint", ReconciliationID: "close:reconciliation:1", InputID: "reconciliation:1", AnchorID: "snapshot:0",
+		Classification: event.ReconciliationExplained, Action: event.ReconciliationActionContinue, CashCompared: true, Currency: "USD",
+		Components: []event.ReconciliationComponent{
+			{Component: event.ReconciliationComponentCash, Book: 100000, Expected: 150000, Observed: 150000, Explanations: []string{"cash-movement:1"}, Explained: true},
+		},
+		Detail: "explained: the cash difference the reader has since recorded",
+	})
+	s.caused("reconciliation:3")
+	got, err := report.Alerts(s.out)
+	if err != nil || len(got) != 1 || got[0].Key != "reconciliation:reconciliation-result:joint:reconciliation:1@joint" {
+		t.Fatalf("the first reading pages, its repeat and its explanation do not: %+v, %v", got, err)
+	}
+
+	degraded := newStream(t)
+	degraded.pendingRead(1, "reconciliation:1", -25050, "")
+	degraded.add(event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, "reconciliation-result:joint:4:pending-cash:reconciliation:1", day(4), event.ReconciliationResultPayload{
+		AccountID: "joint", ReconciliationID: "close:reconciliation:1", InputID: "reconciliation:1", AnchorID: "snapshot:0",
+		Classification: event.ReconciliationUnexplained, Action: event.ReconciliationActionDegrade, CashCompared: true, Currency: "USD",
+		Components: []event.ReconciliationComponent{
+			{Component: event.ReconciliationComponentCash, Book: 100000, Expected: 100000, Observed: 74950, Residual: -25050, Explanations: []string{}},
+		},
+		ScopeCashComponents: []string{event.ReconciliationComponentCash},
+		Detail:              "unexplained: total cash: the difference found pending a reading is not explained",
+	})
+	degraded.caused("reconciliation:4")
+	degraded.add(event.EngineStateEventType, event.EngineStateScopedVersion, "engine-state:joint:4", day(4), event.EngineStatePayload{
+		State: event.EngineStateDegraded, Reason: event.EngineStateReasonReconciliationUnexplained, Detail: "reconciliation close",
+		ScopeCashComponents: []string{event.ReconciliationComponentCash},
+	})
+	degraded.caused("reconciliation:4")
+	got, err = report.Alerts(degraded.out)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("alerts = %+v, %v", got, err)
+	}
+	if !strings.Contains(got[1].Body, "The account is Degraded on instruments [] and cash [total-cash]") || strings.Contains(got[1].Body, "stays") {
+		t.Errorf("the Degraded decision keeps its body:\n%s", got[1].Body)
+	}
+}
