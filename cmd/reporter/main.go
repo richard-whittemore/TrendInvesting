@@ -84,7 +84,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
 	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
-	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors; without it, or before the reader has written it, the summary says the comparison assumes none")
+	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -223,7 +223,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
 	if *summary && refused == nil {
-		a, due, err := summaryAlert(history, report.LoadCashLedger(*cashLedger, os.ReadFile), envelopes, *date, *benchmark, clock)
+		// The ledger is taken only from the account's own flex/<instance>
+		// folder, the instance of the engine directory the journal is in
+		// (report.LoadCashLedgerFor).
+		ledger := report.LoadCashLedgerFor(*cashLedger, filepath.Base(filepath.Dir(*journalPath)), os.ReadFile)
+		a, due, err := summaryAlert(history, ledger, envelopes, *date, *benchmark, clock)
 		switch {
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))

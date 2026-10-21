@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,13 +28,18 @@ const base = "2024-01-02"
 // adjustedBar records a version 2 bar whose split-adjusted close is split and
 // whose split- and dividend-adjusted close is adjusted, based at base.
 func (s *stream) adjustedBar(n int, split, adjusted float64) {
+	s.adjustedBarAt(n, split, adjusted, base)
+}
+
+// adjustedBarAt is adjustedBar based at the session at.
+func (s *stream) adjustedBarAt(n int, split, adjusted float64, at string) {
 	view := func(label string, c float64) event.PriceView {
 		return event.PriceView{View: label, Open: c, High: c, Low: c, Close: c, Volume: 1}
 	}
 	s.add(event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%d", n), day(n),
 		event.CompletedBarAdjustedPayload{
 			CompletedBarPayload: event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: day(n), SplitAdjusted: view(event.ViewSplitAdjusted, split), Raw: view(event.ViewRaw, split)},
-			Adjusted:            view(event.ViewAdjusted, adjusted), AdjustedBase: base,
+			Adjusted:            view(event.ViewAdjusted, adjusted), AdjustedBase: at,
 		})
 }
 
@@ -285,7 +292,7 @@ func TestAVersion1SeriesSaysDividendsAreNotCounted(t *testing.T) {
 	if !near(got.BenchmarkReturn, -0.01) {
 		t.Fatalf("mixed SPY %v: the dividend on day 3 is reinvested, the v1 days are price only", got.BenchmarkReturn)
 	}
-	if !strings.Contains(got.Assumption, "SPY with dividends reinvested from 2024-01-04; price return only before 2024-01-04") {
+	if !strings.Contains(got.Assumption, "SPY price return only for 2024-01-02–2024-01-04; dividends reinvested for the rest") {
 		t.Fatalf("mixed assumption %q", got.Assumption)
 	}
 }
@@ -362,10 +369,197 @@ func TestTheManualsWorkedExample(t *testing.T) {
 	priceOnly.snapshot(2, 16000, 0)
 	priceOnly.bar(3, "SPY", 109)
 	priceOnly.snapshot(3, 16000, 0)
-	if v := summarizeWith(t, priceOnly, read(t, ledgerOf(t, transfer{"d1", startOfNewYorkDay(2), 5000})), "2024-01-05").Equity.Verdict; v != "Beating SPY by 1.0 points since 2024-01-02" {
+	if v := summarizeWith(t, priceOnly, read(t, ledgerOf(t, transfer{"d1", startOfNewYorkDay(2), 5000})), "2024-01-05").Equity.Verdict; v != "Beating SPY by 1.0 point since 2024-01-02" {
 		t.Fatalf("price only: %q", v)
 	}
 	if v := summarizeWith(t, priceOnly, report.CashLedger{}, "2024-01-04").Equity.Verdict; v != "Beating SPY by 50.0 points since 2024-01-02" {
 		t.Fatalf("deposit counted as a gain: %q", v)
+	}
+}
+
+// A base change inside the chain (a fresh run with another warm-up start)
+// makes one link a price return; every link either side of it reinvests,
+// and the sentence names exactly the span that does not.
+func TestAPriceOnlyLinkInTheMiddleIsNamedByItsSpan(t *testing.T) {
+	s := newStream(t)
+	s.adjustedBarAt(0, 100, 100, "2024-01-02")
+	s.snapshot(0, 10000, 0)
+	s.adjustedBarAt(1, 99, 100, "2024-01-02") // ex-dividend, reinvested
+	s.snapshot(1, 10000, 0)
+	s.adjustedBarAt(2, 98, 50, "2024-01-04") // the new base: price return for this link
+	s.snapshot(2, 10000, 0)
+	s.adjustedBarAt(3, 97, 50.5, "2024-01-04") // reinvested again
+	s.snapshot(3, 10000, 0)
+	got := summarizeWith(t, s, read(t, nil), "2024-01-05").Equity
+	want := "SPY price return only for 2024-01-03–2024-01-04; dividends reinvested for the rest"
+	if !strings.Contains(got.Assumption, want) || strings.Contains(got.Assumption, "only before") {
+		t.Fatalf("assumption %q, want %q", got.Assumption, want)
+	}
+	if !near(got.BenchmarkReturn, 1*(98.0/99)*1.01-1) {
+		t.Fatalf("SPY %v", got.BenchmarkReturn)
+	}
+	// Two such links are each named.
+	s.adjustedBarAt(4, 96, 20, "2024-01-06")
+	s.snapshot(4, 10000, 0)
+	s.adjustedBarAt(5, 95, 20.2, "2024-01-06")
+	s.snapshot(5, 10000, 0)
+	got = summarizeWith(t, s, read(t, nil), "2024-01-07").Equity
+	if want := "SPY price return only for 2024-01-03–2024-01-04 and 2024-01-05–2024-01-06; dividends reinvested for the rest"; !strings.Contains(got.Assumption, want) {
+		t.Fatalf("assumption %q, want %q", got.Assumption, want)
+	}
+}
+
+// A shadow account cannot sell SPY it does not hold: when the recorded
+// withdrawals exceed its value it stops at zero that day, and the verdict is
+// withheld from then on.
+func TestWithdrawalsBeyondTheShadowsValueWithholdTheVerdict(t *testing.T) {
+	s := newStream(t)
+	s.adjustedBar(0, 100, 100)
+	s.snapshot(0, 10000, 0)
+	s.adjustedBar(1, 50, 50) // the shadow is worth 5000; the account 20000
+	s.snapshot(1, 12000, 0)  // 20000 less the withdrawal of 8000
+	s.adjustedBar(2, 55, 55)
+	s.snapshot(2, 12100, 0)
+	// A deposit after the shadow stopped buys nothing in it: the comparison
+	// is over from that day.
+	got := summarizeWith(t, s, read(t, ledgerOf(t, transfer{"w1", startOfNewYorkDay(1), -8000}, transfer{"d1", startOfNewYorkDay(2), 100})), "2024-01-04")
+	e := got.Equity
+	if e.Points[1].Shadow != 0 || e.Points[2].Shadow != 0 || e.ShadowValue != 0 {
+		t.Fatalf("shadow %v then %v, value %v: it stops at zero", e.Points[1].Shadow, e.Points[2].Shadow, e.ShadowValue)
+	}
+	want := "the recorded withdrawals exceeded the SPY shadow's value on 2024-01-03; the comparison is not meaningful after that day"
+	if !strings.Contains(e.Verdict, want) || e.VerdictTone != report.VerdictWithheld {
+		t.Fatalf("verdict %q tone %q", e.Verdict, e.VerdictTone)
+	}
+	text := report.RenderText(got)
+	if !strings.Contains(text, want) || strings.Contains(text, "Beating") || strings.Contains(text, "dollar gap") {
+		t.Fatalf("summary:\n%s", text)
+	}
+	// A withdrawal of exactly the shadow's value leaves it at zero, not withheld.
+	exact := summarizeWith(t, s, read(t, ledgerOf(t, transfer{"w1", startOfNewYorkDay(1), -5000})), "2024-01-04").Equity
+	if exact.VerdictTone == report.VerdictWithheld || !near(exact.ShadowValue, 0) {
+		t.Fatalf("exact: %q shadow %v", exact.Verdict, exact.ShadowValue)
+	}
+}
+
+func TestOnePointIsSingular(t *testing.T) {
+	for last, want := range map[float64]string{10220: "Beating SPY by 1.0 point since 2024-01-02", 10020: "Behind SPY by 1.0 point since 2024-01-02", 10230: "Beating SPY by 1.1 points since 2024-01-02"} {
+		s := newStream(t)
+		s.adjustedBar(0, 100, 100)
+		s.snapshot(0, 10000, 0)
+		s.adjustedBar(1, 101.2, 101.2)
+		s.snapshot(1, last, 0)
+		if got := summarizeWith(t, s, read(t, nil), "2024-01-03").Equity.Verdict; got != want {
+			t.Errorf("net %v: verdict %q, want %q", last, got, want)
+		}
+	}
+}
+
+// fileSystem serves the files named, and fs.ErrNotExist for any other.
+func fileSystem(files map[string][]byte) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		if raw, ok := files[path]; ok {
+			return raw, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+}
+
+// The Flex reader writes the ledger at 21:30 New York, after the close's
+// summary is built, and IBKR may post a day's transfer only the next
+// evening: the sentence says how far the record reaches, from the reader's
+// status file beside the ledger (covered_to).
+func TestTheAssumptionSaysHowFarTheFlexReaderHasRecorded(t *testing.T) {
+	const ledger = "/flex/boost/cash-movements.jsonl"
+	s := depositSeries(t)
+	status := func(coveredTo string) []byte {
+		return []byte(`{"checked_at":"2024-01-05T02:30:00Z","covered_to":"` + coveredTo + `","state":"read","written":1}` + "\n")
+	}
+	lines := ledgerOf(t, transfer{"d1", startOfNewYorkDay(2), 5000})
+	behind := report.LoadCashLedger(ledger, fileSystem(map[string][]byte{ledger: lines, ledger + ".status.json": status("20240104")}))
+	got := summarizeWith(t, s, behind, "2024-01-05").Equity.Assumption
+	for _, want := range []string{"transfers recorded through 2024-01-04", "today's deposits or withdrawals, if any, are not yet recorded; tomorrow's summary includes them"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("behind: assumption %q lacks %q", got, want)
+		}
+	}
+	upToDate := report.LoadCashLedger(ledger, fileSystem(map[string][]byte{ledger: lines, ledger + ".status.json": status("20240105")}))
+	got = summarizeWith(t, s, upToDate, "2024-01-05").Equity.Assumption
+	if !strings.Contains(got, "transfers recorded through 2024-01-05") || strings.Contains(got, "not yet recorded; tomorrow") {
+		t.Errorf("up to date: assumption %q", got)
+	}
+	// The reader writes no ledger until it has a transfer to write: a
+	// reading recorded in the status file is an empty ledger, read.
+	none := report.LoadCashLedger(ledger, fileSystem(map[string][]byte{ledger + ".status.json": status("20240105")}))
+	if got = summarizeWith(t, s, none, "2024-01-05").Equity.Assumption; !strings.Contains(got, "mirrored as recorded by the Flex reader (none in this period); transfers recorded through 2024-01-05") {
+		t.Errorf("no transfer yet: assumption %q", got)
+	}
+	// No status file, or one without covered_to (a reading running or set
+	// aside): how far the record reaches is not known, and it says so.
+	for name, files := range map[string]map[string][]byte{
+		"no status":  {ledger: lines},
+		"set aside":  {ledger: lines, ledger + ".status.json": []byte(`{"state":"set-aside","reason":"x"}` + "\n")},
+		"unreadable": {ledger: lines, ledger + ".status.json": []byte("nope\n")},
+	} {
+		got = summarizeWith(t, s, report.LoadCashLedger(ledger, fileSystem(files)), "2024-01-05").Equity.Assumption
+		if !strings.Contains(got, "how far the Flex reader has recorded is not known; today's deposits or withdrawals, if any, may not be recorded yet") {
+			t.Errorf("%s: assumption %q", name, got)
+		}
+	}
+}
+
+// The reader's own contract fixtures, as it writes them in a ledger line:
+// the payload of each, and the note it writes beside the payload for a
+// transfer added out of order, are all read.
+func TestTheLedgerReadsTheFlexReadersOwnRecords(t *testing.T) {
+	var lines []byte
+	for i, name := range []string{"cash_movement.json", "cash_movement_approximated.json", "cash_movement.json"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "adapter", "ibkr", "tests", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatal(err)
+		}
+		record := map[string]any{"id": "ibkr-flex:" + payload["transaction_id"].(string), "type": event.CashMovementEventType,
+			"schema_version": event.CashMovementTransferVersion, "event_time": payload["as_of"], "source": "ibkr-flex", "payload": payload}
+		if i == 2 {
+			payload["transaction_id"], payload["as_of"] = "900000301", "2027-01-15T19:00:00Z"
+			record["id"], record["event_time"] = "ibkr-flex:900000301", "2027-01-15T19:00:00Z"
+			record["note"] = "a later transfer in the same interval was written first; its equity_before omits this one and is not revised"
+		}
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(append(lines, line...), '\n')
+	}
+	got := report.ParseCashLedger(lines)
+	if !got.Read || len(got.Movements) != 3 {
+		t.Fatalf("the reader's own records: %+v", got)
+	}
+	// A field the reader never writes is still refused.
+	unknown := strings.Replace(string(lines), `"source":`, `"sequence":1,"source":`, 1)
+	if report.ParseCashLedger([]byte(unknown)).Unreadable == "" {
+		t.Fatal("a field the reader does not write must refuse the ledger")
+	}
+}
+
+// A ledger is accepted only from the account's own Flex folder
+// (flex/<instance>), the instance whose engine directory it is paired with.
+func TestALedgerFromAnotherAccountsFolderIsNotAccepted(t *testing.T) {
+	const ledger = "/var/lib/trend-investing/flex/roth-ira/cash-movements.jsonl"
+	files := fileSystem(map[string][]byte{ledger: ledgerOf(t, transfer{"d1", startOfNewYorkDay(2), 5000})})
+	if got := report.LoadCashLedgerFor(ledger, "roth-ira", files); !got.Read || len(got.Movements) != 1 {
+		t.Fatalf("its own: %+v", got)
+	}
+	wrong := report.LoadCashLedgerFor(ledger, "trad-ira", files)
+	if wrong.Read || len(wrong.Movements) != 0 {
+		t.Fatalf("another's: %+v", wrong)
+	}
+	got := summarizeWith(t, depositSeries(t), wrong, "2024-01-05").Equity.Assumption
+	if !strings.Contains(got, "ledger not accepted: it belongs to roth-ira, not trad-ira") || !strings.Contains(got, "the comparison assumes none") {
+		t.Fatalf("assumption %q", got)
 	}
 }

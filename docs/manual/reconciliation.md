@@ -350,8 +350,12 @@ needs only each transfer's amount and date, which are exact.
   the ledger directly (their `-cash-ledger` flag) and mirror each deposit and
   withdrawal in the SPY shadow account, so a transfer is never counted as a
   gain or a loss of the strategy (alerts and dashboard chapter, "How the
-  comparison with SPY works"). Until the reader has written the ledger they
-  say the comparison assumes no transfer.
+  comparison with SPY works"). Until the reader has written the ledger, or
+  recorded a reading in its status file, they say the comparison assumes no
+  transfer. They also read the status file's `covered_to` and say
+  "transfers recorded through <day>", adding that the day's own transfers
+  are not yet recorded when the summary's day is later, and they take a
+  ledger only from the account's own `flex/<instance>` folder.
 
 **When.** `ti-flex@<instance>.timer` (one per account: `ti-flex@boost`,
 `ti-flex@trad-ira`, `ti-flex@roth-ira`) runs it on weekdays at 9:30 p.m. New

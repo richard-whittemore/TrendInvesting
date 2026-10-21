@@ -59,7 +59,7 @@ func run(args []string, log io.Writer) error {
 	addr := flags.String("addr", defaultAddr, "listen address: loopback or a Tailscale address")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	var cashLedgers stringList
-	flags.Var(&cashLedgers, "cash-ledger", "the Flex reader's ledger of an account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the equity comparison's shadow account mirrors: the path alone when one -journal or -engine-dir is given, else SOURCE=PATH naming that -journal or -engine-dir; repeat for each account")
+	flags.Var(&cashLedgers, "cash-ledger", "the Flex reader's ledger of an account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the equity comparison's shadow account mirrors: the path alone when one -engine-dir is given, else SOURCE=PATH naming its -journal or -engine-dir, always for a -journal; accepted only from the account's own flex/<instance> folder; repeat for each account")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -308,16 +308,20 @@ type source struct {
 }
 
 // ledgersOf places each -cash-ledger value with its account: a bare path
-// belongs to the one -journal or -engine-dir given, and SOURCE=PATH to the
-// -journal or -engine-dir SOURCE names. A ledger that cannot be placed, or
-// a second for one account, is refused: a deposit mirrored on the wrong
-// account would misstate both.
+// belongs to the one -engine-dir given, and SOURCE=PATH to the -journal or
+// -engine-dir SOURCE names; a journal's ledger is always named, since a
+// journal's file says less of its account than an engine directory. A
+// ledger that cannot be placed, or a second for one account, is refused: a
+// deposit mirrored on the wrong account would misstate both. Whether the
+// ledger is the account's own is checked when it is read (instanceOf).
 func ledgersOf(values, journals, dirs []string) (map[string]string, error) {
 	sources := append(append([]string{}, journals...), dirs...)
 	out := map[string]string{}
 	for _, v := range values {
 		src, path, named := strings.Cut(v, "=")
 		switch {
+		case !named && len(journals) > 0:
+			return nil, fmt.Errorf("dashboard: -cash-ledger %q must be SOURCE=PATH, naming the -journal it belongs to", v)
 		case !named && len(sources) != 1:
 			return nil, fmt.Errorf("dashboard: -cash-ledger %q must be SOURCE=PATH, naming one of the %d -journal or -engine-dir values", v, len(sources))
 		case !named:
@@ -343,10 +347,13 @@ func ledgersOf(values, journals, dirs []string) (map[string]string, error) {
 // the current run's holdings, state, alerts and day's figures do not depend
 // on it.
 func load(src source, benchmark string, logs *logCache) ([]account, error) {
-	type current struct{ path, warning, name, message, ledger string }
+	// instance is the account's instance name, which its ledger's folder
+	// must carry (report.LoadCashLedgerFor): an engine directory's own name,
+	// or for a journal the name of the engine directory it is in.
+	type current struct{ path, warning, name, message, ledger, instance string }
 	var paths []current
 	for _, path := range src.journals {
-		paths = append(paths, current{path: path, ledger: src.ledgers[path]})
+		paths = append(paths, current{path: path, ledger: src.ledgers[path], instance: filepath.Base(filepath.Dir(path))})
 	}
 	for _, dir := range src.dirs {
 		path, warning, err := currentLogIn(dir, logs)
@@ -355,11 +362,11 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 			paths = append(paths, current{name: filepath.Base(dir), message: filepath.Base(dir) + ": " + reason(err)})
 			continue
 		}
-		paths = append(paths, current{path: path, warning: warning, name: filepath.Base(dir), ledger: src.ledgers[dir]})
+		paths = append(paths, current{path: path, warning: warning, name: filepath.Base(dir), ledger: src.ledgers[dir], instance: filepath.Base(dir)})
 	}
 	var out []account
 	for i, c := range paths {
-		a, err := loadOne(c.path, c.warning, c.ledger, benchmark, logs)
+		a, err := loadOne(c.path, c.warning, c.ledger, c.instance, benchmark, logs)
 		if c.message == "" && err != nil && c.name != "" {
 			// An engine directory's head log that cannot be shown is that
 			// account's card; only a fixed journal fails the page.
@@ -378,8 +385,9 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 }
 
 // loadOne reads, verifies and views the log at path, with the cash ledger at
-// ledger ("" for none), read afresh on every request as the log is.
-func loadOne(path, warning, ledger, benchmark string, logs *logCache) (account, error) {
+// ledger ("" for none) when it is instance's, read afresh on every request
+// as the log is.
+func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) (account, error) {
 	if path == "" {
 		return account{}, nil
 	}
@@ -395,7 +403,7 @@ func loadOne(path, warning, ledger, benchmark string, logs *logCache) (account, 
 	if recovery != nil {
 		history = report.EarlierRunsOfRecovery(path, *recovery, logs.earlier)
 	}
-	a, err := view(history, report.LoadCashLedger(ledger, logs.readFile), envelopes, benchmark)
+	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), envelopes, benchmark)
 	if err != nil {
 		return account{}, err
 	}

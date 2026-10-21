@@ -65,7 +65,7 @@ func TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored(t *te
 	if err := run(args, fakeEnv, now, &out, fakeClient); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Behind SPY by 1.0 points since 2024-01-02; dollar gap -40.00 (account 4010.00, SPY shadow 4050.00)",
+	for _, want := range []string{"Behind SPY by 1.0 point since 2024-01-02; dollar gap -40.00 (account 4010.00, SPY shadow 4050.00)",
 		"your deposits and withdrawals mirrored as recorded by the Flex reader (1 in this period: 10.00 in, 0.00 out)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("summary lacks %q:\n%s", want, out.String())
@@ -79,5 +79,51 @@ func TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored(t *te
 	}
 	if !strings.Contains(out.String(), "deposits and withdrawals not yet recorded: the comparison assumes none") {
 		t.Errorf("summary without a ledger:\n%s", out.String())
+	}
+}
+
+// The summary says how far the Flex reader has recorded, and takes a ledger
+// only from the account's own flex/<instance> folder: the instance of the
+// engine directory the journal is in.
+func TestTheDailySummaryTakesOnlyTheAccountsOwnLedgerAndSaysHowFarItReaches(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	root := t.TempDir()
+	engines, own, other := filepath.Join(root, "engines", "trad-ira"), filepath.Join(root, "flex", "trad-ira"), filepath.Join(root, "flex", "roth-ira")
+	for _, d := range []string{engines, own, other} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	journalPath := pairedJournal(t, engines)
+	stamp := t0.AddDate(0, 0, 1).Add(-2 * time.Hour).Format(time.RFC3339)
+	line, err := json.Marshal(map[string]any{"id": "ibkr-flex:t1", "type": event.CashMovementEventType, "schema_version": event.CashMovementTransferVersion,
+		"event_time": stamp, "source": "ibkr-flex",
+		"payload": map[string]any{"as_of": stamp, "amount": 10, "equity_before": 4000, "currency": "USD", "transaction_id": "t1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{own, other} {
+		ledger := filepath.Join(d, "cash-movements.jsonl")
+		if err := os.WriteFile(ledger, append(line, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// The reader's last reading covered the day before the summary's.
+		if err := os.WriteFile(ledger+".status.json", []byte(`{"covered_to":"20240102","state":"read"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := func() time.Time { return t0.AddDate(0, 0, 1).Add(time.Hour) }
+	for name, c := range map[string]struct{ dir, want string }{
+		"own":   {own, "transfers recorded through 2024-01-02; today's deposits or withdrawals, if any, are not yet recorded; tomorrow's summary includes them"},
+		"other": {other, "ledger not accepted: it belongs to roth-ira, not trad-ira"},
+	} {
+		var out bytes.Buffer
+		args := []string{"-journal", journalPath, "-state", filepath.Join(root, name+".json"), "-channel", "stdout,ntfy", "-summary", "-cash-ledger", filepath.Join(c.dir, "cash-movements.jsonl")}
+		if err := run(args, fakeEnv, now, &out, fakeClient); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), c.want) {
+			t.Errorf("%s: summary lacks %q:\n%s", name, c.want, out.String())
+		}
 	}
 }

@@ -9,7 +9,8 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
-// verdictClass colours the verdict: green ahead, red behind, neutral level.
+// verdictClass colours the verdict: green ahead, red behind, neutral level
+// or withheld.
 // Its arrow carries the same meaning, so colour is never the only cue.
 func verdictClass(tone string) string {
 	switch tone {
@@ -27,6 +28,8 @@ func verdictMark(tone string) string {
 		return "▲"
 	case report.VerdictBehind:
 		return "▼"
+	case report.VerdictWithheld:
+		return "!"
 	}
 	return "="
 }
@@ -70,6 +73,7 @@ var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	"signed":       report.SignedMoney,
 	"verdictClass": verdictClass,
 	"verdictMark":  verdictMark,
+	"withheld":     func(e report.Equity) bool { return e.VerdictTone == report.VerdictWithheld },
 	"tone":         tone,
 	"arrow":        arrow,
 	"stateClass":   stateClass,

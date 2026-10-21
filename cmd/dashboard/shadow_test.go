@@ -99,19 +99,30 @@ func writeLedger(t *testing.T, dir string, asOf time.Time, amount float64) strin
 }
 
 func TestTheDashboardReadsTheFlexLedgerForEachEngineDirectory(t *testing.T) {
-	dir := t.TempDir()
+	root := t.TempDir()
+	dir := filepath.Join(root, "engines", "boost")
+	flex := filepath.Join(root, "flex", "boost")
+	for _, d := range []string{dir, flex} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	writeRun(t, dir, "run1.log", approval("", ""), 0, time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC))
 	// Net 4000 then 4010 with SPY 100 then 101: a deposit of 10 on day 1
 	// leaves the account level, one point behind SPY.
-	ledger := writeLedger(t, t.TempDir(), at(1).Add(-2*time.Hour), 10)
+	ledger := writeLedger(t, flex, at(1).Add(-2*time.Hour), 10)
+	// The reader's last reading covered the day before the page's day.
+	if err := os.WriteFile(ledger+".status.json", []byte(`{"covered_to":"20240102","state":"read"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	h := newHandlerWith(source{dirs: []string{dir}, ledgers: map[string]string{dir: ledger}}, "SPY", os.ReadFile)
 	got := summaryOf(t, h).Summary.Equity
-	if got.Verdict != "Behind SPY by 1.0 points since "+at(0).Format(time.DateOnly) || got.TransferCount != 1 || !near(got.ShadowValue, 4040+10) {
+	if got.Verdict != "Behind SPY by 1.0 point since "+at(0).Format(time.DateOnly) || got.TransferCount != 1 || !near(got.ShadowValue, 4040+10) {
 		t.Fatalf("with the ledger: %+v", got)
 	}
 	// The JSON carries the shadow, the time-weighted returns and the verdict.
 	raw := get(h, http.MethodGet, "/api/summary.json").Body.String()
-	for _, key := range []string{`"ShadowValue":`, `"Verdict":"Behind SPY by 1.0 points`, `"VerdictTone":"behind"`, `"AccountReturn":0`, `"Gap":`, `"Assumption":"Counted: `} {
+	for _, key := range []string{`"ShadowValue":`, `"Verdict":"Behind SPY by 1.0 point since`, `"VerdictTone":"behind"`, `"AccountReturn":0`, `"Gap":`, `"Assumption":"Counted: `} {
 		if !strings.Contains(raw, key) {
 			t.Errorf("summary.json lacks %s:\n%s", key, raw)
 		}
@@ -120,8 +131,11 @@ func TestTheDashboardReadsTheFlexLedgerForEachEngineDirectory(t *testing.T) {
 	if !strings.Contains(page, "mirrored as recorded by the Flex reader (1 in this period: 10.00 in, 0.00 out)") {
 		t.Errorf("the page does not state the transfer it mirrored")
 	}
+	if !strings.Contains(page, "transfers recorded through 2024-01-02; today&#39;s deposits or withdrawals, if any, are not yet recorded; tomorrow&#39;s summary includes them") {
+		t.Errorf("the page does not say how far the Flex reader has recorded:\n%s", page)
+	}
 	// No ledger yet: the page says the comparison assumes none.
-	h = newHandlerWith(source{dirs: []string{dir}, ledgers: map[string]string{dir: filepath.Join(t.TempDir(), "absent.jsonl")}}, "SPY", os.ReadFile)
+	h = newHandlerWith(source{dirs: []string{dir}, ledgers: map[string]string{dir: filepath.Join(flex, "absent.jsonl")}}, "SPY", os.ReadFile)
 	if body := get(h, http.MethodGet, "/").Body.String(); !strings.Contains(body, "deposits and withdrawals not yet recorded: the comparison assumes none") {
 		t.Errorf("an absent ledger must be named on the page")
 	}
@@ -139,11 +153,16 @@ func TestTheCashLedgerFlagNamesTheAccountItBelongsTo(t *testing.T) {
 	if err != nil || got[two] != "/flex/ira/cash-movements.jsonl" || got["j.journal"] != "" {
 		t.Fatalf("named source: %v, %v", got, err)
 	}
+	got, err = ledgersOf([]string{"j.journal=/flex/ira/cash-movements.jsonl"}, []string{"j.journal"}, nil)
+	if err != nil || got["j.journal"] != "/flex/ira/cash-movements.jsonl" {
+		t.Fatalf("a journal named: %v, %v", got, err)
+	}
 	for name, c := range map[string]struct{ values, journals, dirs []string }{
 		"bare path, two sources": {[]string{"/flex/a.jsonl"}, []string{"j.journal"}, []string{one}},
 		"unknown source":         {[]string{"/elsewhere=/flex/a.jsonl"}, nil, []string{one}},
 		"twice for one source":   {[]string{one + "=/a", one + "=/b"}, nil, []string{one}},
 		"no path":                {[]string{one + "="}, nil, []string{one}},
+		"bare path, one journal": {[]string{"/flex/a/cash-movements.jsonl"}, []string{"j.journal"}, nil},
 	} {
 		if _, err := ledgersOf(c.values, c.journals, c.dirs); err == nil {
 			t.Errorf("%s: expected an error", name)
@@ -151,5 +170,47 @@ func TestTheCashLedgerFlagNamesTheAccountItBelongsTo(t *testing.T) {
 	}
 	if err := run([]string{"-journal", "a", "-journal", "b", "-cash-ledger", "/flex/x.jsonl"}, &bytes.Buffer{}); err == nil {
 		t.Error("run must refuse a ledger it cannot place")
+	}
+}
+
+// A ledger is accepted only from its account's own Flex folder: flex/<instance>
+// for the engine directory engines/<instance>, or for a journal in it.
+func TestALedgerFromAnotherAccountsFolderIsNotMirrored(t *testing.T) {
+	root := t.TempDir()
+	trad := filepath.Join(root, "engines", "trad-ira")
+	roth := filepath.Join(root, "flex", "roth-ira")
+	for _, d := range []string{trad, roth} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRun(t, trad, "run1.log", approval("", ""), 0, time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC))
+	journal := filepath.Join(trad, "run1.log")
+	ledger := writeLedger(t, roth, at(1).Add(-2*time.Hour), 10)
+	for name, src := range map[string]source{
+		"engine directory": {dirs: []string{trad}, ledgers: map[string]string{trad: ledger}},
+		"journal":          {journals: []string{journal}, ledgers: map[string]string{journal: ledger}},
+	} {
+		h := newHandlerWith(src, "SPY", os.ReadFile)
+		got := summaryOf(t, h).Summary.Equity
+		if got.TransferCount != 0 || !strings.Contains(got.Assumption, "ledger not accepted: it belongs to roth-ira, not trad-ira") {
+			t.Errorf("%s: transfers %d, assumption %q", name, got.TransferCount, got.Assumption)
+		}
+		if page := get(h, http.MethodGet, "/").Body.String(); !strings.Contains(page, "ledger not accepted: it belongs to roth-ira, not trad-ira") {
+			t.Errorf("%s: the page does not say the ledger was not accepted", name)
+		}
+	}
+}
+
+func TestAWithheldVerdictShowsNoDollarGap(t *testing.T) {
+	a := shadowFixture(report.VerdictWithheld)
+	a.Summary.Equity.Verdict = "Verdict withheld: the recorded withdrawals exceeded the SPY shadow's value on 2024-01-03; the comparison is not meaningful after that day"
+	a.Summary.Equity.ShadowValue, a.Summary.Equity.Gap = 0, 1530
+	body := execThemed(t, "", []account{a})
+	if !strings.Contains(body, "the recorded withdrawals exceeded the SPY shadow&#39;s value on 2024-01-03; the comparison is not meaningful after that day") {
+		t.Fatalf("the withheld verdict is not shown:\n%s", body)
+	}
+	if strings.Contains(body, "dollar gap") || strings.Contains(body, "&middot; gap") {
+		t.Error("a withheld verdict has no dollar gap: it measures nothing")
 	}
 }
