@@ -28,7 +28,7 @@ type Reconciliation struct {
 // 2). The changes journalled since stay recorded; the classifier applies
 // those after the book's time. It checks nothing: the engine sets its book
 // through CheckBook.
-func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified = &b, nil }
+func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified, g.reported = &b, nil, nil }
 
 // CheckBook checks b, an account snapshot about to become the book, against
 // the book in force and every change journalled since it
@@ -50,16 +50,24 @@ func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified = &b, nil }
 //     and that reconciliation's result, matched or not, already stands for
 //     those holdings, so one difference is never reported twice. A new book,
 //     fill or corporate action since that reconciliation clears its verdict,
-//     so the snapshot is then checked.
+//     so the snapshot is then checked;
+//   - never for a difference already reported against the same book: an
+//     unexplained result whose every instrument was already reported with
+//     the same residual, and whose cash is not in doubt, repeats a journalled
+//     result, so it is not journalled or paged again however many fills of
+//     other instruments came between. A new instrument or a changed residual
+//     is a new difference and is reported (ADR 0019, amended 2026-10-21,
+//     point 6: one difference, one report).
 func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
 	defer g.SetBook(b)
 	if g.book == nil {
 		return Reconciliation{}, false
 	}
 	r := reconcile.Holdings(g.accountID, g.book, g.changes, b)
-	if r.Action == event.ReconciliationActionContinue || g.classified != nil && maps.Equal(g.classified, b.Positions) {
+	if r.Action == event.ReconciliationActionContinue || g.classified != nil && maps.Equal(g.classified, b.Positions) || g.alreadyReported(r) {
 		return Reconciliation{}, false
 	}
+	g.report(r)
 	return g.consequence(b.AnchorID, r), true
 }
 
@@ -134,7 +142,40 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 			g.classified[position.InstrumentID] = position.Quantity
 		}
 	}
+	g.report(r)
 	return g.consequence(id, r), nil
+}
+
+// report records the residual of each instrument r finds unexplained, the
+// differences journalled against the book in force.
+func (g *Gate) report(r event.ReconciliationResultPayload) {
+	for _, c := range r.Components {
+		if c.InstrumentID == "" || c.Explained {
+			continue
+		}
+		if g.reported == nil {
+			g.reported = map[string]int64{}
+		}
+		g.reported[c.InstrumentID] = c.Residual
+	}
+}
+
+// alreadyReported reports whether r is an unexplained result every
+// difference of which was already reported with the same residual against
+// the book in force; a close snapshot's check compares no cash.
+func (g *Gate) alreadyReported(r event.ReconciliationResultPayload) bool {
+	if r.Action != event.ReconciliationActionDegrade {
+		return false
+	}
+	for _, c := range r.Components {
+		if c.InstrumentID == "" || c.Explained {
+			continue
+		}
+		if residual, ok := g.reported[c.InstrumentID]; !ok || residual != c.Residual {
+			return false
+		}
+	}
+	return true
 }
 
 // consequence journals r, the classification of input id, and moves the

@@ -160,3 +160,60 @@ func TestAChangeAfterAReconciliationIsCheckedOnTheNextSnapshot(t *testing.T) {
 		t.Fatalf("a split IBKR does not show is unexplained: %v %+v", journal, r.Result)
 	}
 }
+
+// unrelatedSplit is a split of an instrument the account does not hold,
+// observed an hour and ten minutes after the fixture time.
+func unrelatedSplit(t *testing.T, g *risklimit.Gate) {
+	t.Helper()
+	split := event.CorporateActionPayload{InstrumentID: "TLT", Kind: event.CorporateActionKindSplit, EffectiveAt: at.Add(70 * time.Minute), NewShares: 2, OldShares: 1, EngineSharesPerRawShare: 1, Currency: "USD"}
+	if err := g.ObserveCorporateAction("ca:tlt-split", split); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestADifferenceAlreadyReportedIsNotReportedAgainAfterAnUnrelatedChange: a
+// change to another instrument ends the reconciliation's standing for the
+// next snapshot, but the snapshot's SPY difference is the one the
+// reconciliation reported, so it is neither journalled nor paged twice
+// (ADR 0019, amended 2026-10-21, point 6: one difference, one report).
+func TestADifferenceAlreadyReportedIsNotReportedAgainAfterAnUnrelatedChange(t *testing.T) {
+	g := booked(t)
+	if r := reconcileWith(t, g, "reconciliation:1", morningOf(1000, 12)); r.State == nil {
+		t.Fatal("the reconciliation degrades")
+	}
+	unrelatedSplit(t, g)
+	if r, journal := checkBookWith(t, g, closeSnapshot(12, 90)); journal {
+		t.Fatalf("the same SPY difference is not reported twice: %+v", r.Result)
+	}
+	if g.State() != risklimit.StateDegraded {
+		t.Errorf("the account stays Degraded, got %s", g.State())
+	}
+}
+
+// TestAChangedDifferenceIsReportedAfterAnUnrelatedChange: the same
+// instrument with a different unexplained delta is a new difference.
+func TestAChangedDifferenceIsReportedAfterAnUnrelatedChange(t *testing.T) {
+	g := booked(t)
+	reconcileWith(t, g, "reconciliation:1", morningOf(1000, 12))
+	unrelatedSplit(t, g)
+	r, journal := checkBookWith(t, g, closeSnapshot(13, 90))
+	if !journal || r.Result.Classification != event.ReconciliationUnexplained || !slices.Equal(r.Result.ScopeInstrumentIDs, []string{"SPY"}) {
+		t.Fatalf("a changed SPY difference is reported: %v %+v", journal, r.Result)
+	}
+}
+
+// TestAnUnverifiableSnapshotIsReportedWhateverWasReportedBefore: a change no
+// book can apply halts the account, a verdict a standing difference never
+// hides (ADR 0019, amended 2026-10-21).
+func TestAnUnverifiableSnapshotIsReportedWhateverWasReportedBefore(t *testing.T) {
+	g := booked(t)
+	reconcileWith(t, g, "reconciliation:1", morningOf(1000, 12))
+	delisting := event.CorporateActionPayload{InstrumentID: "TLT", Kind: event.CorporateActionKindDelisting, EffectiveAt: at.Add(70 * time.Minute)}
+	if err := g.ObserveCorporateAction("ca:tlt-delisting", delisting); err != nil {
+		t.Fatal(err)
+	}
+	r, journal := checkBookWith(t, g, closeSnapshot(12, 90))
+	if !journal || r.Result.Action != event.ReconciliationActionHalt || g.State() != risklimit.StateHalted {
+		t.Fatalf("a delisting halts: %v %+v state %s", journal, r.Result, g.State())
+	}
+}

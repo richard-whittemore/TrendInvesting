@@ -187,13 +187,15 @@ import (
 //     before it becomes the book (risklimit.Gate.CheckBook,
 //     reconcile.Holdings): a holding they do not explain, such as a trade
 //     made during the session that the engine did not place, a fill it was
-//     never given or a journalled fill IBKR does not show, is journalled as a risk.reconciliation.result
-//     (reconciliation ID close-snapshot:<snapshot ID>) and degrades the
-//     account on the instrument, where 1.19.0 took the snapshot as the book
-//     silently (ADR 0019, amended 2026-10-21). A snapshot whose holdings a
-//     reconciliation already classified against the same book and the same
-//     changes is not classified again. A journal holding such a snapshot decides
-//     differently under 1.19.0.
+//     never given or a journalled fill IBKR does not show, is journalled as
+//     a risk.reconciliation.result (reconciliation ID
+//     close-snapshot:<snapshot ID>) and degrades the account on the
+//     instrument, where 1.19.0 took the snapshot as the book silently (ADR
+//     0019, amended 2026-10-21). A snapshot whose holdings a reconciliation
+//     already classified against the same book and the same changes is not
+//     classified again, nor is a difference already reported with the same
+//     residual. A journal holding such a snapshot decides differently under
+//     1.19.0.
 const RulesVersion = "1.20.0"
 
 // source names this handler on every envelope it emits.

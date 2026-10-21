@@ -160,6 +160,10 @@ type Gate struct {
 	// since book was set or a fill or corporate action was recorded
 	// (CheckBook).
 	classified map[string]int64
+	// reported is the residual of each instrument a journalled result found
+	// unexplained against book, so the same difference is not reported
+	// twice (CheckBook); nil once book is set.
+	reported map[string]int64
 	// corporateActions is every corporate action recorded as a change, by
 	// envelope ID, so a redelivery is recognised and never counted twice.
 	corporateActions map[string]event.CorporateActionPayload

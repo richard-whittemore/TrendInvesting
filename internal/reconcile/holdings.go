@@ -23,7 +23,8 @@ const CloseSnapshotPrefix = "close-snapshot:"
 //   - A holding no change explains, such as a trade made during the session
 //     that the engine did not place, a fill it was never given, or a
 //     journalled fill IBKR's snapshot does not show, is unexplained, and
-//     the scope is exactly those instruments: the action degrades. A snapshot is never adopted as the book silently.
+//     the scope is exactly those instruments: the action degrades. A
+//     snapshot is never adopted as the book silently.
 //   - Cash is not compared, whatever the books state: a snapshot's cash moves
 //     with postings no event records yet (interest, fees), which the IBKR
 //     adapter bounds before it stamps a reading as the close (ADR 0019,
