@@ -60,10 +60,10 @@ case ${1:-} in
       e=$(systemctl is-enabled "$u" 2>&1 || true)
       test "$e" = masked || fail "$u is $e, not masked: it would rewrite the Docker VM's binfmt handlers"
     done
-    # Capabilities: only the eight up.sh adds back to --cap-drop ALL (the
+    # Capabilities: only the nine up.sh adds back to --cap-drop ALL (the
     # bounding set, which no process in the container can grow).
     cb=$(awk '/^CapBnd:/ {print $2}' /proc/1/status)
-    test "$cb" = 00000000002401cb || fail "the capability bounding set is $cb, not 00000000002401cb (SYS_ADMIN, SYS_CHROOT, CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID, SETPCAP)"
+    test "$cb" = 00000000202401cb || fail "the capability bounding set is $cb, not 00000000202401cb (SYS_ADMIN, SYS_CHROOT, CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID, SETPCAP, AUDIT_WRITE)"
     failed=$(systemctl list-units --state=failed --no-legend --plain | awk '{print $1}' | sort | tr '\n' ' ')
     for u in $failed; do
       case " ${ALLOWED:-} " in *" $u "*) ;; *) fail "unit $u failed (system $s); journalctl -u $u: $(journalctl -u "$u" -n 5 --no-pager -o cat)" ;; esac

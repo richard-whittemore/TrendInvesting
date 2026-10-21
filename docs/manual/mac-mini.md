@@ -148,16 +148,17 @@ It is careful with what it did not make:
 The container is **not privileged**. systemd as its first program needs a
 few things a normal container lacks, and it is given only those:
 
-- **Every default capability is dropped, and eight are added back.** The
-  eight are `CAP_SYS_ADMIN` (systemd gives each unit its own view of the
+- **Every default capability is dropped, and nine are added back.** The
+  nine are `CAP_SYS_ADMIN` (systemd gives each unit its own view of the
   files, a read-only system, private temporary folders, a private folder
   for the engine's socket, and hands a unit its secrets), `CAP_SYS_CHROOT`
   (the same private views), `CAP_CHOWN` and `CAP_FOWNER` (the units' runtime
   folders), `CAP_DAC_OVERRIDE` (handing a unit its secrets), `CAP_SETUID`
-  and `CAP_SETGID` (running a unit as `ti-trader`), and `CAP_SETPCAP`
-  (systemd's journal and login services fail without it). The list was found
+  and `CAP_SETGID` (running a unit as `ti-trader`), `CAP_SETPCAP`
+  (systemd's journal and login services fail without it), and
+  `CAP_AUDIT_WRITE` (`sudo`, which runs the operator tools, refuses without it). The list was found
   by removing each in turn until the container no longer started its units;
-  Docker's other defaults (`KILL`, `NET_BIND_SERVICE`, `AUDIT_WRITE`,
+  Docker's other defaults (`KILL`, `NET_BIND_SERVICE`,
   `MKNOD`, `NET_RAW`, `SETFCAP`, `FSETID`) are not needed and are gone.
 - **A cgroup namespace of its own** (`--cgroupns private`), whose cgroup
   tree the image makes writable at each start. That tree is the container's
@@ -179,7 +180,7 @@ chance of breaking out into that virtual machine than in an ordinary
 container. From there it could reach every container and volume on this Mac
 and the Mac folders Docker Desktop shares into that virtual machine. The
 container test checks that it is not privileged, drops every default
-capability, adds back only those eight, and that the container's capability
+capability, adds back only those nine, and that the container's capability
 limit is exactly them; it does not, and cannot, check that root inside stays within these
 defaults.
 
