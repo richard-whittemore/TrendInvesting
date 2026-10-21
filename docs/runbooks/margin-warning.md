@@ -48,8 +48,8 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    or the urgent one that IBKR canceled or refused it ("sale back to 98%
    failed": sell the rest by hand). `journal-query orders` and
    `journal-query fills` show the same.
-2. **If the sale was withheld** (`sale-withheld` in `journal-query
-   refusals`):
+2. **If the sale was withheld or refused** (`sale-withheld` or `refused`
+   in `journal-query refusals`):
    - `broker-values-unreadable` or `unknown-working-sell`: the program will
      not try again for this alarm, and the urgent "sale withheld, sell by
      hand" alert says so. **Act by hand at IBKR now**: sell back to 98% of
@@ -59,11 +59,18 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    - `stale-broker-snapshot` or `non-positive-broker-values`: the program
      decides it again from the next good snapshot while the alarm is urgent.
      The first stale one of an outage alerts (once per stale episode); a
-     non-positive one sends no alert, so look for it here.
+     non-positive one pages "sale withheld, sell by hand" once per sale,
+     with the hand-sale steps, since nothing sells until a positive
+     snapshot comes.
      If the snapshots stay bad (the gateway is down: `gateway-login.md`), act
      by hand, but stop the engine and the adapter first ("Selling by hand
      safely"): the attempt is unspent, so the program can still sell from
      the next good snapshot, beside your sale.
+   - **Refused at the gate as `broker-holding`** (the sale is larger than
+     IBKR's holding): the refusal spends the attempt, and the urgent "sale
+     back to 98% refused, sell by hand" page says so. Check the holding at
+     IBKR and, if still above 98%, sell back to 98% by hand, following the
+     steps the page gives ("Selling by hand safely").
 3. **No reading** (the cause says `no-reading`): the adapter has had no
    Excess Liquidity for the stale period. Check the gateway first
    (`gateway-login.md`).

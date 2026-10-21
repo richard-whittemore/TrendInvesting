@@ -137,13 +137,45 @@ func (s sales) lifecycle(account string, e event.Envelope, p event.LimitOrderLif
 	}, true
 }
 
+// refused returns the page that the gate refused a planned sale as
+// broker-holding, once: a sale refused at the gate spends its one attempt
+// (ADR 0019, amended 2026-10-15), so the program never makes it again in that
+// incident, engagement or alarm and the owner sells by hand, following the
+// hand-sale steps. A refusal of an ordinary order, or of a sale for another
+// reason, is the refusal alert alone.
+func (s sales) refused(account string, e event.Envelope, p event.OrderRefusedPayload) (Alert, bool) {
+	sl, ok := s[p.ClientOrderID]
+	if !ok || sl.failed || p.Reason != event.RefusedBrokerHolding {
+		return Alert{}, false
+	}
+	sl.failed = true
+	return Alert{
+		Key: "sale-refused:" + p.ClientOrderID + "@" + account, Kind: KindSaleByHand, Severity: Urgent, AccountID: account, At: e.EventTime,
+		Title: fmt.Sprintf("%s: sale back to 98%% refused, sell by hand (%s)", account, p.InstrumentID),
+		Body: fmt.Sprintf("The risk gate refused the %s sale back to 98%% of net liquidation (%s, order %s, sell %d %s) as %s: it is larger than IBKR's holding net of working sells. %s. The refusal spends this incident's one attempt, so the program will not try again: if the account is still above 98%% of net liquidation, sell back to 98%% by hand (docs/runbooks/margin-warning.md). %s",
+			sl.planned.Sale.Kind, sl.planned.Sale.Trigger, p.ClientOrderID, p.Quantity, p.InstrumentID, p.Reason, p.Detail, handSaleSteps(account)),
+	}, true
+}
+
 // byHandAlert states a sale back to 98% withheld for a reason that counts as
 // the attempt (event.SaleWithheldPayload.Attempted): the program never tries
 // it again automatically, so the owner sells by hand (ADR 0019, amended
-// 2026-10-15, "No order when it cannot be checked"). Any other reason decides
-// again, has nothing to sell, or lapsed, and raises no alert here: a lapse
-// goes in the daily summary.
+// 2026-10-15, "No order when it cannot be checked"). A sale withheld because
+// IBKR's net liquidation or mark is not strictly positive is not an attempt,
+// but nothing sells until a positive snapshot comes, so it pages too, once
+// per sale (its tag and instrument): the hand-sale steps stop the engine and
+// the adapter first, so the sale decided again cannot go out beside the
+// owner's. Any other reason decides again, has nothing to sell, or lapsed,
+// and raises no alert here: a lapse goes in the daily summary.
 func byHandAlert(account string, e event.Envelope, p event.SaleWithheldPayload) (Alert, bool) {
+	if p.Reason == event.SaleWithheldNotPositive {
+		return Alert{
+			Key: "sale-by-hand:" + p.Reason + ":" + p.Tag + ":" + p.InstrumentID + "@" + account, Kind: KindSaleByHand, Severity: Urgent, AccountID: account, At: e.EventTime,
+			Title: fmt.Sprintf("%s: sale of %s withheld, sell by hand (%s)", account, p.InstrumentID, p.Reason),
+			Body: fmt.Sprintf("The %s sale back to 98%% of %s (%s, order %s) was not placed: IBKR reported a net liquidation or mark of zero or less, so the shares to keep cannot be worked out. %s. It is not an attempt: the sale is decided again from the next positive IBKR snapshot while what fired it is in force, and until one comes nothing sells. Check the account at IBKR; if you must sell by hand now: %s",
+				p.Kind, p.InstrumentID, p.Trigger, p.ClientOrderID, p.Detail, handSaleSteps(account)),
+		}, true
+	}
 	if !p.Attempted() {
 		return Alert{}, false
 	}
@@ -154,7 +186,7 @@ func byHandAlert(account string, e event.Envelope, p event.SaleWithheldPayload) 
 	return Alert{
 		Key: "sale-by-hand:" + e.ID + "@" + account, Kind: KindSaleByHand, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: sale of %s withheld, sell by hand (%s)", account, p.InstrumentID, p.Reason),
-		Body: fmt.Sprintf("The %s sale back to 98%% of %s (%s, order %s) was not placed: %s. %s. It counts as this incident's one attempt, so the program will not try again: act by hand at IBKR now and sell back to 98%% of net liquidation, after checking no other sell is working (docs/runbooks/margin-warning.md).",
-			p.Kind, p.InstrumentID, p.Trigger, p.ClientOrderID, check, p.Detail),
+		Body: fmt.Sprintf("The %s sale back to 98%% of %s (%s, order %s) was not placed: %s. %s. It counts as this incident's one attempt, so the program will not try again: act by hand at IBKR now and sell back to 98%% of net liquidation (docs/runbooks/margin-warning.md). %s",
+			p.Kind, p.InstrumentID, p.Trigger, p.ClientOrderID, check, p.Detail, handSaleSteps(account)),
 	}, true
 }
