@@ -786,9 +786,21 @@ def _day_text(day):
     return day.strftime("%Y%m%d")
 
 
-def _check_coverage(statement, coverage, approved_at):
+STALE_STATEMENT_DAYS = 4
+
+
+def _check_coverage(statement, coverage, approved_at, today):
     """CoverageGap when statement starts later than the day after coverage's covered_to (the last accepted
-    reading's), or, with no coverage kept, later than the New York day of the first run's approval at approved_at."""
+    reading's), or, with no coverage kept, later than the New York day of the first run's approval at approved_at;
+    or when statement ends more than STALE_STATEMENT_DAYS before today (the New York day of the reading), a custom
+    period left in place, whose transfers after its end would be in no statement."""
+    last = _flex_day(statement.to_date)
+    if last < today - timedelta(days=STALE_STATEMENT_DAYS):
+        raise CoverageGap(
+            "the Flex statement ends on {}, more than {} days before today, {}: transfers since are in no statement. "
+            "Nothing is written; set the Flex query's period in Client Portal back to Last 30 Calendar Days, start "
+            "this reader once (docs/manual/reconciliation.md)".format(
+                _day_text(last), STALE_STATEMENT_DAYS, _day_text(today)))
     first = _flex_day(statement.from_date)
     if coverage is None:
         approval_day = approved_at.astimezone(NEW_YORK).date()
@@ -912,7 +924,7 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             resolutions = read_resolutions(ledger_path + RESOLUTIONS_SUFFIX)
             statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep), account_id)
             approved_at, snapshots = read_chain(engine_log_path)
-            _check_coverage(statement, coverage, approved_at)
+            _check_coverage(statement, coverage, approved_at, now().astimezone(NEW_YORK).date())
             written, skipped, date_only, resolved = new_movements(statement, ledger, approved_at, snapshots,
                                                                   resolutions)
             for transaction_id in resolved:

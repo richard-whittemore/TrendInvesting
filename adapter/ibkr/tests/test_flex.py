@@ -430,6 +430,21 @@ class ReadOnceTests(unittest.TestCase):
         self.assertEqual(flex.read_resolutions(str(self.ledger) + flex.RESOLUTIONS_SUFFIX),
                          {"900000230": flex.IN_FIRST_BOOK})
 
+    def test_an_identical_decision_is_recorded_again_once_the_reader_is_no_longer_waiting(self):
+        # After a good reading the status no longer lists the transfer as ambiguous; repeating the same decision is
+        # allowed (it changes nothing), while a different one is refused, naming the decision on record.
+        statement = self.set_aside_as_ambiguous()
+        flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        self.assertTrue(self.read(FakeFlex(statements=(statement,))))
+        self.assertNotIn("ambiguous", self.status())
+        flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        with self.assertRaises(flex.StatementRefused) as caught:
+            flex.record_resolutions(str(self.ledger), {"900000230": flex.AFTER_APPROVAL})
+        self.assertEqual(str(caught.exception), "transfer 900000230 is already recorded as in-first-book; a recorded "
+                                                "decision is never changed (docs/manual/reconciliation.md)")
+        self.assertEqual(flex.read_resolutions(str(self.ledger) + flex.RESOLUTIONS_SUFFIX),
+                         {"900000230": flex.IN_FIRST_BOOK})
+
     def test_a_decision_for_a_transfer_already_in_the_ledger_is_refused(self):
         self.assertTrue(self.read(FakeFlex()))
         self.assertIn("900000101", self.payloads())
@@ -673,6 +688,17 @@ class ReadOnceTests(unittest.TestCase):
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(
             ("900000225", "20270117;100000", "100"), period=("20270110", "20270120")),))))
         self.assertIn("900000225", self.payloads())
+
+    def test_a_statement_ending_days_before_the_reading_is_a_coverage_gap(self):
+        # The reading is on the 15th. A custom period left in place ends on the 5th: every later evening returns the
+        # same window, so transfers after its end would be in no statement. Nothing is written, naming both days.
+        self.assertFalse(self.read(FakeFlex(statements=(self.statement(period=("20270101", "20270105")),))))
+        status = self.status()
+        self.assertEqual(status["state"], "coverage-gap")
+        self.assertIn("20270105", status["reason"])
+        self.assertIn("20270115", status["reason"])
+        self.assertFalse(self.ledger.exists())
+        self.assertFalse(Path(str(self.ledger) + flex.COVERAGE_SUFFIX).exists())
 
     def test_the_first_reading_reaching_back_to_the_approval_day_is_read(self):
         # The chain's first run was approved on 12 January (New York): a first statement from that day leaves none

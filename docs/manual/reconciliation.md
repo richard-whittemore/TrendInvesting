@@ -335,8 +335,8 @@ needs only each transfer's amount and date, which are exact.
   coverage file that is lost is treated the same way, as a first reading:
   first put it back, unchanged, from the server's nightly backup (the
   coverage file is part of the backup set once the nightly backup is built,
-  tracked in #508; until then, from a Lightsail snapshot if you took one,
-  see the server chapter, "Backups"), and the next reading goes on from it.
+  which is not built yet; until then, from a Lightsail snapshot if you took
+  one, see the server chapter, "Backups"), and the next reading goes on from it.
   Without a copy, the fallback is the custom-range reading below, which only
   reaches as far back as IBKR lets a custom period go: 365 days, from IBKR's
   documentation and not yet verified against the live Client Portal. When the
@@ -405,7 +405,8 @@ built yet").
 
 **The status file.** `sudo cat
 /var/lib/trend-investing/flex/<instance>/cash-movements.jsonl.status.json`
-shows one JSON object, rewritten whole at each reading:
+shows one JSON object, rewritten whole at each reading that gets as far as
+writing it:
 
 | Field | When | What it says |
 | --- | --- | --- |
@@ -422,13 +423,19 @@ shows one JSON object, rewritten whole at each reading:
 | `unknown_types` | `read` | each IBKR type the reader does not classify, with how many rows had it (`{}` when none) |
 | `reason` | `set-aside`, `coverage-gap`, `ambiguous-transfer` | why, in words |
 | `code` | `set-aside`, `coverage-gap`, `ambiguous-transfer` | IBKR's error code, or `null` when IBKR gave none |
+| `ambiguous` | `ambiguous-transfer` | the transaction IDs this reading set aside as ambiguous, the only ones `--resolve` accepts a new decision for; gone after the next good reading |
 
 A reading writes `"running"` before it asks IBKR for anything, so if it is
 stopped part way (its unit's 45-minute limit, a reboot, a kill), the file
 keeps saying `"running"` with that start time, never the previous evening's
 `"read"`. A `"running"` whose `checked_at` is more than 45 minutes old means
 the reading was stopped: `journalctl -u ti-flex@<instance>` says why, and
-the next firing reads again. Nothing is written to the ledger until a
+the next firing reads again. Two failures stop before a reading starts, so
+the file keeps whatever the last reading left, possibly an older `"read"`:
+an empty Flex token or query ID (the reader returns before it writes the
+status), and a missing `run.env` (the unit fails in its start step, before
+the reader runs). For those, open the failed unit and its journal, not the
+status file. Nothing is written to the ledger until a
 reading has checked everything, so a stopped reading leaves it as it was.
 
 ## What can go wrong, and what the program does then
@@ -458,7 +465,8 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | `ti-flex@<instance>` failed; its status file says **the account snapshot ... is at version N, which this reader does not read** | Refused rather than read as if no snapshot were there, which would misdate every transfer. Nothing written | Tell the developer: the reader must be updated with the adapter |
 | `ti-flex@<instance>` failed; its status file says **the chain of runs ... ends without a first run's approval stating the starting book** | Refused: without the starting book's time the reader cannot tell a transfer in the first book from one after it | Tell the developer; check `run.env` names the account's current run |
 | `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but the last reading covered up to D1** (and names the day the next statement must start on or before, the day after D1) | Nothing written, and the kept days not moved on: a transfer between D1 and D2 would otherwise be lost. Every later reading stops the same way until a statement reaches back | In Client Portal, set the Flex query's period to reach back to the day it names (a custom date range, or *Last 365 Calendar Days*), run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. A transfer already in the ledger is never written twice |
-| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but no earlier reading is kept ... and the first run was approved on D1** | The first reading (or the first after the coverage file was lost) starts after the approval day, so a transfer between D1 and D2 would be in no statement. Nothing written, no coverage kept | In Client Portal, set the Flex query's period to a custom date range starting on D1 and ending today, run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. If the coverage file was lost, put it back from the nightly backup first (see the server chapter, "Backups"); a custom period reaches back 365 days at most (IBKR's documentation, unverified), so if the approval day is further back than that, tell the developer. Turning the reader on no later than 29 days after the first run's approval day avoids this |
+| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but no earlier reading is kept ... and the first run was approved on D1** | The first reading (or the first after the coverage file was lost) starts after the approval day, so a transfer between D1 and D2 would be in no statement. Nothing written, no coverage kept | In Client Portal, set the Flex query's period to a custom date range starting on D1 and ending today, run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. If the coverage file was lost, put it back from the nightly backup once it exists, or until then from a Lightsail snapshot if you took one (see the server chapter, "Backups"); a custom period reaches back 365 days at most (IBKR's documentation, unverified), so if the approval day is further back than that, tell the developer. Turning the reader on no later than 29 days after the first run's approval day avoids this |
+| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement ends on D1, more than 4 days before today, D2** (the period was left as a custom range) | Nothing written, the coverage file not moved on: transfers after D1 are in no statement, and every later reading would return the same window | In Client Portal, set the Flex query's period back to *Last 30 Calendar Days*, run `sudo systemctl start ti-flex@<instance>` and check it read |
 | `ti-flex@<instance>` failed; its status file says `"state": "ambiguous-transfer"`: **the first run was approved at T, after that session's close, and IBKR dates transfer N of AMOUNT by that day alone** | IBKR gives no time for the transfer, and you approved after the day's close, so the reader cannot tell whether the book you stated holds it. Nothing written, the account number never shown; every reading stops the same way until you decide. Trading is unaffected | Check in IBKR's activity when the transfer reached the account against when you read the book. Then record it, once: `sudo -u ti-trader env -C /opt/trend-investing/adapter /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr flex --ledger /var/lib/trend-investing/flex/<instance>/cash-movements.jsonl --resolve N=in-first-book` if the book you read already held it, or `--resolve N=after-approval` if it came after; then `sudo systemctl start ti-flex@<instance>` and check it read. The decision is kept in `cash-movements.jsonl.resolutions.json` and never changed (a second, different `--resolve` for the same transfer is refused). `--resolve` also refuses a transfer already in the ledger ("already journalled as ...") and any transfer the last reading did not name as ambiguous, saying what the reader is waiting on; and if a reading is running it waits up to 10 seconds, then says "a reading is running, try again in a few minutes" (try again once it has finished). Avoid it: move no money on the day you approve a first run |
 | `ti-flex@<instance>` failed; its status file says **the snapshot as of ... is in a year the NYSE calendar does not hold** (or the first run's approval is) | Refused rather than guess whether the snapshot is a session's close. Nothing written. From the first close snapshot past the calendar's last year (2030), every reading that has a new transfer is refused this way until the calendar is extended; the market-data job stops at the same year | Tell the developer to extend `adapter/marketdata/nyse_calendar.py` (checked against NYSE's published holidays and early closes) and install the new build; the next reading then writes the transfers, none lost while they are within the query's window (or a custom-period reading reaches back) |
 | `ti-flex@<instance>` failed; its status file says **the resolutions file ... is not as this reader writes it** | Refused: your recorded decisions on ambiguous transfers are not known | Put the file back from a backup or the server's snapshot; never edit it by hand. Without one, record each decision again with `--resolve` (above) |
