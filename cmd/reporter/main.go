@@ -39,6 +39,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
@@ -294,7 +295,7 @@ func restoredLogNewer(path string) (restored, current string, examined bool) {
 		return "", "", false
 	}
 	dir := filepath.Dir(path)
-	files, err := restart.ListLogs(dir, ".log")
+	files, err := journalquery.ListLogs(dir, ".log")
 	if err != nil {
 		return "", "", false
 	}

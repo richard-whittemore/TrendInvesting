@@ -25,6 +25,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
@@ -243,11 +244,18 @@ func readOnly(next http.Handler) http.Handler {
 	})
 }
 
+// errNoRun is the engine directory holding no run yet: a first start, which
+// the page says so about rather than calling the journal unavailable.
+var errNoRun = errors.New("the engine directory holds no run yet")
+
 // fail answers without naming the server's paths. A broken chain of runs
 // never reaches it: the page shows it on the equity card (load).
 func fail(w http.ResponseWriter, err error) {
 	message := "journal unavailable"
-	if strings.Contains(err.Error(), "does not verify") {
+	switch {
+	case errors.Is(err, errNoRun):
+		message = "no run yet: the engine has not started a run"
+	case strings.Contains(err.Error(), "does not verify"):
 		message = "journal does not verify"
 	}
 	http.Error(w, message, http.StatusInternalServerError)
@@ -303,13 +311,13 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 // currentLogIn returns the path of the current run in an engine's log
 // directory: the head of its chain of runs, the log no other log's approval
 // names as its previous log, ties broken by the engine's own latest-run rule
-// (restart.ChainHead over the engine's listing, restart.ListLogs). Each
+// (restart.ChainHead over the engine's listing, journalquery.ListLogs). Each
 // log's first records are all the head is found by. warning names a log the
 // chain names that is newer by modification time than the head, a log
 // restored without its time, which the engine would take for the latest run
 // at its next start; it is "" when there is none.
 func currentLogIn(dir string, logs *logCache) (path, warning string, err error) {
-	files, err := restart.ListLogs(dir, ".log")
+	files, err := journalquery.ListLogs(dir, ".log")
 	if err != nil {
 		return "", "", errors.New("read the engine directory")
 	}
@@ -331,7 +339,7 @@ func currentLogIn(dir string, logs *logCache) (path, warning string, err error) 
 		return "", "", err
 	}
 	if head == "" {
-		return "", "", errors.New("the engine directory holds no run yet")
+		return "", "", errNoRun
 	}
 	if newer != "" {
 		warning = report.RestoredLogNewer(newer, head)

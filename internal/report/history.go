@@ -69,7 +69,7 @@ func HistoryStarting(h History) string {
 		return ""
 	}
 	if h.StartingMode == event.TradingModePaper || h.StartingMode == event.TradingModeLive {
-		return "the run started but recorded no approval; if the engine is not running, resume it with its approval (see the states chapter)"
+		return "the run started but recorded no approval; if the engine is not running, resume it with its approval (see \"Restarting an engine\")"
 	}
 	return "the run is starting; no history yet"
 }

@@ -3,13 +3,9 @@ package restart
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -242,38 +238,6 @@ func OlderLog(a, b LoggedFile) bool {
 	return a.Name < b.Name
 }
 
-// ListLogs returns the durable logs in dir, the regular files named with
-// suffix, in OlderLog order. A log that vanishes while it is listed is
-// skipped; one that cannot be examined for any other reason refuses, so the
-// latest run is never passed over silently.
-func ListLogs(dir, suffix string) ([]LoggedFile, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("list the durable log's directory %s: %w", dir, err)
-	}
-	return listed(dir, suffix, entries)
-}
-
-// listed is ListLogs of the entries read from dir.
-func listed(dir, suffix string, entries []fs.DirEntry) ([]LoggedFile, error) {
-	var logs []LoggedFile
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), suffix) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			return nil, fmt.Errorf("examine %s in %s: %w", entry.Name(), dir, err)
-		}
-		logs = append(logs, LoggedFile{Name: entry.Name(), Modified: info.ModTime()})
-	}
-	sort.Slice(logs, func(i, j int) bool { return OlderLog(logs[i], logs[j]) })
-	return logs, nil
-}
-
 // LatestRun returns the name of the latest run among the logs of one
 // directory, "" when there is none, by the engine's own rule: every log is
 // read, abandoned attempts and starts are set aside (Classify), and the last
@@ -364,7 +328,6 @@ func ChainHead(files []LoggedFile, start, read LogReader) (head, newer string, e
 // not, which can only be a log sharing its start; those are read whole and classified together, and the
 // next newest is tried when every such log is set aside.
 func latestOfTied(sorted []LoggedFile, starts []journal.Recovery, tied []int, read LogReader) (string, error) {
-	// The oldest tied log has no older one to be an attempt of.
 	for k := len(tied) - 1; k > 0; k-- {
 		newest := tied[k]
 		var group []LoggedFile
@@ -386,6 +349,9 @@ func latestOfTied(sorted []LoggedFile, starts []journal.Recovery, tied []int, re
 			return latest, nil
 		}
 	}
+	// tied[0] is the fallback: every newer tied log was tried above and set
+	// aside, and the head, which no approval names, is never set aside, so
+	// when none is returned the head is tied[0].
 	return sorted[tied[0]].Name, nil
 }
 

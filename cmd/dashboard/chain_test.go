@@ -250,3 +250,14 @@ func TestDashboardOfAFixedJournalStillFollowsTheChain(t *testing.T) {
 		t.Fatalf("points = %d, want 4", len(got.Summary.Equity.Points))
 	}
 }
+
+// TestDashboardOfAnEngineDirectoryWithNoRunSaysSo: a directory the engine has
+// not started a run in is a first start, not a damaged log, so the page says
+// there is no run yet rather than that the journal is unavailable.
+func TestDashboardOfAnEngineDirectoryWithNoRunSaysSo(t *testing.T) {
+	h := newHandlerFor(nil, []string{t.TempDir()}, "SPY")
+	rec := get(h, http.MethodGet, "/api/summary.json")
+	if got := strings.TrimSpace(rec.Body.String()); got != "no run yet: the engine has not started a run" {
+		t.Fatalf("status %d body %q, want the no-run message", rec.Code, got)
+	}
+}

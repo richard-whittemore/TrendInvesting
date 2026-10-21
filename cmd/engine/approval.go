@@ -10,6 +10,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
@@ -444,9 +445,9 @@ func logHeader(comp composition) journal.LogHeader {
 }
 
 // logsByAge returns the durable logs in dir, least recently modified first
-// (restart.ListLogs, the listing the dashboard finds the latest run by).
+// (journalquery.ListLogs, the listing the dashboard finds the latest run by).
 func logsByAge(dir string) ([]restart.LoggedFile, error) {
-	logs, err := restart.ListLogs(dir, durableLogSuffix)
+	logs, err := journalquery.ListLogs(dir, durableLogSuffix)
 	if err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}

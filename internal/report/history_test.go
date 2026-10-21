@@ -405,7 +405,7 @@ func TestEarlierRunsOfACurrentLogHoldingOnlyItsConfigurationAreAStart(t *testing
 			}
 			want := "the run is starting; no history yet"
 			if mode != event.TradingModeDryRun {
-				want = "the run started but recorded no approval; if the engine is not running, resume it with its approval (see the states chapter)"
+				want = "the run started but recorded no approval; if the engine is not running, resume it with its approval (see \"Restarting an engine\")"
 			}
 			if got := report.HistoryStarting(h); got != want {
 				t.Fatalf("line = %q, want %q", got, want)

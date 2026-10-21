@@ -376,8 +376,8 @@ summary is not due until a session closes). In paper or live the engine
 records the approval itself at once, straight after the configuration, so a
 log that stays at its configuration is a start that crashed before its
 approval was recorded: the card then says "the run started but recorded no
-approval; if the engine is not running, resume it with its approval (see the
-states chapter)". Resume it with `-resume` and the `-approval` it was
+approval; if the engine is not running, resume it with its approval (see
+"Restarting an engine")". Resume it with `-resume` and the `-approval` it was
 started with ([restart](restart.md)).
 
 The mode (dry-run, paper or live) may change along the chain: the engine
@@ -735,7 +735,7 @@ passes `-clock-check`.
 | The equity card says "history since <date>, the first <mode> run" | The chain of runs holds runs of another mode (a dry run before paper, or paper before live) before the current mode's. The chain is whole; the comparison holds only the current mode's runs, from the first of them | Nothing: a live account's figures are compared from its first live run |
 | The equity card says "history since <date>, the first <mode> run since the mode last changed; the <mode> runs before that change are not included" | The mode changed and came back (paper, then live, then paper again). The chain is whole; the comparison holds only the current mode's runs since the latest change, so the earlier runs of the same mode, before the run of another mode, are left out | Nothing, if you meant to return to that mode: the comparison starts again at the return |
 | The equity card says "the run is starting; no history yet" | The current log holds only its configuration: a dry run still starting, such as its first run waiting for its first input. No other log names it, so it is no break, and nothing is alerted | Nothing: the line goes once the run records its next input. If it stays, check the engine and the adapter are running (`systemctl status`) |
-| The equity card says "the run started but recorded no approval; if the engine is not running, resume it with its approval (see the states chapter)" | In paper or live the engine records the run's approval itself, straight after its configuration, so a log that stays at its configuration is a start that crashed before its approval was recorded. Nothing is alerted for it | Check the engine (`systemctl status`). If it is not running, resume it with `-resume` and the `-approval` it was started with ([restart](restart.md)) |
+| The equity card says "the run started but recorded no approval; if the engine is not running, resume it with its approval (see "Restarting an engine")" | In paper or live the engine records the run's approval itself, straight after its configuration, so a log that stays at its configuration is a start that crashed before its approval was recorded. Nothing is alerted for it | Check the engine (`systemctl status`). If it is not running, resume it with `-resume` and the `-approval` it was started with ([restart](restart.md)) |
 | The page shows a previous run after a restart | It should not: the page finds the current run, the newest link of the chain, on every request. If it does, the dashboard is an older build that still reads `TI_RUN` at start | Install the current build and restart the dashboard once (`sudo systemctl restart ti-dashboard`); after that no restart is needed |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 
