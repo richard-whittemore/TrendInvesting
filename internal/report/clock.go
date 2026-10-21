@@ -31,7 +31,7 @@ var clockSkew = regexp.MustCompile(`\bskew (?:of )?(-?\d+)s\b`)
 // clockUnmeasured matches the lines that say no skew was measured: the
 // script's refusals before or without a comparison (its "Output" contract),
 // and the reporter's own words for a check that could not run or timed out.
-var clockUnmeasured = regexp.MustCompile(`(?m)^(?:clock: (?:not synchronised|no reference clock could be measured|TI_CLOCK_)|the check (?:could not be run|timed out|failed and said nothing))`)
+var clockUnmeasured = regexp.MustCompile(`(?m)^(?:clock: (?:not synchronised|no reference clock could be measured|TI_CLOCK_)|the clock stepped back|the check (?:could not be run|timed out|failed and said nothing))`)
 
 // ClockSkewSeconds returns the skew in whole seconds that the check's output
 // states (this clock minus the reference), and whether it states one: a clock

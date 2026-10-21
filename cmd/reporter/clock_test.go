@@ -166,11 +166,12 @@ func TestChecksWithinOneTimerPeriodRunOnceAndCountOnce(t *testing.T) {
 	}
 }
 
-// clockPages counts the PagerDuty events sent for the clock alert.
+// clockPages counts the PagerDuty trigger events sent for the clock alert;
+// resolves are not pages.
 func clockPages(r *relay) int {
 	n := 0
 	for _, m := range r.to("events.pagerduty.test") {
-		if strings.Contains(m, "clock-drift:") {
+		if strings.Contains(m, "clock-drift:") && strings.Contains(m, `"event_action":"trigger"`) {
 			n++
 		}
 	}
@@ -215,10 +216,10 @@ func TestACheckRecordedAMomentInTheFutureIsThisPeriodsAndIsReusedNotCounted(t *t
 	}
 }
 
-// A clock set back by hours: the check recorded while it ran ahead is not this
-// period's, so a new one runs, and the old one is not counted with it (ADR
-// 0019: a wrong clock makes the engine withhold sells).
-func TestACheckRecordedHoursAheadMeansTheClockWentBackAndIsCheckedAgainWithoutCountingTheOldOne(t *testing.T) {
+// A clock set back by hours is itself the fault (ADR 0019: a wrong clock makes
+// the engine withhold sells): the check recorded while it ran ahead counts as
+// a failed check, and a new one is made.
+func TestACheckRecordedHoursAheadMeansTheClockWentBackAndCountsAsAFailedCheck(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	check := newStandInCheck(t)
 	check.fail(clockFailure)
@@ -232,11 +233,36 @@ func TestACheckRecordedHoursAheadMeansTheClockWentBackAndIsCheckedAgainWithoutCo
 	if check.runs() != 2 {
 		t.Errorf("a check dated 3 hours ahead was reused: %d runs, want 2", check.runs())
 	}
-	if n := failuresRecorded(t, dir); n != "1" {
-		t.Errorf("the stale check was counted with the new one: failure count %s, want 1", n)
+	if n := failuresRecorded(t, dir); n != "2" {
+		t.Errorf("the step back was not counted: failure count %s, want 2", n)
 	}
-	if got := clockPages(r); got != 0 {
-		t.Errorf("%d clock pages went out on a stale failure and a new one, want 0", got)
+	if got := clockPages(r); got != 1 {
+		t.Errorf("%d clock pages went out on a failed check and a step back, want 1", got)
+	}
+}
+
+// A clock that keeps stepping back by hours, each check passing where it
+// stands, pages on the second firing that finds the step.
+func TestAClockThatKeepsSteppingBackPagesOnTheSecondFiringThatFindsTheStep(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	check := newStandInCheck(t)
+	dir := t.TempDir()
+	at := t0.Add(10 * time.Hour)
+	for i, d := range []time.Duration{0, -3 * time.Hour, -6 * time.Hour} {
+		if err := clockRun(t, r, dir, check.path(), at.Add(d)); err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if i == 2 {
+			want = 1
+		}
+		if got := clockPages(r); got != want {
+			t.Fatalf("after firing %d: %d clock pages, want %d", i+1, got, want)
+		}
+	}
+	body := strings.Join(r.to("events.pagerduty.test"), "\n")
+	if !strings.Contains(body, "stepped back by about") {
+		t.Errorf("the page does not say the clock stepped back: %s", body)
 	}
 }
 

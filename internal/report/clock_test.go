@@ -69,6 +69,7 @@ func TestClockDriftAlertSaysWhenNoSkewWasMeasured(t *testing.T) {
 		"clock: TI_CLOCK_TOLERANCE_SECONDS must be whole seconds from 1 to 60, not 'x'",
 		"the check could not be run: /x/clock-check.sh is missing",
 		"the check timed out after 40s",
+		"the clock stepped back by about 3h0m0s: the last check was recorded that far ahead of now.",
 	} {
 		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: out}, 2)
 		if !strings.Contains(a.Body, "No skew was measured") || !strings.Contains(a.Body, strings.SplitN(out, "\n", 2)[0]) {
