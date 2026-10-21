@@ -346,7 +346,7 @@ def rehearse(work, account):
     def run(phase, engine_log):
         status = adapter_main(argv(engine_log), api_factory=lambda cfg: gateway, should_stop=phase, err=log,
                               poll=0.01,
-ibapi_version=lambda: tuple(int(p) for p in version.split(".")), protobuf_version=lambda: protobuf,
+                              ibapi_version=lambda: tuple(int(p) for p in version.split(".")), protobuf_version=lambda: protobuf,
                               today=lambda: calendar["day"],
                               now=lambda: datetime.fromtimestamp(gateway.server_time, timezone.utc))
         log.flush()
