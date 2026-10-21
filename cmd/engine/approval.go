@@ -268,7 +268,7 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 	if err != nil {
 		return nil, err
 	}
-	if recovery.FinalRecordHash != approval.PreviousLogFinalHash {
+	if !restart.PreviousLogApproved(recovery, approval) {
 		return nil, fmt.Errorf("engine: the approval in %s names %s with final record hash %s, but that log's final record hash is %s; the approval must be of the log as it stands",
 			opts.approvalPath, latest, approval.PreviousLogFinalHash, recovery.FinalRecordHash)
 	}
@@ -476,10 +476,7 @@ func logsByAge(dir string) ([]loggedFile, error) {
 		logs = append(logs, loggedFile{entry.Name(), info.ModTime()})
 	}
 	sort.Slice(logs, func(i, j int) bool {
-		if !logs[i].modified.Equal(logs[j].modified) {
-			return logs[i].modified.Before(logs[j].modified)
-		}
-		return logs[i].name < logs[j].name
+		return restart.OlderLog(restart.LoggedFile{Name: logs[i].name, Modified: logs[i].modified}, restart.LoggedFile{Name: logs[j].name, Modified: logs[j].modified})
 	})
 	return logs, nil
 }

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,11 +17,15 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
+	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
 func main() {
@@ -45,19 +50,21 @@ func run(args []string, log io.Writer) error {
 	flags.SetOutput(log)
 	var journals stringList
 	flags.Var(&journals, "journal", "path to an account's journal; repeat for each account")
+	var engineDirs stringList
+	flags.Var(&engineDirs, "engine-dir", "an engine's log directory: each request shows the latest run in it, followed back to the first; repeat for each account")
 	addr := flags.String("addr", defaultAddr, "listen address: loopback or a Tailscale address")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if len(journals) == 0 {
-		return errors.New("dashboard: at least one -journal is required")
+	if len(journals)+len(engineDirs) == 0 {
+		return errors.New("dashboard: at least one -journal or -engine-dir is required")
 	}
 	if err := checkListenAddr(*addr, hostInterfaces); err != nil {
 		return err
 	}
 	server := &http.Server{
-		Addr: *addr, Handler: newHandler(journals, *benchmark),
+		Addr: *addr, Handler: newHandlerFor(journals, engineDirs, *benchmark),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute,
 	}
 	_, _ = fmt.Fprintf(log, "dashboard: read-only, listening on %s\n", *addr)
@@ -155,11 +162,16 @@ type alertView struct {
 
 // newHandler serves the journals read-only. Every request re-reads and
 // re-verifies them, so the page is never staler than the file.
-func newHandler(journals []string, benchmark string) http.Handler {
+// newHandlerFor serves the journals and, for each engine directory, the
+// latest run in it, resolved afresh on every request, so a restart that
+// starts a new run is shown without restarting the dashboard. Each is shown
+// with the runs before it, followed back to the first (report.EarlierRuns).
+func newHandlerFor(journals, engineDirs []string, benchmark string) http.Handler {
+	sources := source{journals: journals, dirs: engineDirs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok\n") })
 	mux.HandleFunc("/api/summary.json", func(w http.ResponseWriter, _ *http.Request) {
-		accounts, err := load(journals, benchmark)
+		accounts, err := load(sources, benchmark)
 		if err != nil {
 			fail(w, err)
 			return
@@ -168,7 +180,7 @@ func newHandler(journals []string, benchmark string) http.Handler {
 		_ = json.NewEncoder(w).Encode(accounts)
 	})
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
-		accounts, err := load(journals, benchmark)
+		accounts, err := load(sources, benchmark)
 		if err != nil {
 			fail(w, err)
 			return
@@ -221,15 +233,31 @@ func readOnly(next http.Handler) http.Handler {
 // fail answers without naming the server's paths.
 func fail(w http.ResponseWriter, err error) {
 	message := "journal unavailable"
+	var broken *restart.ChainError
+	if errors.As(err, &broken) {
+		message = "journal chain of runs is broken: " + broken.Error()
+	}
 	if strings.Contains(err.Error(), "does not verify") {
 		message = "journal does not verify"
 	}
 	http.Error(w, message, http.StatusInternalServerError)
 }
 
-func load(journals []string, benchmark string) ([]account, error) {
+// source is where the accounts' logs are: fixed journals, and engine
+// directories whose latest run is found on each request.
+type source struct{ journals, dirs []string }
+
+func load(src source, benchmark string) ([]account, error) {
+	paths := slices.Clone(src.journals)
+	for _, dir := range src.dirs {
+		path, err := latestLogIn(dir)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
 	var out []account
-	for _, path := range journals {
+	for _, path := range paths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, errors.New("read journal")
@@ -238,7 +266,11 @@ func load(journals []string, benchmark string) ([]account, error) {
 		if err != nil {
 			return nil, err
 		}
-		a, err := view(envelopes, benchmark)
+		earlier, err := report.EarlierRuns(path, os.ReadFile)
+		if err != nil {
+			return nil, err
+		}
+		a, err := view(earlier, envelopes, benchmark)
 		if err != nil {
 			return nil, err
 		}
@@ -247,12 +279,46 @@ func load(journals []string, benchmark string) ([]account, error) {
 	return out, nil
 }
 
-func view(envelopes []event.Envelope, benchmark string) (account, error) {
+// latestLogIn returns the path of the latest run in an engine's log
+// directory, by the engine's own rule (restart.LatestRun).
+func latestLogIn(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", errors.New("read the engine directory")
+	}
+	var files []restart.LoggedFile
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, restart.LoggedFile{Name: entry.Name(), Modified: info.ModTime()})
+	}
+	latest, err := restart.LatestRun(files, func(name string) (journal.Recovery, error) {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return journal.Recovery{}, errors.New("cannot be read")
+		}
+		return journal.RecoverLog(bytes.NewReader(raw))
+	})
+	if err != nil {
+		return "", err
+	}
+	if latest == "" {
+		return "", errors.New("the engine directory holds no run yet")
+	}
+	return filepath.Join(dir, latest), nil
+}
+
+func view(earlier, envelopes []event.Envelope, benchmark string) (account, error) {
 	date, err := report.LastDate(envelopes)
 	if err != nil {
 		return account{}, err
 	}
-	summary, err := report.Summarize(envelopes, date, benchmark)
+	summary, err := report.SummarizeWithHistory(earlier, envelopes, date, benchmark)
 	if err != nil {
 		return account{}, err
 	}

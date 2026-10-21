@@ -11,7 +11,9 @@ you about it, so you do not have to go looking.
   compares with SPY.
 - `dashboard` shows the same summary as a web page, one section per account,
   with a chart of your equity against SPY and a light or dark colour choice.
-  It is read-only: you cannot click anything that changes the system.
+  It is read-only: you cannot click anything that changes the system. It shows
+  the account's whole history, from its first day, across every restart and
+  upgrade (see "The history across restarts" below).
 
 Neither can place, change or cancel an order, and neither talks to the broker.
 They only read.
@@ -330,14 +332,37 @@ On the server it runs as `ti-dashboard.service`:
 
 ```
 /opt/trend-investing/bin/ti-dashboard \
-  -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log -addr 127.0.0.1:8088
+  -engine-dir /var/lib/trend-investing/engines/boost -addr 127.0.0.1:8088
 ```
 
 Port 8088 is the program's default, the unit's, and the one the Lightsail
-runbook publishes to your tailnet (`sudo tailscale serve --bg 8088`). `TI_RUN`
-is read when the dashboard starts, so after a fresh run restart it
-(`sudo systemctl restart ti-dashboard`) to show the new log. It reads no
-secret and is given none.
+runbook publishes to your tailnet (`sudo tailscale serve --bg 8088`). It reads
+no secret and is given none.
+
+`-engine-dir` names the folder the engine keeps its logs in. On every request
+the page finds the account's latest run there, by the same rule the engine uses
+to find it at a start, so after a restart or an upgrade of the engine the next
+page load already shows the new run. You never restart the dashboard to follow
+the engine. (Restart it only to run a new build of the dashboard itself:
+`provision.sh services` does that for you at the upgrade step of the Lightsail
+runbook, which is why that step already ends with a dashboard restart.)
+
+### The history across restarts
+
+Every restart or upgrade of the engine is a new run with its own log, and each
+new run's approval names the run before it and that log's final fingerprint.
+The page follows those names back to the account's first run, checking each
+log against the fingerprint the approval named, and draws the equity
+comparison from the first run's first close: the chart, the returns since the
+start and the "first paired point" date are the real first day, not the day of
+the last restart. Everything else on the page (holdings, engine state, the
+day's orders and fills, alerts, "Inputs not read") is the current run's, as
+before. The daily summary the reporter sends follows the chain the same way.
+
+If a link cannot be followed (an earlier log is missing, was changed, or the
+approvals loop back on themselves) the page does not show a shorter history. It
+refuses and the message names the two logs the broken link joins; put the
+missing log back as the engine wrote it. The earlier logs are never edited.
 
 On the Mac:
 
@@ -345,7 +370,8 @@ On the Mac:
 go run ./cmd/dashboard -journal joint.log -journal ira.log -addr 127.0.0.1:8088
 ```
 
-Repeat `-journal` for each account. It will listen only on a loopback address
+Repeat `-journal` for each account (it follows the chain of runs back from that
+log), or give `-engine-dir` a folder of logs to show the latest run in it. It will listen only on a loopback address
 or an address this machine's own Tailscale interface holds (`tailscale ip`
 prints it), so on the server it is reachable only over Tailscale. An address
 that merely looks like a Tailscale one but belongs to another network is
@@ -579,10 +605,10 @@ passes `-clock-check`.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| The page says "journal unavailable" | The log could not be read: missing, not readable, or a record that fails its checks. The page and `/api/summary.json` show no figure | `systemctl status ti-dashboard`; check `TI_RUN` in `/var/lib/trend-investing/engines/boost/run.env` names a log that exists. The reporter's "cannot read the journal" alert names the reason when a record is bad |
+| The page says "journal unavailable" | The log could not be read: missing, not readable, or a record that fails its checks. The page and `/api/summary.json` show no figure | `systemctl status ti-dashboard`; check the engine's log folder (`/var/lib/trend-investing/engines/boost`) holds the logs. The reporter's "cannot read the journal" alert names the reason when a record is bad |
 | The page says "journal does not verify" | The log's fingerprints fail, or its records name different runs. No figure is shown | Never edit the log. Runbook `docs/runbooks/durable-log.md`, "A log that cannot be read" |
-| The page shows the previous run | The dashboard reads `TI_RUN` only when it starts | `sudo systemctl restart ti-dashboard` |
-| The unit failed: "ti-dashboard: /var/lib/trend-investing/engines/boost/run.env is missing or empty: ..." | The dashboard does not start | Start the Boost engine once, then `sudo systemctl restart ti-dashboard` |
+| The page says "journal chain of runs is broken: ..." | The page follows each run's approval back to the first run, and one link fails: an earlier log is missing, is not the log the approval named, or the approvals loop. It shows nothing rather than a shorter history. The message names the two logs | Put the named earlier log back, as the engine wrote it, beside the others (`docs/runbooks/durable-log.md`). Never edit or delete a log |
+| The page shows a previous run after a restart | It should not: the page finds the latest run on every request. If it does, the dashboard is an older build that still reads `TI_RUN` at start | Install the current build and restart the dashboard once (`sudo systemctl restart ti-dashboard`); after that no restart is needed |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 
 ## What backs this
