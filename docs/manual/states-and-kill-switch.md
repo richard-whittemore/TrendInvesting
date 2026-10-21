@@ -91,10 +91,11 @@ again at each decided close while it is due. So a check of IBKR's open
 orders that finds none working is not enough: the next close may send the
 exit again, sized without a hand sale IBKR has not yet listed. Sell by
 hand only as this chapter's hand-sale rule says (below, and the failed-sale
-bullet): first stop new orders (the kill switch where it exists, otherwise
-stop the engine), cancel any working program sale in IBKR's app, confirm
-that no `working`, `pending` or `cancel-pending` sell remains, and only
-then sell
+bullet): first stop the engine and the adapter (`sudo systemctl stop
+ti-engine@boost ti-adapter-boost`; the kill switch is not enough), cancel
+every open SPY order in IBKR's app, confirm in IBKR's app that none is open
+and that no `working`, `pending` or `cancel-pending` sell remains, and only
+then sell, starting again only as a fresh run
 ([boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan)).
 
 ## The kill switch

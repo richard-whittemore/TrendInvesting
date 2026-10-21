@@ -268,9 +268,10 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 
 // handSale is the hand-sale procedure a page sends the owner to while the
 // program's sells may still be working (docs/manual/states-and-kill-switch.md):
-// stop new orders first, the kill switch or the engine, cancel the working
-// sale in IBKR's app, confirm none remains, and only then sell.
-var handSale = []string{"kill switch", "stop the engine", "cancel", "IBKR's app", "confirm", "only then"}
+// stop the engine and the adapter (the kill switch does not stop the sale
+// back to 98%), cancel the working sale in IBKR's app, confirm none remains,
+// and only then sell.
+var handSale = []string{"stop the engine and the adapter", "ti-engine@<account> ti-adapter-<account>", "kill switch is not enough", "cancel", "IBKR's app", "confirm", "only then"}
 
 // TestARejectionWhileBuysAreStoppedPagesAsSuch: a sell the venue rejects
 // after two rejections in a row stopped Boost's buys is recorded once, with

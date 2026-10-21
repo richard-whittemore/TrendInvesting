@@ -244,10 +244,11 @@ from the first one's log and checks the two logs are identical byte for byte.
   strategies and the risk gate), 0027 (durable log, restart).
 - The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
   introduced in target-weight rules version 1.11.0 (ADR 0016; the rules are
-  at 1.17.0 now), so a dry-run journal written under an earlier rules
+  at 1.18.0 now), so a dry-run journal written under an earlier rules
   version does not replay.
 - Tests of the withheld sessions, in `internal/targetweight`:
-  `TestAMissingBarWithholdsAndNeverComputesAcrossTheGap`,
+  `TestAMissingBarIsSkippedAndBoostDecidesAcrossTheGap`,
+  `TestAGapWhileBoostedNeverBlocksTheExit`,
   `TestAStaleSnapshotWithholdsButTheLatchAdvances`,
   `TestASnapshotAfterTheCloseWithholds`.
 - Tests of the synthetic reports, in `internal/targetweight`:

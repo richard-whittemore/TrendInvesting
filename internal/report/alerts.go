@@ -452,11 +452,12 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 }
 
 // handSaleSteps is the hand-sale procedure while a program sale may be
-// working (docs/manual/states-and-kill-switch.md): the program plans
-// Boost's exit again at each decided session while it is due, and a hand
-// sale placed after the last IBKR snapshot is not counted until a snapshot
-// lists it, so the owner stops new orders before selling by hand.
-const handSaleSteps = "Before you sell anything by hand, stop the program sending new orders: engage the kill switch (operator kill-switch -state engaged) where the engine was started with -operator, otherwise stop the engine (sudo systemctl stop ti-engine@<account>). Then cancel any working sale of the program's in IBKR's app, confirm that no working, pending or cancel-pending sell remains, and only then sell."
+// working (docs/manual/states-and-kill-switch.md, "Selling by hand safely"):
+// the program plans Boost's exit again at each decided session while it is
+// due, a hand sale placed after the last IBKR snapshot is not counted until a
+// snapshot lists it, and the kill switch does not stop the sale back to 98%,
+// so the owner stops the engine and the adapter before selling by hand.
+const handSaleSteps = "Before you sell anything by hand, stop the engine and the adapter (sudo systemctl stop ti-engine@<account> ti-adapter-<account>); the kill switch is not enough, because it does not stop the sale back to 98%. Then cancel every open order of the program's in IBKR's app, confirm in IBKR's app that no working, pending or cancel-pending sell remains, and only then sell."
 
 // rejectionAlert states the rejection that brought the account's Boost
 // orders rejected in a row to two, whatever their targets, after the other
