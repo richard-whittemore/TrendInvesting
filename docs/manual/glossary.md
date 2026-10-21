@@ -10,7 +10,7 @@ takes a particular one:
 | Name | Example | Used by |
 | --- | --- | --- |
 | The configuration's `account_id` | `joint` in the shipped dry-run file; your IBKR paper account number (`DU…`) in a paper configuration | the engine, and every `operator` command's `-account` (an instruction for any other name is refused or has no effect), and an approval's `account_id` |
-| The server's account label | `boost`, `trad-ira`, `roth-ira` | the service names (`ti-engine@boost`, `ti-adapter-boost`, `ti-reporter@boost`), the state folder (`/var/lib/trend-investing/engines/boost/`), the `.env` and `.config` file names, `TI_ACCOUNT` in the `.env` file |
+| The server's account label (the engine **instance**, `<instance>` in paths and unit names) | `boost`, `trad-ira`, `roth-ira` | the service names (`ti-engine@boost`, `ti-adapter-boost`, `ti-reporter@boost`), the state folder (`/var/lib/trend-investing/engines/boost/`), the `.env` and `.config` file names, `TI_ACCOUNT` in the `.env` file |
 | The IBKR account number | `DU…` for paper; a live number never begins `DU` | IBKR, the adapter's configuration, and the paper configuration's `account_id` |
 | The plan's name | "the joint account", "the Traditional IRA", "the Roth IRA" | the chapters and the plan |
 
@@ -101,7 +101,7 @@ is on disk is **committed**: it may or may not have reached the adapter.
 See [order lifecycle](order-lifecycle.md).
 
 **Configuration.** One account's settings file: strategy, account, mode,
-rule figures and hard limits (`/etc/trend-investing/engines/<account>.config`).
+rule figures and hard limits (`/etc/trend-investing/engines/<instance>.config`).
 It is the first record of every run.
 
 **Configuration hash.** A fingerprint (SHA-256) of the configuration and

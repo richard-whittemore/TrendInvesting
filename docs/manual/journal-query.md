@@ -29,10 +29,10 @@ the engine from the same commit, and `deploy/provision.sh` installs it in
 belong to the engine's user, so run it as that user:
 
 ```
-sudo -u ti-trader journal-query <report> [flags] /var/lib/trend-investing/engines/<account>/<run>.log
+sudo -u ti-trader journal-query <report> [flags] /var/lib/trend-investing/engines/<instance>/<run>.log
 ```
 
-Each run leaves two files in `/var/lib/trend-investing/engines/<account>/`:
+Each run leaves two files in `/var/lib/trend-investing/engines/<instance>/`:
 `<run>.log`, the durable log written as it goes, and `<run>.journal`, the
 journal written when it stops. Name one of them, not both (below). The log
 can be read while the engine is still running.

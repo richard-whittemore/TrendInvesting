@@ -50,11 +50,16 @@ reboots by itself, because a reboot logs the Gateway out.
 
 ## Where the configuration lives
 
+In the paths and unit names below, `<instance>` is the engine instance: the
+name of its configuration file (`boost`, `trad-ira`, `roth-ira`), as in
+`ti-engine@boost`. It is not the account id the `-account` flag takes: the
+Boost instance's account id is `joint`.
+
 | File | What it holds | Who writes it |
 | --- | --- | --- |
-| `/etc/trend-investing/engines/<account>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and, for Boost, the engine's start mode (`TI_MODE`) | copied from `deploy/etc/engines/` by `provision.sh services` |
-| `/etc/trend-investing/engines/<account>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). Only `boost.config` exists | the same |
-| `/var/lib/trend-investing/engines/<account>/run.env` | one engine start: `TI_RUN` (the run's name, never reused), `TI_AS_OF` (its first decided session) and `TI_RESTART_ARGS` (empty, `-approval <file>` or `-resume <log>`) | you, before every start (`docs/runbooks/durable-log.md`, "Restarting an engine"; example in `deploy/etc/engines/run.env.example`) |
+| `/etc/trend-investing/engines/<instance>.env` | the account's label (`TI_ACCOUNT`), its adapter client ID (Boost 11, Traditional IRA 12, Roth IRA 13) and, for Boost, the engine's start mode (`TI_MODE`) | copied from `deploy/etc/engines/` by `provision.sh services` |
+| `/etc/trend-investing/engines/<instance>.config` | the account's configuration: strategy, account, mode, rule figures, hard limits. Hashed into every run (ADR 0016). Only `boost.config` exists | the same |
+| `/var/lib/trend-investing/engines/<instance>/run.env` | one engine start: `TI_RUN` (the run's name, never reused), `TI_AS_OF` (its first decided session) and `TI_RESTART_ARGS` (empty, `-approval <file>` or `-resume <log>`) | you, before every start (`docs/runbooks/durable-log.md`, "Restarting an engine"; example in `deploy/etc/engines/run.env.example`) |
 | `/etc/trend-investing/gateway.env` | the Gateway's restart times | `provision.sh services` |
 | `/etc/trend-investing/adapters/boost.json` | the Boost adapter's settings: the Gateway's address and port (4002), client ID 11, mode and the paper sending switch (`paper_sending_enabled`), timeouts; no account number | created once from `deploy/etc/adapters/boost.json.example` by `provision.sh services`, never overwritten; you edit it for paper |
 
@@ -94,9 +99,9 @@ a command line. Edit these files with `sudo -e`.
 | Folder | What is in it |
 | --- | --- |
 | `/var/lib/trend-investing/data/` | the data step's recordings (never overwritten), `streams/boost/<TI_RUN>/` (the Boost engine's daily input files) and, when you need it, `quarantine/` |
-| `/var/lib/trend-investing/engines/<account>/` | each run's durable log (`<TI_RUN>.log`) and end-of-run journal (`<TI_RUN>.journal`), `run.env`, your approval files, `quarantine/` for a log set aside, `operator/`, the operator inbox the provisioner creates (`ti-operator:ti-trader`, `0750`; [operator](operator.md), "Who can write an instruction"), and `operator-notes/`, the engine's own notes on it |
-| `/var/lib/trend-investing/reports/` | the reporter's own state file, `<account>.reporter.json` (the only folder its unit may write) |
-| `/var/lib/trend-investing/adapters/<account>/` | the adapter's pending file (`pending.json`) and the files beside it (the only folder its unit may write) |
+| `/var/lib/trend-investing/engines/<instance>/` | each run's durable log (`<TI_RUN>.log`) and end-of-run journal (`<TI_RUN>.journal`), `run.env`, your approval files, `quarantine/` for a log set aside, `operator/`, the operator inbox the provisioner creates (`ti-operator:ti-trader`, `0750`; [operator](operator.md), "Who can write an instruction"), and `operator-notes/`, the engine's own notes on it |
+| `/var/lib/trend-investing/reports/` | the reporter's own state file, `<instance>.reporter.json` (the only folder its unit may write) |
+| `/var/lib/trend-investing/adapters/<instance>/` | the adapter's pending file (`pending.json`) and the files beside it (the only folder its unit may write) |
 | `/var/lib/ti-gateway/`, `/var/log/ti-gateway/` | the Gateway's own files and IBC's log |
 | `/opt/trend-investing/bin/` | the installed programs: `ti-engine`, `ti-reporter`, `ti-dashboard`, `operator` and `journal-query` (from `deploy/build-engine.sh`) and `ti-data` (from `deploy/build-data.sh`). `operator` and `journal-query` are linked into `/usr/local/bin` |
 | `/opt/trend-investing/adapter/`, `/opt/trend-investing/adapter-venv/`, `/opt/trend-investing/twsapi/` | the adapter's code (`provision.sh adapter`), its Python environment and IBKR's TWS API with its install record (`provision.sh twsapi`) |
@@ -189,7 +194,7 @@ reporter does not report the clock; this check is the way to see it.
   the secrets, start the Gateway the first time and approve the phone
   prompt (`docs/runbooks/lightsail-deployment.md`).
 - **Every engine start**, after a crash or not: write `run.env`, and for a
-  fresh run an approval, then `sudo systemctl start ti-engine@<account>`
+  fresh run an approval, then `sudo systemctl start ti-engine@<instance>`
   ([restart](restart.md)).
 - **The adapter**, after its engine: `sudo systemctl start ti-adapter-boost`
   ([paper trading](paper-trading.md), "Starting the adapter").
@@ -224,10 +229,10 @@ instructions (`operator kill-switch`, `rebalance-cleared` and `acknowledge`)
 as `ti-operator`, the user that writes them: `sudo -u ti-operator operator
 ...`. The provisioner creates `ti-operator` (a system user with no login
 shell, in the engine's group `ti-trader`) and each account's operator inbox,
-`/var/lib/trend-investing/engines/<account>/operator`, owned by `ti-operator`
+`/var/lib/trend-investing/engines/<instance>/operator`, owned by `ti-operator`
 in the group `ti-trader`, mode `0750`; the engine unit passes it, so `sudo -u
 ti-operator operator kill-switch -inbox
-/var/lib/trend-investing/engines/<account>/operator ...` is read by the engine
+/var/lib/trend-investing/engines/<instance>/operator ...` is read by the engine
 before its next input ([operator](operator.md), "The operator inbox"). The
 engine reads the inbox through its group and cannot write it, and the
 adapter, the data job, the reporter and the dashboard, which also run as
@@ -243,7 +248,7 @@ the engine (the Mac mini's) must create it the same way: owned by whichever
 user that host's engine does not run as (on the server, `ti-operator`), in a
 group the engine's user is in, mode `0750`. The recorded switch only works while the engine
 runs; to stop the program trading outright, also stop it (`sudo systemctl stop
-ti-engine@<account>`). Also stop the adapter
+ti-engine@<instance>`). Also stop the adapter
 (`sudo systemctl stop ti-adapter-boost`): an order the engine released that the
 adapter has not sent is never sent by the fresh run you start next: its adapter
 stops at start naming the earlier run's input ("awaits its reply from an
@@ -267,7 +272,7 @@ already at IBKR in IBKR's own app.
 | The IBKR password is wrong | That check does not catch it: if IBC exits, the unit starts it again every 30 seconds, and repeated failed logins can make IBKR lock the login | Stop the Gateway at once (`sudo systemctl stop ti-gateway`), correct the file, start it again (`docs/runbooks/gateway-login.md`) |
 | `ti-data`, `ti-reporter@boost` or `ti-dashboard` failed: ".../engines/boost/run.env is missing or empty: start the Boost engine once first ..." | That unit does not run. The data job writes nothing; the reporter sends nothing | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine"); then `sudo systemctl restart ti-dashboard` |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
-| `ti-engine@<account>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the IRA engines have no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
+| `ti-engine@<instance>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the IRA engines have no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
 | The data job fails | The unit shows failed; `journalctl -u ti-data` says why; no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)) |
 | The reporter fails every firing | Nothing reaches your phone; the error is in `journalctl -u ti-reporter@boost` | [alerts and dashboard](alerts-and-dashboard.md), "What can go wrong" |
 | The machine dies, or the reporter never runs | **Nothing outside the server tells you.** The outside heartbeat (Healthchecks.io in plan section 7) is not built, and nothing reads a `HEALTHCHECK_URL` line. A reporter on the machine cannot notice the machine dying | Check the dashboard or the server yourself until it exists (tracked in the issue "External heartbeat and a recorded clock input for the margin alarm's 30-minute rule") |

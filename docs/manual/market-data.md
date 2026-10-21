@@ -470,7 +470,7 @@ whole warm-up again to a run whose log already holds it. If this run is a
 crash resume, restore its first run's log from the backup as the engine
 wrote it; if the log is an old run's, once that run has ended move its
 folder out of `streams/boost/` and its log out of the engine's log folder
-(`/var/lib/trend-investing/engines/<account>/`, beside the running log),
+(`/var/lib/trend-investing/engines/<instance>/`, beside the running log),
 and keep both as evidence in a folder outside both: a durable log is never
 edited or deleted. A log whose first records name this run is read
 whole: if it cannot be read, both stop, naming it ("names this run in its
@@ -669,8 +669,10 @@ days), it takes them all, oldest first.
    close is the last account snapshot of this run, or of the earlier runs
    its approvals name, however long ago, or the **starting book** you
    stated when you approved the account's first run (or a fresh run, after
-   a transfer or a sale by hand you checked; `operator approve -first-run`,
-   docs/runbooks/first-paper-order.md), whichever is latest: a fresh run's
+   a transfer or a sale by hand you checked; `operator approve -first-run` for the first
+   run, docs/runbooks/first-paper-order.md, and `operator approve -log
+   <previous run's log> ... -positions ... -cash ... -currency USD` for a
+   fresh run, [operator](operator.md), "An approval"), whichever is latest: a fresh run's
    first reading is compared with the last run's close, never taken as the
    book unchecked. The
    broker snapshot records the real read time beside it (`read_at`) as

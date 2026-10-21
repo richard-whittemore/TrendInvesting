@@ -139,12 +139,12 @@ dirty tree outright: the server only ever runs a committed build.
 ## How it is started
 
 systemd starts it from `deploy/systemd/ti-engine@.service` with every setting
-written out: `-mode` (from `/etc/trend-investing/engines/<account>.env`,
-`TI_MODE`), `-config`, `-socket` (in `/run/ti-engine-<account>`, a folder
+written out: `-mode` (from `/etc/trend-investing/engines/<instance>.env`,
+`TI_MODE`), `-config`, `-socket` (in `/run/ti-engine-<instance>`, a folder
 only the engine's user can open), `-log` and `-out` (named by `TI_RUN`),
 `-as-of` (`TI_AS_OF`) and, for a restart, `-approval` or `-resume`
 (`TI_RESTART_ARGS`). You write `TI_RUN`, `TI_AS_OF` and `TI_RESTART_ARGS`
-before every start in `/var/lib/trend-investing/engines/<account>/run.env`
+before every start in `/var/lib/trend-investing/engines/<instance>/run.env`
 (the example is `deploy/etc/engines/run.env.example`; the steps are in
 `docs/runbooks/durable-log.md`, "Restarting an engine"). The unit is skipped
 until the stamped binary, the account's `.env` and its `.config` are
@@ -159,7 +159,7 @@ durable log and refuses to start without it.
 When it is up it prints `listening on <socket>`; a fresh run after an earlier
 one first prints `recorded the owner's approval of a fresh run after <log>
 ...`, and a resume `resumed N record(s) from <log>`. Read these with
-`journalctl -u ti-engine@<account>`.
+`journalctl -u ti-engine@<instance>`.
 
 ## Your instructions while it runs
 
@@ -169,7 +169,7 @@ writes, and records each in its durable log before its next input from the
 adapter ([operator](operator.md)).
 
 The server's service file passes it: `-operator
-/var/lib/trend-investing/engines/<account>/operator`, the folder the
+/var/lib/trend-investing/engines/<instance>/operator`, the folder the
 provisioner creates, owned by `ti-operator` in the engine's group, mode
 `0750`. The engine refuses to start if the folder is missing, if it could
 write it itself, or if it cannot read it ([operator](operator.md), "Who can
@@ -189,7 +189,7 @@ and the kill switch on the server").
 
 Messages are quoted from the start of what the engine prints (after
 `engine:`); the rest of each message names the file or value concerned.
-Read them with `journalctl -u ti-engine@<account> -n 20`.
+Read them with `journalctl -u ti-engine@<instance> -n 20`.
 
 ### When it starts
 
@@ -197,13 +197,13 @@ Read them with `journalctl -u ti-engine@<account> -n 20`.
 | --- | --- | --- |
 | `-mode dry-run refuses an unstamped build ("dev")` (or `paper`, `live`) | Refuses to start; writes nothing. A plain `go build` is unidentified, so its decisions could not be told from another build's. | Build with `deploy/build-engine.sh` (or `make engine` on the Mac) from a committed tree and install it with `deploy/provision.sh`. |
 | `-resume refuses build "...-dirty"` | Refuses to resume on a build that names uncommitted changes without its tree fingerprint. | Rebuild from a committed tree; see [restart](restart.md). |
-| `-mode X does not match the configuration's mode "Y"` | Refuses: the mode is part of the hashed configuration. | Make `TI_MODE` in `/etc/trend-investing/engines/<account>.env` match the configuration's `mode`. Both are repository files: change them in the repository and run `provision.sh`; a changed configuration is a new run. |
+| `-mode X does not match the configuration's mode "Y"` | Refuses: the mode is part of the hashed configuration. | Make `TI_MODE` in `/etc/trend-investing/engines/<instance>.env` match the configuration's `mode`. Both are repository files: change them in the repository and run `provision.sh`; a changed configuration is a new run. |
 | `-mode live is refused until the limited-live gate` | Refuses: no live order goes out before that gate. | Nothing. Use dry-run or paper ([paper trading](paper-trading.md)). |
 | `the configuration in ... is invalid: ... mode paper names account "...", but an IBKR paper account ID begins "DU"` (or the reverse for live) | Refuses: a paper run is bound to a paper account and a live run to a live one. | Correct the configuration's `account_id` or `mode` in the repository, then provision. |
 | `the configuration in ... names strategy_id "momentum", a target-weight strategy this engine does not compose` | Refuses: this program runs Boost only; the IRAs' momentum strategy has no engine composition yet. | Nothing; the IRA engines have no configuration on the server ([momentum](momentum.md)). |
 | `read the configuration`, `decode the target-weight configuration in ...`, or `the configuration in ... is invalid` | Refuses: the file is missing, is not JSON, has a key the engine does not know, or breaks a rule (each broken rule is listed). | Fix the configuration in the repository and provision it again. |
 | `-mode is required`, `-mode must be one of ...`, `-socket is required`, `-config is required`, `-out is required`, `-as-of is required` or `-log is required in -mode ...` | Refuses: there is no default for any of these. The service file always passes them, so on the server this means `run.env` or the account's `.env` lacks a value. | Fill in `TI_RUN`, `TI_AS_OF` (and `TI_MODE` in the `.env`) as the durable log runbook says. |
-| The unit fails at once and `systemctl status` says `Failed to load environment files` | The engine never ran: `run.env` is missing. The unit requires it and does not guess. | Write `/var/lib/trend-investing/engines/<account>/run.env` (`docs/runbooks/durable-log.md`, "Restarting an engine"). |
+| The unit fails at once and `systemctl status` says `Failed to load environment files` | The engine never ran: `run.env` is missing. The unit requires it and does not guess. | Write `/var/lib/trend-investing/engines/<instance>/run.env` (`docs/runbooks/durable-log.md`, "Restarting an engine"). |
 | `systemctl status` says the unit was skipped because a condition was not met | The engine never ran: the binary, the account's `.env` or its `.config` is not installed. | Run `deploy/build-engine.sh`, then `deploy/provision.sh`. For an IRA this is expected: it has no configuration. |
 | `-as-of must be an RFC 3339 time` or `-as-of must be nonzero` | Refuses. | Write `TI_AS_OF` as `2026-10-20T20:00:00Z`, say. |
 | `-log and -out both name ...` | Refuses: the log and the journal must be two files. | Nothing on the server (the unit names them `<TI_RUN>.log` and `<TI_RUN>.journal`). |
@@ -282,7 +282,11 @@ from the first one's log and checks the two logs are identical byte for byte.
   stand-in gateway ([IBKR adapter](ibkr-adapter.md)).
 - The reconciliations ADR 0019 also asks for after every fill, before every
   order and on a timer; a comparison of open orders; and the joint
-  account's cash (Boost's book states none, so cash is not compared). The
+  account's cash. The engine's reconciliation does not compare it, because
+  Boost's book states none after the first reading; the adapter's own check
+  compares it only on a run's first reading, with the stated book or the
+  previous close, and afterwards reports the daily cash as drift and
+  unexplained cash. The
   ones at every start, reconnect and delivery are built
   ([reconciliation](reconciliation.md), "What is not built yet").
 - The IRAs: this program refuses a momentum configuration (`compose.go`), and

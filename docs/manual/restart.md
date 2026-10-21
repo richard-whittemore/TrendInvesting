@@ -18,7 +18,7 @@ systemd never restarts an engine, and engines do not start at boot. Every
 start is a step you take, written down in `docs/runbooks/durable-log.md`,
 "Restarting an engine": you write `TI_RUN`, `TI_AS_OF` and
 `TI_RESTART_ARGS` in the account's `run.env`, then `sudo systemctl start
-ti-engine@<account>` ([engine](engine.md), "How it is started").
+ti-engine@<instance>` ([engine](engine.md), "How it is started").
 
 A reboot is a fresh run when the server shut down normally: shutdown stops
 the engine with SIGTERM, which ends the run cleanly and writes its journal.
@@ -99,7 +99,7 @@ latch can never quietly switch the boost off.
 Every check below is made before the engine opens its socket, so a refused
 start decides nothing and sends nothing. Messages are quoted from what the
 engine prints (after `engine:`); the rest names the files and values
-concerned. Read them with `journalctl -u ti-engine@<account> -n 20`. The
+concerned. Read them with `journalctl -u ti-engine@<instance> -n 20`. The
 steps for each case are in `docs/runbooks/durable-log.md` (the "durable log
 runbook"); the section is named where there is one.
 
@@ -165,9 +165,12 @@ only by its ID through the recorded recovery); and the Boost latch that log
 ended with. An incident or latch change recorded only in the lost log
 cannot be expressed in the approval, and decisions recorded only there are
 gone. The kill switch is not part of the approval: a fresh run starts with
-it released. If you believe the lost log opened an incident, settle the
-positions by hand at IBKR first, and state the book you then read there in
-the approval (`-positions`, `-cash`, `-currency`). The reconciliation does
+it released. Always state the book you read at IBKR in the approval
+(`-positions`, `-cash`, `-currency USD`, typed right after reading it),
+because the older log's last close is stale by at least a day and any fill
+recorded only in the lost log would make the first reading differ from it
+and halt the account. If you believe the lost log opened an incident,
+settle the positions by hand at IBKR first. The reconciliation does
 run: the fresh run's first reading from IBKR is compared with the book it
 starts from, the one you state or else the readable log's last close, and a
 reading that differs halts the account as unverifiable

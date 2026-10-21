@@ -61,7 +61,7 @@ approve.
 2. **Reconcile** positions, cash and open orders against the journal
    (`reconciliation.md`, *Recover*). Explain every difference; never edit a
    number to make it match.
-3. **Stop the engine** (`sudo systemctl stop ti-engine@<account>`). It writes
+3. **Stop the engine** (`sudo systemctl stop ti-engine@<instance>`). It writes
    its journal.
 4. **Write the approval** from the stopped run's log. To leave the incident
    behind, clear it by its ID:
