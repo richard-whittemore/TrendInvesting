@@ -985,3 +985,40 @@ market-data permissions. Target-weight rules version 1.18.0 reads the new
 versions of the broker snapshot and the mark, so a journal holding either
 does not replay under 1.17.0; with a version 2 mark the band compares as
 above, and decisions are otherwise unchanged.
+
+## Amendment (2026-10-18, the orchestrator's reading, put to the owner): the operator inbox has a writer of its own
+
+This paragraph records the reading the orchestrator took of the kill-switch
+amendment's identity model, for the owner to confirm or correct; it is not yet
+an owner decision. An instruction in the operator inbox moves the account's
+kill switch, so whoever can write the inbox can release it. The writer is
+therefore an identity of its own, `ti-operator` (a system user with no login
+shell, whose group is the engine's, `ti-trader`), and each account's inbox is
+`ti-operator:ti-trader`, mode `0750`: the engine reads it through its group
+and cannot write it. The operator tool writes each record `0640` in the
+inbox's group and refuses to run as any other user.
+
+The engine refuses to start, and says which, when the inbox is missing; when
+its group or others can write it; when others can read it (the records are
+readable only through the group, so a wider mode hides a group mismatch);
+when root or the engine's own user owns it, or the engine runs as root; when
+the engine's user is not in the inbox's group; or when it cannot list the
+inbox or open a record in it. A kill switch the engine cannot read while it
+decides is the failure to refuse (fail closed, ADR 0019). What the engine
+notes about a record (delivered, refused) it writes in a folder of its own
+beside the inbox, `<inbox>-notes`, mode `0700`, which it also refuses when
+others can write it, when another user owns it, or when it cannot list it.
+Only that folder settles a record. A `.delivered` or `.refused` file in the
+inbox itself settles nothing, since whoever writes the inbox could otherwise
+withhold an instruction as well as write one; the engine reads only the
+records there. A record the earlier layout delivered (it wrote its markers
+beside each record in the inbox) is kept from being recorded twice by the
+durable log's committed input (ADR 0027): its ID is in a log of the `-log`
+directory. While it runs, an inbox the engine cannot list, or a record in it
+the engine cannot open, stops the run for a person, as a notes folder it
+cannot list does: the start-up check cannot see a record placed later.
+
+No unit that reads data from outside runs as `ti-operator`. The adapter, the
+data job, the reporter and the dashboard run as `ti-trader` but cannot reach
+the inbox (each unit's `InaccessiblePaths=`) and can write nothing under the
+engines' state directory, so none can write an instruction.

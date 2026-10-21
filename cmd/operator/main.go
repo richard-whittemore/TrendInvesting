@@ -196,9 +196,12 @@ func acknowledge(args []string, out io.Writer) error {
 // record installs r in inbox under its file name, whole and never over
 // another record: written to a temporary name the engine does not read,
 // flushed, linked into place, and the inbox flushed, before it is reported.
-// A record is readable by the user that writes it only, so it is refused
-// unless this tool runs as the inbox's owner, the engine's user: a record
-// the engine cannot read would never take effect.
+// The inbox belongs to the user that writes the owner's instructions, which
+// the engine does not run as (ti-operator on the server; ADR 0026,
+// kill-switch amendment), and the engine reads it through its group, so a
+// record is refused unless this tool runs as the inbox's owner: run as
+// another user it would put an instruction in the wrong hands, or leave one
+// the engine cannot read.
 func record(inbox string, r operator.Record, what string, out io.Writer) error {
 	if inbox == "" {
 		return errors.New("operator: -inbox is required: the engine's operator inbox, its -operator folder")
@@ -208,7 +211,7 @@ func record(inbox string, r operator.Record, what string, out io.Writer) error {
 		return fmt.Errorf("operator: the inbox: %w", err)
 	}
 	if owner, known := inboxOwner(info); known && owner != effectiveUser() {
-		return fmt.Errorf("operator: the inbox %s belongs to user %d, the engine's user, but this tool runs as user %d, and a record it writes is readable by its writer only, so the engine could not read it: run it as the engine's user, `sudo -u <engine user> operator ...` (docs/manual/operator.md)",
+		return fmt.Errorf("operator: the inbox %s belongs to user %d, the user that writes the owner's instructions, but this tool runs as user %d: run it as the inbox's owner, `sudo -u ti-operator operator ...` on the server (docs/manual/operator.md)",
 			inbox, owner, effectiveUser())
 	}
 	path := filepath.Join(inbox, r.FileName())
@@ -231,8 +234,8 @@ var syncDirectory = func(dir string) error {
 	return file.Sync()
 }
 
-// inboxOwner returns the user that owns the inbox, the engine's user, when
-// the file system says; effectiveUser is the user this tool runs as. They
+// inboxOwner returns the user that owns the inbox, the user that writes the
+// owner's instructions, when the file system says; effectiveUser is the user this tool runs as. They
 // are the seams a test sets a different owner through.
 var (
 	inboxOwner = func(info os.FileInfo) (uid int, known bool) {
@@ -245,7 +248,9 @@ var (
 	effectiveUser = os.Geteuid
 )
 
-// install writes raw at path, refusing to replace anything there.
+// install writes raw at path, refusing to replace anything there. The
+// record is mode 0640 in the inbox's group, the engine's: the engine reads
+// it through that group, and only its writer can change it.
 func install(path string, raw []byte) error {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, ".operator-*.partial")
@@ -257,6 +262,9 @@ func install(path string, raw []byte) error {
 		_ = file.Close()
 		_ = os.Remove(temporary)
 	}()
+	if err := readableByTheInboxsGroup(file, dir); err != nil {
+		return fmt.Errorf("operator: make %s readable by the engine's group: %w", path, err)
+	}
 	if _, err := file.Write(raw); err != nil {
 		return fmt.Errorf("operator: write %s: %w", path, err)
 	}
@@ -273,6 +281,22 @@ func install(path string, raw []byte) error {
 		return fmt.Errorf("operator: flush the inbox %s, so the record's name survives a power loss: %w", dir, err)
 	}
 	return nil
+}
+
+// readableByTheInboxsGroup gives file the group of the folder dir and mode
+// 0640. A new file takes its writer's group, not its folder's, so the
+// group is set explicitly.
+func readableByTheInboxsGroup(file *os.File, dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		if err := file.Chown(-1, int(st.Gid)); err != nil {
+			return err
+		}
+	}
+	return file.Chmod(0o640)
 }
 
 func approve(args []string, out io.Writer) error {

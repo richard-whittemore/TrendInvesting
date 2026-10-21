@@ -15,9 +15,10 @@ approve.
 1. **Do not trade by hand while a sale of the program's is working.** If you
    must act at IBKR first, record the kill switch so the program sends
    nothing new but the sale back to 98%:
-   `sudo -u ti-trader operator kill-switch -inbox <inbox> -account <account> -state engaged -by owner -detail "halted: investigating"`
-   (always run the tool as `ti-trader`, the engine's user, so the engine
-   can read what it writes).
+   `sudo -u ti-operator operator kill-switch -inbox <inbox> -account <account> -state engaged -by owner -detail "halted: investigating"`
+   (run the tool as `ti-operator`, the user that writes your instructions;
+   the engine reads them through its group, docs/manual/operator.md,
+   "Who can write an instruction").
 2. **Read what happened.** On the server:
    - `journal-query refusals <durable log>`: the refusal that moved the
      account, its reason and detail, and the `engine-state` row naming the
@@ -71,7 +72,7 @@ approve.
    incident in force, in the same state and scope, with whether its sale was
    attempted, and the new run starts under it.
 5. If the tool warns the kill switch was engaged, and you still want it on,
-   record it again now (`sudo -u ti-trader operator kill-switch ... -state engaged`): a fresh
+   record it again now (`sudo -u ti-operator operator kill-switch ... -state engaged`): a fresh
    run starts with it released.
 6. **Start the fresh run** as `durable-log.md`, "Start a fresh run after an
    earlier one", steps 4 and 5, with `-approval` the file from step 4.
