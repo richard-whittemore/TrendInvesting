@@ -501,9 +501,10 @@ is written or sent:
   a start itself, and a paper first run has an approval to tell it by): it
   has the first run's identity but not its records, and is never handed the
   first run's folder, record of files sent and stream without its own
-  warm-up. Stop it, and start it as a fresh run, with its approval and its
-  warm-up ([paper trading](paper-trading.md), "Never start a run again
-  without an approval");
+  warm-up. Stop it, and start a fresh run with its own warm-up (a dry run
+  needs no approval; a paper run needs its approval) ([paper
+  trading](paper-trading.md), "Never start a run again without an
+  approval");
 - **a first run that crashed having committed nothing but its
   configuration**: nothing in the two logs tells its resume from a second
   start, so it is not taken for either. Nothing of it needs keeping: start
@@ -938,7 +939,8 @@ which writes the sessions again from its recordings, and start the adapter
   only its configuration, or a log that is not a copy of that run's
   records: "A crash resume", above): the adapter refuses to start, naming
   both logs, and sends nothing. For the first two, start a fresh run with
-  its approval and its own warm-up; for the third, resume the crashed run's
+  its own warm-up (a dry run needs no approval; a paper run needs its
+  approval); for the third, resume the crashed run's
   own log with `engine -resume`.
 - **A log beside a stream folder that cannot be read**: one whose first
   records cannot be read cannot be matched to any run. The adapter warns,
