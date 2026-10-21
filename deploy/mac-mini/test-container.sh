@@ -269,7 +269,8 @@ test "$(printf '%s\n' "$owners" | grep -c '^2002:2002 ')" = 4 || fail "reown did
 printf '%s\n' "$owners" | grep -q '^0:0 /var/lib/trend-investing/reown-test/root-own$' || fail "reown changed root's file (above)"
 printf '%s\n' "$owners" | grep -q '^0:0 /etc/hostname$' || fail "reown followed a link out of the volumes (above)"
 # An old ID an account holds now is refused before any file changes: root's
-# 0, and the image's own system account at UID 1 and group 1 (daemon).
+# 0 always, and the image's own system account at UID 1 and group 1 (daemon)
+# unless --force-id says its files at that ID are the old service user's.
 for ids in "0 0" "1" "1998 1"; do
   # shellcheck disable=SC2086 # IDS is the step's one or two arguments.
   if docker exec --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh reown ti-trader $ids; then
@@ -277,7 +278,16 @@ for ids in "0 0" "1" "1998 1"; do
   fi
 done
 test "$(docker exec "$name" stat -c '%u:%g' /var/lib/trend-investing/reown-test/root-own)" = 0:0 || fail "a refused reown changed root's file"
+if docker exec --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh reown ti-trader 0 --force-id; then
+  fail "reown --force-id accepted root's UID 0"
+fi
+refusal=$(docker exec --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh reown ti-trader 1 2>&1 || true)
+case $refusal in *daemon*--force-id*) ;; *) fail "the refusal of a colliding ID does not name the account and the way forward: $refusal" ;; esac
+docker exec "$name" sh -c 'install -o 1 -g 1 -m 0640 /dev/null /var/lib/trend-investing/reown-test/held-id'
+docker exec --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh reown ti-trader 1 --force-id
+test "$(docker exec "$name" stat -c '%u' /var/lib/trend-investing/reown-test/held-id)" = 2002 || fail "reown --force-id did not move the files of the colliding UID"
+test "$(docker exec "$name" stat -c '%u:%g' /var/lib/trend-investing/reown-test/root-own)" = 0:0 || fail "reown --force-id changed root's file"
 docker exec "$name" rm -rf /var/lib/trend-investing/reown-test /etc/trend-investing/reown-test.env
-echo "reown moved the old UID's files to 2002:2002, links themselves, left root's alone, and refused IDs held now"
+echo "reown moved the old UID's files to 2002:2002, links themselves, left root's alone, and refused IDs held now (a system account's only with --force-id)"
 
 step "REAL CONTAINER TEST COMPLETE"

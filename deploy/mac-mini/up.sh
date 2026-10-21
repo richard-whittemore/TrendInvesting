@@ -64,7 +64,7 @@ cleanup() {
   local link
   rm -rf "$scratch"
   for link in ${held[@]+"${held[@]}"}; do
-    if test "$(readlink "$link" 2>/dev/null)" = $$; then rm -f "$link"; fi
+    if test "$(readlink "$link" 2>/dev/null)" = "${self:-}"; then rm -f "$link"; fi
   done
 }
 trap cleanup EXIT
@@ -113,34 +113,53 @@ refuse_duplicates() {
 }
 
 # take_lock: one up.sh at a time for this container. The lock is a symbolic
-# link naming this process, made in one step (symlink(2) fails if it exists),
-# so of two runs only one makes it. One left by a process no longer running is
-# taken over, and the takeover is one at a time too: it is held by a second
-# link, <lock>.takeover, taken by the same rule. Only its holder replaces a
-# stale lock, by renaming a new link over it (rename(2) replaces in one step,
-# so the lock never goes missing for a newcomer to take meanwhile), and it
-# checks again, holding it, that the lock's holder is still the dead one. So
-# no run ever removes or replaces a lock another living run holds. A takeover
-# link left by a taker that died part way is stale in turn and taken over
-# through <lock>.takeover.takeover; the chain ends there, and a stale link at
-# its end is refused with the links to remove by hand, so a run never goes on
-# without end.
+# link naming this process by its ID and start time, made in one step
+# (symlink(2) fails if it exists), so of two runs only one makes it. A holder
+# is live only if a process with that ID is running and started at that time:
+# an ID handed out again, to an unrelated process, after the holder died
+# (after a restart above all) is not the holder. One left by a process no
+# longer running is taken over, and the takeover is one at a time too: it is
+# held by a second link, <lock>.takeover, taken by the same rule. Only its
+# holder replaces a stale lock, by renaming a new link over it (rename(2)
+# replaces in one step, so the lock never goes missing for a newcomer to take
+# meanwhile), and it checks again, holding it, that the lock's holder is still
+# the dead one. So no run ever removes or replaces a lock another living run
+# holds. A takeover link left by a taker that died part way is stale in turn
+# and taken over through <lock>.takeover.takeover; the chain ends there, and a
+# stale link at its end is refused with the links to remove by hand, so a run
+# never goes on without end.
 take_lock() {
   mkdir -p "$HOME/.trend-investing"
+  self="$$:$(ps -o lstart= -p $$ | sed 's/^ *//;s/ *$//')"
   take_link "$HOME/.trend-investing/up-$name.lock" 0
+}
+
+# holder_runs HOLDER: HOLDER is "PID:START" (a bare PID is checked by the
+# process only); true if that process is running and started at START.
+holder_runs() {
+  local pid=${1%%:*} start now
+  test -n "$pid" && ps -p "$pid" >/dev/null 2>&1 || return 1
+  case $1 in
+    *:*)
+      start=${1#*:}
+      now=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//')
+      test "$now" = "$start"
+      ;;
+  esac
 }
 
 # take_link PATH DEPTH: holds PATH for this process (adding it to $held) or
 # refuses. DEPTH 0 is the lock itself, 1 and 2 the takeover links above it.
 take_link() {
   local path=$1 depth=$2 holder top=$HOME/.trend-investing/up-$name.lock
-  if ln -s $$ "$path" 2>/dev/null; then held+=("$path"); return; fi
+  local hint="if no up.sh runs (pgrep -fl up.sh), remove $path by hand"
+  if ln -s "$self" "$path" 2>/dev/null; then held+=("$path"); return; fi
   holder=$(readlink "$path" 2>/dev/null || true)
-  if test -n "$holder" && ps -p "$holder" >/dev/null 2>&1; then
+  if test -n "$holder" && holder_runs "$holder"; then
     if test "$depth" = 0; then
-      refuse "another up.sh (process $holder) is working on the container $name; wait for it to finish (the lock is $path)"
+      refuse "another up.sh (process ${holder%%:*}) is working on the container $name; wait for it to finish (the lock is $path); $hint"
     fi
-    refuse "another up.sh (process $holder) is taking over the stale lock on $name; wait for it, then run up.sh again"
+    refuse "another up.sh (process ${holder%%:*}) is taking over the stale lock on $name; wait for it, then run up.sh again; $hint"
   fi
   if test "$depth" -ge 2; then
     refuse "the lock on $name and the links taking it over were all left by runs no longer running ($top, $top.takeover, $path); if no up.sh runs, remove them by hand and run up.sh again"
@@ -150,13 +169,13 @@ take_link() {
   if test -z "$holder"; then
     # Released meanwhile: taken as a fresh link is, or refused if a newcomer
     # made it first.
-    ln -s $$ "$path" 2>/dev/null || refuse "another up.sh took the lock on $name first; wait for it to finish (the lock is $top)"
-  elif ps -p "$holder" >/dev/null 2>&1; then
-    refuse "another up.sh (process $holder) is working on the container $name or taking over its lock; wait for it to finish (the lock is $top)"
+    ln -s "$self" "$path" 2>/dev/null || refuse "another up.sh took the lock on $name first; wait for it to finish (the lock is $top)"
+  elif holder_runs "$holder"; then
+    refuse "another up.sh (process ${holder%%:*}) is working on the container $name or taking over its lock; wait for it to finish (the lock is $top); if no up.sh runs (pgrep -fl up.sh), remove $path by hand"
   else
-    if test "$depth" = 0; then say "taking over the lock left by process $holder, which is no longer running"; fi
+    if test "$depth" = 0; then say "taking over the lock left by process ${holder%%:*}, which is no longer running"; fi
     rm -f "$path.$$"
-    ln -s $$ "$path.$$"
+    ln -s "$self" "$path.$$"
     mv -f "$path.$$" "$path"
   fi
   held+=("$path")

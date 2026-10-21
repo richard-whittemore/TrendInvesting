@@ -172,11 +172,16 @@ fi
 # the lock, refuses before Docker. A lock left by a process no longer running
 # is taken over.
 # The lock is a link naming the process that holds it.
+# A holder is its process ID and start time: a process now running under the
+# ID of one that died (IDs are handed out again, after a restart above all)
+# started at another time, so its link is stale.
+self="$$:$(ps -o lstart= -p $$ | sed 's/^ *//;s/ *$//')"
+reused="$$:Thu Jan  1 00:00:00 1970"
 lock=$fake_home/.trend-investing/up-ti.lock
 mkdir -p "$fake_home/.trend-investing"
-ln -s $$ "$lock"
+ln -s "$self" "$lock"
 refused "a second up.sh while one runs" "another up.sh" "$clean" TI_DIST="$work/dist"
-test "$(readlink "$lock")" = $$ || fail "a refused up.sh changed the lock it did not hold"
+test "$(readlink "$lock")" = "$self" || fail "a refused up.sh changed the lock it did not hold"
 gone=$(sh -c 'echo $$')
 rm -f "$lock"
 ln -s "$gone" "$lock"
@@ -189,10 +194,10 @@ test ! -L "$lock.takeover" || fail "up.sh left its takeover lock behind"
 # alone, so two runs can never both end up holding it.
 rm -f "$lock"
 ln -s "$gone" "$lock"
-ln -s $$ "$lock.takeover"
+ln -s "$self" "$lock.takeover"
 refused "a stale lock another up.sh is taking over" "taking over" "$clean" TI_DIST="$work/dist"
 test "$(readlink "$lock")" = "$gone" || fail "an up.sh that lost the takeover changed the lock: $(readlink "$lock")"
-test "$(readlink "$lock.takeover")" = $$ || fail "an up.sh that lost the takeover changed the takeover lock"
+test "$(readlink "$lock.takeover")" = "$self" || fail "an up.sh that lost the takeover changed the takeover lock"
 rm -f "$lock" "$lock.takeover"
 # A taker that died part way (killed, or the Mac lost power) leaves its
 # takeover link naming a process no longer running: that link is itself
@@ -210,9 +215,9 @@ done
 rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
 ln -s "$gone" "$lock"
 ln -s "$gone" "$lock.takeover"
-ln -s $$ "$lock.takeover.takeover"
+ln -s "$self" "$lock.takeover.takeover"
 refused "a stale takeover link another up.sh is taking over" "taking over" "$clean" TI_DIST="$work/dist"
-test "$(readlink "$lock")" = "$gone" && test "$(readlink "$lock.takeover")" = "$gone" && test "$(readlink "$lock.takeover.takeover")" = $$ \
+test "$(readlink "$lock")" = "$gone" && test "$(readlink "$lock.takeover")" = "$gone" && test "$(readlink "$lock.takeover.takeover")" = "$self" \
   || fail "an up.sh that lost the takeover of a stale takeover link changed a link"
 # The chain is bounded: when every link up to the last is stale, up.sh
 # refuses and names the links to remove, rather than going on without end.
@@ -220,6 +225,31 @@ rm -f "$lock.takeover.takeover"
 ln -s "$gone" "$lock.takeover.takeover"
 refused "a chain of stale takeover links" "by hand" "$clean" TI_DIST="$work/dist"
 test "$(readlink "$lock")" = "$gone" || fail "an up.sh refusing a chain of stale links changed the lock"
+rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
+# The ID of a dead run, reused by a live process that is not that run, does
+# not hold a link: the lock, a takeover link, and a chain ending in one.
+rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
+ln -s "$reused" "$lock"
+: >"$work/calls"
+if launch "$clean" TI_DIST="$work/dist"; then :; fi
+grep -q '^docker info' "$work/calls" || fail "a lock whose process ID was reused was not taken over: $(cat "$work/out")"
+rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
+ln -s "$gone" "$lock"
+ln -s "$reused" "$lock.takeover"
+: >"$work/calls"
+if launch "$clean" TI_DIST="$work/dist"; then :; fi
+grep -q '^docker info' "$work/calls" || fail "a takeover link whose process ID was reused blocked the takeover: $(cat "$work/out")"
+for left in "$lock" "$lock.takeover" "$lock.takeover.takeover"; do
+  test ! -L "$left" || fail "up.sh left $left behind after taking over a link of a reused ID"
+done
+# A refusal because a holder lives says how to clear it when it is not an up.sh.
+rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
+ln -s "$gone" "$lock"
+ln -s "$self" "$lock.takeover"
+refused "a takeover link held by a live run" "if no up.sh runs" "$clean" TI_DIST="$work/dist"
+rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
+ln -s "$self" "$lock"
+refused "a lock held by a live run" "if no up.sh runs" "$clean" TI_DIST="$work/dist"
 rm -f "$lock" "$lock.takeover" "$lock.takeover.takeover"
 
 # --- Once Docker is reached (an arm64 VM).

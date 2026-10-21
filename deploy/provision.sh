@@ -631,25 +631,36 @@ step_firewall() {
   log "also close port 22 in the Lightsail firewall tab (owner step)"
 }
 
-# reown NAME OLD_UID [OLD_GID] (the Mac mini only): after a container
+# reown NAME OLD_UID [OLD_GID] [--force-id] (the Mac mini only): after a container
 # provisioned before the service users had fixed IDs is re-created, its
 # volumes' files still carry the old numbers. Each file in the volumes owned
 # by OLD_UID goes to NAME's fixed UID, and each of group OLD_GID to its fixed
 # GID, links themselves and not their targets, within each volume. Only
 # once NAME is at its fixed ID, so the pass cannot hand files to a number no
 # account holds. ti-operator has no group of its own (it is ti-trader's).
-# An old ID that an account or group holds now is refused: root's 0, the
-# fixed 2001 to 2003, and any other this container has. Its files are that
-# account's own (root's secret stubs and installed programs among them), not
-# files left behind, and handing them to a service user would expose them.
+# An old ID that root (0) or a service user's fixed ID (2001 to 2003) holds
+# is always refused: those files are that account's own (root's secret stubs
+# and installed programs among them), and handing them to a service user
+# would expose them. An old ID that only collides with another account the
+# new image has (a system account its packages added, at the ID the old
+# service user had) is refused too, naming the account, unless --force-id says
+# the files at that ID are the old service user's: the pass only ever touches
+# the provisioner's own volumes, so they are left-behind files.
 step_reown() {
   mac_mini || die "reown is for the Mac mini's container only (TI_TARGET=mac-mini)"
-  local name=${1:-} old_uid=${2:-} old_gid=${3:-} want
+  local name=${1:-} old_uid=${2:-} old_gid=${3:-} want arg
+  local -a rest=()
+  force_id=0
+  for arg in "$@"; do
+    if test "$arg" = --force-id; then force_id=1; else rest+=("$arg"); fi
+  done
+  set -- ${rest[@]+"${rest[@]}"}
+  name=${1:-} old_uid=${2:-} old_gid=${3:-}
   case $name in
     ti-gateway) want=2001 ;;
     ti-trader) want=2002 ;;
     ti-operator) want=2003; test -z "$old_gid" || die "ti-operator has no group of its own; give only its old UID" ;;
-    *) die "usage: provision.sh reown ti-gateway|ti-trader|ti-operator OLD_UID [OLD_GID]" ;;
+    *) die "usage: provision.sh reown ti-gateway|ti-trader|ti-operator OLD_UID [OLD_GID] [--force-id]" ;;
   esac
   test "$(id -u "$name" 2>/dev/null || echo none)" = "$want" \
     || die "$name is not at its fixed UID $want in this container: run up.sh --recreate first, then reown"
@@ -674,8 +685,9 @@ step_reown() {
 
 # reown_old_id KIND DB ID: prints ID as a plain number (leading zeros taken
 # out), or dies if it is not a number up to 4294967294 or if root, a fixed
-# service ID (2001 to 2003) or an existing entry of DB (passwd or group)
-# holds it now.
+# service ID (2001 to 2003) holds it now, or if another entry of DB (passwd or
+# group) holds it and force_id is not 1 (when it is, the holder is named and
+# the ID accepted).
 reown_old_id() {
   local kind=$1 db=$2 id=$3 holder
   case $id in '' | *[!0-9]*) die "the old $kind must be a number, not '$id'" ;; esac
@@ -686,7 +698,10 @@ reown_old_id() {
     0 | 2001 | 2002 | 2003) die "the old $kind $id is held now (by root or a service user's fixed ID); its files are that account's own, not files left behind" ;;
   esac
   if holder=$(getent "$db" "$id"); then
-    die "the old $kind $id is held now by '${holder%%:*}' in this container; its files are that account's own, not files left behind"
+    if test "${force_id:-0}" != 1; then
+      die "the old $kind $id is held now by '${holder%%:*}' in this container, which the new image may have given that number; if the files at $id under /var/lib/trend-investing, /opt/trend-investing and /etc/trend-investing are the old service user's, run the same reown again with --force-id to move them, otherwise remove or renumber '${holder%%:*}' in the image and run up.sh --recreate"
+    fi
+    log "the old $kind $id is held by '${holder%%:*}' in this container; --force-id: its files in the volumes are taken as the old service user's" >&2
   fi
   printf '%s\n' "$id"
 }
@@ -716,7 +731,7 @@ main() {
     firewall) step_firewall ;;
     reown) shift; step_reown "$@" ;;
     all) step_base; step_clock; step_gateway; step_services; step_firewall ;;
-    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all, or reown NAME OLD_UID [OLD_GID] on the Mac mini" ;;
+    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all, or reown NAME OLD_UID [OLD_GID] [--force-id] on the Mac mini" ;;
   esac
   log "done: ${1}"
 }

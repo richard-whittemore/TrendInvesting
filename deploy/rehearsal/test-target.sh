@@ -48,7 +48,7 @@ redirected_vars='etc unit_dir dl_cache twsapi_root adapter_venv adapter_root'
 # in FILE (outside a comment line) to a literal absolute path other than
 # /dev/null or /dev/stderr (bare, double- or single-quoted), to a path
 # starting with a variable not in $redirected_vars, or to one starting with
-# "~" or a command substitution, whose place the test cannot know. A redirection cannot be intercepted by a stand-in, so
+# "~" or a command substitution ($(...) or backticks), whose place the test cannot know. A redirection cannot be intercepted by a stand-in, so
 # these are the only ones the provisioner may use.
 redirect_leaks() {
   awk -v allowed=" $redirected_vars " '
@@ -56,7 +56,7 @@ redirect_leaks() {
     {
       line = $0
       bad = 0
-      while (match(line, />>?[|]?[[:space:]]*["\047]?(\$\{?[A-Za-z_][A-Za-z_0-9]*|\$\(|~|\/[^[:space:];|&)"\047]*)/)) {
+      while (match(line, />>?[|]?[[:space:]]*["\047]?(\$\{?[A-Za-z_][A-Za-z_0-9]*|\$\(|`|~|\/[^[:space:];|&)"\047]*)/)) {
         t = substr(line, RSTART, RLENGTH)
         line = substr(line, RSTART + RLENGTH)
         sub(/^>>?[|]?[[:space:]]*["\047]?/, "", t)
@@ -299,14 +299,14 @@ scenario() {
     truncate() { guarded truncate "$@"; }
     dd() { guarded dd "$@"; }
     # sed changes a file only in place: -i alone, in a cluster (-ni, -Ei,
-    # -i.bak) or as --in-place[=SUFFIX]. Then every file it is given must be
+    # -i.bak) or as --in-place[=SUFFIX] or an abbreviation of it. Then every file it is given must be
     # inside the tree: each operand and each -f/--file script file, but not
     # the script itself (an -e/--expression value, or else the first
     # operand), which is not a path even when it begins with "/".
     sed() {
       local a inplace=0
       for a in "$@"; do
-        case $a in --in-place* | -i* | -[!-]*i*) inplace=1 ;; esac
+        case $a in --in* | -i* | -[!-]*i*) inplace=1 ;; esac
       done
       if test "$inplace" = 0; then command sed "$@"; return; fi
       local paths=() operands=() ends=0 want='' scripted=0 rest c
@@ -318,11 +318,18 @@ scenario() {
         if test "$ends" = 0; then
           case $a in
             --) ends=1; continue ;;
-            --expression=*) scripted=1; continue ;;
-            --expression) scripted=1; want=e; continue ;;
-            --file=*) scripted=1; paths+=("${a#*=}"); continue ;;
-            --file) scripted=1; want=f; continue ;;
-            --*) continue ;;
+            # GNU sed takes any unambiguous prefix of a long option, so
+            # --e* is --expression and --fi* is --file. Any other long
+            # option but the known ones that take no value is not understood,
+            # and so refused rather than skipped past its operands.
+            --e*=*) scripted=1; continue ;;
+            --e*) scripted=1; want=e; continue ;;
+            --fi*=*) scripted=1; paths+=("${a#*=}"); continue ;;
+            --fi*) scripted=1; want=f; continue ;;
+            --in* | --quiet | --silent | --regexp-extended | --follow-symlinks | --null-data \
+              | --zero-terminated | --separate | --sandbox | --debug | --posix | --unbuffered | --binary \
+              | --line-length=*) continue ;;
+            --*) refuse sed "$@" ;;
             -?*)
               # A cluster: -i's suffix, -e's script and -f's file are
               # attached, or else -e's and -f's are the next argument.
@@ -386,7 +393,10 @@ for leak in "rm -rf $canary/keep" "cp /dev/null $canary/keep" "mv $canary/keep $
   "sed -ni s/keep/gone/p $canary/keep" "sed -Ei s/keep/gone/ $canary/keep" \
   "sed --in-place s/keep/gone/ $canary/keep" "sed --in-place=.bak s/keep/gone/ $canary/keep" \
   "sed -e s/keep/gone/ -i $canary/keep" "cp -t$canary /dev/null" "mv -t$canary $canary/keep" \
-  "cp -at$canary /dev/null" "sed -i -f /dev/null $canary/keep" "sed -i -e /^keep/d $canary/keep"; do
+  "cp -at$canary /dev/null" "sed -i -f /dev/null $canary/keep" "sed -i -e /^keep/d $canary/keep" \
+  "sed -i --expr=s/keep/gone/ $canary/keep" "sed -i --exp s/keep/gone/ $canary/keep" \
+  "sed -i --fi=/dev/null $canary/keep" "sed --in-pl s/keep/gone/ $canary/keep" \
+  "sed -i --some-future-option s/keep/gone/ $canary/keep"; do
   status=0
   TEST_LEAK=$leak scenario mac-mini aarch64 services || status=$?
   test "$status" = 97 || fail "the guard did not end the case on '$leak' (status $status)"
@@ -407,6 +417,7 @@ TEST_LEAK="dd if=/dev/zero of=$work/tmp/dd count=1" scenario mac-mini aarch64 se
 # attached to -t. Only the guard's decision is checked: the Mac's own sed and
 # cp (BSD) read some of these options differently from the server's (GNU).
 for allowed in "sed -i /^drop/d $work/tmp/x" "sed -i -e /^drop/d $work/tmp/x" "sed -i --expression=/^drop/d $work/tmp/x" \
+  "sed -i --expr=/^drop/d $work/tmp/x" "sed -i --quiet --regexp-extended /^drop/d $work/tmp/x" \
   "sed -ni /^keep/p $work/tmp/x" "sed -i -- /^drop/d $work/tmp/x" "sed -i -f $work/tmp/script $work/tmp/x" \
   "cp -t$work/tmp /dev/null" "cp -at$work/tmp /dev/null"; do
   status=0
@@ -438,12 +449,14 @@ printf x >'/etc/flagged-single-quoted'
 printf x >~/flagged-tilde
 printf x >"$(pick)/flagged-substituted"
 printf x >$(pick)-flagged-bare-substituted
+printf x >"`pick`/flagged-backtick"
+printf x >`pick`-flagged-bare-backtick
 printf x >"$etc/fine" 2>/dev/null
 printf x >"$unit_dir/fine" >&2
 # printf x >/etc/a-comment
 SHAPES
 got=$(redirect_leaks "$work/redirects")
-for shape in flagged-literal flagged-quoted flagged-variable flagged-braced flagged-single-quoted flagged-tilde flagged-substituted flagged-bare-substituted; do
+for shape in flagged-literal flagged-quoted flagged-variable flagged-braced flagged-single-quoted flagged-tilde flagged-substituted flagged-bare-substituted flagged-backtick flagged-bare-backtick; do
   case $got in *"$shape"*) ;; *) fail "the redirection check missed '$shape': $got" ;; esac
 done
 case $got in *fine* | *a-comment*) fail "the redirection check flagged an allowed line: $got" ;; esac
@@ -611,9 +624,21 @@ if scenario mac-mini aarch64 "reown ti-trader 99x 998"; then fail "reown accepte
 # group's; given as a number however written. Nothing is changed.
 withother="$default_passwd
 ti-other:x:1500:1600::/nonexistent:/usr/sbin/nologin"
-for ids in "0" "0 $mygid" "00" "2001" "2002" "2003" "02003" "1500" "$me 0" "$me 2001" "$me 2002" "$me 1600" "$me 002002" "99999999999999999999"; do
+for ids in "0" "0 $mygid" "00" "2001" "2002" "2003" "02003" "$me 0" "$me 2001" "$me 2002" "$me 002002" "99999999999999999999" "0 --force-id" "2002 --force-id" "$me 2001 --force-id"; do
   if FAKE_PASSWD=$withother scenario mac-mini aarch64 "reown ti-trader $ids"; then fail "reown accepted the old ID(s) $ids"; fi
   if called "chown" || called "chgrp"; then fail "reown with the old ID(s) $ids changed a file: $(cat "$work/calls")"; fi
+done
+# An old ID that merely collides with another account on the new image (a
+# system account the image added) is refused with the account named and the
+# way forward given; with --force-id it is accepted and the account named.
+for ids in "1500" "$me 1600"; do
+  if FAKE_PASSWD=$withother scenario mac-mini aarch64 "reown ti-trader $ids"; then fail "reown accepted the colliding old ID(s) $ids without --force-id"; fi
+  said "ti-other" || fail "the refusal of the colliding ID(s) $ids does not name the account: $(cat "$work/out")"
+  said "--force-id" || fail "the refusal of the colliding ID(s) $ids does not give the way forward: $(cat "$work/out")"
+  if called "chown" || called "chgrp"; then fail "reown with the colliding ID(s) $ids changed a file without --force-id"; fi
+  FAKE_PASSWD=$withother scenario mac-mini aarch64 "reown ti-trader $ids --force-id" || fail "reown refused the colliding ID(s) $ids with --force-id: $(cat "$work/out")"
+  said "ti-other" || fail "reown --force-id does not name the account whose ID it took: $(cat "$work/out")"
+  said "re-owned" || fail "reown --force-id did not run: $(cat "$work/out")"
 done
 if scenario mac-mini aarch64 "reown ti-operator 0"; then fail "reown accepted ti-operator from UID 0"; fi
 # A listing that fails is an error, never "re-owned 0 file(s)".

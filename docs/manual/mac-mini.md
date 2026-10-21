@@ -125,7 +125,8 @@ It is careful with what it did not make:
 - **One at a time.** Two `up.sh` runs for the same container at once would
   copy over each other's files. Each run holds a lock
   (`~/.trend-investing/up-ti.lock`) while it works; a second run stops and
-  names the first. A lock left by a run that no longer exists is taken over,
+  names the first. A lock records the run's process ID and start time, so an
+  ID given to another program after the run died does not hold it. A lock left by a run that no longer exists is taken over,
   by one run only: a run that finds another already taking it over stops
   too. A run killed while taking over (or a Mac that lost power then) leaves
   its takeover link, `up-ti.lock.takeover`, naming a process that no longer
@@ -270,7 +271,7 @@ restart ti`) has the server's rules:
 | `up: refusing the checkout at ...: it holds N what look like iCloud sync duplicates` | Names the first five and stops before it touches Docker | Delete them, or take a fresh checkout outside the synced folders, then run it again |
 | `up: refusing the checkout at ...: could not read all of it` | Stops before it touches Docker | Fix the folder's permissions it names, or take a fresh checkout |
 | `up: another up.sh (process N) is working on the container ti` | Stops before it touches Docker | Wait for the other run to finish; if no such process exists, run it again (the lock is taken over) |
-| `up: another up.sh (process N) is taking over the stale lock on ti` | Stops before it touches Docker; the lock is left alone | Wait for the other run, then run it again. A takeover link left by a run that was killed is taken over by the next run by itself |
+| `up: another up.sh (process N) is taking over the stale lock on ti` | Stops before it touches Docker; the lock is left alone | Wait for the other run, then run it again. A takeover link left by a run that was killed is taken over by the next run by itself, also when another program has since been given its process ID. If no `up.sh` runs (`pgrep -fl up.sh`), the message names the link to remove by hand |
 | `up: the lock on ti and the links taking it over were all left by runs no longer running` | Stops before it touches Docker | Check that no `up.sh` runs (`pgrep -fl up.sh`), remove the three links it names, then run it again |
 | `up: TI_MAC_DASHBOARD_PORT must be a port number from 1 to 65535` | Stops before it touches Docker | Set a port in that range, or leave it unset (8088) |
 | `up: Docker's VM is x86_64` | Stops: the container is for Apple silicon only | Run it on the Mac mini |
@@ -284,7 +285,7 @@ restart ti`) has the server's rules:
 | `provision: the clock is not good` during `up.sh` | The clock step refuses, and `up.sh` stops before the services step | Turn on the Mac's "Set time and date automatically", then run `up.sh` again ([server](server.md), "The clock") |
 | `ti-clock-check` failed (`systemctl --failed` inside) | The engine is not stopped by it; a clock behind IBKR's makes it withhold every sell | Read `journalctl -u ti-clock-check`; fix the Mac's time (or wait for Docker Desktop to correct it after sleep); `systemctl start ti-clock-check` to check again |
 | `provision: UID 2002 (or 2001, 2003) is held by the account '...' in this image` | Stops before creating the service users | A changed image took the ID; remove that account from the image, then `up.sh --recreate` |
-| `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the `reown` step the message gives, inside the container (`docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh reown ti-trader 998 998`): it moves every file in the volumes of the old UID and GID to the fixed ones and says how many. It refuses an old ID that an account or group in the container holds now (root's 0, 2001 to 2003, or any other), since those files are that account's own; and if it cannot list a volume it stops with `could not list`, never a count. Then run `up.sh` again |
+| `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the `reown` step the message gives, inside the container (`docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh reown ti-trader 998 998`): it moves every file in the volumes of the old UID and GID to the fixed ones and says how many. It always refuses an old ID that root (0) or a service user (2001 to 2003) holds, since those files are that account's own. An old ID that only collides with another account the new image has (a system account its packages added at the number the old service user had) is refused too, naming the account; if the files at that ID are the old service user's, run the same command again with `--force-id` (`... reown ti-trader 995 995 --force-id`) and it moves them, or remove or renumber that account in the image and run `up.sh --recreate` again. If it cannot list a volume it stops with `could not list`, never a count. Then run `up.sh` again |
 | `up: note: ti runs the image ..., not ...` | Keeps the running container and provisions it as before | Run `up.sh --recreate` when it suits you; every volume is kept |
 | After a Mac or Docker Desktop restart, the engine and the adapter are stopped | Nothing: this is the rule, and the timers and dashboard are back | Start the engine as a fresh approved run and then the adapter ([restart](restart.md)) |
 | `systemctl is-system-running` inside says `degraded`, with `ti-reporter@boost` failed | The reporter fails every 5 minutes until the Boost engine has run once and `secrets.env` holds its channels | Expected before the first run; otherwise read `journalctl -u ti-reporter@boost` ([alerts and dashboard](alerts-and-dashboard.md)) |
@@ -309,7 +310,7 @@ restart ti`) has the server's rules:
   test proves that refusal works for each of those shapes. A redirection
   cannot be refused that way, so the test also checks that the provisioner
   redirects only to `/dev/null` or under the folders it sets inside its own:
-  never to a literal path, quoted or not, `~` or a command substitution.
+  never to a literal path, quoted or not, `~` or a command substitution (`$(...)` or backticks).
   `deploy/mac-mini/test-refusals.sh` checks every refusal of the launcher
   listed above, the order of stop and removal on `--recreate`, and that the
   container is created without `--privileged`. Both run in `make check`.
