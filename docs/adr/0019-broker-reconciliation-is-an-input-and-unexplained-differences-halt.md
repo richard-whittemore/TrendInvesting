@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, proposed for the owner's acceptance: a journalled deposit or withdrawal explains the cash difference)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference)
 - Date: 2026-09-17
 
 ## In plain English
@@ -809,13 +809,13 @@ remain unbuilt.
 This changes what the engine decides from journalled inputs, so it is a rules
 change under ADR 0016: target-weight RulesVersion 1.20.0. No schema changes.
 
-## Amendment (2026-10-21, proposed; the owner accepts): a journalled deposit or withdrawal explains the cash difference
+## Amendment (2026-10-21, accepted by the owner 2026-10-22): a journalled deposit or withdrawal explains the cash difference
 
 **Status.** Proposed by the developer on 2026-10-21 in answer to the owner's
 question that day ("If I do a transfer into one of the accounts for which the
-strategy is ongoing, will that cause any hiccups?"); in force once the owner
-accepts it. The cash-drift bound, 1% of net liquidation (the amendment of
-2026-10-18, condition 2), is unchanged.
+strategy is ongoing, will that cause any hiccups?"). **The owner accepted it
+on 2026-10-22**, and it is in force. The cash-drift bound, 1% of net
+liquidation (the amendment of 2026-10-18, condition 2), is unchanged.
 
 **Why.** An IRA's book states its cash, and the reconciliation compares
 IBKR's total cash with the book's cash plus every journalled fill, commission,
