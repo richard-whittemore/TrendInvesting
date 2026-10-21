@@ -38,7 +38,7 @@ like this:
 | Tailscale and the firewall | yes | not installed: nothing listens beyond the Mac's own loopback |
 | Time | a time service on the server | no time service inside; the clock is compared with an outside website when `up.sh` runs and every 15 minutes ("The clock", below) |
 | systemd's journal | the server's disk | kept on disk in its own volume, so why a unit stopped survives a restart |
-| The service users | created by the provisioner | created at fixed IDs (`ti-gateway` 2001, `ti-trader` 2002), so they still own their files after the container is created again |
+| The service users | created by the provisioner | created at fixed IDs (`ti-gateway` 2001, `ti-trader` 2002, and `ti-operator`, the operator inboxes' writer, 2003 in `ti-trader`'s group), so they still own their files after the container is created again |
 
 ## The four volumes
 
@@ -277,8 +277,8 @@ restart ti`) has the server's rules:
 | `up: refusing to provision ti: these units failed: ...` | Stops before copying anything in; the list names each failed unit | Read `docker exec ti journalctl -u <unit>` for each; fix the cause, then run `up.sh` again |
 | `provision: the clock is not good` during `up.sh` | The clock step refuses, and `up.sh` stops before the services step | Turn on the Mac's "Set time and date automatically", then run `up.sh` again ([server](server.md), "The clock") |
 | `ti-clock-check` failed (`systemctl --failed` inside) | The engine is not stopped by it; a clock behind IBKR's makes it withhold every sell | Read `journalctl -u ti-clock-check`; fix the Mac's time (or wait for Docker Desktop to correct it after sleep); `systemctl start ti-clock-check` to check again |
-| `provision: UID 2002 is held by the account '...' in this image` | Stops before creating the service users | A changed image took the ID; remove that account from the image, then `up.sh --recreate` |
-| `provision: ti-trader is 998:998 here, not 2002:2002` | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the two `find ... -exec chown` / `chgrp` passes the message gives, inside the container (`docker exec ti sh -c '...'`), then `up.sh` again |
+| `provision: UID 2002 (or 2001, 2003) is held by the account '...' in this image` | Stops before creating the service users | A changed image took the ID; remove that account from the image, then `up.sh --recreate` |
+| `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the two `find ... -exec chown` / `chgrp` passes the message gives, inside the container (`docker exec ti sh -c '...'`), then `up.sh` again |
 | `up: note: ti runs the image ..., not ...` | Keeps the running container and provisions it as before | Run `up.sh --recreate` when it suits you; every volume is kept |
 | After a Mac or Docker Desktop restart, the engine and the adapter are stopped | Nothing: this is the rule, and the timers and dashboard are back | Start the engine as a fresh approved run and then the adapter ([restart](restart.md)) |
 | `systemctl is-system-running` inside says `degraded`, with `ti-reporter@boost` failed | The reporter fails every 5 minutes until the Boost engine has run once and `secrets.env` holds its channels | Expected before the first run; otherwise read `journalctl -u ti-reporter@boost` ([alerts and dashboard](alerts-and-dashboard.md)) |

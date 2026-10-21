@@ -121,14 +121,17 @@ resolve() {
   printf '%s\n' "${out:-/}"
 }
 default_passwd='ti-gateway:x:2001:2001::/var/lib/ti-gateway:/usr/sbin/nologin
-ti-trader:x:2002:2002::/var/lib/trend-investing:/usr/sbin/nologin'
+ti-trader:x:2002:2002::/var/lib/trend-investing:/usr/sbin/nologin
+ti-operator:x:2003:2002::/nonexistent:/usr/sbin/nologin'
 scenario() {
   local target=$1 arch=$2 step=$3
   : >"$work/calls"
   rm -rf "${work:?}/etc" "${work:?}/units" "${work:?}/tmp" "${work:?}/cwd"
   mkdir -p "$work/etc/adapters" "$work/units" "$work/tmp" "$work/cwd"
   printf '%s\n' "${FAKE_PASSWD-$default_passwd}" | sed '/^$/d' >"$work/passwd"
-  sed 's/^\([^:]*\):x:[0-9]*:\([0-9]*\):.*/\1:x:\2:/' "$work/passwd" >"$work/group"
+  # Each user's primary group, named after the first user that has it (ti-operator
+  # shares ti-trader's).
+  awk -F: '!seen[$4]++ {print $1 ":x:" $4 ":"}' "$work/passwd" >"$work/group"
   if test -n "${FAKE_BOOST_JSON:-}"; then printf '%s\n' "$FAKE_BOOST_JSON" >"$work/etc/adapters/boost.json"; fi
   local status=0
   (
@@ -148,6 +151,14 @@ scenario() {
     id() {
       case $# in
         0) echo "uid=0(root)" ;;
+        2) if test "$1" = -gn; then
+             local g
+             g=$(awk -F: -v n="$2" '$1 == n {print $4; found = 1} END {exit !found}' "$work/passwd") || return 1
+             awk -F: -v g="$g" '$3 == g {print $1; found = 1} END {if (!found) print g}' "$work/group"
+             return
+           fi
+           local field=3; test "$1" = -g && field=4
+           awk -F: -v n="$2" -v f="$field" '$1 == n {print $f; found = 1} END {exit !found}' "$work/passwd" ;;
         1) if test "$1" = -u; then echo 0; else awk -F: -v n="$1" '$1 == n {f = 1} END {exit !f}' "$work/passwd"; fi ;;
         *) local field=3; test "$1" = -g && field=4
            awk -F: -v n="$2" -v f="$field" '$1 == n {print $f; found = 1} END {exit !found}' "$work/passwd" ;;
@@ -159,12 +170,17 @@ scenario() {
     }
     useradd() {
       record useradd "$@"
-      local uid=99 gid=99 name
+      # Without --uid, the next free system ID, as useradd picks one.
+      local uid gid name usergroup=0
+      uid=$((900 + $(wc -l <"$work/passwd")))
+      gid=$uid
       while test $# -gt 1; do
-        case $1 in --uid | -u) uid=$2; shift ;; --gid | -g) gid=$2; shift ;; esac
+        case $1 in --uid | -u) uid=$2; shift ;; --gid | -g) gid=$2; shift ;; --user-group | -U) usergroup=1 ;; esac
         shift
       done
       name=$1
+      case $gid in *[!0-9]*) gid=$(awk -F: -v g="$gid" '$1 == g {print $3}' "$work/group") ;; esac
+      if test "$usergroup" = 1; then echo "$name:x:$gid:" >>"$work/group"; fi
       echo "$name:x:$uid:$gid::/nonexistent:/usr/sbin/nologin" >>"$work/passwd"
     }
     groupadd() {
@@ -428,6 +444,26 @@ shifted='ti-shift:x:2002:2002::/nonexistent:/usr/sbin/nologin'
 if FAKE_PASSWD=$shifted FAKE_SYSTEMD=1 scenario mac-mini aarch64 base; then fail "Mac mini accepted UID 2002 held by another account"; fi
 said "ti-shift" || fail "the refusal of a taken UID does not name its holder: $(cat "$work/out")"
 if called "useradd --system --uid 2002"; then fail "Mac mini created ti-trader over another account's UID"; fi
+# ti-operator, the inbox's writer, at 2003 in ti-trader's group, at the base
+# step and at the services step that ensures it too.
+FAKE_PASSWD='' FAKE_SYSTEMD=1 scenario mac-mini aarch64 base || fail "Mac mini base with no service users failed: $(cat "$work/out")"
+called "useradd --system --uid 2003 --gid ti-trader" || fail "Mac mini base does not create ti-operator at UID 2003: $(grep -E 'useradd|groupadd' "$work/calls")"
+grep -q '^ti-operator:x:2003:2002:' "$work/passwd" || fail "ti-operator is not 2003 in ti-trader's group after a Mac mini base: $(cat "$work/passwd")"
+nooperator='ti-gateway:x:2001:2001::/var/lib/ti-gateway:/usr/sbin/nologin
+ti-trader:x:2002:2002::/var/lib/trend-investing:/usr/sbin/nologin'
+FAKE_PASSWD=$nooperator scenario mac-mini aarch64 services || fail "Mac mini services without ti-operator failed: $(cat "$work/out")"
+called "useradd --system --uid 2003 --gid ti-trader" || fail "Mac mini services does not create ti-operator at UID 2003: $(grep useradd "$work/calls")"
+# UID 2003 held by another account: refused, naming it.
+taken="$nooperator
+ti-other:x:2003:2003::/nonexistent:/usr/sbin/nologin"
+if FAKE_PASSWD=$taken FAKE_SYSTEMD=1 scenario mac-mini aarch64 base; then fail "Mac mini accepted UID 2003 held by another account"; fi
+said "ti-other" || fail "the refusal of a taken UID 2003 does not name its holder: $(cat "$work/out")"
+if called "useradd --system --uid 2003"; then fail "Mac mini created ti-operator over another account's UID"; fi
+# ti-operator already there at another UID: refused, with the re-owning pass.
+oldop="$nooperator
+ti-operator:x:997:2002::/nonexistent:/usr/sbin/nologin"
+if FAKE_PASSWD=$oldop FAKE_SYSTEMD=1 scenario mac-mini aarch64 base; then fail "Mac mini accepted ti-operator at UID 997"; fi
+said "-uid 997 -exec chown -h 2003" || fail "the refusal of ti-operator at another UID does not name the chown pass: $(cat "$work/out")"
 # A ti-trader already there at another UID: refused, since the volumes' files
 # are owned by 2002.
 moved='ti-gateway:x:2001:2001::/var/lib/ti-gateway:/usr/sbin/nologin
@@ -443,6 +479,7 @@ said "-gid 998 -exec chgrp -h 2002" || fail "the refusal of ti-trader at another
 FAKE_PASSWD='' TEST_REHEARSAL=1 scenario "" x86_64 base || fail "Lightsail base with no service users failed: $(cat "$work/out")"
 called "useradd --system --user-group --home-dir /var/lib/trend-investing" || fail "Lightsail no longer creates ti-trader as before: $(grep useradd "$work/calls")"
 if called "--uid"; then fail "Lightsail now creates a service user at a fixed ID"; fi
+called "useradd --system --gid ti-trader --no-create-home" || fail "Lightsail no longer creates ti-operator as before: $(grep useradd "$work/calls")"
 
 # --- The Mac mini's clock is checked every 15 minutes, not only when
 # provisioning runs (ADR 0019: a clock behind IBKR's withholds every sell).

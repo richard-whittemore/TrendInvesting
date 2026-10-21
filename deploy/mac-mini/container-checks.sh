@@ -231,7 +231,7 @@ ENGINE
       find $paths -printf '%y %m %U:%G %p -> %l\n'
       find $paths -type f -exec sha256sum {} +
     } | sort
-    getent passwd ti-trader ti-gateway
+    getent passwd ti-trader ti-gateway ti-operator
     ;;
 
   # T3: after a restart, the timers and the dashboard are back, the engine

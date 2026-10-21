@@ -229,14 +229,15 @@ step "T2: re-creation onto a changed image whose own system user takes an ID fir
 # had it no fixed one.
 printf '\n# The container test only: a system user added by the image.\nRUN useradd --system --user-group ti-shift\n' >>"$work/checkout/deploy/mac-mini/Dockerfile"
 shifted_image="trend-investing-mac-mini:$(shasum -a 256 "$work/checkout/deploy/mac-mini/Dockerfile" | cut -c1-12)"
-inside provision-manifest | grep -E '^ti-(trader|gateway):' >"$work/users-1"
+inside provision-manifest | grep -E '^ti-(trader|gateway|operator):' >"$work/users-1"
 up --recreate
 test "$(docker container inspect --format '{{.Config.Image}}' "$name")" = "$shifted_image" || fail "the container is not on the changed image"
 shift_id=$(docker exec "$name" id -u ti-shift) || fail "the changed image has no ti-shift"
 echo "the changed image's ti-shift took UID $shift_id"
 inside boot
-inside provision-manifest | grep -E '^ti-(trader|gateway):' >"$work/users-2"
+inside provision-manifest | grep -E '^ti-(trader|gateway|operator):' >"$work/users-2"
 diff "$work/users-1" "$work/users-2" || fail "the service users' IDs changed on the changed image (above)"
+grep -q '^ti-operator:x:2003:2002:' "$work/users-2" || fail "ti-operator is not 2003 in ti-trader's group: $(cat "$work/users-2")"
 inside state-manifest >"$work/state-5"
 diff "$work/state-1" "$work/state-5" || fail "the state changed across the re-creation onto a changed image (above)"
 inside tools

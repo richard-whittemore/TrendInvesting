@@ -95,7 +95,7 @@ a command line. Edit these files with `sudo -e`.
 | Folder | What is in it |
 | --- | --- |
 | `/var/lib/trend-investing/data/` | the data step's recordings (never overwritten), `streams/boost/<TI_RUN>/` (the Boost engine's daily input files) and, when you need it, `quarantine/` |
-| `/var/lib/trend-investing/engines/<account>/` | each run's durable log (`<TI_RUN>.log`) and end-of-run journal (`<TI_RUN>.journal`), `run.env`, your approval files, `quarantine/` for a log set aside, and the operator inbox once you create it ([operator](operator.md), "The operator inbox": the provisioner does not create it yet) |
+| `/var/lib/trend-investing/engines/<account>/` | each run's durable log (`<TI_RUN>.log`) and end-of-run journal (`<TI_RUN>.journal`), `run.env`, your approval files, `quarantine/` for a log set aside, `operator/`, the operator inbox the provisioner creates (`ti-operator:ti-trader`, `0750`; [operator](operator.md), "Who can write an instruction"), and `operator-notes/`, the engine's own notes on it |
 | `/var/lib/trend-investing/reports/` | the reporter's own state file (the only folder its unit may write) |
 | `/var/lib/ti-gateway/`, `/var/log/ti-gateway/` | the Gateway's own files and IBC's log |
 | `/opt/trend-investing/bin/` | the installed programs: `ti-engine`, `ti-reporter`, `ti-dashboard`, `operator` and `journal-query` (from `deploy/build-engine.sh`) and `ti-data` (from `deploy/build-data.sh`). `operator` and `journal-query` are linked into `/usr/local/bin` |
@@ -211,13 +211,32 @@ cold re-login, so one phone prompt serves both.
 ## Reading the logs and the kill switch on the server
 
 `journal-query` and `operator` are installed on the server, in
-`/usr/local/bin`: run them as the engine's user, `sudo -u ti-trader
-journal-query ...` and `sudo -u ti-trader operator ...`. `journal-query` only
-reads. The engine's operator inbox is not created by the provisioner yet
-([operator](operator.md), "The operator inbox"): until you create it and pass
-it to the engine, `operator kill-switch` has nowhere to be read from. **Until
-then there is no recorded kill switch on the server:** to stop the program
-trading, stop the engine (`sudo systemctl stop ti-engine@<account>`). No
+`/usr/local/bin`. Run `journal-query`, which only reads, and `operator
+approve` as the engine's user, `sudo -u ti-trader ...`. Run the
+instructions (`operator kill-switch`, `rebalance-cleared` and `acknowledge`)
+as `ti-operator`, the user that writes them: `sudo -u ti-operator operator
+...`. The provisioner creates `ti-operator` (a system user with no login
+shell, in the engine's group `ti-trader`) and each account's operator inbox,
+`/var/lib/trend-investing/engines/<account>/operator`, owned by `ti-operator`
+in the group `ti-trader`, mode `0750`; the engine unit passes it, so `sudo -u
+ti-operator operator kill-switch -inbox
+/var/lib/trend-investing/engines/<account>/operator ...` is read by the engine
+before its next input ([operator](operator.md), "The operator inbox"). The
+engine reads the inbox through its group and cannot write it, and the
+adapter, the data job, the reporter and the dashboard, which also run as
+`ti-trader`, cannot reach it (each unit's `InaccessiblePaths=`) and can write
+nothing under `/var/lib/trend-investing/engines`, so no unit that reads data
+from outside can write an instruction ([operator](operator.md), "Who can
+write an instruction"). The engine checks the inbox's owner and mode each
+time it starts: it refuses to start if the folder is missing, if its group
+or others can write it, if others can read it, if root or the engine's own
+user owns it, or if the engine cannot list the folder or read a record in it
+(for instance, its group is not one the engine's user is in). So a container or any other host that runs
+the engine (the Mac mini's) must create it the same way: owned by whichever
+user that host's engine does not run as (on the server, `ti-operator`), in a
+group the engine's user is in, mode `0750`. The recorded switch only works while the engine
+runs; to stop the program trading outright, also stop it (`sudo systemctl stop
+ti-engine@<account>`). No
 adapter runs on the server yet, so stopping the engine is the whole step
 today. Once the adapter exists, it is also stopped, and an order that must not
 go is settled `--never-sent` with the relay's `resolve` command, run on the

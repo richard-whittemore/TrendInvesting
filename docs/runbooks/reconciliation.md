@@ -42,15 +42,13 @@ stops ordering, not an order resting at the broker.
    bring the account back to Normal. Only a fresh run you approve does
    ([Recover](#recover)).
 3. **Acknowledge the alert** so it stops repeating:
-   `sudo -u ti-trader operator acknowledge -inbox <inbox> -account <account> -alert '<alert key>' -by owner`
+   `sudo -u ti-operator operator acknowledge -inbox <inbox> -account <account> -alert '<alert key>' -by owner`
    ([operator](../manual/operator.md), "Acknowledging an alert").
-   Acknowledging changes nothing else. *Today the `operator` tool is not
-   installed on the server ([server](../manual/server.md)), so this step
-   cannot be done there yet.*
+   Acknowledging changes nothing else.
 4. **Do not trade by hand while a sale of the program's is working.** If
    you must act at IBKR first, stop the program sending anything new: the
-   kill switch (`operator kill-switch ... -state engaged`), or, while the
-   tool is not on the server, stop the engine and the adapter (stopping the
+   kill switch (`sudo -u ti-operator operator kill-switch ... -state engaged`),
+   and to stop everything, also stop the engine and the adapter (stopping the
    Gateway only delays: a released order goes out once it is back the same
    day). The kill switch does not cancel an order already at IBKR: cancel
    one in IBKR's own app.
@@ -75,9 +73,8 @@ Read the engine's verdict on the server, from the account's durable log
   expected and observed figures, the difference and the events that
   explained it.
 - `journal-query refusals <log>` shows the state change and its scope.
-  `journal-query` is not installed on the server yet: copy the log to the
-  Mac to run it ([server](../manual/server.md), "Reading the logs without
-  the tools on the server").
+  Run it on the server as `sudo -u ti-trader journal-query ...`
+  ([server](../manual/server.md)).
 
 Then compare with IBKR's own records: its activity statement and trade,
 order and cash history in Client Portal. Each kind of difference has a

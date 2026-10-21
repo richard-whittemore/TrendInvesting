@@ -125,5 +125,6 @@ deploy-test:
 	./deploy/rehearsal/test-clock.sh
 	./deploy/rehearsal/test-target.sh
 	./deploy/mac-mini/test-refusals.sh
+	./deploy/rehearsal/test-operator-user.sh
 
 check: deps lint coverage vuln build adapter-test research-test deploy-test
