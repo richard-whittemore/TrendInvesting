@@ -796,3 +796,30 @@ func TestAHostClockStateThatCannotBeLockedIsAnErrorAndHoldsNothingBack(t *testin
 		t.Error("the incident alerts were held back")
 	}
 }
+
+// A PagerDuty channel set aside for a bad secret cannot close its incident,
+// so the incident is kept open on record and closed once the channel works
+// again, not forgotten while still open there.
+func TestAResolveWaitsForAPagerDutyChannelSetAside(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	check := newStandInCheck(t)
+	dir := t.TempDir()
+	at := t0.Add(time.Hour)
+	failingTwice(t, r, dir, check, at)
+	check.pass()
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-repeat-interval", "30m", "-clock-check", check.path()}
+	broken := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.private.test", "TI_PAGERDUTY_ROUTING_KEY": ""})
+	err := run(args, broken, func() time.Time { return at.Add(10 * time.Minute) }, &bytes.Buffer{}, &http.Client{Transport: r})
+	if err == nil {
+		t.Error("the set-aside channel was not reported as the run's error")
+	}
+	if got := len(pagerDutyActions(r, "resolve")); got != 0 {
+		t.Fatalf("%d resolves sent through a channel set aside", got)
+	}
+	if err := clockRun(t, r, dir, check.path(), at.Add(15*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(pagerDutyActions(r, "resolve")); got != 1 {
+		t.Fatalf("%d resolves once the channel works again, want 1", got)
+	}
+}

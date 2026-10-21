@@ -70,6 +70,12 @@ func RenderText(s Summary) string {
 	for _, w := range s.SalesWithheld {
 		fmt.Fprintf(&b, "  %s %s: %s (%s). %s\n", w.ClientOrderID, w.InstrumentID, w.Reason, w.Trigger, w.Detail)
 	}
+	if len(s.Skipped) > 0 {
+		b.WriteString("Trades skipped:\n")
+	}
+	for _, k := range s.Skipped {
+		fmt.Fprintf(&b, "  %s %s %s %s shares: %s\n", k.ClientOrderID, k.Side, k.InstrumentID, event.FormatSkippedShares(k.Shares), k.Reason)
+	}
 	if s.Equity.Available {
 		e := s.Equity
 		fmt.Fprintf(&b, "Equity vs %s, %s to %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",

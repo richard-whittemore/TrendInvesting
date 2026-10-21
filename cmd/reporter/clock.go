@@ -123,9 +123,10 @@ func loadHostClock(path string) (hostClock, error) {
 // back, which is itself a failed check: it is counted, a new check is made
 // for the evidence, and the two are one failure. A failure pages once
 // clockPagesAfter checks in a row have failed; a passing check resolves the
-// incident on PagerDuty and forgets it, so the next failure pages anew. It
+// incident on PagerDuty (through the channels in working order; one set aside
+// keeps it open on record) and forgets it, so the next failure pages anew. It
 // returns the check the summary shows, if any.
-func clockStep(path, command, host string, senders []sender, clock func() time.Time, every time.Duration) (*report.ClockCheck, error) {
+func clockStep(path, command, host string, senders []sender, setAside []channelFault, clock func() time.Time, every time.Duration) (*report.ClockCheck, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("reporter: the host clock state's lock: %w", err)
@@ -191,6 +192,13 @@ func clockStep(path, command, host string, senders []sender, clock func() time.T
 	case h.Last.Passed && deliveredAnywhere(seen, key):
 		if err := resolveAll(senders, key, seen); err != nil {
 			return h.Last, err
+		}
+		// A channel set aside this run cannot close what it opened, so the
+		// record stays until a run in which it works.
+		for _, f := range setAside {
+			if seen[channelKey(f.channel, key)] {
+				return h.Last, nil
+			}
 		}
 		forgetAlert(key, seen, sent, repeats)
 		return h.Last, record()

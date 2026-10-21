@@ -57,14 +57,25 @@ const defaultPagerDutyURL = "https://events.pagerduty.com/v2/enqueue"
 // at path: under systemd the secrets arrive as a credential file
 // (LoadCredential), never in the environment (deploy/etc/secrets.env.example).
 // Blank lines and # comments are skipped and values are trimmed. A file that
-// cannot be read, or a line that is not KEY=VALUE, is an error that names
-// the line's number and never its text, which may be a secret.
+// cannot be read, or a line that is not KEY=VALUE, is reported in the error,
+// which names the line's number and never its text, which may be a secret;
+// the lookup still answers from the environment and every line that reads,
+// so a fault leaves unset only what it touches and each channel is judged on
+// its own secrets (ADR 0019, "Alerting": one channel's fault must not silence
+// another).
 func withSecretsFile(getenv func(string) string, path string) (func(string) string, error) {
+	values := map[string]string{}
+	lookup := func(key string) string {
+		if v := getenv(key); v != "" {
+			return v
+		}
+		return values[key]
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, errors.New("reporter: the secrets file cannot be read; check -secrets-file names the credential file")
+		return lookup, errors.New("reporter: the secrets file cannot be read; check -secrets-file names the credential file")
 	}
-	values := map[string]string{}
+	var faults []error
 	for n, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -72,59 +83,99 @@ func withSecretsFile(getenv func(string) string, path string) (func(string) stri
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok || strings.TrimSpace(key) == "" {
-			return nil, fmt.Errorf("reporter: the secrets file's line %d is not KEY=VALUE", n+1)
+			faults = append(faults, fmt.Errorf("reporter: the secrets file's line %d is not KEY=VALUE", n+1))
+			continue
 		}
 		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
-	return func(key string) string {
-		if v := getenv(key); v != "" {
-			return v
-		}
-		return values[key]
-	}, nil
+	return lookup, errors.Join(faults...)
 }
 
-func buildSenders(channels string, getenv func(string) string, client *http.Client, out io.Writer) ([]sender, error) {
+// channelFault is a delivery channel set aside because its configuration is
+// empty or malformed: the channel's name and why, never a secret's value.
+type channelFault struct {
+	channel string
+	err     error
+}
+
+// buildSenders builds every channel named, each validated on its own: a
+// channel whose secret or setting is empty or malformed, or whose name is
+// unknown, is set aside as a fault and the others are still built, so one
+// bad secret never silences every channel (ADR 0019, "Alerting"). The error
+// is set only when no channel that reaches a person was built: it joins every
+// fault, since nothing can then deliver.
+func buildSenders(channels string, getenv func(string) string, client *http.Client, out io.Writer) ([]sender, []channelFault, error) {
 	var senders []sender
+	var faults []channelFault
 	reaches := false
 	for _, c := range strings.Split(channels, ",") {
-		switch strings.TrimSpace(c) {
+		name := strings.TrimSpace(c)
+		var s sender
+		var err error
+		switch name {
 		case "stdout":
 			senders = append(senders, stdoutSender{out: out})
+			continue
 		case "ntfy":
-			topic := getenv("TI_NTFY_TOPIC")
-			if topic == "" {
-				return nil, errors.New("reporter: the ntfy channel needs TI_NTFY_TOPIC (an unguessable topic name; it is the only secret)")
-			}
-			server := getenv("TI_NTFY_SERVER")
-			if server == "" {
-				server = "https://ntfy.sh"
-			}
-			public, err := publicNtfy(server)
-			if err != nil {
-				return nil, err
-			}
-			senders = append(senders, ntfySender{server: strings.TrimRight(server, "/"), topic: topic, client: client, public: public})
-			reaches = true
+			s, err = ntfyFrom(getenv, client)
 		case "pagerduty":
-			key := getenv("TI_PAGERDUTY_ROUTING_KEY")
-			if key == "" {
-				return nil, errors.New("reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY (the Events API v2 integration key; it is a secret)")
-			}
-			endpoint := getenv("TI_PAGERDUTY_URL")
-			if endpoint == "" {
-				endpoint = defaultPagerDutyURL
-			}
-			senders = append(senders, pagerDutySender{url: endpoint, routingKey: key, client: client})
-			reaches = true
+			s, err = pagerDutyFrom(getenv, client)
 		default:
-			return nil, fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty)", c)
+			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty)", c)
 		}
+		if err != nil {
+			faults = append(faults, channelFault{channel: name, err: err})
+			continue
+		}
+		senders = append(senders, s)
+		reaches = true
 	}
 	if !reaches {
-		return nil, errors.New("reporter: no delivery channel named; stdout only shows alerts on the terminal and reaches no one, so add ntfy or pagerduty")
+		errs := make([]error, 0, len(faults)+1)
+		for _, f := range faults {
+			errs = append(errs, f.err)
+		}
+		errs = append(errs, errors.New("reporter: no delivery channel named; stdout only shows alerts on the terminal and reaches no one, so add ntfy or pagerduty"))
+		return nil, faults, errors.Join(errs...)
 	}
-	return senders, nil
+	return senders, faults, nil
+}
+
+// ntfyFrom builds the ntfy channel from its secrets: the topic, which is the
+// only secret, and the server, the public ntfy.sh relay when unset.
+func ntfyFrom(getenv func(string) string, client *http.Client) (sender, error) {
+	topic := getenv("TI_NTFY_TOPIC")
+	if topic == "" {
+		return nil, errors.New("reporter: the ntfy channel needs TI_NTFY_TOPIC (an unguessable topic name; it is the only secret)")
+	}
+	server := getenv("TI_NTFY_SERVER")
+	if server == "" {
+		server = "https://ntfy.sh"
+	}
+	public, err := publicNtfy(server)
+	if err != nil {
+		return nil, err
+	}
+	return ntfySender{server: strings.TrimRight(server, "/"), topic: topic, client: client, public: public}, nil
+}
+
+// pagerDutyFrom builds the PagerDuty channel from its secrets: the routing
+// key, and the Events API endpoint, PagerDuty's own when unset. An endpoint
+// that is not an absolute URL is refused here, where it names the channel,
+// rather than failing every send.
+func pagerDutyFrom(getenv func(string) string, client *http.Client) (sender, error) {
+	key := getenv("TI_PAGERDUTY_ROUTING_KEY")
+	if key == "" {
+		return nil, errors.New("reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY (the Events API v2 integration key; it is a secret)")
+	}
+	endpoint := getenv("TI_PAGERDUTY_URL")
+	if endpoint == "" {
+		endpoint = defaultPagerDutyURL
+	}
+	if u, err := url.Parse(endpoint); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return nil, errors.New("reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue")
+	}
+	return pagerDutySender{url: endpoint, routingKey: key, client: client}, nil
 }
 
 // channelKey is the state-file key recording that one channel took one alert.

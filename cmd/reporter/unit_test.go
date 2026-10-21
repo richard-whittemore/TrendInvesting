@@ -253,19 +253,21 @@ func TestTheSecretsFileSuppliesTheChannelSecrets(t *testing.T) {
 	}
 }
 
-// TestASecretsFileThatCannotBeReadStopsTheRunWithoutPrintingIt: a missing
+// TestASecretsFileThatCannotBeReadIsReportedWithoutPrintingIt: a missing
 // file or a line that is not KEY=VALUE is an error, and the error never
-// carries the file's text, which may be a secret.
-func TestASecretsFileThatCannotBeReadStopsTheRunWithoutPrintingIt(t *testing.T) {
+// carries the file's text, which may be a secret. With no channel left that
+// can deliver, the run stops; a channel whose secrets are intact still
+// delivers (TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset).
+func TestASecretsFileThatCannotBeReadIsReportedWithoutPrintingIt(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad")
-	if err := os.WriteFile(bad, []byte("TI_NTFY_TOPIC=ok\ns3cr3t-without-equals\n"), 0o600); err != nil {
+	if err := os.WriteFile(bad, []byte("TI_PAGERDUTY_URL=https://example.org\ns3cr3t-without-equals\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for name, path := range map[string]string{"missing": filepath.Join(dir, "none"), "malformed": bad} {
 		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-secrets-file", path}
 		err := run(args, env(nil), time.Now, &bytes.Buffer{}, http.DefaultClient)
-		if err == nil || !strings.Contains(err.Error(), "secrets file") || strings.Contains(err.Error(), "s3cr3t") {
+		if err == nil || !strings.Contains(err.Error(), "secrets file") || strings.Contains(err.Error(), "s3cr3t") || !strings.Contains(err.Error(), "no delivery channel") {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -283,8 +285,8 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 		}
 		return "x"
 	}
-	if _, err := buildSenders("ntfy,pagerduty", recording, http.DefaultClient, io.Discard); err != nil {
-		t.Fatal(err)
+	if _, faults, err := buildSenders("ntfy,pagerduty", recording, http.DefaultClient, io.Discard); err != nil || len(faults) != 0 {
+		t.Fatal(err, faults)
 	}
 	example := readAssignments(t, secretsExample)
 	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY"} {

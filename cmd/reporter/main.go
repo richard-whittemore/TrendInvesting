@@ -6,7 +6,10 @@
 // optionally the daily summary (docs/live-trading/plan.md section 3; ADR
 // 0019, "Alerting"). A Degraded, Halted or reconciliation alert is sent
 // again every -repeat-interval until the journal records the owner's
-// acknowledgement of it. It only reads the journal. It writes its own state
+// acknowledgement of it. Each delivery channel is validated on its own: one
+// whose secret is empty or malformed is set aside, named in the run's error,
+// in an urgent alert on the other channels and in the daily summary, and the
+// others still deliver. It only reads the journal. It writes its own state
 // file of delivered incident keys and when each channel last took each and,
 // with -clock-check, the host's clock state and its lock, shared by every
 // reporter on the host. Every rule lives in internal/report; this is
@@ -99,18 +102,26 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// the state file.
 	bounded := *client
 	bounded.Timeout = *sendTimeout
+	// A fault in the secrets file or in one channel's secrets sets aside only
+	// what it touches: every other channel still delivers, and the run fails
+	// naming each fault (ADR 0019, "Alerting").
+	var failures []error
 	if *secretsFile != "" {
-		if getenv, err = withSecretsFile(getenv, *secretsFile); err != nil {
-			return err
+		var secretsErr error
+		if getenv, secretsErr = withSecretsFile(getenv, *secretsFile); secretsErr != nil {
+			failures = append(failures, secretsErr)
 		}
 	}
-	senders, err := buildSenders(*channels, getenv, &bounded, out)
+	senders, setAside, err := buildSenders(*channels, getenv, &bounded, out)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
+	}
+	for _, f := range setAside {
+		failures = append(failures, f.err)
 	}
 	seen, sent, repeats, err := loadState(*statePath)
 	if err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
 	}
 	label := *accountName
 	if label == "" {
@@ -121,7 +132,6 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if account != "" {
 		label = account
 	}
-	var failures []error
 	// The heartbeat is checked first so a refused journal's alert can say
 	// whether liveness is monitored.
 	var heartbeat []report.Alert
@@ -149,6 +159,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, unchecked, now())}
 	}
 	alerts = append(alerts, heartbeat...)
+	for _, f := range setAside {
+		alerts = append(alerts, report.ChannelRefusedAlert(label, f.channel, f.err, now()))
+	}
 
 	// Each delivery is saved as soon as a channel takes it, so a run stopped
 	// before it ends (systemd stops one at its TimeoutStartSec) makes the
@@ -174,7 +187,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		if path == "" {
 			path = filepath.Join(filepath.Dir(*statePath), "host-clock.json")
 		}
-		c, err := clockStep(path, *clockCheck, hostName(), senders, now, *repeat)
+		c, err := clockStep(path, *clockCheck, hostName(), senders, setAside, now, *repeat)
 		clock = c
 		if err != nil {
 			failures = append(failures, err)
@@ -188,6 +201,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
 		case due:
+			a.Body += notDelivering(setAside)
 			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
 				failures = append(failures, err)
 			}
@@ -275,6 +289,19 @@ func summaryAlert(envelopes []event.Envelope, date, benchmark string, clock *rep
 		Key: "summary:" + s.AccountID + ":" + s.Date, Kind: kindSummary, Severity: report.Routine, AccountID: s.AccountID,
 		Title: fmt.Sprintf("%s: daily summary %s", s.AccountID, s.Date), Body: body,
 	}, true, nil
+}
+
+// notDelivering is the daily summary's line naming each channel set aside
+// this run, and why; empty when every channel named delivers.
+func notDelivering(setAside []channelFault) string {
+	if len(setAside) == 0 {
+		return ""
+	}
+	names := make([]string, len(setAside))
+	for i, f := range setAside {
+		names[i] = fmt.Sprintf("%s (%s)", f.channel, f.err)
+	}
+	return "Channels not delivering: " + strings.Join(names, "; ") + "\n"
 }
 
 // loadState reads the delivered channel keys, when each was last sent and
