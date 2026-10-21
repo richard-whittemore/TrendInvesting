@@ -4,7 +4,9 @@ Issues and specs for this repo live as **GitHub issues in `richard-whittemore/Tr
 
 **Use the `gh` CLI where it is installed and logged in (it is, on the Mac mini), or the GitHub MCP tools below.** `gh` performs the same operations (`gh issue …`, `gh pr …`, `gh api …`); where it is not installed on a machine, use the GitHub MCP.
 
-| Operation | Tool |
+The table below lists the **MCP fallback**. When `gh` is installed and logged in, use the equivalent `gh issue …`, `gh pr …`, or `gh api …` command instead.
+
+| Operation | MCP fallback |
 |---|---|
 | Create / edit an issue | `mcp__github__issue_write` (method `create` / `update`) |
 | Read an issue (with comments) | `mcp__github__issue_read` |
@@ -112,11 +114,11 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue with `mcp__github__issue_write`, using the ticket standard above.
+Create a GitHub issue with `gh` when installed (it is on the Mac mini), else the GitHub MCP (`mcp__github__issue_write`), using the ticket standard above.
 
 ## When a skill says "fetch the relevant ticket"
 
-Read it with `mcp__github__issue_read`, including comments.
+Read it with `gh` when installed (it is on the Mac mini), else the GitHub MCP (`mcp__github__issue_read`), including comments.
 
 ## Wayfinding operations
 
