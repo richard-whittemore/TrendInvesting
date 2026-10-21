@@ -60,6 +60,11 @@ for f in ibkr-login.env secrets.env accounts/boost.env; do
 done
 pass "users are non-root, nologin; secret stubs are root:root 0600"
 
+# IBKR's execution times name "US/Eastern", which Ubuntu 24.04 ships only in
+# tzdata-legacy; the adapter cannot read an execution without it.
+python3 -c 'from zoneinfo import ZoneInfo; ZoneInfo("US/Eastern")' || fail "the US/Eastern zone IBKR's execution times name is missing"
+pass "the US/Eastern zone is installed"
+
 # Pinned artefacts are really installed.
 if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
   test -s /var/cache/trend-investing/ibgateway-10.50.1f.sh || fail "gateway installer not downloaded"

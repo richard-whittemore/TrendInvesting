@@ -4,8 +4,8 @@
 with a real systemd, for trying the provisioner, the units and your own
 steps before doing them on the Lightsail server, where paper trading runs
 (`docs/runbooks/lightsail-deployment.md`). What it is and why: the manual
-chapter [mac-mini](../manual/mac-mini.md). Today this runbook has one step:
-creating the container, or re-attaching to it.*
+chapter [mac-mini](../manual/mac-mini.md). Its steps: building the programs and creating the container, or
+re-attaching to it.*
 
 ## Before you start
 
@@ -14,7 +14,7 @@ creating the container, or re-attaching to it.*
 - Git, and Go for the builds (`CONTRIBUTING.md`).
 - About 2 GB free for the image and the volumes.
 
-## 1. Create the container, or re-attach to it
+## 1. Build the programs, create the container, or re-attach to it
 
 1. **A checkout of its own, outside the synced folders.** Once:
 
@@ -33,10 +33,20 @@ creating the container, or re-attaching to it.*
    git status --short        # must print nothing
    ```
 
-3. **Build the programs into `dist/`**, as the server runbook does
-   (`docs/runbooks/lightsail-deployment.md`). The arm64 builds are not in
-   `deploy/build-engine.sh` yet; until they are, `up.sh` installs whatever
-   `dist/` holds and names each program it does not find.
+3. **Build the programs for arm64**, into a folder of their own, never
+   `dist/` (Lightsail's) and outside the checkout (an untracked folder in it
+   makes the tree dirty, and the build refuses):
+
+   ```
+   deploy/build-engine.sh --arch arm64 --out "$HOME/ti-arm64"
+   deploy/build-data.sh "$HOME/ti-arm64/ti-data"
+   ```
+
+   Each prints the stamp. To rehearse them first, run
+   `deploy/mac-mini/rehearse-programs.sh`: it builds into a scratch folder
+   of its own and ends with `programs rehearsal passed`. Then tell the
+   launcher where they are: `export TI_DIST="$HOME/ti-arm64"`. It installs
+   whatever that folder holds and names each program it does not find.
 4. **Run the launcher:**
 
    ```
@@ -77,6 +87,17 @@ creating the container, or re-attaching to it.*
    ```
    docker exec -it ti nano /etc/trend-investing/secrets.env
    docker exec -it ti nano /etc/trend-investing/accounts/boost.env
+   ```
+
+7. **Install the TWS API for the adapter.** Not part of `up.sh`. It fetches
+   IBKR's Mac/Unix archive (the Linux installer is x86_64 only), checks its
+   SHA-256 against the pin (a mismatch stops it with nothing installed),
+   installs its Python client and the pinned protobuf into the adapter's
+   environment, and writes the record the adapter checks at start:
+
+   ```
+   docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh twsapi
+   docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh adapter
    ```
 
 **If the launcher says the image changed**, or the container is damaged:

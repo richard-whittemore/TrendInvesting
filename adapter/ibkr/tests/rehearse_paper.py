@@ -59,6 +59,7 @@ import datetime as dt
 import io
 import json
 import os
+import platform
 import shutil
 import signal
 import subprocess
@@ -81,7 +82,7 @@ from book_basis import cash_change  # noqa: E402
 from cli import main as adapter_main  # noqa: E402
 from config import is_paper_account  # noqa: E402
 from fake_tws import FakeTWS, contract as fake_contract  # noqa: E402
-from ibapi_pin import read_pin  # noqa: E402
+from ibapi_pin import _archive_pin, read_pin  # noqa: E402
 from marketdata import nyse_calendar, tidata  # noqa: E402
 from relay import RELEASED  # noqa: E402
 from reports import FILL_TYPE, LIFECYCLE_TYPE  # noqa: E402
@@ -319,8 +320,11 @@ def rehearse(work, account):
     versions = repo / "deploy" / "versions.env"
     version, sha, protobuf, protobuf_sha = read_pin(str(versions))
     record = work / "INSTALLED"
-    record.write_text("TWSAPI_VERSION={}\nTWSAPI_SHA256={}\nPROTOBUF_VERSION={}\nPROTOBUF_SHA256={}\n".format(
-        version, sha, protobuf, protobuf_sha))
+    # This rehearsal runs on the owner's machine: the record names the pinned file that machine installs from.
+    arm64 = platform.machine().lower() in ("arm64", "aarch64")
+    archive_sha = _archive_pin(str(versions)) if arm64 else None
+    record.write_text("TWSAPI_VERSION={}\nTWSAPI_SHA256={}\nTWSAPI_ARTEFACT={}\nPROTOBUF_VERSION={}\nPROTOBUF_SHA256={}\n".format(
+        version, archive_sha or sha, "archive" if arm64 else "installer", protobuf, protobuf_sha))
 
     gateway = FakeTWS()
     gateway.managed_accounts = (account,)

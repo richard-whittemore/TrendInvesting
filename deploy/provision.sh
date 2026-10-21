@@ -185,11 +185,11 @@ step_base() {
     # the owner's tools as ti-trader, and nano for editing the configuration
     # and secret files in place.
     apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl unzip unattended-upgrades python3 tzdata sudo nano >/dev/null
+      ca-certificates curl unzip unattended-upgrades python3 tzdata tzdata-legacy sudo nano >/dev/null
   else
     apt-get install -y -qq --no-install-recommends \
       ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
-      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata iptables >/dev/null
+      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata tzdata-legacy iptables >/dev/null
   fi
 
   log "service users (non-root, no login shell)"
@@ -370,8 +370,12 @@ print(os.path.realpath(google.protobuf.__file__)); print(os.path.realpath(ibapi.
 # link, so once IBKR replaces the file the checksum fails, and that must not
 # block the Gateway or the services.
 #
-# Runs the verified installer unprivileged, installs the Python client it
-# bundles (source/pythonclient) as root under $twsapi_root/<version>, then
+# On Lightsail it runs the verified x86_64 installer unprivileged; on the
+# Mac mini's arm64 container (TI_TARGET=mac-mini), where that installer
+# cannot run (it starts its own x86_64 Java), it fetches the same release's
+# pinned Mac/Unix archive instead and unpacks it with twsapi-archive.py
+# (owner decision 2026-10-18: no emulation). Either way it installs the Python client
+# (source/pythonclient) as root under $twsapi_root/<version>, then
 # into the adapter's own
 # environment, $adapter_venv, offline (--no-index, --no-deps: ibapi declares
 # no dependencies, but imports protobuf, so the pinned pure-Python protobuf
@@ -385,48 +389,64 @@ adapter_venv=/opt/trend-investing/adapter-venv
 adapter_root=/opt/trend-investing/adapter
 step_twsapi() {
   log "TWS API ${TWSAPI_VERSION}"
-  local installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
-  fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
+  local installer pinned_sha=$TWSAPI_SHA256 artefact=installer
+  if mac_mini; then
+    artefact=archive
+    installer="$dl_cache/twsapi-macunix-${TWSAPI_VERSION}.zip"
+    pinned_sha=$TWSAPI_ARCHIVE_SHA256
+    fetch "$TWSAPI_ARCHIVE_URL" "$TWSAPI_ARCHIVE_SHA256" "$installer"
+  else
+    installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
+    fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
+  fi
   # Both downloads are verified before any file is removed or installed.
   local protobuf="$dl_cache/protobuf-${PROTOBUF_VERSION}-py3-none-any.whl"
   fetch "$PROTOBUF_URL" "$PROTOBUF_SHA256" "$protobuf"
-  if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
-    log "rehearsal: checksum verified, installer not executed (not x86_64)"
+  if ! mac_mini && test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
+    log "rehearsal: checksum verified, installer not executed (TI_REHEARSAL_SKIP_INSTALLER)"
     return 0
   fi
   log "the adapter's Python environment"
   export DEBIAN_FRONTEND=noninteractive
   apt-get install -y -qq --no-install-recommends python3-venv python3-setuptools python3-wheel >/dev/null
-  local target="$twsapi_root/$TWSAPI_VERSION"
-  rm -rf "$target" "$twsapi_root/INSTALLED"
+  local tree="$twsapi_root/$TWSAPI_VERSION"
+  rm -rf "$tree" "$twsapi_root/INSTALLED"
   install -d -m 0755 "$twsapi_root"
-  # The vendor installer runs unprivileged (as nobody), into a scratch
-  # directory it owns, as step_gateway runs the Gateway's installer as its
-  # service user; only the Python client it unpacks is then installed, as
-  # root, under $target. -q: unattended; -dir: where to put the tree. The
-  # install4j installer writes under HOME, so it gets a scratch one.
-  local scratch
-  scratch=$(mktemp -d)
-  chmod 0755 "$scratch"
-  install -d -o nobody -g nogroup -m 0700 "$scratch/home" "$scratch/tree"
-  install -m 0644 "$installer" "$scratch/installer.sh"
-  runuser -u nobody -- env HOME="$scratch/home" sh "$scratch/installer.sh" -q -dir "$scratch/tree" >/dev/null
-  local unpacked
-  unpacked=$(find "$scratch/tree" -type d -name pythonclient -path '*/source/*' | head -n 2)
-  if test "$(printf '%s\n' "$unpacked" | grep -c .)" != 1; then
+  if mac_mini; then
+    # Verifies the archive against its pin again, then unpacks only its one
+    # source/pythonclient, as $tree/pythonclient; refuses with nothing
+    # written otherwise.
+    python3 -I "$here/twsapi-archive.py" "$installer" "$pinned_sha" "$tree" \
+      || die "the TWS API ${TWSAPI_VERSION} archive was refused; not installing"
+  else
+    # The vendor installer runs unprivileged (as nobody), into a scratch
+    # directory it owns, as step_gateway runs the Gateway's installer as its
+    # service user; only the Python client it unpacks is then installed, as
+    # root, under $tree. -q: unattended; -dir: where to put the tree. The
+    # install4j installer writes under HOME, so it gets a scratch one.
+    local scratch
+    scratch=$(mktemp -d)
+    chmod 0755 "$scratch"
+    install -d -o nobody -g nogroup -m 0700 "$scratch/home" "$scratch/tree"
+    install -m 0644 "$installer" "$scratch/installer.sh"
+    runuser -u nobody -- env HOME="$scratch/home" sh "$scratch/installer.sh" -q -dir "$scratch/tree" >/dev/null
+    local unpacked
+    unpacked=$(find "$scratch/tree" -type d -name pythonclient -path '*/source/*' | head -n 2)
+    if test "$(printf '%s\n' "$unpacked" | grep -c .)" != 1; then
+      rm -rf "$scratch"
+      die "the TWS API ${TWSAPI_VERSION} tree has not exactly one source/pythonclient; not installing"
+    fi
+    if ! test -f "$unpacked/setup.py" && ! test -f "$unpacked/pyproject.toml"; then
+      rm -rf "$scratch"
+      die "the TWS API ${TWSAPI_VERSION} pythonclient has no setup.py or pyproject.toml; not installing"
+    fi
+    install -d -o root -g root -m 0755 "$tree"
+    cp -R "$unpacked" "$tree/pythonclient"
+    chown -R root:root "$tree"
+    chmod -R u=rwX,go=rX "$tree"
     rm -rf "$scratch"
-    die "the TWS API ${TWSAPI_VERSION} tree has not exactly one source/pythonclient; not installing"
   fi
-  if ! test -f "$unpacked/setup.py" && ! test -f "$unpacked/pyproject.toml"; then
-    rm -rf "$scratch"
-    die "the TWS API ${TWSAPI_VERSION} pythonclient has no setup.py or pyproject.toml; not installing"
-  fi
-  install -d -o root -g root -m 0755 "$target"
-  cp -R "$unpacked" "$target/pythonclient"
-  chown -R root:root "$target"
-  chmod -R u=rwX,go=rX "$target"
-  rm -rf "$scratch"
-  local client="$target/pythonclient"
+  local client="$tree/pythonclient"
   # A fresh environment each time: nothing of an earlier ibapi remains. The
   # system site packages give pip the setuptools and wheel it builds with,
   # offline.
@@ -435,8 +455,8 @@ step_twsapi() {
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps "$protobuf"
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
   verify_adapter_venv "$adapter_venv" "$PROTOBUF_VERSION"
-  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
-    "$TWSAPI_VERSION" "$TWSAPI_SHA256" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
+  printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nTWSAPI_ARTEFACT=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
+    "$TWSAPI_VERSION" "$pinned_sha" "$artefact" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
   chmod 0644 "$twsapi_root/INSTALLED.tmp"
   mv "$twsapi_root/INSTALLED.tmp" "$twsapi_root/INSTALLED"
   log "ibapi from TWS API ${TWSAPI_VERSION} installed into $adapter_venv; recorded in $twsapi_root/INSTALLED"
@@ -482,7 +502,36 @@ write_stub() {
   chown root:root "$path"
 }
 
+# elf_machine FILE: FILE's ELF e_machine (62 x86-64, 183 AArch64), the two
+# little-endian bytes at offset 18; empty if FILE is not an ELF file.
+elf_machine() {
+  test "$(od -An -tx1 -N4 "$1" | tr -d ' \n')" = 7f454c46 || return 0
+  od -An -tu2 -j18 -N2 "$1" | tr -d ' \n'
+}
+
+# require_native_programs DIST: refuses, before anything is installed, if a
+# Go program in DIST is not an ELF file for this machine's architecture
+# (dist/ built for the other machine: deploy/build-engine.sh builds
+# linux/amd64 for Lightsail, linux/arm64 with --arch arm64 for the Mac mini).
+# ti-engine is checked too, though the owner installs it by hand.
+require_native_programs() {
+  local dist=$1 machine want b got
+  machine=$(uname -m)
+  case $machine in
+    x86_64) want=62 ;;
+    aarch64) want=183 ;;
+    *) die "no Go build for $machine; not installing" ;;
+  esac
+  for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+    test -f "$dist/$b" || continue
+    got=$(elf_machine "$dist/$b")
+    test "$got" = "$want" || die "$dist/$b is not a Linux program for this machine ($machine; its ELF machine is ${got:-none, not ELF}): build it with deploy/build-engine.sh for this machine and copy dist/ again; nothing installed"
+  done
+}
+
 step_services() {
+  local dist=${TI_DIST:-$here/../dist} b
+  require_native_programs "$dist"
   log "directories and config"
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/

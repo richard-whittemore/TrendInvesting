@@ -119,9 +119,15 @@ research-test:
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py
 	cd research/futures-local && python3 -m unittest discover -s . -p "test_*.py"
 
-# Shell tests for the deploy rehearsal (no Docker needed).
+# Shell tests for the deploy rehearsal, the provisioner's architecture
+# rules and the server's build (no Docker needed; test-build.sh
+# cross-compiles for linux/amd64 and linux/arm64).
 deploy-test:
 	./deploy/rehearsal/test-platform.sh
+	./deploy/rehearsal/test-build.sh
+	./deploy/rehearsal/test-provision-arch.sh
+	./deploy/mac-mini/test-programs-lib.sh
+	cd deploy/rehearsal && python3 -m unittest test_twsapi_archive
 	./deploy/rehearsal/test-clock.sh
 	./deploy/rehearsal/test-target.sh
 	./deploy/mac-mini/test-refusals.sh

@@ -1,5 +1,7 @@
 #!/bin/bash
-# Builds the server's Go binaries: linux/amd64, stamped with the build
+# Builds the server's Go binaries: linux/amd64 by default (the Lightsail
+# server), or linux/arm64 with --arch arm64 (the Mac mini's container, which
+# runs natively on Apple silicon, never under emulation), stamped with the build
 # identity cmd/engine records in every envelope's strategy version
 # (scripts/build-stamp.sh: `git describe --always --dirty`, with a dirty
 # tree's own tree hash appended; through the Makefile's LDFLAGS). The
@@ -9,19 +11,47 @@
 #
 #   deploy/build-engine.sh            writes dist/ti-engine, dist/ti-reporter,
 #                                     dist/ti-dashboard, dist/operator and
-#                                     dist/journal-query, and prints the stamp
+#                                     dist/journal-query for linux/amd64, and
+#                                     prints the platform and the stamp
+#   deploy/build-engine.sh --arch arm64
+#                                     the same five for linux/arm64, from the
+#                                     same commit with the same stamp
+#   deploy/build-engine.sh ... --out DIR
+#                                     writes the five into DIR instead of
+#                                     dist/, which is left as it was
+#
+# The architecture changes nothing but GOARCH: the default build is the one
+# this script always made, byte for byte, and both carry the one stamp of
+# the commit. Each run replaces its directory's binaries with that
+# architecture's; dist/ is what the Lightsail runbook copies to the server,
+# so a build for another machine goes elsewhere with --out.
 #
 # A dirty working tree is refused: its stamp names a commit the binary was
 # not built from. TI_ALLOW_DIRTY=1 overrides that for a local experiment;
 # never install such a binary on the server.
 #
 # Install on the server (owner step, see docs/runbooks/lightsail-deployment.md):
+# with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
+# refuses, installing nothing, if any of the five is not built for the
+# server's architecture, and installs the other four; then
 #   sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine
-# and, with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
-# installs the other four.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+usage() { echo "usage: deploy/build-engine.sh [--arch amd64|arm64] [--out DIR]" >&2; exit 1; }
+goarch=amd64
+out=
+while test $# -gt 0; do
+  case $1 in
+    --arch) test $# -ge 2 || usage; goarch=$2; shift 2 ;;
+    --out) test $# -ge 2 && test -n "$2" || usage; out=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
+case $goarch in
+  amd64 | arm64) ;;
+  *) printf 'build-engine: unsupported architecture %s (amd64 or arm64)\n' "$goarch" >&2; exit 1 ;;
+esac
 stamp=$(cd "$repo" && scripts/build-stamp.sh)
 case $stamp in
   *-dirty-*)
@@ -31,13 +61,15 @@ case $stamp in
     fi
     ;;
 esac
-mkdir -p "$repo/dist"
+out=${out:-$repo/dist}
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
 cd "$repo"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 make --no-print-directory engine BUILD_STAMP="$stamp"
-mv bin/ti-engine dist/ti-engine
+GOOS=linux GOARCH=$goarch CGO_ENABLED=0 make --no-print-directory engine BUILD_STAMP="$stamp"
+mv bin/ti-engine "$out/ti-engine"
 for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query; do
-  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOTOOLCHAIN=local go build \
+  GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
     -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$stamp" \
-    -o "dist/${tool#*:}" "./cmd/${tool%%:*}"
+    -o "$out/${tool#*:}" "./cmd/${tool%%:*}"
 done
-printf 'build-engine: dist/ti-engine, ti-reporter, ti-dashboard, operator and journal-query stamped %s\n' "$stamp"
+printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator and journal-query for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"

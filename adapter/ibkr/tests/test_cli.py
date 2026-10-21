@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 tests_dir = Path(__file__).resolve().parent
@@ -20,6 +21,7 @@ from connection import REQUEST_ID_BASE
 from config import AdapterConfig
 from engine_double import LoggedEngine, run_approval
 from fake_tws import ACCOUNT, FakeTWS
+import ibapi_pin
 from test_ibapi_pin import PINS, SHA, record
 from test_loop import SUMMARY
 
@@ -55,6 +57,10 @@ class CommandTests(unittest.TestCase):
         self.secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT))
         self.versions.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA) + PINS)
         self.record.write_text(record())
+        # The record names the installer, the artefact an x86_64 machine installs from.
+        machine = mock.patch.object(ibapi_pin.platform, "machine", return_value="x86_64")
+        machine.start()
+        self.addCleanup(machine.stop)
         # The account's first run, approved with the book the fake shows.
         self.engine = LoggedEngine(str(self.engine_log), approval=run_approval(ACCOUNT, starting_book=({}, 100000.0)))
         self.fake = FakeTWS()
@@ -106,6 +112,90 @@ class CommandTests(unittest.TestCase):
         self.record.unlink()
         self.assertEqual(self.run_main(self.argv()), 1)
         self.assertEqual(self.made, [])
+
+    def test_a_missing_ibkr_time_zone_refuses_to_start_before_connecting_and_names_the_package(self):
+        from zoneinfo import ZoneInfoNotFoundError
+
+        asked = []
+
+        def no_legacy_zones(name):
+            asked.append(name)
+            if name == "US/Eastern":
+                raise ZoneInfoNotFoundError(name)
+            return None
+
+        status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                      should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                      zone_lookup=no_legacy_zones)
+        self.assertEqual(status, 1)
+        self.assertIn("US/Eastern", asked)
+        message = self.err.getvalue()
+        for word in ("US/Eastern", "tzdata-legacy", "provision.sh base"):
+            self.assertIn(word, message)
+        self.assertEqual(self.made, [], "nothing connects when a zone IBKR names is missing")
+
+    def test_an_unreadable_ibkr_time_zone_file_is_reported_as_corrupt_not_as_not_installed(self):
+        def corrupt_zone(name):
+            raise ValueError("ZoneInfo keys must be normalized relative paths")
+
+        status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                      should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                      zone_lookup=corrupt_zone)
+        self.assertEqual(status, 1)
+        message = self.err.getvalue()
+        self.assertIn("US/Eastern", message)
+        self.assertIn("corrupt", message)
+        self.assertNotIn("not installed", message)
+        self.assertNotIn("cannot be read", message)
+        self.assertIn("cannot be parsed", message)
+        self.assertIn("reinstall", message)
+        self.assertIn("restore the zone database", message)
+        self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
+
+    def test_an_unreadable_ibkr_time_zone_file_is_refused_not_a_traceback(self):
+        for error in (PermissionError(13, "Permission denied"), OSError(5, "Input/output error")):
+            with self.subTest(error=type(error).__name__):
+                def unreadable_zone(name, error=error):
+                    raise error
+
+                self.err = io.StringIO()
+                status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                              should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                              zone_lookup=unreadable_zone)
+                self.assertEqual(status, 1)
+                message = self.err.getvalue()
+                self.assertIn("US/Eastern", message)
+                self.assertIn(error.strerror, message)
+                self.assertIn("cannot be read", message)
+                self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
+
+    def test_a_directory_where_an_ibkr_zone_file_should_be_is_refused_as_not_installed(self):
+        # zoneinfo skips anything that is not a regular file, so a directory at
+        # the zone's path reads as a missing zone, not as an unreadable one.
+        import zoneinfo as zoneinfo_module
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        saved = zoneinfo_module.TZPATH
+        self.addCleanup(zoneinfo_module.reset_tzpath, to=saved)
+        zone_root = self.dir / "zoneinfo"
+        (zone_root / "US" / "Eastern").mkdir(parents=True)
+        zoneinfo_module.reset_tzpath(to=[str(zone_root)])
+        # With no tzdata pip package installed, a host has no fallback for the zone; a
+        # machine that has one would resolve the name from it, so the fallback is switched off here.
+        no_fallback = mock.patch("zoneinfo._common.load_tzdata",
+                                 side_effect=ZoneInfoNotFoundError("US/Eastern"))
+        no_fallback.start()
+        self.addCleanup(no_fallback.stop)
+
+        status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                      should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                      protobuf_version=lambda: "5.29.5", zone_lookup=ZoneInfo.no_cache)
+        self.assertEqual(status, 1)
+        message = self.err.getvalue()
+        for word in ("US/Eastern", "is not installed", "tzdata-legacy", "provision.sh base"):
+            self.assertIn(word, message)
+        self.assertNotIn("cannot be read", message)
+        self.assertEqual(self.made, [], "nothing connects when a zone IBKR names is a directory")
 
     def test_the_account_comes_from_one_place_only_and_is_never_echoed(self):
         both = dict(CONFIG, account_id=ACCOUNT)

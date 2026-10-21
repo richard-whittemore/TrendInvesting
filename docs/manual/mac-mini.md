@@ -258,11 +258,60 @@ restart ti`) has the server's rules:
   changes": the services and systemd write to the volumes as they run (new
   journal lines, the reporter's state), and the test does not compare those.
 
+## The programs on the Mac mini
+
+The Mac mini is Apple silicon, so its container is arm64 Linux, and it needs
+the programs built for arm64.
+
+**Built for arm64 from the same commit.** `deploy/build-engine.sh --arch
+arm64 --out "$HOME/ti-arm64"` builds the engine, the reporter, the dashboard,
+`operator` and `journal-query` for the container. They are built from the
+same commit, with the same stamp, as the linux/amd64 build for Lightsail
+(still the default, unchanged byte for byte). The stamp is what every
+decision the engine records names as its build. A tree with uncommitted
+changes, or with an untracked file, is refused, so build into a folder of
+its own outside the checkout (`--out`): `dist/` is what the Lightsail
+runbook copies to the x86_64 server, and `provision.sh services` refuses a
+program built for another architecture, installing nothing. The data job
+(`deploy/build-data.sh`) is pure Python and is the same file on both.
+
+**The TWS API on arm64.** IBKR's pinned TWS API installer is for Linux x86_64
+only. It starts its own x86_64 Java and accepts no other, so it cannot run in
+the container. Under the Mac mini target, `provision.sh twsapi` instead uses
+the same release's Mac/Unix archive (10.51.01), pinned in `deploy/versions.env`
+beside the installer by its own address and SHA-256, under the same rule. The
+step downloads the archive, checks its SHA-256 against the pin and stops on
+any difference, with nothing installed. It then unpacks only the archive's
+Python client, installs it with the pinned protobuf into the adapter's own
+environment and writes the install record, which on the Mac mini names the
+archive's SHA-256 and says it came from the archive. The adapter starts only
+if that record names the archive (the artefact an arm64 machine installs from;
+a record naming the Linux installer is refused there, as is one without an
+artefact, written by an earlier step: run `provision.sh twsapi` again), the
+pinned archive's SHA-256 and version, and the `ibapi` it imports is that version. No emulated
+helper is used (your decision, 2026-10-18).
+
+**How it is checked.** `deploy/mac-mini/rehearse-programs.sh` builds both
+architectures into a scratch folder (never `dist/`), checks that their stamps
+match, and then, in an arm64 container under the Mac mini target, checks that:
+- the programs run;
+- the engine names the stamp, and stops within 10 seconds when asked;
+- the paper rehearsal passes;
+- a tampered download and an unpinned file are both refused, changing nothing
+  already installed;
+- the pinned archive's Python client unpacks and `ibapi` imports;
+- the install record is written and the adapter's pin check passes;
+- no x86_64 file is on the container's disk, and none is running at the end.
+
+It ends with "programs rehearsal passed". The rehearsal cannot watch every
+short-lived program a step starts, so "nothing x86_64 runs" rests on those
+steps never starting one: it runs `base` for real under the Mac mini target,
+and the provisioner's own tests check `twsapi`.
+
 ## What is not built yet
 
-- The programs for arm64 (`deploy/build-engine.sh` builds for the Lightsail
-  server's x86_64) and the adapter's installation in the container. Until
-  then `up.sh` installs only what is in the build folder.
+- The adapter's installation in the container is a step of its own
+  (`provision.sh twsapi`, then `adapter`), not part of `up.sh`.
 - The dashboard on the Mac's loopback. The port is published, but the
   dashboard listens on the container's own loopback, so the Mac cannot reach
   it yet.
@@ -312,6 +361,11 @@ restart ti`) has the server's rules:
 | `provision: UID 2002 (or 2001, 2003) is held by the account '...' in this image` | Stops before creating the service users | A changed image took the ID; remove that account from the image, then `up.sh --recreate` |
 | `provision: ti-trader is 998:998 here, not 2002:2002` (or `ti-operator is UID 997 here, not 2003`) | Stops before changing anything: the container was provisioned before the IDs were fixed | `up.sh --recreate` gives the users their fixed IDs, but does not re-own the files already in the volumes, which stay at the old IDs. After it, run the `reown` step the message gives, inside the container (`docker exec --env TI_TARGET=mac-mini ti /root/deploy/provision.sh reown ti-trader 998 998`): it moves every file in the volumes of the old UID and GID to the fixed ones and says how many. It always refuses an old ID that root (0) or a service user (2001 to 2003) holds, since those files are that account's own. An old ID that only collides with another account the new image has (a system account its packages added at the number the old service user had) is refused too, naming the account; if the files at that ID are the old service user's, run the same command again with `--force-id` (`... reown ti-trader 995 995 --force-id`) and it moves them, or remove or renumber that account in the image and run `up.sh --recreate` again. If it cannot list a volume it stops with `could not list`, never a count. Then run `up.sh` again |
 | `up: note: ti runs the image ..., not ...` | Keeps the running container and provisions it as before | Run `up.sh --recreate` when it suits you; every volume is kept |
+| The programs were built for the wrong architecture (x86_64 programs, for Lightsail) | `provision.sh services` refuses, naming the program and the container's architecture, and installs nothing | Build with `deploy/build-engine.sh --arch arm64 --out "$HOME/ti-arm64"` and copy the folder again |
+| The tree had uncommitted changes | The build refuses; nothing is built | Commit (or discard) the changes, then build |
+| IBKR replaced the TWS API archive at its address | `provision.sh twsapi` stops with "checksum mismatch"; nothing is installed and the adapter will not start | Nothing on the Mac; this is a version bump (the Lightsail runbook, "Bumping a pinned version"); the TWS API pins move together |
+| The adapter's environment was changed by hand | Detected only if the change moves `ibapi` out of the environment or changes the version it reports, or the install record no longer names the pin: then the adapter refuses to start. An edit to `ibapi`'s files that keeps its version and place is **not** detected (the files are not hashed) | Run `provision.sh twsapi` again: it rebuilds the environment whole |
+| Mac-side programs were copied to the Lightsail server | `provision.sh services` refuses, naming the program and the server's architecture, and installs nothing | Build for Lightsail with `deploy/build-engine.sh` (no `--arch`), copy `dist/` again |
 | After a Mac or Docker Desktop restart, the engine and the adapter are stopped | Nothing: this is the rule, and the timers and dashboard are back | Start the engine as a fresh approved run and then the adapter ([restart](restart.md)) |
 | `systemctl is-system-running` inside says `degraded`, with `ti-reporter@boost` failed | The reporter fails every 5 minutes until the Boost engine has run once and `secrets.env` holds its channels | Expected before the first run; otherwise read `journalctl -u ti-reporter@boost` ([alerts and dashboard](alerts-and-dashboard.md)) |
 | An Intel (amd64) container fails on this Mac with `exec format error` | Not this container: its image never touches Docker's program handlers. An older image, or another systemd container, may have cleared them | Quit and reopen Docker Desktop, which registers Rosetta's handler again; check that `ti` runs the current image (`up.sh` says so if not) |
@@ -320,6 +374,10 @@ restart ti`) has the server's rules:
 
 ## What backs this
 
+- `deploy/mac-mini/rehearse-programs.sh` and `programs-inside.sh` build and
+  check the arm64 programs and the TWS API install; `deploy/rehearsal/test-provision-arch.sh`
+  and `test-build.sh` check the provisioner's architecture handling and the
+  build, in `make check`.
 - `deploy/provision.sh` (`TI_TARGET=mac-mini`), `deploy/mac-mini/up.sh`,
   `deploy/mac-mini/Dockerfile` and the clock check's units in
   `deploy/mac-mini/systemd/`.

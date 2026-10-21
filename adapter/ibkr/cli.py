@@ -3,9 +3,9 @@
 Everything is read and checked before anything connects: the configuration
 (config.AdapterConfig, strict), the account number from exactly one place
 (the configuration file, or one named KEY=VALUE line of the account's own
-file, read bare and never echoed: the repository is public), the installed
-ibapi against the pin (ibapi_pin), and the engine's durable log (read at
-start by the loop).
+file, read bare and never echoed: the repository is public), the time
+zones IBKR's reports name (require_zones), the installed ibapi against the
+pin (ibapi_pin), and the engine's durable log (read at start by the loop).
 Then the loop runs (loop.AdapterLoop) until SIGTERM or SIGINT, or until it
 stops for a person. Exit status: 0 for a requested stop, 1 for a refusal or
 a stop for a person (the reason is written to standard error), 2 for a
@@ -17,6 +17,7 @@ import logging
 import re
 import signal
 import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from config import AdapterConfig, ConfigError
 from ibapi_pin import IbapiNotPinned, check_installed
@@ -62,6 +63,39 @@ def mask_accounts(text, account_id):
 
 class Refused(Exception):
     """The command's inputs are unusable; nothing was started."""
+
+
+# The time zones IBKR's reports name: execution times are stated in
+# "US/Eastern" (orders.parse_execution_time), a legacy name Ubuntu 24.04
+# ships only in tzdata-legacy, which `provision.sh base` installs. A missing
+# zone is refused at start, before anything connects, rather than stopping
+# the adapter at the first execution report mid-session (fail closed,
+# AGENTS.md).
+IBKR_ZONES = ("US/Eastern",)
+
+
+def require_zones(lookup=ZoneInfo):
+    """Refused unless every zone in IBKR_ZONES resolves through lookup (zoneinfo.ZoneInfo by default)."""
+    for name in IBKR_ZONES:
+        try:
+            lookup(name)
+        except ZoneInfoNotFoundError:
+            raise Refused("the time zone {} that IBKR's execution times name is not installed; install the "
+                          "tzdata-legacy package with `sudo deploy/provision.sh base` and start the adapter "
+                          "again".format(name)) from None
+        except ValueError:
+            # zoneinfo raises ValueError for a zone file that exists but whose content it cannot parse.
+            raise Refused("the time zone {} that IBKR's execution times name is present but corrupt (its "
+                          "content cannot be parsed); reinstall the package that provides it with `sudo "
+                          "apt-get install --reinstall tzdata-legacy tzdata` (or restore the zone database "
+                          "from a good copy) and start the adapter again".format(name)) from None
+        except OSError as err:
+            # OSError covers PermissionError and other read errors; each is refused as an unreadable zone.
+            # A directory in the zone's place never gets here: zoneinfo skips non-regular files, so it is refused above as not installed.
+            raise Refused("the time zone {} that IBKR's execution times name cannot be read ({}); restore the "
+                          "zone database's permissions or reinstall it with `sudo apt-get install --reinstall "
+                          "tzdata-legacy tzdata` and start the adapter again".format(
+                              name, err.strerror or type(err).__name__)) from None
 
 
 def _parser():
@@ -172,7 +206,7 @@ def _engine_connect(path, timeout):
 
 
 def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL,
-         ibapi_version=None, protobuf_version=None, today=None, now=None):
+         ibapi_version=None, protobuf_version=None, today=None, now=None, zone_lookup=None):
     """Run the command; returns the process exit status.
 
     api_factory, engine_connect, should_stop, ibapi_version and protobuf_version replace the
@@ -180,13 +214,15 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     imported ibapi's version (for the tests and the rehearsal, which run
     without ibapi); today replaces the session's date (the rehearsal's
     synthetic session) and now the adapter's clock (the rehearsal's, kept
-    with its synthetic IBKR clock); poll is how long one step waits for a
-    callback.
+    with its synthetic IBKR clock); zone_lookup replaces zoneinfo.ZoneInfo
+    in the check that IBKR's time zones are installed; poll is how long one
+    step waits for a callback.
     """
     err = err or sys.stderr
     args = _parser().parse_args(argv)
     try:
         cfg = load_config(args)
+        require_zones(zone_lookup or ZoneInfo)
         version = check_installed(args.ibapi_record, args.versions,
                                   **({"installed_version": ibapi_version} if ibapi_version else {}),
                                   **({"installed_protobuf": protobuf_version} if protobuf_version else {}))
