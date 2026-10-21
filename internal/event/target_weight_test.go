@@ -895,3 +895,37 @@ func TestBoostRejectionsWhileStoppedValidate(t *testing.T) {
 		p.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRejected, Released: 12}}
 	}, "order")
 }
+
+// TestBoostVenueOrderIDsNameOneOrderEach: a venue order ID is the venue's
+// ID for one order, so no two of the watched, undecided and working orders
+// carry the same one: a restarted run matches IBKR's unechoed listing by
+// it, and a shared ID would match the wrong order (ADR 0026, point 5,
+// amended 2026-10-18; fail closed, AGENTS.md).
+func TestBoostVenueOrderIDsNameOneOrderEach(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-9", Side: event.OrderSideBuy, Released: 9, LimitPrice: 100, VenueOrderID: "ib-9"}
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{
+		{ClientOrderID: "tw-3", Side: event.OrderSideBuy, Released: 3, LimitPrice: 100, VenueOrderID: "ib-3"},
+		{ClientOrderID: "tw-9"},
+	}
+	v.Boost.WorkingOrders = []event.BoostWatchedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, VenueOrderID: "ib-1"},
+		{ClientOrderID: "tw-2", Side: event.OrderSideBuy, Released: 12, LimitPrice: 105, VenueOrderID: "ib-2"},
+	}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("distinct venue order IDs are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "two working orders", v, func(p *P) {
+		p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+		p.Boost.WorkingOrders[1].VenueOrderID = "ib-1"
+	}, "venue order")
+	expectInvalid(t, "a working and the watched order", v, func(p *P) {
+		p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+		p.Boost.WorkingOrders[0].VenueOrderID = "ib-9"
+	}, "venue order")
+	expectInvalid(t, "an undecided and a working order", v, func(p *P) {
+		p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+		p.Boost.WorkingOrders[0].VenueOrderID = "ib-3"
+	}, "venue order")
+}

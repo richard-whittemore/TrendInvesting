@@ -306,12 +306,31 @@ func (l *sellLedger) byVenue(o event.BrokerOrder) *ledgerSell {
 	if o.ClientOrderID != "" || o.BrokerOrderID == "" {
 		return nil
 	}
+	var match *ledgerSell
 	for _, s := range l.byInstrument[o.InstrumentID] {
-		if s.venueID == o.BrokerOrderID {
-			return s
+		if s.venueID != o.BrokerOrderID {
+			continue
+		}
+		if match != nil {
+			// Two sells under one venue order ID cannot say whose the
+			// listing is: it is counted beside them, an over-count, which
+			// sells less (fail closed, AGENTS.md).
+			return nil
+		}
+		match = s
+	}
+	return match
+}
+
+// venueTaken reports whether a sell of ours already carries venueID as its
+// venue order ID.
+func (l *sellLedger) venueTaken(venueID string) bool {
+	for _, s := range l.sells {
+		if s.venueID == venueID {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // unshown is the pending rule: the shares of instrumentID already being sold
@@ -575,6 +594,8 @@ func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.Targe
 		return fmt.Errorf("risklimit: order %q is already known, or unnamed, and cannot be restored", o.ClientOrderID)
 	case o.Quantity <= 0:
 		return fmt.Errorf("risklimit: restored order %s releases %d shares", o.ClientOrderID, o.Quantity)
+	case venueOrderID != "" && o.Side == event.OrderSideSell && g.ledger.venueTaken(venueOrderID):
+		return fmt.Errorf("risklimit: restored order %s names venue order %s, which another sell carries; a venue order ID names one order", o.ClientOrderID, venueOrderID)
 	}
 	var filled int64
 	seen := map[string]bool{}

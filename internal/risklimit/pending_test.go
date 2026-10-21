@@ -3,6 +3,7 @@ package risklimit_test
 import (
 	"math"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -1265,4 +1266,55 @@ func TestAReleasedSellListedWithoutItsClientOrderIDIsMatchedByItsVenueOrderID(t 
 			pendingIs(t, g, 60, "the released sell, listed with no client order ID")
 		})
 	}
+}
+
+// TestARestoreRefusesAVenueOrderIDAnotherSellCarries: a venue order ID
+// names one order. Two restored sells carrying the same one would let an
+// unechoed listing match whichever was restored last, so the restore
+// refuses the second and restores nothing of it (the pending rule's
+// fail-closed direction, ADR 0019, amended 2026-10-15; ADR 0026, point 5,
+// amended 2026-10-18).
+func TestARestoreRefusesAVenueOrderIDAnotherSellCarries(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	if err := g.RestoreReleased(restoredSell(54), nil, time.Time{}, "ib-dup"); err != nil {
+		t.Fatal(err)
+	}
+	second := restoredSell(40)
+	second.ClientOrderID = "tw-old2"
+	err := g.RestoreReleased(second, nil, time.Time{}, "ib-dup")
+	if err == nil || !strings.Contains(err.Error(), "venue order") {
+		t.Fatalf("a second restored sell under venue order ib-dup: err = %v, want a venue order refusal", err)
+	}
+	if err := g.RestoreReleased(second, nil, time.Time{}, "ib-other"); err != nil {
+		t.Fatalf("nothing of the refused restore was kept, so the order restores under another venue order ID: %v", err)
+	}
+}
+
+// TestAListingMatchingTwoSellsByVenueOrderIDIsNotTakenOntoEither: two
+// released sells that lifecycle reports both tie to one venue order ID
+// cannot say which an unechoed listing under it is, so the listing is
+// counted beside them (an over-count, which sells less) rather than taken
+// onto the first (ADR 0019, amended 2026-10-15; fail closed, AGENTS.md).
+func TestAListingMatchingTwoSellsByVenueOrderIDIsNotTakenOntoEither(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(200))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+		AccountID: "joint", ClientOrderID: "tw-sell", OrderID: "ib-dup", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: 60, LimitPrice: 1, OccurredAt: at.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RestoreReleased(restoredSell(54), nil, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+		AccountID: "joint", ClientOrderID: "tw-old", OrderID: "ib-dup", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: 54, LimitPrice: 1, OccurredAt: at.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	observe(t, g, "broker:2", later(broker(200, unechoed("ib-dup", 30)), 3))
+	g.ObserveAccount(account(200, 4))
+	pendingIs(t, g, 144, "the two sells, 60 and 54, and the ambiguous listing's 30 beside them")
 }

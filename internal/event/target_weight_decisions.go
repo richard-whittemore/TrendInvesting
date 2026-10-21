@@ -1087,6 +1087,27 @@ func (b BoostFigures) validateRejections() []error {
 		}
 		working[o.ClientOrderID] = true
 	}
+	// A venue order ID is the venue's ID for one order: a restarted run
+	// matches IBKR's listing with no client order ID echoed by it, and an ID
+	// two orders carry would match the wrong one (ADR 0026, point 5, amended
+	// 2026-10-18; fail closed, AGENTS.md).
+	venueOf := map[string]string{}
+	named := func(client, venueID string) {
+		if venueID == "" {
+			return
+		}
+		if other, ok := venueOf[venueID]; ok && other != client {
+			errs = append(errs, fmt.Errorf("boost orders %s and %s both name venue order %s; a venue order ID names one order", other, client, venueID))
+		}
+		venueOf[venueID] = client
+	}
+	named(b.Watched.ClientOrderID, b.Watched.VenueOrderID)
+	for _, o := range b.UndecidedOrders {
+		named(o.ClientOrderID, o.VenueOrderID)
+	}
+	for _, o := range b.WorkingOrders {
+		named(o.ClientOrderID, o.VenueOrderID)
+	}
 	return errs
 }
 
