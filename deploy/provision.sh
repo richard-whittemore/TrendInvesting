@@ -201,6 +201,27 @@ step_gateway() {
   fi
 }
 
+# verify_adapter_venv VENV PINNED_PROTOBUF: the twsapi step's last gate, before
+# it records INSTALLED. -I: the venv's own packages only, nothing from the
+# current directory. The modules must import, google.protobuf must be the
+# pinned version, and it and ibapi must resolve under the venv itself: the
+# venv is made with --system-site-packages, so a system google/__init__.py
+# could otherwise shadow the venv's protobuf, which the adapter refuses at
+# start (ibapi_pin.py; ADR 0025).
+verify_adapter_venv() {
+  local venv=$1 want=$2 py="$1/bin/python3" out prefix version pb ib
+  "$py" -I -c 'import google.protobuf, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
+    || die "ibapi did not import from $venv after installing it; not recording it"
+  out=$("$py" -I -c 'import os, sys, google.protobuf, ibapi
+print(os.path.realpath(sys.prefix)); print(google.protobuf.__version__)
+print(os.path.realpath(google.protobuf.__file__)); print(os.path.realpath(ibapi.__file__))') \
+    || die "could not read where protobuf and ibapi resolve in $venv; not recording it"
+  { read -r prefix; read -r version; read -r pb; read -r ib; } <<<"$out"
+  test "$version" = "$want" || die "protobuf $version in $venv, pinned $want; not recording it"
+  case $pb in "$prefix"/*) ;; *) die "google.protobuf resolves to $pb, outside $venv; not recording it" ;; esac
+  case $ib in "$prefix"/*) ;; *) die "ibapi resolves to $ib, outside $venv; not recording it" ;; esac
+}
+
 # IBKR's TWS API (the adapter's ibapi), fetched and verified against its
 # pinned checksum (ADR 0025 point 4, amended 2026-10-16); a mismatch stops
 # the step before anything is installed. Its own step, run with the
@@ -272,9 +293,7 @@ step_twsapi() {
   python3 -m venv --system-site-packages "$adapter_venv"
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps "$protobuf"
   "$adapter_venv/bin/pip" install --quiet --no-index --no-deps --no-build-isolation "$client"
-  # -I: the venv's own packages only, nothing from the current directory.
-  "$adapter_venv/bin/python3" -I -c 'import google.protobuf, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
-    || die "ibapi did not import from $adapter_venv after installing it; not recording it"
+  verify_adapter_venv "$adapter_venv" "$PROTOBUF_VERSION"
   printf 'TWSAPI_VERSION=%s\nTWSAPI_SHA256=%s\nPROTOBUF_VERSION=%s\nPROTOBUF_SHA256=%s\n' \
     "$TWSAPI_VERSION" "$TWSAPI_SHA256" "$PROTOBUF_VERSION" "$PROTOBUF_SHA256" >"$twsapi_root/INSTALLED.tmp"
   chmod 0644 "$twsapi_root/INSTALLED.tmp"
