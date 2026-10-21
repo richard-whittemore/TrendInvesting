@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,10 +17,12 @@ const strategyVersion = "boost/1.0.0+test"
 
 // testConfiguration is Boost with short indicators and RSI_ENTRY 30, so a
 // synthetic series of a few dozen sessions enters and exits. It is a test
-// configuration, never the backtested one.
+// configuration, never the backtested one. Its mode is live, since the
+// simulated venue (simulate) reports on every order it releases, as only
+// a venue that receives them does; boostDryRun makes it a dry-run.
 func testConfiguration() event.TargetWeightConfigurationPayload {
 	return event.TargetWeightConfigurationPayload{
-		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
+		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeLive, Adapter: event.AdapterIBKR,
 		Boost: event.BoostConfiguration{
 			InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 30,
 			TrendDays: 10, ExitSMA: 3, WarmUpStart: "2025-01-02",
@@ -31,6 +34,9 @@ func testConfiguration() event.TargetWeightConfigurationPayload {
 		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30},
 	}
 }
+
+// boostDryRun makes cfg a dry-run, whose released orders no venue receives.
+func boostDryRun(cfg *event.TargetWeightConfigurationPayload) { cfg.Mode = event.TradingModeDryRun }
 
 // syntheticCloses is an invented series: a steady rise, a pullback that
 // enters at session 16 (RSI 28.6 above the 10-session mean), a close below
@@ -102,6 +108,7 @@ type account struct {
 	cash    float64
 	held    int64
 	pending []event.OrderReleasedPayload
+	all     []event.OrderReleasedPayload // every order released, in release order
 }
 
 // take queues every order released among out to fill at the next close.
@@ -112,15 +119,29 @@ func (a *account) take(t *testing.T, out []event.Envelope) {
 			var p event.OrderReleasedPayload
 			decode(t, d, &p)
 			a.pending = append(a.pending, p)
+			a.all = append(a.all, p)
 		}
 	}
 }
 
-// fill fills every queued order at price and returns the venue's report of
-// each execution, filled at at.
-func (a *account) fill(price float64, at time.Time) []event.TargetWeightFillPayload {
+// dropUnsent takes off the queue every order opts says the adapter never
+// sends.
+func (a *account) dropUnsent(opts options) {
+	a.pending = slices.DeleteFunc(a.pending, func(p event.OrderReleasedPayload) bool { return opts.neverReaches(p.Tag) })
+}
+
+// fillAtMost fills every queued order at price, each for at most limit
+// shares when capped, and returns the venue's report of each execution, filled
+// at at; an order capped at 0 shares reports none.
+func (a *account) fillAtMost(price float64, at time.Time, limit int64, capped bool) []event.TargetWeightFillPayload {
 	var reports []event.TargetWeightFillPayload
 	for _, o := range a.pending {
+		if capped {
+			o.Quantity = min(o.Quantity, limit)
+		}
+		if o.Quantity == 0 {
+			continue
+		}
 		quantity := o.Quantity
 		if o.Side == event.OrderSideSell {
 			quantity = -quantity
@@ -167,7 +188,11 @@ func (a *account) snapshot(at time.Time, price float64) event.AccountPositionsSn
 
 // options shape a run of the synthetic series.
 type options struct {
-	closes   []float64
+	closes []float64
+	// intrude, by session, feeds the run inputs the handler is expected to
+	// refuse, before that session's own: each is applied, and the run's
+	// sequence does not move for a refused one.
+	intrude  map[int]func(apply func(typ string, version uint32, id string, at time.Time, payload any) error)
 	skip     map[int]bool // sessions whose bar is missing
 	noSnap   map[int]bool // sessions with no account snapshot
 	noMark   map[int]bool // sessions with no mark
@@ -192,6 +217,117 @@ type options struct {
 	// kill engages (true) or releases (false) the kill switch at the start
 	// of session i.
 	kill map[int]bool
+	// partFill fills each order queued at session i for at most n shares,
+	// after which the venue reports it canceled (a DAY order expiring part
+	// filled); n 0 is an order that expires unfilled. cancelAt delivers the
+	// cancel of an order part-filled at session i at the start of session j
+	// instead, after that session's other reports.
+	partFill map[int]int64
+	cancelAt map[int]int
+	// lateFill reports, for an order part-filled at session i, a further
+	// execution of shares at session lateFill[i].at, after its cancel, at
+	// that session's close: a fill the venue reports after the cancellation.
+	lateFill map[int]lateFill
+	// reject has the venue refuse every order queued at session i before it
+	// rests (invalid): no execution, and no cancel.
+	reject map[int]bool
+	// working queues orders an earlier run released at the start of
+	// session i, so a restarted run receives the venue's reports on them.
+	working map[int][]event.OrderReleasedPayload
+	// fills are the venue's reports of executions fed at session i, after
+	// its cancels: an earlier run's order executing after a restart.
+	fills map[int][]event.TargetWeightFillPayload
+	// hold keeps every working order working through session i: nothing
+	// executes and nothing ends.
+	hold map[int]bool
+	// invalidAt has the venue reject, at the start of session i after its
+	// acknowledgements, each order released at the sessions listed, in that
+	// order, whether or not it is still queued: a rejection delivered late.
+	invalidAt map[int][]int
+	// reports, when set, replaces the simulated venue: session i receives
+	// exactly reports[i], an earlier run's venue reports, and nothing else
+	// executes or ends (venueReports).
+	reports map[int][]event.Envelope
+	// clear records, at the start of session i after the venue's reports,
+	// the owner's operator.rebalance.cleared for the order released at each
+	// session listed: an order the adapter never sent, settled as such.
+	clear map[int][]int
+	// unsent lists the sessions whose released orders the adapter never
+	// sends: the venue is told of none, so none is acknowledged and none
+	// executes. Every session in clear is one.
+	unsent []int
+}
+
+// neverReaches reports whether the adapter never sends the order released
+// by the decision tagged tag.
+func (o options) neverReaches(tag string) bool {
+	if slices.ContainsFunc(o.unsent, func(n int) bool { return decisionTag(n) == tag }) {
+		return true
+	}
+	for _, sessions := range o.clear {
+		if slices.ContainsFunc(sessions, func(n int) bool { return decisionTag(n) == tag }) {
+			return true
+		}
+	}
+	return false
+}
+
+// neverSent is the owner's operator.rebalance.cleared, at at, settling o as
+// an order the adapter never sent.
+func neverSent(t *testing.T, s *stream, o event.OrderReleasedPayload, at time.Time) event.Envelope {
+	t.Helper()
+	return s.envelope(t, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:"+o.ClientOrderID, at,
+		event.RebalanceClearedPayload{AccountID: o.AccountID, AsOf: at, DecisionID: o.Tag, ClientOrderIDs: []string{o.ClientOrderID},
+			Operator: "owner", Detail: "never sent: refused as stale by the adapter, settled with relay.py resolve --never-sent"})
+}
+
+// venueReports returns the venue's fill and lifecycle reports, and the
+// owner's clearances, among an earlier run's inputs, by the session they
+// were fed in, for the sessions after session n.
+func venueReports(inputs []event.Envelope, n int) map[int][]event.Envelope {
+	out := map[int][]event.Envelope{}
+	session := 0
+	for _, in := range inputs {
+		switch in.Type {
+		case event.SessionClosedEventType:
+			session++
+		case event.FillEventType, event.OrderLifecycleEventType, event.RebalanceClearedEventType:
+			if session > n {
+				out[session] = append(out[session], in)
+			}
+		}
+	}
+	return out
+}
+
+// lateFill is a further execution of a part-filled order, reported at
+// session at.
+type lateFill struct {
+	at     int
+	shares int64
+}
+
+// fill executes shares of o at price, at at, and returns the venue's report.
+func (a *account) fill(o event.OrderReleasedPayload, id string, shares int64, price float64, at time.Time) event.TargetWeightFillPayload {
+	quantity := shares
+	if o.Side == event.OrderSideSell {
+		quantity = -quantity
+	}
+	a.held += quantity
+	a.cash -= float64(float64(quantity) * price)
+	return event.TargetWeightFillPayload{
+		AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: id, InstrumentID: o.InstrumentID,
+		Side: o.Side, Quantity: shares, Price: price, FilledAt: at,
+	}
+}
+
+// cancelAtOr is the session the cancel of an order part-filled at session i
+// is delivered at: cancelAt's, else i itself.
+func (o options) cancelAtOr(i int) int {
+	if j, ok := o.cancelAt[i]; ok {
+		return j
+	}
+	return i
 }
 
 type run struct {
@@ -231,6 +367,12 @@ func simulate(t *testing.T, opts options) run {
 		r.decisions = append(r.decisions, out...)
 		return out
 	}
+	late := map[int][]event.OrderReleasedPayload{} // cancels due at each session
+	type rest struct {
+		order  event.OrderReleasedPayload
+		shares int64
+	}
+	rests := map[int][]rest{} // late executions due at each session
 	start := sessionEnd(0).Add(-time.Hour)
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
 	for _, e := range opts.recorded {
@@ -256,6 +398,27 @@ func simulate(t *testing.T, opts options) run {
 	for i := opts.from; i < len(opts.closes); i++ {
 		at := sessionEnd(i)
 		price := opts.closes[i]
+		if in := opts.intrude[i]; in != nil {
+			in(func(typ string, version uint32, id string, when time.Time, payload any) error {
+				before := s.sequence
+				_, err := rec.Apply(context.Background(), s.envelope(t, typ, version, id, when, payload))
+				if err != nil {
+					s.sequence = before
+				}
+				return err
+			})
+		}
+		acct.pending = append(acct.pending, opts.working[i]...)
+		if opts.reports != nil {
+			acct.pending = nil
+			for _, e := range opts.reports[i] {
+				fed := e
+				s.sequence++
+				fed.Sequence = s.sequence
+				fed.CausationID, fed.CorrelationID = "", ""
+				apply(fed)
+			}
+		}
 		for _, o := range acct.pending {
 			ack := event.LimitOrderLifecyclePayload{
 				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
@@ -263,8 +426,69 @@ func simulate(t *testing.T, opts options) run {
 			}
 			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+o.ClientOrderID, ack.OccurredAt, ack))
 		}
-		for _, f := range acct.fill(price, at.Add(-2*time.Hour)) {
+		for _, j := range opts.invalidAt[i] {
+			for _, o := range acct.all {
+				if o.Tag != decisionTag(j) {
+					continue
+				}
+				invalid := event.LimitOrderLifecyclePayload{
+					AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					Side: o.Side, Status: event.OrderLifecycleStatusInvalid, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+					OccurredAt: at.Add(-160 * time.Minute), Message: "rejected by the venue",
+				}
+				apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "reject:"+o.ClientOrderID, invalid.OccurredAt, invalid))
+				acct.pending = slices.DeleteFunc(acct.pending, func(p event.OrderReleasedPayload) bool { return p.ClientOrderID == o.ClientOrderID })
+			}
+		}
+		if opts.reject[i] {
+			for _, o := range acct.pending {
+				invalid := event.LimitOrderLifecyclePayload{
+					AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+					Side: o.Side, Status: event.OrderLifecycleStatusInvalid, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+					OccurredAt: at.Add(-150 * time.Minute), Message: "rejected by the venue",
+				}
+				apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "reject:"+o.ClientOrderID, invalid.OccurredAt, invalid))
+			}
+			acct.pending = nil
+		}
+		expiring := acct.pending
+		limit, part := opts.partFill[i]
+		if lf, ok := opts.lateFill[i]; ok && part {
+			for _, o := range expiring {
+				rests[lf.at] = append(rests[lf.at], rest{order: o, shares: lf.shares})
+			}
+		}
+		if !opts.hold[i] {
+			for _, f := range acct.fillAtMost(price, at.Add(-2*time.Hour), limit, part) {
+				apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+			}
+		}
+		if part {
+			late[opts.cancelAtOr(i)] = append(late[opts.cancelAtOr(i)], expiring...)
+		}
+		for _, o := range late[i] {
+			cancel := event.LimitOrderLifecyclePayload{
+				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+				Side: o.Side, Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+				OccurredAt: at.Add(-90 * time.Minute), Message: "day order expired",
+			}
+			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "cancel:"+o.ClientOrderID, cancel.OccurredAt, cancel))
+		}
+		delete(late, i)
+		for _, x := range rests[i] {
+			f := acct.fill(x.order, "fill-late:"+x.order.ClientOrderID, x.shares, price, at.Add(-80*time.Minute))
 			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+		}
+		delete(rests, i)
+		for _, f := range opts.fills[i] {
+			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+		}
+		for _, j := range opts.clear[i] {
+			for _, o := range acct.all {
+				if o.Tag == decisionTag(j) {
+					apply(neverSent(t, s, o, at.Add(-70*time.Minute)))
+				}
+			}
 		}
 		if engaged, ok := opts.kill[i]; ok {
 			apply(s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion, fmt.Sprintf("kill:%d", i), at.Add(-time.Hour),
@@ -306,6 +530,7 @@ func simulate(t *testing.T, opts options) run {
 			}
 			out := apply(s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("broker:%d", i), b.AsOf, b))
 			acct.take(t, out)
+			acct.dropUnsent(opts)
 		}
 		if !opts.noMark[i] {
 			apply(s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i), at,
@@ -319,6 +544,7 @@ func simulate(t *testing.T, opts options) run {
 		out := apply(s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("session:%d", i), at,
 			event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: ids}))
 		acct.take(t, out)
+		acct.dropUnsent(opts)
 	}
 	r.entries = rec.Entries()
 	return r

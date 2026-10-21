@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/quick"
@@ -45,7 +46,7 @@ func marshalPayloads() []validatedPayload {
 		validDividendAction(), validCampaignDividend(),
 		validWatchlistPublished(),
 		validTargetWeightConfiguration(), validAccountPositionsSnapshot(), validMarkRecorded(),
-		validTargetsDecided(), validTargetsWithheld(), validOrderPlanned(),
+		validTargetsDecidedWatching(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validKillSwitch(), validBrokerSnapshot(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
 		validOperatorRunApproved(), validOperatorRunApprovedInIncident(), validRebalanceCleared(),
@@ -212,7 +213,7 @@ func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
 						}
 					}
 					requirePayloadMarshals(t, candidate.Interface().(validatedPayload))
-					candidate.FieldByName(fieldName(path)).Set(reflect.ValueOf(bad))
+					leafByPath(t, candidate, path).Set(reflect.ValueOf(bad))
 					if _, err := json.Marshal(candidate.Interface()); err == nil {
 						t.Fatal("test timestamp must fail JSON encoding")
 					}
@@ -223,6 +224,33 @@ func TestPayloadTimestampsRejectUnwritableTimes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// leafByPath returns the leaf of v that payloadLeaves named path: the
+// payload's type name, then each field name and slice index. Each slice on
+// the way is cloned into v first.
+func leafByPath(t *testing.T, v reflect.Value, path string) reflect.Value {
+	t.Helper()
+	for _, part := range strings.Split(path, ".")[1:] {
+		name, index, indexed := strings.Cut(part, "[")
+		v = v.FieldByName(name)
+		if indexed {
+			i, err := strconv.Atoi(strings.TrimSuffix(index, "]"))
+			if err != nil || v.Kind() != reflect.Slice || i >= v.Len() {
+				t.Fatalf("%s: no element %s in the fixture", path, part)
+			}
+			// The copy shares the fixture's backing array: clone it, so
+			// setting the leaf changes the copy alone.
+			clone := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+			reflect.Copy(clone, v)
+			v.Set(clone)
+			v = clone.Index(i)
+		}
+		if !v.IsValid() {
+			t.Fatalf("%s: no field %s", path, name)
+		}
+	}
+	return v
 }
 
 func fieldName(path string) string {

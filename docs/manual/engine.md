@@ -93,6 +93,11 @@ same run as under-sized (a resumed run replays the same pending sell). (`make
 demo-boost-dry-run` does not show this: its simulated account reports a fill
 for every released order at the next close, which ends each sell.)
 
+Nor does a dry-run Boost run wait for a venue's verdict on its orders: it
+lists none as awaiting one (`undecided_orders`), and each decision records
+`no_venue: "dry-run"` instead, so its rejection count never moves
+([boost](boost.md)).
+
 ## Build identity
 
 Every decision carries the build that made it. A build is "stamped" with the

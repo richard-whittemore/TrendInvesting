@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8)
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost")
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -132,7 +132,11 @@ want·V / p − q whole shares, rounded toward zero, where want is 0.98 or
 first target, normally 98% from cash, whether or not a boost is on.
 Amended 2026-10-18 (owner): after a refusal that leaves the engine Normal,
 the next decision also plans the difference to the target in force (see the
-amendment of that date).
+amendment of that date); and after its last order ends with shares
+unfilled, or is rejected by the venue, once, and two of its orders
+rejected in a row stop its buys, never a sell, until the owner starts a
+fresh run (see
+"Amendment (2026-10-18, owner decision, #487 and #488)").
 
 **D7, whole shares, open: both options specified.** The choice is
 configuration (point 6):
@@ -185,7 +189,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Broker holding (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is no more than the latest broker snapshot's holding, when that snapshot is readable and fresh; with no readable latest snapshot, a Normal account releases the sell against the journal's account book, only an account Degraded on another instrument reaches this refusal, and every other state has already refused the sell under ADR 0019 reading 7 (checked first) and the exit has fired; an older readable snapshot is never used | refuse (`risk.order.refused`, reason `broker-holding`); alert; **Degraded** on the instrument when the sell is above a fresh snapshot's holding |
 | Broker snapshot freshness (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is checked against the latest broker snapshot, which is stale: older than `MaxSnapshotAge`, or stamped later than the sell's journalled time (point 6) | refuse (`risk.order.refused`, reason `stale-broker-snapshot`); one urgent alert per stale episode, carried by the episode's first `stale-broker-snapshot` refusal or withhold and cleared by whichever comes first: the first journalled `account.broker.snapshot` fresh by its own journalled time, or the first gate check whose latest snapshot is fresh as measured from that check's triggering event (ADR 0019 reading 10); a stale check opens an episode when no episode is open for the account and either no episode has yet closed or the check's triggering event comes after (by journal sequence) the event that closed the most recent episode; a stale check whose triggering event precedes that close belongs to the closed episode and opens none; state unchanged; the sell is re-planned at the next decision |
 | Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
-| Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent. Amended 2026-10-17 (owner): since no venue ever reports on an unsent order, a dry-run momentum run records, at the release, its own **synthetic** terminal report for each order it releases: `execution.order.lifecycle` version 3, `synthetic: true`, status `canceled`, no venue order ID, a message saying it was never sent (target-weight rules version 1.11.0, ADR 0016). It is a decision, never an input (a version-3 report arriving as an input is refused), and it counts no execution: no fill, proceeds, commission or position change follows from it. It ends the order as a venue's cancellation would, so the buy phase (point 2, "IRA execution") is planned at the same close and the next rebalance is not withheld as `rebalance-in-progress`. Paper and live never record one. Boost records none: a dry-run Boost sell stays pending in the gate, so a later exit in the same dry-run is sized net of it, and so are the broker-holding check and ADR 0019's sale back to 98%. Rules version 1.11.0 leaves Boost as it was | not a breach |
+| Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent. Amended 2026-10-17 (owner): since no venue ever reports on an unsent order, a dry-run momentum run records, at the release, its own **synthetic** terminal report for each order it releases: `execution.order.lifecycle` version 3, `synthetic: true`, status `canceled`, no venue order ID, a message saying it was never sent (target-weight rules version 1.11.0, ADR 0016). It is a decision, never an input (a version-3 report arriving as an input is refused), and it counts no execution: no fill, proceeds, commission or position change follows from it. It ends the order as a venue's cancellation would, so the buy phase (point 2, "IRA execution") is planned at the same close and the next rebalance is not withheld as `rebalance-in-progress`. Paper and live never record one. Boost records none: a dry-run Boost sell stays pending in the gate, so a later exit in the same dry-run is sized net of it, and so are the broker-holding check and ADR 0019's sale back to 98%. Rules version 1.11.0 leaves Boost as it was. Rules version 1.18.0: no dry-run Boost order is listed as awaiting the venue's word (`boost.undecided_orders`), since none will come; each dry-run Boost decision records `boost.no_venue: "dry-run"` instead (point 2, "Boost", amended 2026-10-18) | not a breach |
 
 Degraded and Halted are emitted through the existing `strategy.engine.state`.
 A new reason, `risk-limit-breached`, joins its closed set, as
@@ -326,7 +330,9 @@ IBKR bars:
 **Missing bars fail closed:**
 - A missing final bar for SPY, IEF or SHY at a decision time gives `withheld`
   (`missing-bars`). Nothing is traded and the owner is alerted. Boost never
-  computes RSI across a gap (`plan.md` lines 152-155).
+  computes RSI across a gap (`plan.md` lines 152-155). *(Amended
+  2026-10-18: Boost skips the session and its readings continue at the next
+  bar; see "Amendment (2026-10-18, owner decision, #487 and #488)".)*
 - A universe stock missing any session in its 253-close window is left out of
   that month's ranking, and the decision records it. *(Amended 2026-10-18:
   a stock the account holds is scored across the gap instead, as the
@@ -859,6 +865,324 @@ which applies no minimum lot, and record no holdings, so no golden month
 changed. The parity tool knows no holdings either; it was re-run on the
 kept exports and its three reports are byte-identical to the
 `_held_gap` reports (`docs/research/parity-2026-10.md`).
+
+## Amendment (2026-10-18, owner decision, #487 and #488): a session with no SPY bar, and an order that ends unfilled
+
+Accepted on 2026-10-18: the owner's decisions on #487 and #488 ("use the
+recommendation"), with three readings settled by the orchestrator and
+flagged to the owner, who can veto them before merge. Each is marked below. It amends
+point 2, "Boost", and point 5, "Missing bars fail closed", for Boost.
+
+### A session with no SPY bar is skipped
+
+**What happened before.** A session that closed without SPY's bar was
+withheld (`missing-bars`), and so was every later session of the run, since
+the indicators were never computed across a gap. The exit included: one
+missing bar stopped Boost until a fresh run the owner approved.
+
+**The rule now.**
+
+- The session with no bar is withheld (`missing-bars`) and nothing is
+  traded. The latch and the indicators do not move: no close is added for
+  it.
+- At the next session with a bar, RSI(2), the 200-session mean and the
+  5-session mean continue over the closes received, as if the missing
+  session were not in the series, and that session decides as any other.
+  The latch moves on its readings, and the exit can fire.
+- The decision that reads the first bar after the gap records the missing
+  sessions (`boost.gap_sessions`, YYYY-MM-DD, ascending, each before the
+  decision's session). A gap is recorded by the first decision that reads
+  a bar after it, unless a quiet session with a bar comes between them
+  (a restarted run's warm-up sessions, which only feed the indicators): a
+  gap during the warm-up, or just before a restart's recovered decision,
+  is skipped the same way and recorded by that first decision.
+- The reporter pages once per gap, however many sessions in a row are
+  missing, naming the first and saying that decisions continue.
+
+**Who decided what.** The owner accepted the recommendation that a missing
+bar must not freeze the run (2026-10-18). Skipping the session, rather than
+filling its close forward as LEAN does, is the orchestrator's reading, put
+to the owner and awaiting his confirmation. **It is not a copy of the
+backtest.** The owner's recommendation said "as the backtest does"; it does
+not. The Boost template subscribes to SPY with LEAN's default fill-forward
+(`template.py:48`). LEAN puts a filled-forward bar into `data.Bars` and into
+every consolidator, so into `SMA` and `RSI` alike (LEAN's
+`TimeSliceFactory` and `AlgorithmManager`, checked on 2026-10-18): on a
+session its data lacked, the backtest would read the previous close again,
+update all three indicators with it (no change for RSI, a repeated value in
+both means) and decide on it, possibly turning the boost on or off and
+trading. That decides on a price nobody traded. A live gap is a failure of
+the data job or the vendor, not a session SPY did not trade, so live trading
+skips the session instead (the orchestrator's reading of "skipped, not
+filled", flagged to the owner). QuantConnect's SPY daily data has no missing
+session in the recorded runs, so the two rules never differed there, and
+no golden case can come from those logs: the golden case for this rule is
+synthetic and hand-computed (`TestSyntheticGoldenBoostGap`).
+
+### An order that ends with shares unfilled is re-planned
+
+**What happened before.** A Boost DAY limit order that expired or was
+cancelled with part unfilled left the account short of its target until the
+target next changed; point 2 said nothing of a partial fill.
+
+**The rule now.**
+
+- When the last order a decided session released is canceled (which
+  includes a DAY order's expiry) with fewer shares filled than released,
+  the next decided session plans the remaining difference to the target in
+  force through the same re-plan as a refusal (the amendment of 2026-10-18
+  above): want·V / p − q whole shares, rounded toward zero, from the
+  account snapshot as of that close.
+- `part-filled`: more than none filled. This is the owner's decision on
+  #488.
+- `unfilled`: none filled; the whole difference is planned. **This extends
+  the owner's part-fill decision; confirmed by the owner on 2026-10-18**:
+  without it, one share filled of 39 would be re-planned and none of 39
+  would not.
+- `rejected`: the venue refused the order before it rested (`invalid`).
+  Its reason may last (a permission, a margin requirement, a contract
+  IBKR will not trade), so the re-plan is bounded: the next decided session
+  re-plans it **once**, through the same re-plan as a refusal, recording the
+  cause `rejected`. A re-planned order that is instead canceled
+  part-filled is re-planned as any other. The bound counts orders the venue
+  rejected, not decisions: when the gate refuses the one re-plan (the kill
+  switch, a stale broker snapshot) and a later decided session releases it,
+  that order is still the rejection's one re-plan, and a restart from the
+  decision that recorded the refusal recovers it as such. The one re-plan
+  is marked only while the target in force is unchanged: an order planned
+  to a new target is a new order, so a rejection's re-plan pending when the
+  target changes does not mark the order to the new target, and a restart
+  from a decision recording it reads it the same way, by the target in
+  force before that decision and the target it decided.
+- **Two rejections in a row stop Boost's buys.** A target that changes
+  at each session (the latch flipping) would give every order its own one
+  re-plan, so a venue that rejects for a lasting reason would be sent an
+  order at every session. The bound is therefore also independent of the
+  target: when the venue has rejected **2** of the account's orders in a
+  row (the orders decided sessions released, each counted when the
+  venue's first word on it is read, however late; the sale
+  back to 98% is ADR 0019's one attempt and not counted), whatever their
+  targets, the decision of the session at whose close the rejection that
+  makes it two is read records it (`boost.replan_withheld`, the order and
+  its shares), whichever order it was: a late rejection of an older order
+  can make it two while a later order is watched, working or
+  accepted, and is recorded all the same. The reporter pages it once
+  (urgent), and **no session buys again**, a
+  change of target included, until the owner starts a fresh run he
+  approves (`operator approve`, with `-clear-incident` when the run also
+  ended in an incident; ADR 0027). The stop never blocks an order that
+  reduces exposure (point 4's exemption): Boost's exit, and any sell a
+  decided session plans, is still planned, checked by the gate and sent
+  while the stop is in force, and an exit the gate refuses still falls
+  back to ADR 0019's one sale back to 98%. Such a sell may itself be
+  rejected: each rejection read after the stop, of any of the account's
+  orders, is recorded once (`boost.rejected_while_stopped`, the order and
+  its shares, with the count of such rejections since the stop in
+  `boost.rejections_while_stopped`) and paged once as another rejection
+  while buys are stopped, naming which one since the stop it is and the
+  two rejections that stopped buys, and the sell is planned again at every decided session while it is due. Once
+  reached, the count stays at 2, never above it, until the fresh run: a
+  sell the venue accepts does not lift the stop. Before the stop, an
+  order the venue accepted sets the count back to none: any execution on
+  it, or any lifecycle report but `submitted` (IBKR's `PreSubmitted` maps
+  to `submitted` and can precede a rejection), whether or not a later
+  decided session's order has replaced it as the watched order. An order
+  the venue has shown neither accepted nor rejected counts nothing until
+  it does: a late rejection is one more in a row, or, once buys are
+  stopped, one more while stopped; a late acceptance sets the count back
+  to none before the stop, but only when the order accepted was released
+  after the latest released of the rejections counted, and changes nothing
+  after the stop. An acceptance of an order released before those
+  rejections, read late, is older than the run in release order and does
+  not end it: otherwise an older order's expiry read between a rejection
+  and its re-plan's rejection would give the rejected order a third send.
+  So a re-planned order rejected again is always the second in a row, and
+  this bound holds it too. Every decision records the state the rule needs, as it stands
+  after the decision, and nothing beyond it, so nothing is trimmed: the
+  rejections in a row (`boost.venue_rejections`, omitted when none); the
+  orders they name (`boost.rejected_in_a_row`, each client order ID and,
+  when a lifecycle report or a broker snapshot's open-order listing named
+  it, the venue order ID, exactly as many
+  as the count, so at the stop the two rejections that stopped buys,
+  which stay named until the fresh run and are named in the page); and
+  every order decided sessions released that the venue has not yet ruled
+  on (`boost.undecided_orders`, in release order, each but the watched one
+  with its side, shares and limit as released and its venue order ID once
+  a lifecycle report or a broker snapshot's open-order listing under its
+  client order ID named it), and how many of those were released before
+  the latest rejection counted (`boost.undecided_before_rejection`, omitted
+  when none), which an acceptance is compared with. A run restarted from the decision restores
+  these exactly and counts as the full run does: a late verdict on any
+  order released before the restart is read against the orders not yet
+  ruled on, an order the venue has ruled on is never counted again, the
+  venue's reports on an order still undecided are read, and a working sell
+  among them netted, as on an order the restarted run released. Which
+  orders stay listed, and when they leave: an order the venue received
+  leaves at its first word beyond `submitted` (an execution, its expiry or
+  cancellation, or a rejection; an order the venue has only named as
+  submitted stays listed), and a DAY order always gets one, so in paper and
+  live the list holds only orders still working or whose word is late. An
+  order the adapter never sent gets no word: it stays listed, in every
+  decision, until the owner settles it. The owner settles it with `relay.py
+  resolve --never-sent` and then records `operator rebalance-cleared` naming
+  the decision that released it and the order; Boost reads that clearance
+  for this alone, refuses one that names anything but an undecided order of
+  that decision, or an order the venue has already named (a venue order ID
+  from a `submitted` report, or an open-order listing under its client
+  order ID in a broker snapshot: it was sent), and takes the order off the
+  list, counting it neither accepted nor rejected. The clearance changes
+  nothing else: the order stays released in the gate, so a never-sent sell
+  still counts as being sold and a never-sent buy is not planned again,
+  until the fresh run the owner starts after reconciling. A venue report
+  on a cleared order (a fill, or any lifecycle report) proves the
+  clearance wrong: the report is refused, which stops the run for a person
+  to reconcile, as a later report on a cleared IRA order does (fail
+  closed). Each decision
+  records the cleared orders with their release
+  (`boost.cleared_orders`, omitted when none), so a run restarted from it
+  restores them and counts as the full run does. A dry-run's orders reach no venue, so none is
+  ever listed: each dry-run Boost decision records `boost.no_venue:
+  "dry-run"` in place of the list and counts no verdict, and the clearance
+  is refused there, there being nothing to clear. An order the venue
+  accepted (an execution, or any word beyond `submitted`) that is neither
+  filled in full nor ended when a later order replaces it as the watched
+  one stays recorded, with its release, executions and venue order ID, in
+  `boost.working_orders` (omitted when none), so a run restarted from the
+  decision reads the venue's later fills and cancel of it and nets a
+  working sell as on an order it released; a dry-run decision lists none.
+  Its venue order ID is recorded once a lifecycle report or a broker
+  snapshot's open-order listing names it, even when the venue's first word
+  on it was an execution, so the restarted run matches IBKR's listing of a
+  working sell with no client order ID echoed. A run restarted from a
+  decision whose watched order the venue accepted and has not ended (it
+  is neither undecided nor cleared) restores it as working too, so once a
+  later order replaces it the decision records it as the full run's does;
+  an order replaced as the watched one is listed after the other working
+  orders.
+  A fresh run starts from none. A refusal's re-plan pending at the second rejection is
+  dropped, and the rejection is recorded all the same. One read during a
+  restarted run's warm-up, whose sessions only feed the indicators, is
+  recorded by the first decision after it. The limit, 2, is a constant of
+  the target-weight module (`maxVenueRejections`), not configuration. While
+  buys are stopped the page tells the owner that Boost's exit and the
+  margin alarm's sale back to 98% (ADR 0019) still go, and that before any
+  sale by hand he follows the hand-sale procedure of the operator's manual
+  (`docs/manual/states-and-kill-switch.md`): stop new orders first (the
+  kill switch where it exists, otherwise the engine), cancel the working
+  program sale in IBKR's app, confirm that none remains, and only then
+  sell, since the exit is planned again at each decided close while it is
+  due. (The orchestrator's reading of review findings, confirmed by the
+  owner on 2026-10-18 with the `unfilled` extension and the one re-plan of
+  a rejection; the skipped session remains put to the owner.)
+- An order filled in full plans nothing more, and a re-plan it set is
+  cleared if the rest of its fills arrive before the session that would
+  plan it: re-planning then would trade drift toward an unchanged target.
+- **What the watch is.** The last order a decided session released is
+  watched until it has filled in full, or the venue has ended it and a
+  decided session has planned after that end. A decided session that plans
+  no order, or whose order is refused, does not end the watch: the venue's
+  cancel of a DAY order can be recorded after the close of its own expiry
+  session (two producers race), and a decision that ordered nothing sized
+  nothing. Only a later decided session's **released** order replaces the
+  watch: that order was sized from the account as it stood, and re-planning
+  the earlier one after it would trade drift, or buy twice while the later
+  buy still works. The sale back to 98% is never watched: its one attempt
+  is ADR 0019's.
+- The engine reads the watched order at each session's close, not at the
+  terminal report, so a fill the venue reports after the cancellation still
+  counts, at every close until the session that plans the re-plan, whose
+  decision records the shares filled as they then stand.
+- `boost.replan_pending` is set from that close until the session that
+  plans it; a withheld session carries it. Every decision that enters with
+  a re-plan pending records its cause (`boost.replan`): `refused`, or
+  `part-filled`, `unfilled` or `rejected` with the order's client order ID
+  and its filled and released shares.
+- **Restarts.** Every decision records the watched order as it stands after
+  it (`boost.watched`: client order ID, side, released shares, limit, shares
+  filled so far and each execution (`fills`: fill ID, shares, price,
+  commission, time), its terminal status once reported and when it
+  occurred (`ended_at`), whether it is a rejection's one re-plan, and its
+  venue order ID (`venue_order_id`, from the first lifecycle report or
+  broker snapshot's open-order listing that names it, omitted before
+  one)). A
+  run restarted from that decision watches the order still and reads the
+  venue's fill and lifecycle reports on it as on an order it released,
+  adding it to any order a broker snapshot read before the recovery
+  released. An execution the decision holds, sent again by the venue, is a
+  redelivery that changes nothing, and the same fill ID for a different
+  execution is refused, as on an order this run released (ADR 0019,
+  "Explained means"); an execution the earlier run recorded after its last
+  decision is not in it, so the venue's report of it counts once. A watched
+  **sell** is restored as a working sell (ADR 0019, amended 2026-10-15:
+  every exit and sale back to 98% is sized net of every working sell),
+  released before every snapshot of the restarted run, filled by its
+  recorded executions as stamped and ended at its recorded end, so a later
+  exit cannot sell its shares again. A broker snapshot read before the
+  recovery that listed it, as a sell the gate did not then know, is read as
+  its listing, so it is counted once. IBKR does not always echo the client
+  order ID on its listing, so the listing is matched in this order:
+  1. by its client order ID and instrument;
+  2. failing that, with no client order ID echoed, by the venue order ID
+     the decision recorded, for the listings before the recovery and every
+     one after it. The same holds for a sell this run released: the venue's
+     lifecycle report names its venue order ID, and a listing under it with
+     no client order ID is its own. This needs the producer to write the
+     same IBKR identifier (the `permId`) as a lifecycle report's `order_id`
+     and a listing's `broker_order_id`; where they differ, nothing matches
+     and the sell is counted twice, which sells less, never more.
+
+  Any other listing with no client order ID is counted beside the
+  restored sell until a client order ID or venue order ID shows they are
+  one order: a brief over-count, which sells less, the pending rule's
+  fail-closed direction, ending at the first listing that echoes the
+  restored sell's client order ID under the listing's venue order ID, or
+  the first lifecycle report naming that venue order ID: either records it
+  as the sell's, so every later listing under it with no client order ID
+  echoed is the sell's own. A listing or report under another venue order
+  ID keeps both counted. A run restarted from a withheld decision recovers the pending re-plan's cause; one restarted from a
+  decided decision whose own order was refused recovers `refused`, or
+  `rejected` when that order was a rejection's one re-plan: the decision
+  entered with `rejected` and decided the target in force before it
+  (`target_in_force`), so an order refused at a change of target recovers
+  `refused`, as the full run reads it.
+- **Which start reads a recorded decision.** Neither of the engine's two
+  starts feeds the handler a recorded decision today. A **resume** after a
+  crash (ADR 0027) re-applies every input of the crashed log, so the order,
+  its executions and its reports are read again in order and the watch is
+  rebuilt exactly; an execution the venue sends again after the resume is a
+  redelivery. A **fresh run** (CONTEXT.md, "Fresh run": any start that is
+  not a resume, started from the owner's approval) watches no order of the
+  earlier run, refuses the venue's reports on one as on any order it did
+  not release (reconciliation's to explain, ADR 0019),
+  and its first decided session plans to the target from the account as it
+  stands. Nothing in the engine makes a fresh run wait for the earlier
+  run's DAY order to expire: the runbook asks the owner to start one after a
+  session's end and a reconciliation (docs/runbooks/durable-log.md, "Start
+  a fresh run after an earlier one"). The recovery from a decided record
+  is the handler's input contract for a restart from a decision (point 5),
+  tested as such.
+
+### Rules and schema
+
+A journal holding a gap or such an order decides differently under an
+earlier build: target-weight rules version **1.18.0** (ADR 0016).
+`strategy.targets.decided` moves to schema version **6** for the new
+Boost fields, `replan`, `replan_withheld`, `watched` (with its
+`venue_order_id`), `venue_rejections` (with `rejected_in_a_row`,
+`undecided_orders`, `undecided_before_rejection`, `cleared_orders`,
+`no_venue`, and `rejected_while_stopped` and `rejections_while_stopped`
+after the stop), `working_orders` (the accepted orders still working
+beside the watched one, each with its executions) and `gap_sessions`, each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
+golden cases for both rules (`TestSyntheticGoldenBoostGap`;
+`TestAPartFilledOrderIsReplannedAtTheNextDecision` and
+`TestAnExpiredUnfilledOrderIsReplannedInFull`,
+`TestACancelRecordedAfterItsExpirySessionIsStillReplanned`,
+`TestAPendingPartFillReplanReadsTheLatestFills`,
+`TestAVenueRejectionIsReplannedOnceThenWithheld` and
+`TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange`, whose quantities are
+computed by hand in their comments; the gap case is built so that skipping
+and LEAN's fill-forward give a different RSI(2) and different means). The parity tool's Boost comparison is
+unchanged: QuantConnect's exports have neither a gap nor a partial fill.
 
 ## Amendment (2026-10-18, owner decision): the remaining parity scope
 

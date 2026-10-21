@@ -135,6 +135,9 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 	if g.broker != nil && !s.AsOf.After(g.broker.AsOf) {
 		return Observation{}, fmt.Errorf("risklimit: broker snapshot as of %s does not follow the last, %s", s.AsOf, g.broker.AsOf)
 	}
+	if err := g.ledger.refuseSharedVenue(id, s.OpenOrders); err != nil {
+		return Observation{}, err
+	}
 	g.recordBroker(s)
 	if g.broker == nil {
 		g.firstBroker = s.AsOf

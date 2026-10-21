@@ -52,9 +52,9 @@ are what this build runs):
 
 | What | Version |
 | --- | --- |
-| Target-weight rules (Boost and momentum), `RulesVersion` | 1.17.0 |
+| Target-weight rules (Boost and momentum), `RulesVersion` | 1.18.0 |
 | Target-weight configuration schema | 7 |
-| Decision record (`strategy.targets.decided`) | 5 |
+| Decision record (`strategy.targets.decided`) | 6 |
 | Fresh-run approval (`operator.run.approved`) | 2 |
 | IB Gateway, pinned | 10.50.1f |
 | IBKR TWS API (`ibapi`), pinned | 10.51.01 |
