@@ -9,15 +9,17 @@
 # The test must never change the machine it runs on, whatever permissions it
 # has. Commands that only change the machine (install, systemctl, useradd and
 # the rest) are recorded and never run. The file commands the provisioner
-# also uses on its own temporary files (rm, cp, mv, mkdir, touch, sed -i...)
-# run only when every absolute path they are given is inside the test's own
-# tree; any other path is refused, recorded as REFUSED, and ends the case at
-# once with status 97, which every case is checked for. Where a step must
+# also uses on its own temporary files (rm, cp, mv, mkdir, touch, dd, sed in
+# place...) run only when every path they are given, resolved against the
+# case's folder inside the test's tree as `realpath -m` would, is inside
+# that tree; any other path is refused, recorded as REFUSED, and ends the
+# case at once with status 97, which every case is checked for. Where a step must
 # stop part way (the Gateway's unpacking), its stand-in stops it explicitly
 # (status 75) rather than relying on `set -e`, which Bash ignores inside a
-# subshell tested with `||`. The provisioner writes no file by redirection to
-# a literal absolute path (checked below), since a redirection cannot be
-# intercepted.
+# subshell tested with `||`. A redirection cannot be intercepted, so the
+# provisioner redirects only to /dev/null or /dev/stderr, or under one of the
+# path variables each case sets inside the tree ($redirected_vars; checked
+# below).
 #
 # What the Mac mini target does differently is in docs/manual/mac-mini.md:
 # arm64 accepted only with it; no Tailscale, firewall or Linux Gateway; the
@@ -29,13 +31,43 @@
 # shellcheck disable=SC2034,SC2329
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-work=$(mktemp -d)
+# The tree's own path with every link resolved, as the guard below resolves
+# each path it is given (macOS's temporary folder is reached through a link).
+work=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$work"' EXIT
 # The caller's environment must not decide any case.
 unset TI_TARGET TI_REHEARSAL TI_REHEARSAL_ANY_ARCH TI_REHEARSAL_SKIP_INSTALLER TI_CLOCK_VERIFY
 
 failures=0
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+
+# The provisioner's path variables each case sets under $work, so that a
+# redirection to one of them stays inside the test's tree.
+redirected_vars='etc unit_dir dl_cache twsapi_root adapter_venv adapter_root'
+# redirect_leaks FILE: prints, as "LINE: TEXT;", each line with a redirection of output
+# in FILE (outside a comment line) to a literal absolute path other than
+# /dev/null or /dev/stderr, or to a path starting with a variable not in
+# $redirected_vars. A redirection cannot be intercepted by a stand-in, so
+# these are the only ones the provisioner may use.
+redirect_leaks() {
+  awk -v allowed=" $redirected_vars " '
+    /^[[:space:]]*#/ { next }
+    {
+      line = $0
+      bad = 0
+      while (match(line, />>?[|]?[[:space:]]*"?(\$\{?[A-Za-z_][A-Za-z_0-9]*|\/[^[:space:];|&)"]*)/)) {
+        t = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        sub(/^>>?[|]?[[:space:]]*"?/, "", t)
+        if (t ~ /^\$/) {
+          v = t; sub(/^\$\{?/, "", v)
+          if (index(allowed, " " v " ")) continue
+        } else if (t == "/dev/null" || t == "/dev/stderr") continue
+        bad = 1
+      }
+      if (bad) { text = $0; sub(/^[[:space:]]+/, "", text); printf "%d: %s; ", NR, text }
+    }' "$1"
+}
 
 # A copy of deploy/, whose clock scripts record that they ran (and the clock
 # check fails when FAKE_CLOCK_BAD=1).
@@ -59,6 +91,35 @@ chmod +x "$work/deploy/libexec/"*.sh
 # database's lines ("name:x:uid:gid::home:shell"; by default both service
 # users exist) and TEST_LEAK to a command run before `main` (the guard's own
 # test). A command refused by the guard fails the case unless TEST_LEAK is set.
+# resolve PATH: PATH made absolute against $PWD, with every link followed and
+# every "." and ".." taken out, whether or not the rest exists: what GNU
+# `realpath -m` prints, which macOS's realpath cannot (it has no -m). A link
+# is followed before a ".." after it is applied, as the kernel does.
+resolve() {
+  local p=$1 out='' c target depth=${2:-0}
+  test "$depth" -lt 40 || { echo /resolve-loop; return; }
+  case $p in /*) ;; *) p=$PWD/$p ;; esac
+  local IFS=/
+  # shellcheck disable=SC2086
+  set -- $p
+  for c in "$@"; do
+    case $c in
+      '' | .) ;;
+      ..) out=${out%/*} ;;
+      *)
+        if test -L "$out/$c"; then
+          target=$(readlink "$out/$c")
+          case $target in /*) ;; *) target=$out/$target ;; esac
+          out=$(resolve "$target" $((depth + 1)))
+          test "$out" = / && out=
+        else
+          out=$out/$c
+        fi
+        ;;
+    esac
+  done
+  printf '%s\n' "${out:-/}"
+}
 default_passwd='ti-gateway:x:2001:2001::/var/lib/ti-gateway:/usr/sbin/nologin
 ti-trader:x:2002:2002::/var/lib/trend-investing:/usr/sbin/nologin'
 scenario() {
@@ -148,16 +209,26 @@ scenario() {
     mktemp() {
       if test "${1:-}" = -d; then command mktemp -d "$work/tmp/tmp.XXXXXX"; else command mktemp "$work/tmp/tmp.XXXXXX"; fi
     }
-    # File commands run only inside the test's tree.
+    # File commands run only inside the test's tree: every argument that is
+    # not an option (each one after "--"), an option's "=value", and dd's
+    # if=/of= operands is resolved as `realpath -m` would, against the case's
+    # folder, and must be $work or under it. A sed script or a mode resolves
+    # as a relative name inside the tree, so it passes.
     inside_work() {
-      local a p
+      local a p ends=0
       for a in "$@"; do
         p=$a
-        case $p in --*=*) p=${p#*=} ;; esac
-        case $p in
-          /dev/null | /dev/stdin | "$work" | "$work"/*) ;;
-          /*) return 1 ;;
-        esac
+        if test "$ends" = 0; then
+          case $p in
+            --) ends=1; continue ;;
+            --*=*) p=${p#*=} ;;
+            -*) continue ;;
+            if=* | of=*) p=${p#*=} ;;
+          esac
+        fi
+        case $p in /dev/null | /dev/zero | /dev/stdin | /dev/stdout | /dev/stderr) continue ;; esac
+        p=$(resolve "$p")
+        case $p in "$work" | "$work"/*) ;; *) return 1 ;; esac
       done
     }
     guarded() {
@@ -180,15 +251,21 @@ scenario() {
     tee() { guarded tee "$@"; }
     truncate() { guarded truncate "$@"; }
     dd() { guarded dd "$@"; }
+    # sed changes a file only in place: -i alone, in a cluster (-ni, -Ei,
+    # -i.bak) or as --in-place[=SUFFIX].
     sed() {
       local a
       for a in "$@"; do
-        case $a in -i*) guarded sed "$@"; return ;; esac
+        case $a in --in-place* | -i* | -[!-]*i*) guarded sed "$@"; return ;; esac
       done
       command sed "$@"
     }
     etc=$work/etc
     unit_dir=$work/units
+    dl_cache=$work/cache
+    twsapi_root=$work/opt/twsapi
+    adapter_venv=$work/opt/adapter-venv
+    adapter_root=$work/opt/adapter
     if test -n "${TEST_LEAK:-}"; then eval "$TEST_LEAK"; fi
     main "$step"
   ) >"$work/out" 2>&1 || status=$?
@@ -205,9 +282,18 @@ said() { grep -qF -- "$1" "$work/out"; }
 canary=$(mktemp -d)
 trap 'rm -rf "$work" "$canary"' EXIT
 echo keep >"$canary/keep"
+# The case runs in $work/cwd, so a relative path is resolved against it: up
+# climbs from there to /, whatever the depth of the temporary folder.
+up=$(printf '../%.0s' $(seq 1 40))
 for leak in "rm -rf $canary/keep" "cp /dev/null $canary/keep" "mv $canary/keep $canary/moved" \
   "mkdir $canary/made" "touch $canary/touched" "sed -i s/keep/gone/ $canary/keep" \
-  "rm -rf --one-file-system /opt/ibc-test-target-canary"; do
+  "rm -rf --one-file-system /opt/ibc-test-target-canary" \
+  "rm -f ${up%/}$canary/keep" "cp /dev/null ${up%/}$canary/keep" "touch $work/${up%/}$canary/touched" \
+  "mkdir -p -- ${up%/}$canary/made" "rm -f -- $canary/keep" \
+  "dd if=/dev/zero of=$canary/keep count=1" "dd if=/dev/zero of=${up%/}$canary/keep count=1" \
+  "sed -ni s/keep/gone/p $canary/keep" "sed -Ei s/keep/gone/ $canary/keep" \
+  "sed --in-place s/keep/gone/ $canary/keep" "sed --in-place=.bak s/keep/gone/ $canary/keep" \
+  "sed -e s/keep/gone/ -i $canary/keep"; do
   status=0
   TEST_LEAK=$leak scenario mac-mini aarch64 services || status=$?
   test "$status" = 97 || fail "the guard did not end the case on '$leak' (status $status)"
@@ -216,13 +302,34 @@ for leak in "rm -rf $canary/keep" "cp /dev/null $canary/keep" "mv $canary/keep $
 done
 test "$(cat "$canary/keep" 2>/dev/null)" = keep || fail "a refused command changed the canary"
 test ! -e "$canary/moved" && test ! -e "$canary/made" && test ! -e "$canary/touched" || fail "a refused command created a file outside the test's tree: $(ls "$canary")"
-# A path inside the test's tree is allowed.
+# A path inside the test's tree is allowed, given absolute or relative to
+# the case's folder, and as dd's operand.
 TEST_LEAK="mkdir -p $work/tmp/allowed" scenario mac-mini aarch64 services || fail "the guard refused a path inside the test's tree: $(cat "$work/out")"
-# No redirection to a literal absolute path other than /dev/null, which no
-# stand-in could intercept.
-if grep -nE '>>?[[:space:]]*/' "$here/../provision.sh" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE '>>?[[:space:]]*/dev/(null|stderr)'; then
-  fail "provision.sh writes by redirection to a literal absolute path (above); use \$etc, \$unit_dir or another variable the test redirects"
+TEST_LEAK="mkdir -p ../tmp/relative" scenario mac-mini aarch64 services || fail "the guard refused a relative path inside the test's tree: $(cat "$work/out")"
+test -d "$work/tmp/relative" || fail "the guard did not run an allowed relative mkdir"
+TEST_LEAK="dd if=/dev/zero of=$work/tmp/dd count=1" scenario mac-mini aarch64 services || fail "the guard refused dd inside the test's tree: $(cat "$work/out")"
+# No redirection to a path the test does not redirect: a literal absolute
+# path other than /dev/null, or a variable other than those set under $work
+# above. A redirection cannot be intercepted by a stand-in.
+leaks=$(redirect_leaks "$here/../provision.sh")
+if test -n "$leaks"; then
+  fail "provision.sh writes by redirection to a path the test does not redirect: $leaks. Write under one of the variables the test sets under its own tree ($redirected_vars)"
 fi
+# The check itself: it flags each shape, and passes the redirected ones.
+cat >"$work/redirects" <<'SHAPES'
+printf x >/etc/flagged-literal
+printf x >> "/var/flagged-quoted"
+printf x >"$somewhere/flagged-variable"
+printf x 2>${elsewhere}/flagged-braced
+printf x >"$etc/fine" 2>/dev/null
+printf x >"$unit_dir/fine" >&2
+# printf x >/etc/a-comment
+SHAPES
+got=$(redirect_leaks "$work/redirects")
+for shape in flagged-literal flagged-quoted flagged-variable flagged-braced; do
+  case $got in *"$shape"*) ;; *) fail "the redirection check missed '$shape': $got" ;; esac
+done
+case $got in *fine* | *a-comment*) fail "the redirection check flagged an allowed line: $got" ;; esac
 
 # --- An unknown target is refused before anything is done.
 if scenario nowhere x86_64 services; then fail "an unknown TI_TARGET was accepted"; fi
@@ -327,6 +434,11 @@ moved='ti-gateway:x:2001:2001::/var/lib/ti-gateway:/usr/sbin/nologin
 ti-trader:x:998:998::/var/lib/trend-investing:/usr/sbin/nologin'
 if FAKE_PASSWD=$moved FAKE_SYSTEMD=1 scenario mac-mini aarch64 base; then fail "Mac mini accepted ti-trader at UID 998"; fi
 said "998" || fail "the refusal of ti-trader at another UID does not say which: $(cat "$work/out")"
+# Its remedy: re-creating the container leaves the volumes' files at the old
+# IDs, so the refusal says so and names the re-owning pass.
+said "does not re-own" || fail "the refusal of ti-trader at another UID does not say a re-creation leaves the volumes' files: $(cat "$work/out")"
+said "-uid 998 -exec chown -h 2002" || fail "the refusal of ti-trader at another UID does not name the chown pass: $(cat "$work/out")"
+said "-gid 998 -exec chgrp -h 2002" || fail "the refusal of ti-trader at another UID does not name the chgrp pass: $(cat "$work/out")"
 # Lightsail is unchanged: the users are created as before, at no fixed ID.
 FAKE_PASSWD='' TEST_REHEARSAL=1 scenario "" x86_64 base || fail "Lightsail base with no service users failed: $(cat "$work/out")"
 called "useradd --system --user-group --home-dir /var/lib/trend-investing" || fail "Lightsail no longer creates ti-trader as before: $(grep useradd "$work/calls")"

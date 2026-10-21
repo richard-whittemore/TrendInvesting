@@ -12,8 +12,9 @@
 # Once it reaches Docker: a container of the same name that up.sh did not make
 # from this checkout, or whose mounts are not the four volumes, is neither
 # changed nor removed; --recreate refuses while an engine or the adapter runs,
-# and otherwise stops the container (systemd's own shutdown, within a bound)
-# before removing it, never killing it; a degraded system is accepted only
+# and otherwise stops the container before removing it, never
+# force-removing it: `docker stop -t 60` gives systemd's own shutdown 60 s
+# and only then does Docker kill what is left; a degraded system is accepted only
 # when every failed unit is one that fails until the first engine run, and
 # the mount sharing systemd's credentials need is checked; the container is
 # created without --privileged.
@@ -40,6 +41,7 @@ mkdir -p "$fake_home" "$work/bin"
 #   FAKE_LABELS           its labels, "<mac-mini label>|<checkout label>"
 #   FAKE_MOUNTS           its mounts, "type name destination;" each (default: the four volumes)
 #   FAKE_ACTIVE           the engine and adapter units it reports running
+#   FAKE_LIST_FAILS=1     systemd in it does not answer `systemctl list-units`
 #   FAKE_SYSTEM           what is-system-running says (default running)
 #   FAKE_FAILED           the failed units it lists
 #   FAKE_MOUNT_SHARED=1   mount-shared.service is not active
@@ -55,7 +57,7 @@ case "$*" in
   "container inspect --format "*.State.Running*) echo true ;;
   "container inspect --format "*.Config.Image*) echo "${FAKE_IMAGE:-}" ;;
   "container inspect "*) test "${FAKE_EXISTS:-0}" = 1 ;;
-  *"systemctl list-units --state=active"*) test -z "${FAKE_ACTIVE:-}" || printf '%s\n' $FAKE_ACTIVE ;;
+  *"systemctl list-units --state=active"*) test "${FAKE_LIST_FAILS:-0}" = 0 || exit 1; test -z "${FAKE_ACTIVE:-}" || printf '%s\n' $FAKE_ACTIVE ;;
   *"systemctl list-units --state=failed"*) test -z "${FAKE_FAILED:-}" || printf '%s\n' $FAKE_FAILED ;;
   *"systemctl is-system-running"*) echo "${FAKE_SYSTEM:-running}" ;;
   *"systemctl is-active --quiet mount-shared.service"*) test "${FAKE_MOUNT_SHARED:-0}" = 0 ;;
@@ -166,6 +168,17 @@ ln -s "$gone" "$lock"
 if launch "$clean" TI_DIST="$work/dist"; then :; fi
 grep -q '^docker info' "$work/calls" || fail "a stale lock (process $gone) was not taken over: $(cat "$work/out")"
 test ! -L "$lock" || fail "up.sh left its lock behind"
+test ! -L "$lock.takeover" || fail "up.sh left its takeover lock behind"
+# Taking over a stale lock is itself one at a time: while another up.sh
+# (here, this test) is taking it over, a second refuses and leaves the lock
+# alone, so two runs can never both end up holding it.
+rm -f "$lock"
+ln -s "$gone" "$lock"
+ln -s $$ "$lock.takeover"
+refused "a stale lock another up.sh is taking over" "taking over" "$clean" TI_DIST="$work/dist"
+test "$(readlink "$lock")" = "$gone" || fail "an up.sh that lost the takeover changed the lock: $(readlink "$lock")"
+test "$(readlink "$lock.takeover")" = $$ || fail "an up.sh that lost the takeover changed the takeover lock"
+rm -f "$lock" "$lock.takeover"
 
 # --- Once Docker is reached (an arm64 VM).
 co=$(cd "$clean" && pwd -P)
@@ -202,6 +215,10 @@ run_after() {
 # removed.
 refused_after "an unlabelled container" "not one up.sh made" -- FAKE_EXISTS=1 FAKE_LABELS="|"
 refused_after "an unlabelled container, --recreate" "not one up.sh made" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="|"
+# One made by an earlier up.sh, before it recorded the checkout: the refusal
+# gives the command that removes it, keeping its volumes.
+refused_after "a container from the launcher before the checkout label" "docker rm ti" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="ti|"
+grep -qF "volumes are kept" "$work/out" || fail "the refusal of a container from the earlier launcher does not say the volumes are kept: $(cat "$work/out")"
 refused_after "a container made from another checkout" "/elsewhere" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="ti|/elsewhere"
 refused_after "a container with a fifth mount" "mounts" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" \
   FAKE_MOUNTS="volume ti-etc /etc/trend-investing;volume ti-state /var/lib/trend-investing;volume ti-opt /opt/trend-investing;volume ti-journal /var/log/journal;bind  /data;"
@@ -211,6 +228,9 @@ refused_after "a container missing its state volume" "mounts" -- FAKE_EXISTS=1 F
 # --recreate while an engine or the adapter runs: refused, naming the unit.
 refused_after "--recreate while the engine runs" "ti-engine@boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service"
 refused_after "--recreate while the adapter runs" "ti-adapter-boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-adapter-boost.service"
+# systemd not answering which units run: refused, saying so, before anything
+# is stopped.
+refused_after "--recreate when systemd does not list its units" "cannot ask systemd" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_LIST_FAILS=1
 # Otherwise it stops the container (systemd shuts down within the bound),
 # then removes it; nothing is killed or force-removed.
 run_after --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" || fail "--recreate of up.sh's own stopped-engine container failed: $(cat "$work/out")"

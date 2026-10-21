@@ -58,8 +58,10 @@ refuse() { printf 'up: %s\n' "$*" >&2; exit 1; }
 
 scratch=$(mktemp -d)
 lock=
+takeover=
 cleanup() {
   rm -rf "$scratch"
+  if test -n "$takeover" && test "$(readlink "$takeover" 2>/dev/null)" = $$; then rm -f "$takeover"; fi
   if test -n "$lock" && test "$(readlink "$lock" 2>/dev/null)" = $$; then rm -f "$lock"; fi
 }
 trap cleanup EXIT
@@ -108,21 +110,42 @@ refuse_duplicates() {
 }
 
 # take_lock: one up.sh at a time for this container. The lock is a symbolic
-# link naming this process, made in one step; one left by a process no longer
-# running is taken over.
+# link naming this process, made in one step (symlink(2) fails if it exists),
+# so of two runs only one makes it. One left by a process no longer running is
+# taken over, and the takeover is one at a time too: it is held by a second
+# link, <lock>.takeover, made the same way. Only its holder replaces a stale
+# lock, by renaming a new link over it (rename(2) replaces in one step, so the
+# lock never goes missing for a newcomer to take meanwhile), and it checks
+# again, holding it, that the lock's holder is still the dead one. So no run
+# ever removes or replaces a lock another living run holds.
 take_lock() {
   local path=$HOME/.trend-investing/up-$name.lock holder
   mkdir -p "$HOME/.trend-investing"
-  if ! ln -s $$ "$path" 2>/dev/null; then
-    holder=$(readlink "$path" 2>/dev/null || true)
-    if test -n "$holder" && ps -p "$holder" >/dev/null 2>&1; then
-      refuse "another up.sh (process $holder) is working on the container $name; wait for it to finish (the lock is $path)"
-    fi
-    say "taking over the lock left by process ${holder:-unknown}, which is no longer running"
-    rm -f "$path"
+  if ln -s $$ "$path" 2>/dev/null; then lock=$path; return; fi
+  holder=$(readlink "$path" 2>/dev/null || true)
+  if test -n "$holder" && ps -p "$holder" >/dev/null 2>&1; then
+    refuse "another up.sh (process $holder) is working on the container $name; wait for it to finish (the lock is $path)"
+  fi
+  if ! ln -s $$ "$path.takeover" 2>/dev/null; then
+    refuse "another up.sh (process $(readlink "$path.takeover" 2>/dev/null || echo unknown)) is taking over the stale lock on $name; wait for it, then run up.sh again. If no up.sh runs, remove $path.takeover"
+  fi
+  takeover=$path.takeover
+  holder=$(readlink "$path" 2>/dev/null || true)
+  if test -z "$holder"; then
+    # Released meanwhile: taken as a fresh lock is, or refused if a newcomer
+    # made it first.
     ln -s $$ "$path" 2>/dev/null || refuse "another up.sh took the lock on $name first; wait for it to finish (the lock is $path)"
+  elif ps -p "$holder" >/dev/null 2>&1; then
+    refuse "another up.sh (process $holder) is working on the container $name; wait for it to finish (the lock is $path)"
+  else
+    say "taking over the lock left by process $holder, which is no longer running"
+    rm -f "$path.$$"
+    ln -s $$ "$path.$$"
+    mv -f "$path.$$" "$path"
   fi
   lock=$path
+  rm -f "$takeover"
+  takeover=
 }
 
 case $name in
@@ -167,6 +190,9 @@ check_own() {
   labels=${labels//<no value>/}
   made=${labels%%|*}
   from=${labels#*|}
+  if test "$made" = "$name" && test -z "$from"; then
+    refuse "the container $name was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter, then its engine (docker exec $name systemctl stop ti-adapter-boost ti-engine@boost), then stop and remove it: docker stop -t 60 $name && docker rm $name (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
+  fi
   if test "$made" != "$name" || test "$from" != "$repo"; then
     refuse "the container $name is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. Use another TI_MAC_NAME, or run up.sh from the checkout that made it."
   fi
@@ -185,7 +211,9 @@ if test "$exists" = 1 && test "$recreate" = 1; then
     # Removing the container ends every process in it at once, which for an
     # engine is a crash: its last group may be uncommitted (ADR 0027). The
     # owner stops the engine and the adapter first (docs/manual/restart.md).
-    running=$(docker exec "$name" systemctl list-units --state=active,activating,deactivating,reloading --no-legend --plain 'ti-engine@*' 'ti-adapter-*' | awk '{print $1}' | tr '\n' ' ')
+    if ! running=$(docker exec "$name" systemctl list-units --state=active,activating,deactivating,reloading --no-legend --plain 'ti-engine@*' 'ti-adapter-*' | awk '{print $1}' | tr '\n' ' '); then
+      refuse "cannot ask systemd in $name which units run, so it is not removed: an engine might be running. Nothing was changed. See: docker logs $name"
+    fi
     running=${running% }
     if test -n "$running"; then
       refuse "refusing to remove $name while $running runs: stop it first (docker exec $name systemctl stop ${running%% *}; the adapter before its engine), then run up.sh --recreate again"
@@ -214,9 +242,11 @@ else
   # for the units' ProtectSystem, PrivateTmp and RuntimeDirectory, and its
   # credentials) and a cgroup namespace of its own, whose cgroup tree the
   # image's entrypoint makes writable. Docker's default seccomp filter stays,
-  # and the container gets no other device, no clock and no kernel parameter.
-  # CAP_SYS_ADMIN is still broad: what it exposes is in docs/manual/mac-mini.md,
-  # "What the container may do".
+  # and no other capability is added (no clock, no module, no raw device).
+  # /proc/sys read-only, the masked paths and the device rules are only
+  # Docker's defaults: root inside holds CAP_SYS_ADMIN and can remount them,
+  # changing the VM's kernel settings. The container is a rehearsal tool, not
+  # a boundary (docs/manual/mac-mini.md, "What the container may do").
   docker create --name "$name" --hostname "$name" --platform linux/arm64 \
     --cap-add SYS_ADMIN --cgroupns private \
     --restart unless-stopped --stop-timeout 60 \

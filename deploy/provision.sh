@@ -116,9 +116,14 @@ ensure_user() {
       useradd --system --user-group --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
     fi
   elif test -n "$want"; then
-    local have
-    have="$(id -u "$name"):$(id -g "$name")"
-    test "$have" = "$want:$want" || die "$name is $have here, not $want:$want, which owns its files in the volumes; this container was provisioned before the IDs were fixed: run up.sh --recreate"
+    # A container provisioned before the IDs were fixed: its files in the
+    # volumes are owned by the old IDs, and a re-creation, which only makes
+    # /etc/passwd anew, leaves them so. The remedy names the re-owning pass,
+    # by number, which needs no account to exist.
+    local uid gid
+    uid=$(id -u "$name")
+    gid=$(id -g "$name")
+    test "$uid:$gid" = "$want:$want" || die "$name is $uid:$gid here, not $want:$want: this container was provisioned before the IDs were fixed. Re-creating it does not re-own the files already in the volumes, which stay $uid:$gid. Run up.sh --recreate, then re-own them inside the new container (docker exec <name> sh -c '...', <name> being ti unless TI_MAC_NAME is set): find /etc/trend-investing /var/lib/trend-investing /opt/trend-investing -xdev -uid $uid -exec chown -h $want {} + ; find /etc/trend-investing /var/lib/trend-investing /opt/trend-investing -xdev -gid $gid -exec chgrp -h $want {} + ; then run up.sh again (docs/manual/mac-mini.md, 'What can go wrong')"
   fi
   install -d -o "$name" -g "$name" -m 0750 "$home"
 }
