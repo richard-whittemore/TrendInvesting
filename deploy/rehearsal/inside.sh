@@ -99,7 +99,9 @@ cp -a /root/deploy /root/deploy-badpb
 sed -i 's/^PROTOBUF_SHA256=.*/PROTOBUF_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' /root/deploy-badpb/versions.env
 grep -q '^PROTOBUF_SHA256=0\{64\}$' /root/deploy-badpb/versions.env || fail "could not break the protobuf pin"
 rm -f "$cache"/protobuf-*.whl
-if /root/deploy-badpb/provision.sh twsapi >/dev/null 2>&1; then fail "a protobuf wheel that does not match its pin was accepted"; fi
+err=$(mktemp)
+if /root/deploy-badpb/provision.sh twsapi >/dev/null 2>"$err"; then fail "a protobuf wheel that does not match its pin was accepted"; fi
+grep -q 'checksum mismatch for .*protobuf-5\.29\.5-py3-none-any\.whl' "$err" || fail "the twsapi step failed for another reason: $(cat "$err")"
 test ! -e "$venv" && test ! -e "$record" || fail "a mismatched protobuf wheel left an environment or an install record"
 "$p" twsapi
 if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
@@ -115,7 +117,9 @@ assert ibapi.VERSION == {"major": 1051, "minor": 1}, ibapi.VERSION' || fail "iba
   (cd /tmp && "$venv/bin/python3" -I -c 'import sys; sys.path.insert(0, "/"); from ibapi_pin import check_installed
 print(check_installed(sys.argv[1], sys.argv[2]))' "$record" /root/deploy/versions.env) || fail "the adapter's pin check refuses the installed ibapi"
   cp "$record" "$record.good"
-  if /root/deploy-badpb/provision.sh twsapi >/dev/null 2>&1; then fail "a protobuf wheel that does not match its pin was accepted"; fi
+  err=$(mktemp)
+if /root/deploy-badpb/provision.sh twsapi >/dev/null 2>"$err"; then fail "a protobuf wheel that does not match its pin was accepted"; fi
+grep -q 'checksum mismatch for .*protobuf-5\.29\.5-py3-none-any\.whl' "$err" || fail "the twsapi step failed for another reason: $(cat "$err")"
   cmp -s "$record" "$record.good" || fail "a refused protobuf wheel changed the install record"
   rm -f "$record.good"
   "$venv/bin/python3" -I -c 'import ibapi' || fail "a refused protobuf wheel broke the installed environment"

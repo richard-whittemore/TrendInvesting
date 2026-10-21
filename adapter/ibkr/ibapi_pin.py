@@ -23,7 +23,7 @@ the venv (a system-wide or hand-installed one, whatever version it
 reports), a Python that is not running in a venv, an ibapi that does not
 import, or a record not exactly as the step writes it (fail closed,
 AGENTS.md). The files inside the venv are not hashed: the record attests
-the installer, and the venv is root's, rebuilt whole by that step. ADR 0025 point 5: a change of API
+the installer and the wheel, and the venv is root's, rebuilt whole by that step. ADR 0025 point 5: a change of API
 version repeats the paper-account test before the pin moves.
 
 The TWS API's version "10.51.01" is ibapi's VERSION {"major": 1051, "minor":
@@ -142,7 +142,7 @@ def check_installed(record_path, versions_path, installed_version=installed_ibap
                     installed_protobuf=installed_protobuf_version):
     """Return the pinned version if exactly that build is recorded as installed and imports, else raise IbapiNotPinned.
 
-    The record holds the two pin keys and nothing else, each once.
+    The record holds the four pin keys (PIN_KEYS) and nothing else, each once.
     installed_version returns the imported ibapi's (major, minor, micro) and
     installed_protobuf the imported protobuf's version string; by default
     those this Python imports.
