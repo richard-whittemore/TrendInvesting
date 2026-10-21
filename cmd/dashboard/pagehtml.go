@@ -61,6 +61,8 @@ main h1{margin:0;font-size:28px;line-height:1.15}
 .tile .row{display:flex;justify-content:space-between;gap:.5rem;font-size:13px;color:var(--muted)}
 .dot{display:inline-block;width:.5rem;height:.5rem;margin-right:.375rem;border-radius:50%;background:currentColor}
 .dot.bad{border-radius:1px;transform:rotate(45deg)}
+.verdict{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem .5rem;margin:0 0 .5rem;padding:.5rem .75rem;border-radius:10px;background:var(--chip);font-size:17px}
+.verdict.level{color:var(--text)}
 .ok{color:var(--pos)}.warn{color:var(--warn)}.bad{color:var(--neg)}.pos{color:var(--pos)}.neg{color:var(--neg)}
 section.acct{display:flex;flex-direction:column;gap:1rem;scroll-margin-top:5rem}
 section.acct>header{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .75rem}
@@ -121,15 +123,17 @@ tr.urgent td:first-child{border-left:3px solid var(--neg)}
 <p class="warn">{{$warning}}.</p>{{end}}
 <div class="cols"><div>
 <div class="card">
-{{if .HaveSnapshot}}<p>Net liquidation {{printf "%.2f" .NetLiquidation}} as of {{.HoldingsAsOf.UTC.Format "2006-01-02 15:04Z"}}</p>{{else}}<p>No account snapshot.</p>{{end}}
+{{if .Equity.Available}}<p class="{{verdictClass .Equity.VerdictTone}}"><span aria-hidden="true">{{verdictMark .Equity.VerdictTone}}</span> <strong>{{.Equity.Verdict}}</strong> <span class="chip">dollar gap {{signed .Equity.Gap}}</span></p>
+{{end}}{{if .HaveSnapshot}}<p>Net liquidation {{printf "%.2f" .NetLiquidation}} as of {{.HoldingsAsOf.UTC.Format "2006-01-02 15:04Z"}}</p>{{else}}<p>No account snapshot.</p>{{end}}
 <h3>Equity against {{.Benchmark}}</h3>{{if .Equity.HistoryUnavailable}}<p class="warn">{{.Equity.HistoryUnavailable}}.</p><p class="assume">The comparison here starts at {{.Equity.HistoryStartsAt}}, the first intact run it includes: the runs before the break are left out until the chain is whole.</p>{{end}}{{if .Equity.HistoryStarting}}<p class="assume">{{.Equity.HistoryStarting}}.</p>{{end}}{{if .Equity.HistorySince}}<p class="assume">{{.Equity.HistorySince}}; the runs of another mode before it are left out.</p>{{end}}{{if .Equity.Available}}<div class="chips"><span class="chip {{tone .Equity.AccountReturn}}">{{arrow .Equity.AccountReturn}} {{pct .Equity.AccountReturn}} account</span><span class="chip {{tone .Equity.BenchmarkReturn}}">{{arrow .Equity.BenchmarkReturn}} {{pct .Equity.BenchmarkReturn}} {{.Benchmark}}</span><span class="chip {{tone .Equity.Excess}}">{{arrow .Equity.Excess}} {{pct .Equity.Excess}} difference</span></div>
-<p>{{.Equity.StartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>{{if .Equity.DayAvailable}}Day, {{.Equity.DayStartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.{{else}}Day: not available (no paired snapshot and {{.Benchmark}} close on {{.Date}}).{{end}}</p>
+{{if .Equity.Points}}<p class="mono">Account {{money (last .Equity).Net}} &middot; {{.Benchmark}} shadow account {{money .Equity.ShadowValue}} &middot; gap {{signed .Equity.Gap}} on {{.Equity.EndDate}}</p>{{end}}
+<p>{{.Equity.StartDate}} to {{.Equity.EndDate}}, time-weighted: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>{{if .Equity.DayAvailable}}Day, {{.Equity.DayStartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.{{else}}Day: not available (no paired snapshot and {{.Benchmark}} close on {{.Date}}).{{end}}</p>
 {{template "equity" chart .}}
-<p class="assume">{{count .Equity}} paired points, {{.Equity.StartDate}} to {{.Equity.EndDate}}. {{assumption}}</p>
+<p class="assume">{{count .Equity}} paired points, {{.Equity.StartDate}} to {{.Equity.EndDate}}. {{.Equity.Assumption}}</p>
 {{if gt (count .Equity) 1}}<dl class="pairs"><dt>First paired point</dt><dd class="mono">{{(first .Equity).Date}} &middot; {{money (first .Equity).Net}} &middot; {{.Benchmark}} {{money (first .Equity).Benchmark}}</dd>
 <dt>Before</dt><dd class="mono">{{(before .Equity).Date}} &middot; {{money (before .Equity).Net}} &middot; {{.Benchmark}} {{money (before .Equity).Benchmark}}</dd>
 <dt>Latest paired point</dt><dd class="mono">{{(last .Equity).Date}} &middot; {{money (last .Equity).Net}} &middot; {{.Benchmark}} {{money (last .Equity).Benchmark}}</dd></dl>
-<p class="assume">The same starting balance held in {{.Benchmark}} would be {{held .Equity}} on {{.Equity.EndDate}}.</p>{{end}}
+<p class="assume">The {{.Benchmark}} shadow account is the starting balance held in {{.Benchmark}} at the first paired day&rsquo;s close, buying or selling {{.Benchmark}} at the close for each recorded deposit or withdrawal; on {{.Equity.EndDate}} it is worth {{money .Equity.ShadowValue}}.</p>{{end}}
 {{else}}<p>Not enough paired snapshots and bars yet.</p>{{template "equity" chart .}}{{end}}
 </div>
 <div class="card"><h3>Change between paired points</h3>{{template "strip" strip .}}</div>

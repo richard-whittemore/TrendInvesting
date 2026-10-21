@@ -84,6 +84,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
 	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
+	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors; without it, or before the reader has written it, the summary says the comparison assumes none")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -222,7 +223,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
 	if *summary && refused == nil {
-		a, due, err := summaryAlert(history, envelopes, *date, *benchmark, clock)
+		a, due, err := summaryAlert(history, report.LoadCashLedger(*cashLedger, os.ReadFile), envelopes, *date, *benchmark, clock)
 		switch {
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
@@ -365,7 +366,9 @@ func deliveredAnywhere(seen map[string]bool, key string) bool {
 // the latest closed session's day, and it is not yet due when none has
 // closed. A stated date whose session has not closed is an error. A clock
 // check run in this firing adds its time and result as the summary's last line.
-func summaryAlert(history report.History, envelopes []event.Envelope, date, benchmark string, clock *report.ClockCheck) (report.Alert, bool, error) {
+// ledger is the Flex reader's record of the owner's transfers, which the
+// equity comparison's shadow account mirrors.
+func summaryAlert(history report.History, ledger report.CashLedger, envelopes []event.Envelope, date, benchmark string, clock *report.ClockCheck) (report.Alert, bool, error) {
 	if date == "" {
 		last, ok := report.ClosedSessionDate(envelopes)
 		if !ok {
@@ -373,7 +376,7 @@ func summaryAlert(history report.History, envelopes []event.Envelope, date, benc
 		}
 		date = last
 	}
-	s, err := report.SummarizeWithHistory(history, envelopes, date, benchmark)
+	s, err := report.SummarizeWithCash(history, ledger, envelopes, date, benchmark)
 	if err != nil {
 		return report.Alert{}, false, err
 	}

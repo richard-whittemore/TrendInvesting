@@ -9,15 +9,26 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
-// held is what the first paired point's balance would be worth today had it
-// been held in the benchmark: the same price return the benchmark column
-// shows.
-func held(e report.Equity) string {
-	if len(e.Points) < 2 {
-		return ""
+// verdictClass colours the verdict: green ahead, red behind, neutral level.
+// Its arrow carries the same meaning, so colour is never the only cue.
+func verdictClass(tone string) string {
+	switch tone {
+	case report.VerdictAhead:
+		return "verdict pos"
+	case report.VerdictBehind:
+		return "verdict neg"
 	}
-	first, last := e.Points[0], e.Points[len(e.Points)-1]
-	return fmt.Sprintf("%.2f", first.Net*last.Benchmark/first.Benchmark)
+	return "verdict level"
+}
+
+func verdictMark(tone string) string {
+	switch tone {
+	case report.VerdictAhead:
+		return "▲"
+	case report.VerdictBehind:
+		return "▼"
+	}
+	return "="
 }
 
 // tone names the class that colours a figure by its sign; the arrow beside it
@@ -52,19 +63,20 @@ func lastPoint(e report.Equity) report.EquityPoint { return e.Points[len(e.Point
 func beforeLast(e report.Equity) report.EquityPoint { return e.Points[len(e.Points)-2] }
 
 var page = template.Must(template.New("page").Funcs(template.FuncMap{
-	"weight":     func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) },
-	"shares":     event.FormatSkippedShares,
-	"pct":        func(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) },
-	"money":      func(v float64) string { return fmt.Sprintf("%.2f", v) },
-	"held":       held,
-	"tone":       tone,
-	"arrow":      arrow,
-	"stateClass": stateClass,
-	"first":      func(e report.Equity) report.EquityPoint { return e.Points[0] },
-	"last":       lastPoint,
-	"before":     beforeLast,
-	"count":      func(e report.Equity) int { return len(e.Points) },
-	"chart":      equityChart,
-	"strip":      dailyChangeStrip,
-	"assumption": func() string { return equityAssumption },
+	"weight":       func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) },
+	"shares":       event.FormatSkippedShares,
+	"pct":          func(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) },
+	"money":        func(v float64) string { return fmt.Sprintf("%.2f", v) },
+	"signed":       report.SignedMoney,
+	"verdictClass": verdictClass,
+	"verdictMark":  verdictMark,
+	"tone":         tone,
+	"arrow":        arrow,
+	"stateClass":   stateClass,
+	"first":        func(e report.Equity) report.EquityPoint { return e.Points[0] },
+	"last":         lastPoint,
+	"before":       beforeLast,
+	"count":        func(e report.Equity) int { return len(e.Points) },
+	"chart":        equityChart,
+	"strip":        dailyChangeStrip,
 }).Parse(pageHTML))

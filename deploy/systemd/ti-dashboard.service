@@ -16,7 +16,10 @@ Environment=TZ=America/New_York
 # Loopback only, on the port `tailscale serve --bg 8088` publishes; the
 # firewall also closes every non-Tailscale port. The dashboard needs no
 # secret, so it is handed none.
-ExecStart=/opt/trend-investing/bin/ti-dashboard -engine-dir /var/lib/trend-investing/engines/boost -addr 127.0.0.1:8088
+# The Flex reader's ledger of Boost's deposits and withdrawals (ti-flex@boost)
+# is read on every request for the equity card's SPY shadow account; until
+# the reader has written it the card says the comparison assumes none.
+ExecStart=/opt/trend-investing/bin/ti-dashboard -engine-dir /var/lib/trend-investing/engines/boost -cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl -addr 127.0.0.1:8088
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true

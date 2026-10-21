@@ -346,6 +346,12 @@ needs only each transfer's amount and date, which are exact.
   engine never sees, so the reader cannot change an order, a state or a
   reconciliation. The cash-drift check stays as it is, and stays the
   cross-check: a transfer the reader missed still shows as drift.
+- **The SPY comparison reads it.** The daily summary and the dashboard read
+  the ledger directly (their `-cash-ledger` flag) and mirror each deposit and
+  withdrawal in the SPY shadow account, so a transfer is never counted as a
+  gain or a loss of the strategy (alerts and dashboard chapter, "How the
+  comparison with SPY works"). Until the reader has written the ledger they
+  say the comparison assumes no transfer.
 
 **When.** `ti-flex@<instance>.timer` (one per account: `ti-flex@boost`,
 `ti-flex@trad-ira`, `ti-flex@roth-ira`) runs it on weekdays at 9:30 p.m. New

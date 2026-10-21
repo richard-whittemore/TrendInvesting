@@ -83,8 +83,9 @@ func engineLogWith(t *testing.T, closes []float64, positions []event.AccountPosi
 		}
 		apply(event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%d", n), at, event.CompletedBarAdjustedPayload{
 			CompletedBarPayload: event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted, c), Raw: view(event.ViewRaw, c)},
-			Adjusted:            view(event.ViewAdjusted, 7),
-			AdjustedBase:        "2024-01-02",
+			// Synthetic dividends: the adjusted close gains a tenth a session.
+			Adjusted:     view(event.ViewAdjusted, c*float64(10+n)/10),
+			AdjustedBase: "2024-01-02",
 		})
 		apply(event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", n), at,
 			event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: at, Currency: "USD", NetLiquidation: 4000 + float64(100*n), Positions: positions})
@@ -115,8 +116,11 @@ func TestSummaryOfAnEngineDurableLogReadsItsBarsAndComparesEquity(t *testing.T) 
 	if !got.Equity.Available || !got.Equity.DayAvailable {
 		t.Fatalf("the equity comparison must be available from the engine's log: %+v", got.Equity)
 	}
-	if !near(got.Equity.BenchmarkReturn, 105.0/100-1) || !near(got.Equity.DayBenchmarkReturn, 105.0/102-1) {
-		t.Fatalf("the benchmark return must come from the split-adjusted close, not the adjusted view: %+v", got.Equity)
+	if !near(got.Equity.BenchmarkReturn, 105.0*1.2/100-1) || !near(got.Equity.DayBenchmarkReturn, 105.0*1.2/(102*1.1)-1) {
+		t.Fatalf("the benchmark return must come from the adjusted view, dividends reinvested: %+v", got.Equity)
+	}
+	if p := got.Equity.Points[2]; p.Benchmark != 105 {
+		t.Fatalf("the quoted close stays the split-adjusted price: %+v", p)
 	}
 	if !near(got.Equity.AccountReturn, 4200.0/4000-1) {
 		t.Fatalf("account return = %v", got.Equity.AccountReturn)

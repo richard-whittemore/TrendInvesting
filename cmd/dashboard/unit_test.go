@@ -89,6 +89,9 @@ func TestTheServiceFileServesTheBoostLogOnTheOnePort(t *testing.T) {
 	if got, want := flag("-engine-dir"), "/var/lib/trend-investing/engines/boost"; got != want {
 		t.Errorf("-engine-dir %q, want the Boost engine's log directory %q, so the page finds the latest run on each request", got, want)
 	}
+	if got, want := flag("-cash-ledger"), "/var/lib/trend-investing/flex/boost/cash-movements.jsonl"; got != want {
+		t.Errorf("-cash-ledger %q, want the Boost Flex reader's ledger %q, so the shadow account mirrors the owner's transfers", got, want)
+	}
 	if flag("-journal") != "" {
 		t.Errorf("-journal names one log, which would pin the page to a run: a restart would show the previous run")
 	}

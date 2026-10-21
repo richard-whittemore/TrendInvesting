@@ -27,14 +27,17 @@ func execThemed(t *testing.T, theme string, accounts []account) string {
 }
 
 // pairedFixture is a synthetic summary with n paired points: the account
-// grows 1% a day from 1000 and the benchmark 0.5% a day from 100.
+// grows 1% a day from 1000 and the benchmark 0.5% a day from 100, with no
+// transfer, so each side's growth is its own value rebased to 100.
 func pairedFixture(n int) account {
 	eq := report.Equity{Available: n >= 2}
 	net, bench := 1000.0, 100.0
 	for i := 0; i < n; i++ {
-		eq.Points = append(eq.Points, report.EquityPoint{Date: fmt.Sprintf("2024-01-%02d", i+2), Net: net, Benchmark: bench})
+		eq.Points = append(eq.Points, report.EquityPoint{Date: fmt.Sprintf("2024-01-%02d", i+2), Net: net, Benchmark: bench,
+			Shadow: 10 * bench, AccountGrowth: net / 10, BenchmarkGrowth: bench})
 		net, bench = net*1.01, bench*1.005
 	}
+	eq.Assumption = "Counted: SPY with dividends reinvested; deposits and withdrawals not yet recorded: the comparison assumes none."
 	if n > 0 {
 		eq.StartDate, eq.EndDate = eq.Points[0].Date, eq.Points[n-1].Date
 	}
@@ -95,7 +98,7 @@ func TestDailyChangeStripHasABarPerSeriesPerDay(t *testing.T) {
 
 func TestEquityCardKeepsTheCountDatesAndStatesTheAssumption(t *testing.T) {
 	body := execThemed(t, "", []account{pairedFixture(6)})
-	for _, want := range []string{"6 paired points", "2024-01-02", "2024-01-07", "price return only, no deposits or withdrawals", "Equity against SPY"} {
+	for _, want := range []string{"6 paired points", "2024-01-02", "2024-01-07", "deposits and withdrawals not yet recorded: the comparison assumes none", "Equity against SPY"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("equity card lacks %q", want)
 		}
@@ -112,7 +115,7 @@ func TestChartsLabelAxesInWordsAndDates(t *testing.T) {
 }
 
 func TestThemeQueryIsHonouredAndLinksFlipIt(t *testing.T) {
-	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
 	cases := []struct {
 		query, root string
 		absent      bool
@@ -161,7 +164,8 @@ func seriesFixture(nets, benches []float64) account {
 	a := pairedFixture(0)
 	eq := &a.Summary.Equity
 	for i := range nets {
-		eq.Points = append(eq.Points, report.EquityPoint{Date: fmt.Sprintf("d%05d", i), Net: nets[i], Benchmark: benches[i]})
+		eq.Points = append(eq.Points, report.EquityPoint{Date: fmt.Sprintf("d%05d", i), Net: nets[i], Benchmark: benches[i],
+			AccountGrowth: 100 * nets[i] / nets[0], BenchmarkGrowth: 100 * benches[i] / benches[0]})
 	}
 	eq.Available = len(nets) >= 2
 	if n := len(nets); n >= 2 {

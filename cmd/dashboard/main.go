@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,17 +58,23 @@ func run(args []string, log io.Writer) error {
 	flags.Var(&engineDirs, "engine-dir", "an engine's log directory: each request shows the current run in it, the newest link of its chain of runs, followed back to the first; repeat for each account")
 	addr := flags.String("addr", defaultAddr, "listen address: loopback or a Tailscale address")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
+	var cashLedgers stringList
+	flags.Var(&cashLedgers, "cash-ledger", "the Flex reader's ledger of an account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the equity comparison's shadow account mirrors: the path alone when one -journal or -engine-dir is given, else SOURCE=PATH naming that -journal or -engine-dir; repeat for each account")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if len(journals)+len(engineDirs) == 0 {
 		return errors.New("dashboard: at least one -journal or -engine-dir is required")
 	}
+	ledgers, err := ledgersOf(cashLedgers, journals, engineDirs)
+	if err != nil {
+		return err
+	}
 	if err := checkListenAddr(*addr, hostInterfaces); err != nil {
 		return err
 	}
 	server := &http.Server{
-		Addr: *addr, Handler: newHandlerFor(journals, engineDirs, *benchmark),
+		Addr: *addr, Handler: newHandlerFor(journals, engineDirs, ledgers, *benchmark),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute,
 	}
 	_, _ = fmt.Fprintf(log, "dashboard: read-only, listening on %s\n", *addr)
@@ -191,8 +198,9 @@ type alertView struct {
 // the dashboard. Each is shown with the runs before it, followed back to the
 // first (report.EarlierRunsOfRecovery). Every request re-reads and
 // re-verifies the current log, so the page is never staler than the file.
-func newHandlerFor(journals, engineDirs []string, benchmark string) http.Handler {
-	return newHandlerWith(source{journals: journals, dirs: engineDirs}, benchmark, os.ReadFile)
+// ledgers names each account's Flex ledger (source).
+func newHandlerFor(journals, engineDirs []string, ledgers map[string]string, benchmark string) http.Handler {
+	return newHandlerWith(source{journals: journals, dirs: engineDirs, ledgers: ledgers}, benchmark, os.ReadFile)
 }
 
 // newHandlerWith is newHandlerFor reading each file whole with readFile.
@@ -244,11 +252,6 @@ func themeOf(r *http.Request) string {
 	return ""
 }
 
-// equityAssumption states in words what the equity comparison assumes. It is
-// one sentence, shown on every equity card, so a change in how the benchmark
-// side is built changes it in one place.
-const equityAssumption = "The comparison assumes price return only, no deposits or withdrawals: the benchmark's dividends are left out, and money you add or take out counts as the account's own gain or loss."
-
 // readOnly admits GET and HEAD and nothing else, whatever the route.
 func readOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -295,8 +298,43 @@ func fail(w http.ResponseWriter, err error) {
 }
 
 // source is where the accounts' logs are: fixed journals, and engine
-// directories whose current run is found on each request.
-type source struct{ journals, dirs []string }
+// directories whose current run is found on each request. ledgers names,
+// by journal path or engine directory, the Flex reader's ledger of that
+// account's deposits and withdrawals; an account without one is compared
+// assuming none, and its card says so.
+type source struct {
+	journals, dirs []string
+	ledgers        map[string]string
+}
+
+// ledgersOf places each -cash-ledger value with its account: a bare path
+// belongs to the one -journal or -engine-dir given, and SOURCE=PATH to the
+// -journal or -engine-dir SOURCE names. A ledger that cannot be placed, or
+// a second for one account, is refused: a deposit mirrored on the wrong
+// account would misstate both.
+func ledgersOf(values, journals, dirs []string) (map[string]string, error) {
+	sources := append(append([]string{}, journals...), dirs...)
+	out := map[string]string{}
+	for _, v := range values {
+		src, path, named := strings.Cut(v, "=")
+		switch {
+		case !named && len(sources) != 1:
+			return nil, fmt.Errorf("dashboard: -cash-ledger %q must be SOURCE=PATH, naming one of the %d -journal or -engine-dir values", v, len(sources))
+		case !named:
+			src, path = sources[0], v
+		case !slices.Contains(sources, src):
+			return nil, fmt.Errorf("dashboard: -cash-ledger names %q, which is no -journal or -engine-dir", src)
+		}
+		if path == "" {
+			return nil, fmt.Errorf("dashboard: -cash-ledger %q names no ledger file", v)
+		}
+		if _, twice := out[src]; twice {
+			return nil, fmt.Errorf("dashboard: -cash-ledger is given twice for %q", src)
+		}
+		out[src] = path
+	}
+	return out, nil
+}
 
 // load reads and recovers each account's current log once, afresh, and its
 // earlier runs and the engine directories' other logs through logs. Only the
@@ -305,10 +343,10 @@ type source struct{ journals, dirs []string }
 // the current run's holdings, state, alerts and day's figures do not depend
 // on it.
 func load(src source, benchmark string, logs *logCache) ([]account, error) {
-	type current struct{ path, warning, name, message string }
+	type current struct{ path, warning, name, message, ledger string }
 	var paths []current
 	for _, path := range src.journals {
-		paths = append(paths, current{path: path})
+		paths = append(paths, current{path: path, ledger: src.ledgers[path]})
 	}
 	for _, dir := range src.dirs {
 		path, warning, err := currentLogIn(dir, logs)
@@ -317,11 +355,11 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 			paths = append(paths, current{name: filepath.Base(dir), message: filepath.Base(dir) + ": " + reason(err)})
 			continue
 		}
-		paths = append(paths, current{path: path, warning: warning, name: filepath.Base(dir)})
+		paths = append(paths, current{path: path, warning: warning, name: filepath.Base(dir), ledger: src.ledgers[dir]})
 	}
 	var out []account
 	for i, c := range paths {
-		a, err := loadOne(c.path, c.warning, benchmark, logs)
+		a, err := loadOne(c.path, c.warning, c.ledger, benchmark, logs)
 		if c.message == "" && err != nil && c.name != "" {
 			// An engine directory's head log that cannot be shown is that
 			// account's card; only a fixed journal fails the page.
@@ -339,8 +377,9 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 	return out, nil
 }
 
-// loadOne reads, verifies and views the log at path.
-func loadOne(path, warning, benchmark string, logs *logCache) (account, error) {
+// loadOne reads, verifies and views the log at path, with the cash ledger at
+// ledger ("" for none), read afresh on every request as the log is.
+func loadOne(path, warning, ledger, benchmark string, logs *logCache) (account, error) {
 	if path == "" {
 		return account{}, nil
 	}
@@ -356,7 +395,7 @@ func loadOne(path, warning, benchmark string, logs *logCache) (account, error) {
 	if recovery != nil {
 		history = report.EarlierRunsOfRecovery(path, *recovery, logs.earlier)
 	}
-	a, err := view(history, envelopes, benchmark)
+	a, err := view(history, report.LoadCashLedger(ledger, logs.readFile), envelopes, benchmark)
 	if err != nil {
 		return account{}, err
 	}
@@ -602,12 +641,12 @@ func (c *logCache) held(path string) bool {
 	return start || earlier || tied
 }
 
-func view(history report.History, envelopes []event.Envelope, benchmark string) (account, error) {
+func view(history report.History, ledger report.CashLedger, envelopes []event.Envelope, benchmark string) (account, error) {
 	date, err := report.LastDate(envelopes)
 	if err != nil {
 		return account{}, err
 	}
-	summary, err := report.SummarizeWithHistory(history, envelopes, date, benchmark)
+	summary, err := report.SummarizeWithCash(history, ledger, envelopes, date, benchmark)
 	if err != nil {
 		return account{}, err
 	}

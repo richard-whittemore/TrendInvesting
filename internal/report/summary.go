@@ -91,9 +91,13 @@ type SkippedLine struct {
 	Shares        float64
 }
 
-// Equity compares the account's net liquidation with the benchmark's close
-// over the points where both are recorded on one date. Returns are simple
-// price returns: the benchmark's dividends are not included.
+// Equity compares the account with a shadow account holding the benchmark
+// (equityOf has the rule) over the points where the account's net
+// liquidation and the benchmark's close are both recorded on one date. Both
+// returns are time-weighted, so a recorded deposit or withdrawal moves
+// neither; the benchmark's dividends are reinvested where its bars carry the
+// split- and dividend-adjusted view, and Assumption says in words what is
+// counted.
 //
 // The comparison runs from StartDate to EndDate, the latest paired point,
 // which can be earlier than the summary's date when that day has no bar or
@@ -116,6 +120,23 @@ type Equity struct {
 	DayAccountReturn   float64
 	DayBenchmarkReturn float64
 	Points             []EquityPoint
+	// ShadowValue is the shadow account's value on EndDate, and Gap the
+	// account's net liquidation less it.
+	ShadowValue float64
+	Gap         float64
+	// Verdict says whether the account is beating the benchmark since
+	// StartDate, from the two time-weighted returns; VerdictTone is
+	// VerdictAhead, VerdictBehind or VerdictLevel.
+	Verdict     string
+	VerdictTone string
+	// TransferCount, Deposits and Withdrawals are the recorded transfers
+	// the shadow account mirrored, Withdrawals as a positive sum.
+	TransferCount int
+	Deposits      float64
+	Withdrawals   float64
+	// Assumption states what the comparison counts: the benchmark's
+	// dividends, and the owner's transfers or that none is recorded.
+	Assumption string
 	// HistoryUnavailable is set when the chain of runs is broken
 	// (HistoryUnavailable, the function): the comparison then runs from
 	// HistoryStartsAt, the log of the first intact run it includes, not
@@ -132,11 +153,19 @@ type Equity struct {
 }
 
 // EquityPoint is one date on which the account's net liquidation and the
-// benchmark's split-adjusted close are both recorded.
+// benchmark's close are both recorded. Benchmark is the split-adjusted
+// close, the price as quoted; Shadow the shadow account's value at it;
+// Transfers the recorded transfers mirrored since the point before; and
+// AccountGrowth and BenchmarkGrowth each side's time-weighted growth since
+// the first point, rebased to 100 there.
 type EquityPoint struct {
-	Date      string
-	Net       float64
-	Benchmark float64
+	Date            string
+	Net             float64
+	Benchmark       float64
+	Shadow          float64
+	Transfers       float64
+	AccountGrowth   float64
+	BenchmarkGrowth float64
 }
 
 // Summary is one account's day.
@@ -194,7 +223,7 @@ type Summary struct {
 // trades) that does not read or
 // validate refuses the summary, as journalquery does.
 func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, error) {
-	return SummarizeWithHistory(History{}, envelopes, date, benchmark)
+	return SummarizeWithCash(History{}, CashLedger{}, envelopes, date, benchmark)
 }
 
 // SummarizeWithHistory is Summarize for a run that follows others: history
@@ -207,6 +236,16 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 // as its own. A broken history is named in the comparison, which then runs
 // over the intact runs alone.
 func SummarizeWithHistory(history History, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	return SummarizeWithCash(history, CashLedger{}, envelopes, date, benchmark)
+}
+
+// SummarizeWithCash is SummarizeWithHistory with the owner's recorded
+// deposits and withdrawals, ledger, which only the equity comparison reads:
+// its shadow account mirrors them and its returns leave them out
+// (equityOf). The ledger is read from the Flex reader's file, not from the
+// journal, so a transfer is counted once whether or not the engine also
+// journalled it.
+func SummarizeWithCash(history History, ledger CashLedger, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
 	earlier := history.Earlier
 	end, err := time.Parse(time.DateOnly, date)
 	if err != nil {
@@ -219,7 +258,7 @@ func SummarizeWithHistory(history History, envelopes []event.Envelope, date, ben
 	end = end.AddDate(0, 0, 1)
 	s := Summary{AccountID: account, StrategyID: strategy, Date: date, Benchmark: benchmark, EngineState: StateNormal}
 	orders := map[string]int{}
-	closes := map[string]float64{}
+	closes := map[string]benchBar{}
 	var points []equityPoint
 	netBy := map[string]float64{}
 	pairEarlier(earlier, end, account, benchmark, netBy, closes)
@@ -250,13 +289,13 @@ func SummarizeWithHistory(history History, envelopes []event.Envelope, date, ben
 			s.CashChecked, s.CashUnchecked = v2 && p.AsOfClose, v2 && !p.AsOfClose
 			s.CashDrift, s.UnexplainedCash = p.CashDrift, p.UnexplainedCash
 		case event.CompletedBarEventType:
-			p, err := readBar(e)
+			p, bar, err := readBar(e)
 			if err != nil {
 				s.RejectedInputs++
 				continue
 			}
 			if p.InstrumentID == benchmark {
-				closes[dateOf(p.PeriodEnd)] = p.SplitAdjusted.Close
+				closes[dateOf(p.PeriodEnd)] = bar
 			}
 		case event.EngineStateEventType:
 			var p event.EngineStatePayload
@@ -338,12 +377,12 @@ func SummarizeWithHistory(history History, envelopes []event.Envelope, date, ben
 		}
 	}
 	for d, net := range netBy {
-		if c, ok := closes[d]; ok && c > 0 && net > 0 {
-			points = append(points, equityPoint{date: d, net: net, benchmark: c})
+		if c, ok := closes[d]; ok && c.split > 0 && net > 0 {
+			points = append(points, equityPoint{date: d, net: net, benchmark: c.split})
 		}
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
-	s.Equity = equityOf(points, date)
+	s.Equity = equityOf(points, closes, ledger, benchmark, date)
 	if history.Broken != nil {
 		s.Equity.HistoryUnavailable, s.Equity.HistoryStartsAt = HistoryUnavailable(history.Broken), historyStartsAt(history)
 	}
@@ -357,7 +396,7 @@ func SummarizeWithHistory(history History, envelopes []event.Envelope, date, ben
 // reads its own by: a positions snapshot names this account and is later than
 // the last taken, and a bar or snapshot that does not read is skipped. The
 // current run's own records then replace a date both hold.
-func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark string, netBy, closes map[string]float64) {
+func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark string, netBy map[string]float64, closes map[string]benchBar) {
 	var last time.Time
 	taken := false
 	for _, e := range earlier {
@@ -376,8 +415,8 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark str
 			taken, last = true, p.AsOf
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
 		case event.CompletedBarEventType:
-			if p, err := readBar(e); err == nil && p.InstrumentID == benchmark {
-				closes[dateOf(p.PeriodEnd)] = p.SplitAdjusted.Close
+			if p, bar, err := readBar(e); err == nil && p.InstrumentID == benchmark {
+				closes[dateOf(p.PeriodEnd)] = bar
 			}
 		}
 	}
@@ -402,7 +441,7 @@ func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
 		case env.Type == event.TargetWeightConfigurationEventType, env.Type == event.OperatorRunApprovedEventType, env.Type == event.AccountSnapshotEventType:
 			keep = true
 		case env.Type == event.CompletedBarEventType:
-			if p, err := readBar(env); err == nil && p.InstrumentID == benchmark {
+			if p, _, err := readBar(env); err == nil && p.InstrumentID == benchmark {
 				keep = true
 			}
 		}
@@ -432,24 +471,26 @@ func readFill(e event.Envelope) (FillLine, error) {
 }
 
 // readBar decodes a bar at either version this build reads and validates it
-// in full at its own version. The benchmark comparison takes the
-// split-adjusted close of either: account money is kept in that one view
-// (ADR 0004, amendment), and a version 2 bar's split- and dividend-adjusted
-// view is for the target-weight strategies' signals only (ADR 0026, point 1),
-// never for an equity figure.
-func readBar(e event.Envelope) (event.CompletedBarPayload, error) {
+// in full at its own version, and returns its closes for the benchmark
+// comparison. The split-adjusted close is the price as quoted, the view
+// account money is kept in (ADR 0004, amendment). A version 2 bar's split-
+// and dividend-adjusted close is read only for the benchmark's growth, as
+// its ratios between sessions of one base are the benchmark held with its
+// dividends reinvested (CompletedBarAdjustedPayload); no account figure is
+// computed from it.
+func readBar(e event.Envelope) (event.CompletedBarPayload, benchBar, error) {
 	if e.SchemaVersion == event.CompletedBarAdjustedVersion {
 		var p event.CompletedBarAdjustedPayload
 		if err := read(e, barVersions, &p); err != nil {
-			return event.CompletedBarPayload{}, err
+			return event.CompletedBarPayload{}, benchBar{}, err
 		}
-		return p.CompletedBarPayload, nil
+		return p.CompletedBarPayload, benchBar{split: p.SplitAdjusted.Close, adjusted: p.Adjusted.Close, base: p.AdjustedBase, v2: true}, nil
 	}
 	var p event.CompletedBarPayload
 	if err := read(e, barVersions, &p); err != nil {
-		return event.CompletedBarPayload{}, err
+		return event.CompletedBarPayload{}, benchBar{}, err
 	}
-	return p, nil
+	return p, benchBar{split: p.SplitAdjusted.Close}, nil
 }
 
 // snapshotFollows applies the engine's own rule for a positions snapshot
@@ -476,26 +517,4 @@ func (s *Summary) order(index map[string]int, id, instrument, side string, quant
 type equityPoint struct {
 	date           string
 	net, benchmark float64
-}
-
-func equityOf(points []equityPoint, date string) Equity {
-	if len(points) < 2 {
-		return Equity{}
-	}
-	first, last, prev := points[0], points[len(points)-1], points[len(points)-2]
-	e := Equity{
-		Available: true, StartDate: first.date, EndDate: last.date,
-		AccountReturn:   last.net/first.net - 1,
-		BenchmarkReturn: last.benchmark/first.benchmark - 1,
-	}
-	for _, p := range points {
-		e.Points = append(e.Points, EquityPoint{Date: p.date, Net: p.net, Benchmark: p.benchmark})
-	}
-	e.Excess = e.AccountReturn - e.BenchmarkReturn
-	if last.date == date {
-		e.DayAvailable, e.DayStartDate = true, prev.date
-		e.DayAccountReturn = last.net/prev.net - 1
-		e.DayBenchmarkReturn = last.benchmark/prev.benchmark - 1
-	}
-	return e
 }

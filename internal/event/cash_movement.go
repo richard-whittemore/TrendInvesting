@@ -48,11 +48,11 @@ const (
 	EquityBeforeSameDaySnapshotLessAmount = "same-day-snapshot-less-amount"
 )
 
-// CashMovementVersions returns the versions ValidateSchema accepts. No
-// reader of the engine's log reads version 2 yet: the Turtle reducer reads
-// version 1 only (internal/strategy, notional.go), and version 2 is read
-// only by the adapter contract test (TestTheIBKRAdapterPayloadsDecodeAndValidate)
-// until a reader of the Flex reader's ledger is built.
+// CashMovementVersions returns the versions ValidateSchema accepts. The
+// Turtle reducer reads version 1 only (internal/strategy, notional.go);
+// version 2 is read from the Flex reader's ledger by the reporter and the
+// dashboard's equity comparison (internal/report, ParseCashLedger) and by
+// the adapter contract test (TestTheIBKRAdapterPayloadsDecodeAndValidate).
 func CashMovementVersions() []uint32 {
 	return []uint32{CashMovementSchemaVersion, CashMovementTransferVersion}
 }
