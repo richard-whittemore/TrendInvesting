@@ -1342,3 +1342,41 @@ func TestAReportOrListingGivingASecondSellAVenueOrderIDAnotherCarriesIsRefused(t
 		t.Fatalf("a synthetic report naming no venue order ID: %v", err)
 	}
 }
+
+// TestNoInputCanGiveTwoSellsOneVenueOrderIDWithinItself: a broker snapshot
+// lists each open order under a distinct, non-empty broker order ID, and a
+// lifecycle report names one order under a non-empty venue order ID, so a
+// single input cannot hand two sells one venue order ID, nor an empty one:
+// validation refuses it when it arrives, and nothing of it is taken in
+// (ADR 0019, amended 2026-10-15; ADR 0026, point 5; fail closed,
+// AGENTS.md).
+func TestNoInputCanGiveTwoSellsOneVenueOrderIDWithinItself(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(200))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	if err := g.RestoreReleased(restoredSell(54), nil, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	same := later(broker(200), 2)
+	same.OpenOrders = []event.BrokerOrder{
+		{BrokerOrderID: "ib-dup", ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 54},
+		{BrokerOrderID: "ib-dup", ClientOrderID: "tw-sell", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 60},
+	}
+	if _, err := g.ObserveBroker("broker:2", same); err == nil || !strings.Contains(err.Error(), "ascending") {
+		t.Errorf("one snapshot listing two sells under one broker order ID: err %v, want it refused as not strictly ascending", err)
+	}
+	empty := later(broker(200), 2)
+	empty.OpenOrders = []event.BrokerOrder{{ClientOrderID: "tw-old", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 54}}
+	if _, err := g.ObserveBroker("broker:2", empty); err == nil || !strings.Contains(err.Error(), "broker order id is required") {
+		t.Errorf("a snapshot listing a sell under no broker order ID: err %v, want it refused", err)
+	}
+	err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+		AccountID: "joint", ClientOrderID: "tw-sell", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: 60, LimitPrice: 1, OccurredAt: at.Add(time.Minute),
+	})
+	if err == nil || !strings.Contains(err.Error(), "order id is required") {
+		t.Errorf("a venue report naming no venue order ID: err %v, want it refused", err)
+	}
+	observe(t, g, "broker:2", later(broker(200), 2))
+	pendingIs(t, g, 114, "the two sells, 60 and 54, with none of the refused inputs taken in")
+}

@@ -3,6 +3,7 @@ package targetweight_test
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1739,9 +1740,10 @@ func TestARecoveredOrderStatingAnExecutionAlreadyReadIsRefused(t *testing.T) {
 // venue order ID is the venue's ID for one order, so a lifecycle report, or
 // a broker snapshot listing an order under its client order ID, that names
 // the venue order ID another order the run lists already carries is refused
-// when it arrives, naming the report and both orders, and nothing of it is
-// recorded: the run goes on to decide (ADR 0026, point 5, amended
-// 2026-10-18; fail closed, AGENTS.md).
+// when it arrives, naming the report and both orders (ADR 0026, point 5,
+// amended 2026-10-18; fail closed, AGENTS.md). A refusal stops the run for a
+// person to reconcile (ADR 0026, point 2, "Boost"); what the refused input
+// would have recorded is pinned by the next test.
 func TestAReportOrListingGivingAnOrderAVenueOrderIDAnotherCarriesIsRefused(t *testing.T) {
 	closes := flippingCloses()[:20]
 	r := simulate(t, options{closes: closes, hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}})
@@ -1791,5 +1793,77 @@ func TestAReportOrListingGivingAnOrderAVenueOrderIDAnotherCarriesIsRefused(t *te
 		Side: o.Side, Status: event.BrokerOrderWorking, RemainingQuantity: o.Quantity}}
 	if err := applyAfter(t, r, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "dup:listing", at.Add(time.Minute), broker); !names(err, "dup:listing", o.ClientOrderID, other, venueID) {
 		t.Errorf("a listing giving %s the venue order ID %s of %s: err %v, want it refused naming the listing and both orders", o.ClientOrderID, venueID, other, err)
+	}
+}
+
+// TestARefusedVenueOrderIDIsNotRecordedOnAnOrderWithNone: an order released
+// at the last decision has no venue order ID yet, so a report or a listing
+// giving it the ID a working order carries would, were the refusal to come
+// after the recording, leave it with that ID. The refusal changes nothing:
+// the next decision, with the inputs refused beforehand, is the one the run
+// makes without them (ADR 0026, point 5, amended 2026-10-18; fail closed,
+// AGENTS.md).
+func TestARefusedVenueOrderIDIsNotRecordedOnAnOrderWithNone(t *testing.T) {
+	closes := flippingCloses()[:21]
+	opts := options{closes: closes, hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}}
+	base := simulate(t, opts)
+	last := targets(t, base.decisions)[18].Boost
+	fresh := releasedBy(t, base.decisions, 18)
+	if len(last.WorkingOrders) != 1 || last.WorkingOrders[0].VenueOrderID == "" || len(fresh) != 1 {
+		t.Fatalf("setup: session 18 records %+v and releases %+v, want a working order with a venue order ID and one new order", last, fresh)
+	}
+	venueID, o := last.WorkingOrders[0].VenueOrderID, fresh[0]
+	at := sessionEnd(19).Add(-4 * time.Hour)
+	var errs []error
+	opts.intrude = map[int]func(func(string, uint32, string, time.Time, any) error){19: func(apply func(string, uint32, string, time.Time, any) error) {
+		report := event.LimitOrderLifecyclePayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: venueID,
+			InstrumentID: o.InstrumentID, Side: o.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at}
+		errs = append(errs, apply(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "dup:report", at, report))
+		broker := (&account{cash: 4000}).broker(at.Add(time.Minute), closes[18])
+		broker.OpenOrders = []event.BrokerOrder{{BrokerOrderID: venueID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID,
+			Side: o.Side, Status: event.BrokerOrderWorking, RemainingQuantity: o.Quantity}}
+		errs = append(errs, apply(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "dup:listing", at.Add(time.Minute), broker))
+	}}
+	got := simulate(t, opts)
+	if len(errs) != 2 || errs[0] == nil || errs[1] == nil {
+		t.Fatalf("the report and the listing giving the new order %s the venue order ID %s of a working order: errs %v, want both refused", o.ClientOrderID, venueID, errs)
+	}
+	if want, have := targets(t, base.decisions)[19:], targets(t, got.decisions)[19:]; !reflect.DeepEqual(want, have) {
+		t.Errorf("the decisions after the refused inputs are %+v, want the run's without them, %+v", have, want)
+	}
+}
+
+// TestNoInputCanGiveTwoOrdersOneVenueOrderIDWithinItself: a broker snapshot
+// lists each open order under a distinct, non-empty broker order ID, and a
+// lifecycle report names one order under a non-empty venue order ID, so
+// event validation refuses, before the run reads them, an input that would
+// give two orders one venue order ID within itself, or an empty one, which
+// refuseVenue would otherwise match against every order that has none yet
+// (ADR 0026, point 5, amended 2026-10-18; fail closed, AGENTS.md).
+func TestNoInputCanGiveTwoOrdersOneVenueOrderIDWithinItself(t *testing.T) {
+	closes := flippingCloses()[:19]
+	r := simulate(t, options{closes: closes, hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}})
+	fresh := releasedBy(t, r.decisions, 18)
+	if len(fresh) != 1 {
+		t.Fatalf("setup: session 18 releases %+v, want one new order", fresh)
+	}
+	o := fresh[0]
+	at := sessionEnd(len(closes) - 1).Add(time.Hour)
+	order := func(client, venue string) event.BrokerOrder {
+		return event.BrokerOrder{BrokerOrderID: venue, ClientOrderID: client, InstrumentID: o.InstrumentID, Side: o.Side, Status: event.BrokerOrderWorking, RemainingQuantity: o.Quantity}
+	}
+	broker := (&account{cash: 4000}).broker(at, closes[len(closes)-1])
+	broker.OpenOrders = []event.BrokerOrder{order(o.ClientOrderID, "ib-dup"), order("tw-other", "ib-dup")}
+	if err := applyAfter(t, r, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "dup:within", at, broker); err == nil || !strings.Contains(err.Error(), "ascending") {
+		t.Errorf("a snapshot listing two orders under one broker order ID: err %v, want it refused by validation", err)
+	}
+	broker.OpenOrders = []event.BrokerOrder{order(o.ClientOrderID, "")}
+	if err := applyAfter(t, r, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "dup:empty", at, broker); err == nil || !strings.Contains(err.Error(), "broker order id is required") {
+		t.Errorf("a snapshot listing an order under no broker order ID: err %v, want it refused by validation", err)
+	}
+	report := event.LimitOrderLifecyclePayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at}
+	if err := applyAfter(t, r, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "dup:noid", at, report); err == nil || !strings.Contains(err.Error(), "order id is required") {
+		t.Errorf("a venue report naming no venue order ID: err %v, want it refused by validation", err)
 	}
 }

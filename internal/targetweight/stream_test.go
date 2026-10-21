@@ -188,7 +188,11 @@ func (a *account) snapshot(at time.Time, price float64) event.AccountPositionsSn
 
 // options shape a run of the synthetic series.
 type options struct {
-	closes   []float64
+	closes []float64
+	// intrude, by session, feeds the run inputs the handler is expected to
+	// refuse, before that session's own: each is applied, and the run's
+	// sequence does not move for a refused one.
+	intrude  map[int]func(apply func(typ string, version uint32, id string, at time.Time, payload any) error)
 	skip     map[int]bool // sessions whose bar is missing
 	noSnap   map[int]bool // sessions with no account snapshot
 	noMark   map[int]bool // sessions with no mark
@@ -394,6 +398,16 @@ func simulate(t *testing.T, opts options) run {
 	for i := opts.from; i < len(opts.closes); i++ {
 		at := sessionEnd(i)
 		price := opts.closes[i]
+		if in := opts.intrude[i]; in != nil {
+			in(func(typ string, version uint32, id string, when time.Time, payload any) error {
+				before := s.sequence
+				_, err := rec.Apply(context.Background(), s.envelope(t, typ, version, id, when, payload))
+				if err != nil {
+					s.sequence = before
+				}
+				return err
+			})
+		}
 		acct.pending = append(acct.pending, opts.working[i]...)
 		if opts.reports != nil {
 			acct.pending = nil

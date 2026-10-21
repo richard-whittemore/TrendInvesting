@@ -1069,7 +1069,10 @@ func (h *Handler) learnVenueID(id, venueID string) {
 // awaiting the venue's verdict and the working ones) already carries: a
 // venue order ID names one order, and the failure is the input's, refused
 // when it arrives rather than found when the decision is written (ADR 0026,
-// point 5, amended 2026-10-18; fail closed, AGENTS.md).
+// point 5, amended 2026-10-18; fail closed, AGENTS.md). venueID is never
+// empty and one input never gives two orders the same ID: event validation
+// requires a venue report's order ID and each listing's broker order ID,
+// and lists the latter strictly ascending.
 func (h *Handler) refuseVenue(in event.Envelope, id, venueID string) error {
 	carried := func(other, otherVenue string) error {
 		if otherVenue == venueID && other != id {

@@ -286,7 +286,9 @@ func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 // refuseSharedVenue refuses broker snapshot id when it lists a sell of ours
 // under its client order ID with a broker order ID another sell of ours
 // carries as its venue order ID: a venue order ID names one order, and the
-// listing would give a second sell the ID (learnVenue).
+// listing would give a second sell the ID (learnVenue). One snapshot never
+// lists two orders under one broker order ID: its validation requires them
+// non-empty and strictly ascending.
 func (l *sellLedger) refuseSharedVenue(id string, orders []event.BrokerOrder) error {
 	for _, o := range orders {
 		if s := l.sells[o.ClientOrderID]; o.Side == event.OrderSideSell && s != nil && s.instrumentID == o.InstrumentID {
