@@ -1,5 +1,11 @@
 # The glide path: how the IRAs move into bonds as you age
 
+*For the owner. What share of each IRA the program means for bonds at your
+age, how it is worked out each month, where you can see it, and what can go
+wrong. The IRAs cannot run yet: the engine program still refuses a momentum
+configuration ([momentum](momentum.md), "Where this stands"). Terms are in
+the [glossary](glossary.md).*
+
 ## What it does and why it exists
 
 The momentum strategy that runs the IRAs is all stocks when you are young.
@@ -53,9 +59,11 @@ You give a birth **year and month** only, as `YYYY-MM` (for example
 
 Your birth value is personal. It has no default anywhere, it is never stored
 in the repository (every value there is made up), and error messages never
-print it. It comes only from the server's configuration. The configuration
-record at the top of each journal does contain it, so journals of real IRA
-runs stay on the server and are never committed.
+print it (an age outside the bounds below is reported as an age in months).
+It comes only from the server's configuration. The configuration record at
+the top of each journal does contain it, and every decision records your
+age in months, so journals of real IRA runs stay on the server and are never
+committed.
 
 ## The two sleeves
 
@@ -97,34 +105,36 @@ it) applies to the sum. So a small monthly step in b does not trade SHY every
 month, and IEF held by both sleeves in two risk-off months in a row is not
 resized just because the split between the sleeves moved.
 
-## What can go wrong
+## Where you see b
 
-Every one of these stops a trade rather than guessing.
+- **The dashboard** shows each decision's targets, rounded to whole percent:
+  the IEF and SHY targets there are the bond sleeve (and, for IEF, the sum of
+  both sleeves). It does not show b, your age or the sleeve shares
+  ([alerts and dashboard](alerts-and-dashboard.md)).
+- **The journal.** Each `strategy.targets.decided` record carries the glide
+  figures: `rebalance_session`, `age_months` and `bond_share` (b), and, for
+  a summed target, its `shares` by sleeve. `journal-query` has no report of
+  decisions, so they are read from the journal's JSON lines
+  ([journal-query](journal-query.md)).
+- The daily summary and the alerts do not mention b.
 
-- **A malformed birth value** (a day included, a month of 13, the wrong
-  shape) is refused when the configuration is checked. The run does not
-  start.
-- **An implausible age.** A birth value that makes you younger than 18 or
-  older than 110 is refused as a likely typo. The bounds are checked at the
-  configured first decision time, when the run starts, and again at every
-  decision's rebalance session, where a run that reaches an age above 110
-  stops with an error instead of deciding.
-- **A missing final bar for a bond fund.** SHY and IEF need their final bar
-  of the month like every other fund that is held or targeted. Whenever b is
-  above 0 the bond sleeve targets both, so if either has no final bar the
-  decision is withheld with the reason `missing-bars` and nothing trades that
-  month.
-- **A month-end session that never closed.** The next close records that
-  month's decision as withheld (`missing-bars`), still with its glide figures
-  for the rebalance day it would have used. If that age is implausible, the
-  run stops there too.
-- **A momentum book set above 98% invested.** The bond sleeve is fixed at
-  98% of b, so a momentum book invested above 98% could not be combined with
-  it. Such a configuration is refused when the run starts. A book invested
-  below 98% is accepted, and its bond sleeve stays at 98% of b.
-- **A restart does not remember the book.** A restarted run does not yet
-  read back the last decision's book, b or sleeve shares from its journal; it
-  starts from the next decision.
+## What can go wrong, and what the program does then
+
+Every one of these stops a trade rather than guessing. No glide-path problem
+has a reason code or an alert of its own: a refused configuration or a
+stopped run shows as an engine that is not running, and a missing bond-fund
+bar as the momentum chapter's withheld month.
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| The engine will not start, with an error beginning `glide: birth` (for example "birth month 13 is not 01-12", "birth value must be YYYY-MM") | A malformed birth value (a day included, a month of 13, the wrong shape) is refused when the configuration is checked. The run does not start and nothing is recorded | Correct `glide.birth` in the server's IRA configuration as `YYYY-MM` and start again |
+| The engine will not start, with "birth value implies an age of N months, outside 18 to 110 years" | A birth value that makes you younger than 18 or older than 110 at the configured first decision time is refused as a likely typo | Correct the birth value and start again |
+| The engine stops at a month's close with the same age error; once sessions pass with nothing recorded, the reporter's no-heartbeat alert follows ([alerts and dashboard](alerts-and-dashboard.md)) | At every decision the age is checked again on the rebalance session; a run that reaches an age above 110 stops with an error instead of deciding. No decision is recorded for that month | Check the birth value. If it was wrong, correct it and start a fresh run (next row) |
+| You find the birth month was wrong after the run started | The birth value is part of the configuration, so it is part of the configuration's hash. The engine resumes a log only under the configuration that recorded it ("the durable log opens with a different configuration input"), so a corrected birth month cannot be slipped into a running run | Correct the configuration and start a fresh run with your approval ([restart](restart.md); `docs/runbooks/durable-log.md`, "Restarting an engine"). Not mid-rebalance ([momentum](momentum.md), "What can go wrong"). The earlier decisions keep the b they recorded |
+| Alert `<account>: decision withheld (missing-bars)` (urgent) in a month when b is above 0, naming SHY or IEF | SHY and IEF need their final bar of the month like every other fund that is held or targeted. Whenever b is above 0 the bond sleeve targets both, so if either has no final bar the month is withheld and nothing trades. See [engine](engine.md), "What can go wrong" | Fix the feed; the next month decides as usual |
+| Alert `<account>: decision withheld (missing-bars)` after a month-end session that never closed | The next close records that month's decision as withheld, still with its glide figures for the rebalance day it would have used. If that age is out of bounds, the run stops there too | As for the row above |
+| The engine will not start: "momentum invested … is above the bond sleeve's 0.98" | The bond sleeve is fixed at 98% of b, so a momentum book invested above 98% could not be combined with it. A book invested below 98% is accepted, and its bond sleeve stays at 98% of b | Set `momentum.invested` to 0.98 or below |
+| The engine stops and you restart it | b needs no memory: it is worked out afresh each month from the birth value and the rebalance session. After a **crash**, the engine resumes: it replays its whole log, so it is exactly where it was, book, b and sleeve shares included. A **fresh run** reads nothing of the previous run's book from its journal: its first decision works from IBKR's account snapshot, and b from your birth value as always ([restart](restart.md)) | After a crash, resume; otherwise start a fresh run with your approval (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 
 ## Where to look
 
@@ -136,3 +146,20 @@ Every one of these stops a trade rather than guessing.
 - The recorded figures: `GlideFigures` and `SleeveShare` in
   `internal/event/target_weight_decisions.go`.
 - The rules: ADR 0026 (point 6 for the bond sleeve) and plan.md section 2.
+- Tests of the schedule and the sleeves, in `internal/targetweight/glide`:
+  `TestAnchorsExactAndEitherSide`, `TestAgeMonthsChangesOnFirstOfMonth`,
+  `TestBirthRefusals`, `TestBadAnchorsFailClosed`,
+  `TestCombineSumsIEFAndRecordsShares`, `TestCombineWeightsSumTo98`,
+  `TestCombineZeroShareLeavesMomentumUntouched`, `TestCombineRefusals`,
+  `TestScheduleMatchesReferenceFormulaEveryMonth`,
+  `TestScheduleMatchesValuesComputedFromGlidePathPy`,
+  `TestEndToEndFromBirthValue`.
+- Tests of the run, in `internal/targetweight`:
+  `TestGlideBondShareStepsAcrossTheMonthBoundary`,
+  `TestGlideSleevesAreSummedIntoOneTarget`,
+  `TestGlideBandAppliesToTheSummedTargets`,
+  `TestGlideBondFundsNeedTheirFinalBar`, `TestGlideBirthValueIsRefused`,
+  `TestGlideAgeBeyondThePlausibleStopsTheRun`,
+  `TestGlideJournalIsByteIdenticalAndReplays`,
+  `TestAMissedDecisionRecordsTheGlideOnItsRebalanceSession`,
+  `TestGlideAgeBeyondThePlausibleAtAMissedDecisionStopsTheRun`.

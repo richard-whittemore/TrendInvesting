@@ -137,16 +137,22 @@ A replay of the same journal gives the same verdict and the same state change,
 byte for byte.
 
 The alert (see [alerts-and-dashboard](alerts-and-dashboard.md)) is one per
-mismatch, on every channel you named (PagerDuty and ntfy). It says what
+mismatch, urgent, on every channel you named (PagerDuty and ntfy). The
+engine-state change the same reconciliation causes is part of that one
+incident, not a second alert. A reconciliation that matches or is explained
+sends nothing. It says what
 differs, the state the account is now in, what it still does and what it has
 stopped doing. The state is the account's whole state, not just this
 reconciliation's: an account already Halted is told it is still Halted, and a
-Degraded account's scope includes what was already frozen. It repeats until you acknowledge it. On the public ntfy relay
-the alert names what is in doubt but carries no figure; the figures go to
-PagerDuty, your own ntfy server, the dashboard and `journal-query`. A
-reconciliation that could not be verified says only that on the public relay,
-and sends you to the private channel for the reasons, which can carry
-amounts.
+Degraded account's scope includes what was already frozen. It repeats (every 30 minutes by default) until you acknowledge it
+with `operator acknowledge` ([operator](operator.md)). On the public ntfy
+relay the alert names what is in doubt but carries no figure; the figures
+go to PagerDuty, your own ntfy server and the dashboard, which shows the
+full alert. `journal-query refusals` shows the engine-state change and its
+detail, but no `journal-query` report lists the reconciliation result's
+figures themselves ([journal-query](journal-query.md)). A reconciliation
+that could not be verified says only that on the public relay, and sends you
+to the private channel for the reasons, which can carry amounts.
 
 ## What the adapter sends
 
@@ -168,6 +174,10 @@ own date), else at the read time ([paper trading](paper-trading.md), "A
 paper day"). The reconciliation always carries the read time, so it is
 never earlier than the book it is compared with.
 
+Today its main loop sends only the first: a broker snapshot ahead of each
+day's market data. The reconciliation record is built and tested but never
+sent, so the engine never receives one.
+
 Every field is always stated. A list with nothing in it is sent as an empty
 list. Something IBKR did not deliver, or delivered in a form the engine cannot
 represent (a fractional share, an option, a balance in another currency, an
@@ -182,36 +192,22 @@ Two conservative choices, both of which can only make a sale smaller:
   open-order report does not carry what has filled;
 - an order IBKR holds back (`Inactive`) counts as one that may still execute.
 
-## What can go wrong
+## What can go wrong, and what the program does then
 
-- **No account snapshot yet.** With nothing to compare against, a
-  reconciliation would be unverifiable and halt the account, so the adapter
-  sends none until the engine holds a book; the run's first delivery carries
-  the first, right behind its account snapshot.
-- **A run's first reading that is not the book it was compared with** (the
-  previous run's last close, or your starting book). The adapter sends its
-  reconciliation alone and withholds its snapshots, so the engine, holding
-  no book, finds it unverifiable and halts, and nothing of that reading is
-  taken as the book, by this run or the next. Clear it with a fresh run whose
-  approval states the book you check in IBKR (`operator approve -log ...
-  -clear-incident ... -positions ... -cash ... -currency USD`;
-  [restart](restart.md)): without one, the fresh run is compared with the
-  same book again and halts again.
-- **IBKR cannot be read.** Unverifiable, Halted. The alert names what could not
-  be read.
-- **A dividend, interest charge or fee the journal has not recorded.** The cash
-  differs, so the account goes Degraded on cash: buys stop until you approve
-  a fresh run that clears the incident. **No command records the missing
-  event today**: you check it on IBKR's cash activity and then clear the
-  incident with `operator approve -clear-incident`
-  (`docs/runbooks/reconciliation.md`, *Recover*). A restart that continues the incident
-  carries the cash scope in its approval (`"scope_cash_components":
-  ["total-cash"]`), so buys stay refused. Margin interest on the joint account is
-  not compared yet (its book carries no cash).
-- **A fill stamped at the moment of the read.** The account can go Degraded on
-  that instrument. The morning read is before the open precisely so that
-  nothing is filling. A fill report lost during a session is not caught by
-  the morning check at all (see "What the morning check covers").
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| Alert: `<account>: reconciliation <classification> (<id>)`, urgent, repeating until acknowledged; `<classification>` is `unexplained` or `unverifiable`, `<id>` the reconciliation's ID | Sent once per reconciliation that degrades or halts. Its text names what differs (or "evidence that could not be compared"), the account's whole state after it, what it still does and what it has stopped; on the public relay, no figures. It ends "Recovery is a person's: docs/runbooks/reconciliation.md." | Read the full text on PagerDuty or the dashboard. Follow `docs/runbooks/reconciliation.md`, "First, in every case". Acknowledge with `operator acknowledge` and the alert key the text ends with. |
+| `reconciliation-unexplained`. Alert: `<account>: reconciliation unexplained (<id>)` | A difference no journalled event accounts for. The account goes **Degraded** on exactly what differs: a holding's instrument is frozen, unexplained cash refuses every buy. A later difference widens the scope; a later match never brings it back to Normal. | `docs/runbooks/reconciliation.md`, "Find the cause", then "Recover": explain each difference at IBKR, then start a fresh run whose approval clears the incident (`operator approve -clear-incident <id>`), or carries it in force if something is still unexplained ([restart](restart.md)). |
+| `reconciliation-unverifiable`. Alert: `<account>: reconciliation unverifiable (<id>)` | The figures could not be compared, so the account goes **Halted**: no order is released, except, for the joint account, the one sale back to 98%. The private text lists why, for example `the broker's positions could not be read`, `the broker's total cash could not be read`, `no account snapshot has been recorded, so the journal has no book to compare`, `the observation as of ... precedes the book as of ...`, or `the broker's cash is in ...; the book's is in ...`. | Fix what could not be read (the adapter's link, `journalctl -u ti-adapter-boost`), then follow the runbook's "Recover". Leaving Halted is never automatic: it takes a fresh run you approve. |
+| A dividend, interest charge, fee or fill the journal has not recorded | Cash (or that instrument) differs, so the account goes Degraded: on cash, buys stop. **No command records the missing event**: `operator` has four commands (the kill switch, an approval, a rebalance clearance and an acknowledgement), and none records a market or account event. | Check the item on IBKR's activity, write down what you found, and either approve a fresh run that clears the incident (`operator approve -clear-incident <id>`) or one that carries it in force (leave `-clear-incident` out; for cash its scope is `"scope_cash_components": ["total-cash"]`, so buys stay refused) (`docs/runbooks/reconciliation.md`, "Recover"). |
+| Private text names `corporate action ... (... of ...) is not one a target-weight book can apply` | A delisting, merger or symbol change: the book can apply only fills, dividends and splits, so the reconciliation is unverifiable and the account goes Halted. | Check at IBKR what the account now holds for that stock. There is no way to record the action for the program: clear the incident in a fresh run once the holding is understood. For an IRA, the next rebalance sells what the rule no longer targets. |
+| An account has no account snapshot yet (a start or reconnect before the run's first delivery) | The adapter sends no reconciliation: with no book to compare, it would be unverifiable and halt the account. The run's first delivery carries the first, right behind its account snapshot. | Nothing. |
+| A run's first reading is not the book it was compared with (the previous run's last close, or your starting book) | The adapter sends its reconciliation alone and withholds its snapshots, so the engine, holding no book, finds it unverifiable and **Halted**; nothing of that reading is taken as the book, by this run or the next. | Clear it with a fresh run whose approval states the book you check in IBKR (`operator approve -log <the halted run's log> -account <account> -by owner -clear-incident <id> -positions SYM=<shares> -cash <total cash> -currency USD -out <approval file>`, typed right after reading the book in IBKR; [restart](restart.md)). Without a stated book, the fresh run is compared with the same book again and halts again. |
+| The daily summary shows `cash drift` and `unexplained cash` | Information only: the drift since the previous close and that drift added up since the cash was last explained (an explained reconciliation, else the starting book). The program does not act on it, and the post-close reading is stamped at its read time instead of the close when the drift exceeds 1% of net liquidation (the session is then withheld). | A small posting day (interest, a dividend) is expected; a figure that keeps growing is a cash movement to find at IBKR before approving anything. |
+| Margin interest on the joint account | Not compared: Boost's book states no cash, so the result says cash is not compared. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
+| A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
+| A fill stamped in the same second as the morning read | It counts as after the read. If IBKR's figure includes it, the result is a difference and the account goes Degraded on that instrument: the safe side. | Check the fill at IBKR, then recover as for any difference. |
+| A fill report lost during a session, or a difference that arises while the market is open | Not caught by the morning check: the next close's snapshot absorbs it ("What the morning check covers"). | Compare IBKR with the journal yourself when anything looks wrong. |
 
 ## What is not built yet
 

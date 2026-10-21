@@ -12,7 +12,8 @@ The minimum-lot rule, called D7-L in the design (ADR 0026, point 2, and the
 each stock the momentum book would hold, it compares the price of one share
 (the previous session's raw close) with the dollar value that stock would get:
 its weight, times the momentum share of the account (1 minus the bond share
-from the glide path), times the account's net liquidation value.
+from the glide path), times the account's net liquidation value (what the
+account would be worth if everything were sold now; see the [glossary](glossary.md)).
 
 If one share costs more than that value, the stock is **skipped** and the
 next-ranked stock that is eligible, and within the sector cap, takes its
@@ -96,7 +97,10 @@ A book with no stock and nothing skipped (nothing eligible) is withheld as
 Whole shares also mean that a small trade can round down to zero shares. The
 program records every such trade as a `strategy.order.skipped` event instead
 of dropping it silently. It names the instrument, the shares the rule asked
-for and one of three reasons:
+for and one of three reasons. No alert is sent; the daily summary and the
+dashboard list the day's skipped trades under "Trades skipped", and
+`journal-query orders` lists each as `skipped` (see "What can go wrong"
+below).
 
 - `below-one-share`: the trade the planner sized is less than one share. For
   a stock already held this is a trade past the rebalance band; a buy of a
@@ -196,27 +200,25 @@ version, `TestOrderSkippedValidate` and `TestUnaffordableNamesValidate` (in
 `TestAnAllUnaffordableWithholdIsUrgent` (in `internal/report`) pins the
 alert.
 
-## What can go wrong and what the program does then
+## What can go wrong, and what the program does then
 
-- **No stock with a target is affordable.** The decision is withheld as
-  `all-unaffordable` and the account keeps its book; an urgent alert is
-  sent. Check the net liquidation value in the detail against the broker and
-  the one-share prices of the `unaffordable` names against the market. If the
-  figures are right, the account is too small for the book; if not, fix the
-  data and the next decision runs on it.
-- **A held stock is kept although it costs more than its target.** That is
-  intended (`held-one-lot-short`). Check its recorded share of the account:
-  if it has grown large, the account is small for that stock's price; the
-  next rebalance compares it again.
-- **A stock is skipped and the book holds fewer or different names than the
-  research.** That is intended. The decision keeps whether the backtest would
-  have picked each stock, so the difference can be measured.
-- **A trade rounds to no shares.** It is recorded as `strategy.order.skipped`
-  with its reason; nothing is sent.
-- **No account snapshot as of the previous close.** The rule is not applied
-  and the decision is withheld as a stale account snapshot; nothing is
-  traded until the next decision.
-- **Missing bars, or an earlier rebalance still working.** The decision is
-  withheld, as before; the MinimumLot figures stay on the withheld record.
-- **An old journal will not replay.** Journals from before rules version 1.4.0
-  are history only. Start a new run from the current build.
+The reporter sends no alert for the three skipped-trade reasons below. The
+daily summary and the dashboard list the day's skipped trades under "Trades
+skipped" (each with its side, the shares the rule asked for and its reason),
+and `journal-query orders` lists every one as `skipped`
+([journal-query](journal-query.md)).
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| `all-unaffordable`. Alert: `<account>: decision withheld (all-unaffordable)`, urgent, with the detail naming the one-share lot, the momentum scale and the net liquidation value used, and how many candidates were valued and found unaffordable | No stock with a target above zero can be bought at its target (or the only ones are held stocks kept one lot short). Decides nothing, keeps the book the account holds, orders nothing. Every skipped stock is recorded `unaffordable` with its one-share price and target value. | Check the net liquidation value in the detail against the broker, and the one-share prices of the `unaffordable` names against the market. If the figures are right, the account is too small for the book; nothing to fix, and the next month decides afresh. If they are wrong, fix the data; the next decision runs on it. |
+| `below-one-share`. No alert. Listed under "Trades skipped" in the daily summary and the dashboard, and as `skipped` in `journal-query orders`, with the instrument and the shares the rule asked for | The trade the planner sized is less than one share, so whole-share rounding leaves none. For a stock already held this is a trade past the 25% rebalance band; a buy of a stock not held has no band. Nothing is sent for it. | Nothing. The next month compares again. If it keeps happening for a stock you want, the account is small for that stock's price. |
+| `scaled-below-one-share`. No alert. Listed under "Trades skipped" in the daily summary and the dashboard, and as `skipped` in `journal-query orders` (the scale used is in the journal's `strategy.order.skipped` record) | A buy was scaled down to fit the budget (the fee allowance) and is left with less than one share. Nothing is sent for it. | Nothing. The next month decides afresh. |
+| `held-by-working-sells`. No alert. Listed under "Trades skipped" in the daily summary and the dashboard, and as `skipped` in `journal-query orders` | A sell was sized at one share or more, but the whole holding is already committed to sells that are still working, so there is nothing left to sell. Nothing more is sent. | Nothing, unless those working sells do not fill; then see [order lifecycle](order-lifecycle.md). |
+| A held stock listed `held-one-lot-short` in the decision, with its holding and share of the account | Intended. It keeps its place and weight in the book and no order is placed in it: not bought, not sold, not trimmed. | Check its recorded share of the account. If it has grown large, the account is small for that stock's price. The next rebalance compares it again. |
+| A stock listed `unaffordable` while the book still decides | Intended. The stock is skipped and the next-ranked eligible stock within the sector cap takes its place. The decision keeps whether the backtest would have picked it, so the difference can be measured. | Nothing. |
+| The decision says every pick's target is zero (fully risk-off) | Intended, not a fault: nothing is compared, the whole invested fraction goes to the risk-off instrument and every held stock is sold. | Nothing. |
+| The decision is withheld because there is no account snapshot as of the previous close (a stale account snapshot; owned by [engine](engine.md)) | The minimum-lot rule is not applied and nothing is traded until the next decision. | See the engine chapter's table. |
+| The decision is withheld for missing bars, or because an earlier rebalance is still working | Withheld as before; the minimum-lot figures stay on the withheld record beside the unaffordable stocks they value. | See [engine](engine.md) and [momentum](momentum.md). |
+| No stock can be picked and none was skipped as unaffordable (nothing eligible; owned by [momentum](momentum.md)) | Withheld, book kept. | See the momentum chapter's table. |
+| An old journal will not replay | Journals written before rules version 1.4.0 (and, since the held-stock change, before 1.17.0) do not replay under this build; they are history only. | Start a new run from the current build. |
+

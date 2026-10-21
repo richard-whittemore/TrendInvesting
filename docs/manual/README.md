@@ -30,7 +30,8 @@ gate (plan section 9, Phase 5).
 ## Built today and not built yet
 
 This is the one list for the whole program. Other chapters link here
-rather than keep their own. As of `main` on 2026-10-18:
+rather than keep their own. As of `main` on 2026-10-18, after the adapter
+began delivering the data job's daily file to the engine:
 
 | Piece | Built today | Not built yet |
 | --- | --- | --- |
@@ -56,7 +57,7 @@ are what this build runs):
 | IBKR broker snapshot (`account.broker.snapshot`) and mark (`market.mark.recorded`) the adapter writes | 2 |
 | Target-weight configuration schema | 7 |
 | Decision record (`strategy.targets.decided`) | 6 |
-| Fresh-run approval (`operator.run.approved`) | 2 |
+| Fresh-run approval (`operator.run.approved`); version 3 states the starting book | 3 |
 | IB Gateway, pinned | 10.50.1f |
 | IBKR TWS API (`ibapi`), pinned | 10.51.01 |
 | IBC, pinned | 3.24.2 |

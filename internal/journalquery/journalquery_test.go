@@ -1008,3 +1008,59 @@ func TestTheCompactUniverseInputsAreRead(t *testing.T) {
 		t.Errorf("fills: %v %v", fills.Rows, err)
 	}
 }
+
+// TestSkippedTradesAreListedWithTheOrders: a trade the order planner sized
+// but could not order is recorded so no planned trade disappears silently
+// (ADR 0026, point 8), so the orders report lists it as skipped, with its
+// side, no shares ordered, its reference price, and in the note its reason
+// and the unrounded shares the rule asked for. Filters apply to it as to any
+// order; a version this build does not know, or an invalid record, is
+// refused.
+func TestSkippedTradesAreListedWithTheOrders(t *testing.T) {
+	d := at(time.March, 2)
+	skipped := event.OrderSkippedPayload{AccountID: "A", Tag: "t", ClientOrderID: "c-1", InstrumentID: "AAA", Side: event.OrderSideBuy,
+		Phase: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: 0.4, TargetWeight: 0.5, NetLiquidation: 1, ReferencePrice: 3}
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input, dec(event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, d, skipped)))}
+	o, err := journalquery.Orders(js, journalquery.Filter{})
+	if err != nil || len(o.Rows) != 1 {
+		t.Fatalf("orders: %v %+v", err, o)
+	}
+	for column, want := range map[string]string{"event": "skipped", "account": "A", "instrument": "AAA", "side": "buy", "quantity": "0", "price": "3.00",
+		"note": "below-one-share: 0.4 shares wanted"} {
+		if got := cell(o, 0, column); got != want {
+			t.Errorf("%s = %q, want %q", column, got, want)
+		}
+	}
+	if o, _ := journalquery.Orders(js, journalquery.Filter{Instrument: "BBB"}); len(o.Rows) != 0 {
+		t.Errorf("an instrument filter: %v", o.Rows)
+	}
+	for name, bad := range map[string]rec{
+		"unknown version": dec(event.OrderSkippedEventType, event.OrderSkippedSchemaVersion+1, d, skipped),
+		"invalid":         dec(event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, d, event.OrderSkippedPayload{AccountID: "A"}),
+	} {
+		js := []journalquery.Journal{load(t, "j", build(t, input, bad))}
+		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 2") {
+			t.Errorf("%s: accepted or unnamed: %v", name, err)
+		}
+	}
+}
+
+// TestSkippedSharesInTheOrdersNoteAreBounded: the recorded shares are the
+// planner's unrounded float (ADR 0026, point 8), so 0.1+0.2 is noted to the
+// schema's six decimals, not as binary noise.
+func TestSkippedSharesInTheOrdersNoteAreBounded(t *testing.T) {
+	d := at(time.March, 2)
+	a, b := 0.1, 0.2
+	skipped := event.OrderSkippedPayload{AccountID: "A", Tag: "t", ClientOrderID: "c-1", InstrumentID: "AAA", Side: event.OrderSideBuy,
+		Phase: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: a + b, TargetWeight: 0.5, NetLiquidation: 1, ReferencePrice: 3}
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input, dec(event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, d, skipped)))}
+	o, err := journalquery.Orders(js, journalquery.Filter{})
+	if err != nil || len(o.Rows) != 1 {
+		t.Fatalf("orders: %v %+v", err, o)
+	}
+	if got, want := cell(o, 0, "note"), "below-one-share: 0.3 shares wanted"; got != want {
+		t.Errorf("note = %q, want %q", got, want)
+	}
+}

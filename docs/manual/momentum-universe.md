@@ -49,7 +49,10 @@ histories.
 Ranking is a rule, and rules live in Go (ADR 0026, point 1). The market-data
 step that writes the histories is Python, so it does not rank: it asks a
 small Go command, `universe-rank`, which runs the engine's own ranking code
-on the snapshot and reads the IRA's own configuration. The engine then ranks
+on the snapshot and reads the IRA's own configuration (its one flag is
+`-config <file>`; it reads one request per line on standard input, a universe
+snapshot and the next session, and writes the stocks to fetch histories for,
+one answer per line). The engine then ranks
 the same snapshot again when the histories arrive and refuses them if they
 name any other set of stocks. A ranker built from older code, or run with the
 wrong configuration, therefore stops the run instead of changing what it
@@ -217,42 +220,6 @@ snapshot even when the next day's has arrived),
 `TestRetractingTheNextSessionDecidesTheLastOneClosed`,
 `TestSessionRetractionRules` and the encoder's `RetractionTest`.
 
-## What can go wrong, and what the engine does
-
-The engine stops the run with a message, and decides nothing from the input,
-when:
-
-- a history names a stock the engine did not rank, or one it ranked has no
-  history;
-- a history arrives before its session's universe snapshot, for a session
-  that is not the last of its month, for a session that has already closed
-  (unless a late retraction left that session's decision waiting for it), or
-  twice for one stock;
-- a universe snapshot arrives while the histories of the one before it are
-  still waiting for their session to close;
-- a history arrives in a run configured `"bars"`;
-- a ranked stock with both a bar and a history has a bar whose raw close
-  differs from its universe row's close;
-- a history has a price on a day the calendar does not list, or a price that
-  disagrees with one the engine already holds for that stock and day, or was
-  adjusted from a different base;
-- a retraction names a day not on the calendar, or any day on or before the
-  last session closed (a retraction must name a session after it; a day
-  before it that never closed cannot be repaired by retracting it), a day
-  whose bars, universe snapshot or histories have arrived (it traded), or
-  would leave the calendar with no session after the last one closed.
-
-A second copy of the same retraction changes nothing, and a later calendar
-that still lists the cancelled day is read without it.
-
-A month's last session with no history for the stocks it ranks in a compact
-run, or a ranked stock without its bar in a bars run, is not a stop: the decision is
-withheld as `histories-missing` or `missing-bars` (above).
-
-A stock whose history is short or has a gap is recorded in the decision as
-`short-history` or `gap` and left out of that month, exactly as with daily
-bars (ADR 0026, point 5), unless you hold it (next section).
-
 ## A stock you hold with a missing day
 
 Sometimes a stock has no price for a day inside its last 253 sessions: it
@@ -306,6 +273,43 @@ Tests: `TestAHeldStockWithOneMissingSessionIsDecidedAcrossTheGap`,
 (`internal/targetweight`), and
 `TestDecideScoresAHeldNameAcrossItsGapAsTheBacktestDoes` and its neighbours
 in `internal/targetweight/momentum/held_gap_test.go`.
+
+## What can go wrong, and what the program does then
+
+Two kinds of trouble. In the first the engine **withholds** one month's
+decision: it writes down why, keeps the book the account holds and sends an
+alert. In the second it meets input it cannot trust and **stops the run**
+with a message, deciding nothing from that input. A withheld month repairs
+itself at the next month's decision; a stopped run does not (the second
+table). The reporter's alert for a withheld month is
+`<account>: decision withheld (<reason>)`, filled in as shown below. It is
+sent once, not repeated until you acknowledge it ([alerts](alerts-and-dashboard.md)).
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| `missing-universe`. Alert: `<account>: decision withheld (missing-universe)`, urgent, with the detail "no universe snapshot with a member for the session <date>" | Found no universe snapshot for the session the month closed on, or a snapshot that ranks no stock. Decides nothing, keeps the book, orders nothing. | Check that the daily data job recorded and delivered that session's universe ([market data](market-data.md), "The daily data job"). Nothing to redo: the next decision is at the next month's last session. |
+| `histories-missing`. Alert: `<account>: decision withheld (histories-missing)`, urgent, with the detail "no market.close.history arrived for the N members ranked ..." | In a compact run, the month's last session closed with its universe snapshot but no price history for the stocks it ranks. Does not decide from the few stocks it has bars for. Keeps the book. The same reason is used when a late retraction made a day the decision session and the next session closed before any histories came (see "A session the exchange cancels"). | Find out why the histories were not written: the ranker (`universe-rank`) answered with no stocks, was not used (`encode` run without `--ranker`), or the stream was cut. Fix the data job. The next month decides afresh. |
+| `labels-missing`. Alert: `<account>: decision withheld (labels-missing)`, urgent, with the detail "how many of how many had no label" and the ceiling (20%) | More than the configured share (`max_unlabelled_share`, 0.20) of the ranked stocks have no sector label, so it does not decide. Keeps the book. | Open the latest `sectors-iwv` and `sectors-nasdaq` recordings for the session. Check each still has a sector column and its usual sector names. A renamed column or sector is the usual cause. Fix the sector step before the next month ([market data](market-data.md)). |
+| A bars run: the decision-withheld alert for missing bars (explained in [engine](engine.md), 'What can go wrong'), with the detail "N of the M members ranked ... have no bar in that session" | In a run configured `"bars"`, a month's last session whose snapshot ranks any stock without a bar that session is withheld, even when the stocks you hold have bars. Keeps the book. | Re-encode with `--universe-members` so every ranked stock has its bar, and check the data job's log for stocks left out for bad data. |
+| A held stock listed in the decision as `gap` with no target, then sold (bars run, or a compact run where the stock was not named with `--optional`) | The stock has a missing day in its last 253 sessions and the engine may not score across it, so it is not in the book and the rebalance sells it. | Name every holding with `--optional` in a compact run (mandatory). In a bars run this is expected; nothing to do. |
+| A stock listed in the decision as `short-history` or `gap` that you do not hold | Left out of that month, exactly as with daily bars. | Nothing. It can be ranked again once its last 253 sessions are complete. |
+| A held stock listed with its usual status and `gap_sessions` naming the missing days | Scored across the hole from its last 253 prices in 260 sessions, then kept, trimmed, topped up or sold on its score. | Nothing. This is the intended rule (compact run only). |
+| A held stock listed as `short-history` | Fewer than 253 prices in its last 260 sessions (more than seven missing, or too new). Sold at the rebalance, as the backtest left it out too. | Nothing. |
+| The market-data step refuses the whole stream when you name a holding with `--optional` and its bar is unusable (a missing or negative price, a split or dividend that cannot be adjusted) | No stream is written, so the engine receives no input and decides nothing for the session. | Fix the data ([market data](market-data.md)), then encode again. |
+
+The engine **stops the run** with a message, and decides nothing from the
+input, when it meets any of these:
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| "history ... names ..., but the universe of ... ranks ..." or "close histories for the session ... name [...], but the universe ranks [...]": a history for a stock the engine did not rank, or a ranked stock with no history | Refuses the input and stops the run. The input is not recorded. | The ranker that wrote the histories was built from older code or run with the wrong configuration. Run `universe-rank -config <the IRA's own configuration file>` from the current build; re-encode; see [engine](engine.md) and [restart](restart.md) to start again. |
+| "history ... ends at ..., which is not the session of the universe snapshot held", "... on or before the last session closed ...", "close histories arrived for the session ..., which is not a decision session with its universe snapshot", "a second close history for ...", or a universe snapshot arriving while the histories of the one before are still waiting | A history that came before its snapshot, for a session that is not the last of its month, for a session already closed (unless a late retraction left that session's decision waiting), or twice for one stock. Stops the run. | The stream is out of order or duplicated. Re-encode from the recordings; do not edit the stream by hand. |
+| "this run reads bars for its universe members ..., never a close history" | A history arrived in a run configured `"bars"`. Stops the run. | The stream and the configuration disagree on shape. Encode with `--universe-members` for a bars run, or set `universe_input` to `"compact"`. |
+| "the universe row close ... for ... disagrees with its bar's raw close ..." | A ranked stock you hold has a bar and a universe row whose raw closes differ. Stops the run. | One of the two recordings is wrong. Check that stock's recordings for the session and encode again. |
+| "history ... has a close on ..., which is not on the calendar", "the close history for ... gives ... on ..., but the run holds ...", or "... is based at ...; its earlier closes are based at ..." | A history with a price on a day the calendar does not list, a price that disagrees with one the engine already holds for that stock and day, or one adjusted from a different base. Stops the run. | The adjustment base moved (a new split or dividend) or the calendar is wrong. See [market data](market-data.md), "Adjusting"; re-record and re-encode. |
+| "retraction ... names ..., which is not on the calendar", "... on or before the last session closed ...", "... its universe snapshot has arrived, so it traded", "... bars for it have arrived, so it traded", or "... would leave no session after the last closed" | A retraction for a day not on the calendar, on or before the last session closed, a day that traded, or one that would leave no session after the last one closed. Stops the run. A second copy of the same retraction changes nothing. | Retract only a day the exchange really cancelled and that no data has arrived for, and only before the run has closed it: `marketdata retract --session <date> --reason <why>`. |
+| "universe ... is from ...; this run reads ..." or "universe ... labels ... from ..., not a configured sector source" | The universe snapshot or a sector label comes from a source the configuration does not name. Stops the run. | Check the data job is writing the sources the configuration names ([market data](market-data.md)). |
+| `universe-rank` exits with status 1, "-config is required", or "a history request needs a configuration reading the compact universe input; this one reads bars" | The ranker answers nothing. The market-data step then writes no histories. | Give it the IRA's own configuration, one whose `universe_input` is `"compact"`. |
 
 ## What backs it
 

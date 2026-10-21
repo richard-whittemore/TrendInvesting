@@ -60,10 +60,16 @@ const (
 	KindSaleSent   Kind = "sale-sent"
 	KindSaleFilled Kind = "sale-filled"
 	KindSaleFailed Kind = "sale-failed"
-	// KindSaleByHand is a sale back to 98% withheld for a reason that counts
-	// as the attempt, which the owner makes by hand (ADR 0019, amended
-	// 2026-10-15, "No order when it cannot be checked").
+	// KindSaleByHand is a sale back to 98% the owner must make by hand:
+	// withheld for a reason that spends the attempt, withheld for values
+	// that are not positive, or refused at the gate as broker-holding (ADR
+	// 0019, amended 2026-10-15, "No order when it cannot be checked";
+	// docs/manual/states-and-kill-switch.md, "Selling by hand safely").
 	KindSaleByHand Kind = "sale-by-hand"
+	// KindChannelRefused is the reporter's own failure to use one delivery
+	// channel, an empty or malformed secret: that channel is set aside and
+	// the others still deliver.
+	KindChannelRefused Kind = "channel-refused"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
@@ -108,6 +114,11 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     episode and is that episode's one urgent alert, as missing data
 //     (ADR 0019, amendment of 2026-10-17, reading 10, "Stale episode"); it
 //     proves the gate flags stale episodes, as a flagged stale refusal does.
+//   - A sale back to 98% the owner must make by hand pages with the hand-sale
+//     steps (docs/manual/states-and-kill-switch.md, "Selling by hand
+//     safely"): withheld for a reason that spends the attempt, once per
+//     record; withheld for values that are not positive, once per sale; and
+//     refused at the gate as broker-holding, beside its refusal alert.
 //   - A strategy.engine.state record is an incident when its state, reason and
 //     scope differ from the previous one: a repeat of the same state is the
 //     same incident, and Degraded to Halted is a new one (ADR 0019). The
@@ -164,6 +175,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	// of that reason earlier in the journal carried the flag.
 	flagged := map[string]bool{}
 	pending := sales{}
+	// paged holds the by-hand pages already raised: a sale withheld again
+	// for values that are not positive is the same incident.
+	paged := map[string]bool{}
 	// notAtClose is the latest broker snapshot stamped at its read time, if
 	// the latest one is: its ID and why it was not as of the close.
 	var notAtClose [2]string
@@ -217,6 +231,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				return nil, err
 			}
 			out = append(out, refusalAlerts(account, e, p, flagged[p.Reason])...)
+			if a, ok := pending.refused(account, e, p); ok {
+				out = append(out, a)
+			}
 			if p.Alert {
 				flagged[p.Reason] = true
 			}
@@ -229,7 +246,8 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				flagged[event.RefusedStaleBrokerSnapshot] = true
 				out = append(out, staleSaleAlert(account, e, p))
 			}
-			if a, ok := byHandAlert(account, e, p); ok {
+			if a, ok := byHandAlert(account, e, p); ok && !paged[a.Key] {
+				paged[a.Key] = true
 				out = append(out, a)
 			}
 		case event.MarginAlarmEventType:
@@ -473,12 +491,27 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
-// handSaleSteps is the hand-sale procedure while a program sale may be
-// working (docs/manual/states-and-kill-switch.md): the program plans
-// Boost's exit again at each decided session while it is due, and a hand
-// sale placed after the last IBKR snapshot is not counted until a snapshot
-// lists it, so the owner stops new orders before selling by hand.
-const handSaleSteps = "Before you sell anything by hand, stop the program sending new orders: engage the kill switch (operator kill-switch -state engaged) where the engine was started with -operator, otherwise stop the engine (sudo systemctl stop ti-engine@<account>). Then cancel any working sale of the program's in IBKR's app, confirm that no working, pending or cancel-pending sell remains, and only then sell."
+// handSaleSteps is the hand-sale procedure for the account while a program sale may be
+// working (docs/manual/states-and-kill-switch.md, "Selling by hand safely"):
+// the program plans Boost's exit again at each decided session while it is
+// due, a hand sale placed after the last IBKR snapshot is not counted until a
+// snapshot lists it, and the kill switch does not stop the sale back to 98%,
+// so the owner stops the engine and the adapter before selling by hand. The
+// fresh run's approval states the book after the sale: no fill of a hand
+// sale is committed, so the previous close adjusted by the fills is not the
+// book, and a first reading that is not the book halts the account as
+// unverifiable (ADR 0019, amended 2026-10-18).
+//
+// The units are named by the engine instance, not by the account it
+// decides, which the journal records: the steps come only from Boost's
+// rejections and the sale back to 98%, which only the margin account makes
+// (ADR 0019, amended 2026-10-15), and Boost runs as ti-engine@boost with ti-adapter-boost, the
+// only adapter unit, wired to that engine's socket and log, whatever account
+// its configuration decides (the shipped one decides "joint";
+// deploy/systemd, docs/manual/server.md). The approval names the account.
+func handSaleSteps(account string) string {
+	return fmt.Sprintf("Before you sell anything by hand, stop the engine and the adapter (sudo systemctl stop ti-engine@boost ti-adapter-boost); the kill switch is not enough, because it does not stop the sale back to 98%%. Then cancel every open order on the instrument, the program's and any of your own, in IBKR's app, and confirm there that none is open, cancel-pending included; only then sell. Start the fresh run you approve only once your sale has filled or been cancelled; its approval states the book as it is after your sale (operator approve -log <previous run's log> -account %[1]s -by <you> -positions SYM=shares,... -cash <IBKR's TotalCashValue> -currency USD -out <approval>), typed right after reading the book in IBKR, or the fresh run's first reading is not the book it is compared with and the account halts as unverifiable. Then start the adapter only after the fresh run's engine is running; never resume the stopped run: a resumed engine hands the adapter an order it had released but never sent, and the adapter sends it beside your sale.", account)
+}
 
 // rejectionAlert states the rejection that brought the account's Boost
 // orders rejected in a row to two, whatever their targets, after the other
@@ -499,7 +532,7 @@ func rejectionAlert(account string, e event.Envelope, w event.BoostReplan, inARo
 		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost buys stopped", account, w.ClientOrderID),
 		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled)%s, and has now rejected two orders in a row for this account. The program sends no more buys for this account, whatever the target does, until you start a fresh run. Its sells still go: Boost's exit, tried again at each session while it is due, and the margin alarm's sale back to 98%%. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			w.ClientOrderID, w.Filled, w.Released, after, handSaleSteps),
+			w.ClientOrderID, w.Filled, w.Released, after, handSaleSteps(account)),
 	}
 }
 
@@ -521,7 +554,7 @@ func stoppedRejectionAlert(account string, e event.Envelope, r event.BoostReplan
 		Key: "rejected-while-stopped:" + r.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: order %s rejected: another rejection while Boost's buys are stopped (%s since the stop)", account, r.ClientOrderID, ordinal(nth)),
 		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled): another rejection while Boost's buys are stopped, the %s since the stop.%s A rejected sell, such as Boost's exit, is planned again at the next decided session while it is due; the program still sends no buy for this account until you start a fresh run. %s Find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve, adding -clear-incident if the run also ended in an incident).",
-			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), stoppedBy, handSaleSteps),
+			r.ClientOrderID, r.Filled, r.Released, ordinal(nth), stoppedBy, handSaleSteps(account)),
 	}
 }
 
@@ -636,6 +669,20 @@ func HeartbeatUncheckedAlert(account string, err error, at time.Time) Alert {
 		Key: "heartbeat-unchecked:" + account + ":" + err.Error(), Kind: KindHeartbeatUnchecked, Severity: Urgent, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: the reporter cannot check the heartbeat", account),
 		Body:  fmt.Sprintf("The reporter cannot check the heartbeat: %s. Until it can, a silent engine goes unreported. Stops and orders at the broker are unaffected. Check the NYSE calendar's years and the journal's modification time.", err),
+	}
+}
+
+// ChannelRefusedAlert reports that the reporter set a delivery channel aside,
+// for an empty or malformed secret or setting, and sends this run's alerts on
+// the other channels: one channel's configuration must never silence the
+// rest (ADR 0019, "Alerting": an alert is a safety requirement). err never
+// carries a secret's value. The key is the account, the channel and the
+// problem, so one problem is one incident and a different one is another.
+func ChannelRefusedAlert(account, channel string, err error, at time.Time) Alert {
+	return Alert{
+		Key: "channel-refused:" + account + ":" + channel + ":" + err.Error(), Kind: KindChannelRefused, Severity: Urgent, AccountID: account, At: at,
+		Title: fmt.Sprintf("%s: the reporter cannot deliver to %s", account, channel),
+		Body:  fmt.Sprintf("The reporter set the %s channel aside: %s. Every alert still goes to the other channels, but none reaches %s until it is fixed. Check the secrets file (/etc/trend-investing/secrets.env) and journalctl -u ti-reporter@<instance>.", channel, err, channel),
 	}
 }
 
