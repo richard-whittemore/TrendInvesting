@@ -779,10 +779,13 @@ is classified, with the snapshot's holdings as the observation:
 5. **Nothing is journalled for a check that continues**: a snapshot the fills
    explain is the ordinary close, and every such journal keeps its bytes.
 6. **One difference, one report.** A snapshot whose holdings are exactly the
-   positions a reconciliation already classified against the same book is not
-   classified again: the adapter sends each reading's reconciliation ahead of
-   its snapshot, and that result, matched or not, already stands for those
-   holdings.
+   positions a reconciliation already classified against the same book and
+   the same journalled changes is not classified again: the adapter sends
+   each reading's reconciliation ahead of its snapshot, and that result,
+   matched or not, already stands for those holdings. A new book, or a fill
+   or corporate action journalled after that reconciliation, ends its
+   standing: the reconciliation did not see the change, so the next snapshot
+   is checked even when it holds the same shares.
 7. **Not the run's first book.** A run's first snapshot has no book in the
    engine to be checked against; the adapter checks that reading against the
    previous close or the starting book (condition 2), and the Run approval

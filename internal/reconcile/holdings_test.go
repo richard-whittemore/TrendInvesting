@@ -96,6 +96,13 @@ func TestAnIntraSessionTradeIsUnexplained(t *testing.T) {
 		if !strings.Contains(r.Detail, "close snapshot snapshot:2") || !strings.Contains(r.Detail, "SPY") {
 			t.Errorf("%s: the detail names the snapshot and the instrument: %q", name, r.Detail)
 		}
+		// The owner reads every cause the check reports, a fill IBKR does
+		// not show among them.
+		for _, cause := range []string{"a trade the engine did not place", "a fill it was not given", "a journalled fill IBKR does not show"} {
+			if !strings.Contains(r.Detail, cause) {
+				t.Errorf("%s: the detail names %q: %q", name, cause, r.Detail)
+			}
+		}
 	}
 }
 

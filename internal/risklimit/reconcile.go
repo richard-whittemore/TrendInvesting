@@ -45,10 +45,12 @@ func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified = &b, nil }
 //   - never when the check continues: a snapshot the fills explain is the
 //     ordinary close, and recording nothing keeps every such journal's bytes;
 //   - never when b's holdings are exactly the positions a reconciliation
-//     already classified against the same book: the IBKR adapter sends each
-//     reading's reconciliation ahead of its snapshot, and that
-//     reconciliation's result, matched or not, already stands for those
-//     holdings, so one difference is never reported twice.
+//     already classified against the same book and the same changes: the
+//     IBKR adapter sends each reading's reconciliation ahead of its snapshot,
+//     and that reconciliation's result, matched or not, already stands for
+//     those holdings, so one difference is never reported twice. A new book,
+//     fill or corporate action since that reconciliation clears its verdict,
+//     so the snapshot is then checked.
 func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
 	defer g.SetBook(b)
 	if g.book == nil {
@@ -85,6 +87,9 @@ func (g *Gate) ObserveCorporateAction(id string, p event.CorporateActionPayload)
 	}
 	g.corporateActions[id] = p
 	g.changes = append(g.changes, reconcile.CorporateActionChange(id, p))
+	// As for a fill: a reconciliation classified before this action did not
+	// see it (ADR 0019, amended 2026-10-21, point 6; CheckBook).
+	g.classified = nil
 	return nil
 }
 

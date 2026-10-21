@@ -21,9 +21,9 @@ const CloseSnapshotPrefix = "close-snapshot:"
 // the window, the union of positions and the zero tolerance are the same.
 //
 //   - A holding no change explains, such as a trade made during the session
-//     that the engine did not place, or a fill it was never given, is
-//     unexplained, and the scope is exactly those instruments: the action
-//     degrades. A snapshot is never adopted as the book silently.
+//     that the engine did not place, a fill it was never given, or a
+//     journalled fill IBKR's snapshot does not show, is unexplained, and
+//     the scope is exactly those instruments: the action degrades. A snapshot is never adopted as the book silently.
 //   - Cash is not compared, whatever the books state: a snapshot's cash moves
 //     with postings no event records yet (interest, fees), which the IBKR
 //     adapter bounds before it stamps a reading as the close (ADR 0019,
@@ -59,7 +59,7 @@ func Holdings(accountID string, book *Book, changes []Change, next Book) event.R
 	uncompared := fmt.Sprintf("; the holdings of the close snapshot %s are compared with the book and the changes journalled since it, and its cash is not compared", next.AnchorID)
 	r := classify(positionsOnly, changes, next.AnchorID, obs, uncompared)
 	if r.Classification == event.ReconciliationUnexplained {
-		r.Detail = strings.Replace(r.Detail, "unexplained: ", "unexplained: holdings no journalled fill explains (a trade the engine did not place, or a fill it was not given): ", 1)
+		r.Detail = strings.Replace(r.Detail, "unexplained: ", "unexplained: holdings no journalled fill explains (a trade the engine did not place, a fill it was not given, or a journalled fill IBKR does not show): ", 1)
 	}
 	return r
 }

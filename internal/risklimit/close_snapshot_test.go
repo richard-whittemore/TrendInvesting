@@ -124,3 +124,39 @@ func TestTheCheckedSnapshotBecomesTheBook(t *testing.T) {
 		t.Fatalf("snapshot:3: %v %+v", journal, r.Result)
 	}
 }
+
+// TestAChangeAfterAReconciliationIsCheckedOnTheNextSnapshot: a fill or a
+// corporate action observed after a reconciliation means its positions were
+// not classified against the book and those changes, so a snapshot holding
+// the same shares is checked afresh (ADR 0019, amended 2026-10-21, point 6).
+func TestAChangeAfterAReconciliationIsCheckedOnTheNextSnapshot(t *testing.T) {
+	g := booked(t)
+	if r := reconcileWith(t, g, "reconciliation:1", morningOf(1000, 10)); r.Result.Classification != event.ReconciliationMatched {
+		t.Fatalf("the reconciliation matches: %+v", r.Result)
+	}
+	released(t, check(t, g, order(event.OrderSideBuy, 2, 10))[0])
+	if err := g.ObserveFill(event.TargetWeightFillPayload{
+		AccountID: "joint", ClientOrderID: "tw-buy", FillID: "exec-1", InstrumentID: "SPY",
+		Side: event.OrderSideBuy, Quantity: 2, Price: 1, Commission: 0.5, FilledAt: at.Add(70 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, journal := checkBookWith(t, g, closeSnapshot(10, 90))
+	if !journal || r.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("a journalled fill IBKR does not show is unexplained: %v %+v", journal, r.Result)
+	}
+	if r.State == nil || r.State.State != event.EngineStateDegraded || !slices.Equal(r.State.ScopeInstrumentIDs, []string{"SPY"}) {
+		t.Fatalf("want Degraded on SPY, got %+v", r.State)
+	}
+
+	// A split observed after the reconciliation is checked the same way.
+	s := booked(t)
+	reconcileWith(t, s, "reconciliation:1", morningOf(1000, 10))
+	split := event.CorporateActionPayload{InstrumentID: "SPY", Kind: event.CorporateActionKindSplit, EffectiveAt: at.Add(70 * time.Minute), NewShares: 2, OldShares: 1, EngineSharesPerRawShare: 1, Currency: "USD"}
+	if err := s.ObserveCorporateAction("ca:split", split); err != nil {
+		t.Fatal(err)
+	}
+	if r, journal := checkBookWith(t, s, closeSnapshot(10, 90)); !journal || r.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("a split IBKR does not show is unexplained: %v %+v", journal, r.Result)
+	}
+}

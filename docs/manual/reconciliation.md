@@ -51,14 +51,18 @@ slipping into it:
   new account snapshot becomes the book, the engine itself compares the
   snapshot's holdings with the book in force plus the fills, dividends and
   splits journalled since. A holding they do not explain (shares bought or
-  sold by hand during the session, or a fill the engine was never given) is an
-  unexplained difference: the account goes **Degraded** on that stock and you
-  get the reconciliation alert, its ID `close-snapshot:<snapshot ID>`. This
-  does not rely on the adapter: it holds for every snapshot after a run's
-  first, stamped at the close or at the read time, whether or not a
-  reconciliation came with it. When the delivery's reconciliation already
-  found the same holdings against the same book, the check sends nothing more:
-  one difference is one alert. It compares holdings only, never cash.
+  sold by hand during the session, a fill the engine was never given, or a
+  fill the journal recorded that IBKR does not show) is an unexplained
+  difference: the account goes **Degraded** on that stock and you get the
+  reconciliation alert, its ID `close-snapshot:<snapshot ID>`. A delisting,
+  merger or symbol change journalled since the book cannot be applied, so the
+  check is unverifiable and the account goes **Halted**, as for any
+  unverifiable reconciliation. This does not rely on the adapter: it holds
+  for every snapshot after a run's first, stamped at the close or at the read
+  time, whether or not a reconciliation came with it. When the delivery's
+  reconciliation already found the same holdings against the same book, with
+  no fill or corporate action journalled after it, the check sends nothing
+  more: one difference is one alert. It compares holdings only, never cash.
 
 What neither catches:
 
@@ -228,7 +232,7 @@ Two conservative choices, both of which can only make a sale smaller:
 | Margin interest on the joint account | Not compared: Boost's book states no cash, so the result says cash is not compared. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
 | A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
 | A fill stamped in the same second as the morning read | It counts as after the read. If IBKR's figure includes it, the result is a difference and the account goes Degraded on that instrument: the safe side. | Check the fill at IBKR, then recover as for any difference. |
-| A trade during a session that the engine did not place (one you made by hand in IBKR, or another program's), or a fill report the engine was never given. Alert: `<account>: reconciliation unexplained (close-snapshot:<snapshot ID>)` | The session's close snapshot holds shares that the book and the fills journalled since it do not explain. The engine records the check (`risk.reconciliation.result`, its input the snapshot) and the account goes **Degraded** on that stock: no buys, the stock frozen, the snapshot still taken as the book the next decision sizes from. If the delivery's reconciliation from the same reading already reported the same holdings, nothing more is sent: you get that reconciliation's alert instead. Nothing is recorded for a snapshot the fills explain. | Find the trade in IBKR's trade log for the session. Then follow `docs/runbooks/reconciliation.md`, "Recover", as for any unexplained difference: a fresh run whose approval clears the incident, or carries it in force. |
+| A trade during a session that the engine did not place (one you made by hand in IBKR, or another program's), a fill report the engine was never given, or a journalled fill IBKR does not show. Alert: `<account>: reconciliation unexplained (close-snapshot:<snapshot ID>)` | The session's close snapshot holds shares that the book and the fills journalled since it do not explain. The engine records the check (`risk.reconciliation.result`, its input the snapshot) and the account goes **Degraded** on that stock: no buys, the stock frozen, the snapshot still taken as the book the next decision sizes from. A delisting, merger or symbol change journalled since the book cannot be applied, so the check is unverifiable and the account goes **Halted**, as for any unverifiable reconciliation. If the delivery's reconciliation from the same reading already reported the same holdings, nothing more is sent: you get that reconciliation's alert instead. Nothing is recorded for a snapshot the fills explain. | Find the trade in IBKR's trade log for the session. Then follow `docs/runbooks/reconciliation.md`, "Recover", as for any unexplained difference: a fresh run whose approval clears the incident, or carries it in force. Halted: recover as for an unverifiable reconciliation, a fresh run whose approval clears the incident and re-states the book. |
 | A difference that arises while the market is open | Found at that session's close, by the delivery's reconciliation or the close-snapshot check (above), not when it happens: the after-fill and pre-order reconciliations are not built. | Compare IBKR with the journal yourself when anything looks wrong during the day. |
 
 ## What is not built yet
