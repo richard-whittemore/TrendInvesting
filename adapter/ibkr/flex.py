@@ -786,21 +786,33 @@ def _day_text(day):
     return day.strftime("%Y%m%d")
 
 
-STALE_STATEMENT_DAYS = 4
+def _session_before(day):
+    """The last NYSE session before day, by the adapter's calendar."""
+    day -= timedelta(days=1)
+    while not nyse_calendar.is_trading_day(day):
+        day -= timedelta(days=1)
+    return day
 
 
 def _check_coverage(statement, coverage, approved_at, today):
     """CoverageGap when statement starts later than the day after coverage's covered_to (the last accepted
     reading's), or, with no coverage kept, later than the New York day of the first run's approval at approved_at;
-    or when statement ends more than STALE_STATEMENT_DAYS before today (the New York day of the reading), a custom
-    period left in place, whose transfers after its end would be in no statement."""
+    or when statement ends more than one NYSE session before the last session before today (the New York day of
+    the reading), a custom period left in place, whose transfers after its end would be in no statement. IBKR's
+    last day for Last 30 Calendar Days is yesterday's date or the last business day: both pass."""
     last = _flex_day(statement.to_date)
-    if last < today - timedelta(days=STALE_STATEMENT_DAYS):
+    try:
+        latest = _session_before(today)
+        earliest = _session_before(latest)
+    except nyse_calendar.OutOfRange:
+        raise StatementRefused("the reading's day, {}, is in a year the NYSE calendar does not hold, so whether the "
+                               "statement is current is not known".format(_day_text(today))) from None
+    if last < earliest:
         raise CoverageGap(
-            "the Flex statement ends on {}, more than {} days before today, {}: transfers since are in no statement. "
-            "Nothing is written; set the Flex query's period in Client Portal back to Last 30 Calendar Days, start "
-            "this reader once (docs/manual/reconciliation.md)".format(
-                _day_text(last), STALE_STATEMENT_DAYS, _day_text(today)))
+            "the Flex statement ends on {}, but a current one ends on {} or the session before: transfers since "
+            "are in no statement. Nothing is written; check the Flex query's period in Client Portal and set it "
+            "back to Last 30 Calendar Days, start this reader once (docs/manual/reconciliation.md)".format(
+                _day_text(last), _day_text(latest)))
     first = _flex_day(statement.from_date)
     if coverage is None:
         approval_day = approved_at.astimezone(NEW_YORK).date()

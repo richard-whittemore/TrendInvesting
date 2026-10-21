@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -270,10 +270,14 @@ class ReadOnceTests(unittest.TestCase):
             self.assertIn(text, status["reason"])
         return status
 
-    def read(self, service):
+    def read(self, service, now=datetime(2027, 1, 16, 2, 30, tzinfo=timezone.utc)):
         return flex.read_once(TOKEN, QUERY, ACCOUNT, str(self.log), str(self.ledger), get=service,
-                              sleep=lambda s: None, now=lambda: datetime(2027, 1, 16, 2, 30, tzinfo=timezone.utc),
-                              err=self.out)
+                              sleep=lambda s: None, now=lambda: now, err=self.out)
+
+    def read_on(self, day, to_date):
+        """A reading at 21:30 New York on day (a date), of a statement ending on to_date."""
+        at = datetime(day.year, day.month, day.day, 21, 30, tzinfo=flex.NEW_YORK).astimezone(timezone.utc)
+        return self.read(FakeFlex(statements=(self.statement(period=("20270112", to_date)),)), now=at)
 
     def records(self):
         return [json.loads(line) for line in self.ledger.read_text().splitlines()]
@@ -690,15 +694,44 @@ class ReadOnceTests(unittest.TestCase):
         self.assertIn("900000225", self.payloads())
 
     def test_a_statement_ending_days_before_the_reading_is_a_coverage_gap(self):
-        # The reading is on the 15th. A custom period left in place ends on the 5th: every later evening returns the
-        # same window, so transfers after its end would be in no statement. Nothing is written, naming both days.
+        # The reading is on the 15th, so the last session before it is the 14th. A custom period left in place ends
+        # on the 5th: every later evening returns the same window, so transfers after its end would be in no
+        # statement. Nothing is written, naming the 5th and the 14th.
         self.assertFalse(self.read(FakeFlex(statements=(self.statement(period=("20270101", "20270105")),))))
         status = self.status()
         self.assertEqual(status["state"], "coverage-gap")
         self.assertIn("20270105", status["reason"])
-        self.assertIn("20270115", status["reason"])
+        self.assertIn("20270114", status["reason"])
         self.assertFalse(self.ledger.exists())
         self.assertFalse(Path(str(self.ledger) + flex.COVERAGE_SUFFIX).exists())
+
+    def test_a_monday_reading_of_a_statement_ending_on_the_friday_is_read(self):
+        self.assertTrue(self.read_on(date(2027, 1, 25), "20270122"))
+
+    def test_a_reading_after_a_monday_holiday_of_a_statement_ending_on_the_friday_is_read(self):
+        # The 18th is Martin Luther King Day: the last session before the 19th is Friday the 15th.
+        self.assertTrue(self.read_on(date(2027, 1, 19), "20270115"))
+
+    def test_a_statement_ending_the_session_before_the_last_one_is_read(self):
+        # Whether IBKR's last day is the last business day or one earlier, a nightly reading is not refused.
+        self.assertTrue(self.read_on(date(2027, 1, 19), "20270114"))
+
+    def test_a_statement_ending_two_sessions_before_the_last_one_is_a_coverage_gap(self):
+        self.assertFalse(self.read_on(date(2027, 1, 19), "20270113"))
+        status = self.status()
+        self.assertEqual(status["state"], "coverage-gap")
+        self.assertIn("20270113", status["reason"])
+        self.assertIn("20270115", status["reason"], "the latest day it should end on")
+        self.assertIn("period", status["reason"])
+
+    def test_a_saturday_reading_of_a_statement_ending_on_yesterdays_date_is_read(self):
+        self.assertTrue(self.read_on(date(2027, 1, 16), "20270115"))
+
+    def test_a_sunday_reading_of_a_statement_ending_on_yesterdays_date_is_read(self):
+        self.assertTrue(self.read_on(date(2027, 1, 17), "20270116"))
+
+    def test_a_thanksgiving_week_reading_of_a_statement_ending_on_the_wednesday_is_read(self):
+        self.assertTrue(self.read_on(date(2027, 11, 26), "20271124"))
 
     def test_the_first_reading_reaching_back_to_the_approval_day_is_read(self):
         # The chain's first run was approved on 12 January (New York): a first statement from that day leaves none
