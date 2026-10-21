@@ -55,9 +55,18 @@ creating the container, or re-attaching to it.*
    docker exec ti systemctl list-units 'ti-*' --all
    ```
 
-   Expect `running`, or `degraded` with only `ti-reporter@boost`,
-   `ti-dashboard` or `ti-data` failed before the Boost engine has run once
-   and `secrets.env` is filled in (up.sh refuses any other failed unit).
+   Expect `running`, or `degraded` with only these units failed, each for its
+   own reason:
+   - `ti-reporter@boost` and `ti-dashboard` may fail until the Boost engine
+     has run once (there is no log yet).
+   - `ti-data` may fail until its Massive key is filled in: `MASSIVE_API_KEY`
+     in `/etc/trend-investing/secrets.env`.
+
+   "Degraded accepted" means up.sh lets `degraded` through only when every
+   failed unit is one of `ti-reporter@*.service`, `ti-dashboard.service` or
+   `ti-data.service`. It checks the unit names, not the reasons above, so
+   check the reason yourself. Any other failed unit (`mount-shared`,
+   `systemd-journald`, `ti-clock-check`...) stops up.sh with the list.
    Expect `ti-data.timer`, `ti-reporter@boost.timer` and
    `ti-clock-check.timer` active, `ti-gateway` masked, and `ti-engine@boost`
    and `ti-adapter-boost` inactive.
