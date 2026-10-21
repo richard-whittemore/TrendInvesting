@@ -54,7 +54,7 @@ for u in ti-gateway ti-trader; do
   test "$(getent passwd "$u" | cut -d: -f7)" = /usr/sbin/nologin || fail "$u has a login shell"
   test "$(id -u "$u")" -ne 0 || fail "$u is uid 0"
 done
-for f in ibkr-login.env secrets.env accounts/boost.env; do
+for f in ibkr-login.env secrets.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
   test "$(mode_of "/etc/trend-investing/$f")" = 600 || fail "$f is not mode 600"
   test "$(stat -c %U:%G "/etc/trend-investing/$f")" = root:root || fail "$f is not root-owned"
 done
@@ -343,7 +343,9 @@ verify_log=$(mktemp)
 verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service ti-adapter-boost.service >"$verify_log" 2>&1 || verify_status=$?
+  ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service ti-adapter-boost.service \
+  ti-flex@boost.service ti-flex@boost.timer ti-flex@trad-ira.service ti-flex@trad-ira.timer \
+  ti-flex@roth-ira.service ti-flex@roth-ira.timer >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"
 # Every line is a finding: no warning is expected in this container (the
 # rehearsal of 2026-10-16 printed none), so nothing is filtered out, and a
@@ -391,7 +393,7 @@ for a in boost trad-ira roth-ira; do
 done
 # shellcheck disable=SC2016
 grep -q -- '-operator ${TI_STATE_DIR}/operator' /etc/systemd/system/ti-engine@.service || fail "the engine unit does not pass -operator"
-for unit in ti-adapter-boost.service ti-data.service ti-reporter@.service ti-dashboard.service; do
+for unit in ti-adapter-boost.service ti-data.service ti-reporter@.service ti-dashboard.service ti-flex@.service; do
   grep -q '^InaccessiblePaths=.*-/var/lib/trend-investing/engines/boost/operator' "/etc/systemd/system/$unit" || fail "$unit can reach the operator inbox"
 done
 pass "ti-operator writes the instructions: each account's inbox is ti-operator:ti-trader 0750, the engine unit passes it, and no network-facing unit can reach it"
@@ -564,6 +566,12 @@ pass "three distinct engine client IDs, and none for the data step"
 
 # The adapter's state directory and its configuration, created once and kept.
 test "$(stat -c %U:%a /var/lib/trend-investing/adapters/boost)" = ti-trader:750 || fail "adapter state directory not ti-trader 0750"
+for a in boost trad-ira roth-ira; do
+  test "$(stat -c %U:%a "/var/lib/trend-investing/flex/$a")" = ti-trader:750 || fail "the $a Flex reader's ledger directory not ti-trader 0750"
+done
+# One templated Flex reader for every account; the Boost-only pair is gone.
+test -f /etc/systemd/system/ti-flex@.service && test -f /etc/systemd/system/ti-flex@.timer || fail "ti-flex@ unit or timer not installed"
+test ! -e /etc/systemd/system/ti-flex-boost.service && test ! -e /etc/systemd/system/ti-flex-boost.timer || fail "the Boost-only Flex reader unit is still installed"
 grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.json || fail "adapter configuration not created from the example"
 pass "adapter state directory and configuration in place, sending off"
 echo "REHEARSAL COMPLETE"

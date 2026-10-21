@@ -294,7 +294,11 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 			t.Errorf("secrets.env.example has no %s line", need)
 		}
 	}
-	others := map[string]bool{"IBKR_ACCOUNT_BOOST": true, "IBKR_ACCOUNT_TRAD_IRA": true, "IBKR_ACCOUNT_ROTH_IRA": true, "MASSIVE_API_KEY": true}
+	// Read by other programs: the account numbers, the data step's Massive
+	// key, and the Flex reader's token and query ID (adapter/ibkr/flex.py,
+	// whose own test checks it reads both lines).
+	others := map[string]bool{"IBKR_ACCOUNT_BOOST": true, "IBKR_ACCOUNT_TRAD_IRA": true, "IBKR_ACCOUNT_ROTH_IRA": true, "MASSIVE_API_KEY": true,
+		"TI_IBKR_FLEX_TOKEN": true, "TI_IBKR_FLEX_QUERY_ID": true}
 	for key := range example {
 		if !asked[key] && !others[key] {
 			t.Errorf("secrets.env.example names %s, which nothing reads", key)

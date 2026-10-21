@@ -278,4 +278,18 @@ func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
 	if reconciliation.TotalCash != -4700 || reconciliation.Currency != "USD" {
 		t.Errorf("reconciliation %+v", reconciliation)
 	}
+	// The Flex reader (adapter/ibkr/flex.py) writes each deposit or
+	// withdrawal at version 2, with IBKR's transaction ID.
+	var movement event.CashMovementPayload
+	read("cash_movement.json", event.CashMovementTransferVersion, &movement)
+	if movement.Amount != 2500 || movement.EquityBefore != 8530 || movement.TransactionID != "900000101" || movement.Currency != "USD" {
+		t.Errorf("cash movement %+v", movement)
+	}
+	// A transfer in the first run's window, before any snapshot, takes the
+	// next snapshot less itself, and says so.
+	var approximated event.CashMovementPayload
+	read("cash_movement_approximated.json", event.CashMovementTransferVersion, &approximated)
+	if approximated.EquityBefore != 6530 || approximated.EquityBeforeBasis != event.EquityBeforeNextSnapshotLessAmount {
+		t.Errorf("approximated cash movement %+v", approximated)
+	}
 }

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="synthetic-cash" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="DU0000001"
