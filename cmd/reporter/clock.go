@@ -194,11 +194,11 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 		failed, resolveErr := resolveAll(senders, key, seen)
 		// Each channel's record is cleared on its own (ADR 0019, "Alerting"):
 		// a working channel, or one no longer configured, forgets the
-		// incident at once so a new fault pages it again. Only a set-aside
-		// channel that can close incidents keeps its record, until a run in
-		// which it works and its resolve is sent.
-		// A channel whose resolve failed keeps its record too, to retry the
-		// resolve; the others forget at once and are not held back by it.
+		// incident at once so a new fault pages it again. Two kinds of record
+		// are kept: a set-aside PagerDuty, which can close the incident and
+		// sends its resolve in the first run in which it works, and any
+		// channel whose resolve failed, which keeps its record to retry. The
+		// rest forget at once and are not held back by them.
 		keep := map[string]bool{}
 		for _, f := range setAside {
 			keep[f.channel] = f.channel == "pagerduty"
