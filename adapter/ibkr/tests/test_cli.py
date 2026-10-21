@@ -126,6 +126,20 @@ class CommandTests(unittest.TestCase):
             self.assertIn(word, message)
         self.assertEqual(self.made, [], "nothing connects when a zone IBKR names is missing")
 
+    def test_an_unreadable_ibkr_time_zone_file_is_reported_as_corrupt_not_as_not_installed(self):
+        def corrupt_zone(name):
+            raise ValueError("ZoneInfo keys must be normalized relative paths")
+
+        status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                      should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                      zone_lookup=corrupt_zone)
+        self.assertEqual(status, 1)
+        message = self.err.getvalue()
+        self.assertIn("US/Eastern", message)
+        self.assertIn("corrupt", message)
+        self.assertNotIn("not installed", message)
+        self.assertEqual(self.made, [], "nothing connects when a zone IBKR names cannot be read")
+
     def test_the_account_comes_from_one_place_only_and_is_never_echoed(self):
         both = dict(CONFIG, account_id=ACCOUNT)
         self.write_config(both)

@@ -65,6 +65,8 @@ scenario() {
     # fetched is recorded.
     python3() { record python3 "$@"; return 1; }
     runuser() { record runuser "$@"; return 1; }
+    # The clock check reads the machine's time daemon, which the stand-ins do not model.
+    if test "${FAKE_NO_CLOCK:-0}" = 1; then step_clock() { record step_clock; }; fi
     etc=$work/etc
     twsapi_root=$work/twsapi
     adapter_venv=$work/venv
@@ -127,8 +129,25 @@ scenario mac-mini aarch64 base || fail "Mac mini base failed: $(cat "$work/out")
 called "tzdata-legacy" || fail "Mac mini base does not install tzdata-legacy"
 if called "tailscale"; then fail "Mac mini base fetches the amd64 Tailscale tarball: $(cat "$work/calls")"; fi
 
-# --- services refuses a Go program built for another architecture.
+# --- The Mac mini runs no Linux Gateway: `gateway` fetches and runs nothing,
+# `all` is base, clock, services (no Gateway unit installed) and no firewall.
+scenario mac-mini aarch64 gateway || fail "Mac mini gateway failed: $(cat "$work/out")"
+said "no Linux Gateway" || fail "the Mac mini's gateway step does not say it installs none: $(cat "$work/out")"
+if called "fetch"; then fail "the Mac mini gateway step fetches something: $(cat "$work/calls")"; fi
+if called "runuser"; then fail "the Mac mini gateway step runs an installer"; fi
+if called "systemctl"; then fail "the Mac mini gateway step touches systemd"; fi
+
+dist "$work/arm64all" 183
 dist "$work/amd64" 62
+FAKE_NO_CLOCK=1 FAKE_DIST=$work/arm64all scenario mac-mini aarch64 all || fail "Mac mini all failed: $(cat "$work/out")"
+if called "fetch $GATEWAY_URL" || called "fetch $IBC_URL"; then fail "Mac mini all fetches the Gateway or IBC: $(cat "$work/calls")"; fi
+if called "runuser"; then fail "Mac mini all runs an installer"; fi
+if called "ti-gateway.service"; then fail "Mac mini all installs the Gateway unit: $(cat "$work/calls")"; fi
+if called "fetch $TAILSCALE_URL"; then fail "Mac mini all fetches Tailscale"; fi
+FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail services failed"
+called "$work/deploy/systemd/ti-gateway.service" || fail "Lightsail services no longer installs the Gateway unit: $(cat "$work/calls")"
+
+# --- services refuses a Go program built for another architecture.
 FAKE_DIST=$work/amd64 scenario "" x86_64 services || fail "Lightsail services refused an x86_64 dist/: $(cat "$work/out")"
 called "install -m 0755 $work/amd64/ti-reporter /opt/trend-investing/bin/ti-reporter" || fail "Lightsail services did not install the reporter"
 

@@ -6,6 +6,7 @@
 # mini target, which accepts arm64 and installs the TWS API from its pinned
 # Mac/Unix archive). Checks, stopping at the first failure:
 #
+#  0. provision.sh base runs for real under the Mac mini target;
 #  1. the container is arm64 and every Go program is an arm64 binary that
 #     runs here natively; the engine, started in dry-run, writes that stamp
 #     into its durable log's strategy version, and journal-query reads the
@@ -21,14 +22,16 @@
 #     stops with "ibapi did not import" and records nothing; the rehearsal
 #     checks that fail-closed stop, says so, and does not claim the install
 #     record or the pin check;
-#  5. no x86_64 ELF file is on the container's disk outside /proc and /sys
+#  5. no x86_64 ELF file is on the container's disk outside /proc, /sys and /dev
 #     (none was installed, none left behind), and none is running once every
 #     step has finished. It cannot see a short-lived x86_64 helper that ran
 #     and was deleted during a step; that the Mac mini's path runs none is
 #     shown by deploy/rehearsal/test-provision-arch.sh (the archive path
 #     runs no installer).
 #
-# Re-runnable in the same container: every wait is bounded, the engine is
+# Re-runnable in the same container, but only before the adapter is first
+# started in it (section 4 removes and rebuilds the TWS API tree and the
+# adapter environment): every wait is bounded, the engine is
 # stopped and reaped on every path, and section 3 compares what is installed
 # before and after each refused download rather than requiring nothing.
 set -euo pipefail
@@ -45,11 +48,11 @@ test "${TI_TARGET:-}" = mac-mini || fail "TI_TARGET is not mac-mini"
 # shellcheck disable=SC1091
 . /src/deploy/versions.env
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-# The packages provision.sh base installs that these checks use, tzdata-legacy
-# among them (IBKR's "US/Eastern" execution times).
-apt-get install -y -qq --no-install-recommends ca-certificates curl python3 tzdata tzdata-legacy >/dev/null
+# The provisioner's own `base` under the Mac mini target (TI_TARGET, checked
+# above): its package list, service users, automatic updates and persistent
+# journal, run for real. TI_REHEARSAL=1 skips only what needs a running
+# systemd. Idempotent.
+TI_REHEARSAL=1 /src/deploy/provision.sh base >/dev/null
 
 # ELF e_machine of a file: 62 x86-64, 183 AArch64; empty if not ELF.
 elf_machine() {
@@ -173,7 +176,7 @@ for exe in /proc/[0-9]*/exe; do
   real=$(readlink -f "$exe" 2>/dev/null) || continue
   test "$(elf_machine "$real" 2>/dev/null || true)" != 62 || fail "an x86_64 program is running: $real"
 done
-pass "no x86_64 file is on the container's disk and none is running"
+pass "no x86_64 file is on the container's disk (outside /proc, /sys and /dev) and none is running"
 if test "$installed" = 1; then
   echo "programs rehearsal passed"
 else

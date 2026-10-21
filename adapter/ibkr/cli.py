@@ -79,10 +79,15 @@ def require_zones(lookup=ZoneInfo):
     for name in IBKR_ZONES:
         try:
             lookup(name)
-        except (ZoneInfoNotFoundError, ValueError):
+        except ZoneInfoNotFoundError:
             raise Refused("the time zone {} that IBKR's execution times name is not installed; install the "
                           "tzdata-legacy package with `sudo deploy/provision.sh base` and start the adapter "
                           "again".format(name)) from None
+        except ValueError:
+            # zoneinfo raises ValueError for a zone file that exists but cannot be read.
+            raise Refused("the time zone {} that IBKR's execution times name is present but corrupt (its "
+                          "file cannot be read); reinstall the tzdata-legacy package with `sudo apt-get "
+                          "install --reinstall tzdata-legacy` and start the adapter again".format(name)) from None
 
 
 def _parser():

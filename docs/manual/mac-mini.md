@@ -16,16 +16,17 @@ archive below instead of the x86_64 installer. Without that target the
 provisioner is Lightsail's and refuses arm64. The rehearsal checks that no
 x86_64 file is installed or left on the container's disk; it cannot watch
 every short-lived program a step starts, so "nothing x86_64 runs" rests on
-those two steps never starting one, which the provisioner's own tests
-check.
+those two steps never starting one: the rehearsal runs `base` for real
+under the Mac mini target, and the provisioner's own tests check `twsapi`.
 
 **Built for arm64 from the same commit.** `deploy/build-engine.sh --arch
-arm64 --out dist-arm64` builds the engine, the reporter, the dashboard, `operator` and
+arm64 --out "$HOME/ti-arm64"` builds the engine, the reporter, the dashboard, `operator` and
 `journal-query` for the container. They are built from the same commit,
 with the same stamp, as the linux/amd64 build for Lightsail (still the
 default, unchanged byte for byte). The stamp is what every decision the
-engine records names as its build. A tree with uncommitted changes is
-refused. Build the arm64 programs into a folder of their own (`--out`):
+engine records names as its build. A tree with uncommitted changes, or with an untracked file, is
+refused, so build the arm64 programs into a folder of their own outside the
+checkout (`--out`):
 `dist/` is what the Lightsail runbook copies to the x86_64 server, and
 `provision.sh services` refuses a program in it built for another
 architecture, installing nothing. The data job (`deploy/build-data.sh`) is
@@ -74,7 +75,7 @@ protobuf pin is in does it go on to those checks and end with
 
 | What happens | What happens on the Mac mini | What you do |
 | --- | --- | --- |
-| The programs were built for the wrong architecture | They do not start in the container ("exec format error"); nothing runs | Build with `deploy/build-engine.sh --arch arm64` and install again |
+| The programs were built for the wrong architecture (x86_64 programs, for Lightsail) | `provision.sh services` refuses, naming the program and the container's architecture, and installs nothing | Build with `deploy/build-engine.sh --arch arm64` and copy the folder again |
 | The tree had uncommitted changes | The build refuses; nothing is built | Commit (or discard) the changes, then build |
 | IBKR replaced the archive at its address | `provision.sh twsapi` stops with "checksum mismatch"; nothing is installed and the adapter will not start | Nothing on the Mac; this is a version bump (the Lightsail runbook, "Bumping a pinned version"); the two TWS API pins move together |
 | `ibapi` does not import (today: protobuf missing) | `provision.sh twsapi` stops; no install record, so the adapter refuses to start | Wait for the protobuf decision; nothing to type |
