@@ -135,7 +135,7 @@ Only an acknowledgement for the account counts. One recorded for another
 account has no effect, so the alert keeps coming until an acknowledgement for
 this account is in the log. One the engine refuses (its time is more than five
 minutes ahead of the engine's clock, or it cannot be read) is never recorded;
-you see a `.refused` note beside the file saying why in the engine's inbox and
+you see a `.refused` note saying why in the engine's notes folder beside its inbox (`operator-notes`) and
 on the engine's output (`journalctl -u ti-engine@<account>`). Record the
 acknowledgement again with the right account and the current time.
 

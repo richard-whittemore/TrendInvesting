@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -162,6 +163,13 @@ func TestTheServiceFileStartsTheEngineWithExplicitSettings(t *testing.T) {
 			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)
 		}
 	}
+	// The unit passes the account's operator inbox (ADR 0026, kill-switch
+	// amendment), in the state directory, where the provisioner creates it.
+	inbox := filepath.Join(state, "operator")
+	if i := indexOf(args, "-operator"); i < 0 || i+1 >= len(args) || args[i+1] != inbox {
+		t.Fatalf("ExecStart %v does not pass -operator %s", args, inbox)
+	}
+	makeOperatorInbox(t, inbox)
 	runtimeDir := filepath.Dir(args[indexOf(args, "-socket")+1])
 	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -248,5 +256,74 @@ func TestEverySystemctlArgumentIsAUnit(t *testing.T) {
 			}
 			t.Errorf("deploy/provision.sh:%d passes %q to systemctl %s as a unit: %q", n+1, f, fields[1], strings.TrimSpace(line))
 		}
+	}
+}
+
+// TestTheProvisionerCreatesTheOperatorInbox: the instruction's writer is a
+// user of its own, ti-operator, with no login shell, in the engine's group
+// so it can reach the account's state directory; each account's operator
+// inbox is created by the services step inside that directory, owned by
+// ti-operator and the engine's group ti-trader, mode 0750, so the engine
+// reads it through its group and cannot write it, and nobody else can
+// (ADR 0026, kill-switch amendment; docs/manual/operator.md, "Who can write
+// an instruction").
+func TestTheProvisionerCreatesTheOperatorInbox(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		lines[strings.TrimSpace(line)] = true
+	}
+	for _, want := range []string{
+		`useradd --system --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator`,
+		`install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"`,
+	} {
+		if !lines[want] {
+			t.Errorf("deploy/provision.sh does not run: %s", want)
+		}
+	}
+}
+
+// TestNoNetworkFacingUnitCanWriteAnInstruction: a unit that reads IB
+// Gateway's data, Massive's answers or an HTTP request runs as ti-trader, the
+// engine's user, so a defect in it must not reach the inbox or the engine's
+// notes beside it: each is sandboxed (ProtectSystem=strict) with no writable
+// path under the engines' state, and each account's inbox is inaccessible
+// to it. The engine itself reads its own inbox read-only (ADR 0026,
+// kill-switch amendment; docs/manual/server.md).
+func TestNoNetworkFacingUnitCanWriteAnInstruction(t *testing.T) {
+	const engines = "/var/lib/trend-investing/engines"
+	for _, unit := range []string{"ti-adapter-boost.service", "ti-data.service", "ti-reporter@.service", "ti-dashboard.service"} {
+		values := map[string][]string{}
+		for _, d := range unitDirectives(t, "../../deploy/systemd/"+unit) {
+			if d.section == "[Service]" {
+				values[d.key] = append(values[d.key], strings.Fields(d.value)...)
+			}
+		}
+		if !slices.Equal(values["ProtectSystem"], []string{"strict"}) {
+			t.Errorf("%s: ProtectSystem=%v, want strict", unit, values["ProtectSystem"])
+		}
+		for _, path := range values["ReadWritePaths"] {
+			path = strings.TrimLeft(path, "-+")
+			if path == engines || strings.HasPrefix(path, engines+"/") || strings.HasPrefix(engines, path+"/") {
+				t.Errorf("%s may write %s, which holds the operator inboxes", unit, path)
+			}
+		}
+		for _, account := range []string{"boost", "trad-ira", "roth-ira"} {
+			if want := "-" + engines + "/" + account + "/operator"; !slices.Contains(values["InaccessiblePaths"], want) {
+				t.Errorf("%s: InaccessiblePaths=%v does not name %s", unit, values["InaccessiblePaths"], want)
+			}
+		}
+	}
+	var readOnly []string
+	for _, d := range unitDirectives(t, unitPath) {
+		if d.section == "[Service]" && d.key == "ReadOnlyPaths" {
+			readOnly = append(readOnly, strings.Fields(d.value)...)
+		}
+	}
+	if want := "-" + engines + "/%i/operator"; !slices.Contains(readOnly, want) {
+		t.Errorf("the engine unit's ReadOnlyPaths=%v does not name %s", readOnly, want)
 	}
 }
