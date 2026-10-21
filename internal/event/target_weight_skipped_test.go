@@ -132,6 +132,7 @@ func TestFormatSkippedSharesBoundsTheDecimals(t *testing.T) {
 	}{
 		{a + b, "0.3"}, {0.25, "0.25"}, {3, "3"}, {0, "0"}, {0.004, "0.004"},
 		{1.0 / 3, "0.333333"}, {2.9999999, "3"}, {1234567.5, "1234567.5"},
+		{4e-7, "4e-07"}, {math.Copysign(0, -1), "0"},
 	} {
 		if got := event.FormatSkippedShares(c.in); got != c.want {
 			t.Errorf("FormatSkippedShares(%v) = %q, want %q", c.in, got, c.want)

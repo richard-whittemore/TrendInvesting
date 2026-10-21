@@ -382,7 +382,7 @@ section.
   only here, never as an alert.
 - Every trade the program sized but did not order that day (ADR 0026, point
   8) is listed under "Trades skipped", with its client order ID, side,
-  instrument, the shares the rule asked for (to at most six decimals) and its reason
+  instrument, the shares the rule asked for (to at most six decimals; a smaller size is shown in scientific notation) and its reason
   (`below-one-share`, `scaled-below-one-share` or `held-by-working-sells`;
   [momentum minimum lot](momentum-minimum-lot.md)). The dashboard shows the
   same list.

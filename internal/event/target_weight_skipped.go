@@ -101,10 +101,19 @@ const SkippedSharesDecimals = 6
 // the summary, the dashboard and the journal query. The record keeps the
 // planner's float64 unrounded (ADR 0026, point 8), so a sum such as 0.1+0.2
 // would print as 0.30000000000000004; the text is bounded to
-// SkippedSharesDecimals decimals with trailing zeros dropped. Only the text
-// is bounded; the record is untouched.
+// SkippedSharesDecimals decimals with trailing zeros dropped. A non-zero size
+// that the six decimals would show as zero is printed in scientific notation
+// with three significant digits instead, so a skipped trade never reads as
+// "0 shares wanted"; negative zero is shown as "0". Only the text is bounded;
+// the record is untouched.
 func FormatSkippedShares(v float64) string {
+	if v == 0 {
+		return "0"
+	}
 	s := strconv.FormatFloat(v, 'f', SkippedSharesDecimals, 64)
+	if strings.Trim(s, "-0.") == "" {
+		return strconv.FormatFloat(v, 'g', 3, 64)
+	}
 	if strings.Contains(s, ".") {
 		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
 	}

@@ -152,7 +152,7 @@ Which trades did the program size but not order?
 ordered), the price the trade was sized at, and in the note the reason
 (`below-one-share`, `scaled-below-one-share` or `held-by-working-sells`,
 explained in [momentum minimum lot](momentum-minimum-lot.md)) and the
-shares the rule asked for, to at most six decimals.
+shares the rule asked for, to at most six decimals; a smaller size is shown in scientific notation.
 
 ```
 $ journal-query orders -instrument BBB ira.log
