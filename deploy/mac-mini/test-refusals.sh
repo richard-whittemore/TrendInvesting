@@ -303,6 +303,10 @@ refused_after() {
   grep -qiF -- "$word" "$work/out" || fail "$what: the refusal does not say '$word': $(cat "$work/out")"
   if mutated; then fail "$what: the container was changed before the refusal: $(cat "$work/calls")"; fi
 }
+# expect_line WHAT LINE: the refusal in $work/out is exactly LINE, whole.
+expect_line() {
+  grep -qxF -- "$2" "$work/out" || fail "$1: the refusal is not exactly: $2 -- it is: $(cat "$work/out")"
+}
 # run_after [ARGS...] [-- ENV=VALUE...]: the same, expected to succeed.
 run_after() {
   local args=()
@@ -321,7 +325,7 @@ refused_after "an unlabelled container, --recreate" "not one up.sh made" --recre
 # One made by an earlier up.sh, before it recorded the checkout: the refusal
 # gives the command that removes it, keeping its volumes.
 refused_after "a container from the launcher before the checkout label" "docker rm ti" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="ti|"
-grep -qF "volumes are kept" "$work/out" || fail "the refusal of a container from the earlier launcher does not say the volumes are kept: $(cat "$work/out")"
+expect_line "a container from the launcher before the checkout label" "up: the container ti was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter and then its engine (docker exec ti systemctl stop ti-adapter-boost && docker exec ti systemctl stop ti-engine@boost), then stop and remove it: docker stop -t 60 ti && docker rm ti (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
 refused_after "a container made from another checkout" "/elsewhere" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="ti|/elsewhere"
 refused_after "a container with a fifth mount" "mounts" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" \
   FAKE_MOUNTS="volume ti-etc /etc/trend-investing;volume ti-state /var/lib/trend-investing;volume ti-opt /opt/trend-investing;volume ti-journal /var/log/journal;bind  /data;"
@@ -338,8 +342,13 @@ refused_after "a container of this checkout on another checkout's volumes" "volu
 refused_after "--recreate of this checkout's container on another checkout's volumes" "volumes" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_VOLUME_LABELS="ti|/elsewhere"
 # Moving the checkout is the commonest cause: the refusal says the volumes are kept.
 refused_after "volumes made from another path" "volumes are kept" -- FAKE_VOLUME_LABELS="ti|/elsewhere"
+expect_line "volumes made from another path" "up: the volume ti-etc is not one up.sh made from this checkout: its labels name 'ti' from '/elsewhere', and this is ti from $co. Nothing was changed. If /elsewhere is this checkout's old place, move it (or a fresh clone) back there and run up.sh again; the volumes are kept. Otherwise run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm ti-etc ti-state ti-opt ti-journal (once no container uses them)"
+# Volumes labelled for another name are not this checkout's old place either.
+refused_after "volumes made for another name" "is not one up.sh made" -- FAKE_VOLUME_LABELS="other|/elsewhere"
+expect_line "volumes made for another name" "up: the volume ti-etc is not one up.sh made from this checkout: its labels name 'other' from '/elsewhere', and this is ti from $co. Nothing was changed. Run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm ti-etc ti-state ti-opt ti-journal (once no container uses them)"
 # A container on volumes of the earlier launcher: the safe way out, never -f.
 refused_after "a container on volumes from the launcher before the checkout label" "systemctl stop" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_VOLUME_LABELS="ti|"
+expect_line "a container on volumes from the launcher before the checkout label" "up: the volume ti-etc was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container ti uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter and then its engine (docker exec ti systemctl stop ti-adapter-boost && docker exec ti systemctl stop ti-engine@boost), then docker stop -t 60 ti && docker rm ti, then remove the four volumes (docker volume rm ti-etc ti-state ti-opt ti-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
 grep -qF "docker stop -t 60 ti" "$work/out" || fail "the refusal does not give docker stop -t 60: $(cat "$work/out")"
 grep -qF "docker rm ti" "$work/out" || fail "the refusal does not give docker rm: $(cat "$work/out")"
 grep -qF "docker volume rm ti-etc" "$work/out" || fail "the refusal does not give docker volume rm: $(cat "$work/out")"
@@ -349,6 +358,7 @@ refused_after "volume inspect failing for another reason" "cannot inspect" -- FA
 grep -qF "Cannot connect" "$work/out" || fail "the refusal does not show Docker's error: $(cat "$work/out")"
 if grep -q '^docker volume create' "$work/calls"; then fail "volumes were created after an inspect error: $(cat "$work/calls")"; fi
 refused_after "volumes without labels" "ti-etc" -- FAKE_VOLUME_LABELS="|"
+expect_line "volumes without labels" "up: the volume ti-etc is not one up.sh made from this checkout: its labels name 'none' from 'no checkout', and this is ti from $co. Nothing was changed. Run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm ti-etc ti-state ti-opt ti-journal (once no container uses them)"
 refused_after "volumes from the launcher before the checkout label" "before it recorded" -- FAKE_VOLUME_LABELS="ti|"
 if grep -q '^docker volume create' "$work/calls"; then fail "volumes were created over unlabelled ones: $(cat "$work/calls")"; fi
 # New volumes carry the same two labels as the container.

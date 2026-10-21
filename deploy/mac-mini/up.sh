@@ -227,7 +227,7 @@ check_own() {
   made=${labels%%|*}
   from=${labels#*|}
   if test "$made" = "$name" && test -z "$from"; then
-    refuse "the container $name was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter, then its engine (docker exec $name systemctl stop ti-adapter-boost ti-engine@boost), then stop and remove it: docker stop -t 60 $name && docker rm $name (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
+    refuse "the container $name was made by an earlier up.sh, before it recorded the checkout it was made from, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal container: stop its adapter and then its engine (docker exec $name systemctl stop ti-adapter-boost && docker exec $name systemctl stop ti-engine@boost), then stop and remove it: docker stop -t 60 $name && docker rm $name (its volumes are kept). Then run up.sh again, which creates it anew with the same volumes"
   fi
   if test "$made" != "$name" || test "$from" != "$repo"; then
     refuse "the container $name is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. Use another TI_MAC_NAME, or run up.sh from the checkout that made it."
@@ -261,12 +261,18 @@ check_volumes() {
     from=${labels#*|}
     if test "$made" = "$name" && test -z "$from"; then
       if test "${exists:-0}" = 1; then
-        refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container $name uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter, then its engine (docker exec $name systemctl stop ti-adapter-boost ti-engine@boost), then docker stop -t 60 $name && docker rm $name, then remove the four volumes (docker volume rm $name-etc $name-state $name-opt $name-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
+        refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container $name uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter and then its engine (docker exec $name systemctl stop ti-adapter-boost && docker exec $name systemctl stop ti-engine@boost), then docker stop -t 60 $name && docker rm $name, then remove the four volumes (docker volume rm $name-etc $name-state $name-opt $name-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
       fi
       refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal's and its contents may go, remove the four volumes ($name-etc, $name-state, $name-opt, $name-journal) once no container uses them: docker volume rm $name-etc $name-state $name-opt $name-journal. Then run up.sh again, which creates them anew"
     fi
     if test "$made" != "$name" || test "$from" != "$repo"; then
-      refuse "the volume $name-$v is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. If $from is this checkout's old place, move it (or a fresh clone) back there and run up.sh again; the volumes are kept. Otherwise run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm $name-etc $name-state $name-opt $name-journal (once no container uses them)"
+      # Only a volume this name labelled with another checkout's path was
+      # made from a checkout that may have moved; for any other label there
+      # is no old place to move back.
+      if test "$made" = "$name" && test -n "$from"; then
+        refuse "the volume $name-$v is not one up.sh made from this checkout: its labels name '$made' from '$from', and this is $name from $repo. Nothing was changed. If $from is this checkout's old place, move it (or a fresh clone) back there and run up.sh again; the volumes are kept. Otherwise run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm $name-etc $name-state $name-opt $name-journal (once no container uses them)"
+      fi
+      refuse "the volume $name-$v is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. Run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm $name-etc $name-state $name-opt $name-journal (once no container uses them)"
     fi
   done
   for v in $missing; do

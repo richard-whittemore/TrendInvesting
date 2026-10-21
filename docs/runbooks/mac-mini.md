@@ -72,7 +72,8 @@ creating the container, or re-attaching to it.*
 
 **If the launcher says the image changed**, or the container is damaged:
 stop the adapter and then the engine if they run
-(`docker exec ti systemctl stop ti-adapter-boost ti-engine@boost`), then run
+(`docker exec ti systemctl stop ti-adapter-boost`, then
+`docker exec ti systemctl stop ti-engine@boost`), then run
 `deploy/mac-mini/up.sh --recreate`. It refuses while either runs; otherwise
 it stops the container (systemd shuts its units down, up to 60 seconds),
 removes it and creates it again, keeping all four volumes. Do not run
