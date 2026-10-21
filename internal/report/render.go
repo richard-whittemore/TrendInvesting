@@ -76,17 +76,22 @@ func RenderText(s Summary) string {
 	for _, k := range s.Skipped {
 		fmt.Fprintf(&b, "  %s %s %s %s shares: %s\n", k.ClientOrderID, k.Side, k.InstrumentID, event.FormatSkippedShares(k.Shares), k.Reason)
 	}
-	switch {
-	case s.Equity.HistoryUnavailable != "":
-		e := s.Equity
+	// A broken chain is named above the comparison, which then runs over
+	// the intact runs, as the dashboard's card shows it; a history of one
+	// mode says where it starts.
+	from := ""
+	if e := s.Equity; e.HistoryUnavailable != "" {
 		fmt.Fprintf(&b, "Equity vs %s: %s\n", s.Benchmark, e.HistoryUnavailable)
-		if e.DayAvailable {
-			fmt.Fprintf(&b, "Day, %s to %s: account %+.2f%%, %s %+.2f%%\n", e.DayStartDate, e.EndDate, e.DayAccountReturn*100, s.Benchmark, e.DayBenchmarkReturn*100)
-		}
+		from = fmt.Sprintf(" from %s, the first intact run,", e.HistoryStartsAt)
+	}
+	if s.Equity.HistorySince != "" {
+		fmt.Fprintf(&b, "Equity vs %s: %s\n", s.Benchmark, s.Equity.HistorySince)
+	}
+	switch {
 	case s.Equity.Available:
 		e := s.Equity
-		fmt.Fprintf(&b, "Equity vs %s, %s to %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",
-			s.Benchmark, e.StartDate, e.EndDate, e.AccountReturn*100, s.Benchmark, e.BenchmarkReturn*100, e.Excess*100)
+		fmt.Fprintf(&b, "Equity vs %s,%s %s to %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",
+			s.Benchmark, from, e.StartDate, e.EndDate, e.AccountReturn*100, s.Benchmark, e.BenchmarkReturn*100, e.Excess*100)
 		if e.DayAvailable {
 			fmt.Fprintf(&b, "Day, %s to %s: account %+.2f%%, %s %+.2f%%\n", e.DayStartDate, e.EndDate, e.DayAccountReturn*100, s.Benchmark, e.DayBenchmarkReturn*100)
 		} else {

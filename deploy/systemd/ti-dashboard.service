@@ -9,7 +9,7 @@ Type=simple
 User=ti-trader
 Group=ti-trader
 Environment=TZ=America/New_York
-# The page finds the engine's latest run in its log directory on every
+# The page finds the engine's current run in its log directory on every
 # request and follows the chain of runs back to the first, so a restart or an
 # upgrade of the engine needs no restart of this unit (a new dashboard build
 # does; docs/runbooks/lightsail-deployment.md).

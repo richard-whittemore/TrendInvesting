@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
 // Engine states a summary reports.
@@ -121,6 +122,10 @@ type Equity struct {
 	// account's first run.
 	HistoryUnavailable string
 	HistoryStartsAt    string
+	// HistorySince is set when earlier runs of another mode come before
+	// the current mode's (HistorySince, the function): the comparison then
+	// runs from the first run of the current mode.
+	HistorySince string
 }
 
 // EquityPoint is one date on which the account's net liquidation and the
@@ -339,6 +344,7 @@ func SummarizeWithHistory(history History, envelopes []event.Envelope, date, ben
 	if history.Broken != nil {
 		s.Equity.HistoryUnavailable, s.Equity.HistoryStartsAt = HistoryUnavailable(history.Broken), historyStartsAt(history.Broken)
 	}
+	s.Equity.HistorySince = HistorySince(history)
 	return s, nil
 }
 
@@ -371,6 +377,36 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark str
 			}
 		}
 	}
+}
+
+// ForHistory returns what of an earlier run's recovery the chain of runs and
+// the equity history read, for a caller that keeps earlier logs between
+// reads: its header and final record hash, its first two records (its
+// configuration and approval, ADR 0027), every configuration and approval
+// input after them (FollowChain refuses a second approval), every account
+// snapshot and every bar of benchmark (pairEarlier). A log holding nothing
+// past its configuration keeps that one record, so restart.CutShort reads it
+// as it reads the whole log.
+func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
+	kept := recovery
+	kept.Entries = nil
+	for i, e := range recovery.Entries {
+		env := e.Envelope
+		keep := i < 2
+		switch {
+		case e.Kind != journal.KindInput:
+		case env.Type == event.TargetWeightConfigurationEventType, env.Type == event.OperatorRunApprovedEventType, env.Type == event.AccountSnapshotEventType:
+			keep = true
+		case env.Type == event.CompletedBarEventType:
+			if p, err := readBar(env); err == nil && p.InstrumentID == benchmark {
+				keep = true
+			}
+		}
+		if keep {
+			kept.Entries = append(kept.Entries, e)
+		}
+	}
+	return kept
 }
 
 // readFill decodes a fill at either version this build reads: the Turtle

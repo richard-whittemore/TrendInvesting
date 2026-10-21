@@ -19,7 +19,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +52,7 @@ func run(args []string, log io.Writer) error {
 	var journals stringList
 	flags.Var(&journals, "journal", "path to an account's journal; repeat for each account")
 	var engineDirs stringList
-	flags.Var(&engineDirs, "engine-dir", "an engine's log directory: each request shows the latest run in it, followed back to the first; repeat for each account")
+	flags.Var(&engineDirs, "engine-dir", "an engine's log directory: each request shows the current run in it, the newest link of its chain of runs, followed back to the first; repeat for each account")
 	addr := flags.String("addr", defaultAddr, "listen address: loopback or a Tailscale address")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	if err := flags.Parse(args); err != nil {
@@ -148,10 +147,12 @@ func checkListenAddr(addr string, interfaces func() ([]netInterface, error)) err
 	return fmt.Errorf("dashboard: %s is not an address of this host's Tailscale interface", ip)
 }
 
-// account is one journal's view.
+// account is one journal's view. Warning, for an engine directory, names a
+// log restored without its modification time (report.RestoredLogNewer).
 type account struct {
 	Summary report.Summary
 	Alerts  []alertView
+	Warning string `json:",omitempty"`
 }
 
 type alertView struct {
@@ -163,18 +164,23 @@ type alertView struct {
 }
 
 // newHandlerFor serves the journals and, for each engine directory, the
-// latest run in it, resolved afresh on every request, so a restart that
-// starts a new run is shown without restarting the dashboard. Each is shown
-// with the runs before it, followed back to the first (report.EarlierRuns).
-// Every request re-reads and re-verifies the current log, so the page is
-// never staler than the file.
+// current run in it, the head of its chain of runs, resolved afresh on every
+// request, so a restart that starts a new run is shown without restarting
+// the dashboard. Each is shown with the runs before it, followed back to the
+// first (report.EarlierRunsOfRecovery). Every request re-reads and
+// re-verifies the current log, so the page is never staler than the file.
 func newHandlerFor(journals, engineDirs []string, benchmark string) http.Handler {
 	return newHandlerWith(source{journals: journals, dirs: engineDirs}, benchmark, os.ReadFile)
 }
 
-// newHandlerWith is newHandlerFor reading each file with readFile.
+// newHandlerWith is newHandlerFor reading each file whole with readFile.
 func newHandlerWith(sources source, benchmark string, readFile func(string) ([]byte, error)) http.Handler {
-	logs := &logCache{stat: os.Stat, readFile: readFile, logs: map[string]cachedLog{}}
+	return newHandlerCached(sources, benchmark, newLogCache(readFile, func(path string) (io.ReadCloser, error) { return os.Open(path) }))
+}
+
+// newHandlerCached is newHandlerFor keeping the earlier logs in logs.
+func newHandlerCached(sources source, benchmark string, logs *logCache) http.Handler {
+	logs.benchmark = benchmark
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok\n") })
 	mux.HandleFunc("/api/summary.json", func(w http.ResponseWriter, _ *http.Request) {
@@ -248,75 +254,108 @@ func fail(w http.ResponseWriter, err error) {
 }
 
 // source is where the accounts' logs are: fixed journals, and engine
-// directories whose latest run is found on each request.
+// directories whose current run is found on each request.
 type source struct{ journals, dirs []string }
 
-// load reads each account's current log afresh, and its earlier runs and the
-// engine directories' other logs through logs. Only the equity comparison
-// reads the earlier runs, so a broken chain of them is shown on the equity
-// card, naming both logs, and never refuses the page: the current run's
-// holdings, state, alerts and day's figures do not depend on it.
+// load reads and recovers each account's current log once, afresh, and its
+// earlier runs and the engine directories' other logs through logs. Only the
+// equity comparison reads the earlier runs, so a broken chain of them is
+// shown on the equity card, naming both logs, and never refuses the page:
+// the current run's holdings, state, alerts and day's figures do not depend
+// on it.
 func load(src source, benchmark string, logs *logCache) ([]account, error) {
-	paths := slices.Clone(src.journals)
+	type current struct{ path, warning string }
+	var paths []current
+	for _, path := range src.journals {
+		paths = append(paths, current{path: path})
+	}
 	for _, dir := range src.dirs {
-		path, err := latestLogIn(dir, logs)
+		path, warning, err := currentLogIn(dir, logs)
 		if err != nil {
 			return nil, err
 		}
-		paths = append(paths, path)
+		paths = append(paths, current{path, warning})
 	}
 	var out []account
-	for _, path := range paths {
-		raw, err := logs.readFile(path)
+	for _, c := range paths {
+		raw, err := logs.readFile(c.path)
 		if err != nil {
 			return nil, errors.New("read journal")
 		}
-		_, envelopes, err := report.Load(raw)
+		envelopes, recovery, err := report.LoadLog(raw)
 		if err != nil {
 			return nil, err
 		}
-		a, err := view(report.EarlierRunsOf(path, raw, logs.recover), envelopes, benchmark)
+		var history report.History
+		if recovery != nil {
+			history = report.EarlierRunsOfRecovery(c.path, *recovery, logs.earlier)
+		}
+		a, err := view(history, envelopes, benchmark)
 		if err != nil {
 			return nil, err
 		}
+		a.Warning = c.warning
 		out = append(out, a)
 	}
 	return out, nil
 }
 
-// latestLogIn returns the path of the latest run in an engine's log
-// directory, by the engine's own rule: the engine's listing
-// (restart.ListLogs) and its choice of the latest run (restart.LatestRun).
-func latestLogIn(dir string, logs *logCache) (string, error) {
+// currentLogIn returns the path of the current run in an engine's log
+// directory: the head of its chain of runs, the log no other log's approval
+// names as its previous log, ties broken by the engine's own latest-run rule
+// (restart.ChainHead over the engine's listing, restart.ListLogs). Each
+// log's first records are all the head is found by. warning names a log the
+// chain names that is newer by modification time than the head, a log
+// restored without its time, which the engine would take for the latest run
+// at its next start; it is "" when there is none.
+func currentLogIn(dir string, logs *logCache) (path, warning string, err error) {
 	files, err := restart.ListLogs(dir, ".log")
 	if err != nil {
-		return "", errors.New("read the engine directory")
+		return "", "", errors.New("read the engine directory")
 	}
-	latest, err := restart.LatestRun(files, func(name string) (journal.Recovery, error) {
-		return logs.recover(filepath.Join(dir, name))
-	})
+	logs.sweep(dir, files)
+	head, newer, err := restart.ChainHead(files,
+		func(name string) (journal.Recovery, error) { return logs.start(filepath.Join(dir, name)) },
+		func(name string) (journal.Recovery, error) { return logs.whole(filepath.Join(dir, name)) })
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if latest == "" {
-		return "", errors.New("the engine directory holds no run yet")
+	if head == "" {
+		return "", "", errors.New("the engine directory holds no run yet")
 	}
-	return filepath.Join(dir, latest), nil
+	if newer != "" {
+		warning = report.RestoredLogNewer(newer, head)
+	}
+	return filepath.Join(dir, head), warning, nil
 }
 
-// logCache keeps each log's recovery by its path, size and modification
-// time. A durable log is only ever appended to, so a log whose size and
-// time are unchanged holds what it held, and a request recovers only the
-// logs that changed, never every byte the engine has written.
+// logCache keeps, by path, size and modification time, what the page reads
+// of logs other than the current one: of an earlier run's log only what the
+// chain and the equity history read (report.ForHistory), and of any other
+// log only its first records, which the chain's head is found by. A durable
+// log is only ever appended to, so a log whose size and time are unchanged
+// holds what it held: an earlier run's log is read again only when its size
+// or modification time changes, and the current log, never kept whole, is
+// read and verified afresh on every request. An entry whose file is gone is
+// dropped.
 type logCache struct {
-	stat     func(string) (fs.FileInfo, error)
-	readFile func(string) ([]byte, error)
-	mu       sync.Mutex
-	logs     map[string]cachedLog
+	stat      func(string) (fs.FileInfo, error)
+	readFile  func(string) ([]byte, error)
+	open      func(string) (io.ReadCloser, error)
+	benchmark string
+	mu        sync.Mutex
+	starts    map[string]cachedLog
+	histories map[string]cachedLog
 }
 
-// cachedLog is one log's recovery, or the reason it does not recover, as
-// of its size and modification time.
+// newLogCache is an empty cache reading whole logs with readFile and the
+// first records of a log through open.
+func newLogCache(readFile func(string) ([]byte, error), open func(string) (io.ReadCloser, error)) *logCache {
+	return &logCache{stat: os.Stat, readFile: readFile, open: open, starts: map[string]cachedLog{}, histories: map[string]cachedLog{}}
+}
+
+// cachedLog is what is kept of one log, or the reason it does not recover,
+// as of its size and modification time.
 type cachedLog struct {
 	size     int64
 	modified time.Time
@@ -324,28 +363,123 @@ type cachedLog struct {
 	err      error
 }
 
-// recover returns the recovery of the log at path. A file that cannot be
-// read is not kept, so a fault fixed at the file is seen on the next request.
-func (c *logCache) recover(path string) (journal.Recovery, error) {
+func (c cachedLog) current(info fs.FileInfo) bool {
+	return c.size == info.Size() && c.modified.Equal(info.ModTime())
+}
+
+// startGroups is how many committed groups a log's start holds: its
+// configuration's and its approval's (ADR 0027).
+const startGroups = 2
+
+// start returns the first records of the log at path. A file that cannot
+// be read is not kept, so a fault fixed at the file is seen on the next
+// request.
+func (c *logCache) start(path string) (journal.Recovery, error) {
 	info, err := c.stat(path)
 	if err != nil {
+		c.drop(path)
 		return journal.Recovery{}, errors.New("cannot be read")
 	}
 	c.mu.Lock()
-	hit, ok := c.logs[path]
+	hit, ok := c.histories[path]
+	if !ok || !hit.current(info) {
+		hit, ok = c.starts[path]
+	}
 	c.mu.Unlock()
-	if ok && hit.size == info.Size() && hit.modified.Equal(info.ModTime()) {
+	if ok && hit.current(info) {
 		return hit.recovery, hit.err
 	}
-	raw, err := c.readFile(path)
+	f, err := c.open(path)
 	if err != nil {
 		return journal.Recovery{}, errors.New("cannot be read")
 	}
-	recovery, err := journal.RecoverLog(bytes.NewReader(raw))
+	defer func() { _ = f.Close() }()
+	recovery, err := journal.RecoverLogStart(f, startGroups)
 	c.mu.Lock()
-	c.logs[path] = cachedLog{size: info.Size(), modified: info.ModTime(), recovery: recovery, err: err}
+	c.starts[path] = cachedLog{size: info.Size(), modified: info.ModTime(), recovery: recovery, err: err}
 	c.mu.Unlock()
 	return recovery, err
+}
+
+// earlier returns what the chain and the history read of the earlier run's
+// log at path (report.ForHistory). A file that cannot be read is not kept.
+func (c *logCache) earlier(path string) (journal.Recovery, error) {
+	info, err := c.stat(path)
+	if err != nil {
+		c.drop(path)
+		return journal.Recovery{}, errors.New("cannot be read")
+	}
+	c.mu.Lock()
+	hit, ok := c.histories[path]
+	c.mu.Unlock()
+	if ok && hit.current(info) {
+		return hit.recovery, hit.err
+	}
+	recovery, err := c.whole(path)
+	if errors.Is(err, errUnreadable) {
+		return journal.Recovery{}, err
+	}
+	kept := cachedLog{size: info.Size(), modified: info.ModTime(), recovery: report.ForHistory(recovery, c.benchmark), err: err}
+	c.mu.Lock()
+	c.histories[path] = kept
+	delete(c.starts, path)
+	c.mu.Unlock()
+	return kept.recovery, kept.err
+}
+
+// errUnreadable is a log file that cannot be read; the reason is not shown,
+// since a reader of the page is not told the server's paths.
+var errUnreadable = errors.New("cannot be read")
+
+// whole reads and recovers the log at path, keeping nothing: the engine's
+// latest-run rule reads whole only the logs that tie for the chain's head.
+func (c *logCache) whole(path string) (journal.Recovery, error) {
+	raw, err := c.readFile(path)
+	if err != nil {
+		return journal.Recovery{}, errUnreadable
+	}
+	return journal.RecoverLog(bytes.NewReader(raw))
+}
+
+// drop forgets the log at path.
+func (c *logCache) drop(path string) {
+	c.mu.Lock()
+	delete(c.starts, path)
+	delete(c.histories, path)
+	c.mu.Unlock()
+}
+
+// sweep forgets every log kept from dir that its listing no longer holds.
+func (c *logCache) sweep(dir string, files []restart.LoggedFile) {
+	listed := map[string]bool{}
+	for _, f := range files {
+		listed[filepath.Join(dir, f.Name)] = true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range []map[string]cachedLog{c.starts, c.histories} {
+		for path := range m {
+			if filepath.Dir(path) == filepath.Clean(dir) && !listed[path] {
+				delete(m, path)
+			}
+		}
+	}
+}
+
+// retained is how many records the cache keeps of the log at path.
+func (c *logCache) retained(path string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.starts[path].recovery.Entries) + len(c.histories[path].recovery.Entries)
+}
+
+// held reports whether the cache keeps anything of the log at path.
+func (c *logCache) held(path string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, start := c.starts[path]
+	_, earlier := c.histories[path]
+	return start || earlier
 }
 
 func view(history report.History, envelopes []event.Envelope, benchmark string) (account, error) {

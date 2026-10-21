@@ -107,3 +107,91 @@ func TestABrokenChainCostsNoAlertAndIsReportedOnce(t *testing.T) {
 		t.Fatalf("the break was reported twice:\n%s", second.String())
 	}
 }
+
+// TestARepairedChainBrokenAgainAlertsAgain: the break's key is forgotten
+// when a later firing finds the chain whole, so the same link broken again
+// is a new incident, and a break of another cause at the same link is one
+// too.
+func TestARepairedChainBrokenAgainAlertsAgain(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "run1.log")
+	hash := writeChainedLog(t, first, approvalNaming("", ""))
+	backup, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(dir, "run2.log")
+	writeChainedLog(t, current, approvalNaming("run1.log", hash))
+	args := []string{"-journal", current, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy"}
+	now := func() time.Time { return t0.Add(time.Hour) }
+	fire := func() string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := run(args, fakeEnv, now, &out, fakeClient); err != nil {
+			t.Fatalf("run: %v\n%s", err, out.String())
+		}
+		return out.String()
+	}
+	const title = "joint: the history of earlier runs is unavailable"
+	if err := os.Remove(first); err != nil {
+		t.Fatal(err)
+	}
+	if out := fire(); !strings.Contains(out, title) {
+		t.Fatalf("the break was not reported:\n%s", out)
+	}
+	if err := os.WriteFile(first, backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := fire(); strings.Contains(out, title) {
+		t.Fatalf("a whole chain was reported broken:\n%s", out)
+	}
+	if err := os.Remove(first); err != nil {
+		t.Fatal(err)
+	}
+	if out := fire(); !strings.Contains(out, title) {
+		t.Fatalf("the same link broken again after a repair was not reported:\n%s", out)
+	}
+	// The wrong backup restored: the same link, another cause.
+	wrong := approvalNaming("", "")
+	wrong.ApprovedBy = "someone else"
+	writeChainedLog(t, first, wrong)
+	if out := fire(); !strings.Contains(out, title) || !strings.Contains(out, "final record hash") {
+		t.Fatalf("a break of another cause at the same link was not reported:\n%s", out)
+	}
+}
+
+// TestARestoredLogNewerThanTheCurrentRunIsReportedOnce: a log the current
+// run names, restored with a fresh modification time, is one routine alert
+// naming both logs.
+func TestARestoredLogNewerThanTheCurrentRunIsReportedOnce(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "run1.log")
+	hash := writeChainedLog(t, first, approvalNaming("", ""))
+	current := filepath.Join(dir, "run2.log")
+	writeChainedLog(t, current, approvalNaming("run1.log", hash))
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(current, base, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(first, base.Add(time.Hour), base.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-journal", current, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy"}
+	now := func() time.Time { return t0.Add(time.Hour) }
+	var out, again bytes.Buffer
+	if err := run(args, fakeEnv, now, &out, fakeClient); err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "joint: a restored log looks newer than the current run") ||
+		!strings.Contains(out.String(), "run1.log looks newer than the current run run2.log; fix its modification time before the next restart") {
+		t.Fatalf("the restored log was not reported:\n%s", out.String())
+	}
+	if err := run(args, fakeEnv, now, &again, fakeClient); err != nil {
+		t.Fatalf("second run: %v\n%s", err, again.String())
+	}
+	if strings.Contains(again.String(), "looks newer") {
+		t.Fatalf("reported twice:\n%s", again.String())
+	}
+}

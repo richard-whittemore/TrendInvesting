@@ -31,6 +31,10 @@ type Journal struct {
 	Header    journal.Header
 	LogHeader journal.LogHeader
 	Records   []journal.Record
+	// Recovery is a durable log's recovery, nil for an end-of-run journal,
+	// so a reader that needs the log's final record hash does not recover
+	// the log a second time.
+	Recovery *journal.Recovery
 }
 
 // Load verifies data as a journal and returns it. The chain is checked before

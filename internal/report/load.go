@@ -32,9 +32,30 @@ func Load(raw []byte) (journal.Header, []event.Envelope, error) {
 // a decision, which an order's lifecycle state is read from
 // (OrderLifecycles).
 func LoadEntries(raw []byte) (journal.Header, []journal.Entry, error) {
+	header, entries, _, err := loadEntries(raw)
+	return header, entries, err
+}
+
+// LoadLog is Load that also returns a durable log's recovery, nil for an
+// end-of-run journal, so a caller that follows the chain of runs back from
+// the log (EarlierRunsOfRecovery) reads and recovers it once.
+func LoadLog(raw []byte) ([]event.Envelope, *journal.Recovery, error) {
+	_, entries, recovery, err := loadEntries(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	envelopes := make([]event.Envelope, len(entries))
+	for i, e := range entries {
+		envelopes[i] = e.Envelope
+	}
+	return envelopes, recovery, nil
+}
+
+// loadEntries is LoadEntries returning the durable log's recovery too.
+func loadEntries(raw []byte) (journal.Header, []journal.Entry, *journal.Recovery, error) {
 	loaded, err := journalquery.Load("journal", raw)
 	if err != nil {
-		return journal.Header{}, nil, fmt.Errorf("report: %w", err)
+		return journal.Header{}, nil, nil, fmt.Errorf("report: %w", err)
 	}
 	// Every record must name the run its file's header names (ADR 0017's
 	// identity rule). Recovering a durable log checks its chain and commits
@@ -45,11 +66,11 @@ func LoadEntries(raw []byte) (journal.Header, []journal.Entry, error) {
 		identity = journal.Header{ConfigurationHash: loaded.LogHeader.ConfigurationHash, StrategyVersion: loaded.LogHeader.StrategyVersion}
 	}
 	if err := journal.CheckIdentity(identity, loaded.Records); err != nil {
-		return journal.Header{}, nil, err
+		return journal.Header{}, nil, nil, err
 	}
 	entries := make([]journal.Entry, len(loaded.Records))
 	for i, r := range loaded.Records {
 		entries[i] = journal.Entry{Kind: r.Kind, Envelope: r.Envelope}
 	}
-	return loaded.Header, entries, nil
+	return loaded.Header, entries, loaded.Recovery, nil
 }

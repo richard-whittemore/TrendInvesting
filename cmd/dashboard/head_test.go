@@ -1,0 +1,164 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+)
+
+// counted is a readFile and an open that count, per log, the whole reads
+// and the bytes the open reads took.
+type counted struct {
+	whole map[string]int
+	bytes map[string]int
+}
+
+func newCounted() *counted { return &counted{whole: map[string]int{}, bytes: map[string]int{}} }
+
+func (c *counted) readFile(path string) ([]byte, error) {
+	c.whole[filepath.Base(path)]++
+	return os.ReadFile(path)
+}
+
+func (c *counted) open(path string) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &countingFile{f: f, name: filepath.Base(path), c: c}, nil
+}
+
+func (c *counted) reset() { clear(c.whole); clear(c.bytes) }
+
+type countingFile struct {
+	f    *os.File
+	name string
+	c    *counted
+}
+
+func (f *countingFile) Read(p []byte) (int, error) {
+	n, err := f.f.Read(p)
+	f.c.bytes[f.name] += n
+	return n, err
+}
+
+func (f *countingFile) Close() error { return f.f.Close() }
+
+// TestDashboardFindsTheCurrentRunByTheChainNotTheModificationTime: an
+// earlier log restored from a backup with a fresh modification time is the
+// newest file, but the current run names it, so the page still shows the
+// current run, and warns, naming both logs, that the restored log looks
+// newer.
+func TestDashboardFindsTheCurrentRunByTheChainNotTheModificationTime(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	h1 := writeRun(t, dir, "run1.log", approval("", ""), 0, base)
+	h2 := writeRun(t, dir, "run2.log", approval("run1.log", h1), 2, base.Add(time.Hour))
+	writeRun(t, dir, "run3.log", approval("run2.log", h2), 4, base.Add(2*time.Hour))
+	restored := base.Add(3 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, "run1.log"), restored, restored); err != nil {
+		t.Fatal(err)
+	}
+	h := newHandlerFor(nil, []string{dir}, "SPY")
+	got := summaryOf(t, h)
+	if got.Summary.Date != at(5).Format(time.DateOnly) || len(got.Summary.Equity.Points) != 6 {
+		t.Fatalf("the page shows %s with %d points, want run3.log's day and the whole history", got.Summary.Date, len(got.Summary.Equity.Points))
+	}
+	const warning = "run1.log looks newer than the current run run3.log; fix its modification time before the next restart"
+	if got.Warning != warning {
+		t.Fatalf("warning = %q, want %q", got.Warning, warning)
+	}
+	if rec := get(h, http.MethodGet, "/"); !strings.Contains(rec.Body.String(), warning) {
+		t.Fatalf("the page does not warn:\n%s", rec.Body)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "run1.log"), base, base); err != nil {
+		t.Fatal(err)
+	}
+	if got := summaryOf(t, h); got.Warning != "" {
+		t.Fatalf("a log with its time restored still warns: %q", got.Warning)
+	}
+}
+
+// TestDashboardKeepsOnlyTheHistoryOfAnEarlierLog: the current log's whole
+// recovery is never kept; of an earlier log the cache keeps only what the
+// chain and the equity history read, however many other records it holds,
+// and an entry whose file is gone is dropped.
+func TestDashboardKeepsOnlyTheHistoryOfAnEarlierLog(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	var noise []journal.Entry
+	for i := range 300 {
+		noise = append(noise, input(t, 0, at(1), event.KillSwitchEventType, event.KillSwitchSchemaVersion, fmt.Sprintf("ks:%d", i), event.KillSwitchPayload{AccountID: "joint", AsOf: at(1), Operator: "owner"}))
+	}
+	h1 := writeRun(t, dir, "run1.log", approval("", ""), 0, base, noise...)
+	writeRun(t, dir, "run2.log", approval("run1.log", h1), 2, base.Add(time.Hour))
+	c := newCounted()
+	logs := newLogCache(c.readFile, c.open)
+	h := newHandlerCached(source{dirs: []string{dir}}, "SPY", logs)
+	if got := summaryOf(t, h); len(got.Summary.Equity.Points) != 4 {
+		t.Fatalf("points = %d, want 4", len(got.Summary.Equity.Points))
+	}
+	// Of run1.log: its configuration and approval, two bars and two
+	// snapshots. Nothing of run2.log, the current log, is kept whole.
+	if n := logs.retained(filepath.Join(dir, "run1.log")); n > 6 {
+		t.Fatalf("the cache keeps %d of run1.log's records, want at most the six the history reads", n)
+	}
+	if n := logs.retained(filepath.Join(dir, "run2.log")); n > 2 {
+		t.Fatalf("the cache keeps %d of the current log's records, want only its start", n)
+	}
+	if err := os.Remove(filepath.Join(dir, "run1.log")); err != nil {
+		t.Fatal(err)
+	}
+	summaryOf(t, h)
+	if logs.held(filepath.Join(dir, "run1.log")) {
+		t.Fatal("the cache still holds a log that is gone")
+	}
+}
+
+// TestDashboardOfAThousandRunsReadsEachEarlierLogOnce: a directory of a
+// thousand chained runs: the first request reads each earlier log whole
+// once, for its hash and its history, and the current run is found from the
+// logs' starts; after the engine appends to the current log, a request reads
+// that log whole once and no earlier log at all.
+func TestDashboardOfAThousandRunsReadsEachEarlierLogOnce(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	previous, hash, before := "", "", ""
+	var last string
+	for i := range 1000 {
+		last = fmt.Sprintf("run%04d.log", i)
+		before = hash
+		hash = writeRun(t, dir, last, approval(previous, hash), 0, base.Add(time.Duration(i)*time.Minute))
+		previous = last
+	}
+	c := newCounted()
+	h := newHandlerCached(source{dirs: []string{dir}}, "SPY", newLogCache(c.readFile, c.open))
+	summaryOf(t, h)
+	for name, n := range c.whole {
+		if n != 1 {
+			t.Fatalf("the first request read %s whole %d times", name, n)
+		}
+	}
+	if len(c.whole) != 1000 {
+		t.Fatalf("the first request read %d logs whole, want each of the thousand once", len(c.whole))
+	}
+	c.reset()
+	writeRun(t, dir, last, approval("run0998.log", before), 0, base.Add(time.Hour*24), halted(t, 2))
+	summaryOf(t, h)
+	if len(c.whole) != 1 || c.whole[last] != 1 {
+		t.Fatalf("after the current log changed, read whole %v; want %s once", c.whole, last)
+	}
+	for name := range c.bytes {
+		if name != last {
+			t.Fatalf("after the current log changed, %s was read again", name)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -34,11 +35,8 @@ func input(t *testing.T, seq uint64, when time.Time, eventType string, version u
 func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApprovedPayload, first int, modified time.Time, extra ...journal.Entry) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	log, err := journal.CreateLog(file, journal.NewLogHeader("h", "v"))
+	var file memoryFile
+	log, err := journal.CreateLog(&file, journal.NewLogHeader("h", "v"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +74,7 @@ func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApproved
 		}
 		group = nil
 	}
-	if err := file.Close(); err != nil {
+	if err := os.WriteFile(path, file.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(path, modified, modified); err != nil {
@@ -84,6 +82,12 @@ func writeRun(t *testing.T, dir, name string, approval event.OperatorRunApproved
 	}
 	return log.FinalRecordHash()
 }
+
+// memoryFile is a log file held in memory and written out whole: a test's
+// logs need no flush to the disk.
+type memoryFile struct{ bytes.Buffer }
+
+func (*memoryFile) Sync() error { return nil }
 
 func approval(previous, hash string) event.OperatorRunApprovedPayload {
 	latched := false

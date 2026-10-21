@@ -314,6 +314,23 @@ func (r Recovery) JournalHeader() (Header, error) {
 // one final fragment with no newline. The torn tail is reported, not
 // recovered. Anything else returns a *LogDamageError.
 func RecoverLog(r io.Reader) (Recovery, error) {
+	return recoverLog(r, -1)
+}
+
+// RecoverLogStart is RecoverLog of a log's first groups committed groups
+// alone, checked as RecoverLog checks them: it stops reading at the commit
+// that closes the last of them, so a reader that needs only a run's first
+// records (its configuration and approval, ADR 0027) never reads the rest of
+// a long log. FinalRecordHash is then the hash of the last group read, not
+// the log's, and a damaged or torn part past those groups is not seen. A log
+// holding fewer groups is recovered whole.
+func RecoverLogStart(r io.Reader, groups int) (Recovery, error) {
+	return recoverLog(r, groups)
+}
+
+// recoverLog is RecoverLog stopping after groups committed groups, or at the
+// end of the log when groups is negative.
+func recoverLog(r io.Reader, groups int) (Recovery, error) {
 	reader := bufio.NewReader(r)
 	headerLine, err := readLogLine(reader)
 	if err != nil {
@@ -353,6 +370,9 @@ func RecoverLog(r io.Reader) (Recovery, error) {
 			return Recovery{}, &LogDamageError{Line: line, Offset: scan.offset, Reason: reason}
 		}
 		scan.offset += next.n
+		if groups >= 0 && scan.groups == groups && len(scan.pending) == 0 {
+			break
+		}
 	}
 
 	recovery := Recovery{Header: header, Entries: scan.committed, FinalRecordHash: scan.committedHash}
@@ -371,6 +391,7 @@ type logScan struct {
 	committed       []Entry
 	committedOffset int64
 	committedHash   string
+	groups          int
 	pending         []Entry
 	pendingHash     string
 }
@@ -427,6 +448,7 @@ func (s *logScan) acceptCommit(commit logCommit, end int64) string {
 		return fmt.Sprintf("the commit names record %d (%s), but the group ends at record %d (%s)", commit.Sequence, commit.RecordHash, s.sequence, s.pendingHash)
 	}
 	s.committed = append(s.committed, s.pending...)
+	s.groups++
 	s.pending = nil
 	s.committedHash = s.pendingHash
 	s.committedOffset = end

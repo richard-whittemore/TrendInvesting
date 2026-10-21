@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -18,9 +19,31 @@ import (
 // break alone. A broken history never refuses the journal: the current
 // log's alerts, state and day's figures do not depend on it (ADR 0019,
 // "Alerting").
+//
+// Since is set when the chain holds runs of another mode before the current
+// mode's: the engine accepts a paper run approved against a dry-run log and
+// a live run against a paper log, so such a chain is whole, but Earlier then
+// holds only the current mode's runs, from the earliest contiguous one.
 type History struct {
 	Earlier []event.Envelope
 	Broken  *restart.ChainError
+	Since   *ModeStart
+}
+
+// ModeStart is where a history of one mode starts: the log of the first run
+// in the current mode, that mode, and the date (YYYY-MM-DD) the run's
+// configuration was recorded.
+type ModeStart struct {
+	Log, Mode, Date string
+}
+
+// HistorySince is the line the equity comparison gives for a history that
+// starts at the first run of the current mode, "" when it holds every run.
+func HistorySince(h History) string {
+	if h.Since == nil {
+		return ""
+	}
+	return fmt.Sprintf("history since %s, the first %s run", h.Since.Date, h.Since.Mode)
 }
 
 // EarlierRuns returns the history of the run whose durable log is at path:
@@ -34,7 +57,7 @@ func EarlierRuns(path string, readFile func(string) ([]byte, error)) History {
 	raw, err := readFile(path)
 	if err != nil {
 		_, current := filepath.Split(path)
-		return History{Broken: &restart.ChainError{Run: current, Reason: fmt.Sprintf("that log cannot be read (%v)", withoutPath(err))}}
+		return History{Broken: &restart.ChainError{Run: current, Cause: restart.CauseUnreadable, Reason: fmt.Sprintf("that log cannot be read (%v)", withoutPath(err))}}
 	}
 	return EarlierRunsOf(path, raw, func(earlier string) (journal.Recovery, error) {
 		raw, err := readFile(earlier)
@@ -50,14 +73,28 @@ func EarlierRuns(path string, readFile func(string) ([]byte, error)) History {
 // earlier log's path beside path. A chain that cannot be followed is
 // returned as History.Broken naming the link, never cut short silently.
 func EarlierRunsOf(path string, raw []byte, recoverLog func(path string) (journal.Recovery, error)) History {
-	if first, _, _ := bytes.Cut(raw, []byte("\n")); !bytes.Contains(first, []byte(`"log_version"`)) {
+	if !isDurableLog(raw) {
 		return History{} // an end-of-run journal: it follows no chain
 	}
-	dir, current := filepath.Split(path)
 	currentRecovery, err := journal.RecoverLog(bytes.NewReader(raw))
 	if err != nil {
-		return History{Broken: &restart.ChainError{Run: current, Reason: fmt.Sprintf("that log does not recover (%v)", err)}}
+		_, current := filepath.Split(path)
+		return History{Broken: &restart.ChainError{Run: current, Cause: restart.CauseUnreadable, Reason: fmt.Sprintf("that log does not recover (%v)", err)}}
 	}
+	return EarlierRunsOfRecovery(path, currentRecovery, recoverLog)
+}
+
+// isDurableLog reports whether raw is a durable log, whose header line
+// carries its log version, not an end-of-run journal.
+func isDurableLog(raw []byte) bool {
+	first, _, _ := bytes.Cut(raw, []byte("\n"))
+	return bytes.Contains(first, []byte(`"log_version"`))
+}
+
+// EarlierRunsOfRecovery is EarlierRunsOf for a caller that has recovered the
+// current durable log itself, so it is neither read nor recovered again.
+func EarlierRunsOfRecovery(path string, currentRecovery journal.Recovery, recoverLog func(path string) (journal.Recovery, error)) History {
+	dir, current := filepath.Split(path)
 	chain, err := restart.FollowChain(current, func(name string) (journal.Recovery, error) {
 		if name == current {
 			return currentRecovery, nil
@@ -69,6 +106,7 @@ func EarlierRunsOf(path string, raw []byte, recoverLog func(path string) (journa
 	if errors.As(err, &broken) {
 		chain = broken.Intact
 	}
+	chain, since := currentModeOf(chain)
 	var earlier []event.Envelope
 	for _, link := range chain {
 		if link.Name == current {
@@ -78,7 +116,31 @@ func EarlierRunsOf(path string, raw []byte, recoverLog func(path string) (journa
 			earlier = append(earlier, e.Envelope)
 		}
 	}
-	return History{Earlier: earlier, Broken: broken}
+	return History{Earlier: earlier, Broken: broken, Since: since}
+}
+
+// currentModeOf returns the runs of chain, oldest first, from the earliest
+// of the unbroken run of the current (last) run's mode, and where that
+// history starts when runs of another mode come before it. The equity
+// comparison is one mode's: a dry run's or paper run's figures never join
+// a live run's.
+func currentModeOf(chain []restart.Link) ([]restart.Link, *ModeStart) {
+	if len(chain) == 0 {
+		return chain, nil
+	}
+	mode := chain[len(chain)-1].Mode
+	first := len(chain) - 1
+	for first > 0 && chain[first-1].Mode == mode {
+		first--
+	}
+	if first == 0 {
+		return chain, nil
+	}
+	start := ModeStart{Log: chain[first].Name, Mode: mode}
+	if entries := chain[first].Recovery.Entries; len(entries) > 0 {
+		start.Date = entries[0].Envelope.EventTime.UTC().Format(time.DateOnly)
+	}
+	return chain[first:], &start
 }
 
 // withoutPath strips the path from a file error: the reason is shown to a

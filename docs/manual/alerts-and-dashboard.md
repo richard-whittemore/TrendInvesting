@@ -340,9 +340,10 @@ runbook publishes to your tailnet (`sudo tailscale serve --bg 8088`). It reads
 no secret and is given none.
 
 `-engine-dir` names the folder the engine keeps its logs in. On every request
-the page finds the account's latest run there, by the same rule the engine uses
-to find it at a start, so after a restart or an upgrade of the engine the next
-page load already shows the new run. You never restart the dashboard to follow
+the page finds the account's current run there, the newest link of the chain
+of runs (ties decided by the rule the engine uses to find the latest run at a
+start), so after a restart or an upgrade of the engine the next page load
+already shows the new run. You never restart the dashboard to follow
 the engine. (Restart it only to run a new build of the dashboard itself:
 `provision.sh services` does that for you at the upgrade step of the Lightsail
 runbook, which is why that step already ends with a dashboard restart.)
@@ -359,29 +360,77 @@ the last restart. Everything else on the page (holdings, engine state, the
 day's orders and fills, alerts, "Inputs not read") is the current run's, as
 before. The daily summary the reporter sends follows the chain the same way.
 
-Each earlier log must also be the same account's, in the same mode (dry-run,
-paper or live), as the current one, so another account's log or a dry run's
-never joins a paper or live history. A run with no approval counts as a first
-run only in a dry run, whose first run starts without one; in paper or live a
-log with no approval states no starting book, so it is a broken link.
+Each earlier log must also be the same account's as the current one, so
+another account's log never joins the history. A run with no approval counts
+as a first run only in a dry run, whose first run starts without one; in paper
+or live a log with no approval states no starting book, so it is a broken
+link. A dry-run log holding nothing past its configuration is a broken link
+too, since it cannot be told from a start cut short before its approval was
+recorded.
+
+The mode (dry-run, paper or live) may change along the chain: the engine
+accepts a paper run approved against a dry-run log, and a live run against a
+paper log, so such a link is followed and checked like any other and is not a
+break. The equity comparison is one mode's, though: it holds only the runs in
+the current run's mode, from the earliest of them since the last change of
+mode, and the card and the daily summary say "history since <date>, the first
+<mode> run" (the date that run started), so a dry run's or a paper run's
+figures never join a live run's.
+
+The current run is the log no other log in the folder names as its previous
+log, the newest link of the chain; when two logs tie (a run you resumed and
+the log it copied, say) the page picks the one the engine would. The page
+finds it from each log's first records, its configuration and approval, so it
+reads no more of the other logs than that. An earlier run's log is read whole
+once, for its fingerprint and its share of the equity history, and read again
+only when its size or modification time changes; the current log is read
+afresh on every request.
 
 If a link cannot be followed (an earlier log is missing, was changed, is
-another account's or mode's, or the approvals loop back on themselves) the
-history never costs you an alert or a figure of the current run. The page
-still shows the current run's holdings, engine state, alerts and day's
-figures; only the equity card says "history unavailable: the chain of runs is
-broken between <log A> and <log B>", naming the two logs the broken link joins,
-and draws the comparison from the first intact run, saying so. The reporter
-still sends every alert and the daily summary, whose equity line is that one
-message, and tells you of the break once, in a routine alert, "<account>: the
-history of earlier runs is unavailable".
+another account's, or the approvals loop back on themselves) the history
+never costs you an alert or a figure of the current run. The page still shows
+the current run's holdings, engine state, alerts and day's figures; only the
+equity card says "history unavailable: the chain of runs is broken between
+<log A> and <log B>", naming the two logs the broken link joins, and draws the
+comparison from the first intact run, saying so. The reporter still sends
+every alert and the daily summary, whose equity section gives that line and
+then the comparison over the intact runs, "Equity vs SPY, from <log>, the
+first intact run, <date> to <date>: ...", the same figures the card shows,
+and tells you of the break once, in a routine alert, "<account>: the history
+of earlier runs is unavailable".
 
 The remedy: restore the named earlier log from a backup of it as the engine
-wrote it, beside the others. If it cannot be recovered, the history starts at
-the first intact run from then on, and the page says so. Never put back a log
-the engine told you to move into `quarantine/`: the engine reads every log in
-its folder at a start and would refuse to start again. The earlier logs are
-never edited.
+wrote it, beside the others, **keeping its modification time, and before any
+restart of the engine**. The engine finds the latest run by modification
+time, so a log restored with the time of the restore looks like the newest
+run, and the engine's next start would take it for the latest run and ask you
+to approve a new run against it. Restore it with a command that keeps the
+time, for example (the backup's path is yours):
+
+```
+sudo rsync -a /path/to/backup/run1.log /var/lib/trend-investing/engines/boost/
+```
+
+or `sudo cp -p /path/to/backup/run1.log /var/lib/trend-investing/engines/boost/`.
+Then check the times:
+
+```
+ls -l --time-style=full-iso /var/lib/trend-investing/engines/boost/
+```
+
+The restored log must be older than the current one. If it is not, the page
+shows "<restored log> looks newer than the current run <log>; fix its
+modification time before the next restart" above the account's figures, and
+the reporter sends that once in a routine alert, "<account>: a restored log
+looks newer than the current run". Restore it again with `rsync -a` or
+`cp -p` from the backup, or set its time back with
+`sudo touch -d '<a time before the current log's>' <restored log>`, and check again before you
+restart anything.
+
+If it cannot be recovered, the history starts at the first intact run from
+then on, and the page says so. Never put back a log the engine told you to
+move into `quarantine/`: the engine reads every log in its folder at a start
+and would refuse to start again. The earlier logs are never edited.
 
 On the Mac:
 
@@ -390,7 +439,7 @@ go run ./cmd/dashboard -journal joint.log -journal ira.log -addr 127.0.0.1:8088
 ```
 
 Repeat `-journal` for each account (it follows the chain of runs back from that
-log), or give `-engine-dir` a folder of logs to show the latest run in it. It will listen only on a loopback address
+log), or give `-engine-dir` a folder of logs to show the current run in it. It will listen only on a loopback address
 or an address this machine's own Tailscale interface holds (`tailscale ip`
 prints it), so on the server it is reachable only over Tailscale. An address
 that merely looks like a Tailscale one but belongs to another network is
@@ -526,6 +575,7 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: the reporter cannot read the journal` | urgent | this chapter, below |
 | `<account>: the reporter cannot check the heartbeat` | urgent | this chapter, below |
 | `<account>: the history of earlier runs is unavailable` | routine | this chapter, below |
+| `<account>: a restored log looks newer than the current run` | routine | this chapter, below |
 | `<account>: engine <state> (<reason>)` (Degraded or Halted) | urgent, repeated until acknowledged | [states and kill switch](states-and-kill-switch.md); a reconciliation's own reasons in [reconciliation](reconciliation.md) |
 | `<account>: margin cushion <level>` | urgent at the urgent level, otherwise routine | [states and kill switch](states-and-kill-switch.md), and the [margin warning](../runbooks/margin-warning.md) runbook |
 | `<account>: sale back to 98% sent (<instrument>)` and `... released, not sent (<mode>)` | routine | [states and kill switch](states-and-kill-switch.md) |
@@ -593,7 +643,8 @@ and whether the alert is urgent:
 | `<account>: order refused (<reason>)` | The risk gate refused one order before anything was sent to IBKR. The reporter sends this urgent alert once per refused order (once per kill-switch engagement, and once per stale-snapshot episode). It is not repeated. The body names the order, its side, size, limit price and the gate's detail | Look the reason up in "Which chapter explains each alert", above; that chapter's table says what to do |
 | `<account>: decision withheld (<reason>)` | The engine decided no new targets for that session. Positions and orders already in place are unchanged. One alert per run of the same reason; a decided session ends the run, and the reason coming back later is a new alert. Urgent when an input is missing, no stock is affordable or sector labels are missing; routine otherwise | Look the reason up in the table above; that chapter says what to do |
 | `<account>: no engine heartbeat` | The log has not changed while `-heartbeat-sessions` NYSE sessions (default 2) closed. One urgent alert per silence; a later silence is another. Orders already at IBKR are unaffected | `systemctl status ti-engine@<instance>` and `journalctl -u ti-engine@<instance>`. If it crashed, resume it; otherwise start a fresh run you approve ([restart](restart.md); runbook `docs/runbooks/durable-log.md`, "Restarting an engine") |
-| `<account>: the history of earlier runs is unavailable` | The chain of runs behind the current log is broken: the body names the two logs and why. Only the equity comparison is affected: every other alert and the daily summary are sent as before, and the summary's equity line reads "history unavailable: the chain of runs is broken between <log A> and <log B>". Once per account and break | Restore the named earlier log from a backup of it as the engine wrote it ("The history across restarts", above). If it cannot be recovered, the history starts at the first intact run from then on. Never put back a log moved into `quarantine/` |
+| `<account>: the history of earlier runs is unavailable` | The chain of runs behind the current log is broken: the body names the two logs and why. Only the equity comparison is affected: every other alert and the daily summary are sent as before, and the summary's equity section reads "history unavailable: the chain of runs is broken between <log A> and <log B>", then gives the comparison over the intact runs, as the dashboard does. Once per account, break and reason: the same link broken for another reason (a restored log that is not the one approved) is another alert, and once a firing finds the chain whole the break is forgotten, so a later break alerts again | Before any restart, restore the named earlier log from a backup of it as the engine wrote it, keeping its modification time (`sudo rsync -a` or `sudo cp -p`), and check with `ls -l --time-style=full-iso` that it is older than the current log ("The history across restarts", above). If it cannot be recovered, the history starts at the first intact run from then on. Never put back a log moved into `quarantine/` |
+| `<account>: a restored log looks newer than the current run` | A log the chain of runs names as an earlier run has a newer modification time than the current run, usually a log restored from a backup with the time of the restore. The body reads "<restored log> looks newer than the current run <log>; fix its modification time before the next restart". The running engine is unaffected, but the engine finds the latest run by modification time, so its next start would take the restored log for the latest run. Once per account and pair of logs | Before any restart, restore the log again from its backup with `sudo rsync -a` or `sudo cp -p`, or set its time back with `sudo touch -d '<a time before the current log's>' <restored log>`, and check with `ls -l --time-style=full-iso` that it is older than the current log ("The history across restarts", above) |
 | `<account>: the reporter cannot read the journal` | The log does not verify, mixes runs, is missing, or holds a decision record that fails its checks. No other alert from that log is sent and no summary; the heartbeat is still checked unless the body says "The heartbeat is NOT checked" and why. Once per account and problem; the run exits with the error | Check the file with `sudo -u ti-trader journal-query` ([journal-query](journal-query.md)); never edit it. Runbook `docs/runbooks/durable-log.md`, "A log that cannot be read". Until it reads, nothing in it reaches you: watch the account in IBKR's app |
 | `<account>: the reporter cannot check the heartbeat` | The NYSE calendar does not cover the span (it covers 2022 to 2030), so a silent engine would go unreported. Once per problem; the run exits with the error | Install a build whose calendar covers the year. Until then check the engine yourself each trading day |
 | `<host>: the server's clock failed its check` | The reporter runs the clock check (`/usr/local/libexec/trend-investing/clock-check.sh`) at every firing, after it has sent the firing's other alerts, so a slow check never holds them back. A clock behind IBKR's makes every engine on the server count the account reading as stale and withhold every sell (ADR 0019). **When it pages:** after two checks in a row fail, one timer period apart, so within 10 minutes of the clock going wrong; a single failing check (a reference briefly unreachable, say) pages nothing, and one passing check starts the count again. A check recorded more than 150 seconds ahead of the time now means the clock was set back, and that counts as a failed check in its own right (the alert then says the clock stepped back by about so long), so a clock that keeps stepping back pages on the second firing that finds it. **Once per server:** the clock is the server's, so every account's reporter shares one record of it, `/var/lib/trend-investing/reports/host-clock.json` (`-clock-state`), under a lock: one check per 5-minute period, one page per fault, whichever account's reporter made the check. The alert gives the time of the check, the skew it measured (this clock minus the reference), or says none was measured (the clock not synchronised, no reference reachable, the check missing, not executable or timed out), or that its output could not be read, and what the check said. It is not repeated; when a later check passes the PagerDuty incident is resolved and the failure forgotten, channel by channel, so drifting again pages again. A channel that works forgets it at once. If PagerDuty is set aside at that moment (a bad routing key), its record is kept and the incident is closed by the first firing in which PagerDuty works again; ntfy, which has nothing to close, is not held back by it. The same holds if PagerDuty's resolve fails (its service down, or its routing key invalid since the trigger): only PagerDuty's record is kept, to retry the resolve, and a new fault still pages ntfy. A routing key changed to another valid key is accepted by PagerDuty, so the resolve succeeds, closes nothing and the record is forgotten at once: the incident opened under the old key stays open, and it must be resolved by hand in PagerDuty. A channel taken out of `-channel` has its record dropped by the next passing check, but the program cannot reach its incident: if PagerDuty was removed, resolve the open `clock-drift:<host>` incident by hand in PagerDuty. Reporters on one host naming different `-channel` lists share this record, so keep the lists the same | Run the check by hand and fix the time syncing, or on the Mac mini turn on the Mac's automatic date and time ([server](server.md), "The clock"). If the alert says the check **is missing**, run `sudo deploy/provision.sh clock`, which installs it. If it says the check **is not executable by this user**, the reporter's user (`ti-trader`) cannot run it: `sudo chmod 0755 /usr/local/libexec/trend-investing/clock-check.sh` (or run `provision.sh clock` again). If it says the check **timed out after 40s**, the check hung (a reference or `timedatectl` did not answer): run it by hand to see which, and check the network and `systemctl status systemd-timesyncd`. If it says the output **could not be read**, read what the check said in the alert; the check's wording and the reporter disagree, so install a matching build. Until the clock is right, expect sales to be withheld as `stale-broker-snapshot` |
@@ -628,8 +679,10 @@ passes `-clock-check`.
 | --- | --- | --- |
 | The page says "journal unavailable" | The log could not be read: missing, not readable, or a record that fails its checks. The page and `/api/summary.json` show no figure | `systemctl status ti-dashboard`; check the engine's log folder (`/var/lib/trend-investing/engines/boost`) holds the logs. The reporter's "cannot read the journal" alert names the reason when a record is bad |
 | The page says "journal does not verify" | The log's fingerprints fail, or its records name different runs. No figure is shown | Never edit the log. Runbook `docs/runbooks/durable-log.md`, "A log that cannot be read" |
-| The equity card says "history unavailable: the chain of runs is broken between <log A> and <log B>" | The page follows each run's approval back to the first run, and one link fails: an earlier log is missing, is not the log the approval named, is another account's or mode's, holds no approval outside a dry run, or the approvals loop. The rest of the page is the current run's, as always; the equity comparison is drawn from the first intact run, and the card says where it starts | Restore the named earlier log from a backup of it as the engine wrote it, beside the others (`docs/runbooks/durable-log.md`). If it cannot be recovered, the history starts at the first intact run from then on, and the page says so. Never put back a log moved into `quarantine/`, and never edit or delete a log |
-| The page shows a previous run after a restart | It should not: the page finds the latest run on every request. If it does, the dashboard is an older build that still reads `TI_RUN` at start | Install the current build and restart the dashboard once (`sudo systemctl restart ti-dashboard`); after that no restart is needed |
+| The equity card says "history unavailable: the chain of runs is broken between <log A> and <log B>" | The page follows each run's approval back to the first run, and one link fails: an earlier log is missing, is not the log the approval named, is another account's, holds no approval outside a dry run, is a dry-run log holding nothing past its configuration, or the approvals loop. The rest of the page is the current run's, as always; the equity comparison is drawn from the first intact run, and the card says where it starts | Before any restart, restore the named earlier log from a backup of it as the engine wrote it, beside the others, keeping its modification time (`sudo rsync -a` or `sudo cp -p`; "The history across restarts", above, and `docs/runbooks/durable-log.md`), and check with `ls -l --time-style=full-iso` that it is older than the current log. If it cannot be recovered, the history starts at the first intact run from then on, and the page says so. Never put back a log moved into `quarantine/`, and never edit or delete a log |
+| The page says "<restored log> looks newer than the current run <log>; fix its modification time before the next restart" | A log the chain names as an earlier run is newer by modification time than the current run, usually restored with the time of the restore. The page still shows the current run, found by the chain; the engine, which finds the latest run by modification time, would take the restored log for the latest run at its next start | Before any restart, restore it again with `sudo rsync -a` or `sudo cp -p` from the backup, or `sudo touch -d '<a time before the current log's>' <restored log>`, and check with `ls -l --time-style=full-iso` |
+| The equity card says "history since <date>, the first <mode> run" | The chain of runs holds runs of another mode (a dry run before paper, or paper before live) before the current mode's. The chain is whole; the comparison holds only the current mode's runs, from the first of them | Nothing: a live account's figures are compared from its first live run |
+| The page shows a previous run after a restart | It should not: the page finds the current run, the newest link of the chain, on every request. If it does, the dashboard is an older build that still reads `TI_RUN` at start | Install the current build and restart the dashboard once (`sudo systemctl restart ti-dashboard`); after that no restart is needed |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 
 ## What backs this

@@ -133,17 +133,17 @@ func TestFollowChainRefusesALinkWithNeitherApprovalNorStartingBook(t *testing.T)
 	}
 }
 
-// TestFollowChainRefusesAnEarlierLogOfAnotherAccountOrMode: every earlier
-// log is of the current log's account and mode before its records join the
-// history; another account's log, or a dry run's spliced into a paper
-// chain, is a broken link naming the log and both values.
-func TestFollowChainRefusesAnEarlierLogOfAnotherAccountOrMode(t *testing.T) {
+// TestFollowChainRefusesAnEarlierLogOfAnotherAccount: every earlier log is
+// of the current log's account before its records join the history;
+// another account's log is a broken link naming the log and both accounts.
+// A change of mode is no break (TestFollowChainFollowsAModeChangeTheEngineAccepts).
+func TestFollowChainRefusesAnEarlierLogOfAnotherAccount(t *testing.T) {
 	cases := map[string]struct {
 		a    journal.Recovery
 		want []string
 	}{
-		"another account": {runOf(t, "a.log", "", "ira", event.TradingModePaper), []string{"a.log", `"ira"`, `"joint"`}},
-		"a dry run":       {runOf(t, "a.log", "", "joint", event.TradingModeDryRun), []string{"a.log", `"dry-run"`, `"paper"`}},
+		"another account":              {runOf(t, "a.log", "", "ira", event.TradingModePaper), []string{"a.log", `"ira"`, `"joint"`}},
+		"another account in a dry run": {runOf(t, "a.log", "", "ira", event.TradingModeDryRun), []string{"a.log", `"ira"`, `"joint"`}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

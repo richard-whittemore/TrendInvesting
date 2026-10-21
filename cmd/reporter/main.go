@@ -39,6 +39,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
+	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
 // The defaults of -repeat-interval and -ack-within, which the reporter's
@@ -134,6 +135,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	history, envelopes, account, alerts, refused := readJournal(*journalPath, now(), *ackWithin, seen)
 	if account != "" {
 		label = account
+	}
+	if refused == nil && history.Broken == nil {
+		// A whole chain clears every break delivered for the account, so a
+		// break after a repair is a new incident (ADR 0019, "Alerting":
+		// once per incident).
+		forget(report.HistoryUnavailableKeyPrefix(account), seen, sent, repeats)
 	}
 	// The heartbeat is checked first so a refused journal's alert can say
 	// whether liveness is monitored.
@@ -254,7 +261,59 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 	if history.Broken != nil {
 		alerts = append(alerts, report.HistoryUnavailableAlert(account, history.Broken, now))
 	}
+	if restored, current := restoredLogNewer(path); restored != "" {
+		alerts = append(alerts, report.RestoredLogNewerAlert(account, restored, current, now))
+	}
 	return history, envelopes, account, alerts, nil
+}
+
+// restoredLogNewer returns a log of the journal's directory that an approval
+// names as a previous log but that is newer by modification time than the
+// chain's head, and that head (restart.ChainHead, the rule the dashboard
+// finds the current run by), or "" when there is none. The engine finds the
+// latest run by modification time, so it would take such a log, restored
+// without its time, for the latest run at its next start. Only the logs'
+// first records are read. A directory that cannot be listed or read here
+// warns of nothing: the journal itself was read, and its alerts stand.
+func restoredLogNewer(path string) (restored, current string) {
+	if filepath.Ext(path) != ".log" {
+		return "", ""
+	}
+	dir := filepath.Dir(path)
+	files, err := restart.ListLogs(dir, ".log")
+	if err != nil {
+		return "", ""
+	}
+	open := func(name string, groups int) (journal.Recovery, error) {
+		f, err := os.Open(filepath.Join(dir, name))
+		if err != nil {
+			return journal.Recovery{}, err
+		}
+		defer func() { _ = f.Close() }()
+		if groups < 0 {
+			return journal.RecoverLog(f)
+		}
+		return journal.RecoverLogStart(f, groups)
+	}
+	head, newer, err := restart.ChainHead(files,
+		func(name string) (journal.Recovery, error) { return open(name, 2) },
+		func(name string) (journal.Recovery, error) { return open(name, -1) })
+	if err != nil || newer == "" {
+		return "", ""
+	}
+	return newer, head
+}
+
+// forget removes from the delivery state every channel's record of the
+// alerts whose keys begin with prefix.
+func forget(prefix string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) {
+	for k := range seen {
+		if _, key, ok := strings.Cut(k, "|"); ok && strings.HasPrefix(key, prefix) {
+			delete(seen, k)
+			delete(sent, k)
+			delete(repeats, k)
+		}
+	}
 }
 
 // recoverLogFile recovers the durable log at path.
