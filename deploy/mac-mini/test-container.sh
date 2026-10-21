@@ -23,9 +23,9 @@
 #        within 5 minutes.
 #   T10  every mount is a named volume inside Docker's VM; nothing is under
 #        the Desktop, Documents or iCloud Drive; the container is not
-#        privileged, drops every default capability and adds back only nine
+#        privileged, drops every default capability and adds back only eleven
 #        (SYS_ADMIN, SYS_CHROOT, CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID,
-#        SETPCAP, AUDIT_WRITE), whose bounding set the container's PID 1 shows.
+#        SETPCAP, AUDIT_WRITE, KILL, FSETID), whose bounding set the container's PID 1 shows.
 #
 # And up.sh refuses --recreate while the engine runs, leaving it running;
 # provision.sh reown moves files of an old UID and GID in the volumes to the
@@ -178,13 +178,14 @@ test "$(docker exec "$name" uname -m)" = aarch64 || fail "the container is not a
 test "$(docker container inspect --format '{{.HostConfig.Privileged}}' "$name")" = false || fail "the container is privileged"
 test "$(docker container inspect --format '{{json .HostConfig.CapDrop}}' "$name")" = '["ALL"]' || test "$(docker container inspect --format '{{json .HostConfig.CapDrop}}' "$name")" = '["CAP_ALL"]' || fail "the container does not drop every default capability"
 caps=$(docker container inspect --format '{{range .HostConfig.CapAdd}}{{.}} {{end}}' "$name" | tr ' ' '\n' | sed -e '/^$/d' -e 's/^CAP_//' | sort | tr '\n' ' ')
-test "$caps" = "AUDIT_WRITE CHOWN DAC_OVERRIDE FOWNER SETGID SETPCAP SETUID SYS_ADMIN SYS_CHROOT " || fail "the container's added capabilities are '$caps', not the nine systemd needs"
+test "$caps" = "AUDIT_WRITE CHOWN DAC_OVERRIDE FOWNER FSETID KILL SETGID SETPCAP SETUID SYS_ADMIN SYS_CHROOT " || fail "the container's added capabilities are '$caps', not the eleven systemd needs"
 test "$(docker container inspect --format '{{.HostConfig.CgroupnsMode}}' "$name")" = private || fail "the container has no cgroup namespace of its own"
-echo "four named volumes in Docker's VM, no bind mount, dashboard on 127.0.0.1:$port only, host.docker.internal resolves, restart unless-stopped, arm64, not privileged (all capabilities dropped, nine added, private cgroup namespace)"
+echo "four named volumes in Docker's VM, no bind mount, dashboard on 127.0.0.1:$port only, host.docker.internal resolves, restart unless-stopped, arm64, not privileged (all capabilities dropped, eleven added, private cgroup namespace)"
 
 step "the test's files, then T1 against the running systemd"
 inside fixtures
 inside units
+inside stop
 inside tools
 inside boot
 inside clock
@@ -212,10 +213,18 @@ docker exec "$name" systemctl is-active --quiet ti-engine@boost.service || fail 
 echo "refused, naming the engine; the container and the engine are untouched"
 
 step "T2, T3: docker restart"
+# The ordered shutdown sends the engine (ti-trader) SIGTERM and ends well
+# inside the 60 s stop timeout, not by Docker's SIGKILL at its end.
+docker exec "$name" rm -f /var/lib/trend-investing/engines/boost/term-marker
+t0=$(date +%s)
 docker restart "$name" >/dev/null
+took=$(($(date +%s) - t0))
+test "$took" -le 40 || fail "docker restart took ${took}s: the ordered shutdown ran into the stop timeout"
+echo "docker restart took ${took}s"
 inside boot
 binfmt_unchanged "after docker restart"
 inside after-restart
+inside marker
 inside state-manifest >"$work/state-3"
 diff "$work/state-1" "$work/state-3" || fail "the state changed across the restart (above)"
 echo "state byte-identical across the restart"

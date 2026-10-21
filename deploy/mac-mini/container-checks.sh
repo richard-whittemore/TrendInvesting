@@ -60,10 +60,14 @@ case ${1:-} in
       e=$(systemctl is-enabled "$u" 2>&1 || true)
       test "$e" = masked || fail "$u is $e, not masked: it would rewrite the Docker VM's binfmt handlers"
     done
-    # Capabilities: only the nine up.sh adds back to --cap-drop ALL (the
+    # Capabilities: only the eleven up.sh adds back to --cap-drop ALL (the
     # bounding set, which no process in the container can grow).
     cb=$(awk '/^CapBnd:/ {print $2}' /proc/1/status)
-    test "$cb" = 00000000202401cb || fail "the capability bounding set is $cb, not 00000000202401cb (SYS_ADMIN, SYS_CHROOT, CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID, SETPCAP, AUDIT_WRITE)"
+    test "$cb" = 00000000202401fb || fail "the capability bounding set is $cb, not 00000000202401fb (SYS_ADMIN, SYS_CHROOT, CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID, SETPCAP, AUDIT_WRITE, KILL, FSETID)"
+    # systemd-tmpfiles sets the journal folder to 2755 root:systemd-journal; a
+    # chmod without CAP_FSETID would drop the setgid bit silently.
+    jm=$(stat -c %a /var/log/journal)
+    test "$jm" = 2755 || fail "/var/log/journal is mode $jm after the boot, not 2755 (setgid lost)"
     failed=$(systemctl list-units --state=failed --no-legend --plain | awk '{print $1}' | sort | tr '\n' ' ')
     for u in $failed; do
       case " ${ALLOWED:-} " in *" $u "*) ;; *) fail "unit $u failed (system $s); journalctl -u $u: $(journalctl -u "$u" -n 5 --no-pager -o cat)" ;; esac
@@ -79,7 +83,9 @@ case ${1:-} in
   fixtures)
     cat >/opt/trend-investing/bin/ti-engine <<'ENGINE'
 #!/bin/bash
-# A stand-in for the engine: records what its unit handed it, then waits.
+# A stand-in for the engine: records what its unit handed it, then waits. On
+# SIGTERM it writes a marker and exits, as the real engine runs its shutdown.
+trap 'echo terminated >"$TI_STATE_DIR/term-marker"; exit 0' TERM
 {
   echo "user=$(id -un)"
   echo "runtime_mode=$(stat -c %a "$RUNTIME_DIRECTORY")"
@@ -87,7 +93,8 @@ case ${1:-} in
   if touch /usr/standin-probe 2>/dev/null; then echo "usr=writable"; else echo "usr=read-only"; fi
   echo "args=$*"
 } >"$TI_STATE_DIR/standin-proof"
-exec sleep infinity
+sleep infinity &
+wait
 ENGINE
     chmod 0755 /opt/trend-investing/bin/ti-engine
     install -d /opt/trend-investing/adapter-venv/bin
@@ -199,6 +206,36 @@ ENGINE
     systemctl is-active --quiet ti-engine@boost.service || fail "the engine stand-in is not running"
     rm -f "$boost/standin-proof"
     pass "ti-engine@boost (stand-in) runs as ti-trader with its credential, /run/ti-engine-boost 0700 and / read-only"
+    ;;
+
+  # Stopping a unit that runs as another user: systemd (root) must be able to
+  # send ti-trader's engine the SIGTERM it stops with (CAP_KILL), so the stop
+  # is the engine's own shutdown within seconds, not a SIGKILL after
+  # TimeoutStopSec (90 s). The engine is left running, as it was.
+  stop)
+    systemctl is-active --quiet ti-engine@boost.service || fail "the engine stand-in is not running"
+    rm -f "$boost/term-marker"
+    t0=$(date +%s)
+    systemctl stop ti-engine@boost.service
+    took=$(($(date +%s) - t0))
+    test "$took" -le 15 || fail "systemctl stop of the engine took ${took}s: systemd could not SIGTERM a unit running as ti-trader"
+    test -s "$boost/term-marker" || fail "the engine stand-in never received SIGTERM (stopped by SIGKILL after ${took}s)"
+    r=$(systemctl show ti-engine@boost.service -p Result --value)
+    test "$r" = success || fail "the engine's stop ended '$r', not success"
+    rm -f "$boost/term-marker" "$boost/standin-proof"
+    systemctl start ti-engine@boost.service
+    for _ in $(seq 20); do test -s "$boost/standin-proof" && break; sleep 0.5; done
+    systemctl is-active --quiet ti-engine@boost.service || fail "the engine stand-in did not start again"
+    rm -f "$boost/standin-proof"
+    pass "systemctl stop delivered SIGTERM to the engine running as ti-trader and it exited in ${took}s"
+    ;;
+
+  # Whether the engine was told to stop (not killed) by the container's
+  # ordered shutdown; see test-container.sh.
+  marker)
+    test -s "$boost/term-marker" || fail "the engine stand-in got no SIGTERM in the container's shutdown"
+    rm -f "$boost/term-marker"
+    pass "the container's shutdown sent the engine SIGTERM"
     ;;
 
   # The rehearsal's checks of the owner's tools, as on main: both run as

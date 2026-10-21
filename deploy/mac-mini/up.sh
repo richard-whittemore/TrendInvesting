@@ -280,9 +280,10 @@ else
   uuid=$(printf 'trend-investing mac mini %s' "$name" | shasum -a 256 | cut -c1-32)
   # Named volumes by --mount type=volume, which Docker never reads as a Mac
   # folder (a -v whose name had a slash in it would be a bind mount).
-  # Not --privileged. Every capability is dropped and nine are added back,
+  # Not --privileged. Every capability is dropped and eleven are added back,
   # the set found by removing each of Docker's defaults and CAP_SYS_ADMIN's
-  # companions in turn until a boot and the units no longer started:
+  # companions in turn until a boot, a unit's start, its stop (and the
+  # container's ordered shutdown) or an operator tool no longer worked:
   #   SYS_ADMIN   systemd's mount namespaces for the units' ProtectSystem,
   #               PrivateTmp and RuntimeDirectory, and its credentials
   #   SYS_CHROOT  the same mount namespaces (a unit fails without it)
@@ -290,8 +291,13 @@ else
   #   DAC_OVERRIDE    handing a unit its credentials
   #   SETUID, SETGID  running a unit as ti-trader (and dbus)
   #   SETPCAP     journald and logind (both fail without it)
+  #   KILL        SIGTERM to a unit that runs as another user (ti-trader's
+  #               engine, the dashboard, dbus): without it every stop ends in
+  #               SIGKILL after the stop timeout
+  #   FSETID      systemd-tmpfiles' chmod of the journal folders to 2755: the
+  #               setgid bit is dropped silently without it
   #   AUDIT_WRITE sudo, which the owner's tools run under (it refuses without it)
-  # container-checks.sh boot asserts this exact bounding set (0x202401cb). A
+  # container-checks.sh boot asserts this exact bounding set (0x202401fb). A
   # cgroup namespace of its own is needed too, whose cgroup tree the image's
   # entrypoint makes writable. Docker's default seccomp filter stays. /proc/sys
   # read-only, the masked paths and the device rules are only Docker's
@@ -300,7 +306,7 @@ else
   # boundary (docs/manual/mac-mini.md, "What the container may do").
   docker create --name "$name" --hostname "$name" --platform linux/arm64 \
     --cap-drop ALL --cap-add SYS_ADMIN --cap-add SYS_CHROOT --cap-add CHOWN --cap-add FOWNER \
-    --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --cap-add AUDIT_WRITE --cgroupns private \
+    --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --cap-add AUDIT_WRITE --cap-add KILL --cap-add FSETID --cgroupns private \
     --restart unless-stopped --stop-timeout 60 \
     --tmpfs /run --tmpfs /run/lock \
     --env container_uuid="$uuid" \
