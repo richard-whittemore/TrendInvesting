@@ -471,3 +471,45 @@ func TestALateEarlierReadingDoesNotOverwriteAReportedResidual(t *testing.T) {
 		t.Fatalf("the later reading's residual stands: %+v", r.Result)
 	}
 }
+
+// resolvedThenDelivered: a reading at +1h reports SPY +2, a reading at +2h
+// finds it explained, then a reading read at readAt, delivered after both,
+// shows +2 again.
+func resolvedThenDelivered(t *testing.T, readAt time.Duration) *risklimit.Gate {
+	t.Helper()
+	g := booked(t)
+	reported := morningOf(1000, 12)
+	reconcileWith(t, g, "reconciliation:1", reported)
+	resolved := morningOf(1000, 10)
+	resolved.AsOf = at.Add(2 * time.Hour)
+	reconcileWith(t, g, "reconciliation:2", resolved)
+	again := morningOf(1000, 12)
+	again.AsOf = at.Add(readAt)
+	reconcileWith(t, g, "reconciliation:3", again)
+	// A last, older reading ends the classified standing of the third, so the
+	// close snapshot is judged by what was reported.
+	old := morningOf(1000, 10)
+	old.AsOf = at.Add(10 * time.Minute)
+	reconcileWith(t, g, "reconciliation:4", old)
+	return g
+}
+
+// TestAnEarlierReadingDeliveredAfterAResolutionRecordsNothing: the later
+// reading found the instrument explained, so a reading read before it, though
+// delivered afterwards, neither re-records the old residual nor hides the
+// difference from the close snapshot (ADR 0019, amended 2026-10-21, point 6).
+func TestAnEarlierReadingDeliveredAfterAResolutionRecordsNothing(t *testing.T) {
+	g := resolvedThenDelivered(t, 90*time.Minute)
+	if r, journal := checkBookWith(t, g, closeSnapshot(12, 180)); !journal {
+		t.Fatalf("nothing was recorded, so the difference is reported: %+v", r.Result)
+	}
+}
+
+// TestAReadingLaterThanAResolutionRecordsItsResidual: a difference that
+// recurs after the resolution is a new difference, recorded once.
+func TestAReadingLaterThanAResolutionRecordsItsResidual(t *testing.T) {
+	g := resolvedThenDelivered(t, 3*time.Hour)
+	if r, journal := checkBookWith(t, g, closeSnapshot(12, 240)); journal {
+		t.Fatalf("the later reading's residual stands: %+v", r.Result)
+	}
+}

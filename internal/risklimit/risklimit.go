@@ -168,9 +168,10 @@ type Gate struct {
 	// unexplained against book, so the same difference is not reported
 	// twice (CheckBook); nil once book is set.
 	reported map[string]int64
-	// reportedAsOf is the reading time of the reconciliation that reported
-	// each instrument in reported: only a reading at or after it forgets the
-	// residual (report).
+	// reportedAsOf is the reading time of the latest reconciliation that
+	// reported or resolved each instrument, kept after a resolution clears
+	// its residual from reported: only a reading at or after it changes what
+	// is recorded (report).
 	reportedAsOf map[string]time.Time
 	// haltedOn is every reason a journalled Halt result gave for being
 	// unverifiable, so a snapshot that finds only those reasons again is not
