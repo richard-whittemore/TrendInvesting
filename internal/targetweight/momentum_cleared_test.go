@@ -107,13 +107,15 @@ func TestAClearanceMustNameTheRebalanceInProgress(t *testing.T) {
 	}
 }
 
-// TestBoostReadsNoClearance: Boost decides one target with one order and
-// never holds a rebalance, so the clearance is not an input it reads.
-func TestBoostReadsNoClearance(t *testing.T) {
+// TestBoostRefusesAClearanceOfAnOrderItNeverReleased: Boost never holds a
+// rebalance; it reads the clearance only as the owner's settlement of an
+// order it released that the adapter never sent, so one naming any other
+// order is refused (TestAClearedNeverSentOrderIsNoLongerUndecided).
+func TestBoostRefusesAClearanceOfAnOrderItNeverReleased(t *testing.T) {
 	h, s := configured(t)
 	mustRefuse(t, h, s.envelope(t, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared", sessionEnd(0),
 		event.RebalanceClearedPayload{AccountID: "joint", AsOf: sessionEnd(0), DecisionID: "d", ClientOrderIDs: []string{"o"}, Operator: "owner", Detail: "x"}),
-		"not one this handler reads")
+		"not an order this run released")
 }
 
 // TestADryRunHasNothingToClear: a dry-run momentum run ends each order it

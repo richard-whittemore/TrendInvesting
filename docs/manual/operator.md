@@ -34,7 +34,7 @@ It has four commands:
 | Command | What it records | Where it goes | When the engine acts |
 | --- | --- | --- | --- |
 | `operator kill-switch` | the kill switch engaged or released | the engine's operator inbox | before the engine's next input from the adapter |
-| `operator rebalance-cleared` | your clearance of a rebalance that is stuck | the engine's operator inbox | before the engine's next input from the adapter |
+| `operator rebalance-cleared` | your clearance of a rebalance that is stuck, or of a Boost order the adapter never sent | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator acknowledge` | your acknowledgement of one alert, by its alert key | the engine's operator inbox | before the engine's next input from the adapter; the reporter stops repeating the alert at its next run |
 | `operator approve` | your approval of a fresh run | an approval file you pass to the engine with `-approval` | when that fresh run starts, as its second input |
 
@@ -291,13 +291,26 @@ is never sent, and the next decision time decides afresh. `journal-query
 refusals` and `journal-query orders` show which orders are open; the
 [missed-rebalance runbook](../runbooks/missed-rebalance.md) has the steps.
 
-The momentum engine is not composed into the running program yet (only
-Boost is), so today a clearance is read by the momentum strategy and its
-tests only. A clearance sent to the Boost engine is recorded and refused
-(`not one this handler reads`), with no effect. Clear only after IBKR shows the order finished. A later IBKR
-report on a cleared order is refused, which stops the engine until you
+For an IRA, clear only after IBKR shows the order finished. A later IBKR
+report on a cleared IRA order is refused, which stops the engine until you
 reconcile. The reporter reads the clearance the same way, so that report
-also raises the urgent "venue report not read" alert.
+also raises the urgent "venue report not read" alert. The momentum engine
+is not composed into the running program yet (only Boost is), so today an
+IRA's clearance is read by the momentum strategy and its tests only.
+
+For Boost (the joint account), a clearance means something else: it
+settles one order the adapter **never sent**, after `relay.py resolve
+--never-sent`, so IBKR should have nothing to show for it. Name the decision that released it and that order. Boost then
+stops listing it as an order IBKR has not ruled on (`undecided_orders`),
+records it under `cleared_orders`, and nothing else changes; reconcile and
+start a fresh run ([boost](boost.md)). Boost refuses a clearance of an
+order IBKR has already named, even only as "submitted" (that order was
+sent and its verdict is still to come), one that IBKR lists among its
+open orders, a clearance that names any other order, and every clearance
+in dry-run, where no order is listed. If IBKR reports on a cleared Boost
+order after all, the clearance was wrong: Boost refuses the report, which
+stops the engine until you reconcile with IBKR and start a fresh run, as
+for an IRA.
 
 ## Acknowledging an alert
 
@@ -481,7 +494,7 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `.refused`: `acknowledgement ... is for account "..."; this run decides "joint"` | Recorded with no effect; the alert keeps repeating | Record it again with `-account joint` |
 | The alert keeps repeating after a delivered acknowledgement with no `.refused` note | The key named no alert (a typing slip): recorded, does nothing | Copy the key from the alert again, in single quotes |
 | `.refused`: `... names orders [...], but the orders not terminal are [...]`, `names <id>, but the rebalance in progress is <id>`, or `no rebalance is in progress ...` | Recorded with no effect | Clear again naming exactly the decision and orders the note lists |
-| `.refused`: `input type "operator.rebalance.cleared" is not one this handler reads` | A clearance sent to the Boost engine: recorded with no effect | Nothing; Boost has no rebalance to clear |
+| `.refused`: `targetweight: clearance <id> names order <id>, which is not an order this run released that the venue has not ruled on; Boost clears only an order the adapter never sent`, or `... which the venue has already named as order <n> ...`, or `... which decision <id> did not release`, or `... is for account "..."` | A clearance sent to the Boost engine that it will not read: the order is not one awaiting IBKR's word (already ruled on, in dry-run none is ever listed), IBKR has named it so it was sent, another decision released it, or the account is wrong. Recorded with no effect | Check with `journal-query orders` and IBKR's app which orders are open. Clear again naming exactly the decision that released the order and an order the adapter never sent; if IBKR has named it, do not clear it, wait for its verdict |
 | `engine: operator record <file> was not delivered, so it stays in the inbox and is delivered at the next start: ...` on the engine's output | No note; the run stops: the disk failed, or the log is full (the most records a run holds) | Resume the run, or after a full log start a fresh one ([restart](restart.md)); the instruction is recorded first |
 | `engine: list the operator inbox <inbox>, so a kill switch in it could wait unread: ...`, `engine: read the operator record <file>, which could be a kill switch, so the run cannot decide with it unread: ...` or `engine: list the engine's operator notes <folder>, which say which records are settled, so the inbox cannot be read safely: ...` | The run stops with that error: it may be a kill switch, so nothing is decided with it unread | Fix the folder's or the file's owner or mode (`ti-operator:ti-trader`, `0750` for the folder, `0640` for a record; the notes folder is the engine's, `0700`), then resume the run ([restart](restart.md)) |
 | `engine: note the refusal of <file> at <note>: ...` | The record was refused (no effect), but its note was not written, so the next start reads it again | Check the disk and the notes folder (the engine's own, `0700`). As root, move the record out of the inbox before the next start (`sudo mkdir -p /var/lib/trend-investing/engines/<account>/operator-old && sudo mv /var/lib/trend-investing/engines/<account>/operator/<file> /var/lib/trend-investing/engines/<account>/operator-old/`, where `<account>` is the account the engine trades and `<file>` is the file the error names; `operator-old` sits beside the inbox, as in the upgrade step above): one refused for a time more than five minutes ahead would be delivered once that time has passed. Record the instruction again with the current time if you still mean it |
@@ -545,7 +558,10 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
 `TestTheOwnersClearanceEndsARebalanceInProgress`,
-`TestAClearanceMustNameTheRebalanceInProgress`, `TestBoostReadsNoClearance`
+`TestAClearanceMustNameTheRebalanceInProgress`,
+`TestBoostRefusesAClearanceOfAnOrderItNeverReleased`,
+`TestAClearedNeverSentOrderIsNoLongerUndecided`,
+`TestAClearanceOfNoUndecidedBoostOrderIsRefused`
 (`internal/targetweight`); `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`,
 `TestAnApprovalNeverUnderstatesTheSaleAttempt`,
 `TestProposeApprovalStatesTheEndStateOrClearsTheIncident`

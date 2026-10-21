@@ -3,6 +3,7 @@ package event_test
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,18 @@ func validTargetsDecided() event.TargetsDecidedPayload {
 			LatchedBefore: false, LatchedAfter: true, TargetInForce: 0.98, TargetInForceSet: true,
 		},
 	}
+}
+
+// validTargetsDecidedWatching is validTargetsDecided watching an order
+// cancelled with part filled, its executions recorded.
+func validTargetsDecidedWatching() event.TargetsDecidedPayload {
+	p := validTargetsDecided()
+	p.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, Filled: 20,
+		Fills:  []event.BoostWatchedFill{{FillID: "f1", Quantity: 20, Price: 104, Commission: 1, FilledAt: twSession.Add(-2 * time.Hour)}},
+		Status: event.OrderLifecycleStatusCanceled, EndedAt: twSession.Add(-time.Hour)}
+	p.Boost.WorkingOrders = []event.BoostWatchedOrder{{ClientOrderID: "tw-0", Side: event.OrderSideBuy, Released: 9, LimitPrice: 100, Filled: 4,
+		Fills: []event.BoostWatchedFill{{FillID: "f0", Quantity: 4, Price: 99, FilledAt: twSession.Add(-3 * time.Hour)}}}}
+	return p
 }
 
 func validTargetsWithheld() event.TargetsDecidedPayload {
@@ -459,4 +472,460 @@ func TestARefusalAlertBelongsToAKillSwitchOrStaleRefusal(t *testing.T) {
 		}
 	}
 	expectInvalid(t, "alert on another reason", validOrderRefused(), func(p *event.OrderRefusedPayload) { p.Alert = true }, "alert")
+}
+
+// TestBoostReplanValidate: a re-plan names its cause, refused or
+// part-filled; a part-fill names the order and filled shares strictly
+// between none and the released shares, and a refusal names neither (ADR
+// 0026, point 2, "Boost", amended 2026-10-18).
+func TestBoostReplanValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Replan = event.BoostReplan{Cause: event.ReplanCausePartFilled, ClientOrderID: "tw-1", Filled: 20, Released: 39}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a part-fill re-plan is valid: %v", err)
+	}
+	refused := v
+	refused.Boost.Replan = event.BoostReplan{Cause: event.ReplanCauseRefused}
+	if err := refused.Validate(); err != nil {
+		t.Fatalf("a refusal re-plan is valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "unknown cause", v, func(p *P) { p.Boost.Replan.Cause = "bored" }, "re-plan cause")
+	expectInvalid(t, "figures without a cause", v, func(p *P) { p.Boost.Replan.Cause = "" }, "re-plan cause")
+	expectInvalid(t, "part-fill without order", v, func(p *P) { p.Boost.Replan.ClientOrderID = "" }, "order")
+	expectInvalid(t, "part-fill filled nothing", v, func(p *P) { p.Boost.Replan.Filled = 0 }, "filled")
+	expectInvalid(t, "part-fill filled in full", v, func(p *P) { p.Boost.Replan.Filled = 39 }, "filled")
+	unfilled := v
+	unfilled.Boost.Replan = event.BoostReplan{Cause: event.ReplanCauseUnfilled, ClientOrderID: "tw-1", Released: 39}
+	if err := unfilled.Validate(); err != nil {
+		t.Fatalf("an unfilled re-plan is valid: %v", err)
+	}
+	expectInvalid(t, "unfilled with a fill", unfilled, func(p *P) { p.Boost.Replan.Filled = 1 }, "filled")
+	expectInvalid(t, "unfilled without order", unfilled, func(p *P) { p.Boost.Replan.ClientOrderID = "" }, "order")
+	expectInvalid(t, "unfilled released nothing", unfilled, func(p *P) { p.Boost.Replan.Released = 0 }, "released")
+	expectInvalid(t, "refusal with figures", refused, func(p *P) { p.Boost.Replan.Filled = 1 }, "refus")
+}
+
+// TestBoostGapSessionsValidate: a Boost decision's gap sessions are dates,
+// strictly ascending and before the session it decided, whose bar the
+// indicators read (ADR 0026, point 5, amended 2026-10-18).
+func TestBoostGapSessionsValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.GapSessions = []string{"2025-02-28", "2025-03-03"}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("gap sessions before the session are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "not a date", v, func(p *P) { p.Boost.GapSessions = []string{"yesterday"} }, "gap session")
+	expectInvalid(t, "descending", v, func(p *P) { p.Boost.GapSessions = []string{"2025-03-03", "2025-02-28"} }, "ascending")
+	expectInvalid(t, "the session itself", v, func(p *P) { p.Boost.GapSessions = []string{"2025-03-04"} }, "before")
+	m := validTargetsDecided()
+	m.Boost = event.BoostFigures{}
+	if !m.Boost.IsZero() || v.Boost.IsZero() {
+		t.Error("IsZero reports only empty Boost figures")
+	}
+}
+
+// TestBoostRejectedReplanValidate: a venue rejection's re-plan, and the
+// re-plan withheld after a second rejection, name the order and its released
+// shares, with fewer filled; the withheld one is a rejection only (ADR 0026,
+// point 2, "Boost", amended 2026-10-18).
+func TestBoostRejectedReplanValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Replan = event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-1", Released: 39}
+	v.Boost.ReplanWithheld = event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-0", Released: 39}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a rejection's re-plan and a withheld one are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "rejected without order", v, func(p *P) { p.Boost.Replan.ClientOrderID = "" }, "order")
+	expectInvalid(t, "rejected released nothing", v, func(p *P) { p.Boost.Replan.Released = 0 }, "released")
+	expectInvalid(t, "rejected filled in full", v, func(p *P) { p.Boost.Replan.Filled = 39 }, "filled")
+	expectInvalid(t, "withheld for a part-fill", v, func(p *P) {
+		p.Boost.ReplanWithheld = event.BoostReplan{Cause: event.ReplanCausePartFilled, ClientOrderID: "tw-0", Filled: 1, Released: 39}
+	}, "withheld")
+	expectInvalid(t, "withheld without order", v, func(p *P) { p.Boost.ReplanWithheld.ClientOrderID = "" }, "order")
+	if v.Boost.IsZero() {
+		t.Error("figures with a withheld re-plan are not empty")
+	}
+}
+
+// TestBoostWatchedOrderValidate: a watched order names its client order ID,
+// side and positive limit, with fewer shares filled than released, and its
+// status, when set, is canceled or invalid (ADR 0026, points 2 and 5,
+// amended 2026-10-18).
+func TestBoostWatchedOrderValidate(t *testing.T) {
+	v := validTargetsDecided()
+	filledAt := time.Date(2026, 3, 2, 19, 0, 0, 0, time.UTC)
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, Filled: 20,
+		Fills: []event.BoostWatchedFill{
+			{FillID: "f1", Quantity: 15, Price: 104, FilledAt: filledAt},
+			{FillID: "f2", Quantity: 5, Price: 104.5, Commission: 1, FilledAt: filledAt.Add(time.Minute)},
+		},
+		Status: event.OrderLifecycleStatusCanceled, EndedAt: filledAt.Add(time.Hour)}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a watched order is valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "fills short of filled", v, func(p *P) { p.Boost.Watched.Fills = p.Boost.Watched.Fills[:1] }, "sum to")
+	expectInvalid(t, "filled with no fills", v, func(p *P) { p.Boost.Watched.Fills = nil }, "sum to")
+	expectInvalid(t, "a fill id twice", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[1].FillID = "f1"
+	}, "fill id f1 twice")
+	expectInvalid(t, "an unnamed fill", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].FillID = ""
+	}, "fill id")
+	expectInvalid(t, "an empty fill", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].Quantity, p.Boost.Watched.Fills[1].Quantity = 0, 20
+	}, "positive quantity")
+	expectInvalid(t, "a fill with no price", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].Price = 0
+	}, "price")
+	expectInvalid(t, "a negative commission", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].Commission = -1
+	}, "commission")
+	expectInvalid(t, "a fill at a fraction of a second", v, func(p *P) {
+		p.Boost.Watched.Fills = slices.Clone(p.Boost.Watched.Fills)
+		p.Boost.Watched.Fills[0].FilledAt = filledAt.Add(time.Millisecond)
+	}, "whole second")
+	expectInvalid(t, "ended with no status", v, func(p *P) { p.Boost.Watched.Status = "" }, "ended")
+	expectInvalid(t, "a status with no end", v, func(p *P) { p.Boost.Watched.EndedAt = time.Time{} }, "ended")
+	expectInvalid(t, "no order", v, func(p *P) { p.Boost.Watched.ClientOrderID = "" }, "client order ID")
+	expectInvalid(t, "no side", v, func(p *P) { p.Boost.Watched.Side = "short" }, "buy or a sell")
+	expectInvalid(t, "no limit", v, func(p *P) { p.Boost.Watched.LimitPrice = 0 }, "limit")
+	expectInvalid(t, "filled in full", v, func(p *P) { p.Boost.Watched.Filled, p.Boost.Watched.Fills = 39, nil }, "fewer filled")
+	expectInvalid(t, "negative fill", v, func(p *P) { p.Boost.Watched.Filled, p.Boost.Watched.Fills = -1, nil }, "fewer filled")
+	expectInvalid(t, "working status", v, func(p *P) { p.Boost.Watched.Status = event.OrderLifecycleStatusSubmitted }, "status")
+	// Fills whose sum wraps past the largest int64 to the recorded figure
+	// are refused before the sum can wrap: 1 filled of 39, from fills of
+	// MaxInt64, MaxInt64 and 3.
+	expectInvalid(t, "fills that overflow their sum", v, func(p *P) {
+		p.Boost.Watched.Filled = 1
+		p.Boost.Watched.Fills = []event.BoostWatchedFill{
+			{FillID: "f1", Quantity: math.MaxInt64, Price: 104, FilledAt: filledAt},
+			{FillID: "f2", Quantity: math.MaxInt64, Price: 104, FilledAt: filledAt},
+			{FillID: "f3", Quantity: 3, Price: 104, FilledAt: filledAt},
+		}
+	}, "more shares than released")
+	if v.Boost.IsZero() {
+		t.Error("figures with a watched order are not empty")
+	}
+}
+
+// TestBoostWatchedOrderEqualAndFill: two records of a watched order are equal
+// when every field and execution is, each instant the same in any UTC
+// offset, and an execution restates the fill report it came from.
+func TestBoostWatchedOrderEqualAndFill(t *testing.T) {
+	w := validTargetsDecidedWatching().Boost.Watched
+	moved := w
+	moved.Fills = slices.Clone(w.Fills)
+	moved.Fills[0].FilledAt = w.Fills[0].FilledAt.In(time.FixedZone("EST", -5*3600))
+	moved.EndedAt = w.EndedAt.In(time.FixedZone("EST", -5*3600))
+	if !w.Equal(moved) {
+		t.Error("the same record in another offset is equal")
+	}
+	other := w
+	other.Fills = slices.Clone(w.Fills)
+	other.Fills[0].Commission = 2
+	if w.Equal(other) || w.Equal(event.BoostWatchedOrder{}) || w.IsZero() || !(event.BoostWatchedOrder{}).IsZero() {
+		t.Error("a record with another execution, or none, is not equal")
+	}
+	f := w.Fill("joint", "SPY", w.Fills[0])
+	want := event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy,
+		Quantity: 20, Price: 104, Commission: 1, FilledAt: w.Fills[0].FilledAt}
+	if !f.SameExecution(want) {
+		t.Errorf("Fill = %+v, want %+v", f, want)
+	}
+}
+
+// TestBoostVenueRejectionsValidate: a Boost decision counts the venue's
+// rejections in a row as a whole number, never below none and never above
+// two, and names exactly the orders it counts, each once; figures with a
+// count are not empty (ADR 0026, point 2, "Boost", amended 2026-10-18).
+func TestBoostVenueRejectionsValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 2
+	v.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-0", VenueOrderID: "ib-0"}, {ClientOrderID: "tw-1"}}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("two rejections in a row are valid: %v", err)
+	}
+	if (event.BoostFigures{VenueRejections: 1}).IsZero() || (event.BoostFigures{RejectedInARow: v.Boost.RejectedInARow}).IsZero() {
+		t.Error("figures with a rejection count are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "negative count", v, func(p *P) { p.Boost.VenueRejections = -1 }, "rejections")
+	// Once reached, the count stays at two (ADR 0026, point 2, "Boost",
+	// amended 2026-10-18).
+	expectInvalid(t, "a count above two", v, func(p *P) {
+		p.Boost.VenueRejections = 3
+		p.Boost.RejectedInARow = append(slices.Clone(p.Boost.RejectedInARow), event.BoostRejectedOrder{ClientOrderID: "tw-2"})
+	}, "two")
+	expectInvalid(t, "a count naming fewer orders", v, func(p *P) { p.Boost.RejectedInARow = p.Boost.RejectedInARow[:1] }, "names 1")
+	expectInvalid(t, "an order named without a count", v, func(p *P) { p.Boost.VenueRejections = 0 }, "names 2")
+	expectInvalid(t, "unnamed", v, func(p *P) {
+		p.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}, {VenueOrderID: "ib-1"}}
+	}, "client order ID")
+	expectInvalid(t, "named twice", v, func(p *P) {
+		p.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}, {ClientOrderID: "tw-0"}}
+	}, "twice")
+}
+
+// TestBoostUndecidedOrdersValidate: a Boost decision records the released
+// orders the venue has not yet ruled on, each named once and none of them
+// among the rejections counted; each but the watched one carries its side,
+// shares and limit as released, so a restart reads the venue's reports on
+// it, and the watched one, the latest released, comes last, with no
+// execution or end, either of which is the venue's word on it (ADR 0026,
+// points 2 and 5, amended 2026-10-18).
+func TestBoostUndecidedOrdersValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 1
+	v.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}}
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-2", Side: event.OrderSideSell, Released: 12, LimitPrice: 550}
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105, VenueOrderID: "ib-1"},
+		{ClientOrderID: "tw-2"},
+	}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a rejection, an undecided order and the watched order are valid: %v", err)
+	}
+	if (event.BoostFigures{UndecidedOrders: v.Boost.UndecidedOrders}).IsZero() {
+		t.Error("figures with an undecided order are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	at := func(i int, f func(*event.BoostUndecidedOrder)) func(*P) {
+		return func(p *P) {
+			p.Boost.UndecidedOrders = slices.Clone(p.Boost.UndecidedOrders)
+			f(&p.Boost.UndecidedOrders[i])
+		}
+	}
+	expectInvalid(t, "unnamed", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "" }), "names")
+	expectInvalid(t, "named twice", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "tw-2" }), "twice")
+	expectInvalid(t, "also rejected", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "tw-0" }), "both")
+	expectInvalid(t, "without its release", v, at(0, func(o *event.BoostUndecidedOrder) { o.Released = 0 }), "released")
+	expectInvalid(t, "with no side", v, at(0, func(o *event.BoostUndecidedOrder) { o.Side = "" }), "released")
+	expectInvalid(t, "with no limit", v, at(0, func(o *event.BoostUndecidedOrder) { o.LimitPrice = 0 }), "released")
+	expectInvalid(t, "the watched order with its release", v, at(1, func(o *event.BoostUndecidedOrder) { o.Side = event.OrderSideSell }), "watched")
+	expectInvalid(t, "the watched order before another", v, func(p *P) {
+		p.Boost.UndecidedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-2"}, {ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105}}
+	}, "last")
+	expectInvalid(t, "the watched order executed", v, func(p *P) {
+		p.Boost.Watched.Filled = 1
+		p.Boost.Watched.Fills = []event.BoostWatchedFill{{FillID: "f1", Quantity: 1, Price: 550, FilledAt: twSession.Add(-2 * time.Hour)}}
+	}, "ruled")
+	expectInvalid(t, "the watched order ended", v, func(p *P) {
+		p.Boost.Watched.Status, p.Boost.Watched.EndedAt = event.OrderLifecycleStatusCanceled, twSession.Add(-time.Hour)
+	}, "ruled")
+}
+
+// TestBoostClearedOrdersValidate: an order the owner settled as never sent
+// records its release, as released, and no venue order ID, since no venue
+// named it; it is named once and is not also undecided (ADR 0026, point 2,
+// "Boost", amended 2026-10-18, and point 5).
+func TestBoostClearedOrdersValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-3", Side: event.OrderSideBuy, Released: 5, LimitPrice: 100}}
+	v.Boost.ClearedOrders = []event.BoostUndecidedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideSell, Released: 12, LimitPrice: 550},
+		{ClientOrderID: "tw-2", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105},
+	}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("cleared orders beside an undecided one are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	at := func(i int, f func(*event.BoostUndecidedOrder)) func(*P) {
+		return func(p *P) {
+			p.Boost.ClearedOrders = slices.Clone(p.Boost.ClearedOrders)
+			f(&p.Boost.ClearedOrders[i])
+		}
+	}
+	expectInvalid(t, "unnamed", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "" }), "cleared")
+	expectInvalid(t, "named twice", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "tw-2" }), "twice")
+	expectInvalid(t, "also undecided", v, at(0, func(o *event.BoostUndecidedOrder) { o.ClientOrderID = "tw-3" }), "undecided")
+	expectInvalid(t, "without its release", v, at(0, func(o *event.BoostUndecidedOrder) { o.Released = 0 }), "released")
+	expectInvalid(t, "with no side", v, at(0, func(o *event.BoostUndecidedOrder) { o.Side = "" }), "released")
+	expectInvalid(t, "with no limit", v, at(0, func(o *event.BoostUndecidedOrder) { o.LimitPrice = 0 }), "released")
+	expectInvalid(t, "with a venue order ID", v, at(0, func(o *event.BoostUndecidedOrder) { o.VenueOrderID = "ib-1" }), "venue")
+}
+
+// TestBoostUndecidedBeforeRejectionValidate: a Boost decision counts how
+// many of the undecided orders were released before the latest rejection it
+// counts, never below none, never more than are listed, never the watched
+// order, the latest released, and only beside a rejection counted (ADR
+// 0026, point 2, "Boost", amended 2026-10-18).
+func TestBoostUndecidedBeforeRejectionValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 1
+	v.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}}
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-2", Side: event.OrderSideSell, Released: 12, LimitPrice: 550}
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105},
+		{ClientOrderID: "tw-2"},
+	}
+	v.Boost.UndecidedBeforeRejection = 1
+	if err := v.Validate(); err != nil {
+		t.Fatalf("an undecided order released before the rejection is valid: %v", err)
+	}
+	if (event.BoostFigures{UndecidedBeforeRejection: 1}).IsZero() {
+		t.Error("figures counting an order older than the rejection are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "negative", v, func(p *P) { p.Boost.UndecidedBeforeRejection = -1 }, "before")
+	expectInvalid(t, "the watched order", v, func(p *P) { p.Boost.UndecidedBeforeRejection = 2 }, "before")
+	expectInvalid(t, "more than listed", v, func(p *P) {
+		p.Boost.Watched, p.Boost.UndecidedOrders = event.BoostWatchedOrder{}, p.Boost.UndecidedOrders[:1]
+		p.Boost.UndecidedBeforeRejection = 2
+	}, "before")
+	expectInvalid(t, "with no rejection counted", v, func(p *P) { p.Boost.VenueRejections, p.Boost.RejectedInARow = 0, nil }, "before")
+}
+
+// TestBoostNoVenueValidate: a dry-run Boost decision records that no venue
+// receives its orders, and so lists none undecided and counts no verdict;
+// no other mode is recorded so (ADR 0026, point 3, "Mode").
+func TestBoostNoVenueValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.NoVenue = event.TradingModeDryRun
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a dry-run decision is valid: %v", err)
+	}
+	if (event.BoostFigures{NoVenue: event.TradingModeDryRun}).IsZero() {
+		t.Error("figures recording a dry-run are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "another mode", v, func(p *P) { p.Boost.NoVenue = event.TradingModePaper }, "dry-run")
+	expectInvalid(t, "an undecided order", v, func(p *P) {
+		p.Boost.UndecidedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105}}
+	}, "dry-run")
+	expectInvalid(t, "a rejection counted", v, func(p *P) {
+		p.Boost.VenueRejections, p.Boost.RejectedInARow = 1, []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}}
+	}, "dry-run")
+	// Nothing is sent, so the owner has nothing to clear and no order is
+	// accepted and working (ADR 0026, point 3, "Mode").
+	expectInvalid(t, "a cleared order", v, func(p *P) {
+		p.Boost.ClearedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105}}
+	}, "dry-run")
+	expectInvalid(t, "a working order", v, func(p *P) {
+		p.Boost.WorkingOrders = []event.BoostWatchedOrder{{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105}}
+	}, "dry-run")
+}
+
+// TestBoostWorkingOrdersValidate: an order the venue accepted that still
+// works besides the watched one records its release, its executions and its
+// venue order ID as the watched order does, and no end, being still
+// working; it is named once and is neither the watched order, nor
+// undecided, nor cleared (ADR 0026, point 5).
+func TestBoostWorkingOrdersValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-9", Side: event.OrderSideBuy, Released: 9, LimitPrice: 100}
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-9"}}
+	v.Boost.ClearedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-5", Side: event.OrderSideSell, Released: 12, LimitPrice: 550}}
+	v.Boost.WorkingOrders = []event.BoostWatchedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, Filled: 20, VenueOrderID: "ib-1",
+			Fills: []event.BoostWatchedFill{{FillID: "f1", Quantity: 20, Price: 104, FilledAt: twSession.Add(-2 * time.Hour)}}},
+		{ClientOrderID: "tw-2", Side: event.OrderSideSell, Released: 12, LimitPrice: 550},
+	}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("working orders beside the watched, undecided and cleared ones are valid: %v", err)
+	}
+	if (event.BoostFigures{WorkingOrders: v.Boost.WorkingOrders}).IsZero() {
+		t.Error("figures recording a working order are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	at := func(i int, f func(*event.BoostWatchedOrder)) func(*P) {
+		return func(p *P) {
+			p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+			f(&p.Boost.WorkingOrders[i])
+		}
+	}
+	expectInvalid(t, "named twice", v, at(1, func(o *event.BoostWatchedOrder) { o.ClientOrderID = "tw-1" }), "twice")
+	expectInvalid(t, "the watched order", v, at(1, func(o *event.BoostWatchedOrder) { o.ClientOrderID = "tw-9" }), "watched")
+	expectInvalid(t, "also undecided", v, func(p *P) {
+		p.Boost.UndecidedOrders = []event.BoostUndecidedOrder{{ClientOrderID: "tw-2", Side: event.OrderSideSell, Released: 12, LimitPrice: 550}, {ClientOrderID: "tw-9"}}
+	}, "undecided")
+	expectInvalid(t, "also cleared", v, at(1, func(o *event.BoostWatchedOrder) { o.ClientOrderID = "tw-5" }), "cleared")
+	expectInvalid(t, "also rejected", v, func(p *P) {
+		p.Boost.VenueRejections, p.Boost.RejectedInARow = 1, []event.BoostRejectedOrder{{ClientOrderID: "tw-2"}}
+	}, "rejected")
+	expectInvalid(t, "ended", v, at(1, func(o *event.BoostWatchedOrder) {
+		o.Status, o.EndedAt = event.OrderLifecycleStatusCanceled, twSession.Add(-time.Hour)
+	}), "working")
+	expectInvalid(t, "fully filled", v, at(0, func(o *event.BoostWatchedOrder) { o.Filled, o.Fills = 39, nil }), "filled")
+	expectInvalid(t, "without its release", v, at(1, func(o *event.BoostWatchedOrder) { o.Released = 0 }), "released")
+	expectInvalid(t, "naming nothing", v, func(p *P) {
+		p.Boost.WorkingOrders = append(slices.Clone(p.Boost.WorkingOrders), event.BoostWatchedOrder{})
+	}, "client order ID")
+	early := event.BoostWatchedFill{FillID: "f1", Quantity: 1, Price: 550, FilledAt: twSession.Add(-2 * time.Hour)}
+	expectInvalid(t, "a fill of another working order", v, at(1, func(o *event.BoostWatchedOrder) {
+		o.Filled, o.Fills = 1, []event.BoostWatchedFill{early}
+	}), "two orders")
+	expectInvalid(t, "a fill of the watched order", v, func(p *P) {
+		p.Boost.Watched.Filled, p.Boost.Watched.Fills, p.Boost.UndecidedOrders = 1, []event.BoostWatchedFill{early}, nil
+	}, "two orders")
+}
+
+// TestBoostRejectionsWhileStoppedValidate: once two rejections in a row
+// have stopped Boost's buys, each later rejection is recorded once, cause
+// rejected, beside the count of them so far (ADR 0026, points 2, "Boost",
+// amended 2026-10-18, and 4).
+func TestBoostRejectionsWhileStoppedValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 2
+	v.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-0"}, {ClientOrderID: "tw-1"}}
+	v.Boost.RejectionsWhileStopped = 1
+	v.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-2", Released: 12}}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a rejection after the stop is valid: %v", err)
+	}
+	if (event.BoostFigures{RejectionsWhileStopped: 1}).IsZero() || (event.BoostFigures{RejectedWhileStopped: v.Boost.RejectedWhileStopped}).IsZero() {
+		t.Error("figures with a rejection after the stop are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "before the stop", v, func(p *P) { p.Boost.VenueRejections = 1 }, "stopped")
+	expectInvalid(t, "more recorded than counted", v, func(p *P) { p.Boost.RejectionsWhileStopped = 0 }, "stopped")
+	expectInvalid(t, "negative count", v, func(p *P) { p.Boost.RejectionsWhileStopped = -1 }, "stopped")
+	expectInvalid(t, "not a rejection", v, func(p *P) {
+		p.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRefused}}
+	}, "rejection")
+	expectInvalid(t, "without its order", v, func(p *P) {
+		p.Boost.RejectedWhileStopped = []event.BoostReplan{{Cause: event.ReplanCauseRejected, Released: 12}}
+	}, "order")
+}
+
+// TestBoostVenueOrderIDsNameOneOrderEach: a venue order ID is the venue's
+// ID for one order, so no two of the watched, undecided and working orders
+// carry the same one: a restarted run matches IBKR's unechoed listing by
+// it, and a shared ID would match the wrong order (ADR 0026, point 5,
+// amended 2026-10-18; fail closed, AGENTS.md).
+func TestBoostVenueOrderIDsNameOneOrderEach(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.Watched = event.BoostWatchedOrder{ClientOrderID: "tw-9", Side: event.OrderSideBuy, Released: 9, LimitPrice: 100, VenueOrderID: "ib-9"}
+	v.Boost.UndecidedOrders = []event.BoostUndecidedOrder{
+		{ClientOrderID: "tw-3", Side: event.OrderSideBuy, Released: 3, LimitPrice: 100, VenueOrderID: "ib-3"},
+		{ClientOrderID: "tw-9"},
+	}
+	v.Boost.WorkingOrders = []event.BoostWatchedOrder{
+		{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 39, LimitPrice: 105, VenueOrderID: "ib-1"},
+		{ClientOrderID: "tw-2", Side: event.OrderSideBuy, Released: 12, LimitPrice: 105, VenueOrderID: "ib-2"},
+	}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("distinct venue order IDs are valid: %v", err)
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "two working orders", v, func(p *P) {
+		p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+		p.Boost.WorkingOrders[1].VenueOrderID = "ib-1"
+	}, "venue order")
+	expectInvalid(t, "a working and the watched order", v, func(p *P) {
+		p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+		p.Boost.WorkingOrders[0].VenueOrderID = "ib-9"
+	}, "venue order")
+	expectInvalid(t, "an undecided and a working order", v, func(p *P) {
+		p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+		p.Boost.WorkingOrders[0].VenueOrderID = "ib-3"
+	}, "venue order")
 }

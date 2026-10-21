@@ -84,6 +84,19 @@ Degraded sell needs a broker snapshot to size from. Without one it is refused
 (`broker-holding`). A sell larger than the broker's holding is refused, not cut
 down, and the instrument is added to the scope.
 
+The same holds when IBKR has rejected two of Boost's orders in a row: the
+program stops its buys until you start a fresh run, but Boost's exit and
+the sale back to 98% still go, and an exit IBKR rejects is planned and sent
+again at each decided close while it is due. So a check of IBKR's open
+orders that finds none working is not enough: the next close may send the
+exit again, sized without a hand sale IBKR has not yet listed. Sell by
+hand only as this chapter's hand-sale rule says (below, and the failed-sale
+bullet): first stop new orders (the kill switch where it exists, otherwise
+stop the engine), cancel any working program sale in IBKR's app, confirm
+that no `working`, `pending` or `cancel-pending` sell remains, and only
+then sell
+([boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan)).
+
 ## The kill switch
 
 The kill switch is your own input, recorded in the journal as
@@ -384,7 +397,7 @@ refused, because working sells could not be checked.
 The thresholds are in the configuration. They were introduced in version 5 of
 `strategy.target-weight.configuration`, carried unchanged in versions 6 and the
 current 7, and read from rules version 1.5.0 on. This build (rules version
-1.17.0) reads only configuration version 7, so a journal written under an earlier rules
+1.18.0) reads only configuration version 7, so a journal written under an earlier rules
 version will not replay. Only the margin account has them: an
 IRA has no margin cushion, so its configuration leaves them out and it gets no
 alarm. A change of level is recorded as

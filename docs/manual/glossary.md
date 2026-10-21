@@ -142,8 +142,10 @@ price. A fill is a separate report from an order's status. See
 the engine, a reboot, a new build, leaving Degraded or Halted. It needs your
 **approval**. See [restart](restart.md).
 
-**Gap.** A session missing from a price series. Boost never computes across
-one; momentum leaves out a stock not held with a gap. See [boost](boost.md)
+**Gap.** A session missing from a price series. Boost skips a session with
+no SPY bar (that session is withheld, nothing trades) and computes its
+readings over the closes it has; the next decision names the gap
+(`gap_sessions`). Momentum leaves out a stock not held with a gap. See [boost](boost.md)
 and [momentum universe](momentum-universe.md).
 
 **Golden case.** A month (momentum) or a session (Boost) logged from
@@ -251,9 +253,16 @@ reads it.
 input, by sending the same input again; the engine answers from its log,
 so an order is never lost or doubled. See [re-delivery](redelivery.md).
 
-**Re-plan.** Boost planning again, at its next decided session, an order
-the gate refused while the account stayed Normal. See
-[boost](boost.md#a-refused-order-is-planned-again-re-plan).
+**Re-plan.** Boost planning again, at its next decided session, the
+difference to its target after its last order did not get there: the gate
+refused it while the account stayed Normal (`refused`), it ended with
+shares unfilled (`part-filled`, or `unfilled` when none filled), or IBKR
+rejected it (`rejected`, planned once more only; two orders rejected in a
+row stop Boost's buys until a fresh run, while its sells still go). The
+`unfilled` re-plan, the one retry of a rejection and the stop after two
+were confirmed by the owner on 2026-10-18. The decision records the
+cause (`replan`). See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Reconciled, reconciliation.** Three different things carry this word:
 
@@ -270,6 +279,14 @@ compare IBKR's positions, cash and open orders with the journal yourself
 **Refused.** The risk gate's answer to an order that breaks a limit or
 meets a state that stops it (`risk.order.refused`, with a reason). A
 refused order is never sent.
+
+**Rejections in a row.** Boost's count of its orders IBKR rejected since
+the last one IBKR accepted, each counted when IBKR's first word on it
+arrives, however late (`venue_rejections`). At two Boost's buys stop until
+a fresh run, while its sells still go; each decision names the orders
+counted (`rejected_in_a_row`), so at the stop the two that stopped buys,
+and the page names them too. See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Release, released.** The risk gate's answer to an order that passes
 (`risk.order.released`). In the order's lifecycle, **released** also means
@@ -295,7 +312,7 @@ lower: exempt from the order count, order size and price band.
 **RulesVersion.** A version number declared in the code that changes only
 when a rule changes, so two builds with the same rules version replay each
 other's logs exactly (ADR 0016). The target-weight strategies are at
-**1.17.0**; a log written under an earlier one does not replay. Each
+**1.18.0**; a log written under an earlier one does not replay. Each
 chapter's "since version x" notes say when a rule arrived.
 
 **Run.** One start of an engine to its stop, with its own name (`TI_RUN`),
@@ -329,7 +346,7 @@ adapter hands to the engine in order, each input once, behind a fresh
 **broker snapshot**. See [market data](market-data.md).
 
 **Strategy version.** `<strategy>/<rules version>+<build>`, carried on every
-record, for example `boost/1.17.0+<commit>`.
+record, for example `boost/1.18.0+<commit>`.
 
 **Synthetic report.** In dry-run only, the engine's own "never sent,
 cancelled" record for each order a momentum IRA releases, so the next month
@@ -337,6 +354,16 @@ is not held back. It is never an execution. See [engine](engine.md).
 
 **Torn tail.** A partial group at the end of a log, left by a crash in the
 middle of a write. A resume leaves it out; nothing from it was released.
+
+**Undecided order.** An order Boost released that IBKR has neither
+accepted nor rejected yet: no fill, and no report but "submitted". Each
+decision lists them (`undecided_orders`), so IBKR's late word on any of
+them counts after a restart as it would have without one. An order leaves
+the list at its first word beyond "submitted" (a fill, an expiry or
+cancellation, or a rejection), or, if the adapter never sent it,
+when you record `operator rebalance-cleared` for it; a dry-run lists none
+(`no_venue: "dry-run"`), since no order reaches IBKR. See
+[boost](boost.md#a-refused-or-unfilled-order-is-planned-again-re-plan).
 
 **Universe.** For momentum, the 500 US common stocks with the highest
 dollar volume (at $5 or more) on the decision session. See
