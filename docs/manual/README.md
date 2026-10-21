@@ -59,7 +59,7 @@ are what this build runs):
 | IB Gateway, pinned | 10.50.1f |
 | IBKR TWS API (`ibapi`), pinned | 10.51.01 |
 | IBC, pinned | 3.24.2 |
-| Go | 1.27.2 |
+| Go | 1.27.3 |
 
 ## Reading order
 
