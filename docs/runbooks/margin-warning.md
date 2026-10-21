@@ -35,7 +35,7 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    next boost buy (`sudo -u ti-operator operator kill-switch ... -state engaged`),
    which still lets the sale back to 98% go. Selling by
    hand is your call; if you do, stop the engine and the adapter first
-   (`sudo systemctl stop ti-engine@<account> ti-adapter-boost`), as
+   (`sudo systemctl stop ti-engine@boost ti-adapter-boost`), as
    the manual's "Selling by hand safely" says
    (`docs/manual/states-and-kill-switch.md`): the kill switch does not stop
    the sale back to 98%, so the program could sell beside you.

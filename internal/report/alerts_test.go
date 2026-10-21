@@ -232,14 +232,14 @@ func TestABoostGapPagesOnceAndSaysDecisionsContinue(t *testing.T) {
 // the owner approves a fresh run, while its sells still go; the decisions
 // after it page nothing more.
 func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
-	s := newStreamFor(t, "boost")
+	s := newStreamFor(t, "joint")
 	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
-		event.TargetsDecidedPayload{AccountID: "boost", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
 			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
 			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2,
 				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-6"}, {ClientOrderID: "tw-7"}},
 				ReplanWithheld: event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-7", Released: 37}}})
-	s.decidedFor("boost", 1, 0.98)
+	s.decidedFor("joint", 1, 0.98)
 	got, err := report.Alerts(s.out)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 			t.Errorf("page lacks %q: %q", want, a.Body)
 		}
 	}
-	requireHandSale(t, a.Body, "boost")
+	requireHandSale(t, a.Body, "joint")
 }
 
 // handSale is the hand-sale procedure a page sends the owner to while the
@@ -278,8 +278,13 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 // run's first reading is not the book it is compared with and the account
 // halts as unverifiable), and the adapter only after that run's engine is
 // running, never resuming the stopped one.
+//
+// The units are the Boost program's, named by its engine instance, not by
+// the account it decides: the shipped Boost configuration decides account
+// "joint" under ti-engine@boost, and ti-adapter-boost is the only adapter
+// unit, wired to that engine's socket and log (deploy/systemd).
 func handSale(account string) []string {
-	return []string{"stop the engine and the adapter", "ti-engine@" + account + " ti-adapter-" + account,
+	return []string{"stop the engine and the adapter", "sudo systemctl stop ti-engine@boost ti-adapter-boost",
 		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
 		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve",
 		"only once your sale has filled or been cancelled", "states the book as it is after your sale",
@@ -294,6 +299,12 @@ func requireHandSale(t *testing.T, body, account string) {
 	t.Helper()
 	if strings.Contains(body, "<account>") {
 		t.Errorf("placeholder left: %q", body)
+	}
+	if strings.Contains(body, "ti-engine@"+account) || strings.Contains(body, "ti-adapter-"+account) {
+		t.Errorf("units named by the account %q, not the engine instance: %q", account, body)
+	}
+	if !strings.Contains(body, "operator approve -log <previous run's log> -account "+account+" ") {
+		t.Errorf("approval does not name the account %q: %q", account, body)
 	}
 	last := -1
 	for _, want := range handSale(account) {
@@ -315,9 +326,9 @@ func requireHandSale(t *testing.T, body, account string) {
 // amended 2026-10-18, and 4), and paged once per order as another rejection
 // while buys are stopped, saying which one it is, not as the stop.
 func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
-	s := newStreamFor(t, "boost")
+	s := newStreamFor(t, "joint")
 	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
-		event.TargetsDecidedPayload{AccountID: "boost", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
 			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
 			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, VenueRejections: 2, RejectionsWhileStopped: 3,
 				RejectedInARow: []event.BoostRejectedOrder{{ClientOrderID: "tw-1"}, {ClientOrderID: "tw-2", VenueOrderID: "ib-2"}},
@@ -325,7 +336,7 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-8", Released: 6},
 					{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-9", Released: 5},
 				}}})
-	s.decidedFor("boost", 1, 0.98)
+	s.decidedFor("joint", 1, 0.98)
 	got, err := report.Alerts(s.out)
 	if err != nil {
 		t.Fatal(err)
@@ -344,7 +355,7 @@ func TestARejectionWhileBuysAreStoppedPagesAsSuch(t *testing.T) {
 				t.Errorf("page %d lacks %q: %q %q", i, want, a.Title, a.Body)
 			}
 		}
-		requireHandSale(t, a.Body, "boost")
+		requireHandSale(t, a.Body, "joint")
 	}
 }
 

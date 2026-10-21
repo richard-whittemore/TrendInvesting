@@ -166,9 +166,14 @@ ended with. An incident or latch change recorded only in the lost log
 cannot be expressed in the approval, and decisions recorded only there are
 gone. The kill switch is not part of the approval: a fresh run starts with
 it released. If you believe the lost log opened an incident, settle the
-positions by hand at IBKR first: the engine's own reconciliation does not
-run yet ([reconciliation](reconciliation.md)), so nothing else will catch a
-difference.
+positions by hand at IBKR first, and state the book you then read there in
+the approval (`-positions`, `-cash`, `-currency`). The reconciliation does
+run: the fresh run's first reading from IBKR is compared with the book it
+starts from, the one you state or else the readable log's last close, and a
+reading that differs halts the account as unverifiable
+([reconciliation](reconciliation.md), "What can go wrong"). But it compares
+only positions and cash, not open orders, and it cannot know what the lost
+log recorded, so it does not replace your check.
 
 ## What the engine cannot tell
 
