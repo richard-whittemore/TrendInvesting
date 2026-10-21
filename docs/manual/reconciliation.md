@@ -10,19 +10,18 @@ and what it does not"). Every decision the
 engine makes rests on what it believes you hold, so a difference it cannot
 explain is a reason to stop taking on new risk (ADR 0019).
 
-As designed, every morning before the day's first decision the IBKR adapter
-reads the account's positions and cash from IBKR and records them in the
-journal. The engine then compares them with its own book and decides one of
-four things. **This does not run yet**: the engine's side and the alert are
-built and tested, and the adapter can build the record, but its main loop
-does not send it (see "What is not built yet"). Until it does, no
-reconciliation happens and no reconciliation alert is ever sent.
-
-"Reconciled" also means two other things in this program: the adapter's
-own check of IBKR's open orders when it connects, and the
-`journal-query reconcile` report. The [glossary](glossary.md)
-("Reconciled, reconciliation") tells the three apart. This chapter is about
-the engine's morning reconciliation.
+At every start of the IBKR adapter, at every reconnect, and with every
+delivery of market data, the adapter reads the account's positions and cash
+from IBKR and records them in the journal. A delivery's goes ahead of that
+day's account snapshot, so the engine compares IBKR's holdings with the book
+it holds before the new snapshot replaces it: shares no fill explains are
+found, never taken over. A run's first delivery carries it right behind the
+first account snapshot, which is the engine's first book. A start's or a
+reconnect's is read only once every trade IBKR replayed has its commission
+and its fill has reached the engine. Before the engine holds any account
+snapshot there is no book to compare, so the adapter sends none at a start
+or reconnect then. The engine compares them with its own book and decides one of four
+things:
 
 | Result | What it means | What happens |
 | --- | --- | --- |
@@ -159,12 +158,21 @@ to the private channel for the reasons, which can carry amounts.
 
 The adapter reads positions, the account summary (net liquidation, total cash,
 Excess Liquidity) and every open order in one pass, then asks IBKR the time.
-From that one read it can build two records (`adapter/ibkr/snapshot.py`):
+From that one read it builds the records the engine reads:
 
+- the engine's **account snapshot** (`account.snapshot`), positions and net
+  liquidation, the **book** the strategy decides from;
 - the **broker snapshot** (`account.broker.snapshot`), which the risk gate
   sizes sells and the sale back to 98% from, and the margin alarm watches;
 - the **reconciliation** (`account.reconciliation`), positions and total cash
-  for the morning comparison.
+  for the comparison, stamped with the true read time.
+
+After a session's close, the account and broker snapshots are stamped as of
+that close when the reading can stand for it (your decision of 2026-10-18:
+nothing working at IBKR, no execution since the close, read on the close's
+own date), else at the read time ([paper trading](paper-trading.md), "A
+paper day"). The reconciliation always carries the read time, so it is
+never earlier than the book it is compared with.
 
 Today its main loop sends only the first: a broker snapshot ahead of each
 day's market data. The reconciliation record is built and tested but never
@@ -193,32 +201,20 @@ Two conservative choices, both of which can only make a sale smaller:
 | `reconciliation-unverifiable`. Alert: `<account>: reconciliation unverifiable (<id>)` | The figures could not be compared, so the account goes **Halted**: no order is released, except, for the joint account, the one sale back to 98%. The private text lists why, for example `the broker's positions could not be read`, `the broker's total cash could not be read`, `no account snapshot has been recorded, so the journal has no book to compare`, `the observation as of ... precedes the book as of ...`, or `the broker's cash is in ...; the book's is in ...`. | Fix what could not be read (the adapter's link, `journalctl -u ti-adapter-boost`), then follow the runbook's "Recover". Leaving Halted is never automatic: it takes a fresh run you approve. |
 | A dividend, interest charge, fee or fill the journal has not recorded | Cash (or that instrument) differs, so the account goes Degraded: on cash, buys stop. **No command records the missing event**: `operator` has four commands (the kill switch, an approval, a rebalance clearance and an acknowledgement), and none records a market or account event. | Check the item on IBKR's activity, write down what you found, and either approve a fresh run that clears the incident (`operator approve -clear-incident <id>`) or one that carries it in force (leave `-clear-incident` out; for cash its scope is `"scope_cash_components": ["total-cash"]`, so buys stay refused) (`docs/runbooks/reconciliation.md`, "Recover"). |
 | Private text names `corporate action ... (... of ...) is not one a target-weight book can apply` | A delisting, merger or symbol change: the book can apply only fills, dividends and splits, so the reconciliation is unverifiable and the account goes Halted. | Check at IBKR what the account now holds for that stock. There is no way to record the action for the program: clear the incident in a fresh run once the holding is understood. For an IRA, the next rebalance sells what the rule no longer targets. |
-| Margin interest on the joint account | Never compared: Boost's book carries no cash, so its cash is not reconciled and the result says so. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
+| An account has no account snapshot yet (a start or reconnect before the run's first delivery) | The adapter sends no reconciliation: with no book to compare, it would be unverifiable and halt the account. The run's first delivery carries the first, right behind its account snapshot. | Nothing. |
+| A run's first reading is not the book it was compared with (the previous run's last close, or your starting book) | The adapter sends its reconciliation alone and withholds its snapshots, so the engine, holding no book, finds it unverifiable and **Halted**; nothing of that reading is taken as the book, by this run or the next. | Clear it with a fresh run whose approval states the book you check in IBKR (`operator approve -clear-incident <id> -positions ... -cash ... -currency USD`; [restart](restart.md)). Without a stated book, the fresh run is compared with the same book again and halts again. |
+| The daily summary shows `cash drift` and `unexplained cash` | Information only: the drift since the previous close and that drift added up since the cash was last explained (an explained reconciliation, else the starting book). The program does not act on it, and the post-close reading is stamped at its read time instead of the close when the drift exceeds 1% of net liquidation (the session is then withheld). | A small posting day (interest, a dividend) is expected; a figure that keeps growing is a cash movement to find at IBKR before approving anything. |
+| Margin interest on the joint account | Not compared: Boost's book states no cash, so the result says cash is not compared. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
 | A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
 | A fill stamped in the same second as the morning read | It counts as after the read. If IBKR's figure includes it, the result is a difference and the account goes Degraded on that instrument: the safe side. | Check the fill at IBKR, then recover as for any difference. |
 | A fill report lost during a session, or a difference that arises while the market is open | Not caught by the morning check: the next close's snapshot absorbs it ("What the morning check covers"). | Compare IBKR with the journal yourself when anything looks wrong. |
-| Today: no reconciliation alert at all | Nothing runs: the adapter does not send the morning read. A difference between IBKR and the engine's book is not detected by the program. | Before every fresh run, compare IBKR's positions, cash and open orders with the journal yourself (`docs/runbooks/reconciliation.md`, "If the system itself is silent", step 3). |
 
 ## What is not built yet
 
-- Sending the morning read: the adapter builds the `account.reconciliation`
-  record but its main loop never sends it, so the morning reconciliation
-  does not run. The engine side and the alert are built and tested against
-  recorded inputs.
-- The account snapshot the book starts from: for Boost, nothing produces
-  the account snapshot as of the close yet ([engine](engine.md)), so even
-  a delivered reconciliation would find no book and be unverifiable.
-- Delivering dividends and splits to the engine: the data job uses them to
-  adjust prices, but no program sends them to the engine as events, so a
-  posted dividend could not explain a cash difference yet.
-- The reconciliations ADR 0019 also asks for at startup, after every fill,
-  before every order and on a timer; until they exist, a difference that
-  arises during a session (a lost fill report among them) is not caught.
-  Also the comparison of open orders; the joint account's cash; matching
-  each cash activity to IBKR's activity rows rather than comparing one net
-  total; any command that records a missed event; and the outside heartbeat
-  monitor.
-- `-operator` in the engine's service file on the server: without it, an
-  `operator acknowledge` does not reach the engine, so a repeating alert
-  cannot be acknowledged there ([engine](engine.md), "Your instructions
-  while it runs").
+- The reconciliations ADR 0019 also asks for after every fill, before every
+  order and on a timer (the start, reconnect and daily-delivery ones are
+  sent); until they exist, a difference that
+  arises during a session (a lost fill report among them) is not caught. Also
+  the comparison of open orders; the joint account's cash; matching each cash
+  activity to IBKR's activity rows rather than comparing one net total; and
+  the outside heartbeat monitor. These are tracked as follow-up issues.

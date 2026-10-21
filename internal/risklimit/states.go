@@ -159,19 +159,22 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 		Warning: g.limits.ExcessLiquidityWarning, Urgent: g.limits.ExcessLiquidityUrgent, StaleMinutes: g.limits.ExcessLiquidityStaleMinutes,
 	}
 	stale := time.Duration(g.limits.ExcessLiquidityStaleMinutes) * time.Minute
+	// One price basis per rule (ADR 0019, amended 2026-10-18): Excess
+	// Liquidity over IBKR's own net liquidation at the same read.
+	nl := s.AlarmNetLiquidation()
 	switch {
-	case s.Readable(event.BrokerComponentExcessLiquidity) && s.Readable(event.BrokerComponentNetLiquidation) && !(s.NetLiquidation > 0):
+	case s.Readable(event.BrokerComponentExcessLiquidity) && s.Readable(event.BrokerComponentNetLiquidation) && !(nl > 0):
 		// A reading, and the most alarming: no ratio, but below every
 		// threshold, so urgent at once rather than awaited as no reading.
 		g.lastReading, g.lastReadingSet = s.AsOf, true
 		alarm.Cause, alarm.ReadingSet, alarm.Level = event.MarginAlarmCauseNonPositive, true, event.MarginAlarmUrgent
-		alarm.ExcessLiquidity, alarm.NetLiquidation = s.ExcessLiquidity, s.NetLiquidation
-		alarm.Detail = fmt.Sprintf("net liquidation %v is not positive (excess liquidity %v): below every threshold", s.NetLiquidation, s.ExcessLiquidity)
+		alarm.ExcessLiquidity, alarm.NetLiquidation = s.ExcessLiquidity, nl
+		alarm.Detail = fmt.Sprintf("net liquidation %v is not positive (excess liquidity %v): below every threshold", nl, s.ExcessLiquidity)
 	case s.Readable(event.BrokerComponentExcessLiquidity) && s.Readable(event.BrokerComponentNetLiquidation):
 		g.lastReading, g.lastReadingSet = s.AsOf, true
 		alarm.Cause, alarm.ReadingSet = event.MarginAlarmCauseRatio, true
-		alarm.ExcessLiquidity, alarm.NetLiquidation = s.ExcessLiquidity, s.NetLiquidation
-		alarm.Ratio = s.ExcessLiquidity / s.NetLiquidation
+		alarm.ExcessLiquidity, alarm.NetLiquidation = s.ExcessLiquidity, nl
+		alarm.Ratio = s.ExcessLiquidity / nl
 		switch {
 		case alarm.Ratio < g.limits.ExcessLiquidityUrgent:
 			alarm.Level = event.MarginAlarmUrgent
@@ -181,7 +184,7 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 			alarm.Level = event.MarginAlarmClear
 		}
 		alarm.Detail = fmt.Sprintf("excess liquidity %v is %v of net liquidation %v (warning below %v, urgent below %v)",
-			s.ExcessLiquidity, alarm.Ratio, s.NetLiquidation, alarm.Warning, alarm.Urgent)
+			s.ExcessLiquidity, alarm.Ratio, nl, alarm.Warning, alarm.Urgent)
 	case s.MarketOpen && s.AsOf.Sub(g.noReadingSince()) >= stale:
 		alarm.Cause, alarm.Level = event.MarginAlarmCauseNoReading, event.MarginAlarmUrgent
 		alarm.Detail = fmt.Sprintf("no excess liquidity reading for %d minutes while the market is open", g.limits.ExcessLiquidityStaleMinutes)

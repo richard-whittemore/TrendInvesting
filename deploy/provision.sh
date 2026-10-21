@@ -286,13 +286,15 @@ step_adapter() {
   rm -rf "$adapter_root.new"
   install -d -m 0755 "$adapter_root.new/adapter/ibkr"
   install -m 0644 "$src"/*.py "$adapter_root.new/adapter/ibkr/"
-  # The NYSE calendar and the table of inputs the data job writes, in the
-  # same layout, so the adapter states the market's hours from the same
-  # committed calendar and refuses any input type the data job does not
-  # write (delivery.py).
+  # The NYSE calendar, the table of inputs the data job writes and the
+  # reader of the engine's durable log, in the same layout, so the adapter
+  # states the market's hours from the same committed calendar, refuses any
+  # input type the data job does not write (delivery.py) and reads the log
+  # exactly as the data job does (relay.py).
   install -d -m 0755 "$adapter_root.new/adapter/marketdata"
   install -m 0644 "$here/../adapter/marketdata/nyse_calendar.py" "$adapter_root.new/adapter/marketdata/"
   install -m 0644 "$here/../adapter/marketdata/kinds.py" "$adapter_root.new/adapter/marketdata/"
+  install -m 0644 "$here/../adapter/marketdata/engine_log.py" "$adapter_root.new/adapter/marketdata/"
   install -m 0644 "$here/versions.env" "$adapter_root.new/versions.env"
   rm -rf "$adapter_root"
   mv "$adapter_root.new" "$adapter_root"

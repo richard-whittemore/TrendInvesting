@@ -58,11 +58,12 @@ and records everything, and marks every order "do not send".
    always says what it decided under, including the mode.
 4. **Each session** the engine needs the SPY bar, an account snapshot
    (positions and value) as of the close, the current price ("mark") and
-   "the session closed". Today the adapter delivers the bar and the close
-   from the daily data job's file, behind a broker snapshot (IBKR's view of
-   the account, which the sale back to 98% and the margin alarm read); the
-   account snapshot as of the close and the recorded mark are not produced
-   yet, so every session is withheld (see "What can go wrong"). On the
+   "the session closed". The adapter delivers the bar and the close
+   from the daily data job's file, behind one account reading after the
+   close: the account snapshot and the broker snapshot (IBKR's view of the
+   account, which the sale back to 98% and the margin alarm read), and the
+   recorded mark. When the reading cannot be stamped as of the close, the
+   session is withheld (see "What can go wrong"). On the
    close the engine decides Boost's target (98% invested, or 147% when the
    boost is on), plans the one order that moves the account there, and
    checks it against the hard limits: the 150% exposure cap, the maximum
@@ -215,7 +216,7 @@ Read them with `journalctl -u ti-engine@<account> -n 20`.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| `stale-account-snapshot`. Alert: `<account>: decision withheld (stale-account-snapshot)`, urgent, sent once for each run of sessions withheld for this reason | No target is decided for the session and no order is planned: there is no account snapshot as of the session's close, or only one taken after it, and orders are valued at that close (ADR 0026, point 2). Boost's latch (whether the boost is on) still moves, so a change withheld one session is ordered the next. The same holds for a momentum IRA. **On the server today this is every session**, because nothing produces the account snapshot as of the close yet. | Today, nothing: it is the expected state until the snapshot is built ([paper trading](paper-trading.md)). Once it is built, check the adapter is running and connected (`journalctl -u ti-adapter-boost`) and that IBKR answered the account read. |
+| `stale-account-snapshot`. Alert: `<account>: decision withheld (stale-account-snapshot)`, urgent, sent once for each run of sessions withheld for this reason | No target is decided for the session and no order is planned: there is no account snapshot as of the session's close, or only one taken after it, and orders are valued at that close (ADR 0026, point 2). Boost's latch (whether the boost is on) still moves, so a change withheld one session is ordered the next. The same holds for a momentum IRA. It happens when the adapter's reading after the close could not be stamped as of the close (an order still working at IBKR, an execution at or since the close, cash more than 1% of net liquidation from the previous close's adjusted by the fills, a date that is not the close's, or a first reading that is not the book it was compared with); the reading is then stamped at its read time. | Check why in the adapter's log (`journalctl -u ti-adapter-boost`), and that IBKR answered the account read. A session withheld for working orders or a late execution decides normally the next day; for a first reading that is not the book, see [reconciliation](reconciliation.md), "What can go wrong". |
 | `missing-bars`. Alert: `<account>: decision withheld (missing-bars)`, urgent, sent once for each run of sessions withheld for this reason | A session closed without the bar the decision needs, so nothing is decided. **Boost** withholds that session only and decides again at the next session with a bar, its readings computed over the closes it has (the missing close is not filled in), naming the gap (`gap_sessions`); one page per gap ([boost](boost.md)). A **momentum IRA** withholds when a held or targeted name, a ranked name or the trend instrument has no bar for the decision session, or a decision session never closed. | Find why the bar is missing: `journalctl -u ti-data` and the data job's stream ([market data](market-data.md)). For Boost nothing more: the run recovers by itself, so do not start a fresh run for a gap. For a momentum IRA, see [momentum](momentum.md). |
 | An order breaks a hard limit, or the kill switch or a Degraded or Halted state stops it | The risk gate refuses it. | See [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong". |
 | An input refused with a message starting `targetweight:` (a bar out of order, for another instrument, on another price base, or before the warm-up start) | Nothing is decided from that input; the adapter is told why. | Read the adapter's journal: it is a fault in what was delivered, not in the decision. See [IBKR adapter](ibkr-adapter.md) and [market data](market-data.md). |
@@ -270,12 +271,11 @@ from the first one's log and checks the two logs are identical byte for byte.
 
 ## Not built yet
 
-- The account snapshot as of the close and the recorded mark for Boost:
-  nothing produces them, so the engine withholds every session and releases
-  nothing ([paper trading](paper-trading.md)). The adapter's main loop, its
-  link to the engine's socket, the real IBKR client, the paper sending
-  switch and the delivery of the data job's stream are built
-  ([IBKR adapter](ibkr-adapter.md)).
+- A paper run against IBKR's paper servers: the account snapshot as of the
+  close, the recorded mark, the adapter's main loop, its link to the
+  engine's socket, the real IBKR client, the paper sending switch and the
+  delivery of the data job's stream are built and rehearsed against a
+  stand-in gateway ([IBKR adapter](ibkr-adapter.md)).
 - `-operator` in the server's service file: without it your kill switch,
   acknowledgements and clearances do not reach the engine on the server.
 - The engine's own reconciliation against IBKR at every start (ADR 0019).

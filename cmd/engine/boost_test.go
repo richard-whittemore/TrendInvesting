@@ -323,6 +323,7 @@ func TestTheAccountMustMatchTheMode(t *testing.T) {
 	dir := t.TempDir()
 	opts := boostOptions(t, dir)
 	opts.mode, opts.configPath = modePaper, writeBoostConfiguration(t, dir, modePaper, "DU1234567")
+	opts.approvalPath = writeFirstRunApproval(t, "DU1234567")
 	if err := startEngine(t, opts)(); err != nil {
 		t.Fatalf("a paper account in -mode paper: %v", err)
 	}

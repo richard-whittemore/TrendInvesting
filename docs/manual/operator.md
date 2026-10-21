@@ -36,7 +36,7 @@ It has four commands:
 | `operator kill-switch` | the kill switch engaged or released | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator rebalance-cleared` | your clearance of a rebalance that is stuck, or of a Boost order the adapter never sent | the engine's operator inbox | before the engine's next input from the adapter |
 | `operator acknowledge` | your acknowledgement of one alert, by its alert key | the engine's operator inbox | before the engine's next input from the adapter; the reporter stops repeating the alert at its next run |
-| `operator approve` | your approval of a fresh run | an approval file you pass to the engine with `-approval` | when that fresh run starts, as its second input |
+| `operator approve` | your approval of a fresh run, or of an account's first run with its starting book (`-first-run`) | an approval file you pass to the engine with `-approval` | when that run starts, as its second input |
 
 **`-account` is the account's name in the engine's configuration**, its
 `account_id`: `joint` for Boost (`/etc/trend-investing/engines/boost.config`).
@@ -411,6 +411,31 @@ change. An edit that leaves the file malformed is refused when the engine
 starts ([restart](restart.md), "Starting a fresh run"): it starts nothing
 and changes nothing, so fix the file and start again.
 
+**An account's first run** is approved too, with the book it starts from,
+since there is no previous log to read. Check the paper account's holdings
+and total cash (`TotalCashValue`) in IBKR, then:
+
+```
+operator approve -first-run -account <IBKR account> -by owner \
+  -positions SPY=<shares> -cash <total cash> -currency USD \
+  -out /var/lib/trend-investing/engines/boost/first-run-approval.json
+```
+
+(`-positions ""` when the account holds nothing). It prints the book and the
+next step. The cash is IBKR's `TotalCashValue` in USD, the currency the
+adapter reads IBKR's cash in: any other `-currency` is refused. A first
+run has no incident to clear, so `-clear-incident` with `-first-run` is
+refused too. Approve right after you read the book: the approval's time is
+the book's cutoff (a trade before it is taken as in the book, one after it
+as a change since), so an `-at` later than now is refused whenever a
+starting book is stated. A fresh run's approval takes the same three options when you
+moved shares or cash in or out since the previous run, or to clear a halt
+on a run's first reading (see [restart](restart.md)): the fresh run's first
+reading is then compared with the book you state, not with the previous
+run's last close (ADR 0019 and ADR 0027, amended 2026-10-18), and the tool
+prints that book back before the next step. A first run in paper or live
+mode does not start without its approval.
+
 The engine checks the approval against the same log when the fresh run
 starts (see [restart](restart.md), "What the engine checks"). One more check
 is new: an approval that carries the incident in force and says its sale
@@ -473,6 +498,11 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `operator: invalid alert acknowledged payload: account id is required` (or `alert key is required`, `acknowledged by is required`) | Nothing written | Add `-account`, `-alert` or `-by` |
 | `operator: -alert must hold no newline: ...` | Nothing written (spaces around the key are trimmed, a line break inside it is refused) | Copy the key from the alert again, in single quotes, on one line |
 | `operator: -log is required: ...` or `operator: -out is required: ...` (`approve`) | Nothing written | Name the previous run's log and where to write the approval |
+| `operator: -first-run approves an account's first run, which has no previous log: leave out -log`, or `... which has no incident to clear: leave out -clear-incident` (`approve`) | Nothing written | Run it again for the first run with only `-account`, `-by`, `-positions`, `-cash`, `-currency` and `-out` |
+| `operator: -<positions, cash or currency> is required: a starting book states the holdings (-positions, empty when none), the total cash (-cash) and its currency (-currency) checked in IBKR` | Nothing written: a starting book is all three or none | Read the holdings and `TotalCashValue` in IBKR and give all three |
+| `operator: -positions "...": "..." is not SYM=shares, a whole number of shares`, `... names <SYM> twice`, or `operator: -cash "..." is not an amount of cash` | Nothing written | Write holdings as `SPY=100` (several as `SPY=100,QQQ=5`), whole shares, each symbol once, and cash as a plain number |
+| `operator: -currency "...": the adapter reads IBKR's cash in USD, so state IBKR's USD TotalCashValue with -currency USD` | Nothing written: a book in another currency could never match the adapter's reading | State the USD figure with `-currency USD` |
+| `operator: -at <time> is later than now: a starting book's approval time is its cutoff, so approve right after reading the book in IBKR, leaving out -at` | Nothing written | Leave `-at` out and approve right after you read the book |
 | `operator: open the previous log: ...` or `operator: <log> cannot be read as a durable log (docs/runbooks/durable-log.md): ...` | Nothing written | Check the path; a damaged log follows `docs/runbooks/durable-log.md`, "A log that cannot be read" |
 | `operator: <log> holds nothing past its configuration: its start was cut short, so resume it ...` | Nothing written | Resume that run with `-resume` ([restart](restart.md)) |
 | `restart: <log> records no incident, so there is none to clear: it ended normal`, or `restart: <log> ended <state> in incident <id>, so that is the incident to clear, not <id>` | Nothing written: `-clear-incident` names an incident the log did not end in | Leave `-clear-incident` out, or copy the incident ID from the tool's own output without it |

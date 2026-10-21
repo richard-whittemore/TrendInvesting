@@ -118,6 +118,21 @@ type Summary struct {
 	SalesWithheld  []SaleWithheldLine
 	EngineState    string
 	Equity         Equity
+	// CashChecked is set when the latest broker snapshot is the IBKR
+	// adapter's reading as of a close (version 2): CashDrift is then the
+	// cash drift since the previous close it accepted, within its daily
+	// bound, and UnexplainedCash that drift added up since the cash was
+	// last explained: a reconciliation the engine explained, else the
+	// owner's starting book, which is always the basis for Boost, whose
+	// book carries no cash; a run whose chain holds neither (a dry run's
+	// first run, which has no approval) takes the daily basis, so the
+	// figure is the day's drift (ADR 0019, amended 2026-10-18).
+	// CashUnchecked is set instead when that snapshot is a version-2 reading
+	// stamped at its read time, which checked no drift.
+	CashChecked     bool
+	CashUnchecked   bool
+	CashDrift       float64
+	UnexplainedCash float64
 	// RejectedInputs counts the inputs the summary would have read (bars,
 	// snapshots, the day's fills) that are at a schema version this build
 	// does not read or that fail validation. None of them moves a figure.
@@ -169,6 +184,15 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 			}
 			s.HaveSnapshot, s.HoldingsAsOf, s.NetLiquidation, s.Holdings = true, p.AsOf, p.NetLiquidation, p.Positions
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
+		case event.BrokerSnapshotEventType:
+			var p event.BrokerSnapshotPayload
+			if read(e, brokerSnapshotVersions, &p) != nil {
+				s.RejectedInputs++
+				continue
+			}
+			v2 := e.SchemaVersion == event.BrokerSnapshotReadAtVersion
+			s.CashChecked, s.CashUnchecked = v2 && p.AsOfClose, v2 && !p.AsOfClose
+			s.CashDrift, s.UnexplainedCash = p.CashDrift, p.UnexplainedCash
 		case event.CompletedBarEventType:
 			p, err := readBar(e)
 			if err != nil {

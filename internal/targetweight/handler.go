@@ -167,7 +167,22 @@ import (
 //     owner for confirmation (ADR 0026, point 2, "Boost", and point 5,
 //     amended 2026-10-18). A journal holding such an order or gap decides
 //     differently under 1.17.0.
-const RulesVersion = "1.18.0"
+//   - 1.19.0 reads account.broker.snapshot version 2 (the read time beside
+//     an as-of that is the session's close, or the reason the reading could
+//     not stand for it) and market.mark.recorded version 2 (IBKR's last
+//     price beside the mark, as evidence), which the IBKR adapter writes
+//     under the owner's decision of 2026-10-18 that one reading after the
+//     close, with nothing working at IBKR and no execution since, is the
+//     account as of that close (ADR 0019, ADR 0025 point 5, ADR 0026 point
+//     1, amended 2026-10-18). The mark is the delivered bar's official
+//     close; the price band compares a checked order's reference price with
+//     IBKR's last price beside it when IBKR gave one, else with that close,
+//     and records which (RiskFigures.MarkSource). A broker snapshot as of
+//     the close values its net liquidation at the official close, and the
+//     margin alarm divides Excess Liquidity by IBKR's own net liquidation at
+//     the read beside it (one price basis per rule). A journal holding either
+//     version 2 input does not replay under 1.18.0, which refuses it.
+const RulesVersion = "1.19.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -349,6 +364,7 @@ type Handler struct {
 	base       string // the adjusted view's base, fixed by the first bar
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
+	markAt     uint32 // the schema version the mark arrived at (bandMark)
 	gate       *risklimit.Gate
 	// released holds every order this run released, by client order ID,
 	// so a venue's report about one can be checked against it.
@@ -462,10 +478,27 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 
 // decodeInput checks an input's schema version and decodes and validates its payload.
 func decodeInput[T interface{ Validate() error }](in event.Envelope, version uint32) (T, error) {
-	var p T
 	if in.SchemaVersion != version {
+		var p T
 		return p, fmt.Errorf("targetweight: %s schema version %d is not the version %d this build reads (ADR 0015)", in.Type, in.SchemaVersion, version)
 	}
+	return decodeAt[T](in)
+}
+
+// decodeVersions is decodeInput for an input read at any of versions: the
+// broker snapshot and the mark, which the IBKR adapter writes at version 2
+// (the owner's decision of 2026-10-18) and earlier journals hold at 1.
+func decodeVersions[T interface{ Validate() error }](in event.Envelope, versions []uint32) (T, error) {
+	if !slices.Contains(versions, in.SchemaVersion) {
+		var p T
+		return p, fmt.Errorf("targetweight: %s schema version %d is not one of the versions %v this build reads (ADR 0015)", in.Type, in.SchemaVersion, versions)
+	}
+	return decodeAt[T](in)
+}
+
+// decodeAt decodes and validates an input's payload at the version it arrived at.
+func decodeAt[T interface{ Validate() error }](in event.Envelope) (T, error) {
+	var p T
 	if err := json.Unmarshal(in.Payload, &p); err != nil {
 		return p, fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
 	}
@@ -662,7 +695,9 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 	if h.approved || h.prelude {
 		return errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
 	}
-	p, err := decodeInput[event.OperatorRunApprovedPayload](in, event.OperatorRunApprovedSchemaVersion)
+	// Version 3 adds the starting book, which the IBKR adapter reads (ADR
+	// 0027, amended 2026-10-18); a version 2 approval still replays.
+	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, event.OperatorRunApprovedSchemaVersion})
 	if err != nil {
 		return err
 	}
@@ -748,7 +783,7 @@ func (h *Handler) applySnapshot(in event.Envelope) error {
 }
 
 func (h *Handler) applyMark(in event.Envelope) error {
-	p, err := decodeInput[event.MarkRecordedPayload](in, event.MarkRecordedSchemaVersion)
+	p, err := decodeVersions[event.MarkRecordedPayload](in, event.MarkRecordedVersions())
 	if err != nil {
 		return err
 	}
@@ -759,7 +794,25 @@ func (h *Handler) applyMark(in event.Envelope) error {
 		return fmt.Errorf("targetweight: mark as of %s does not follow the last, %s", p.AsOf, h.mark.AsOf)
 	}
 	h.mark = &p
+	h.markAt = in.SchemaVersion
 	return nil
+}
+
+// bandMark is the price the gate's price band compares a checked order's
+// reference price with, from a mark recorded at schema version, and the
+// source the order's figures name: IBKR's last price when a version-2 mark
+// carries one, so the band checks the reference price against a price of
+// its own, else the mark, the official close; a version-1 mark names no
+// source, so its figures keep their bytes. One rule for Boost's and
+// momentum's orders alike (ADR 0026 point 3, amended 2026-10-18).
+func bandMark(p event.MarkRecordedPayload, version uint32) (price float64, source string) {
+	switch {
+	case version != event.MarkRecordedEvidenceVersion:
+		return p.Price, ""
+	case p.BrokerLastSet:
+		return p.BrokerLast, event.MarkSourceBrokerLast
+	}
+	return p.Price, event.MarkSourceOfficialClose
 }
 
 func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
@@ -881,7 +934,8 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	}
 	gateOrder := risklimit.Order{Planned: order}
 	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
-		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
+		gateOrder.MarkSet = true
+		gateOrder.Mark, gateOrder.MarkSource = bandMark(*h.mark, h.markAt)
 	}
 	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}, At: b.at}
 	outcome := b.order(gateOrder, book)
@@ -1000,7 +1054,7 @@ func (h *Handler) applyAcknowledgement(in event.Envelope) error {
 // margin alarm when its level changes; an alarm turning urgent fires the sale
 // back to 98%. Its emissions are timed at the snapshot.
 func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, error) {
-	p, err := decodeInput[event.BrokerSnapshotPayload](in, event.BrokerSnapshotSchemaVersion)
+	p, err := decodeVersions[event.BrokerSnapshotPayload](in, event.BrokerSnapshotVersions())
 	if err != nil {
 		return nil, err
 	}

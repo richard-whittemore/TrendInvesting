@@ -38,13 +38,13 @@ began delivering the data job's daily file to the engine:
 | Boost rule and its order | Yes; parity passed on every session compared | — |
 | Momentum rule, order planner, minimum lot, glide path | Yes; parity checked for the rule (passed once the owner's 2026-10-18 decisions were applied: `docs/research/parity-2026-10.md`) | Parity of the glide path, the minimum lot, the IRA buy delay and buy scaling; the engine program refuses a momentum configuration; no IRA configuration exists |
 | Risk gate: hard limits, Normal, Degraded, Halted, kill switch, sale back to 98%, margin alarm | Yes | The adapter's second check of the limits before calling IBKR |
-| Durable log, crash resume, approved fresh run | Yes ([restart](restart.md)) | — |
-| Engine on the server | Boost in dry-run, started by hand (`ti-engine@boost`) | Paper: the adapter is built and installed, but nothing has run against IBKR yet |
-| Daily data job | Boost's stream (`ti-data` and its timer), written for the adapter to deliver | A job for the IRAs |
-| IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit (`ti-adapter-boost`), the real client, the paper sending switch, re-delivery and the settling commands, and delivering the data job's daily file behind a broker snapshot that carries IBKR's last price for each holding; all run against a stand-in gateway, and a whole synthetic paper day in `deploy/rehearse-paper.sh` | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed; the account snapshot as of the close (`account.snapshot`) and the recorded mark (`market.mark.recorded`) the Boost engine decides from, so in paper every session is withheld today ([paper trading](paper-trading.md), "Not built yet") |
-| Morning reconciliation | The engine's comparison, states and alert | The adapter's reconciliation record (not sent until an account snapshot exists); the checks at startup, after fills and before orders; open orders; the joint account's cash; any command to record a missed event |
-| Reporter and dashboard | Both programs, built with the engine and installed on the server. The reporter runs as `ti-reporter@boost` every 5 minutes around the clock, sends every alert in [alerts and dashboard](alerts-and-dashboard.md) (the margin alarm, the sale back to 98% and the sell-by-hand alerts included) and the daily summary (withheld and lapsed sales, Boost fills). The dashboard listens on `127.0.0.1:8088` | The outside heartbeat (a dead-man's switch: nothing reads `HEALTHCHECK_URL`); reporters for the IRAs (no IRA engine yet) |
-| Operator tool and journal-query | Both programs, built with the engine and installed on the server, and the engine's operator inbox, created by the provisioner and passed by the service file | — |
+| Durable log, crash resume, approved fresh run | Yes | — |
+| Engine on the server | Boost in dry-run, started by hand; paper rehearsed end to end with the real engine (`deploy/rehearse-paper.sh`) | A paper run on the server |
+| Daily data job | Boost's stream, installed with its timer | A job for the IRAs |
+| IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind one account reading after the close: the account snapshot and broker snapshot as of the close when nothing is working at IBKR and nothing has executed since (else at the read time, with the reason), and SPY's mark from the official close; all against a stand-in gateway, rehearsed with the real engine ([paper trading](paper-trading.md), "A paper day") | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed |
+| Morning reconciliation | The engine's comparison, states and alert; the adapter's read delivered to the engine at a run's first delivery, every start and every reconnect | The checks after fills and before orders, and on a timer; open orders; the joint account's cash (the Boost book states none, so cash is not compared); any command to record a missed event |
+| Reporter and dashboard | Both programs, installed on the server; the reporter checks every 5 minutes, around the clock | The outside heartbeat |
+| Operator tool and journal-query | Both programs, installed on the server, and the engine's operator inbox, created by the provisioner and passed by the service file | — |
 | Server | Provisioning, the Gateway unit, the firewall, pinned downloads | Backups; a real server run |
 | Day-trade counter for the joint account | — | Counted by hand ([margin warning](../runbooks/margin-warning.md)) |
 
@@ -53,7 +53,8 @@ are what this build runs):
 
 | What | Version |
 | --- | --- |
-| Target-weight rules (Boost and momentum), `RulesVersion` | 1.18.0 |
+| Target-weight rules (Boost and momentum), `RulesVersion` | 1.19.0 |
+| IBKR broker snapshot (`account.broker.snapshot`) and mark (`market.mark.recorded`) the adapter writes | 2 |
 | Target-weight configuration schema | 7 |
 | Decision record (`strategy.targets.decided`) | 6 |
 | Fresh-run approval (`operator.run.approved`) | 2 |

@@ -63,31 +63,64 @@ stops the start (ReportRecordInvalid).
 With a streams folder (delivery.py), each step while the link is up and
 reconciled also delivers the run's market-data stream: the files of
 <streams>/<run> it has not delivered, oldest session first, behind one
-broker snapshot (the account read with IBKR's marks for its holdings), all
-recorded in the outbox in one write, so the snapshot is journalled before
-the bars and each session's bars before its close (ADR 0019's snapshot
-rule; ADR 0021). A stream entry is sent as the data job wrote it, with the
-engine's next sequence (the file's own is a file-local ordinal) and its
-send time as its recorded time, as every input the adapter sends, so the
-snapshot is never recorded after the input it serves (ADR 0019's snapshot
-rule measures its age at the trigger's recorded time, while the adapter's
-clock keeps time with IBKR's: one behind it gives a negative age, which the
-engine finds stale and fails closed on). An earlier run's batch left in
-the outbox, its snapshot and its stream entries, is marked dropped, so that
-run gets its files again if it is resumed (delivery.py), and then struck
-off unsent in one outbox write, since a run's own stream carries its whole
-history from its warm-up: a stop leaves the batch whole or wholly gone,
-never its stream entries without their snapshot.
+account reading (_post_close_reading), all recorded in the outbox in one
+write, so the account snapshot is journalled before the bars, the mark
+before the close and each session's bars before its close (ADR 0019's
+snapshot rule; ADR 0021). The owner's decision of 2026-10-18 (ADR 0019,
+ADR 0025 point 5, ADR 0026 point 1, amended): the reading is the account
+as of the batch's last close when it is taken after that close on its own
+New York date, with no open order for the account at IBKR (in either
+account read or the last open-order list), no execution in it at or since
+the close, every holding valued at an official close of the batch, IBKR's
+own net liquidation positive, and its holdings and cash those of the
+previous close adjusted by the fills since, the cash within
+CASH_DRIFT_BOUND (_not_as_of_close). The previous close is the latest
+account snapshot of this run or of the runs its Run approvals chain back to,
+or the latest starting book an approval states, an account's first run's
+included (book_basis): a fresh run's first batch is never adopted
+unchecked. Both snapshots are then stamped as of the close and valued at it
+(cash plus each holding times its official close), IBKR's own net
+liquidation, the cash drift and the unexplained cash (that drift added up
+since the last cash explained) recorded beside it. Otherwise both are
+stamped at the read time, with the reason, and are IBKR's own reading, so
+the engine withholds the session; when the engine holds no book and the
+reading differs from the earlier run's close or the starting book, or has
+neither to compare with, its reconciliation goes alone, its snapshots
+withheld, so the engine, with no book, classifies it unverifiable and halts
+(ADR 0019).
+A stream entry is sent as the data job
+wrote it, with the engine's next sequence (the file's own is a file-local
+ordinal) and its send time as its recorded time, as every input the
+adapter sends. An earlier run's batch left in the outbox, its adapter
+entries and its stream entries, is marked dropped, so that run gets its
+files again if it is resumed (delivery.py), and then struck off unsent in
+one outbox write, since a run's own stream carries its whole history from
+its warm-up: a stop leaves the batch whole or wholly gone, never its stream
+entries without their snapshots.
 
-The broker snapshot is one consistent reading (ADR 0019: its components
+Once the engine holds an account snapshot (its book), every reconcile
+(each start and reconnect) is followed by an account.reconciliation of
+IBKR's positions and cash, for the engine to classify against that book
+(ADR 0025 point 5, ADR 0019), read once every execution IBKR replayed has
+its commission and its fill is recorded, and sent before any stream entry
+(_send_reconciliation), read again at most SNAPSHOT_ATTEMPTS times in a row
+while its positions or cash cannot be read, then stopping the adapter for a
+person (ReconcileIncomplete); every batch carries one too, from its own
+reading, ahead of its snapshots once the engine holds a book (delivery.py);
+before it, a run's first batch carries one behind them, or alone when the
+reading is unverified (above).
+
+The account reading is one consistent reading (ADR 0019: its components
 share one cutoff): every callback already received is applied first, so a
 report IBKR sent before the read is recorded ahead of it; it is not taken
 while an execution awaits its commission (its fill is not yet recorded);
-the account is read, then the marks, then the account again, and the
-snapshot is the second read. It is read again, up to SNAPSHOT_ATTEMPTS
+the account is read, then IBKR's last prices (beside each mark, the price band's comparison),
+then the account again, then IBKR's open orders and executions, and the
+snapshots are the second read. It is read again, up to SNAPSHOT_ATTEMPTS
 times, if an order report is recorded or an execution arrives (of any
-client's order in the account, not only this adapter's) between the start
-of the first read and the end of the second, if the two reads' holdings,
+client's order in the account, not only this adapter's, each counted once
+by its execution ID) between the start of the first read and the end of
+the last list, if the two reads' holdings,
 open orders or cash differ (a trade IBKR reports to another client only,
 such as one placed in its own app), or if any component could not be read.
 A reading still incomplete then stops the adapter for a person
@@ -132,16 +165,22 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from connection import Connection, NotConnected
-from delivery import DELIVERED_SUFFIX, Deliverer, SnapshotRefused, market_open, run_name
-from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect
+from delivery import (DELIVERED_SUFFIX, Deliverer, PostCloseReading, SnapshotRefused, market_open, nyse_calendar,
+                      run_name)
+from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect, order_key
 from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
                    read_engine_log, released_client_order_ids, run_identity, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
-from account import TOTAL_CASH
-from snapshot import Record, broker_snapshot_record, read_account, read_marks
+from account import NET_LIQUIDATION, TOTAL_CASH
+from book_basis import cash_change, fills_since, holdings_after, previous_close
+from book_basis import cents as _cents
+from snapshot import (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, CASH, NET, POSITIONS, RECONCILIATION_TYPE, Record,
+                      account_snapshot_record, broker_snapshot_record, close_valuation, mark_record, read_account,
+                      read_marks, reconciliation_record)
 
 log = logging.getLogger("ibkr")
 
@@ -153,6 +192,9 @@ ENVELOPE_VERSION = 1
 # suffixes are .handover, .refused, .not-handed-over, .run, .run-ended,
 # .corrections, .late-fills and .lock, and relay.OUTBOX_SUFFIX the outbox's).
 HELD_SUFFIX = ".held"
+# The bases the runs before the one now running give its readings, kept once
+# per run (book_basis).
+BASIS_SUFFIX = ".basis"
 # The input types whose event time is in their payload.
 EVENT_TIME_FIELD = {LIFECYCLE_TYPE: "occurred_at", FILL_TYPE: "filled_at"}
 # How long, in seconds, the loop waits on the engine's thread between reads
@@ -161,6 +203,17 @@ ENGINE_WAIT_POLL = 0.05
 # How many times one delivery reads the account and the marks for a broker
 # snapshot that is complete and not overtaken by an order report.
 SNAPSHOT_ATTEMPTS = 3
+# The source a mark names: the data job, whose delivered bar's official close
+# it is (adapter/marketdata/kinds.py SOURCE).
+MARK_SOURCE = "marketdata"
+# The cash drift since the previous close a reading may show and still stand
+# for this close, as a share of its net liquidation at the close: room for
+# the postings IBKR makes with no order or execution (interest, a fee, a
+# dividend: SPY's largest quarterly dividend on a holding at 147% of net
+# liquidation exceeds 0.5%), recorded as the broker snapshot's cash_drift;
+# beyond it the reading is stamped at its read time (ADR 0019, amended
+# 2026-10-18; the engine checks the same bound, event.CashDriftBound).
+CASH_DRIFT_BOUND = Decimal("0.01")
 
 
 class ReconcileIncomplete(Exception):
@@ -200,6 +253,16 @@ def _next_entry(entries):
     return entries[0]
 
 
+def _order_name(record):
+    """An open order's name in a broker snapshot (snapshot._take_order's broker_order_id)."""
+    key = order_key(record.client_id, record.broker_order_id, record.perm_id)
+    return "perm:{}".format(key[2]) if key[0] == "perm" else "order:{}:{}".format(key[1], key[2])
+
+
+def _holding_text(positions, symbols):
+    return ", ".join("{} {}".format(s, positions.get(s, 0)) for s in symbols)
+
+
 def _event_time_readable(payload, field):
     """Whether payload holds field as a time with its zone, as the adapter stamps every report it records."""
     text = payload.get(field) if isinstance(payload, dict) else None
@@ -224,6 +287,11 @@ class _AskedOnItsOwnThread:
     def __init__(self, engine, await_engine):
         self._engine = engine
         self._await = await_engine
+
+    def close(self):
+        """Close the engine connection, if it can be closed (engine_client.EngineClient can)."""
+        if hasattr(self._engine, "close"):
+            self._engine.close()
 
     def decide(self, envelope):
         outcome = {}
@@ -279,10 +347,19 @@ class AdapterLoop:
         self._reports_recorded = 0
         self._last_report = None
         # Every execution IBKR reports in the account, whichever client or
-        # app placed its order (a broker snapshot's cutoff watermark too).
-        self._account_executions = 0
+        # app placed its order, by its execution ID, so a replay of the
+        # day's list counts nothing new (a broker snapshot's cutoff
+        # watermark too).
+        self._account_executions = set()
+        # Set when a reconcile finds the engine holding a book: the
+        # reconciliation it is owed, sent once no execution awaits its
+        # commission (_send_reconciliation).
+        self._reconciliation_due = False
+        # How many reads in a row of that reconciliation left positions or
+        # cash unread (_send_reconciliation).
+        self._reconciliation_unread = 0
         self.delivery = None if streams is None else Deliverer(
-            streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._broker_snapshot, new_id)
+            streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
 
     def start(self):
         """Take the pending file's lock, connect, reconcile, and settle any input left awaiting its reply."""
@@ -359,6 +436,69 @@ class AdapterLoop:
         self.conn.mark_reconciled()
         log.info("ibkr reconciled client_id=%d positions=%d open_orders=%d executions=%d", self.config.client_id,
                  len(reading.positions), len(broker.open_orders), len(broker.executions))
+        # The start-of-run and reconnect reconciliation (ADR 0025 point 5,
+        # ADR 0019): IBKR's positions and cash, for the engine to classify
+        # against its book, which exists once it has committed an account
+        # snapshot. Before that a run's first stream batch carries it, behind
+        # its account snapshot (delivery.py). It is read and recorded only
+        # once every execution IBKR replayed has its commission and its fill
+        # is recorded (_send_reconciliation), so no fill reaches the engine
+        # after a reconciliation that already shows its shares.
+        if any(i.event_type == ACCOUNT_SNAPSHOT_TYPE for i in read_engine_log(self._engine_log_path).inputs):
+            self._reconciliation_due = True
+
+    def _send_reconciliation(self):
+        """Record the reconciliation a reconcile owes the engine, from a fresh read with nothing awaiting its commission.
+
+        The read holds one cutoff, as the broker snapshot's does (ADR 0019):
+        every callback already received is applied first; while an execution
+        awaits its commission, or an order report or execution arrives during
+        the read, or positions or cash could not be read, nothing is recorded
+        and the next step tries again. Positions or cash unread in
+        SNAPSHOT_ATTEMPTS reads in a row stop the adapter for a person
+        (ReconcileIncomplete), as the broker snapshot's reading does. True
+        once it is recorded.
+        """
+        self._pump_all()
+        if not self.ready():
+            return False
+        if self.reports.awaiting_commission():
+            log.info("ibkr reconciliation waits: an execution awaits its commission, so its fill is not recorded yet")
+            return False
+        before = self._activity()
+        reading = read_account(self.conn)
+        if self._unended(reading) or not self.ready():
+            return False
+        unread = sorted(reading.unread & {POSITIONS, CASH})
+        if self._activity() != before:
+            log.info("ibkr reconciliation read again next step: an order report or execution arrived during its "
+                     "read")
+            return False
+        if unread:
+            # Read again, as the broker snapshot's reading is, at most
+            # SNAPSHOT_ATTEMPTS times in a row: a component IBKR never gives
+            # would otherwise hold the day's stream behind the reconciliation
+            # in silence (fail closed and tell a person, AGENTS.md).
+            self._reconciliation_unread += 1
+            log.info("ibkr reconciliation read again next step (attempt %d of %d): %s could not be read",
+                     self._reconciliation_unread, SNAPSHOT_ATTEMPTS, ",".join(unread))
+            if self._reconciliation_unread >= SNAPSHOT_ATTEMPTS:
+                raise ReconcileIncomplete(
+                    "the reconciliation owed after the start or reconnect could not be read in {} attempts ({} "
+                    "could not be read), so no stream input is sent: a reconciliation with values IBKR did not "
+                    "give would compare nothing (ADR 0019: an unavailable balance is not zero). Check IB "
+                    "Gateway's link and the account's currency and positions, then start the adapter again "
+                    "(docs/manual/market-data.md, \"What happens to the file\")".format(
+                        SNAPSHOT_ATTEMPTS, ", ".join(unread)))
+            return False
+        self._reconciliation_unread = 0
+        input_id = self._new_id(RECONCILIATION_TYPE)
+        record = reconciliation_record(reading, input_id)
+        self.submit(record.event_type, record.schema_version, record.payload, record.payload["as_of"],
+                    input_id=input_id)
+        self._reconciliation_due = False
+        log.info("ibkr reconciliation recorded for the engine id=%s as_of=%s", input_id, record.payload["as_of"])
+        return True
 
     def submit(self, event_type, schema_version, payload, event_time, input_id=None):
         """Record an input for the engine in the outbox; it is sent, in order, while the link is ready."""
@@ -373,8 +513,9 @@ class AdapterLoop:
         self.conn.pump(self._poll)
         self.reports.check_overdue()
         if self.ready():
-            if self.delivery is not None:
-                self.delivery.deliver()
+            if not self._reconciliation_due or self._send_reconciliation():
+                if self.delivery is not None:
+                    self.delivery.deliver()
             self._drain()
 
     def run(self, should_stop):
@@ -503,7 +644,7 @@ class AdapterLoop:
         """Count an execution IBKR reports in the account, of any client's order or none (see _activity)."""
         if event.name == "exec_details" and len(event.args) == 3:
             if getattr(event.args[2], "acctNumber", None) == self.config.account_id:
-                self._account_executions += 1
+                self._account_executions.add(getattr(event.args[2], "execId", None))
 
     def _activity(self):
         """A broker snapshot's cutoff watermark: the order reports recorded, and the executions seen.
@@ -513,18 +654,30 @@ class AdapterLoop:
         placed in IBKR's own app or by another client changes the holdings
         and cash as much as this adapter's do.
         """
-        return self._reports_recorded, self.reports.executions_seen(), self._account_executions
+        return self._reports_recorded, self.reports.executions_seen(), len(self._account_executions)
 
-    def _broker_snapshot(self):
-        """The account.broker.snapshot of one consistent account read, with IBKR's marks (see the module).
+    def _post_close_reading(self, close, closes):
+        """The batch's account read (delivery.PostCloseReading) for the session closing at close (see the module).
+
+        closes maps each instrument the batch's last session delivers a bar
+        for to that bar's official close: the market.mark.recorded of each,
+        with IBKR's last price beside it, the price band's comparison (read_marks; a missing
+        market-data permission leaves it unset). The reading is stamped as
+        of close when it can stand for it (_not_as_of_close), and is then
+        valued at the close: each holding marked at its official close and
+        the net liquidation its cash plus those holdings (snapshot
+        close_valuation), IBKR's own beside it; else it is stamped at its
+        read time with why not, IBKR's own reading, each holding marked at
+        IBKR's last price (ADR 0019, amended 2026-10-18: one price basis per
+        rule).
 
         None when it cannot be taken now (the link went, an execution awaits
         its commission, a read was cut off before answers that carry no
-        request ID ended, or the account changed on every attempt); SnapshotRefused when
-        the account could not be read in full within SNAPSHOT_ATTEMPTS.
-        Marks are asked for each holding the configuration has IBKR's
-        contract number for; any other holding is stated with no mark.
-        market_open is the NYSE session's state at the read's time.
+        request ID ended, the account changed on every attempt, or the read
+        time does not follow the last snapshot the engine holds);
+        SnapshotRefused when the account could not be read in full within
+        SNAPSHOT_ATTEMPTS. market_open is the NYSE session's state at the
+        stamp.
         """
         unread = None
         for attempt in range(1, SNAPSHOT_ATTEMPTS + 1):
@@ -540,14 +693,21 @@ class AdapterLoop:
             reading = read_account(self.conn)
             if self._unended(reading):
                 return None
-            con_ids = {s: self.config.con_ids[s] for s in reading.positions if s in self.config.con_ids}
-            marks = read_marks(self.conn, con_ids)
+            symbols = set(closes) | set(reading.positions)
+            con_ids = {s: self.config.con_ids[s] for s in symbols if s in self.config.con_ids}
+            last_prices = read_marks(self.conn, con_ids)
             # Read again after the marks: a trade IBKR reports to another
             # client only (an order placed in its own app) still changes
             # the holdings, open orders and cash, and only a second read
             # shows it.
             confirm = read_account(self.conn) if not reading.unread else None
             if confirm is not None and self._unended(confirm):
+                return None
+            # IBKR's open orders and executions, read last and inside the
+            # same cutoff: the open-order list checked is the last one IBKR
+            # returned, and an execution arriving during it reads again.
+            broker = self._broker_lists() if confirm is not None else "unread"
+            if broker is None:
                 return None
             if not self.ready():
                 log.info("ibkr link went during the broker snapshot; the stream waits until it is reconciled")
@@ -568,12 +728,36 @@ class AdapterLoop:
                          "or cash changed between its reads", attempt, SNAPSHOT_ATTEMPTS)
                 unread = None
                 continue
-            log.info("ibkr broker snapshot as_of=%s cutoff: no order report, execution or account change between "
-                     "its reads; the last report recorded before it %s", _stamp(confirm.as_of),
-                     self._last_report or "none")
+            judged = self._not_as_of_close(confirm, close, closes, broker)
+            if judged is None:
+                return None
+            why, valuation, drift, unexplained, unverified = judged
+            stamp = None if why else close
+            log.info("ibkr broker snapshot read_at=%s as_of=%s cutoff: no order report, execution or account change "
+                     "between its reads; the last report recorded before it %s%s", _stamp(confirm.as_of),
+                     _stamp(stamp or confirm.as_of), self._last_report or "none",
+                     "; cash drift {}, unexplained cash {}".format(drift, unexplained) if stamp
+                     else "; not as of the close: " + why)
             # The second read's as_of is IBKR's time after every component
             # and the marks were read.
-            return broker_snapshot_record(confirm, market_open(confirm.as_of), marks)
+            if stamp:
+                marks = {s: closes[s] for s in confirm.positions}
+                account = account_snapshot_record(confirm, stamp, net_liquidation=valuation)
+                snapshot = broker_snapshot_record(confirm, market_open(stamp), marks, close=stamp,
+                                                  net_liquidation=valuation, cash_drift=drift,
+                                                  unexplained_cash=unexplained)
+            else:
+                marks = {s: last_prices[s] for s in confirm.positions if s in last_prices}
+                account = account_snapshot_record(confirm, confirm.as_of)
+                snapshot = broker_snapshot_record(confirm, market_open(confirm.as_of), marks, why=why)
+            if unverified:
+                log.warning("ibkr broker snapshot read_at=%s: the engine holds no book and the reading is not the "
+                            "book it was compared with, so only its reconciliation is sent, its snapshots withheld: "
+                            "the engine halts on it (docs/manual/reconciliation.md)", _stamp(confirm.as_of))
+            return PostCloseReading(
+                account=account, broker=snapshot,
+                marks=[mark_record(s, close, closes[s], MARK_SOURCE, last_prices.get(s)) for s in sorted(closes)],
+                reading=confirm, unverified=unverified)
         if unread is not None:
             raise SnapshotRefused(
                 "the account could not be read in full for the broker snapshot in {} attempts ({} could not be "
@@ -582,6 +766,215 @@ class AdapterLoop:
                 "and positions, then start the adapter again (docs/manual/market-data.md, \"What happens to the "
                 "file\")".format(SNAPSHOT_ATTEMPTS, ", ".join(unread)))
         return None
+
+    def _broker_lists(self):
+        """IBKR's open orders and executions for a broker snapshot: orders.BrokerOrders, "unread", or None to wait.
+
+        None when the link went or the open-order list was cut off (it carries
+        no request ID, so the link is dropped first; see the module);
+        "unread" when only the executions could not be read in full.
+        """
+        if not self.ready():
+            return None
+        try:
+            return collect_broker_orders(self.conn)
+        except NotConnected:
+            return None
+        except BrokerOrdersIncomplete as err:
+            if "open-orders" in err.missing and "connection" not in err.missing:
+                self.conn.drop("untagged-read-interrupted")
+            if "connection" in err.missing or "open-orders" in err.missing:
+                return None
+            return "unread"
+
+    def _not_as_of_close(self, reading, close, closes, broker):
+        """Whether reading stands for the account as of close: (why, valuation, drift, unexplained, unverified), or None.
+
+        None when it cannot be stamped now. why is "" when it stands for the
+        close, and then valuation is its net liquidation at the close
+        (snapshot.close_valuation), drift the cash drift accepted and
+        unexplained that drift added up (_since_previous_close); otherwise
+        why names every condition that failed. unverified is
+        _since_previous_close's.
+
+        The owner's decision of 2026-10-18 (ADR 0019, ADR 0025 point 5, ADR
+        0026 point 1, amended): after the close and before the next open,
+        with no order working or pending at IBKR for the account and no
+        execution since the close, the account does not change, so the
+        reading is the account as of the close. Each condition, checked
+        against IBKR's own lists, as the start's reconciliation reads them:
+
+        - read after the close, on the session's own New York date: IBKR's
+          executions reach back only to midnight (ADR 0025 point 5), so only
+          then does its list cover every execution since the close (and the
+          next open is on a later date);
+        - no open order for the account, of any client (working, pending or
+          cancel-pending, snapshot.OPEN_STATUS), in the account read and in
+          the last open-order list IBKR returned (broker);
+        - no execution in the account at or since the close in IBKR's list
+          (orders.collect_broker_orders), which shows other clients'
+          executions only when this client ID is Gateway's Master API client
+          ID; one stamped at the close's own second counts, since the engine
+          applies a fill stamped in a book's second to that book;
+        - every holding has an official close in the batch, so the account
+          can be valued at the close, and IBKR's own net liquidation at the
+          read is positive (the margin alarm's basis beside the valuation);
+        - a check that needs no client ID: the holdings are the previous
+          close's adjusted by the fills since, and the total cash is the
+          previous close's adjusted by those fills, within CASH_DRIFT_BOUND
+          of the net liquidation at the close, or IBKR's own at the read
+          when the account cannot be valued at the close (a posting such as
+          interest or a dividend),
+          the difference recorded as the cash drift; a corporate action, a
+          transfer or a trade this client cannot see fails it. The previous
+          close is found back through the chain of runs, or is the owner's
+          starting book (_since_previous_close, book_basis), so a fresh
+          run's first batch is compared too. Its residual: a round trip
+          another client makes after the close, out of this client's view,
+          leaves the holdings unchanged and shows only as cash drift; the
+          executions are asked for every client and Gateway's Master API
+          client ID is set to the adapter's (a runbook precondition), so
+          IBKR's list shows it;
+        - the close after every account or broker snapshot the engine has
+          committed: each is stamped later than the one before it.
+
+        A stamp at the read time must itself follow the last the engine
+        holds; when it does not (a clock behind), None: the batch waits.
+        """
+        reasons = []
+        read_ny, close_ny = reading.as_of.astimezone(nyse_calendar.NEW_YORK), close.astimezone(nyse_calendar.NEW_YORK)
+        if not reading.as_of > close:
+            reasons.append("it was read at {}, not after the close at {}".format(_stamp(reading.as_of), _stamp(close)))
+        elif read_ny.date() != close_ny.date():
+            reasons.append("it was read at {}, on a later New York date than the close at {}: IBKR's executions "
+                           "reach back only to midnight, so none since the close can be ruled out".format(
+                               _stamp(reading.as_of), _stamp(close)))
+        if reading.open_orders:
+            reasons.append("IBKR shows {} open order(s) for the account (working, pending or cancel-pending): "
+                           "{}".format(len(reading.open_orders),
+                                       ", ".join(o["broker_order_id"] for o in reading.open_orders)))
+        if broker == "unread":
+            reasons.append("IBKR's executions could not be read in full")
+        else:
+            if broker.open_orders:
+                reasons.append("IBKR's last open-order list shows {} open order(s) for the account: {}".format(
+                    len(broker.open_orders), ", ".join(_order_name(o) for o in broker.open_orders)))
+            # At or after the close's second: the engine applies a fill
+            # stamped in the book's second to that book (internal/reconcile
+            # Classify), so a closing-auction fill stamped at the close is
+            # one the close's snapshot must not already show.
+            since = [e for e in broker.executions if e.occurred_at >= close]
+            if since:
+                reasons.append("IBKR reports {} execution(s) in the account since the close: {}".format(
+                    len(since), ", ".join(e.exec_id for e in since)))
+        valuation = None
+        try:
+            valuation = close_valuation(reading, closes)
+        except ValueError as err:
+            reasons.append(str(err))
+        if NET not in reading.unread and not reading.balances[NET_LIQUIDATION].amount > 0:
+            # The margin alarm's basis at the read: a snapshot as of the
+            # close states IBKR's own beside its valuation, positive (ADR
+            # 0019: an unavailable balance is not zero); one that is not is
+            # IBKR's own reading, at the read time, for the alarm to read.
+            reasons.append("IBKR's own net liquidation at the read is {}, not positive".format(
+                reading.balances[NET_LIQUIDATION].amount))
+        drift, unexplained, unverified = self._since_previous_close(reading, valuation, reasons)
+        last = self._last_stamp(read_engine_log(self._engine_log_path))
+        if last is not None and not close > last:
+            reasons.append("the engine already holds an account or broker snapshot as of {}, not before this "
+                           "close".format(_stamp(last)))
+        if reasons and last is not None and not reading.as_of > last:
+            log.info("ibkr broker snapshot waits: its read time %s does not follow the last snapshot the engine "
+                     "holds, as of %s", _stamp(reading.as_of), _stamp(last))
+            return None
+        return "; ".join(reasons), valuation, drift, unexplained, unverified
+
+    def _since_previous_close(self, reading, valuation, reasons):
+        """(drift, unexplained, unverified) of reading against the previous close, adding to reasons what fails.
+
+        The previous close is book_basis.previous_close's daily basis: the
+        latest account snapshot in this run or the runs its Run approvals
+        chain back to, its total cash the reconciliation read with it, or
+        the latest starting book an approval states (ADR 0019 and ADR 0027,
+        amended 2026-10-18), with every fill committed since and those still
+        in the outbox, stamped at or after its as-of time and before the
+        read (book_basis.fills_since). The holdings must be its own adjusted by those fills,
+        share for share, and the total cash its own adjusted by them within
+        CASH_DRIFT_BOUND of the net liquidation at the close (IBKR's own at
+        the read when valuation is None); drift is the
+        cash difference, and unexplained the cash IBKR shows beyond the
+        unexplained-cash basis and every fill since it, the drift added up.
+        unverified is set when the engine holds no book (the basis is not
+        this run's own account snapshot) and the reading failed the
+        comparison or had nothing to be compared with: its reconciliation
+        then goes alone, its snapshots withheld (delivery._entries), never
+        adopted. A cash check that cannot be bounded fails the comparison,
+        and so does a basis that cannot be compared with (Basis.refused).
+        """
+        daily, cumulative = previous_close(self._engine_log_path, self._pending_path + BASIS_SUFFIX)
+        committed = {i.id for i in read_engine_log(self._engine_log_path).inputs}
+        pending = [e["payload"] for e in self.outbox.load()
+                   if e["event_type"] == FILL_TYPE and e["id"] not in committed]
+        if daily is None:
+            reasons.append("no account snapshot of a previous close is committed in this run or the runs its Run "
+                           "approvals chain back to, and no approval states the starting book, so the reading has "
+                           "nothing to be compared with and is never adopted as the book: approve the account's "
+                           "first run with the holdings and cash checked in IBKR (operator approve -first-run; "
+                           "docs/runbooks/first-paper-order.md)")
+            return Decimal(0), Decimal(0), True
+        if daily.refused:
+            reasons.append(daily.refused)
+            return Decimal(0), Decimal(0), not daily.own
+        # Only the fills stamped at or after the basis's as-of time and before
+        # the read move it (book_basis.fills_since, internal/reconcile's
+        # window): one already in the book is never counted again.
+        fills = fills_since(daily.fills + pending, daily.as_of, reading.as_of)
+        failed = False
+        expected = holdings_after(daily.positions, fills)
+        if expected != reading.positions:
+            differ = sorted(set(expected) | set(reading.positions))
+            reasons.append("IBKR holds {}, but {} and the {} fill(s) committed since give {}: a change no execution "
+                           "this adapter saw explains (another client's trade, a transfer or a corporate "
+                           "action)".format(_holding_text(reading.positions, differ), daily.source, len(fills),
+                                            _holding_text(expected, differ)))
+            failed = True
+        if daily.cash is None:
+            reasons.append("the total cash of {} is not recorded (no reconciliation of the same reading, or its cash "
+                           "unread), so the cash since cannot be checked".format(daily.source))
+            return Decimal(0), Decimal(0), not daily.own
+        cash = reading.balances[TOTAL_CASH].amount
+        drift = _cents(cash - (daily.cash + cash_change(fills)))
+        # The cash bound is part of the comparison (ADR 0019 condition 2): an
+        # account that cannot be valued at the close is bounded by IBKR's
+        # own net liquidation at the read, and with neither the check fails
+        # rather than pass unchecked (AGENTS.md: fail closed).
+        bound, basis = valuation, "net liquidation"
+        if bound is None and NET not in reading.unread and reading.balances[NET_LIQUIDATION].amount > 0:
+            bound, basis = reading.balances[NET_LIQUIDATION].amount, "IBKR's own net liquidation at the read"
+        if bound is None:
+            reasons.append("the account has no net liquidation the cash since {} can be bounded by, so the cash "
+                           "cannot be checked".format(daily.source))
+            failed = True
+        elif abs(drift) > CASH_DRIFT_BOUND * abs(bound):
+            reasons.append("IBKR's total cash differs from that of {} and the {} fill(s) committed since by {}, "
+                           "beyond the {}% of {} ({}) allowed for postings such as interest or a "
+                           "dividend".format(daily.source, len(fills), drift, (CASH_DRIFT_BOUND * 100).normalize(),
+                                             basis, _cents(CASH_DRIFT_BOUND * abs(bound))))
+            failed = True
+        if cumulative.refused:
+            reasons.append(cumulative.refused)
+            return drift, Decimal(0), not daily.own
+        since = fills_since(cumulative.fills + pending, cumulative.as_of, reading.as_of)
+        unexplained = _cents(cash - (cumulative.cash + cash_change(since)))
+        return drift, unexplained, failed and not daily.own
+
+    def _last_stamp(self, engine_log):
+        """The latest as-of time of an account or broker snapshot engine_log holds committed, or None."""
+        stamps = [datetime.fromisoformat(i.payload["as_of"].replace("Z", "+00:00"))
+                  for i in engine_log.inputs
+                  if i.event_type in (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE)]
+        return max(stamps, default=None)
 
     def _unended(self, reading):
         """Whether reading was cut off before answers that carry no request ID ended; if so the link is dropped (see the module)."""
@@ -682,6 +1075,11 @@ class AdapterLoop:
                             "(docs/manual/paper-trading.md)".format(entry["id"]))
                     self.outbox.strike(entry["id"])
                     continue
+                if batch_run is not None and self._reconciliation_due:
+                    # The reconciliation a reconcile owes goes ahead of the
+                    # stream (ADR 0019): no session is decided before it.
+                    log.info("ibkr stream input %s waits behind the reconciliation still to be read", entry["id"])
+                    return
                 if batch_run is not None and self.reports.awaiting_commission():
                     # An execution IBKR reported awaits its commission, so its
                     # fill is not recorded yet: no stream input goes ahead of
