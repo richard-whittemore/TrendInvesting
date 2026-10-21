@@ -413,10 +413,10 @@ func (g *Gate) withheldOnCash() *pendingCash {
 // PendingCashIncrease is the sum, in dollars, of every pending cash
 // increase still undecided that snapshot's cash could hold: cash IBKR shows
 // that no journalled transfer or fill explains yet, found by a reading at
-// or before the moment the snapshot's cash is held until (reconcile.
-// HeldUntil: a snapshot stamped at the close was read after it, with the
-// evening's reconciliation, and holds the rest of that New York day; ADR
-// 0019, point 2). When that moment is not known, every pending increase
+// or before the moment the snapshot's cash is held until
+// (reconcile.HeldUntil: a snapshot stamped at the close was read after it,
+// with the evening's reconciliation, and holds the rest of that New York
+// day; ADR 0019, point 2). When that moment is not known, every pending increase
 // counts: the budget fails closed. Buys are sized from the snapshot's cash
 // less this, so a credit that is reversed or posted in error is never
 // invested; an increase found by a reading after the snapshot's cash was

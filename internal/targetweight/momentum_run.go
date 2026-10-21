@@ -811,6 +811,9 @@ func (r *momentumRun) planBuys(b *emissions) {
 	if short := r.unexplainedCashDrop(reb); short > 0 {
 		reb.budget.Remove(short)
 	}
+	// The book's anchor is the decision ID, not the snapshot's envelope id:
+	// PendingCashIncrease reads only the book's AsOf (through HeldUntil), so
+	// the anchor is informational here.
 	if unexplained := r.h.gate.PendingCashIncrease(reconcile.CashBook(reb.decisionID, reb.snapshot)); unexplained > 0 {
 		reb.budget.Remove(unexplained)
 	}
