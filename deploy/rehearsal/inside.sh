@@ -184,9 +184,11 @@ posts = sys.argv[1]
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         with open(posts, "a") as f:
             f.write(self.path + "\n")
+        with open(posts + ".bodies", "ab") as f:
+            f.write(body.replace(b"\n", b" ") + b"\n")
         self.send_response(202)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -224,8 +226,55 @@ sent=$(wc -l <"$rep/posts")
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter's second run failed"
 test "$(wc -l <"$rep/posts")" = "$sent" || fail "the reporter's second run sent its alerts again"
-kill "$fake"
 pass "the reporter runs as its unit runs it, as ti-trader, delivers to both channels once, and keeps its state"
+
+# The clock check. The reporter ran the installed check as ti-trader above:
+# the host clock state must hold what the check said, not that it could not
+# run (missing, or not executable by ti-trader).
+clock_state=$rep/reports/host-clock.json
+test -s "$clock_state" || fail "the reporter wrote no host clock state"
+python3 - "$clock_state" <<'PY' || fail "the installed clock check did not run as ti-trader: $(cat "$clock_state")"
+import json, sys
+out = json.load(open(sys.argv[1]))["last"]["Output"]
+sys.exit(0 if out.startswith("clock: ") else 1)
+PY
+# Then -clock-check with a stand-in: a failing check pages on the second
+# failure in a row, once for the host, and a passing one resolves the
+# PagerDuty incident. Each run's check is aged past the timer period so the
+# next run checks again.
+stand=$(mktemp -d)
+chmod 0755 "$stand"
+printf '#!/bin/sh\nif test -e %s/fail; then echo "clock: skew of -42s against https://reference.test (this clock minus the reference), more than the 2s tolerance." >&2; exit 1; fi\necho "clock: ok, skew 0s against https://reference.test, within 2s"\n' "$stand" >"$stand/check.sh"
+chmod 0755 "$stand/check.sh"
+stand_line=${line//\/usr\/local\/libexec\/trend-investing\/clock-check.sh/$stand/check.sh}
+age_check() {
+  python3 - "$clock_state" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+s["last"]["At"] = "2000-01-01T00:00:00Z"
+json.dump(s, open(sys.argv[1], "w"))
+PY
+}
+clock_pages() { grep -c 'clock-drift:.*"event_action":"trigger"\|"event_action":"trigger".*clock-drift:' "$rep/posts.bodies" || true; }
+# The real check's own count (it may fail here with no network) is cleared.
+rm -f "$clock_state"
+touch "$stand/fail"
+for n in 1 2; do
+  test ! -e "$clock_state" || age_check
+  # shellcheck disable=SC2086
+  sudo -u ti-trader env -i PATH=/usr/bin:/bin $stand_line >/dev/null || fail "the reporter with a failing stand-in clock check failed to run"
+  if test "$n" = 1 && test "$(clock_pages)" != 0; then fail "one failing clock check paged"; fi
+done
+test "$(clock_pages)" = 1 || fail "two failing clock checks in a row did not page once on PagerDuty"
+grep -q -- '-42s' "$rep/posts.bodies" || fail "the clock page lacks the measured skew"
+rm "$stand/fail"
+age_check
+# shellcheck disable=SC2086
+sudo -u ti-trader env -i PATH=/usr/bin:/bin $stand_line >/dev/null || fail "the reporter with a passing stand-in clock check failed"
+grep -q '"event_action":"resolve","dedup_key":"clock-drift:' "$rep/posts.bodies" || fail "a passing clock check did not resolve the PagerDuty incident"
+rm -rf "$stand"
+kill "$fake"
+pass "the reporter runs the installed clock check as ti-trader, pages a failing stand-in on the second failure, and resolves it on a pass"
 
 # Unit files. The engine's binary is installed by hand on the server; the
 # rehearsal installs the stamped engine deploy/rehearse.sh built (the

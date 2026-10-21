@@ -177,6 +177,7 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		"-secrets-file": credentials + "/secrets",
 		"-channel":      "ntfy,pagerduty",
 		"-account":      "boost",
+		"-clock-state":  reports + "/host-clock.json",
 	} {
 		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
 			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)

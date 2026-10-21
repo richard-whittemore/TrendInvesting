@@ -6,9 +6,11 @@
 // optionally the daily summary (docs/live-trading/plan.md section 3; ADR
 // 0019, "Alerting"). A Degraded, Halted or reconciliation alert is sent
 // again every -repeat-interval until the journal records the owner's
-// acknowledgement of it. It only reads the journal. The one file it writes
-// is its own state file of delivered incident keys and when each channel last
-// took each. Every rule lives in internal/report; this is composition.
+// acknowledgement of it. It only reads the journal. It writes its own state
+// file of delivered incident keys and when each channel last took each and,
+// with -clock-check, the host's clock state and its lock, shared by every
+// reporter on the host. Every rule lives in internal/report; this is
+// composition.
 //
 // It runs once per invocation, from a timer. The heartbeat it checks is the
 // journal file's modification time, with silence counted in NYSE sessions; a
@@ -71,7 +73,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets, read for any not set in the environment (under systemd: %d/secrets, the credential file)")
 	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
-	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run on every firing, a failure is alerted once, and the daily summary shows the last check")
+	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
+	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -146,27 +149,6 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, unchecked, now())}
 	}
 	alerts = append(alerts, heartbeat...)
-	var clock *report.ClockCheck
-	if *clockCheck != "" {
-		c := runClockCheck(*clockCheck, now())
-		clock = &c
-		if c.Passed {
-			forgetAlert(report.ClockDriftAlert(label, c).Key, seen, sent, repeats)
-		} else {
-			alerts = append(alerts, report.ClockDriftAlert(label, c))
-		}
-	}
-	// A summary that cannot be built is reported, but never holds back the
-	// incident alerts: they are what ADR 0019 requires to reach a person.
-	if *summary && refused == nil {
-		a, due, err := summaryAlert(envelopes, *date, *benchmark, clock)
-		switch {
-		case err != nil:
-			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
-		case due:
-			alerts = append(alerts, a)
-		}
-	}
 
 	// Each delivery is saved as soon as a channel takes it, so a run stopped
 	// before it ends (systemd stops one at its TimeoutStartSec) makes the
@@ -180,6 +162,35 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	for _, a := range report.Fresh(alerts, nil) {
 		if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
+		}
+	}
+	// The clock check comes after every incident alert is sent, so a slow or
+	// hung check never holds one back (ADR 0019, "Alerting"; its bounds are in
+	// clock.go). The clock is the host's: its state is shared by every
+	// reporter instance on the host.
+	var clock *report.ClockCheck
+	if *clockCheck != "" {
+		path := *clockState
+		if path == "" {
+			path = filepath.Join(filepath.Dir(*statePath), "host-clock.json")
+		}
+		c, err := clockStep(path, *clockCheck, hostName(), senders, at, *repeat)
+		clock = c
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	// A summary that cannot be built is reported, but never holds back the
+	// incident alerts: they are what ADR 0019 requires to reach a person.
+	if *summary && refused == nil {
+		a, due, err := summaryAlert(envelopes, *date, *benchmark, clock)
+		switch {
+		case err != nil:
+			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
+		case due:
+			if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
+				failures = append(failures, err)
+			}
 		}
 	}
 	if err := saveState(*statePath, seen, sent, repeats); err != nil {
@@ -303,15 +314,26 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // that, a power cut can leave an empty state file, which loadState refuses,
 // and every later run then fails.
 func saveState(path string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
+	raw, err := json.Marshal(deliveredOf(seen, sent, repeats))
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, raw)
+}
+
+// deliveredOf is the state file's form of the delivered keys, their send
+// times and repeat counts.
+func deliveredOf(seen map[string]bool, sent map[string]time.Time, repeats map[string]int) delivered {
 	d := delivered{Keys: make([]string, 0, len(seen)), Sent: sent, Repeats: repeats}
 	for k := range seen {
 		d.Keys = append(d.Keys, k)
 	}
 	sort.Strings(d.Keys)
-	raw, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
+	return d
+}
+
+// writeAtomic replaces the file at path with raw, atomically and durably.
+func writeAtomic(path string, raw []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".reporter-state-*")
 	if err != nil {
 		return fmt.Errorf("reporter: write state: %w", err)

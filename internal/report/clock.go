@@ -22,7 +22,16 @@ type ClockCheck struct {
 	Output string
 }
 
+// clockSkew reads the skew from the check's output. deploy/libexec/clock-check.sh
+// documents the lines it prints (its "Output" contract): a measured skew is
+// "skew <N>s" or "skew of <N>s", N a whole number of seconds with an optional
+// minus sign.
 var clockSkew = regexp.MustCompile(`\bskew (?:of )?(-?\d+)s\b`)
+
+// clockUnmeasured matches the lines that say no skew was measured: the
+// script's refusals before or without a comparison (its "Output" contract),
+// and the reporter's own words for a check that could not run or timed out.
+var clockUnmeasured = regexp.MustCompile(`(?m)^(?:clock: (?:not synchronised|no reference clock could be measured|TI_CLOCK_)|the check (?:could not be run|timed out|failed and said nothing))`)
 
 // ClockSkewSeconds returns the skew in whole seconds that the check's output
 // states (this clock minus the reference), and whether it states one: a clock
@@ -39,21 +48,29 @@ func ClockSkewSeconds(output string) (int, bool) {
 	return n, true
 }
 
-// ClockDriftAlert reports a failed clock check: the measured skew (or that
-// none was measured) and the manual's remedy (docs/manual/server.md, "The
-// clock"). The key names the account only, so one failure is one incident
-// however many checks fail in a row; the caller forgets the key when a check
-// passes, which makes the next failure a new incident.
-func ClockDriftAlert(account string, c ClockCheck) Alert {
-	skew := "No skew was measured: the check failed before it could compare the clock with a reference."
+// ClockDriftKey is the incident key of a clock failure on host. The clock is
+// the host's, not an account's, so every reporter on the host pages and
+// clears under this one key.
+func ClockDriftKey(host string) string { return "clock-drift:" + host }
+
+// ClockDriftAlert reports a failed clock check on host: the measured skew (or
+// that none was measured, or that the output could not be read) and the
+// manual's remedy (docs/manual/server.md, "The clock"). The key names the
+// host only, so one failure is one incident however many checks fail in a row
+// and whichever account's reporter saw it; the caller resolves and forgets the
+// key when a check passes, which makes the next failure a new incident.
+func ClockDriftAlert(host string, c ClockCheck) Alert {
+	skew := "No skew could be read from the check's output: it is not in a form clock-check.sh documents, so read what the check said below."
 	if s, ok := ClockSkewSeconds(c.Output); ok {
 		skew = fmt.Sprintf("Measured skew: %+ds (this clock minus the reference).", s)
+	} else if clockUnmeasured.MatchString(c.Output) {
+		skew = "No skew was measured: the check failed before it could compare the clock with a reference."
 	}
 	return Alert{
-		Key: "clock-drift:" + account, Kind: KindClockDrift, Severity: Urgent, AccountID: account, At: c.At,
-		Title: fmt.Sprintf("%s: the server's clock failed its check", account),
-		Body: fmt.Sprintf("The clock check failed at %s. %s The check said: %s While the clock is wrong the engine counts IBKR's account reading as stale and withholds every sell (ADR 0019). "+
-			"Remedy (docs/manual/server.md, \"The clock\"): run /usr/local/libexec/trend-investing/clock-check.sh on the server, then fix the time syncing (on the Mac mini, turn on the Mac's automatic date and time). You are told once; the next failure after a passing check is told again.",
+		Key: ClockDriftKey(host), Kind: KindClockDrift, Severity: Urgent, AccountID: host, At: c.At,
+		Title: fmt.Sprintf("%s: the server's clock failed its check", host),
+		Body: fmt.Sprintf("The clock check failed at %s, the second check in a row to fail. %s The check said: %s While the clock is wrong every account's engine on this server counts IBKR's account reading as stale and withholds every sell (ADR 0019). "+
+			"Remedy (docs/manual/server.md, \"The clock\"): run /usr/local/libexec/trend-investing/clock-check.sh on the server, then fix the time syncing (on the Mac mini, turn on the Mac's automatic date and time). You are told once for the whole server; the incident is resolved when a check passes, and the next failure after that is told again.",
 			c.At.UTC().Format(time.RFC3339), skew, strings.TrimSpace(c.Output)),
 	}
 }
