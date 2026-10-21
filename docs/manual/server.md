@@ -245,10 +245,12 @@ group the engine's user is in, mode `0750`. The recorded switch only works while
 runs; to stop the program trading outright, also stop it (`sudo systemctl stop
 ti-engine@<account>`). Also stop the adapter
 (`sudo systemctl stop ti-adapter-boost`): an order the engine released that the
-adapter has not sent is never sent by the fresh run you start next (its adapter
-stops at start naming the order), and an order that must not
-go is settled `--never-sent` with the relay's `resolve` command, run on the
-adapter's machine (the first-paper-order runbook shows it). Cancel anything
+adapter has not sent is never sent by the fresh run you start next: its adapter
+stops at start naming the earlier run's input ("awaits its reply from an
+earlier engine run"), which you settle with the relay's `resolve --run-ended`
+command, run on the adapter's machine ([paper trading](paper-trading.md), that
+row). `--never-sent` is only for an order the adapter refuses before it wrote
+"about to send" ([redelivery](redelivery.md)). Cancel anything
 already at IBKR in IBKR's own app.
   Do not treat stopping the Gateway (`sudo systemctl stop ti-gateway`) as a
   kill switch: it only delays. An order the engine has released waits in the

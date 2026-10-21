@@ -470,9 +470,8 @@ So a new incident, a new engagement of the kill switch, or, with neither in
 force, a new urgent alarm is a new sale. Stopping the engine and the adapter
 stops those too.
 
-An IRA makes no sale back to 98%, so there the kill switch, once its inbox
-is set up ([operator](operator.md)), stops the program's new orders; without
-it, stop the engine and the adapter as in step 1.
+An IRA makes no sale back to 98%, so there the kill switch ([operator](operator.md))
+stops the program's new orders.
 
 ## Reading it afterwards
 
@@ -504,7 +503,7 @@ account's name; an IRA's alerts carry its own.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| `kill-switch`. Alert: `joint: order refused (kill-switch)`, for the first refusal of each engagement only | Refuses every order except the margin account's one sale back to 98%. The engine state does not change. A refused Boost order is planned again at the first close that decides after you release the switch | Nothing, if you meant it. Release it with `sudo -u ti-operator operator kill-switch -state released` ([operator](operator.md)). The switch does not cancel an order already working at IBKR: cancel that in IBKR's own app |
+| `kill-switch`. Alert: `joint: order refused (kill-switch)`, for the first refusal of each engagement only | Refuses every order except the margin account's one sale back to 98%. The engine state does not change. A refused Boost order is planned again at the first close that decides after you release the switch | Nothing, if you meant it. Release it with `sudo -u ti-operator operator kill-switch -inbox /var/lib/trend-investing/engines/boost/operator -account joint -state released -by owner -detail "why"` ([operator](operator.md)). The switch does not cancel an order already working at IBKR: cancel that in IBKR's own app |
 | `engine-degraded`. Alert: `joint: order refused (engine-degraded)` | The account is Degraded: every buy, and every order on an instrument in the scope, is refused. Sells elsewhere still go | Work the [halted-account runbook](../runbooks/halted-account.md) for the Degraded alert that came first |
 | `engine-halted`. Alert: `joint: order refused (engine-halted)` | The account is Halted: every order but the sale back to 98% is refused | The [halted-account runbook](../runbooks/halted-account.md) |
 | `undecided-order`. Alerts: `joint: order refused (undecided-order)` and `joint: engine halted (risk-limit-breached)` | An order (or a sale) named no recorded decision. That is a defect in the program's order path, so the account is Halted at once | Do not recover until the cause is found: keep the log, and report it as a defect. Then the [halted-account runbook](../runbooks/halted-account.md) |
