@@ -17,9 +17,10 @@ stops ordering, not an order resting at the broker.
 > inputs: the comparison, the states and the alert
 > ([reconciliation](../manual/reconciliation.md)). The adapter's morning
 > reading is built and delivered to the engine: the adapter sends IBKR's
-> positions and cash with every day's file and at every start and
-> reconnect, so a reconciliation runs by itself (Boost; the IRAs' inputs
-> are not built). Rehearse this runbook in paper trading before live money
+> positions and cash with every day's file, and at every start and
+> reconnect once the engine holds a book (a fresh Boost run holds none until
+> its first delivered file), so a reconciliation runs by itself from then on
+> (Boost; the IRAs' inputs are not built). Rehearse this runbook in paper trading before live money
 > (below).
 
 ## First, in every case
@@ -192,9 +193,13 @@ the whole server is down, nothing will tell you.
    fresh run you approve (`docs/runbooks/durable-log.md`, "Restarting an
    engine"). Either way the engine comes back **in the state it was in**:
    a Degraded or Halted account stays so.
-3. The adapter sends a reconciliation at every start, so a fresh run is
-   compared with IBKR when it starts; before it, still compare IBKR's
-   open orders with the journal yourself (open orders are not compared).
+3. The adapter sends its reconciliation at a start only once the engine
+   holds a book: a fresh Boost run holds none until its first delivered
+   file, and with no market data delivered nothing is compared at all. Until
+   then, compare IBKR's positions and cash with the journal yourself. The
+   adapter does stop at start on an open order or a trade no released order
+   explains, but the engine's reconciliation does not compare open orders:
+   check those against the journal yourself.
 
 ## Before live money
 
