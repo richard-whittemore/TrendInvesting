@@ -724,6 +724,17 @@ class ReadOnceTests(unittest.TestCase):
         self.assertIn("20270115", status["reason"], "the latest day it should end on")
         self.assertIn("period", status["reason"])
 
+    def test_a_reading_on_a_day_the_nyse_calendar_does_not_hold_is_set_aside(self):
+        # The calendar holds 2022 to 2030: from 2031 no reading can say whether its statement is current.
+        at = datetime(2031, 1, 6, 21, 30, tzinfo=flex.NEW_YORK).astimezone(timezone.utc)
+        self.assertFalse(self.read(FakeFlex(statements=(self.statement(period=("20270112", "20270115")),)), now=at))
+        status = self.status()
+        self.assertEqual(status["state"], "set-aside")
+        self.assertIn("20310106", status["reason"], "the day it could not check")
+        self.assertIn("NYSE calendar", status["reason"])
+        self.assertIn("nyse_calendar.py", status["reason"], "the remedy: extend the calendar")
+        self.assertFalse(self.ledger.exists())
+
     def test_a_saturday_reading_of_a_statement_ending_on_yesterdays_date_is_read(self):
         self.assertTrue(self.read_on(date(2027, 1, 16), "20270115"))
 
@@ -912,11 +923,12 @@ class CommandTests(unittest.TestCase):
         self.account.write_text("IBKR_ACCOUNT_BOOST={}\nIBKR_ACCOUNT_TRAD_IRA=DU0000777\n".format(ACCOUNT))
         self.ledger = self.dir / "cash-movements.jsonl"
 
-    def run_command(self, service, secrets=None, instance="boost"):
+    def run_command(self, service, secrets=None, instance="boost", now=datetime(2027, 1, 16, 2, 30, tzinfo=timezone.utc)):
         err = io.StringIO()
         code = main(["flex", "--secrets", str(secrets or self.secrets), "--account-secrets", str(self.account),
                      "--instance", instance, "--engine-log", str(self.log),
-                     "--ledger", str(self.ledger)], err=err, flex_get=service, flex_sleep=lambda s: None)
+                     "--ledger", str(self.ledger)], err=err, flex_get=service, flex_sleep=lambda s: None,
+                    now=lambda: now)
         return code, err.getvalue()
 
     def test_a_reading_exits_0(self):
@@ -925,6 +937,13 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(len(self.ledger.read_text().splitlines()), 2)
         self.assertNotIn(TOKEN, said)
         self.assertNotIn(ACCOUNT, said)
+
+    def test_the_reading_stamps_the_clock_its_caller_gives(self):
+        # The CLI passes its clock to the reader, so a reading on a named day does not depend on the real date.
+        code, said = self.run_command(FakeFlex(), now=datetime(2027, 1, 16, 2, 30, tzinfo=timezone.utc))
+        self.assertEqual(code, 0, said)
+        status = json.loads(Path(str(self.ledger) + flex.STATUS_SUFFIX).read_text())
+        self.assertEqual(status["checked_at"], "2027-01-16T02:30:00Z")
 
     def test_the_instance_names_its_account_line(self):
         # The IRA instance reads its own line, so a statement for the Boost account is refused as another's.

@@ -806,7 +806,10 @@ def _check_coverage(statement, coverage, approved_at, today):
         earliest = _session_before(latest)
     except nyse_calendar.OutOfRange:
         raise StatementRefused("the reading's day, {}, is in a year the NYSE calendar does not hold, so whether the "
-                               "statement is current is not known".format(_day_text(today))) from None
+                               "statement is current is not known; every reading is refused until the calendar is "
+                               "extended (adapter/marketdata/nyse_calendar.py, checked against NYSE's published "
+                               "holidays and early closes) and the new build installed".format(_day_text(today))) \
+            from None
     if last < earliest:
         raise CoverageGap(
             "the Flex statement ends on {}, but a current one ends on {} or the session before: transfers since "
@@ -1037,7 +1040,7 @@ def _resolutions(texts):
     return decisions
 
 
-def command(args, err, get=_get, sleep=time.sleep):
+def command(args, err, get=_get, sleep=time.sleep, now=lambda: datetime.now(timezone.utc)):
     """`flex`'s exit status: 0 for a reading or a recorded decision, 1 for a refusal or a set-aside (why on err).
 
     With --resolve, the owner's decisions are recorded beside the ledger and nothing is read: the next reading
@@ -1067,4 +1070,4 @@ def command(args, err, get=_get, sleep=time.sleep):
         print("refused: {}".format(mask(str(refusal))), file=err)
         return 1
     return 0 if read_once(token, query_id, account_id, args.engine_log, args.ledger, get=get, sleep=sleep,
-                          err=err) else 1
+                          now=now, err=err) else 1

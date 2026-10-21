@@ -251,7 +251,7 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
     if args.command == "flex":
         import flex
         return flex.command(args, err, **({"get": flex_get} if flex_get else {}),
-                            **({"sleep": flex_sleep} if flex_sleep else {}))
+                            **({"sleep": flex_sleep} if flex_sleep else {}), **({"now": now} if now else {}))
     try:
         cfg = load_config(args)
         require_zones(zone_lookup or ZoneInfo)
