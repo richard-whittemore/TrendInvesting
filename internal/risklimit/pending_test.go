@@ -1290,12 +1290,13 @@ func TestARestoreRefusesAVenueOrderIDAnotherSellCarries(t *testing.T) {
 	}
 }
 
-// TestAListingMatchingTwoSellsByVenueOrderIDIsNotTakenOntoEither: two
-// released sells that lifecycle reports both tie to one venue order ID
-// cannot say which an unechoed listing under it is, so the listing is
-// counted beside them (an over-count, which sells less) rather than taken
-// onto the first (ADR 0019, amended 2026-10-15; fail closed, AGENTS.md).
-func TestAListingMatchingTwoSellsByVenueOrderIDIsNotTakenOntoEither(t *testing.T) {
+// TestAReportOrListingGivingASecondSellAVenueOrderIDAnotherCarriesIsRefused:
+// a venue order ID is the venue's ID for one order, so a lifecycle report,
+// or a listing echoing a client order ID, that would give a second live
+// sell the ID another already carries is refused when it arrives, naming
+// the report and both orders, and nothing of it is taken in (ADR 0019,
+// amended 2026-10-15; ADR 0026, point 5; fail closed, AGENTS.md).
+func TestAReportOrListingGivingASecondSellAVenueOrderIDAnotherCarriesIsRefused(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(200))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
@@ -1308,13 +1309,36 @@ func TestAListingMatchingTwoSellsByVenueOrderIDIsNotTakenOntoEither(t *testing.T
 	if err := g.RestoreReleased(restoredSell(54), nil, time.Time{}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+	report := event.LimitOrderLifecyclePayload{
 		AccountID: "joint", ClientOrderID: "tw-old", OrderID: "ib-dup", InstrumentID: "SPY", Side: event.OrderSideSell,
 		Status: event.OrderLifecycleStatusSubmitted, Quantity: 54, LimitPrice: 1, OccurredAt: at.Add(2 * time.Minute),
-	}); err != nil {
-		t.Fatal(err)
 	}
-	observe(t, g, "broker:2", later(broker(200, unechoed("ib-dup", 30)), 3))
+	err := g.ObserveLifecycle(report)
+	for _, want := range []string{"lifecycle report", "tw-old", "tw-sell", "ib-dup"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("a report giving tw-old the venue order ID tw-sell carries: err %v, want it refused naming %q", err, want)
+		}
+	}
+	snapshot := later(broker(200), 3)
+	snapshot.OpenOrders = []event.BrokerOrder{{BrokerOrderID: "ib-dup", ClientOrderID: "tw-old", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 54}}
+	_, err = g.ObserveBroker("broker:2", snapshot)
+	for _, want := range []string{"broker:2", "tw-old", "tw-sell", "ib-dup"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("a listing giving tw-old the venue order ID tw-sell carries: err %v, want it refused naming %q", err, want)
+		}
+	}
+	// Nothing of either was taken in: the refused snapshot is not recorded,
+	// so the next one, in its place, still reads the account.
+	observe(t, g, "broker:2", later(broker(200), 3))
 	g.ObserveAccount(account(200, 4))
-	pendingIs(t, g, 144, "the two sells, 60 and 54, and the ambiguous listing's 30 beside them")
+	pendingIs(t, g, 114, "the two sells, 60 and 54, with neither report nor listing taken in")
+	// A synthetic dry-run report names no venue order ID, and no sell
+	// carries none: it is not a second sell's claim on one.
+	synthetic := report
+	synthetic.OrderID, synthetic.Synthetic, synthetic.Status = "", true, event.OrderLifecycleStatusCanceled
+	synthetic.Message = "dry-run: never sent"
+	if err := g.ObserveLifecycle(synthetic); err != nil {
+		t.Fatalf("a synthetic report naming no venue order ID: %v", err)
+	}
 }

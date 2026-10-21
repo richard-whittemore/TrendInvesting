@@ -1734,3 +1734,62 @@ func TestARecoveredOrderStatingAnExecutionAlreadyReadIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestAReportOrListingGivingAnOrderAVenueOrderIDAnotherCarriesIsRefused: a
+// venue order ID is the venue's ID for one order, so a lifecycle report, or
+// a broker snapshot listing an order under its client order ID, that names
+// the venue order ID another order the run lists already carries is refused
+// when it arrives, naming the report and both orders, and nothing of it is
+// recorded: the run goes on to decide (ADR 0026, point 5, amended
+// 2026-10-18; fail closed, AGENTS.md).
+func TestAReportOrListingGivingAnOrderAVenueOrderIDAnotherCarriesIsRefused(t *testing.T) {
+	closes := flippingCloses()[:20]
+	r := simulate(t, options{closes: closes, hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}})
+	last := targets(t, r.decisions)[len(targets(t, r.decisions))-1].Boost
+	if len(last.WorkingOrders) != 1 || last.WorkingOrders[0].VenueOrderID == "" || last.Watched.ClientOrderID == "" {
+		t.Fatalf("setup: the last decision records %+v, want a working order with a venue order ID beside the watched order", last)
+	}
+	other, venueID := last.WorkingOrders[0].ClientOrderID, last.WorkingOrders[0].VenueOrderID
+	var o, w event.OrderReleasedPayload
+	for _, rel := range released(t, r.decisions) {
+		switch rel.ClientOrderID {
+		case last.Watched.ClientOrderID:
+			o = rel
+		case other:
+			w = rel
+		}
+	}
+	if o.ClientOrderID == "" || w.ClientOrderID == "" || last.Watched.VenueOrderID == "" {
+		t.Fatalf("setup: the watched order %s and the working order %s are not both released and named by the venue", last.Watched.ClientOrderID, other)
+	}
+	at := sessionEnd(len(closes) - 1).Add(time.Hour)
+	names := func(err error, parts ...string) bool {
+		if err == nil {
+			return false
+		}
+		for _, p := range parts {
+			if !strings.Contains(err.Error(), p) {
+				return false
+			}
+		}
+		return true
+	}
+	report := event.LimitOrderLifecyclePayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: venueID,
+		InstrumentID: o.InstrumentID, Side: o.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at}
+	if err := applyAfter(t, r, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "dup:report", at, report); !names(err, "dup:report", o.ClientOrderID, other, venueID) {
+		t.Errorf("a report giving %s the venue order ID %s of %s: err %v, want it refused naming the report and both orders", o.ClientOrderID, venueID, other, err)
+	}
+	// The watched order's venue order ID is no more a working order's to
+	// take.
+	onWorking := event.LimitOrderLifecyclePayload{AccountID: w.AccountID, ClientOrderID: w.ClientOrderID, OrderID: last.Watched.VenueOrderID,
+		InstrumentID: w.InstrumentID, Side: w.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: w.Quantity, LimitPrice: w.LimitPrice, OccurredAt: at}
+	if err := applyAfter(t, r, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "dup:working", at, onWorking); !names(err, "dup:working", other, last.Watched.ClientOrderID, last.Watched.VenueOrderID) {
+		t.Errorf("a report giving %s the venue order ID of the watched %s: err %v, want it refused naming the report and both orders", other, last.Watched.ClientOrderID, err)
+	}
+	broker := (&account{cash: 4000}).broker(at.Add(time.Minute), closes[len(closes)-1])
+	broker.OpenOrders = []event.BrokerOrder{{BrokerOrderID: venueID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID,
+		Side: o.Side, Status: event.BrokerOrderWorking, RemainingQuantity: o.Quantity}}
+	if err := applyAfter(t, r, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "dup:listing", at.Add(time.Minute), broker); !names(err, "dup:listing", o.ClientOrderID, other, venueID) {
+		t.Errorf("a listing giving %s the venue order ID %s of %s: err %v, want it refused naming the listing and both orders", o.ClientOrderID, venueID, other, err)
+	}
+}

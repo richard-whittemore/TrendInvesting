@@ -283,6 +283,21 @@ func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 	}
 }
 
+// refuseSharedVenue refuses broker snapshot id when it lists a sell of ours
+// under its client order ID with a broker order ID another sell of ours
+// carries as its venue order ID: a venue order ID names one order, and the
+// listing would give a second sell the ID (learnVenue).
+func (l *sellLedger) refuseSharedVenue(id string, orders []event.BrokerOrder) error {
+	for _, o := range orders {
+		if s := l.sells[o.ClientOrderID]; o.Side == event.OrderSideSell && s != nil && s.instrumentID == o.InstrumentID {
+			if other := l.venueHolder(o.BrokerOrderID, o.ClientOrderID); other != "" {
+				return fmt.Errorf("risklimit: broker snapshot %s lists order %s under venue order %s, which sell %s already carries; a venue order ID names one order", id, o.ClientOrderID, o.BrokerOrderID, other)
+			}
+		}
+	}
+	return nil
+}
+
 // learnVenue records venueID, the venue order ID a lifecycle report or a
 // listing echoing s's client order ID names, as the released sell s's, when
 // none is recorded: IBKR does not always echo
@@ -301,7 +316,9 @@ func (l *sellLedger) learnVenue(s *ledgerSell, venueID string) {
 }
 
 // byVenue returns the released sell whose venue order ID is o's, when IBKR
-// lists o with no client order ID (learnVenue, restore).
+// lists o with no client order ID (learnVenue, restore), and none when two
+// sells carry that venue order ID: the listing is then counted beside them,
+// an over-count, which sells less (fail closed, AGENTS.md).
 func (l *sellLedger) byVenue(o event.BrokerOrder) *ledgerSell {
 	if o.ClientOrderID != "" || o.BrokerOrderID == "" {
 		return nil
@@ -325,12 +342,25 @@ func (l *sellLedger) byVenue(o event.BrokerOrder) *ledgerSell {
 // venueTaken reports whether a sell of ours already carries venueID as its
 // venue order ID.
 func (l *sellLedger) venueTaken(venueID string) bool {
-	for _, s := range l.sells {
-		if s.venueID == venueID {
-			return true
+	return l.venueHolder(venueID, "") != ""
+}
+
+// venueHolder returns the client order ID of a sell of ours other than
+// except that carries venueID as its venue order ID, or none; a synthetic
+// report names no venue order ID, and nothing carries none. With more than
+// one holder it names the least client order ID, so the answer does not
+// depend on map order.
+func (l *sellLedger) venueHolder(venueID, except string) string {
+	if venueID == "" {
+		return ""
+	}
+	var holder string
+	for client, s := range l.sells {
+		if s.venueID == venueID && client != except && (holder == "" || client < holder) {
+			holder = client
 		}
 	}
-	return false
+	return holder
 }
 
 // unshown is the pending rule: the shares of instrumentID already being sold
@@ -659,6 +689,9 @@ func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 		return fmt.Errorf("risklimit: a lifecycle report on order %s reports %d at %v; the order is %d at %v", p.ClientOrderID, p.Quantity, p.LimitPrice, o.planned.Quantity, o.planned.LimitPrice)
 	}
 	s := g.ledger.sells[p.ClientOrderID]
+	if other := g.ledger.venueHolder(p.OrderID, p.ClientOrderID); s != nil && other != "" {
+		return fmt.Errorf("risklimit: lifecycle report on order %s names venue order %s, which sell %s already carries; a venue order ID names one order", p.ClientOrderID, p.OrderID, other)
+	}
 	if s != nil {
 		g.ledger.learnVenue(s, p.OrderID)
 	}

@@ -1004,6 +1004,9 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	if err != nil {
 		return nil, err
 	}
+	if err := h.refuseSharedVenue(in, p.OpenOrders); err != nil {
+		return nil, err
+	}
 	obs, err := h.gate.ObserveBroker(in.ID, p)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
@@ -1061,6 +1064,48 @@ func (h *Handler) learnVenueID(id, venueID string) {
 	}
 }
 
+// refuseVenue refuses record in when it would give order id the venue order
+// ID venueID that another order the run lists (the watched order, those
+// awaiting the venue's verdict and the working ones) already carries: a
+// venue order ID names one order, and the failure is the input's, refused
+// when it arrives rather than found when the decision is written (ADR 0026,
+// point 5, amended 2026-10-18; fail closed, AGENTS.md).
+func (h *Handler) refuseVenue(in event.Envelope, id, venueID string) error {
+	carried := func(other, otherVenue string) error {
+		if otherVenue == venueID && other != id {
+			return fmt.Errorf("targetweight: %s %s gives order %s venue order %s, which order %s already carries; a venue order ID names one order", in.Type, in.ID, id, venueID, other)
+		}
+		return nil
+	}
+	if w := h.watch; w != nil {
+		if err := carried(w.order.ClientOrderID, w.venueID); err != nil {
+			return err
+		}
+	}
+	for _, list := range [][]undecidedOrder{h.undecided, h.working} {
+		for _, r := range list {
+			if err := carried(r.id, r.venueID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// refuseSharedVenue refuses a broker snapshot that lists an order this run
+// released, under its client order ID, with a broker order ID another order
+// carries as its venue order ID (refuseVenue).
+func (h *Handler) refuseSharedVenue(in event.Envelope, listed []event.BrokerOrder) error {
+	for _, l := range listed {
+		if o, ok := h.released[l.ClientOrderID]; ok && l.ClientOrderID != "" && o.InstrumentID == l.InstrumentID {
+			if err := h.refuseVenue(in, l.ClientOrderID, l.BrokerOrderID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // applyLifecycle records the venue's report of a change to an order this
 // run released, and decides nothing else from it (ADR 0022). The report must
 // name the order as released: its account, instrument, side, quantity and
@@ -1082,6 +1127,9 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if !p.Describes(o) {
 		return fmt.Errorf("targetweight: lifecycle %s reports %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
 			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
+	}
+	if err := h.refuseVenue(in, p.ClientOrderID, p.OrderID); err != nil {
+		return err
 	}
 	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
