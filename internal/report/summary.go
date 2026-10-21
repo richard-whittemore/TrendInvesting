@@ -124,6 +124,12 @@ type Equity struct {
 	// account's net liquidation less it.
 	ShadowValue float64
 	Gap         float64
+	// DollarNote says when the shadow account stopped at zero, and, once a
+	// deposit restarted it, the day its dollar figures restart from;
+	// DollarsWithheld is set while it is stopped, and ShadowValue and Gap
+	// then mean nothing.
+	DollarNote      string
+	DollarsWithheld bool
 	// Verdict says whether the account is beating the benchmark since
 	// StartDate, from the two time-weighted returns; VerdictTone is
 	// VerdictAhead, VerdictBehind or VerdictLevel.

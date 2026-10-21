@@ -313,7 +313,7 @@ type source struct {
 // journal's file says less of its account than an engine directory. A
 // ledger that cannot be placed, or a second for one account, is refused: a
 // deposit mirrored on the wrong account would misstate both. Whether the
-// ledger is the account's own is checked when it is read (instanceOf).
+// ledger is the account's own is checked when it is read (report.LoadCashLedgerFor).
 func ledgersOf(values, journals, dirs []string) (map[string]string, error) {
 	sources := append(append([]string{}, journals...), dirs...)
 	out := map[string]string{}

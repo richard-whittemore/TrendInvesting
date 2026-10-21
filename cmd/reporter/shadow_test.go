@@ -114,7 +114,7 @@ func TestTheDailySummaryTakesOnlyTheAccountsOwnLedgerAndSaysHowFarItReaches(t *t
 	}
 	now := func() time.Time { return t0.AddDate(0, 0, 1).Add(time.Hour) }
 	for name, c := range map[string]struct{ dir, want string }{
-		"own":   {own, "transfers recorded through 2024-01-02; today's deposits or withdrawals, if any, are not yet recorded; tomorrow's summary includes them"},
+		"own":   {own, "transfers recorded through 2024-01-02; deposits or withdrawals from the last two days may not be recorded yet; a transfer appears in the summary two evenings after it posts"},
 		"other": {other, "ledger not accepted: it belongs to roth-ira, not trad-ira"},
 	} {
 		var out bytes.Buffer

@@ -131,7 +131,7 @@ func TestTheDashboardReadsTheFlexLedgerForEachEngineDirectory(t *testing.T) {
 	if !strings.Contains(page, "mirrored as recorded by the Flex reader (1 in this period: 10.00 in, 0.00 out)") {
 		t.Errorf("the page does not state the transfer it mirrored")
 	}
-	if !strings.Contains(page, "transfers recorded through 2024-01-02; today&#39;s deposits or withdrawals, if any, are not yet recorded; tomorrow&#39;s summary includes them") {
+	if !strings.Contains(page, "transfers recorded through 2024-01-02; deposits or withdrawals from the last two days may not be recorded yet; a transfer appears in the summary two evenings after it posts") {
 		t.Errorf("the page does not say how far the Flex reader has recorded:\n%s", page)
 	}
 	// No ledger yet: the page says the comparison assumes none.
@@ -202,15 +202,16 @@ func TestALedgerFromAnotherAccountsFolderIsNotMirrored(t *testing.T) {
 	}
 }
 
-func TestAWithheldVerdictShowsNoDollarGap(t *testing.T) {
-	a := shadowFixture(report.VerdictWithheld)
-	a.Summary.Equity.Verdict = "Verdict withheld: the recorded withdrawals exceeded the SPY shadow's value on 2024-01-03; the comparison is not meaningful after that day"
+func TestWithheldDollarFiguresKeepTheVerdictAndShowTheReason(t *testing.T) {
+	a := shadowFixture(report.VerdictAhead)
+	a.Summary.Equity.DollarsWithheld = true
+	a.Summary.Equity.DollarNote = "the recorded withdrawals exceeded the SPY shadow's value on 2024-01-03; dollar figures are not meaningful after that day"
 	a.Summary.Equity.ShadowValue, a.Summary.Equity.Gap = 0, 1530
 	body := execThemed(t, "", []account{a})
-	if !strings.Contains(body, "the recorded withdrawals exceeded the SPY shadow&#39;s value on 2024-01-03; the comparison is not meaningful after that day") {
-		t.Fatalf("the withheld verdict is not shown:\n%s", body)
+	if !strings.Contains(body, "Beating SPY by 0.5 points") || !strings.Contains(body, "exceeded the SPY shadow&#39;s value on 2024-01-03; dollar figures are not meaningful after that day") {
+		t.Fatalf("the verdict and the reason are both shown:\n%s", body)
 	}
 	if strings.Contains(body, "dollar gap") || strings.Contains(body, "&middot; gap") {
-		t.Error("a withheld verdict has no dollar gap: it measures nothing")
+		t.Error("withheld dollar figures show no gap")
 	}
 }

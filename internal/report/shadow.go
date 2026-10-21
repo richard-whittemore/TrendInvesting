@@ -11,13 +11,11 @@ import (
 )
 
 // The verdict's tones: the account ahead of the benchmark's shadow account,
-// behind it, or level with it within levelBand; or no verdict, withheld,
-// when the recorded withdrawals exceeded the shadow account's value.
+// behind it, or level with it within levelBand.
 const (
-	VerdictAhead    = "ahead"
-	VerdictBehind   = "behind"
-	VerdictLevel    = "level"
-	VerdictWithheld = "withheld"
+	VerdictAhead  = "ahead"
+	VerdictBehind = "behind"
+	VerdictLevel  = "level"
 )
 
 // levelBand is the gap between the two time-weighted returns, in percentage
@@ -118,11 +116,13 @@ func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger,
 		}
 	}
 	// The shadow's holding, in units of the index. It cannot sell what it
-	// does not hold: a withdrawal beyond its value, by more than half a
-	// cent, leaves it at zero from that session on, exhausted, and the
-	// verdict is withheld.
+	// does not hold: a withdrawal that takes its value to zero (within half
+	// a cent) or below leaves it at zero, stopped, and its dollar figures
+	// are withheld until the next recorded deposit buys the benchmark at
+	// that session's close and restarts it. The time-weighted verdict never
+	// depends on the units, so it is kept.
 	units := first.net
-	exhausted := ""
+	stopped, stoppedOn, restartedOn := false, "", ""
 	growth, prevNet := 1.0, first.net
 	next := 0
 	for _, p := range points {
@@ -133,13 +133,16 @@ func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger,
 				continue
 			}
 			moved += f
-			if exhausted != "" {
-				continue
+			at := index[sessions[next]]
+			switch {
+			case stopped && f > 0:
+				units, stopped, restartedOn = f/at, false, sessions[next]
+			case stopped:
+			case f < 0 && float64(units*at)+f < 0.005:
+				units, stopped, stoppedOn, restartedOn = 0, true, sessions[next], ""
+			default:
+				units += f / at
 			}
-			if float64(units*index[sessions[next]])+f < -0.005 {
-				exhausted = sessions[next]
-			}
-			units = math.Max(0, units+f/index[sessions[next]])
 		}
 		if p.date != first.date {
 			growth *= (p.net - moved) / prevNet
@@ -161,9 +164,14 @@ func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger,
 		e.DayBenchmarkReturn = index[last.date]/index[prevPoint.Date] - 1
 	}
 	e.Verdict, e.VerdictTone = verdict(e.Excess, benchmark, first.date)
-	if exhausted != "" {
-		e.Verdict = fmt.Sprintf("Verdict withheld: the recorded withdrawals exceeded the %s shadow's value on %s; the comparison is not meaningful after that day", benchmark, exhausted)
-		e.VerdictTone = VerdictWithheld
+	if stoppedOn != "" {
+		e.DollarNote = fmt.Sprintf("the recorded withdrawals exceeded the %s shadow's value on %s; ", benchmark, stoppedOn)
+		if stopped {
+			e.DollarsWithheld = true
+			e.DollarNote += "dollar figures are not meaningful after that day"
+		} else {
+			e.DollarNote += "dollar figures restart from " + restartedOn
+		}
 	}
 	e.Assumption = assumption(benchmark, reinvestedAny, priceOnly, leftOut, ledger, date, e)
 	return e
@@ -223,9 +231,9 @@ func assumption(benchmark string, reinvestedAny bool, priceOnly [][2]string, lef
 		parts = append(parts, fmt.Sprintf("your deposits and withdrawals mirrored as recorded by the Flex reader (%s)", transfersInWords(e)))
 		switch {
 		case ledger.CoveredTo == "":
-			parts = append(parts, "how far the Flex reader has recorded is not known; today's deposits or withdrawals, if any, may not be recorded yet")
+			parts = append(parts, "how far the Flex reader has recorded is not known; "+lastTwoDays)
 		case date > ledger.CoveredTo:
-			parts = append(parts, "transfers recorded through "+ledger.CoveredTo, "today's deposits or withdrawals, if any, are not yet recorded; tomorrow's summary includes them")
+			parts = append(parts, "transfers recorded through "+ledger.CoveredTo, lastTwoDays+"; a transfer appears in the summary two evenings after it posts")
 		default:
 			parts = append(parts, "transfers recorded through "+ledger.CoveredTo)
 		}
@@ -236,6 +244,12 @@ func assumption(benchmark string, reinvestedAny bool, priceOnly [][2]string, lef
 	}
 	return "Counted: " + strings.Join(parts, "; ") + ". Both returns are time-weighted; fees and interest stay in the account's own result."
 }
+
+// lastTwoDays is the reader's lag: a transfer posted on day D is first in
+// the statement read on the evening of the next session, so the summary two
+// sessions after D is the first to include it (reconciliation chapter,
+// "When"; a Friday transfer is in Tuesday's summary).
+const lastTwoDays = "deposits or withdrawals from the last two days may not be recorded yet"
 
 // inWords joins items as a list in words: "a", "a and b", "a, b and c".
 func inWords(items []string) string {
@@ -257,17 +271,22 @@ func transfersInWords(e Equity) string {
 
 // VerdictLine is the verdict with the dollar gap beside it, as the daily
 // summary sends it: the account's net liquidation against the shadow
-// account's value on the latest paired day; the verdict alone when it is
-// withheld, since the gap then measures nothing; "" before the comparison is
-// available.
+// account's value on the latest paired day, then the note on a stopped or
+// restarted shadow; the verdict and the note alone while the dollar figures
+// are withheld, since the gap then measures nothing; "" before the
+// comparison is available.
 func VerdictLine(e Equity, benchmark string) string {
 	if !e.Available {
 		return ""
 	}
-	if e.VerdictTone == VerdictWithheld {
-		return e.Verdict
+	if e.DollarsWithheld {
+		return e.Verdict + "; " + e.DollarNote
 	}
-	return fmt.Sprintf("%s; dollar gap %s (account %.2f, %s shadow %.2f)", e.Verdict, SignedMoney(e.Gap), e.Points[len(e.Points)-1].Net, benchmark, e.ShadowValue)
+	line := fmt.Sprintf("%s; dollar gap %s (account %.2f, %s shadow %.2f)", e.Verdict, SignedMoney(e.Gap), e.Points[len(e.Points)-1].Net, benchmark, e.ShadowValue)
+	if e.DollarNote != "" {
+		line += "; " + e.DollarNote
+	}
+	return line
 }
 
 // SignedMoney is a dollar figure to the cent with its sign; a figure that
