@@ -203,23 +203,29 @@ step_gateway() {
 
 # verify_adapter_venv VENV PINNED_PROTOBUF: the twsapi step's last gate, before
 # it records INSTALLED. -I: the venv's own packages only, nothing from the
-# current directory. The modules must import, google.protobuf must be the
-# pinned version, and it and ibapi must resolve under the venv itself: the
-# venv is made with --system-site-packages, so a system google/__init__.py
-# could otherwise shadow the venv's protobuf, which the adapter refuses at
-# start (ibapi_pin.py; ADR 0025).
+# current directory. The modules must import; the interpreter must be a real
+# venv (sys.prefix is not sys.base_prefix, as the adapter checks at start);
+# google.protobuf and ibapi must resolve under the realpath of VENV itself;
+# and google.protobuf must be the pinned version. The venv is made with
+# --system-site-packages, so a system google/__init__.py (a regular package)
+# can shadow the venv's namespace google; the location checks run before the
+# version check so that is reported as the shadow it is, not as a version
+# mismatch (ibapi_pin.py; ADR 0025).
 verify_adapter_venv() {
-  local venv=$1 want=$2 py="$1/bin/python3" out prefix version pb ib
+  local venv=$1 want=$2 py="$1/bin/python3" out real prefix base version pb ib
+  real=$(cd "$venv" && pwd -P) || die "$venv does not exist; not recording it"
   "$py" -I -c 'import google.protobuf, ibapi.client, ibapi.contract, ibapi.order, ibapi.wrapper' \
     || die "ibapi did not import from $venv after installing it; not recording it"
   out=$("$py" -I -c 'import os, sys, google.protobuf, ibapi
-print(os.path.realpath(sys.prefix)); print(google.protobuf.__version__)
+print(os.path.realpath(sys.prefix)); print(os.path.realpath(sys.base_prefix))
+print(google.protobuf.__version__)
 print(os.path.realpath(google.protobuf.__file__)); print(os.path.realpath(ibapi.__file__))') \
     || die "could not read where protobuf and ibapi resolve in $venv; not recording it"
-  { read -r prefix; read -r version; read -r pb; read -r ib; } <<<"$out"
+  { read -r prefix; read -r base; read -r version; read -r pb; read -r ib; } <<<"$out"
+  test "$prefix" != "$base" || die "$venv is not a venv (its interpreter's sys.prefix is the base prefix $base); not recording it"
+  case $pb in "$real"/*) ;; *) die "google.protobuf resolves to $pb, outside $venv; not recording it" ;; esac
+  case $ib in "$real"/*) ;; *) die "ibapi resolves to $ib, outside $venv; not recording it" ;; esac
   test "$version" = "$want" || die "protobuf $version in $venv, pinned $want; not recording it"
-  case $pb in "$prefix"/*) ;; *) die "google.protobuf resolves to $pb, outside $venv; not recording it" ;; esac
-  case $ib in "$prefix"/*) ;; *) die "ibapi resolves to $ib, outside $venv; not recording it" ;; esac
 }
 
 # IBKR's TWS API (the adapter's ibapi), fetched and verified against its
