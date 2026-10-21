@@ -337,6 +337,14 @@ func (p ReconciliationResultPayload) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("classification %q is not matched, explained, unexplained, unverifiable or pending-cash-read", p.Classification))
 	}
+	if p.RepeatOf != "" {
+		if p.Classification == ReconciliationMatched || p.Classification == ReconciliationUnverifiable {
+			errs = append(errs, fmt.Errorf("a %s result is no repeat of a pending cash difference", p.Classification))
+		}
+		if p.RepeatOf == p.InputID {
+			errs = append(errs, errors.New("a repeat names an earlier reading, not its own input"))
+		}
+	}
 	if p.Classification != ReconciliationUnverifiable && len(p.Unverifiable) > 0 {
 		errs = append(errs, errors.New("only an unverifiable result names unverifiable reasons"))
 	}

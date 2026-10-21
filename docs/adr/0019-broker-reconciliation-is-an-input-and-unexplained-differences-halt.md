@@ -969,6 +969,7 @@ sentence is the reporter's to state for an alert that moves no state.
 This changes what the engine decides from journalled inputs, so it is a rules
 change under ADR 0016: target-weight RulesVersion 1.21.0. New schemas:
 `account.flex-status` version 1; `risk.reconciliation.result` version 1 gains
-the classification `pending-cash-read` and the action `alert`;
+the classification `pending-cash-read`, the action `alert` and the field
+`repeat_of` (the reading a repeated pending cash read names);
 `risk.order.refused` version 4 adds the refusal reason
 `pending-cash-decrease`.

@@ -163,3 +163,39 @@ func TestAPendingCashReadIsACashOnlyDifferenceThatAlertsAndScopesNothing(t *test
 		t.Errorf("only a pending cash read alerts")
 	}
 }
+
+func TestARepeatOfIsAllowedOnlyOnAPendingCashReadAndItsDecision(t *testing.T) {
+	t.Parallel()
+
+	repeat := pendingResult()
+	repeat.RepeatOf = "r0"
+	if err := repeat.Validate(); err != nil {
+		t.Fatalf("a repeated pending cash read naming the first reading: %v", err)
+	}
+	self := pendingResult()
+	self.RepeatOf = self.InputID
+	if err := self.Validate(); err == nil {
+		t.Errorf("a repeat naming its own input was accepted")
+	}
+	matched := event.ReconciliationResultPayload{
+		AccountID: "ira", ReconciliationID: "r1", InputID: "in1", Classification: event.ReconciliationMatched,
+		Action: event.ReconciliationActionContinue, CashCompared: true, Currency: "USD",
+		Components: []event.ReconciliationComponent{{Component: event.ReconciliationComponentCash, Book: 1, Expected: 1, Observed: 1, Explanations: []string{}, Explained: true}},
+		Detail:     "matched", RepeatOf: "r0",
+	}
+	if err := matched.Validate(); err == nil {
+		t.Errorf("a matched result naming a repeat was accepted")
+	}
+	halt := event.ReconciliationResultPayload{
+		AccountID: "ira", ReconciliationID: "r1", InputID: "in1", Classification: event.ReconciliationUnverifiable,
+		Action: event.ReconciliationActionHalt, Unverifiable: []string{"stale"}, Components: []event.ReconciliationComponent{},
+		Detail: "unverifiable", RepeatOf: "r0",
+	}
+	if err := halt.Validate(); err == nil {
+		t.Errorf("an unverifiable result naming a repeat was accepted")
+	}
+	halt.RepeatOf = ""
+	if err := halt.Validate(); err != nil {
+		t.Fatalf("the halt fixture must be valid without a repeat: %v", err)
+	}
+}
