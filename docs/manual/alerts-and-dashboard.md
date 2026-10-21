@@ -82,6 +82,7 @@ account.
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
+| The server's clock failed its check (the reporter runs `clock-check.sh` at every firing, with `-clock-check`). The page gives the measured skew, or says none was measured, and the remedy ([server](server.md), "The clock"). Not repeated | urgent | failure: the account's next failure after a passing check is another alert, and failing checks in a row are one |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
 
 A sale back to 98% withheld for any other reason sends none of these
@@ -403,6 +404,7 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: venue report <id> not read` | urgent | [order lifecycle](order-lifecycle.md) |
 | `<account>: order <id> not acknowledged` | urgent | [order lifecycle](order-lifecycle.md) |
 | `<account>: order <id> acknowledged` | routine | [order lifecycle](order-lifecycle.md) |
+| `<account>: the server's clock failed its check` | urgent | this chapter, below, and [server](server.md), "The clock" |
 | `<account>: daily summary <date>` | routine | this chapter, "What the summary shows, and its limits" |
 
 **Why an order was refused.** The reason in `order refused (<reason>)`:
@@ -456,6 +458,11 @@ and whether the alert is urgent:
 | `<account>: no engine heartbeat` | The log has not changed while `-heartbeat-sessions` NYSE sessions (default 2) closed. One urgent alert per silence; a later silence is another. Orders already at IBKR are unaffected | `systemctl status ti-engine@<instance>` and `journalctl -u ti-engine@<instance>`. If it crashed, resume it; otherwise start a fresh run you approve ([restart](restart.md); runbook `docs/runbooks/durable-log.md`, "Restarting an engine") |
 | `<account>: the reporter cannot read the journal` | The log does not verify, mixes runs, is missing, or holds a decision record that fails its checks. No other alert from that log is sent and no summary; the heartbeat is still checked unless the body says "The heartbeat is NOT checked" and why. Once per account and problem; the run exits with the error | Check the file with `sudo -u ti-trader journal-query` ([journal-query](journal-query.md)); never edit it. Runbook `docs/runbooks/durable-log.md`, "A log that cannot be read". Until it reads, nothing in it reaches you: watch the account in IBKR's app |
 | `<account>: the reporter cannot check the heartbeat` | The NYSE calendar does not cover the span (it covers 2022 to 2030), so a silent engine would go unreported. Once per problem; the run exits with the error | Install a build whose calendar covers the year. Until then check the engine yourself each trading day |
+| `<account>: the server's clock failed its check` | The reporter runs the clock check (`/usr/local/libexec/trend-investing/clock-check.sh`) at every firing, so within 5 minutes of the clock going wrong. A clock behind IBKR's makes the engine count the account reading as stale and withhold every sell (ADR 0019). The alert gives the time of the check, the skew it measured (this clock minus the reference; none when the clock is not synchronised, when no reference could be reached, or when the check could not be run at all) and what the check said. It is sent once per failure, not every 5 minutes and not on the 30-minute repeat; when a later check passes the failure is forgotten, so drifting again pages again | Run the check by hand and fix the time syncing, or on the Mac mini turn on the Mac's automatic date and time ([server](server.md), "The clock"). If the alert says the check could not be run, the file is missing: run `sudo deploy/provision.sh clock`. Until the clock is right, expect sales to be withheld as `stale-broker-snapshot` |
+
+The daily summary's last line, "Clock check: ok at <time> (...)" or "Clock check:
+FAILED at <time> (...)", is the check the reporter ran in the same firing that
+sent the summary; it appears only when the unit passes `-clock-check`.
 
 ### The reporter itself
 

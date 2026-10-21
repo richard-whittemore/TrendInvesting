@@ -71,6 +71,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	repeat := flags.Duration("repeat-interval", defaultRepeatInterval, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets, read for any not set in the environment (under systemd: %d/secrets, the credential file)")
 	ackWithin := flags.Duration("ack-within", defaultAckWithin, "longest an order to be sent may go without the venue acknowledging it, from its commit, before an alert fires")
+	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run on every firing, a failure is alerted once, and the daily summary shows the last check")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -145,10 +146,20 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, unchecked, now())}
 	}
 	alerts = append(alerts, heartbeat...)
+	var clock *report.ClockCheck
+	if *clockCheck != "" {
+		c := runClockCheck(*clockCheck, now())
+		clock = &c
+		if c.Passed {
+			forgetAlert(report.ClockDriftAlert(label, c).Key, seen, sent, repeats)
+		} else {
+			alerts = append(alerts, report.ClockDriftAlert(label, c))
+		}
+	}
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
 	if *summary && refused == nil {
-		a, due, err := summaryAlert(envelopes, *date, *benchmark)
+		a, due, err := summaryAlert(envelopes, *date, *benchmark, clock)
 		switch {
 		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
@@ -228,8 +239,9 @@ func deliveredAnywhere(seen map[string]bool, key string) bool {
 // orders are written with that close: a summary sent earlier would be
 // incomplete and, being keyed by the day, never replaced. With no date it is
 // the latest closed session's day, and it is not yet due when none has
-// closed. A stated date whose session has not closed is an error.
-func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Alert, bool, error) {
+// closed. A stated date whose session has not closed is an error. A clock
+// check run in this firing adds its time and result as the summary's last line.
+func summaryAlert(envelopes []event.Envelope, date, benchmark string, clock *report.ClockCheck) (report.Alert, bool, error) {
 	if date == "" {
 		last, ok := report.ClosedSessionDate(envelopes)
 		if !ok {
@@ -244,9 +256,13 @@ func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Al
 	if !report.SessionClosedOn(envelopes, date) {
 		return report.Alert{}, false, fmt.Errorf("the log records no session closed on %s, so that day is not complete; it is sent once it is", date)
 	}
+	body := report.RenderText(s)
+	if clock != nil {
+		body += report.ClockSummaryLine(*clock) + "\n"
+	}
 	return report.Alert{
 		Key: "summary:" + s.AccountID + ":" + s.Date, Kind: kindSummary, Severity: report.Routine, AccountID: s.AccountID,
-		Title: fmt.Sprintf("%s: daily summary %s", s.AccountID, s.Date), Body: report.RenderText(s),
+		Title: fmt.Sprintf("%s: daily summary %s", s.AccountID, s.Date), Body: body,
 	}, true, nil
 }
 
