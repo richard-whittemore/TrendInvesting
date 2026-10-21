@@ -501,7 +501,7 @@ name; the other words in angle brackets are filled in by the reporter.
 
 | Reason | Explained in |
 | --- | --- |
-| `kill-switch`, `engine-degraded`, `engine-halted`, `sale-attempted`, `broker-holding`, `sell-exceeds-holding`, `stale-broker-snapshot`, `undecided-order`, `order-count`, `order-size`, `price-band`, `missing-mark`, `unvalued-holding` | [states and kill switch](states-and-kill-switch.md) |
+| `kill-switch`, `engine-degraded`, `engine-halted`, `sale-attempted`, `broker-holding`, `sell-exceeds-holding`, `stale-broker-snapshot`, `undecided-order`, `order-count`, `order-size`, `price-band`, `missing-mark`, `unvalued-holding`, `pending-cash-decrease` | [states and kill switch](states-and-kill-switch.md) |
 | `margin-exposure` | [Boost](boost.md) |
 | `ira-exposure`, `insufficient-cash` | [momentum](momentum.md) |
 

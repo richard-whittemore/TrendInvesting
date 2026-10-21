@@ -266,8 +266,10 @@ advance (ADR 0026, point 7). See [parity](parity.md).
 
 **Pending cash read.** A reconciliation that found only an IRA's cash
 different on a day the Flex reader has not yet read, so a deposit or
-withdrawal you made may explain it. It alerts once and changes nothing else:
-the account keeps its state and buys carry on. It is settled when the
+withdrawal you made may explain it. It alerts once and changes no state.
+With more cash than the book (a deposit), buys carry on; with less (a
+withdrawal), every buy is refused (`pending-cash-decrease`) until it is
+settled, and sells and exits go on. It is settled when the
 reader's record explains it, or becomes Degraded on cash once the reader has
 read the day, or after more than two sessions. See
 [reconciliation](reconciliation.md).

@@ -440,22 +440,25 @@ func TestSafetyFieldsJoinAtTheirVersions(t *testing.T) {
 	killRefused.Reason = event.RefusedKillSwitch
 	sellRefused := validOrderRefused()
 	sellRefused.Reason = event.RefusedSellExceedsHolding
+	pendingRefused := validOrderRefused()
+	pendingRefused.Reason = event.RefusedPendingCashDecrease
 	for name, c := range map[string]struct {
 		p      versioned
 		want   uint32 // the version a writer journals it at
 		oldest uint32 // the earliest version that holds it
 		latest uint32 // the latest version of its type
 	}{
-		"ordinary order":           {validOrderPlanned(), event.OrderPlannedSchemaVersion, 1, 2},
-		"sale":                     {validSaleOrder(), event.OrderPlannedSafetyVersion, 2, 2},
-		"release without a broker": {validOrderReleased(), event.OrderReleasedSchemaVersion, 1, 3},
-		"release with IRA cash":    {cashReleased, event.OrderReleasedSchemaVersion, 2, 3},
-		"release with a broker":    {brokerReleased, event.OrderReleasedSafetyVersion, 3, 3},
-		"refusal without a broker": {validOrderRefused(), event.OrderRefusedSchemaVersion, 1, 3},
-		"IRA refusal":              {validIRARefused(), event.OrderRefusedSchemaVersion, 2, 3},
-		"sell-exceeds-holding":     {sellRefused, event.OrderRefusedSchemaVersion, 2, 3},
-		"refusal with a broker":    {brokerRefused, event.OrderRefusedSafetyVersion, 3, 3},
-		"kill-switch refusal":      {killRefused, event.OrderRefusedSafetyVersion, 3, 3},
+		"ordinary order":            {validOrderPlanned(), event.OrderPlannedSchemaVersion, 1, 2},
+		"sale":                      {validSaleOrder(), event.OrderPlannedSafetyVersion, 2, 2},
+		"release without a broker":  {validOrderReleased(), event.OrderReleasedSchemaVersion, 1, 3},
+		"release with IRA cash":     {cashReleased, event.OrderReleasedSchemaVersion, 2, 3},
+		"release with a broker":     {brokerReleased, event.OrderReleasedSafetyVersion, 3, 3},
+		"refusal without a broker":  {validOrderRefused(), event.OrderRefusedSchemaVersion, 1, 4},
+		"IRA refusal":               {validIRARefused(), event.OrderRefusedSchemaVersion, 2, 4},
+		"sell-exceeds-holding":      {sellRefused, event.OrderRefusedSchemaVersion, 2, 4},
+		"refusal with a broker":     {brokerRefused, event.OrderRefusedSafetyVersion, 3, 4},
+		"kill-switch refusal":       {killRefused, event.OrderRefusedSafetyVersion, 3, 4},
+		"pending-cash-read refusal": {pendingRefused, event.OrderRefusedPendingCashVersion, 4, 4},
 	} {
 		if got := c.p.SchemaVersion(); got != c.want {
 			t.Errorf("%s: version %d, want %d", name, got, c.want)
@@ -477,7 +480,7 @@ func TestSafetyFieldsJoinAtTheirVersions(t *testing.T) {
 		}
 	}
 	if event.OrderReleasedSchemaVersion != 2 || event.OrderReleasedSafetyVersion != 3 ||
-		event.OrderRefusedSchemaVersion != 2 || event.OrderRefusedSafetyVersion != 3 ||
+		event.OrderRefusedSchemaVersion != 2 || event.OrderRefusedSafetyVersion != 3 || event.OrderRefusedPendingCashVersion != 4 ||
 		event.OrderPlannedSchemaVersion != 1 || event.OrderPlannedSafetyVersion != 2 {
 		t.Error("the released and refused versions are 2 and 3, the planned versions 1 and 2")
 	}
@@ -557,7 +560,7 @@ func TestOrderRecordsAreReadAtEveryVersionTheyWereWritten(t *testing.T) {
 	}{
 		"planned":  {event.OrderPlannedVersions(), event.OrderPlannedSafetyVersion},
 		"released": {event.OrderReleasedVersions(), event.OrderReleasedSafetyVersion},
-		"refused":  {event.OrderRefusedVersions(), event.OrderRefusedSafetyVersion},
+		"refused":  {event.OrderRefusedVersions(), event.OrderRefusedPendingCashVersion},
 	} {
 		var want []uint32
 		for v := uint32(1); v <= c.latest; v++ {

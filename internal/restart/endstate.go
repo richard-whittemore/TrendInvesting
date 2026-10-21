@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -41,6 +42,22 @@ type EndState struct {
 	// nothing (risklimit.Gate.SetKillSwitch). A fresh run starts with it released,
 	// so the operator engages it again.
 	KillSwitchEngaged bool
+	// PendingCash is every cash difference the log reported as a pending
+	// cash read and never decided, in the order reported (pendingCashAtEnd).
+	// A fresh run starts with none pending, so its approval must state the
+	// starting book the owner checked in IBKR, which supersedes them (ADR
+	// 0019, amended 2026-10-21).
+	PendingCash []PendingCashRead
+}
+
+// PendingCashRead is one undecided pending cash difference: the
+// reconciliation input that found it, its reconciliation, and the cash
+// residual, in whole cents, in Currency.
+type PendingCashRead struct {
+	InputID          string
+	ReconciliationID string
+	Residual         int64
+	Currency         string
 }
 
 // ReadEndState reads the state the approved log's entries, recorded for
@@ -58,6 +75,9 @@ func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState,
 	end.Scope = slices.Sorted(slices.Values(end.Scope))
 	end.ScopeCash = slices.Sorted(slices.Values(end.ScopeCash))
 	if end.SaleAttempted, end.SaleClientOrderID, err = saleAttemptAtEnd(entries, end.IncidentID, logName); err != nil {
+		return EndState{}, err
+	}
+	if end.PendingCash, err = pendingCashAtEnd(entries, logName); err != nil {
 		return EndState{}, err
 	}
 	var lastKillAt time.Time
@@ -154,6 +174,10 @@ type ApprovalRequest struct {
 	// sale back to 98% attempted, for a sale the owner made by hand that the
 	// log does not record.
 	SaleAttempted bool
+	// StartingBook is whether the approval states the starting book the
+	// owner checked in IBKR (-positions, -cash, -currency), which supersedes
+	// a pending cash difference the log leaves undecided.
+	StartingBook bool
 }
 
 // ProposeApproval builds the approval of a fresh run after a log ending in
@@ -166,6 +190,8 @@ type ApprovalRequest struct {
 // hand sale as the incident's one attempt, carried attempted with the
 // recorded one; it is refused with ClearIncident, on a log ending Normal,
 // and where end already records the attempt (ADR 0019, amended 2026-10-15).
+// A log that leaves a pending cash difference undecided is refused unless
+// req states the starting book (ADR 0019, amended 2026-10-21).
 func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprovedPayload, error) {
 	p := event.OperatorRunApprovedPayload{
 		AccountID: req.AccountID, PreviousLog: req.PreviousLog, PreviousLogFinalHash: req.PreviousLogFinalHash,
@@ -178,6 +204,8 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s records no incident, so there is no sale to state as attempted: it ended normal", req.PreviousLog)
 	case req.SaleAttempted && end.SaleAttempted:
 		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s already records an attempt of incident %s's one sale back to 98%%, so the approval carries it attempted without -sale-attempted", req.PreviousLog, end.IncidentID)
+	case len(end.PendingCash) > 0 && !req.StartingBook:
+		return event.OperatorRunApprovedPayload{}, pendingRefusal(req.PreviousLog, end.PendingCash)
 	case req.ClearIncident != "" && end.IncidentID == "":
 		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s records no incident, so there is none to clear: it ended normal", req.PreviousLog)
 	case req.ClearIncident != "" && req.ClearIncident != end.IncidentID:
@@ -194,4 +222,64 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 		return event.OperatorRunApprovedPayload{}, errors.Join(errors.New("restart: the approval is refused"), err)
 	}
 	return p, nil
+}
+
+// pendingCashAtEnd returns every cash difference the approved log reported
+// as a pending cash read (a risk.reconciliation.result classified
+// pending-cash-read) with no later result deciding it: one for the same
+// reconciliation input, explained or unexplained (risklimit's settlement).
+// A result that cannot be decoded refuses, naming it in logName.
+func pendingCashAtEnd(entries []journal.Entry, logName string) ([]PendingCashRead, error) {
+	var pending []PendingCashRead
+	for _, entry := range entries {
+		env := entry.Envelope
+		if entry.Kind != journal.KindDecision || env.Type != event.ReconciliationResultEventType {
+			continue
+		}
+		var p event.ReconciliationResultPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return nil, fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+		}
+		if p.Classification != event.ReconciliationPendingCashRead {
+			pending = slices.DeleteFunc(pending, func(pc PendingCashRead) bool { return pc.InputID == p.InputID })
+			continue
+		}
+		pc := PendingCashRead{InputID: p.InputID, ReconciliationID: p.ReconciliationID, Currency: p.Currency}
+		for _, c := range p.Components {
+			if c.Component == event.ReconciliationComponentCash {
+				pc.Residual = c.Residual
+			}
+		}
+		pending = append(pending, pc)
+	}
+	return pending, nil
+}
+
+// pendingRefusal states why a fresh run's approval without a starting book
+// is refused while pending names an undecided cash difference (ADR 0019,
+// amended 2026-10-21).
+func pendingRefusal(logName string, pending []PendingCashRead) error {
+	named := make([]string, 0, len(pending))
+	for _, pc := range pending {
+		sign, c := "", pc.Residual
+		if c < 0 {
+			sign, c = "-", -c
+		}
+		named = append(named, fmt.Sprintf("reconciliation %s (input %s) found %s%d.%02d %s", pc.ReconciliationID, pc.InputID, sign, c/100, c%100, pc.Currency))
+	}
+	return fmt.Errorf("restart: %s ends with a cash difference pending a reading of IBKR's statement and not yet decided: %s; a fresh run starts with none pending, so it would be forgotten: wait until the Flex reader's records explain it or it is decided, or state the book you checked in IBKR after the transfer with -positions, -cash and -currency, which supersedes it (ADR 0019, amended 2026-10-21)",
+		logName, strings.Join(named, "; "))
+}
+
+// CheckPendingCash refuses an approval that states no starting book when the
+// approved log leaves a pending cash difference undecided: a fresh run starts
+// with none pending, so the difference would be forgotten; the starting book
+// the owner checked in IBKR supersedes it (ADR 0019, amended 2026-10-21).
+// logName names the approved log in a refusal.
+func CheckPendingCash(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
+	pending, err := pendingCashAtEnd(entries, logName)
+	if err != nil || len(pending) == 0 || approval.StartingBook != nil {
+		return err
+	}
+	return pendingRefusal(logName, pending)
 }

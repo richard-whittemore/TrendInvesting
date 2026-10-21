@@ -302,11 +302,49 @@ func (g *Gate) pend(id string, o reconcile.Outcome, p event.ReconciliationPayloa
 	if g.flex.State == event.FlexStateRead {
 		read = "has read IBKR's cash transactions only through " + g.flex.CoveredTo
 	}
+	// A cash increase is at IBKR, so a buy sized on it is sized on cash that
+	// is there; a decrease may be a withdrawal, so every buy is withheld
+	// while it pends (withheldOnCash).
+	direction := fmt.Sprintf("it is a cash increase of %s %s, like a deposit: this result withholds no buy, since the cash is at IBKR", cents(cash.Residual), r.Currency)
+	if cash.Residual < 0 {
+		direction = fmt.Sprintf("it is a cash decrease of %s %s, like a withdrawal: buys are withheld on the whole account while it pends, so no plan is sized on cash that may not be there, and sells and exits continue", cents(-cash.Residual), r.Currency)
+	}
 	r.Classification, r.Action, r.ScopeCashComponents = event.ReconciliationPendingCashRead, event.ReconciliationActionAlert, nil
-	r.Detail = fmt.Sprintf("pending-cash-read: %s; the Flex reader %s, so a deposit or withdrawal it has not yet recorded may explain it: the account stays %s, buys are not stopped, and the difference is checked again at each reconciliation until the reader's records explain it, or it is Degraded on cash once the reader has covered %s or more than %d sessions have closed since",
-		strings.TrimPrefix(r.Detail, "unexplained: "), read, g.state, p.AsOf.In(nysecalendar.NewYork).Format("20060102"), pendingSessions)
+	r.Detail = fmt.Sprintf("pending-cash-read: %s; the Flex reader %s, so a deposit or withdrawal it has not yet recorded may explain it; %s; %s; the difference is checked again at each reconciliation until the reader's records explain it, or it is Degraded on cash once the reader has covered %s or more than %d sessions have closed since",
+		strings.TrimPrefix(r.Detail, "unexplained: "), read, direction, g.stateClause(), p.AsOf.In(nysecalendar.NewYork).Format("20060102"), pendingSessions)
 	g.pendingCash = append(g.pendingCash, pendingCash{inputID: id, result: r, cash: cash, from: from, to: p.AsOf, counted: counted})
 	return r
+}
+
+// stateClause states the account's engine state as a pending cash read
+// leaves it: a pending cash read is no state, so it is the state already in
+// force, a Degraded one with its scope.
+func (g *Gate) stateClause() string {
+	switch g.state {
+	case StateHalted:
+		return "the account stays Halted"
+	case StateDegraded:
+		scope := slices.Clone(g.scope)
+		if len(g.cashScope) > 0 {
+			scope = append(scope, "cash")
+		}
+		return "the account stays Degraded on " + strings.Join(scope, ", ")
+	}
+	return "the account stays Normal"
+}
+
+// withheldOnCash returns the reconciliation input that found the earliest
+// pending cash decrease still undecided, or "" when none: while one pends,
+// every buy is withheld, since it may be a withdrawal and the cash a buy is
+// sized on may not be there; sells and exits go (ADR 0019, amended
+// 2026-10-21).
+func (g *Gate) withheldOnCash() (inputID string, residual int64, currency string) {
+	for _, pc := range g.pendingCash {
+		if pc.cash.Residual < 0 {
+			return pc.inputID, pc.cash.Residual, pc.result.Currency
+		}
+	}
+	return "", 0, ""
 }
 
 // settlePending decides each pending cash difference reported before p, the
@@ -331,7 +369,7 @@ func (g *Gate) settlePending(id string, p event.ReconciliationPayload) []Reconci
 			kept = append(kept, pc)
 			continue
 		}
-		sum, ids, sumErr := reconcile.TransfersIn(g.changes, pc.from, pc.to, pc.counted)
+		sum, ids, sumErr := reconcile.TransfersIn(g.changes, pc.from, pc.to, pc.counted, pc.result.Currency)
 		sessions, _, calErr := nysecalendar.Closes(pc.to, p.AsOf)
 		r := pc.result
 		c := pc.cash

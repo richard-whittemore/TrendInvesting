@@ -863,10 +863,24 @@ meet the money before the reader has recorded it.
    cash, the journal holds a Flex status, and that status does not cover the
    observation's New York day (its last reading did not read, or covered only
    earlier days), the result is classified `pending-cash-read` with the
-   action `alert`: it names no scope, moves no engine state, and stops no buy;
-   the reporter's reconciliation alert pages it. The difference is checked
-   again at each later reconciliation against the transfers journalled since
-   in its own window:
+   action `alert`: it names no scope and moves no engine state; the
+   reporter's reconciliation alert pages it. What it does to buys depends on
+   its direction (the owner's rule of 2026-10-21: fail closed, and the
+   owner's own transfers never need a manual recovery):
+   - **a cash increase** (IBKR shows more than the book: deposit-like) stops
+     no buy, because the cash is real at the broker;
+   - **a cash decrease** (IBKR shows less: withdrawal-like) withholds every
+     buy on the whole account while it pends, so no plan is sized on cash
+     that may not be there (`risk.order.refused`, reason
+     `pending-cash-decrease`, which moves no state); sells and exits go, as
+     they do while Degraded.
+   The detail names the direction, the consequence, and the account's engine
+   state as it stands (a pending cash read is no state: an account already
+   Degraded or Halted stays so). The difference is checked again at each
+   later reconciliation against the transfers journalled since in its own
+   window, a transfer counting only in the difference's currency (one in
+   another makes the difference unverifiable to sum, so it is decided
+   unexplained):
    - explained to the cent: a result `explained` is journalled for it, under
      its own reconciliation ID and the reconciliation that re-checked it, and
      it is settled;
@@ -882,8 +896,11 @@ meet the money before the reader has recorded it.
    the reader's status already covers; and one where a journalled withdrawal
    is larger than the cash on hand before it, which IBKR would refuse, so the
    record itself is in doubt: that difference is named in the detail and is
-   never pending. A book the NYSE calendar cannot place is never pending
-   either.
+   never pending. The cash on hand is run in time order (each change's time,
+   then IBKR's transaction ID for transfers of the same time, as the reader
+   writes them), not journal order, since the reader may journal an earlier
+   transfer after a later one. A book the NYSE calendar cannot place is never
+   pending either.
 5. **The adapter's cash-drift bound subtracts journalled transfers before it
    is applied.** The IBKR adapter's post-close check (condition 2 of the
    amendment of 2026-10-18) reads the same ledger (`--cash-ledger`) and
@@ -891,21 +908,40 @@ meet the money before the reader has recorded it.
    previous close before comparing the drift with 1% of net liquidation, and
    from the unexplained cash the daily summary shows. A ledger that cannot be
    read fails the cash check (the reading is stamped at its read time) rather
-   than pass unchecked.
+   than pass unchecked. The unexplained cash's basis is the latest
+   reconciliation a result names as explained: a pending cash read is not,
+   until a later result settles it explained.
+6. **A fresh run never forgets a pending difference.** A fresh run starts
+   with none pending, so `operator approve` refuses a fresh run's approval
+   while the previous log holds a pending cash read no later result decided,
+   naming it, and the engine refuses such an approval at its start, unless
+   the approval states the starting book the owner checked in IBKR after the
+   transfer (`-positions`, `-cash`, `-currency`), which supersedes it.
 
-**What this does not cover.** A transfer IBKR times later on a close's
-evening than the post-close reading is taken as held by that close's book,
-as the reader takes it; the next reconciliation then finds a difference,
-pending until the reader covers the day and then Degraded. A fresh run
-starts with no pending difference: one pending when a run ends is not carried
-into the next, so the owner checks a pending cash read before approving a
-fresh run. The joint account's book states no cash, so Boost compares no cash
-and the journalled transfers change none of its results. The reporter's alert
-text for a pending cash read is the reconciliation alert's: its title names
-`pending-cash-read`; its body's account-state sentence is the reporter's to
-state for an alert that moves no state.
+**What this does not cover.** A deposit or withdrawal made during the day
+that moves the cash by more than the adapter's 1% drift bound makes that
+evening's reading stamp at its read time (`not_as_of_close`, the existing
+rule of the amendment of 2026-10-18): the reader runs after the reading and
+IBKR's statement holds a day's transfers only from the next evening, so
+nothing is subtracted yet. The engine withholds that session as stale and the
+reporter pages it, beside the pending cash read the same reading's
+reconciliation raises; the strategy invests a deposit at the next decision
+after the reader has recorded it, usually the following evening. Investing
+it the same evening would need a separate decision on the drift bound. The
+pending cash read clears at the first reconciliation after the reader has
+covered the day, usually the next evening, sometimes the one after. A
+transfer IBKR times later on a close's evening than the post-close reading is
+taken as held by that close's book, as the reader takes it; the next
+reconciliation then finds a difference, pending until the reader covers the
+day and then Degraded. The joint account's book states no cash, so Boost
+compares no cash and the journalled transfers change none of its results.
+The reporter's alert text for a pending cash read is the reconciliation
+alert's: its title names `pending-cash-read`; its body's account-state
+sentence is the reporter's to state for an alert that moves no state.
 
 This changes what the engine decides from journalled inputs, so it is a rules
 change under ADR 0016: target-weight RulesVersion 1.21.0. New schemas:
 `account.flex-status` version 1; `risk.reconciliation.result` version 1 gains
-the classification `pending-cash-read` and the action `alert`.
+the classification `pending-cash-read` and the action `alert`;
+`risk.order.refused` version 4 adds the refusal reason
+`pending-cash-decrease`.

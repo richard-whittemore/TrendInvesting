@@ -531,6 +531,12 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineDegraded, fmt.Sprintf("the account is Degraded (scope %v): only risk-reducing sells go, and the scope's instruments are frozen", g.scope))}
 	case g.state == StateDegraded && !f.BrokerSet:
 		return Outcome{Refused: g.refusal(o, f, event.RefusedBrokerHolding, "the account is Degraded and no readable broker snapshot holds the quantity to size this sell from")}
+	case p.Side == event.OrderSideBuy:
+		// ADR 0019, amended 2026-10-21: a pending cash decrease may be a
+		// withdrawal, so no buy is sized on cash that may not be there.
+		if input, residual, currency := g.withheldOnCash(); input != "" {
+			return Outcome{Refused: g.refusal(o, f, event.RefusedPendingCashDecrease, fmt.Sprintf("reconciliation %s found a cash decrease of %s %s pending a reading of IBKR's statement: every buy is withheld until the Flex reader's records explain it or it is decided; sells and exits go", input, cents(-residual), currency))}
+		}
 	}
 	// After the engine-state and kill-switch refusals, so a stale snapshot
 	// never stops Boost's exit from firing the sale back to 98%.

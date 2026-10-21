@@ -98,6 +98,10 @@ type Change struct {
 	// change while comparing cash, and ignores it when it does not. Share
 	// counts are int64 already; their arithmetic is checked as it is applied.
 	CashFault string
+	// TransactionID is a transfer's IBKR transaction ID, which orders
+	// transfers of the same time as the Flex reader writes them (as of, then
+	// transaction ID); empty for any other change.
+	TransactionID string
 }
 
 // FillChange is fill p's change: a buy adds its shares and costs its value
@@ -149,7 +153,7 @@ func CorporateActionChange(id string, p event.CorporateActionPayload) Change {
 // Amount) or withdrawal, envelope id: its amount in whole cents, dated at its
 // as of (ADR 0007; ADR 0019, amended 2026-10-21). It moves no holding.
 func CashMovementChange(id string, p event.CashMovementPayload) Change {
-	c := Change{ID: id, Kind: ChangeCashMovement, At: p.AsOf, Currency: p.Currency}
+	c := Change{ID: id, Kind: ChangeCashMovement, At: p.AsOf, Currency: p.Currency, TransactionID: p.TransactionID}
 	var err error
 	if c.Cash, err = Cents(p.Amount); err != nil {
 		c.CashFault = fmt.Sprintf("cash movement %s: %v", id, err)
@@ -185,8 +189,10 @@ func HeldUntil(book Book) (time.Time, error) {
 // TransfersIn sums, in whole cents, the journalled transfers among changes
 // dated from from up to, not including, to, leaving out those counted
 // already, and names them in journal order. A transfer whose amount is no
-// cent count, or a sum that does not fit an int64, is an error.
-func TransfersIn(changes []Change, from, to time.Time, counted map[string]bool) (sum int64, ids []string, err error) {
+// cent count, one in a currency other than currency, the difference's (which
+// Classify finds unverifiable: ADR 0019, "Explained means"), or a sum that
+// does not fit an int64, is an error.
+func TransfersIn(changes []Change, from, to time.Time, counted map[string]bool, currency string) (sum int64, ids []string, err error) {
 	ids = []string{}
 	for _, c := range changes {
 		at := c.At.Truncate(time.Second)
@@ -195,6 +201,9 @@ func TransfersIn(changes []Change, from, to time.Time, counted map[string]bool) 
 		}
 		if c.CashFault != "" {
 			return 0, nil, errors.New(c.CashFault)
+		}
+		if c.Currency != currency {
+			return 0, nil, fmt.Errorf("%s moves cash in %s; the difference is in %s", c.ID, c.Currency, currency)
 		}
 		if sum, err = addCents(sum, c.Cash); err != nil {
 			return 0, nil, err
@@ -371,7 +380,9 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	explained := map[string][]string{}
 	cash, cashExplained := book.Cash, []string{}
 	var parts cashParts
-	var overdrawn []string
+	// applied is every change whose cash was applied, in journal order: the
+	// overdrawn test runs over it in time order (overdrawnIn).
+	var applied []Change
 	heldUntil, heldErr := time.Time{}, error(nil)
 	if cashRead && slices.ContainsFunc(changes, func(c Change) bool { return c.Kind == ChangeCashMovement }) {
 		if heldUntil, heldErr = HeldUntil(*book); heldErr != nil {
@@ -410,10 +421,8 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 				reasons = append(reasons, fmt.Sprintf("%s: the expected cash: %v", c.ID, err))
 				continue
 			}
-			if c.Cash < 0 && next < 0 {
-				overdrawn = append(overdrawn, fmt.Sprintf("withdrawal %s of %s is more than the cash on hand before it, %s, which IBKR refuses", c.ID, dollars(-c.Cash), dollars(cash)))
-			}
 			cash = next
+			applied = append(applied, c)
 			cashExplained = append(cashExplained, c.ID)
 			continue
 		}
@@ -439,8 +448,10 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 		if cashRead && (c.Cash != 0 || c.Kind == ChangeFill) {
 			cash = nextCash
 			cashExplained = append(cashExplained, c.ID)
+			applied = append(applied, c)
 		}
 	}
+	overdrawn := overdrawnIn(book.Cash, applied)
 
 	if cashRead {
 		appendEntry(&r, &reasons, event.ReconciliationComponent{
@@ -463,6 +474,39 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	}
 	r = finish(r, reasons, parts.String(book.Cash), overdrawn, uncompared)
 	return r, len(overdrawn) > 0 && r.Classification == event.ReconciliationUnexplained
+}
+
+// overdrawnIn names each journalled withdrawal among applied, the changes
+// whose cash a reconciliation applied, that takes the cash below zero,
+// starting from book: IBKR refuses a withdrawal of more than the account's
+// cash (ADR 0019, amended 2026-10-21). The cash is run in time order, not
+// journal order, since the Flex reader may journal an earlier transfer after
+// a later one; transfers of the same time run in IBKR's transaction ID
+// order, as the reader writes them (adapter/ibkr/flex.py), and other changes
+// of the same time before them, in journal order.
+func overdrawnIn(book int64, applied []Change) []string {
+	ordered := slices.Clone(applied)
+	slices.SortStableFunc(ordered, func(a, b Change) int {
+		if c := a.At.Truncate(time.Second).Compare(b.At.Truncate(time.Second)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.TransactionID, b.TransactionID)
+	})
+	var overdrawn []string
+	cash := book
+	for _, c := range ordered {
+		next, err := addCents(cash, c.Cash)
+		if err != nil {
+			// The journal-order sum fitted; one that does not in time
+			// order says nothing about a withdrawal.
+			return overdrawn
+		}
+		if c.Kind == ChangeCashMovement && c.Cash < 0 && next < 0 {
+			overdrawn = append(overdrawn, fmt.Sprintf("withdrawal %s of %s is more than the cash on hand before it, %s, which IBKR refuses", c.ID, dollars(-c.Cash), dollars(cash)))
+		}
+		cash = next
+	}
+	return overdrawn
 }
 
 // appendEntry completes c's residual and whether it is explained, and adds it

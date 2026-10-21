@@ -112,11 +112,11 @@ func TestTheCloseSnapshotCheckIgnoresTransfers(t *testing.T) {
 
 func TestTransfersInSumsWhatAWindowHolds(t *testing.T) {
 	changes := []reconcile.Change{transfer("T1", 1000, midnight), transfer("T2", -200, midnight.Add(time.Hour)), transfer("T3", 5, morning)}
-	sum, ids, err := reconcile.TransfersIn(changes, midnight, morning, nil)
+	sum, ids, err := reconcile.TransfersIn(changes, midnight, morning, nil, "USD")
 	if err != nil || sum != 80000 || !slices.Equal(ids, []string{"ibkr-flex:T1", "ibkr-flex:T2"}) {
 		t.Fatalf("got %d %v %v", sum, ids, err)
 	}
-	sum, ids, _ = reconcile.TransfersIn(changes, midnight, morning, map[string]bool{"ibkr-flex:T1": true})
+	sum, ids, _ = reconcile.TransfersIn(changes, midnight, morning, map[string]bool{"ibkr-flex:T1": true}, "USD")
 	if sum != -20000 || !slices.Equal(ids, []string{"ibkr-flex:T2"}) {
 		t.Errorf("a transfer already counted is left out: %d %v", sum, ids)
 	}
@@ -133,14 +133,14 @@ func TestATransferTheBookCannotCountIsUnverifiable(t *testing.T) {
 	if r := classify(t, iraBook(), []reconcile.Change{huge}, obs); r.Classification != event.ReconciliationUnverifiable || !strings.Contains(r.Detail, "cash movement ibkr-flex:T7") {
 		t.Errorf("an amount with no cent count: %s %q", r.Classification, r.Detail)
 	}
-	if _, _, err := reconcile.TransfersIn([]reconcile.Change{huge}, midnight, morning, nil); err == nil {
+	if _, _, err := reconcile.TransfersIn([]reconcile.Change{huge}, midnight, morning, nil, "USD"); err == nil {
 		t.Errorf("TransfersIn sums no amount without a cent count")
 	}
 	big := []reconcile.Change{transfer("T8", 9e16, midnight), transfer("T9", 9e16, midnight)}
 	if r := classify(t, iraBook(), big, obs); r.Classification != event.ReconciliationUnverifiable || !strings.Contains(r.Detail, "ibkr-flex:T9: the expected cash") {
 		t.Errorf("a sum past an int64: %s %q", r.Classification, r.Detail)
 	}
-	if _, _, err := reconcile.TransfersIn(big, midnight, morning, nil); err == nil {
+	if _, _, err := reconcile.TransfersIn(big, midnight, morning, nil, "USD"); err == nil {
 		t.Errorf("TransfersIn refuses a sum past an int64")
 	}
 }
@@ -163,5 +163,58 @@ func TestWhetherABookHoldsItsEveningComesFromTheCalendar(t *testing.T) {
 	obs.AsOf = late.AsOf.Add(time.Hour)
 	if r := classify(t, late, []reconcile.Change{transfer("T1", 1000, late.AsOf.Add(time.Minute))}, obs); r.Classification != event.ReconciliationUnverifiable || !strings.Contains(r.Detail, "is a close is not known") {
 		t.Errorf("got %s %q", r.Classification, r.Detail)
+	}
+}
+
+func TestTheOverdrawnTestRunsInTimeOrderNotJournalOrder(t *testing.T) {
+	// The reader writes same-day transfers in (as of, transaction ID) order
+	// and may write an earlier one after a later one, so a withdrawal dated
+	// by day alone can be journalled before the deposit that funded it. The
+	// test is run in time order, IBKR's transaction ID breaking a tie: the
+	// $2,000 deposit (T10) comes before the $1,000 withdrawal (T20), so
+	// nothing was overdrawn, and the $12.30 still missing is an ordinary
+	// difference (ADR 0019, amended 2026-10-21).
+	changes := []reconcile.Change{transfer("T20", -1000, midnight), transfer("T10", 2000, midnight)}
+	o := reconcile.Reconcile(iraBook(), changes, "reconciliation:1", observed(1500, held("SPY", 147), held("TLT", 20)))
+	if o.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("got %s: %s", o.Result.Classification, o.Result.Detail)
+	}
+	if o.Overdrawn || strings.Contains(o.Result.Detail, "more than the cash") {
+		t.Errorf("the deposit came first, so no withdrawal was overdrawn: %v %q", o.Overdrawn, o.Result.Detail)
+	}
+	// A withdrawal dated before the deposit is overdrawn, whatever the
+	// journal order.
+	late := []reconcile.Change{transfer("T10", 2000, midnight.Add(time.Hour)), transfer("T20", -1000, midnight)}
+	if o := reconcile.Reconcile(iraBook(), late, "reconciliation:1", observed(1500, held("SPY", 147), held("TLT", 20))); !o.Overdrawn {
+		t.Errorf("the withdrawal an hour before the deposit took more than the cash: %q", o.Result.Detail)
+	}
+}
+
+func TestTransfersInRefusesATransferInAnotherCurrency(t *testing.T) {
+	// A transfer in another currency cannot settle a difference in the
+	// book's, as Classify finds it unverifiable (ADR 0019, "Explained
+	// means").
+	euro := reconcile.CashMovementChange(event.FlexLedgerIDPrefix+"T1", event.CashMovementPayload{
+		AsOf: midnight, Amount: 1000, EquityBefore: 16000, Currency: "EUR", TransactionID: "T1",
+	})
+	if _, _, err := reconcile.TransfersIn([]reconcile.Change{euro}, midnight, morning, nil, "USD"); err == nil || !strings.Contains(err.Error(), "EUR") {
+		t.Errorf("want a refusal naming the currency, got %v", err)
+	}
+	if sum, _, err := reconcile.TransfersIn([]reconcile.Change{transfer("T2", 5, midnight)}, midnight, morning, nil, "USD"); err != nil || sum != 500 {
+		t.Errorf("a transfer in the book's currency is summed: %d %v", sum, err)
+	}
+}
+
+func TestAnOverdrawnTestThatCannotRunInTimeOrderFindsNoOverdraft(t *testing.T) {
+	// Each partial sum fits in journal order, but two deposits of 9e16
+	// dollars side by side in time order do not: the time-order run says
+	// nothing about a withdrawal then, rather than guess.
+	changes := []reconcile.Change{
+		transfer("T1", 9e16, midnight.Add(time.Hour)),
+		transfer("T3", -9e16, midnight.Add(3*time.Hour)),
+		transfer("T2", 9e16, midnight.Add(2*time.Hour)),
+	}
+	if o := reconcile.Reconcile(iraBook(), changes, "reconciliation:1", observed(512.3, held("SPY", 147), held("TLT", 20))); o.Overdrawn {
+		t.Errorf("no withdrawal is judged overdrawn: %q", o.Result.Detail)
 	}
 }
