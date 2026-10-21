@@ -56,13 +56,19 @@ target before it is traded. See [momentum](momentum.md).
 
 **As of the close** (a reading). The IBKR adapter's one account reading
 after a session's close, stamped as the account at that close: allowed when
-it is read after the close on the close's own New York date, with no order
-working or pending at IBKR, no execution at or since the close, every
-holding valued at its official close, and the holdings and cash those of
-the previous close (or the **starting book**) adjusted by the fills since,
-the cash within 1% of net liquidation (your decision of 2026-10-18).
-Otherwise it is stamped at its **read time**, and the engine withholds that
-session. See [paper trading](paper-trading.md#a-paper-day).
+it is read after the close on the close's own New York date, with no open
+order for the account at IBKR from any client (working, pending or
+cancel-pending), IBKR's executions read in full and none at or since the
+close, every holding with an official close in the file, IBKR's own net
+liquidation above zero, the holdings those of the previous close (or the
+**starting book**) adjusted by the fills recorded since, the cash the
+previous close's adjusted by those fills within 1% of the net liquidation
+at the close, and no snapshot the engine holds as of this close or later
+(your decision of 2026-10-18). Otherwise it is stamped at its **read
+time**, and the engine withholds that session; a run's first reading that
+is not the book sends no snapshot and halts the account as unverifiable
+([reconciliation](reconciliation.md)). See
+[market data](market-data.md) and [paper trading](paper-trading.md#a-paper-day).
 
 **Book.** What the engine believes an account holds: the last **account
 snapshot** plus the fills and other events recorded since. The

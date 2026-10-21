@@ -59,11 +59,16 @@ runbook has the template). `operator` is installed on the server: run it as
   that sale's client order ID if it was sent. The rule is one attempt per
   incident (ADR 0019), so a new run told "attempted" never tries it again;
 - the **starting book**, or `null`: the holdings and total cash you checked
-  in IBKR. A fresh run's approval states it only after a change no trade
-  explains (you moved shares or cash in or out), and then the adapter
+  in IBKR. A fresh run's approval states it after a change no fill the
+  program recorded explains: you moved shares or cash in or out, or you
+  **sold by hand** (that sale is not an order the program released, so no
+  fill of it is recorded). Then the adapter
   compares the fresh run's first reading after a close with it instead of
   with the previous run's last close (ADR 0019 and ADR 0027, amended
-  2026-10-18). The cash is IBKR's `TotalCashValue` in USD, the currency the
+  2026-10-18); approved without it after such a change, that first reading
+  is not the book and the fresh run halts on it (below). Read the book in
+  IBKR after your last change has filled and type the approval right
+  after: its time is the book's cutoff. The cash is IBKR's `TotalCashValue` in USD, the currency the
   adapter reads IBKR's cash in; `operator approve` refuses another, and the
   adapter never compares a book stated in one.
 
@@ -73,8 +78,10 @@ unverifiable) holds no snapshot of that reading: the adapter sent the
 reconciliation alone. A fresh run approved without a starting book is
 compared with the same book again and halts again. Check the account in
 IBKR, and approve the fresh run that clears the incident with the book you
-find there (`operator approve -log ... -clear-incident ... -positions ...
--cash ... -currency USD`).
+find there, typed right after reading it (`operator approve -log <the
+halted run's log> -account <account> -by owner -clear-incident <id>
+-positions SYM=<shares> -cash <total cash> -currency USD -out <approval
+file>`).
 
 **An account's first run** has no previous log, so its approval names none
 and states the starting book instead, the boost not latched and no

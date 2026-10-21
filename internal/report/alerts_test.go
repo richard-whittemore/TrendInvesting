@@ -273,13 +273,18 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 // adapter of the account (the kill switch does not stop the sale back to
 // 98%), cancel every open order on the instrument, the program's and the
 // owner's own, confirm none is open, sell, then start the fresh run only once
-// the sale has filled or been cancelled, and the adapter only after that
-// run's engine is running, never resuming the stopped one.
+// the sale has filled or been cancelled, its approval stating the book as it
+// is after the sale (read in IBKR right before approving; otherwise the
+// run's first reading is not the book it is compared with and the account
+// halts as unverifiable), and the adapter only after that run's engine is
+// running, never resuming the stopped one.
 func handSale(account string) []string {
 	return []string{"stop the engine and the adapter", "ti-engine@" + account + " ti-adapter-" + account,
 		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
 		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve",
-		"only once your sale has filled or been cancelled", "start the adapter only after the fresh run's engine is running",
+		"only once your sale has filled or been cancelled", "states the book as it is after your sale",
+		"-positions", "-cash", "-currency USD", "right after reading the book in IBKR", "halts as unverifiable",
+		"start the adapter only after the fresh run's engine is running",
 		"never resume the stopped run"}
 }
 

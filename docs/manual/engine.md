@@ -15,12 +15,13 @@ a time (ADR 0014, ADR 0025).
 The adapter is built: its main loop, its link to the engine's socket, the
 real IBKR client, the paper sending switch (`paper_sending_enabled`, off as
 shipped) and the delivery of the daily data job's stream (SPY's bar and the
-session's close) behind a broker snapshot. Two inputs the Boost engine needs
-before it decides a session are still produced by nothing: the account
-snapshot as of the close and the recorded mark. So on the server today the
-engine withholds every session (`stale-account-snapshot`, below) and
-releases nothing ([paper trading](paper-trading.md)). `make
-demo-boost-dry-run` shows a full run with an invented account.
+session's close) behind one account reading after the close: the account
+snapshot, the broker snapshot and the recorded mark (the bar's official
+close), with a reconciliation of the same reading. A session is withheld
+(`stale-account-snapshot`, below) only when that reading cannot stand for
+the close, and a run's first reading that is not the book it is compared
+with halts the account instead ([reconciliation](reconciliation.md)).
+`make demo-boost-dry-run` shows a full run with an invented account.
 
 One engine runs per account. Today only the Boost account (the joint margin
 account) has a configuration, and it runs in **dry-run**: the engine decides
@@ -167,20 +168,22 @@ acknowledgements and rebalance clearances from that folder, which `operator`
 writes, and records each in its durable log before its next input from the
 adapter ([operator](operator.md)).
 
-**The server's service file does not pass `-operator` yet.** So on the
-server, what you record with `operator kill-switch`, `operator acknowledge`
-or `operator rebalance-cleared` stays in the folder and never reaches the
-engine. Until the unit passes it, the kill switch does not work on the
-server: to stop the program ordering, stop the adapter and the engine
-(`sudo systemctl stop ti-adapter-boost ti-engine@<account>`), then cancel
-anything already at IBKR in IBKR's own app. Stopping the engine alone is not
-enough: an order it has released waits in the adapter, and goes out once the
-Gateway is back the same day. A fresh run's adapter never sends an earlier
-run's order: it stops naming it, and you settle it with `relay.py resolve
---run-ended` ([paper trading](paper-trading.md), "What can go wrong"); one
-the adapter refuses for good is settled `--never-sent` ([server](server.md),
-"Reading the logs and the kill switch on the server";
-`docs/runbooks/durable-log.md` names the same gap).
+The server's service file passes it: `-operator
+/var/lib/trend-investing/engines/<account>/operator`, the folder the
+provisioner creates, owned by `ti-operator` in the engine's group, mode
+`0750`. The engine refuses to start if the folder is missing, if it could
+write it itself, or if it cannot read it ([operator](operator.md), "Who can
+write an instruction"). The kill switch refuses Boost's orders but not the
+sale back to 98%, so before you sell by hand stop the adapter and the
+engine (`sudo systemctl stop ti-adapter-boost ti-engine@boost`) and follow
+[states-and-kill-switch](states-and-kill-switch.md), "Selling by hand
+safely". Stopping the engine alone is not enough: an order it has released
+waits in the adapter, and goes out once the Gateway is back the same day. A
+fresh run's adapter never sends an earlier run's order: it stops naming it,
+and you settle it with `relay.py resolve --run-ended` ([paper
+trading](paper-trading.md), "What can go wrong"); one the adapter refuses
+for good is settled `--never-sent` ([server](server.md), "Reading the logs
+and the kill switch on the server").
 
 ## What can go wrong, and what the program does then
 
@@ -208,7 +211,7 @@ Read them with `journalctl -u ti-engine@<account> -n 20`.
 | `... so this is a fresh run, and a fresh run decides nothing until the owner's approval is recorded` | Refuses: the folder holds an earlier run, so this start needs your approval. | Write one with `operator approve` and pass it as `-approval` in `TI_RESTART_ARGS` ([restart](restart.md)). |
 | `... is the one it opens with ...: resume ... or declare a new start with -as-of`, or `... opens with this run's configuration input ...: declare a new start with -as-of` | Refuses: `TI_AS_OF` repeats the start of an earlier run in the folder. | Choose a new `TI_AS_OF`, or resume the cut-short log; see [restart](restart.md). |
 | Any other refusal naming an approval, a resume, a log in the folder, a build or a latch | Refuses to start, naming what does not match. | See [restart](restart.md), "What can go wrong", and `docs/runbooks/durable-log.md`. |
-| `the operator inbox ...` or `the operator inbox ... is not a directory` | Refuses: the `-operator` folder cannot be read. | Create the folder, owned by `ti-trader`, or correct the path ([operator](operator.md)). |
+| `the operator inbox ...` or `the operator inbox ... is not a directory` | Refuses: the `-operator` folder is missing, cannot be read, or the engine could write it itself. | Run `provision.sh` again, or fix the folder as [operator](operator.md), "Who can write an instruction", says (`sudo chown ti-operator:ti-trader <inbox>`, mode `0750`). |
 | `ti-data refused: ... no bars for trading day ...` or `HTTP <code> from ...` in `journalctl -u ti-data` during the warm-up | The configuration's `warm_up_start` is earlier than the history Massive (the market-data provider) gives this account's plan, so the data job writes no stream and the engine gets no bar to decide from. A bar earlier than `warm_up_start` that does reach the engine is refused (`targetweight: bar ... precedes the warm-up start`). | Move `warm_up_start` (in the repository's `boost.config`) to an NYSE session inside Massive's history, still long enough for the indicators (`ti-data` refuses a history shorter than the longest window). That is a new configuration, so a new run: provision, approve a fresh run, run the warm-up with `ti-data --backfill-from <new date>` ([market data](market-data.md)). |
 | `ti-data refused: warm_up_start ... is not an NYSE session` | The data job refuses the configuration. | Pick a trading day for `warm_up_start`, as above. |
 
@@ -216,7 +219,8 @@ Read them with `journalctl -u ti-engine@<account> -n 20`.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| `stale-account-snapshot`. Alert: `<account>: decision withheld (stale-account-snapshot)`, urgent, sent once for each run of sessions withheld for this reason | No target is decided for the session and no order is planned: there is no account snapshot as of the session's close, or only one taken after it, and orders are valued at that close (ADR 0026, point 2). Boost's latch (whether the boost is on) still moves, so a change withheld one session is ordered the next. The same holds for a momentum IRA. It happens when the adapter's reading after the close could not be stamped as of the close (an order still working at IBKR, an execution at or since the close, cash more than 1% of net liquidation from the previous close's adjusted by the fills, a date that is not the close's, or a first reading that is not the book it was compared with); the reading is then stamped at its read time. | Check why in the adapter's log (`journalctl -u ti-adapter-boost`), and that IBKR answered the account read. A session withheld for working orders or a late execution decides normally the next day; for a first reading that is not the book, see [reconciliation](reconciliation.md), "What can go wrong". |
+| `stale-account-snapshot`. Alert: `<account>: decision withheld (stale-account-snapshot)`, urgent, sent once for each run of sessions withheld for this reason | No target is decided for the session and no order is planned: there is no account snapshot as of the session's close, or only one taken after it, and orders are valued at that close (ADR 0026, point 2). Boost's latch (whether the boost is on) still moves, so a change withheld one session is ordered the next. The same holds for a momentum IRA. It happens when the adapter's reading after the close cannot stand for the close; the broker snapshot's `not_as_of_close` names every condition that failed: read before the close or on a later New York date than the close; an open order for the account at IBKR from any client (working, pending or cancel-pending); IBKR's executions not read in full, or one at or since the close; a holding with no official close in the file; IBKR's own net liquidation not above zero; holdings that are not the previous close's adjusted by the fills recorded since; cash more than 1% of the net liquidation at the close (IBKR's own at the read when the account cannot be valued at the close) from the previous close's adjusted by those fills; or a snapshot the engine already holds as of this close or later. Both snapshots are then stamped at the read time. A run's first reading that is not the book it was compared with is different: no snapshot is sent at all, only its reconciliation, and the account **halts** as unverifiable (next row). | Check why in the adapter's log (`journalctl -u ti-adapter-boost`), and that IBKR answered the account read. A session withheld for working orders or a late execution decides normally the next day. |
+| A run's first reading is not the book. Alert: `<account>: reconciliation unverifiable (<id>)`, the adapter's log saying the holdings or cash are not the previous close's (or your starting book's) adjusted by the fills | The reading is not the book it was compared with, so the adapter sends its reconciliation alone and no snapshot; the engine, holding no book, finds it unverifiable and the account goes **Halted**. Nothing of that reading is taken as the book. | Read the book in IBKR and start a fresh run whose approval clears the incident and states that book, typed right after reading it (`operator approve -log <this run's log> -account <account> -by owner -clear-incident <id> -positions ... -cash ... -currency USD -out <file>`); never a resume. See [reconciliation](reconciliation.md), "What can go wrong". |
 | `missing-bars`. Alert: `<account>: decision withheld (missing-bars)`, urgent, sent once for each run of sessions withheld for this reason | A session closed without the bar the decision needs, so nothing is decided. **Boost** withholds that session only and decides again at the next session with a bar, its readings computed over the closes it has (the missing close is not filled in), naming the gap (`gap_sessions`); one page per gap ([boost](boost.md)). A **momentum IRA** withholds when a held or targeted name, a ranked name or the trend instrument has no bar for the decision session, or a decision session never closed. | Find why the bar is missing: `journalctl -u ti-data` and the data job's stream ([market data](market-data.md)). For Boost nothing more: the run recovers by itself, so do not start a fresh run for a gap. For a momentum IRA, see [momentum](momentum.md). |
 | An order breaks a hard limit, or the kill switch or a Degraded or Halted state stops it | The risk gate refuses it. | See [states-and-kill-switch](states-and-kill-switch.md), "What can go wrong". |
 | An input refused with a message starting `targetweight:` (a bar out of order, for another instrument, on another price base, or before the warm-up start) | Nothing is decided from that input; the adapter is told why. | Read the adapter's journal: it is a fault in what was delivered, not in the decision. See [IBKR adapter](ibkr-adapter.md) and [market data](market-data.md). |
@@ -226,7 +230,7 @@ Read them with `journalctl -u ti-engine@<account> -n 20`.
 | The process crashes | Stays stopped; nothing restarts it. | Resume it from its log ([restart](restart.md)). |
 | The server reboots | A normal shutdown sends SIGTERM, so the engine stops cleanly and writes its journal; it is not started at boot. A power cut or hard reset is a crash instead: no journal is written. | After a normal reboot, a fresh run you approve. After a power cut (`systemctl status` shows it was killed, no journal), resume ([restart](restart.md)). |
 | The configuration file is changed while it runs | Nothing changes for the running run: it decides under the configuration it recorded first. The next resume is refused (`the durable log was recorded by run ... not this run`, or `... opens with a different configuration input ...`). The data job refuses too (`the Boost configuration ... is not the one the engine's durable log ... holds`) when the instrument, `warm_up_start` or an indicator length changed. Note that `provision.sh` overwrites the configuration with the repository's. | Change a configuration only in the repository, as a new run: stop at the end of a session, provision, approve a fresh run ([restart](restart.md)). |
-| You recorded a kill switch, acknowledgement or clearance and nothing changed | The server's engine is started without `-operator`, so it never reads them (above). | To stop the program ordering, stop the adapter and the engine and cancel anything at IBKR in IBKR's app, as "Your instructions while it runs" says; then settle any order the engine had released as [server](server.md) says. |
+| You recorded a kill switch, acknowledgement or clearance and nothing changed | The engine reads the inbox only before its next input from the adapter, so nothing is read while it is stopped or the adapter sends nothing. | Look for the record's `.delivered` marker in the engine's notes folder ([operator](operator.md), "What can go wrong"). To stop the program ordering now, stop the adapter and the engine and cancel anything at IBKR in IBKR's app, as "Your instructions while it runs" says; then settle any order the engine had released as [server](server.md) says. |
 
 The reporter's own alerts about a silent engine are in
 [alerts-and-dashboard](alerts-and-dashboard.md).
@@ -276,14 +280,11 @@ from the first one's log and checks the two logs are identical byte for byte.
   engine's socket, the real IBKR client, the paper sending switch and the
   delivery of the data job's stream are built and rehearsed against a
   stand-in gateway ([IBKR adapter](ibkr-adapter.md)).
-- `-operator` in the server's service file: without it your kill switch,
-  acknowledgements and clearances do not reach the engine on the server.
-- The engine's own reconciliation against IBKR at every start (ADR 0019).
-  The adapter matches IBKR's open orders and executions against the
-  released orders before it sends anything, but the engine does not compare
-  positions and cash at start. The morning reconciliation's engine side is
-  built, but nothing delivers its input yet
-  ([reconciliation](reconciliation.md)).
+- The reconciliations ADR 0019 also asks for after every fill, before every
+  order and on a timer; a comparison of open orders; and the joint
+  account's cash (Boost's book states none, so cash is not compared). The
+  ones at every start, reconnect and delivery are built
+  ([reconciliation](reconciliation.md), "What is not built yet").
 - The IRAs: this program refuses a momentum configuration (`compose.go`), and
   no IRA configuration exists ([momentum](momentum.md)).
 

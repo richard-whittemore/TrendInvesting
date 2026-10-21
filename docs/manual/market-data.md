@@ -669,7 +669,7 @@ days), it takes them all, oldest first.
    close is the last account snapshot of this run, or of the earlier runs
    its approvals name, however long ago, or the **starting book** you
    stated when you approved the account's first run (or a fresh run, after
-   a transfer you checked; `operator approve -first-run`,
+   a transfer or a sale by hand you checked; `operator approve -first-run`,
    docs/runbooks/first-paper-order.md), whichever is latest: a fresh run's
    first reading is compared with the last run's close, never taken as the
    book unchecked. The
@@ -865,15 +865,25 @@ which writes the sessions again from its recordings, and start the adapter
 - **The link to IB Gateway drops while the snapshot is read**: nothing is
   written down or sent. Once the link is back and matched, the adapter takes
   a fresh snapshot and hands the file over then.
-- **The reading cannot stand for the close** (an order still working at
-  IBKR, an execution since the close, cash more than 1% of net liquidation
-  from the previous close's adjusted by the fills, holdings that are not the
-  previous close's plus or minus the fills, a reading on a later date than
-  the close because the adapter was not running that evening, or, for a
-  run's first reading, one that is not the book it was compared with: that
-  last one also halts the account, see [reconciliation](reconciliation.md)): this stops
-  nothing. The file goes, with both snapshots stamped at the read time and
-  the reason in the broker snapshot; the engine withholds that session
+- **The reading cannot stand for the close**: it was read before the
+  close or on a later New York date than the close (the adapter was not
+  running that evening); IBKR shows an open order for the account from any
+  client (working, pending or cancel-pending); IBKR's executions could not
+  be read in full, or one is at or since the close; a holding has no
+  official close in the file; IBKR's own net liquidation is not above zero;
+  the holdings are not the previous close's plus or minus the fills
+  recorded since; the cash is more than 1% of the net liquidation at the
+  close (IBKR's own at the read when the account cannot be valued at the
+  close) from the previous close's adjusted by those fills; or the engine
+  already holds a snapshot as of this close or later (the conditions
+  above). This stops nothing, except for a run's first reading that is not
+  the book it was compared with: that one sends no snapshot, only its
+  reconciliation, and the account **halts** as unverifiable; the remedy is
+  a fresh run whose approval states the book you read in IBKR
+  ([reconciliation](reconciliation.md), "What can go wrong"). Otherwise
+  the file goes, with both snapshots stamped at the read time and the
+  reason in the broker snapshot (`not_as_of_close`); the engine withholds
+  that session
   (`stale-account-snapshot`) and you are paged with the reason
   ([paper trading](paper-trading.md), "What can go wrong").
 - **IBKR cannot give the whole account three times running** (the message
