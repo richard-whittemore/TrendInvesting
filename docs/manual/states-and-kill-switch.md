@@ -78,8 +78,12 @@ then sell
 
 The kill switch is your own input, recorded in the journal as
 `operator.kill-switch`. You record it with `operator kill-switch -state
-engaged` (or `released`); the engine records it before its next input from
-the adapter ([operator](operator.md)). While it is on:
+engaged` (or `released`), run as `ti-operator` on the server (`sudo -u
+ti-operator operator ...`); the engine records it before its next input from
+the adapter ([operator](operator.md)). Only that user can write it: the
+engine and the units that read data from outside run as `ti-trader`, which
+cannot write the inbox, so a switch in the log is yours ([operator](operator.md),
+"Who can write an instruction"). While it is on:
 
 - every order is refused (`kill-switch`), routine sells and the IRAs'
   included;
@@ -412,10 +416,8 @@ the dashboard read every version. See [journal-query](journal-query.md).
   account stays in its state until you recover. The reporter sends an urgent
   "sale back to 98% failed" alert saying how many shares filled. Check the
   account at IBKR; if it is still above 98%, stop the program from sending
-  anything new. Where the operator tool and its inbox exist and the engine was
-  started with `-operator`, engage the kill switch (`operator kill-switch
-  -state engaged`, [operator](operator.md)). Until then there is no recorded
-  kill switch on the server, so stop the engine instead:
+  anything new. Engage the kill switch (`sudo -u ti-operator operator
+  kill-switch -state engaged`, [operator](operator.md)), and stop the engine as well:
   `sudo systemctl stop ti-engine@<account>` ([server](server.md), "Reading the
   logs and the kill switch on the server"). Neither stops orders already at
   IBKR. Then cancel any remaining sale in IBKR's app, confirm that no

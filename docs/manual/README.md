@@ -43,7 +43,7 @@ rather than keep their own. As of `main` on 2026-10-18:
 | IBKR adapter | Connection, account reads, the main loop, the link to the engine's socket, a start command and unit, the real client, paper sending, re-delivery and the settling commands, and delivering the data job's daily file behind a broker snapshot with SPY's mark, all against a stand-in gateway | The paper-account test against IBKR, run by hand; a real server run with `ibapi` installed; the account snapshot as of the close and the recorded mark the Boost engine decides from ([paper trading](paper-trading.md), "A paper day") |
 | Morning reconciliation | The engine's comparison, states and alert | The adapter's read delivered to the engine; the checks at startup, after fills and before orders; open orders; the joint account's cash; any command to record a missed event |
 | Reporter and dashboard | Both programs, installed on the server; the reporter checks every 5 minutes, around the clock | The outside heartbeat |
-| Operator tool and journal-query | Both programs, installed on the server | The engine's operator inbox in its service file |
+| Operator tool and journal-query | Both programs, installed on the server, and the engine's operator inbox, created by the provisioner and passed by the service file | — |
 | Server | Provisioning, the Gateway unit, the firewall, pinned downloads | Backups; a real server run |
 | Day-trade counter for the joint account | — | Counted by hand ([margin warning](../runbooks/margin-warning.md)) |
 
