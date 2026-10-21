@@ -8,13 +8,14 @@
 #
 # The script under test is committed into a fresh clone of this checkout's
 # HEAD, so the build runs in a clean tree whatever state this one is in.
-# The clone sits at a fixed path so Go's build cache serves repeated runs.
+# Each run has a directory of its own, so two runs at once (checks in two
+# worktrees) never remove or read each other's clone.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-work=${TMPDIR:-/tmp}/ti-test-build
-rm -rf "$work"
-mkdir -p "$work"
+tmp=${TMPDIR:-/tmp}
+work=$(mktemp -d "${tmp%/}/ti-test-build.XXXXXX")
+work=$(cd "$work" && pwd -P)
 trap 'rm -rf "$work"' EXIT
 unset TI_ALLOW_DIRTY GOOS GOARCH
 
@@ -82,6 +83,18 @@ expect "an explicit amd64 build succeeds" 0 "$(run_build amd64 --arch amd64)"
 for p in $programs; do
   cmp -s "$work/default/$p" "$work/amd64/$p" || expect "$p from --arch amd64 is the default build" same different
 done
+
+# --out DIR writes the five there and leaves dist/ alone: the Mac-side arm64
+# rehearsal never replaces the build the Lightsail runbook copies.
+mkdir -p "$clone/dist"
+echo lightsail >"$clone/dist/ti-engine"
+status=0
+(cd "$clone" && deploy/build-engine.sh --arch arm64 --out "$work/elsewhere") >"$work/out.out" 2>&1 || status=$?
+expect "an arm64 build into --out succeeds" 0 "$status"
+check_build "$work/elsewhere" arm64 183
+expect "a build into --out leaves dist/ as it was" lightsail "$(cat "$clone/dist/ti-engine")"
+grep -q "$work/elsewhere" "$work/out.out" || expect "the build names where it wrote" "$work/elsewhere" "$(cat "$work/out.out")"
+expect "a missing --out directory is refused" 1 "$(run_build noout --out)"
 
 expect "an unknown architecture is refused" 1 "$(run_build riscv --arch riscv64)"
 test ! -e "$work/riscv" || expect "nothing is built for an unknown architecture" absent present

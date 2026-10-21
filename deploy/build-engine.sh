@@ -16,29 +16,38 @@
 #   deploy/build-engine.sh --arch arm64
 #                                     the same five for linux/arm64, from the
 #                                     same commit with the same stamp
+#   deploy/build-engine.sh ... --out DIR
+#                                     writes the five into DIR instead of
+#                                     dist/, which is left as it was
 #
 # The architecture changes nothing but GOARCH: the default build is the one
 # this script always made, byte for byte, and both carry the one stamp of
-# the commit. Each run replaces dist/'s binaries with that architecture's.
+# the commit. Each run replaces its directory's binaries with that
+# architecture's; dist/ is what the Lightsail runbook copies to the server,
+# so a build for another machine goes elsewhere with --out.
 #
 # A dirty working tree is refused: its stamp names a commit the binary was
 # not built from. TI_ALLOW_DIRTY=1 overrides that for a local experiment;
 # never install such a binary on the server.
 #
 # Install on the server (owner step, see docs/runbooks/lightsail-deployment.md):
+# with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
+# refuses, installing nothing, if any of the five is not built for the
+# server's architecture, and installs the other four; then
 #   sudo install -m 0755 dist/ti-engine /opt/trend-investing/bin/ti-engine
-# and, with dist/ copied beside deploy/, `sudo deploy/provision.sh services`
-# installs the other four.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-usage() { echo "usage: deploy/build-engine.sh [--arch amd64|arm64]" >&2; exit 1; }
+usage() { echo "usage: deploy/build-engine.sh [--arch amd64|arm64] [--out DIR]" >&2; exit 1; }
 goarch=amd64
-case $# in
-  0) ;;
-  2) test "$1" = --arch || usage; goarch=$2 ;;
-  *) usage ;;
-esac
+out=
+while test $# -gt 0; do
+  case $1 in
+    --arch) test $# -ge 2 || usage; goarch=$2; shift 2 ;;
+    --out) test $# -ge 2 && test -n "$2" || usage; out=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
 case $goarch in
   amd64 | arm64) ;;
   *) printf 'build-engine: unsupported architecture %s (amd64 or arm64)\n' "$goarch" >&2; exit 1 ;;
@@ -52,13 +61,15 @@ case $stamp in
     fi
     ;;
 esac
-mkdir -p "$repo/dist"
+out=${out:-$repo/dist}
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
 cd "$repo"
 GOOS=linux GOARCH=$goarch CGO_ENABLED=0 make --no-print-directory engine BUILD_STAMP="$stamp"
-mv bin/ti-engine dist/ti-engine
+mv bin/ti-engine "$out/ti-engine"
 for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journal-query:journal-query; do
   GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build \
     -ldflags "-X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$stamp" \
-    -o "dist/${tool#*:}" "./cmd/${tool%%:*}"
+    -o "$out/${tool#*:}" "./cmd/${tool%%:*}"
 done
-printf 'build-engine: dist/ti-engine, ti-reporter, ti-dashboard, operator and journal-query for linux/%s stamped %s\n' "$goarch" "$stamp"
+printf 'build-engine: %s/ti-engine, ti-reporter, ti-dashboard, operator and journal-query for linux/%s stamped %s\n' "$out" "$goarch" "$stamp"

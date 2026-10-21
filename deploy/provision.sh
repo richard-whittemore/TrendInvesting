@@ -1,6 +1,7 @@
 #!/bin/bash
 # Idempotent provisioning for the Trend Investing server (Ubuntu 24.04 LTS,
-# x86_64, a Lightsail VM). Safe to run again after any partial failure.
+# x86_64, a Lightsail VM), or for the Mac mini's container (TI_TARGET below).
+# Safe to run again after any partial failure.
 #
 #   sudo deploy/provision.sh base       users, packages, automatic updates, Tailscale binaries
 #   sudo deploy/provision.sh clock      enable time syncing and refuse to finish unless the clock is good
@@ -19,6 +20,16 @@
 #
 # TI_REHEARSAL=1 (container rehearsal only): skip steps that need a running
 # systemd, a kernel firewall or a network identity.
+#
+# TI_TARGET selects the machine: lightsail (the default) or mac-mini, the
+# long-running arm64 Ubuntu 24.04 container under Docker Desktop that
+# deploy/mac-mini/up.sh creates (the owner's approval of the Mac mini plan,
+# option A, 2026-10-18: Mac_Mini_Paper_Deployment_Plan_2026-10-18.md, section
+# 5, item 1). On the Mac mini, IB Gateway is IBKR's macOS app outside the
+# container and nothing listens beyond the Mac's loopback, so the target
+# accepts arm64, installs no Tailscale, firewall or Linux Gateway, masks the
+# Gateway unit, makes systemd's journal persistent, and checks the clock
+# against a reference instead of syncing it. Every other step is the same.
 set -euo pipefail
 set +x
 
@@ -27,6 +38,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/versions.env"
 
 rehearsal=${TI_REHEARSAL:-0}
+target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
 dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
 
@@ -35,12 +47,35 @@ die() { printf 'provision: %s\n' "$*" >&2; exit 1; }
 
 need_root() { test "$(id -u)" -eq 0 || die "run as root (sudo)"; }
 
-check_platform() {
-  # TI_REHEARSAL_ANY_ARCH=1 lets the rehearsal run on an arm64 Docker host,
-  # where the x86_64 installer cannot be executed (see TI_REHEARSAL_SKIP_INSTALLER).
-  test "$(uname -m)" = x86_64 || test "${TI_REHEARSAL_ANY_ARCH:-0}" = 1 || die "IB Gateway's Linux installer is x86_64 only; this is $(uname -m)"
+# The distribution's ID and VERSION_ID, read into the caller's shell.
+read_os_release() {
   # shellcheck disable=SC1091
   . /etc/os-release
+}
+
+# Whether systemd is the running init (it creates this directory at boot).
+systemd_running() { test -d /run/systemd/system; }
+
+mac_mini() { test "$target" = mac-mini; }
+
+check_target() {
+  case $target in
+    lightsail | mac-mini) ;;
+    *) die "TI_TARGET must be lightsail (the default) or mac-mini, not '$target'" ;;
+  esac
+}
+
+check_platform() {
+  if mac_mini; then
+    # The Mac mini is Apple silicon: its container is arm64, and runs no x86_64
+    # installer (the Gateway is the Mac app).
+    test "$(uname -m)" = aarch64 || die "the Mac mini target is an arm64 (aarch64) container; this is $(uname -m)"
+  else
+    # TI_REHEARSAL_ANY_ARCH=1 lets the rehearsal run on an arm64 Docker host,
+    # where the x86_64 installer cannot be executed (see TI_REHEARSAL_SKIP_INSTALLER).
+    test "$(uname -m)" = x86_64 || test "${TI_REHEARSAL_ANY_ARCH:-0}" = 1 || die "IB Gateway's Linux installer is x86_64 only; this is $(uname -m)"
+  fi
+  read_os_release
   test "${ID:-}" = ubuntu || die "Ubuntu LTS only (found ${ID:-unknown})"
   case ${VERSION_ID:-} in 24.04) ;; *) die "pinned and rehearsed on Ubuntu 24.04 only (found ${VERSION_ID:-unknown})" ;; esac
 }
@@ -74,12 +109,23 @@ step_base() {
   log "packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  # tzdata-legacy: IBKR states execution times in "US/Eastern", a name
-  # Ubuntu 24.04 moved out of tzdata; without it the adapter cannot read an
-  # execution report and stops (adapter/ibkr/orders.py, parse_execution_time).
-  apt-get install -y -qq --no-install-recommends \
-    ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
-    libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata tzdata-legacy iptables >/dev/null
+  # tzdata-legacy, on both targets: IBKR states execution times in
+  # "US/Eastern", a name Ubuntu 24.04 moved out of tzdata; without it the
+  # adapter refuses to start (adapter/ibkr/cli.py, require_zones), as it
+  # could not read an execution report (adapter/ibkr/orders.py,
+  # parse_execution_time). A server provisioned before this package was
+  # listed gets it by running this step again.
+  if mac_mini; then
+    # No Gateway, firewall or X display in the container; sudo for running
+    # the owner's tools as ti-trader, and nano for editing the configuration
+    # and secret files in place.
+    apt-get install -y -qq --no-install-recommends \
+      ca-certificates curl unzip unattended-upgrades python3 tzdata tzdata-legacy sudo nano >/dev/null
+  else
+    apt-get install -y -qq --no-install-recommends \
+      ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
+      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata tzdata-legacy iptables >/dev/null
+  fi
 
   log "service users (non-root, no login shell)"
   ensure_user ti-gateway /var/lib/ti-gateway
@@ -103,6 +149,12 @@ Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 CONF
 
+  if mac_mini; then
+    step_journal
+    log "Mac mini: no Tailscale (nothing listens beyond the Mac's loopback)"
+    return 0
+  fi
+
   log "tailscale ${TAILSCALE_VERSION}"
   local tgz="$dl_cache/tailscale_${TAILSCALE_VERSION}_amd64.tgz"
   fetch "$TAILSCALE_URL" "$TAILSCALE_SHA256" "$tgz"
@@ -118,6 +170,23 @@ CONF
     systemctl enable --now tailscaled
   fi
   rm -rf "$tmp"
+}
+
+# systemd's journal kept on disk, in /var/log/journal (a volume of its own on
+# the Mac mini), so the reason a unit stopped survives a restart of the
+# container and its removal and re-creation (Mac mini plan, section 5, item 1).
+step_journal() {
+  log "persistent journal"
+  install -d -m 0755 /etc/systemd/journald.conf.d
+  install -m 0644 /dev/stdin /etc/systemd/journald.conf.d/50-trend-investing.conf <<'CONF'
+[Journal]
+Storage=persistent
+CONF
+  install -d -m 2755 /var/log/journal
+  systemd-tmpfiles --create --prefix /var/log/journal
+  if test "$rehearsal" != 1 && systemd_running; then
+    systemctl restart systemd-journald.service
+  fi
 }
 
 # The clock (ADR 0019: a clock behind IBKR's makes every snapshot stale and
@@ -183,11 +252,11 @@ step_gateway() {
 # link, so once IBKR replaces the file the checksum fails, and that must not
 # block the Gateway or the services.
 #
-# On x86_64 it runs the verified installer unprivileged; on arm64 (the Mac
-# mini's container), where that installer cannot run (it starts its own
-# x86_64 Java), it fetches the same release's pinned Mac/Unix archive
-# instead and unpacks it with twsapi-archive.py (owner decision 2026-10-18:
-# no emulation). Either way it installs the Python client
+# On Lightsail it runs the verified x86_64 installer unprivileged; on the
+# Mac mini's arm64 container (TI_TARGET=mac-mini), where that installer
+# cannot run (it starts its own x86_64 Java), it fetches the same release's
+# pinned Mac/Unix archive instead and unpacks it with twsapi-archive.py
+# (owner decision 2026-10-18: no emulation). Either way it installs the Python client
 # (source/pythonclient) as root under $twsapi_root/<version>, then
 # into the adapter's own
 # environment, $adapter_venv, offline (--no-index, --no-deps), checks that
@@ -202,35 +271,30 @@ adapter_venv=/opt/trend-investing/adapter-venv
 adapter_root=/opt/trend-investing/adapter
 step_twsapi() {
   log "TWS API ${TWSAPI_VERSION}"
-  local arch installer pinned_sha=$TWSAPI_SHA256
-  arch=$(uname -m)
-  case $arch in
-    x86_64)
-      installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
-      fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
-      ;;
-    aarch64)
-      installer="$dl_cache/twsapi-macunix-${TWSAPI_VERSION}.zip"
-      pinned_sha=$TWSAPI_ARCHIVE_SHA256
-      fetch "$TWSAPI_ARCHIVE_URL" "$TWSAPI_ARCHIVE_SHA256" "$installer"
-      ;;
-    *) die "no TWS API pin for $arch; not installing" ;;
-  esac
-  if test "$arch" = x86_64 && test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
-    log "rehearsal: checksum verified, installer not executed (not x86_64)"
-    return 0
+  local installer pinned_sha=$TWSAPI_SHA256
+  if mac_mini; then
+    installer="$dl_cache/twsapi-macunix-${TWSAPI_VERSION}.zip"
+    pinned_sha=$TWSAPI_ARCHIVE_SHA256
+    fetch "$TWSAPI_ARCHIVE_URL" "$TWSAPI_ARCHIVE_SHA256" "$installer"
+  else
+    installer="$dl_cache/tws-api-${TWSAPI_VERSION}-linux-x64.sh"
+    fetch "$TWSAPI_URL" "$TWSAPI_SHA256" "$installer"
+    if test "${TI_REHEARSAL_SKIP_INSTALLER:-0}" = 1; then
+      log "rehearsal: checksum verified, installer not executed (TI_REHEARSAL_SKIP_INSTALLER)"
+      return 0
+    fi
   fi
   log "the adapter's Python environment"
   export DEBIAN_FRONTEND=noninteractive
   apt-get install -y -qq --no-install-recommends python3-venv python3-setuptools python3-wheel >/dev/null
-  local target="$twsapi_root/$TWSAPI_VERSION"
-  rm -rf "$target" "$twsapi_root/INSTALLED"
+  local tree="$twsapi_root/$TWSAPI_VERSION"
+  rm -rf "$tree" "$twsapi_root/INSTALLED"
   install -d -m 0755 "$twsapi_root"
-  if test "$arch" = aarch64; then
+  if mac_mini; then
     # Verifies the archive against its pin again, then unpacks only its one
-    # source/pythonclient, as $target/pythonclient; refuses with nothing
+    # source/pythonclient, as $tree/pythonclient; refuses with nothing
     # written otherwise.
-    python3 -I "$here/twsapi-archive.py" "$installer" "$pinned_sha" "$target" \
+    python3 -I "$here/twsapi-archive.py" "$installer" "$pinned_sha" "$tree" \
       || die "the TWS API ${TWSAPI_VERSION} archive was refused; not installing"
   else
     # The vendor installer runs unprivileged (as nobody), into a scratch
@@ -249,18 +313,18 @@ step_twsapi() {
     if test "$(printf '%s\n' "$unpacked" | grep -c .)" != 1; then
       rm -rf "$scratch"
       die "the TWS API ${TWSAPI_VERSION} tree has not exactly one source/pythonclient; not installing"
-  fi
-  if ! test -f "$unpacked/setup.py" && ! test -f "$unpacked/pyproject.toml"; then
+    fi
+    if ! test -f "$unpacked/setup.py" && ! test -f "$unpacked/pyproject.toml"; then
+      rm -rf "$scratch"
+      die "the TWS API ${TWSAPI_VERSION} pythonclient has no setup.py or pyproject.toml; not installing"
+    fi
+    install -d -o root -g root -m 0755 "$tree"
+    cp -R "$unpacked" "$tree/pythonclient"
+    chown -R root:root "$tree"
+    chmod -R u=rwX,go=rX "$tree"
     rm -rf "$scratch"
-    die "the TWS API ${TWSAPI_VERSION} pythonclient has no setup.py or pyproject.toml; not installing"
   fi
-  install -d -o root -g root -m 0755 "$target"
-  cp -R "$unpacked" "$target/pythonclient"
-  chown -R root:root "$target"
-  chmod -R u=rwX,go=rX "$target"
-  rm -rf "$scratch"
-  fi
-  local client="$target/pythonclient"
+  local client="$tree/pythonclient"
   # A fresh environment each time: nothing of an earlier ibapi remains. The
   # system site packages give pip the setuptools and wheel it builds with,
   # offline.
@@ -313,7 +377,36 @@ write_stub() {
   chown root:root "$path"
 }
 
+# elf_machine FILE: FILE's ELF e_machine (62 x86-64, 183 AArch64), the two
+# little-endian bytes at offset 18; empty if FILE is not an ELF file.
+elf_machine() {
+  test "$(od -An -tx1 -N4 "$1" | tr -d ' \n')" = 7f454c46 || return 0
+  od -An -tu2 -j18 -N2 "$1" | tr -d ' \n'
+}
+
+# require_native_programs DIST: refuses, before anything is installed, if a
+# Go program in DIST is not an ELF file for this machine's architecture
+# (dist/ built for the other machine: deploy/build-engine.sh builds
+# linux/amd64 for Lightsail, linux/arm64 with --arch arm64 for the Mac mini).
+# ti-engine is checked too, though the owner installs it by hand.
+require_native_programs() {
+  local dist=$1 machine want b got
+  machine=$(uname -m)
+  case $machine in
+    x86_64) want=62 ;;
+    aarch64) want=183 ;;
+    *) die "no Go build for $machine; not installing" ;;
+  esac
+  for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
+    test -f "$dist/$b" || continue
+    got=$(elf_machine "$dist/$b")
+    test "$got" = "$want" || die "$dist/$b is not a Linux program for this machine ($machine; its ELF machine is ${got:-none, not ELF}): build it with deploy/build-engine.sh for this machine and copy dist/ again; nothing installed"
+  done
+}
+
 step_services() {
+  local dist=${TI_DIST:-$here/../dist} b
+  require_native_programs "$dist"
   log "directories and config"
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
@@ -341,7 +434,6 @@ CONF
   # unit fails when it runs, so the gap is seen. The owner runs the tools as
   # `sudo -u ti-trader operator ...` and `sudo -u ti-trader journal-query ...`:
   # sudo's PATH includes /usr/local/bin, where each is linked.
-  local dist=${TI_DIST:-$here/../dist} b
   for b in ti-reporter ti-dashboard operator journal-query; do
     if test -f "$dist/$b"; then
       install -m 0755 "$dist/$b" "/opt/trend-investing/bin/$b"
@@ -453,6 +545,7 @@ step_firewall() {
 }
 
 main() {
+  check_target
   need_root
   check_platform
   case ${1:-} in
@@ -469,4 +562,8 @@ main() {
   log "done: ${1}"
 }
 
-main "$@"
+# Run as a program; sourced (by deploy/rehearsal/test-provision-arch.sh), it
+# only defines the steps.
+if test "${BASH_SOURCE[0]}" = "$0"; then
+  main "$@"
+fi

@@ -105,6 +105,27 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.run_main(self.argv()), 1)
         self.assertEqual(self.made, [])
 
+    def test_a_missing_ibkr_time_zone_refuses_to_start_before_connecting_and_names_the_package(self):
+        from zoneinfo import ZoneInfoNotFoundError
+
+        asked = []
+
+        def no_legacy_zones(name):
+            asked.append(name)
+            if name == "US/Eastern":
+                raise ZoneInfoNotFoundError(name)
+            return None
+
+        status = main(self.argv(), api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
+                      should_stop=Steps(3), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1),
+                      zone_lookup=no_legacy_zones)
+        self.assertEqual(status, 1)
+        self.assertIn("US/Eastern", asked)
+        message = self.err.getvalue()
+        for word in ("US/Eastern", "tzdata-legacy", "provision.sh base"):
+            self.assertIn(word, message)
+        self.assertEqual(self.made, [], "nothing connects when a zone IBKR names is missing")
+
     def test_the_account_comes_from_one_place_only_and_is_never_echoed(self):
         both = dict(CONFIG, account_id=ACCOUNT)
         self.write_config(both)

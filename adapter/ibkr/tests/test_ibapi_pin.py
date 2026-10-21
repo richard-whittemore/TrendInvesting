@@ -90,21 +90,6 @@ class PinTests(unittest.TestCase):
         with self.assertRaises(IbapiNotPinned):
             check_installed(str(self.record), str(self.versions), installed_version=lambda: (10, 51, 1))
 
-    def test_the_pinned_release_s_own_version_shape_is_read(self):
-        # TWS API 10.51.01's ibapi/__init__.py states VERSION = {"major": 1051,
-        # "minor": 1} (API_VersionNum.txt: API_Version=10.51.01): major is the
-        # release's first two parts run together, minor its third.
-        self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
-        stub = ibapi_stub(None, VENV_IBAPI)
-        stub.VERSION = {"major": 1051, "minor": 1}
-        with in_venv(stub):
-            self.assertEqual(check_installed(str(self.record), str(self.versions)), "10.51.01")
-        for version in ({"major": 1051, "minor": 2}, {"major": 1050, "minor": 1}, {"major": 10511, "minor": 1},
-                        {"major": 99, "minor": 1}, {"major": 1051, "minor": 1, "micro": 1}, {"major": True, "minor": 1}):
-            stub.VERSION = version
-            with self.subTest(version=version), in_venv(stub), self.assertRaises(IbapiNotPinned):
-                check_installed(str(self.record), str(self.versions))
-
     def test_the_build_recorded_as_installed_is_the_pinned_build(self):
         self.write_record("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
         self.assertEqual(check_installed(str(self.record), str(self.versions), installed_version=lambda: (10, 51, 1)),

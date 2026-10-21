@@ -27,12 +27,8 @@ AGENTS.md). The files inside the venv are not hashed: the record attests
 the installer, and the venv is root's, rebuilt whole by that step. ADR 0025 point 5: a change of API
 version repeats the paper-account test before the pin moves.
 
-The TWS API's version "10.51.01" is compared with ibapi's VERSION as whole
-numbers, (10, 51, 1). The pinned release states it as {"major": 1051,
-"minor": 1} (its ibapi/__init__.py; API_VersionNum.txt says 10.51.01): the
-first two parts run together as a four-digit major, the third as minor.
-The older shape {"major": 10, "minor": 51, "micro": 1} is read as it says.
-Any other shape names no version.
+The TWS API's version "10.51.01" is ibapi's VERSION {"major": 10, "minor":
+51, "micro": 1}: compared as whole numbers.
 """
 import importlib
 import os
@@ -92,21 +88,6 @@ def _pinned_files(versions_path):
     return values["TWSAPI_VERSION"], shas
 
 
-def _whole_number(value):
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _version_parts(version):
-    """(major, minor, micro) from ibapi.VERSION in either shape the module docstring names, else ()."""
-    if not isinstance(version, dict) or not all(_whole_number(v) for v in version.values()):
-        return ()
-    if set(version) == {"major", "minor", "micro"}:
-        return version["major"], version["minor"], version["micro"]
-    if set(version) == {"major", "minor"} and 1000 <= version["major"] <= 9999:
-        return version["major"] // 100, version["major"] % 100, version["minor"]
-    return ()
-
-
 def _version_numbers(text):
     return tuple(int(part) for part in text.split("."))
 
@@ -139,8 +120,9 @@ def installed_ibapi_version():
         raise IbapiNotPinned("ibapi does not import ({}); install the pinned build with `sudo deploy/provision.sh "
                              "twsapi`".format(type(err).__name__)) from None
     _require_own_environment(ibapi)
-    parts = _version_parts(getattr(ibapi, "VERSION", None))
-    if not parts:
+    version = getattr(ibapi, "VERSION", None)
+    parts = tuple(version.get(k) for k in ("major", "minor", "micro")) if isinstance(version, dict) else ()
+    if len(parts) != 3 or not all(isinstance(p, int) and not isinstance(p, bool) for p in parts):
         raise IbapiNotPinned("the ibapi this Python imports names no version (ibapi.VERSION); install the pinned "
                              "build with `sudo deploy/provision.sh twsapi`")
     return parts
