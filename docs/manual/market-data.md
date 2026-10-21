@@ -32,7 +32,7 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
-| `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
+| `python3 -m marketdata encode --out DIR --first YYYY-MM-DD --asof YYYY-MM-DD --configuration-hash H --strategy-version V --run-id R --stream FILE ...` (all of these but `--asof` are required: the engine's configuration hash, strategy version and run name come from its durable log) | the engines' input stream (below) | no, and it never uses the network |
 | `python3 -m marketdata retract --out DIR --session YYYY-MM-DD --reason TEXT` | that the exchange cancelled a session (below) | no |
 
 If your recordings hold an older 253-session backfill, extend it to 260
@@ -413,9 +413,10 @@ days since.
 crash"): a new log that holds a copy of the crashed run's records. It is the
 same run, not a new one, so it needs **no** warm-up and gets no folder of
 its own. The data job and the adapter both find the run's folder by the
-run's identity, not by the log's name: its Run approval (or, for the
-engine's very first run, its configuration and as-of time), which the
-copied log carries. The folder is the one named after the run that began
+run's identity, not by the log's name: its Run approval's ID (a paper run
+always has one, the first run's stating the starting book; a dry-run first
+run, which needs none, is known by its configuration and as-of time), which
+the copied log carries. The folder is the one named after the run that began
 the chain, the `TI_RUN` its warm-up was run for, and stays so through any
 number of resumes:
 
@@ -495,13 +496,14 @@ naming both logs ("nothing shows it is that run's crash resume"), the
 message names the three cases below with the remedy for each, and nothing
 is written or sent:
 
-- **the engine's first run started again without an approval** (same
-  `run.env`, same configuration and as-of time): it has the first run's
-  identity but not its records, and is never handed the first run's
-  folder, record of files sent and stream without its own warm-up. Stop
-  it, and start it as a fresh run, with its approval and its warm-up
-  ([paper trading](paper-trading.md), "Never start the engine's first run
-  again without an approval");
+- **a dry-run first run started again without an approval** (same
+  `run.env`, same configuration and as-of time; a paper engine refuses such
+  a start itself, and a paper first run has an approval to tell it by): it
+  has the first run's identity but not its records, and is never handed the
+  first run's folder, record of files sent and stream without its own
+  warm-up. Stop it, and start it as a fresh run, with its approval and its
+  warm-up ([paper trading](paper-trading.md), "Never start a run again
+  without an approval");
 - **a first run that crashed having committed nothing but its
   configuration**: nothing in the two logs tells its resume from a second
   start, so it is not taken for either. Nothing of it needs keeping: start
@@ -563,6 +565,13 @@ carries on from them.
   a recording was removed; restore it from the backup (today that means a
   Lightsail snapshot, if snapshots are on: [server](server.md), "Backups").
 - **A history shorter than the indicators need** at the warm-up.
+- **The configuration is not usable**: "it is not a Boost configuration"
+  (the engine's first input is another strategy's, or the file is), "warm_up_start
+  ... is not an NYSE session" (pick a trading day), "--backfill-from ... is not
+  the configuration's warm_up_start" (the warm-up takes that date only), or
+  "session ... precedes the warm-up start". Correct the date you passed; the
+  configuration is never edited after the engine started (an edited
+  configuration is a new run).
 - **A file already written differs** from what its recordings now give.
   Every run checks every earlier file, so this stops the job the day it
   happens, naming the file. The causes: Massive published a split or
@@ -662,7 +671,8 @@ days), it takes them all, oldest first.
    adjusted by those fills within **1% of net liquidation** (room for a
    day's interest or a dividend; `cash_drift` records the difference, and
    `unexplained_cash` that difference added up since the cash was last
-   explained, both shown in the daily summary; this check needs no client
+   explained (for Boost, whose book states no cash, since your starting
+   book), both shown in the daily summary; this check needs no client
    ID, so it catches a trade the adapter is not shown, a split or a
    transfer), and the engine holds no snapshot already stamped at or after
    that close, both snapshots are stamped **as of the close**. The previous
@@ -858,9 +868,12 @@ which writes the sessions again from its recordings, and start the adapter
   nothing, since a wrong folder could feed the engine another run's days.
   Check the engine's log is whole and readable, then move the unmatched
   folder aside as the message says and start the adapter again.
-- **The kept bases file does not read** (a warning in the adapter's log):
-  nothing stops. The adapter walks the earlier runs again to rebuild the
-  previous close and replaces the file; it is only a saving of work.
+- **The kept bases file does not read** (`pending.json.basis`, a warning in
+  the adapter's log naming it): nothing stops. The adapter walks the earlier
+  runs again to rebuild the previous close and replaces the file; it is only
+  a saving of work. An earlier run's log that cannot be read, or whose record
+  hash chain is broken, does stop it, naming the log: restore it from the
+  backup as the engine wrote it.
 - **The `.delivered` file cannot be read**: something other than the adapter
   changed it. The adapter stops before delivering anything. Restore it from
   the backup as it was ([server](server.md), "Backups"); never edit it.
@@ -920,7 +933,7 @@ which writes the sessions again from its recordings, and start the adapter
   folders, and sends nothing. Move the folder that should not
   be there out of `streams/boost/`, keep it, and start the adapter again.
 - **A run that only shares the identity of the run whose folder it finds**
-  ("nothing shows it is that run's crash resume": the engine's first run
+  ("nothing shows it is that run's crash resume": a dry-run first run
   started again without an approval, a resume of a first run that committed
   only its configuration, or a log that is not a copy of that run's
   records: "A crash resume", above): the adapter refuses to start, naming
@@ -942,8 +955,26 @@ which writes the sessions again from its recordings, and start the adapter
 
 ## What can go wrong, and what the step does
 
-Every failure writes nothing and exits with status 1 and a message on stderr,
-for the scheduler to alert on.
+**The daily job and the delivery, at a glance.** The detail and the steps
+are in the sections named in the last column; the list after the table is
+for the recording and encoding steps.
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| `ti-data refused:` "no secrets file", "cannot read MASSIVE_API_KEY from the secrets file" or "MASSIVE_API_KEY is not set in the secrets file" | No file is written; the unit shows as failed. The key is never printed | Put the key on the `MASSIVE_API_KEY=` line of `/etc/trend-investing/secrets.env`, then `sudo systemctl start ti-data` ("What can go wrong" under "The daily data job") |
+| `ti-data refused:` "run ... has no stream yet: run the warm-up once first" | No file is written | Run the one-time warm-up with the date it names ("The one-time warm-up") |
+| `ti-data refused:` the engine's durable log "cannot be read", "is not an engine durable log", "holds no committed configuration input: start the engine first", "holds no committed input, so it names no run", or the run's first input "is not its configuration" | No file is written | Start the engine once (so `run.env` and its log exist), check `TI_RUN`, and restore a log that cannot be read from the backup as the engine wrote it; never edit it |
+| `ti-data refused:` "it is not a Boost configuration", "warm_up_start ... is not an NYSE session", "--backfill-from ... is not the configuration's warm_up_start", "session ... precedes the warm-up start", or "the Boost configuration ... is not the one the engine's durable log ... holds" | No file is written | Correct the date or put the configuration back as the engine started with it; an edited configuration is a new run |
+| `ti-data refused:` "the history ... holds N sessions; the indicators need M", or Massive returns nothing for a trading day | No file is written; recordings already made are kept | Choose a later `warm_up_start`, or let the next firing retry the day |
+| `ti-data refused:` "... differs from the stream its recordings and the engine log ... give now", or "cannot be encoded again from their recordings" | Nothing more is written for the run: the engine has already read the old file | "A file already written differs" under "The daily data job": usually a new run with its own warm-up |
+| `ti-data refused:` "ConflictingActions: dividends <id> differs between recordings" | No file is written | Check the figure against the fund's notice and quarantine the recordings that hold the wrong one ("Two recordings give different figures for one dividend") |
+| `ti-data refused:` "has more than one stream folder", "cannot be matched to any run", "names this run in its first records but cannot be read", "does not follow its record hash chain", or "a second start of a first run" | No file is written | Restore or move aside as "A crash resume" says; never run a warm-up for a resumed run's new name |
+| The adapter stops: "the stream file ... is refused", "the run's stream folder ... does not exist", the same folder and log messages as the row above, or "the delivery record ... cannot be read" | Nothing from any file is sent | "What happens to the file", "What can go wrong, and what the adapter does" |
+| The adapter stops: "could not be read in full for the broker snapshot", or "the reconciliation owed ... could not be read" | Nothing is written down or sent; the file stays | Check IB Gateway's link and the account's currency, then start the adapter again |
+| You are paged: a decision withheld as stale-account-snapshot, "The adapter's reading after the close could not stand for the close" | Both snapshots are stamped at the read time with the reason; the engine orders nothing for that session. A run's first reading that is not your starting book instead halts the account as unverifiable | "The reading cannot stand for the close" under "What happens to the file" |
+
+**The recording and encoding steps.** Every failure writes nothing and
+exits with status 1 and a message on stderr, for the scheduler to alert on.
 
 - **The session has not settled.** A session is refused until an hour after
   its close (`--settle-minutes`, default 60), so an intraday price is never

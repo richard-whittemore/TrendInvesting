@@ -30,7 +30,7 @@ This workspace runs inside **Herdr** (`herdr --skill` prints its CLI guide) — 
 
 ### Issue tracker
 
-GitHub Issues in `richard-whittemore/TrendInvesting`, accessed only through the GitHub MCP (the `gh` CLI is not installed). See `docs/agents/issue-tracker.md`.
+GitHub Issues in `richard-whittemore/TrendInvesting`, accessed with the `gh` CLI (installed and logged in on the Mac mini) or the GitHub MCP. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

@@ -16,9 +16,11 @@ stops ordering, not an order resting at the broker.
 > **Status.** The engine's side is built and tested against recorded
 > inputs: the comparison, the states and the alert
 > ([reconciliation](../manual/reconciliation.md)). The adapter's morning
-> read is built but not yet delivered to the engine, so a reconciliation
-> does not yet run by itself. Rehearse this runbook in paper trading before
-> live money (below).
+> reading is built and delivered to the engine: the adapter sends IBKR's
+> positions and cash with every day's file and at every start and
+> reconnect, so a reconciliation runs by itself (Boost; the IRAs' inputs
+> are not built). Rehearse this runbook in paper trading before live money
+> (below).
 
 ## First, in every case
 
@@ -97,7 +99,7 @@ Two things the morning check never sees, so check them yourself:
   joint account's monthly statement.
 - **A difference that arises during a session** (a fill report lost while
   the market is open). The checks after each fill and before each order
-  that ADR 0019 asks for are not built.
+  that ADR 0019 asks for are not built (only the start, reconnect and daily-delivery reconciliations are).
 
 ## Recover
 
@@ -126,43 +128,27 @@ that is why the approval is your attestation and must follow a real check.
 4. **To leave the incident behind** (every difference explained), write the
    approval clearing it by its ID. `operator` is installed on the server
    ([server](../manual/server.md), "Reading the logs and the kill switch on
-   the server"), and the steps below, which run it on the
-   Mac against a copy of the log, still work (`scp` the stopped engine's log into a folder outside the repository
-   and iCloud, keeping the log's original file name, because the approval
-   records that name and the engine checks it; run
-   `go run ./cmd/operator approve -log <copy> ...` from the commit the server
-   is deployed from, with the same flags, minus `sudo -u ti-trader` and with
-   `-out` pointing at a local file). Then return the approval to the server:
-   `scp` it to a staging path (your login's home folder, say), and install it
-   into the account's state directory with the owner and mode the engine
-   needs, since the tool writes mode 0600 for the Mac user and the engine
-   runs as `ti-trader`:
-
-   ```
-   sudo install -o ti-trader -g ti-trader -m 0600 <staged file> /var/lib/trend-investing/engines/<instance>/<approval name>
-   ```
-
-   Check that the file name the tool printed matches the log you copied.
-   Once the tool is installed on the server, run it there:
+   the server"), so write it there, as `ti-trader`, with `-out` naming a
+   file in the account's state directory:
 
    ```
    sudo -u ti-trader operator approve -log <latest run>.log -account <account> -by owner \
-     -clear-incident <incident id> -out approval-<new run>.json
+     -clear-incident <incident id> -out /var/lib/trend-investing/engines/<instance>/approval-<new run>.json
    ```
 
    `operator approve` reads the incident's ID, the latch and the sale
    attempt from the log ([operator](../manual/operator.md), "An approval").
+   Check that the file name the tool printed matches the log you approved.
 5. **To restart but stay restricted** (something is not yet explained),
    leave out `-clear-incident`: the approval carries the incident in force,
    in the same state and scope (`total-cash` included), and the new run
    starts under it. Buys stay refused until you clear it in a later run.
 6. If the tool warns that the kill switch was engaged, and you still want
-   it on: a fresh run starts with it released, and the switch is recorded
-   with the `operator` tool, which is not on the server. Follow the
-   `-operator` prerequisite in `docs/runbooks/durable-log.md` ("Start a fresh
-   run after an earlier one"). If `-operator` is not set on the engine, do
-   not start the run wanting the switch on: keep the engine stopped, or
-   cancel and hold the positions in IBKR.
+   it on: a fresh run starts with it released. Record it again with
+   `sudo -u ti-operator operator kill-switch ... -state engaged` into the
+   account's inbox, which the server's service file passes to the engine
+   as `-operator` (`docs/runbooks/durable-log.md`, "Start a fresh run after
+   an earlier one").
 7. **Start the fresh run**: `docs/runbooks/durable-log.md`, "Start a fresh
    run after an earlier one", steps 4 and 5, with `-approval` the file from
    step 4 or 5.
@@ -206,9 +192,9 @@ the whole server is down, nothing will tell you.
    fresh run you approve (`docs/runbooks/durable-log.md`, "Restarting an
    engine"). Either way the engine comes back **in the state it was in**:
    a Degraded or Halted account stays so.
-3. The reconciliation at startup that ADR 0019 asks for is not built, so
-   before a fresh run, compare IBKR's positions, cash and open orders with
-   the journal yourself.
+3. The adapter sends a reconciliation at every start, so a fresh run is
+   compared with IBKR when it starts; before it, still compare IBKR's
+   open orders with the journal yourself (open orders are not compared).
 
 ## Before live money
 
@@ -221,12 +207,11 @@ the whole server is down, nothing will tell you.
   ([server](../manual/server.md)).
 - Provision the outside heartbeat monitor and prove it pages when the engine
   is stopped and when it is stuck.
-- Install the `operator` and `journal-query` tools on the server.
 
 ## What is not built yet
 
-- The adapter's morning read reaching the engine, and the reconciliations at
-  startup, after each fill, before each order and on a timer (ADR 0019).
+- The reconciliations after each fill, before each order and on a timer
+  (ADR 0019); the start, reconnect and daily-delivery ones are built.
 - The comparison of open orders, and of the joint account's cash.
 - Any command that records a missed fill, dividend, fee, interest charge or
   corporate action.

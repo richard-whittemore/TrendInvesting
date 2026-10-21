@@ -31,6 +31,7 @@ link, not the program that holds the record (ADR 0025, plan section 3).
 | Reports (`orders.py`, `reports.py`) | Turns IBKR's answers on this engine's orders into the engine's inputs: a status change (working, cancelling, cancelled, refused) and each fill with IBKR's commission and time. A fill is recorded only once its commission arrives | Built |
 | Real IBKR client (`real_client.py`) | The only part that imports `ibapi` | Built; it places an order only in paper, on a paper account the login manages, with `paper_sending_enabled` switched on, and the paper-account test against IBKR is still to be run by hand |
 | Main loop (`loop.py`) | At start: takes the pending file's lock, connects to the engine's socket, reads the engine's durable log, connects to IB Gateway, matches IBKR's orders against the orders the engine released, records IBKR's positions and cash for the engine to reconcile once the engine holds a book (read only once every replayed fill is recorded, sent before any market data, and tried at most three times in a row if IBKR does not give the positions or cash, then it stops for you), then asks again for any input a stop left waiting. It does the same after every reconnect. Each step reads IB Gateway's callbacks and, while the link is up and matched, sends the engine its waiting inputs in order ([re-delivery](redelivery.md)). It checks whether a reading after the close can stand for the close: read on the close's own date, after it; no open order at IBKR, from any client; no execution at or since the close; every holding with an official close in the file and IBKR's own net liquidation positive; and the holdings and cash those of the previous close adjusted by the fills since (cash within 1% of net liquidation). The previous close is the last account snapshot of this run or of the earlier runs its approvals name, or the starting book you stated when approving the account's first run, so a fresh run's first reading is compared too; one that differs is never taken as the book ([paper trading](paper-trading.md), "A paper day"). When it stops it closes its connection to the engine, which takes one at a time | Built, against the stand-in gateway, a stand-in engine and, in the rehearsal, the real engine |
+| Previous close's book (`book_basis.py`) | Finds the book a reading after the close is compared with, back through the chain of runs: the last account snapshot of this run or of the earlier runs its Run approvals name, or the starting book an approval states, whichever is later, with every fill since. It also keeps the figure behind `cash_drift` (the day's cash difference) and `unexplained_cash` (that difference added up since the cash was last explained; for Boost, since your starting book, as its book states no cash). The earlier runs' books never change, so they are kept once per run in a file beside the pending file (`.basis`); a kept file that does not read is only a warning, and is walked again and replaced. A log that cannot be read, or whose record hash chain is broken, stops it, naming the log. A starting book in another currency than the account's is never compared | Built, against a stand-in for IB Gateway and the engine |
 | Market-data delivery (`delivery.py`) | Picks up each file the data job writes for the run (`--streams`), oldest first, and hands it to the engine through the outbox behind one fresh account reading: the account snapshot, the broker snapshot, a run's first reconciliation, then the file's lines with SPY's mark (the bar's official close) just before the last session's close; each input once, with the engine's own input numbers; refuses a file not as the data job writes it, not this run's, or older than one delivered ([market data](market-data.md), "What happens to the file"). **No decision needs IBKR market-data permissions**: nothing is sized from IBKR's last price; the price band compares with it when it is set. Every file carries a reconciliation of the same reading, ahead of its snapshots once the engine holds a book; in a run's first file it goes behind them when the reading matched the previous close or your starting book; when it did not it goes alone, the snapshots withheld, so the engine, holding no book, halts rather than take the difference as the book | Built, against a stand-in for IB Gateway and the engine, and rehearsed with the real engine |
 | Engine link (`engine_client.py`) | The adapter's side of the engine's socket: one input at a time, and a reply is used only if it is the answer to that input from the run now running | Built, against a stand-in engine |
 | `ibapi` pin (`ibapi_pin.py`) | Refuses to start unless the `ibapi` installed (`provision.sh twsapi`) is the version pinned with the adapter's code | Built |
@@ -96,6 +97,14 @@ adapter/ibkr/relay.py ...`.
 | "the delivery record ... cannot be read" | The `.delivered` file beside the pending file holds something the adapter did not write | Restore it from the backup as it was; never edit it |
 | IBKR error 326 | Another program holds this engine's client ID; the adapter does not retry or pick another | Stop the other program |
 | Started in live mode | Refused until the limited-live gate | Use paper |
+| "no order the engine released explains" or "IBKR shows N unexplained open order(s) or execution(s)" | At start or after a reconnect IBKR shows an open order or a trade of today that no run of this engine released: one placed by hand or by another program, or by an earlier run no longer read. The link is not treated as matched; nothing is sent | Look at each in IBKR (the message lists them by order reference, client ID and order number), cancel what should not be there and reconcile before starting again ([paper trading](paper-trading.md), "What can go wrong") |
+| "could not be read in full" | IBKR did not answer every part of the account read at start or after a reconnect | Check IB Gateway is logged in, then start the adapter again |
+| "the reconciliation owed after the start or reconnect could not be read in 3 attempts", or "the account could not be read in full for the broker snapshot in 3 attempts" | IBKR gave neither the positions and cash for the reconciliation nor the whole account for the day's snapshot three times running; no stream input is sent | Check IB Gateway's link and that the account reports in US dollars, then start the adapter again; the file is delivered then ([market data](market-data.md), "What happens to the file") |
+| "awaits its reply from an earlier engine run" | The adapter stopped while it waited for the engine's answer to an input, and the engine now running is a fresh run, not that run resumed | Resume the crashed run, or cancel at IBKR what the message names and settle with `resolve --run-ended ... --journal ENGINE_LOG --reason "..."` ([paper trading](paper-trading.md), "What can go wrong") |
+| "carries other content than the input the engine committed", or "has no ... that can be read" naming a report | An input or report in the adapter's files is not as the adapter records it; it is neither sent nor dropped | Never edit the files; investigate against IBKR before starting again |
+| "gave up after N attempts", "no handshake within connect_timeout", "Gateway closed the connection during the handshake" | The adapter could not connect to IB Gateway after its growing pauses (`max_connect_attempts`) | `docs/runbooks/gateway-login.md`, then start the adapter |
+| "cannot connect to the engine's socket", "durable log ... cannot be read", "EngineUnavailable" or "the engine refused the input" | The engine is not running, has not finished starting (a fresh run records your Run approval before it listens), has stopped, or refused an input. Nothing is sent and the input stays where it is | Start or resume the engine ([the durable log runbook](../runbooks/durable-log.md), "Restarting an engine"), then start the adapter. A refusal is a fault: investigate |
+| "refused: ..." at start | The configuration (unknown or missing keys, a value of the wrong kind, `paper_sending_enabled` outside paper, a key that looks like a credential), the account (named in both places or neither, or written with quotes or spaces), or the installed `ibapi` ("install the pinned build") | Correct what it names; for `ibapi`, `sudo deploy/provision.sh twsapi` and `adapter` ([paper trading](paper-trading.md), "Installing IBKR's `ibapi` on the server") |
 
 ### The settling commands at a glance
 
@@ -111,7 +120,8 @@ Each command keeps your decision and reason in a file beside the pending
 file: `.handover.decisions`, `.corrections` or `.late-fills`. The adapter's
 other files there are `.lock` (never delete it), `.handover` (the
 hand-over marks) and `.refused` (what the sender refused and why). The
-held-reports file, ending `.held`, sits beside the journal.
+held-reports file (`.held`), the delivery record (`.delivered`) and the kept
+previous-close books (`.basis`) sit beside the pending file too.
 
 ### The engine side after `--never-sent`
 
@@ -136,7 +146,7 @@ the order stays released:
 
 ## What can go wrong, and what the adapter does then
 
-| What happens | What the adapter does | What you do |
+| What you see | What the program does | What you do |
 | --- | --- | --- |
 | The link to IB Gateway drops | Reconnects under the same client ID; matches IBKR's orders, trades and balances before anything is sent; never resends an order IBKR already has | Nothing, unless it gives up: `docs/runbooks/gateway-login.md` |
 | The Gateway's nightly restart (11:45 PM New York) or Sunday re-login (09:00) | The link drops and comes back as above. An order IBKR accepted stays at IBKR, and is found again on reconnect | Approve the Sunday phone prompt. Not yet rehearsed against a real Gateway |
@@ -144,7 +154,7 @@ the order stays released:
 | The adapter stops mid-send | Stops with "was being handed to the broker" | The first row of the stops table |
 | The engine restarts after a crash | On reconnect the adapter asks for its waiting input's reply again and receives the order decided before the crash, once | Nothing ([re-delivery](redelivery.md)) |
 | IBKR refuses the order | Records the refusal with IBKR's reason; the engine reads the order as ended | Read the reason (`journal-query orders`). In paper it is usually an account setting |
-| A sell order the program did not send (a sale you placed by hand) is working | The broker snapshot lists it among the open orders; the engine counts it as being sold, and the joint account's sale back to 98% is withheld (`unknown-working-sell`, CONTAINMENT REQUIRED) | Do not trade by hand while a program order is working ([states-and-kill-switch](states-and-kill-switch.md)) |
+| A sell order the program did not send (a sale you placed by hand) is working | The broker snapshot lists it among the open orders, and the reading after the close cannot stand for the close while it works (the session is withheld); at the adapter's next start or reconnect it stops on it ("no order the engine released explains"). The engine counts it as being sold, and the joint account's sale back to 98% is withheld (`unknown-working-sell`, CONTAINMENT REQUIRED) | Do not trade by hand while a program order is working ([states-and-kill-switch](states-and-kill-switch.md)) |
 
 ## What backs this
 
@@ -157,7 +167,7 @@ the order stays released:
   close; the mark is the official close).
 - `adapter/ibkr/README.md` lists every module's rules.
 - Tests in `adapter/ibkr/tests/`: `test_config.py`, `test_connection.py`,
-  `test_account.py`, `test_snapshot.py`, `test_post_close.py`,
+  `test_account.py`, `test_snapshot.py`, `test_book_basis.py`, `test_post_close.py`,
   `test_delivery.py`, `test_orders.py`,
   `test_sender.py`, `test_relay.py`, `test_paper.py`,
   `test_real_client.py`, `test_loop.py`, `test_engine_client.py`,

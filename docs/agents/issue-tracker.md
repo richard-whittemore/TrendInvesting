@@ -1,8 +1,8 @@
-# Issue tracker: GitHub Issues (via the GitHub MCP)
+# Issue tracker: GitHub Issues (via `gh` or the GitHub MCP)
 
 Issues and specs for this repo live as **GitHub issues in `richard-whittemore/TrendInvesting`**.
 
-**Use the route `AGENTS.md` names (the GitHub MCP tools).** Whether the `gh` CLI is installed varies by machine: where it is installed and logged in, it performs the same operations (`gh issue …`, `gh pr …`, `gh api …`); where it is not, use the GitHub MCP tools below.
+**Use the `gh` CLI where it is installed and logged in (it is, on the Mac mini), or the GitHub MCP tools below.** `gh` performs the same operations (`gh issue …`, `gh pr …`, `gh api …`); where it is not installed on a machine, use the GitHub MCP.
 
 | Operation | Tool |
 |---|---|
