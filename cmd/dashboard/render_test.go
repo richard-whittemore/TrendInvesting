@@ -60,3 +60,29 @@ func TestDashboardShowsTheDaysWithheldSalesAndFillSides(t *testing.T) {
 		}
 	}
 }
+
+// TestDashboardShowsTheDaysSkippedTrades: a skipped trade is recorded so no
+// planned trade disappears silently (ADR 0026, point 8), and the dashboard
+// shows the summary the reporter sends, so each of the day's skips appears
+// with its side, the shares the rule asked for and its reason.
+func TestDashboardShowsTheDaysSkippedTrades(t *testing.T) {
+	var buf bytes.Buffer
+	s := report.Summary{AccountID: "joint", Date: "2024-01-02", Benchmark: "SPY",
+		Skipped: []report.SkippedLine{{ClientOrderID: "tw-a", InstrumentID: "SPY", Side: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: 0.4}}}
+	if err := page.Execute(&buf, []account{{Summary: s}}); err != nil {
+		t.Fatal(err)
+	}
+	body := buf.String()
+	for _, want := range []string{"<h3>Trades skipped</h3>", "<td>tw-a</td><td>buy</td><td>SPY</td><td>0.40 shares</td><td>below-one-share</td>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q:\n%s", want, body)
+		}
+	}
+	buf.Reset()
+	if err := page.Execute(&buf, []account{{Summary: report.Summary{AccountID: "joint"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "Trades skipped") {
+		t.Error("a day with no skipped trade shows the section")
+	}
+}

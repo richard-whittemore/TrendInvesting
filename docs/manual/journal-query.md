@@ -47,7 +47,7 @@ Reports:
 
 | Report | Answers |
 | --- | --- |
-| `orders` | orders planned, released and refused, and order lifecycle changes |
+| `orders` | orders planned, released and refused, trades skipped (sized but not ordered), and order lifecycle changes |
 | `fills` | each fill with quantity, price and commission |
 | `refusals` | refused orders, withheld sales back to 98% and engine-state changes (degraded, halted) |
 | `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row |
@@ -114,7 +114,8 @@ sent) and refused (`refused`), and each report IBKR sent back on an order
 [order lifecycle](order-lifecycle.md): `lifecycle-submitted`,
 `lifecycle-cancel-pending`, `lifecycle-canceled` or `lifecycle-invalid`), and
 a dry-run engine's own report on an order it never sent
-(`synthetic-lifecycle-canceled`, below). It prints no `working` or `pending` value, and it never shows an order you
+(`synthetic-lifecycle-canceled`, below), and each trade the program sized
+but did not order (`skipped`, below). It prints no `working` or `pending` value, and it never shows an order you
 placed by hand. A released sell has ended only once it has a
 `lifecycle-canceled` or `lifecycle-invalid` row, or `fills` shows it filled
 in full; `lifecycle-cancel-pending` may still fill. And with the adapter
@@ -143,6 +144,20 @@ positions.jsonl  5    2026-01-10  A1       BBB         10     10        ok
 positions.jsonl  7    2026-01-20  A1       AAA         0      20        DISAGREES
 positions.jsonl  7    2026-01-20  A1       BBB         10     10        ok
 1 disagreement(s) between the fills and the account snapshots
+```
+
+Which trades did the program size but not order?
+
+`orders` lists each as `skipped`: the side, a quantity of 0 (nothing was
+ordered), the price the trade was sized at, and in the note the reason
+(`below-one-share`, `scaled-below-one-share` or `held-by-working-sells`,
+explained in [momentum minimum lot](momentum-minimum-lot.md)) and the
+unrounded shares the rule asked for.
+
+```
+$ journal-query orders -instrument BBB ira.log
+journal  seq  time        account  instrument  event    side  quantity  price  note
+ira.log  12   2026-03-02  A1       BBB         skipped  buy   0         80.00  below-one-share: 0.4 shares wanted
 ```
 
 For a spreadsheet or another program, add `-format csv` or `-format json`.
@@ -205,7 +220,8 @@ version 2, or a venue's at version 3, is refused), planned orders of
 versions 1 and 2 (2 is a sale back to 98%), risk-gate releases and refusals
 of versions 1, 2 and 3 (3 adds the broker figures, more reasons and the
 refusal's alert), withheld sales back to 98% (`risk.sale.withheld`, listed
-by `refusals` with their reason, `lapsed` included), engine-state changes,
+by `refusals` with their reason, `lapsed` included), skipped trades
+(`strategy.order.skipped`, listed by `orders`), engine-state changes,
 kill switches, rebalance clearances, approvals, symbol changes, and account
 snapshots of versions 3 (positions) and 4 (positions and cash; the cash is
 not reported). The equity-and-cash snapshot (version 2), which holds no
@@ -227,6 +243,6 @@ itself.
   tamper refusal, byte-identical files after every report and format,
   date and account filters, CSV and JSON, and a deliberate position
   disagreement. `internal/journalquery/journalquery_test.go` covers the query
-  logic itself.
+  logic itself, among them `TestSkippedTradesAreListedWithTheOrders`.
 - The tool opens journals read-only and its query code receives bytes, never
   a file handle, so it cannot write.

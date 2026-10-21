@@ -77,6 +77,9 @@ var (
 	// A withheld sale back to 98%, for the stale episode it opens (ADR 0019,
 	// amendment of 2026-10-17, reading 10).
 	saleWithheldVersions = []uint32{event.SaleWithheldSchemaVersion}
+	// A trade the order planner sized but could not order (ADR 0026,
+	// point 8).
+	skippedVersions = []uint32{event.OrderSkippedSchemaVersion}
 	// The margin-cushion alarm's level changes (plan.md section 5).
 	marginAlarmVersions = []uint32{event.MarginAlarmSchemaVersion}
 	// The IBKR adapter's broker snapshot, read for the reason a reading

@@ -64,6 +64,10 @@ const (
 	// as the attempt, which the owner makes by hand (ADR 0019, amended
 	// 2026-10-15, "No order when it cannot be checked").
 	KindSaleByHand Kind = "sale-by-hand"
+	// KindChannelRefused is the reporter's own failure to use one delivery
+	// channel, an empty or malformed secret: that channel is set aside and
+	// the others still deliver.
+	KindChannelRefused Kind = "channel-refused"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
@@ -108,6 +112,11 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     episode and is that episode's one urgent alert, as missing data
 //     (ADR 0019, amendment of 2026-10-17, reading 10, "Stale episode"); it
 //     proves the gate flags stale episodes, as a flagged stale refusal does.
+//   - A sale back to 98% the owner must make by hand pages with the hand-sale
+//     steps (docs/manual/states-and-kill-switch.md, "Selling by hand
+//     safely"): withheld for a reason that spends the attempt, once per
+//     record; withheld for values that are not positive, once per sale; and
+//     refused at the gate as broker-holding, beside its refusal alert.
 //   - A strategy.engine.state record is an incident when its state, reason and
 //     scope differ from the previous one: a repeat of the same state is the
 //     same incident, and Degraded to Halted is a new one (ADR 0019). The
@@ -164,6 +173,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	// of that reason earlier in the journal carried the flag.
 	flagged := map[string]bool{}
 	pending := sales{}
+	// paged holds the by-hand pages already raised: a sale withheld again
+	// for values that are not positive is the same incident.
+	paged := map[string]bool{}
 	// notAtClose is the latest broker snapshot stamped at its read time, if
 	// the latest one is: its ID and why it was not as of the close.
 	var notAtClose [2]string
@@ -217,6 +229,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				return nil, err
 			}
 			out = append(out, refusalAlerts(account, e, p, flagged[p.Reason])...)
+			if a, ok := pending.refused(account, e, p); ok {
+				out = append(out, a)
+			}
 			if p.Alert {
 				flagged[p.Reason] = true
 			}
@@ -229,7 +244,8 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				flagged[event.RefusedStaleBrokerSnapshot] = true
 				out = append(out, staleSaleAlert(account, e, p))
 			}
-			if a, ok := byHandAlert(account, e, p); ok {
+			if a, ok := byHandAlert(account, e, p); ok && !paged[a.Key] {
+				paged[a.Key] = true
 				out = append(out, a)
 			}
 		case event.MarginAlarmEventType:
@@ -486,7 +502,8 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 //
 // The units are named by the engine instance, not by the account it
 // decides, which the journal records: the steps come only from Boost's
-// rejections, and Boost runs as ti-engine@boost with ti-adapter-boost, the
+// rejections and the sale back to 98%, which only the margin account makes
+// (ADR 0019, amended 2026-10-15), and Boost runs as ti-engine@boost with ti-adapter-boost, the
 // only adapter unit, wired to that engine's socket and log, whatever account
 // its configuration decides (the shipped one decides "joint";
 // deploy/systemd, docs/manual/server.md). The approval names the account.
@@ -650,6 +667,20 @@ func HeartbeatUncheckedAlert(account string, err error, at time.Time) Alert {
 		Key: "heartbeat-unchecked:" + account + ":" + err.Error(), Kind: KindHeartbeatUnchecked, Severity: Urgent, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: the reporter cannot check the heartbeat", account),
 		Body:  fmt.Sprintf("The reporter cannot check the heartbeat: %s. Until it can, a silent engine goes unreported. Stops and orders at the broker are unaffected. Check the NYSE calendar's years and the journal's modification time.", err),
+	}
+}
+
+// ChannelRefusedAlert reports that the reporter set a delivery channel aside,
+// for an empty or malformed secret or setting, and sends this run's alerts on
+// the other channels: one channel's configuration must never silence the
+// rest (ADR 0019, "Alerting": an alert is a safety requirement). err never
+// carries a secret's value. The key is the account, the channel and the
+// problem, so one problem is one incident and a different one is another.
+func ChannelRefusedAlert(account, channel string, err error, at time.Time) Alert {
+	return Alert{
+		Key: "channel-refused:" + account + ":" + channel + ":" + err.Error(), Kind: KindChannelRefused, Severity: Urgent, AccountID: account, At: at,
+		Title: fmt.Sprintf("%s: the reporter cannot deliver to %s", account, channel),
+		Body:  fmt.Sprintf("The reporter set the %s channel aside: %s. Every alert still goes to the other channels, but none reaches %s until it is fixed. Check the secrets file (/etc/trend-investing/secrets.env) and journalctl -u ti-reporter@<instance>.", channel, err, channel),
 	}
 }
 
