@@ -238,6 +238,10 @@ type momentumOptions struct {
 	// it after that close's snapshot, and a reconciliation then decide it.
 	deposit         map[string]float64
 	depositRecorded bool
+	// depositAfterSnapshot lands the deposit after that close's snapshot:
+	// the snapshot does not hold it, and the reconciliation half an hour
+	// later, against that snapshot's book, finds it pending a reading.
+	depositAfterSnapshot bool
 	// brokerLast, when set, feeds every mark at version 2 with IBKR's last
 	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
 	// ADR 0026 point 1, amended 2026-10-18).
@@ -453,7 +457,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			}
 		}
 		amount, deposits := opts.deposit[session]
-		if deposits {
+		if deposits && !opts.depositAfterSnapshot {
 			acct.settled = float64(acct.settled + amount)
 			apply(flexStatusInput(t, s, event.FlexStateRead, previousDay(session), end.Add(-time.Hour)))
 			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("after-close:"+session, end)))
@@ -464,6 +468,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				asOf = end.Add(time.Hour)
 			}
 			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, marks)))
+		}
+		if deposits && opts.depositAfterSnapshot {
+			acct.settled = float64(acct.settled + amount)
+			apply(flexStatusInput(t, s, event.FlexStateRead, previousDay(session), end.Add(-time.Hour)))
+			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("after-close:"+session, end.Add(30*time.Minute))))
 		}
 		if deposits && opts.depositRecorded {
 			apply(movementInput(t, s, "D:"+session, amount, newYorkDay(session)))

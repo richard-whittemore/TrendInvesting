@@ -176,6 +176,34 @@ func TestAPendingCashIncreaseIsNotInvestedUntilTheReaderExplainsIt(t *testing.T)
 	}
 }
 
+// TestAPendingCashIncreaseTheSnapshotNeverSawLeavesNoBudget: the budget is
+// the cash of the decision's snapshot, so a pending increase leaves it only
+// when that snapshot is taken at or after the reading that found it. A
+// deposit that lands after the snapshot, found by a reading after it, is not
+// in the snapshot's cash: the buys are sized from that cash, as if no
+// deposit came (ADR 0019, point 3, amended 2026-10-21).
+func TestAPendingCashIncreaseTheSnapshotNeverSawLeavesNoBudget(t *testing.T) {
+	const deposited = 2500
+	base := released(t, simulateMomentum(t, momentumOptions{}).decisions)[4:]
+	late := simulateMomentum(t, momentumOptions{deposit: map[string]float64{"2025-02-28": deposited}, depositAfterSnapshot: true})
+	results := ofType(late.decisions, event.ReconciliationResultEventType)
+	if len(results) != 1 {
+		t.Fatalf("want the pending result alone, got %d results", len(results))
+	}
+	var r event.ReconciliationResultPayload
+	decode(t, results[0], &r)
+	if r.Classification != event.ReconciliationPendingCashRead {
+		t.Fatalf("the deposit the reader has not read: %s: %s", r.Classification, r.Detail)
+	}
+	buys := released(t, late.decisions)[4:]
+	if len(base) == 0 || len(buys) == 0 {
+		t.Fatalf("%d and %d buys", len(base), len(buys))
+	}
+	if got, want := buys[0].Figures.CashAvailable, base[0].Figures.CashAvailable; math.Abs(got-want) > 1e-6 {
+		t.Errorf("the first buy is checked against %v, want %v, the snapshot's cash, which never held the deposit", got, want)
+	}
+}
+
 // TestAPendingDifferenceReadTwicePagesOnce: a reconnect's reading of the
 // same pending difference is journalled, but the reporter pages once for
 // the difference, and once for its decision (ADR 0019, amended 2026-10-21:

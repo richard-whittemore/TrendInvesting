@@ -869,10 +869,15 @@ meet the money before the reader has recorded it.
    owner's own transfers never need a manual recovery):
    - **a cash increase** (IBKR shows more than the book: deposit-like) stops
      no buy, but while it pends unexplained the buys are sized from the
-     book's cash, the broker's less the unexplained increase, so a credit
-     IBKR reverses or posted in error is never invested; the new cash is
-     invested at the first decision after the reader's records explain it,
-     usually the next evening;
+     cash of the decision's snapshot less the unexplained increase, so a
+     credit IBKR reverses or posted in error is never invested. The
+     increase is subtracted only when that snapshot is taken at or after
+     the reading that found it (the snapshot's cash then includes it); an
+     increase found by a reading later than the snapshot is not subtracted,
+     since the snapshot never saw that cash. A repeat reading leaves the
+     time it was found at the first reading's. The new cash is invested at
+     the first decision after the reader's records explain it, usually the
+     next evening;
    - **a cash decrease** (IBKR shows less: withdrawal-like) withholds every
      buy on the whole account while it pends, so no plan is sized on cash
      that may not be there (`risk.order.refused`, reason

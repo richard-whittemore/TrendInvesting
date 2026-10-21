@@ -418,7 +418,7 @@ func TestARepeatedReadingOfAPendingDifferenceIsTheSameDifference(t *testing.T) {
 	if !strings.Contains(r.Result.Detail, "the same difference reconciliation morning (reconciliation:1) found") {
 		t.Errorf("the repeat names the reading that found it: %q", r.Result.Detail)
 	}
-	if got := g.PendingCashIncrease(); got != 500 {
+	if got := g.PendingCashIncrease(again.AsOf); got != 500 {
 		t.Fatalf("one difference of $500 pends, got %v", got)
 	}
 	if r.Result.RepeatOf != "morning" {
@@ -446,7 +446,7 @@ func TestARepeatedReadingOfAPendingDifferenceIsTheSameDifference(t *testing.T) {
 	if next.Settled[0].ResultID == next.Settled[1].ResultID {
 		t.Errorf("each has its own ID: %s", next.Settled[0].ResultID)
 	}
-	if got := g.PendingCashIncrease(); got != 0 {
+	if got := g.PendingCashIncrease(day(1, 1500).AsOf); got != 0 {
 		t.Errorf("decided: %v pends", got)
 	}
 }
@@ -481,8 +481,47 @@ func TestAPendingDifferenceReadAgainAfterAFillIsTheSameDifference(t *testing.T) 
 	if r.Result.RepeatOf != "morning" {
 		t.Errorf("the repeat names the reading that found the difference: %q", r.Result.RepeatOf)
 	}
-	if got := g.PendingCashIncrease(); got != 500 {
+	if got := g.PendingCashIncrease(again.AsOf); got != 500 {
 		t.Fatalf("one difference of $500 pends, got %v", got)
+	}
+}
+
+func TestAPendingCashIncreaseLeavesOnlyABudgetWhoseSnapshotSawIt(t *testing.T) {
+	// A budget is the cash of the decision's snapshot. A pending increase
+	// leaves it only when that snapshot is taken at or after the reading
+	// that found the increase, so its cash holds it; a snapshot before that
+	// reading never saw the cash, and leaving it out again would under-size
+	// the buys (ADR 0019, point 3, amended 2026-10-21).
+	g := booked(t)
+	flexRead(t, g, "20250304", at.Add(-12*time.Hour))
+	found := morningOf(1500, 10)
+	reconcileWith(t, g, "reconciliation:1", found)
+	if got := g.PendingCashIncrease(found.AsOf.Add(time.Hour)); got != 500 {
+		t.Errorf("a snapshot after the reading holds the increase: %v leaves the budget, want 500", got)
+	}
+	if got := g.PendingCashIncrease(found.AsOf); got != 500 {
+		t.Errorf("a snapshot at the reading holds the increase: %v leaves the budget, want 500", got)
+	}
+	if got := g.PendingCashIncrease(found.AsOf.Add(-time.Minute)); got != 0 {
+		t.Errorf("a snapshot before the reading never saw the increase: %v leaves the budget, want 0", got)
+	}
+	// A repeat reading is the same difference, found at the first reading.
+	again := morningOf(1500, 10)
+	again.AsOf, again.ReconciliationID = again.AsOf.Add(time.Hour), "reconnect"
+	reconcileWith(t, g, "reconciliation:2", again)
+	if got := g.PendingCashIncrease(found.AsOf.Add(30 * time.Minute)); got != 500 {
+		t.Errorf("a snapshot between the first reading and its repeat holds the increase: %v, want 500", got)
+	}
+	// Explained, it leaves no budget, whenever the snapshot.
+	rebook(g, 0, 1500)
+	deposited(t, g, "T1", 500, 30)
+	flexRead(t, g, "20250305", at.Add(12*time.Hour))
+	decided := day(1, 1500)
+	reconcileWith(t, g, "reconciliation:3", decided)
+	for _, asOf := range []time.Time{found.AsOf.Add(-time.Minute), found.AsOf, decided.AsOf} {
+		if got := g.PendingCashIncrease(asOf); got != 0 {
+			t.Errorf("explained: %v leaves the budget of a snapshot at %s, want 0", got, asOf)
+		}
 	}
 }
 

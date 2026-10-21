@@ -259,7 +259,9 @@ const pendingSessions = event.PendingCashReadSessions
 
 // pendingCash is one cash difference reported as a pending cash read: the
 // reconciliation that found it, its cash component, and its window, the
-// transfers dated from from up to to, those it counted already excluded.
+// transfers dated from from up to to, those it counted already excluded. to
+// is the as-of of the reading that found it, which a repeat leaves as it is:
+// a snapshot at or after to holds the difference (PendingCashIncrease).
 type pendingCash struct {
 	inputID string
 	result  event.ReconciliationResultPayload
@@ -408,15 +410,18 @@ func (g *Gate) withheldOnCash() *pendingCash {
 }
 
 // PendingCashIncrease is the sum, in dollars, of every pending cash
-// increase still undecided: cash IBKR shows that no journalled transfer or
-// fill explains yet. Buys are sized from the book's cash, the broker's less
-// this, so a credit that is reversed or posted in error is never invested;
-// once the Flex reader's records explain it, it leaves the sum and the next
-// decision invests it (ADR 0019, amended 2026-10-21).
-func (g *Gate) PendingCashIncrease() float64 {
+// increase still undecided that a broker snapshot taken at asOf holds: cash
+// IBKR shows that no journalled transfer or fill explains yet, found by a
+// reading at or before asOf. Buys are sized from the decision's snapshot's
+// cash less this, so a credit that is reversed or posted in error is never
+// invested; an increase found by a reading after the snapshot is not in its
+// cash, so it is not taken from it again. Once the Flex reader's records
+// explain an increase, it leaves the sum and the next decision invests it
+// (ADR 0019, point 3, amended 2026-10-21).
+func (g *Gate) PendingCashIncrease(asOf time.Time) float64 {
 	var sum int64
 	for _, pc := range g.pendingCash {
-		if pc.cash.Residual > 0 {
+		if pc.cash.Residual > 0 && !pc.to.After(asOf) {
 			sum += pc.cash.Residual
 		}
 	}

@@ -253,9 +253,13 @@ liquidation):
    pending-cash-read (<id>)`, and the account's state does not change. What
    it does to buys depends on which way the cash moved:
    - **more cash than the book** (a deposit): buys carry on, but they are
-     sized from the book's cash, IBKR's less the new cash, so money IBKR
-     reverses or posted in error is never invested; the deposit is invested
-     at the first decision after the reader's record explains it;
+     sized from the cash in IBKR's snapshot that the decision used, less
+     the new cash, so money IBKR reverses or posted in error is never
+     invested. The new cash is taken off only when that snapshot was taken
+     at or after the reconciliation that found it, so the snapshot's cash
+     includes it; when the reconciliation came after the snapshot, the
+     snapshot never saw the new cash, and nothing is taken off. The deposit
+     is invested at the first decision after the reader's record explains it;
    - **less cash than the book** (a withdrawal): every buy on the account
      waits, refused with the reason `pending-cash-decrease`, so no order is
      sized on cash that may not be there; sells and exits go on, as while
