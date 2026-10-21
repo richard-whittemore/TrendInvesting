@@ -124,5 +124,6 @@ deploy-test:
 	./deploy/rehearsal/test-platform.sh
 	./deploy/rehearsal/test-clock.sh
 	./deploy/rehearsal/test-operator-user.sh
+	./deploy/rehearsal/test-adapter-venv.sh
 
 check: deps lint coverage vuln build adapter-test research-test deploy-test
