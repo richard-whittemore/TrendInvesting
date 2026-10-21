@@ -962,9 +962,12 @@ taken as held by that close's book, as the reader takes it; the next
 reconciliation then finds a difference, pending until the reader covers the
 day and then Degraded. The joint account's book states no cash, so Boost
 compares no cash and the journalled transfers change none of its results.
-The reporter's alert text for a pending cash read is the reconciliation
-alert's: its title names `pending-cash-read`; its body's account-state
-sentence is the reporter's to state for an alert that moves no state.
+The reporter's alert for a pending cash read keeps the reconciliation alert's
+title form and key, with `pending-cash-read` in the title, but builds its own
+body: the difference and its direction, the New York day of the reading, that
+the Flex reader has not covered that day, the state the account is in (the
+state already in force, or the state the same input moved it to), what buys
+do, and when it becomes Degraded. The alert moves no state.
 
 This changes what the engine decides from journalled inputs, so it is a rules
 change under ADR 0016: target-weight RulesVersion 1.21.0. New schemas:

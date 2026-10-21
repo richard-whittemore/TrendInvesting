@@ -549,10 +549,10 @@ the dashboard read every version. See [journal-query](journal-query.md).
 
 Every refusal reaches you as an urgent alert,
 `<account>: order refused (...)` with the reason filled in, within 5 minutes
-([alerts-and-dashboard](alerts-and-dashboard.md)). The kill switch and a
-stale IBKR snapshot are the exceptions: they alert once per engagement or
-outage. `journal-query refusals <log>` lists every refusal, state change and
-withheld sale, with its detail. In the tables, `joint` is the margin
+([alerts-and-dashboard](alerts-and-dashboard.md)). The kill switch, a stale
+IBKR snapshot and a pending cash decrease are the exceptions: they alert once
+per engagement, outage or pending difference. `journal-query refusals <log>`
+lists every refusal, state change and withheld sale, with its detail. In the tables, `joint` is the margin
 account's name; an IRA's alerts carry its own.
 
 ### Orders the gate refuses

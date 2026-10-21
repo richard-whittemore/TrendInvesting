@@ -1,6 +1,7 @@
 package risklimit_test
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -174,8 +175,9 @@ func TestAPendingCashReadNeverLastsMoreThanTwoSessions(t *testing.T) {
 	if len(r.Settled) != 1 || r.Settled[0].State == nil || r.Settled[0].State.State != event.EngineStateDegraded {
 		t.Fatalf("want Degraded after more than two sessions, got %+v", r.Settled)
 	}
-	if !strings.Contains(r.Settled[0].Result.Detail, "two sessions") {
-		t.Errorf("the detail says why: %q", r.Settled[0].Result.Detail)
+	// The cap is formatted from the shared constant, never written out.
+	if want := fmt.Sprintf("more than the %d sessions a difference may wait", event.PendingCashReadSessions); !strings.Contains(r.Settled[0].Result.Detail, want) {
+		t.Errorf("the detail says why, with the cap from the constant: want %q in %q", want, r.Settled[0].Result.Detail)
 	}
 }
 

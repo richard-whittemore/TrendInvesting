@@ -464,7 +464,7 @@ func (g *Gate) settlePending(id string, p event.ReconciliationPayload) []Reconci
 		case calErr != nil:
 			why = "the sessions since it cannot be counted: " + calErr.Error()
 		case sessions > pendingSessions:
-			why = fmt.Sprintf("%d sessions have closed since it, more than the two sessions a difference may wait for the Flex reader", sessions)
+			why = fmt.Sprintf("%d sessions have closed since it, more than the %d sessions a difference may wait for the Flex reader", sessions, pendingSessions)
 		default:
 			kept = append(kept, pc)
 			continue

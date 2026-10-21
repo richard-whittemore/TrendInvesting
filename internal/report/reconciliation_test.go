@@ -420,6 +420,42 @@ func TestAPendingCashReadStatesTheTruth(t *testing.T) {
 	}
 }
 
+// TestAPendingCashReadSaysIsWhenItsInputMovedTheState: when one reconciliation
+// input settles an earlier pending difference as Degraded on cash and pends
+// its own cash difference, the state that input caused is the state the
+// account is in when the new pending read is reported, so the alert says
+// "the account is", not "stays" (ADR 0019, amended 2026-10-21).
+func TestAPendingCashReadSaysIsWhenItsInputMovedTheState(t *testing.T) {
+	s := newStream(t)
+	s.pendingRead(1, "reconciliation:1", 50000, "")
+	s.pendingRead(2, "reconciliation:2", -25050, "")
+	s.add(event.EngineStateEventType, event.EngineStateScopedVersion, "engine-state:joint:reconciliation:2", day(2), event.EngineStatePayload{
+		State: event.EngineStateDegraded, Reason: event.EngineStateReasonReconciliationUnexplained, Detail: "reconciliation:1 settled as unexplained cash",
+		ScopeCashComponents: []string{event.ReconciliationComponentCash},
+	})
+	s.caused("reconciliation:2")
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pending []report.Alert
+	for _, a := range got {
+		if strings.Contains(a.Title, "pending-cash-read") {
+			pending = append(pending, a)
+		}
+	}
+	if len(pending) != 2 {
+		t.Fatalf("want a pending alert per pending read, got %d in %+v", len(pending), got)
+	}
+	want := "joint: cash differs from the book by 250.50 USD (a decrease, like a withdrawal) on 2024-01-04; the Flex reader has not covered that day yet; the account is Degraded on cash [total-cash]; buys are withheld until the reader explains it, and sells and exits continue; it becomes Degraded if unexplained after the Flex reader covers 2024-01-04 or more than 2 sessions close since, whichever comes first."
+	if !strings.HasPrefix(pending[1].Body, want) {
+		t.Errorf("body:\n%s\nwant it to start:\n%s", pending[1].Body, want)
+	}
+	if strings.Contains(pending[1].Body, "stays") || strings.Contains(pending[1].PublicBody, "stays") {
+		t.Errorf("the state moved by this input, so the alert must not say it stays:\n%s", pending[1].Body)
+	}
+}
+
 // TestAPendingCashDifferenceIsDecidedWithItsOwnBody: a later reading of the
 // same pending difference stays silent, the decision that explains it sends
 // nothing (an explained result continues), and the decision that degrades
