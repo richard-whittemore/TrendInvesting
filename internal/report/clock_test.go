@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ var clockAt = time.Date(2026, time.October, 21, 14, 5, 0, 0, time.UTC)
 const driftOutput = "clock: skew of -7s against https://www.cloudflare.com (this clock minus the reference), more than the 2s tolerance. The host's clock is wrong."
 
 func TestClockDriftAlertIsOneUrgentIncidentWithTheMeasuredSkewAndTheRemedy(t *testing.T) {
-	a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: driftOutput})
+	a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: driftOutput}, 2)
 	if a.Kind != report.KindClockDrift || a.Severity != report.Urgent || a.AccountID != "ti-server" {
 		t.Fatalf("got %+v", a)
 	}
@@ -33,8 +34,8 @@ func TestClockDriftAlertIsOneUrgentIncidentWithTheMeasuredSkewAndTheRemedy(t *te
 }
 
 func TestClockDriftAlertKeyIsTheHostsAndStableWhileTheFailureLasts(t *testing.T) {
-	first := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: driftOutput})
-	later := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt.Add(25 * time.Minute), Output: strings.Replace(driftOutput, "-7s", "-31s", 1)})
+	first := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: driftOutput}, 2)
+	later := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt.Add(25 * time.Minute), Output: strings.Replace(driftOutput, "-7s", "-31s", 1)}, 2)
 	if first.Key != later.Key {
 		t.Errorf("one failure must be one key: %q vs %q", first.Key, later.Key)
 	}
@@ -46,14 +47,14 @@ func TestClockDriftAlertKeyIsTheHostsAndStableWhileTheFailureLasts(t *testing.T)
 	if !strings.Contains(first.Title, "ti-server") {
 		t.Errorf("title %q does not name the host", first.Title)
 	}
-	if other := report.ClockDriftAlert("other-server", report.ClockCheck{At: clockAt, Output: driftOutput}); other.Key == first.Key {
+	if other := report.ClockDriftAlert("other-server", report.ClockCheck{At: clockAt, Output: driftOutput}, 2); other.Key == first.Key {
 		t.Error("two hosts must not share a key")
 	}
 }
 
 func TestClockDriftAlertSaysWhenTheOutputCannotBeRead(t *testing.T) {
 	for _, out := range []string{"clock: skew: -7s against https://x", "something else entirely", "clock: skew +3s"} {
-		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: out})
+		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: out}, 2)
 		if !strings.Contains(a.Body, "No skew could be read") || strings.Contains(a.Body, "No skew was measured") {
 			t.Errorf("%q: body:\n%s", out, a.Body)
 		}
@@ -69,7 +70,7 @@ func TestClockDriftAlertSaysWhenNoSkewWasMeasured(t *testing.T) {
 		"the check could not be run: /x/clock-check.sh is missing",
 		"the check timed out after 40s",
 	} {
-		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: out})
+		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: out}, 2)
 		if !strings.Contains(a.Body, "No skew was measured") || !strings.Contains(a.Body, strings.SplitN(out, "\n", 2)[0]) {
 			t.Errorf("%q: body:\n%s", out, a.Body)
 		}
@@ -108,5 +109,18 @@ func TestClockSummaryLineShowsTheLastCheckTimeAndResult(t *testing.T) {
 	}
 	if strings.Contains(pass, "\n") || strings.Contains(fail, "\n") {
 		t.Error("the line is one line")
+	}
+}
+
+func TestClockDriftAlertStatesTheActualCountOfFailedChecks(t *testing.T) {
+	for _, n := range []int{2, 3, 11} {
+		a := report.ClockDriftAlert("ti-server", report.ClockCheck{At: clockAt, Output: driftOutput}, n)
+		want := fmt.Sprintf("%d checks in a row have failed", n)
+		if !strings.Contains(a.Body, want) {
+			t.Errorf("failures %d: the body does not say %q: %s", n, want, a.Body)
+		}
+		if strings.Contains(a.Body, "second check") {
+			t.Errorf("failures %d: the body hard-codes the second check: %s", n, a.Body)
+		}
 	}
 }

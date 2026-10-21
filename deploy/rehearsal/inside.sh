@@ -271,7 +271,20 @@ rm "$stand/fail"
 age_check
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin $stand_line >/dev/null || fail "the reporter with a passing stand-in clock check failed"
-grep -q '"event_action":"resolve","dedup_key":"clock-drift:' "$rep/posts.bodies" || fail "a passing clock check did not resolve the PagerDuty incident"
+trigger_key=$(python3 - "$rep/posts.bodies" <<'PY'
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        b = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(b, dict) and b.get("event_action") == "trigger" and str(b.get("dedup_key", "")).startswith("clock-drift:"):
+        print(b["dedup_key"])
+        break
+PY
+)
+test -n "$trigger_key" || fail "the clock page's dedup key could not be read from the posts"
+grep -qF "\"event_action\":\"resolve\",\"dedup_key\":\"$trigger_key\"" "$rep/posts.bodies" || fail "a passing clock check did not resolve the PagerDuty incident"
 rm -rf "$stand"
 kill "$fake"
 pass "the reporter runs the installed clock check as ti-trader, pages a failing stand-in on the second failure, and resolves it on a pass"

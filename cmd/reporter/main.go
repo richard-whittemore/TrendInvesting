@@ -174,7 +174,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		if path == "" {
 			path = filepath.Join(filepath.Dir(*statePath), "host-clock.json")
 		}
-		c, err := clockStep(path, *clockCheck, hostName(), senders, at, *repeat)
+		c, err := clockStep(path, *clockCheck, hostName(), senders, now, *repeat)
 		clock = c
 		if err != nil {
 			failures = append(failures, err)

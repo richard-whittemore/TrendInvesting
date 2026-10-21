@@ -166,7 +166,7 @@ func TestChecksWithinOneTimerPeriodRunOnceAndCountOnce(t *testing.T) {
 	}
 }
 
-func TestAClockThatWentBackwardsIsCheckedAgain(t *testing.T) {
+func TestACheckRecordedInTheFutureIsThisPeriodsAndIsReusedNotCounted(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	check := newStandInCheck(t)
 	dir := t.TempDir()
@@ -176,8 +176,47 @@ func TestAClockThatWentBackwardsIsCheckedAgain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if check.runs() != 1 {
+		t.Errorf("a check dated after this firing was made again: %d runs, want 1", check.runs())
+	}
+}
+
+// Three timers fire together; the sibling that took the clock time earlier
+// reaches the clock step after another has recorded its check, and must not
+// count a second failure in the same period.
+func TestAnInstanceThatReachesTheClockStepAfterASiblingRecordedItsCheckDoesNotCountAgain(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	check := newStandInCheck(t)
+	check.fail(clockFailure)
+	reports := t.TempDir()
+	clockState := filepath.Join(reports, "host-clock.json")
+	fire := func(account string, now func() time.Time) {
+		t.Helper()
+		args := []string{"-journal", writeJournal(t, t.TempDir()), "-state", filepath.Join(reports, account+".reporter.json"),
+			"-clock-state", clockState, "-account", account, "-channel", "ntfy,pagerduty", "-clock-check", check.path()}
+		if err := run(args, twoChannels(), now, &bytes.Buffer{}, &http.Client{Transport: r}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p1 := t0.Add(time.Hour)
+	p2 := p1.Add(5 * time.Minute)
+	fire("first", func() time.Time { return p1 })
+	// The sibling that is quick: its check is recorded a minute into the period.
+	fire("quick", func() time.Time { return p2.Add(time.Minute) })
+	// The slow one took its time at the period's start, then spent seconds
+	// delivering alerts; every reading of its clock is earlier than the
+	// sibling's record.
+	var calls int
+	fire("slow", func() time.Time { calls++; return p2.Add(time.Duration(calls) * time.Second) })
 	if check.runs() != 2 {
-		t.Errorf("a check recorded in this clock's future was reused: %d runs, want 2", check.runs())
+		t.Errorf("the check ran %d times in two periods, want 2", check.runs())
+	}
+	raw, err := os.ReadFile(clockState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"consecutive_failures":2`) {
+		t.Errorf("the failure count moved within one period: %s", raw)
 	}
 }
 
@@ -619,7 +658,7 @@ func TestTheRealClockCheckSaysWhatTheReporterReads(t *testing.T) {
 				t.Errorf("read skew %d (%v) from %q, want about %d (%v)", skew, ok, got.Output, c.skew, c.measured)
 			}
 			if !c.passes {
-				body := report.ClockDriftAlert("h", got).Body
+				body := report.ClockDriftAlert("h", got, 2).Body
 				if strings.Contains(body, "could be read") {
 					t.Errorf("the real check's output was not understood: %s", body)
 				}

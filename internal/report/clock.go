@@ -53,13 +53,14 @@ func ClockSkewSeconds(output string) (int, bool) {
 // clears under this one key.
 func ClockDriftKey(host string) string { return "clock-drift:" + host }
 
-// ClockDriftAlert reports a failed clock check on host: the measured skew (or
+// ClockDriftAlert reports a failed clock check on host, the failures-th in a row (the
+// caller's count, not a fixed one, since a channel may take the page on a later failure): the measured skew (or
 // that none was measured, or that the output could not be read) and the
 // manual's remedy (docs/manual/server.md, "The clock"). The key names the
 // host only, so one failure is one incident however many checks fail in a row
 // and whichever account's reporter saw it; the caller resolves and forgets the
 // key when a check passes, which makes the next failure a new incident.
-func ClockDriftAlert(host string, c ClockCheck) Alert {
+func ClockDriftAlert(host string, c ClockCheck, failures int) Alert {
 	skew := "No skew could be read from the check's output: it is not in a form clock-check.sh documents, so read what the check said below."
 	if s, ok := ClockSkewSeconds(c.Output); ok {
 		skew = fmt.Sprintf("Measured skew: %+ds (this clock minus the reference).", s)
@@ -69,9 +70,9 @@ func ClockDriftAlert(host string, c ClockCheck) Alert {
 	return Alert{
 		Key: ClockDriftKey(host), Kind: KindClockDrift, Severity: Urgent, AccountID: host, At: c.At,
 		Title: fmt.Sprintf("%s: the server's clock failed its check", host),
-		Body: fmt.Sprintf("The clock check failed at %s, the second check in a row to fail. %s The check said: %s While the clock is wrong every account's engine on this server counts IBKR's account reading as stale and withholds every sell (ADR 0019). "+
+		Body: fmt.Sprintf("The clock check failed at %s, %d checks in a row have failed. %s The check said: %s While the clock is wrong every account's engine on this server counts IBKR's account reading as stale and withholds every sell (ADR 0019). "+
 			"Remedy (docs/manual/server.md, \"The clock\"): run /usr/local/libexec/trend-investing/clock-check.sh on the server, then fix the time syncing (on the Mac mini, turn on the Mac's automatic date and time). You are told once for the whole server; the incident is resolved when a check passes, and the next failure after that is told again.",
-			c.At.UTC().Format(time.RFC3339), skew, strings.TrimSpace(c.Output)),
+			c.At.UTC().Format(time.RFC3339), failures, skew, strings.TrimSpace(c.Output)),
 	}
 }
 

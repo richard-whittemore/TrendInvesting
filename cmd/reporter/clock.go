@@ -24,9 +24,12 @@ import (
 // most 45 seconds. It runs only after every incident alert of the firing has
 // been sent, so it never holds one back (ADR 0019, "Alerting"); after it come
 // at most the clock alert or its resolve and the daily summary, two channels
-// at -send-timeout (30 s) each: 45 + 60 + 60 = 165 seconds, inside the unit's
-// TimeoutStartSec of 4 minutes (deploy/systemd/ti-reporter@.service). Tests
-// shorten them.
+// at -send-timeout (30 s) each: the tail of the run is 45 + 60 + 60 = 165
+// seconds. The incident alerts before it are bounded only per send, so with
+// several on slow channels the run can pass the unit's TimeoutStartSec of 4
+// minutes (deploy/systemd/ti-reporter@.service) inside this step; systemd then
+// stops it and the next firing makes the period's check again. Tests shorten
+// them.
 var (
 	clockCheckTimeout   = 40 * time.Second
 	clockCheckWaitDelay = 5 * time.Second
@@ -113,13 +116,14 @@ func loadHostClock(path string) (hostClock, error) {
 // clockStep checks the host's clock, under an exclusive lock on the shared
 // clock state so that the host's reporters page and clear once between them.
 // An instance that finds the lock held skips the check, since another is
-// making it now, and reports the last one recorded. A check younger than
-// clockCheckFresh is reused rather than made again; one dated after now (the
-// clock went back) is not. A failure pages once clockPagesAfter checks in a
-// row have failed; a passing check resolves the incident on PagerDuty and
+// making it now, and reports the last one recorded. A check made within
+// clockCheckFresh of now, or dated after it (a sibling's clock reading a
+// moment later, or this clock gone back), is this period's and is reused
+// rather than made again or counted again. A failure pages once
+// clockPagesAfter checks in a row have failed; a passing check resolves the incident on PagerDuty and
 // forgets it, so the next failure pages anew. It returns the check the
 // summary shows, if any.
-func clockStep(path, command, host string, senders []sender, now time.Time, every time.Duration) (*report.ClockCheck, error) {
+func clockStep(path, command, host string, senders []sender, clock func() time.Time, every time.Duration) (*report.ClockCheck, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("reporter: the host clock state's lock: %w", err)
@@ -136,6 +140,10 @@ func clockStep(path, command, host string, senders []sender, now time.Time, ever
 	if err != nil {
 		return nil, err
 	}
+	// The time is taken now, under the lock, not carried from the start of
+	// the firing: the alerts delivered before this step can take seconds, and
+	// a sibling may have recorded its check meanwhile.
+	now := clock()
 	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
 	for _, k := range h.Keys {
 		seen[k] = true
@@ -154,7 +162,7 @@ func clockStep(path, command, host string, senders []sender, now time.Time, ever
 		}
 		return writeAtomic(path, raw)
 	}
-	if age := now.Sub(timeOf(h.Last)); h.Last == nil || age < 0 || age >= clockCheckFresh {
+	if h.Last == nil || now.Sub(h.Last.At) >= clockCheckFresh {
 		c := runClockCheck(command, now)
 		h.Last = &c
 		h.Failures++
@@ -174,7 +182,7 @@ func clockStep(path, command, host string, senders []sender, now time.Time, ever
 		forgetAlert(key, seen, sent, repeats)
 		return h.Last, record()
 	case !h.Last.Passed && h.Failures >= clockPagesAfter:
-		return h.Last, deliver(senders, report.ClockDriftAlert(host, *h.Last), seen, sent, repeats, now, every, record)
+		return h.Last, deliver(senders, report.ClockDriftAlert(host, *h.Last, h.Failures), seen, sent, repeats, now, every, record)
 	}
 	return h.Last, nil
 }
@@ -182,13 +190,6 @@ func clockStep(path, command, host string, senders []sender, now time.Time, ever
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func timeOf(c *report.ClockCheck) time.Time {
-	if c == nil {
-		return time.Time{}
-	}
-	return c.At
 }
 
 // resolver is a channel that can close an incident it opened: PagerDuty.
