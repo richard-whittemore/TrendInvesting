@@ -190,7 +190,10 @@ test "$(readlink "$lock")" = "$self" || fail "a refused up.sh changed the lock i
 c_form=$(LC_ALL=C ps -o lstart= -p $$)
 alt_locale=""
 for cand in $(locale -a 2>/dev/null | grep -v -e '^C' -e '^POSIX' -e '^en_'); do
-  if test "$(LC_ALL=$cand ps -o lstart= -p $$ 2>/dev/null)" != "$c_form"; then alt_locale=$cand; break; fi
+  # A candidate whose ps fails or prints nothing shows no start time to compare.
+  start=$(LC_ALL=$cand ps -o lstart= -p $$ 2>/dev/null) || continue
+  test -n "$start" || continue
+  if test "$start" != "$c_form"; then alt_locale=$cand; break; fi
 done
 if test -n "$alt_locale"; then
   echo "test-refusals: lock start time checked under time zone Pacific/Auckland and locale $alt_locale"
