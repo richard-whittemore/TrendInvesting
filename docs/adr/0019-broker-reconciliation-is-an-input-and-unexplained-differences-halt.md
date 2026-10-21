@@ -871,11 +871,17 @@ meet the money before the reader has recorded it.
      no buy, but while it pends unexplained the buys are sized from the
      cash of the decision's snapshot less the unexplained increase, so a
      credit IBKR reverses or posted in error is never invested. The
-     increase is subtracted only when that snapshot is taken at or after
-     the reading that found it (the snapshot's cash then includes it); an
-     increase found by a reading later than the snapshot is not subtracted,
-     since the snapshot never saw that cash. A repeat reading leaves the
-     time it was found at the first reading's. The new cash is invested at
+     increase is subtracted whenever the snapshot's cash could include it:
+     the reading that found it is at or before the moment the snapshot's
+     cash is held until, by point 2's convention (a snapshot stamped at the
+     close was read after it, with the evening's reconciliation, and holds
+     the rest of that New York day; any other snapshot holds what came
+     before its own time). An increase found by a reading after that
+     moment, such as one on a later New York day than a close snapshot
+     holds, is not subtracted, since the snapshot's cash was read before
+     it; when that moment cannot be determined, every pending increase is
+     subtracted. A repeat reading leaves the time it was found at the first
+     reading's. The new cash is invested at
      the first decision after the reader's records explain it, usually the
      next evening;
    - **a cash decrease** (IBKR shows less: withdrawal-like) withholds every

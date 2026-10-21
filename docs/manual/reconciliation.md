@@ -255,11 +255,16 @@ liquidation):
    - **more cash than the book** (a deposit): buys carry on, but they are
      sized from the cash in IBKR's snapshot that the decision used, less
      the new cash, so money IBKR reverses or posted in error is never
-     invested. The new cash is taken off only when that snapshot was taken
-     at or after the reconciliation that found it, so the snapshot's cash
-     includes it; when the reconciliation came after the snapshot, the
-     snapshot never saw the new cash, and nothing is taken off. The deposit
-     is invested at the first decision after the reader's record explains it;
+     invested. The new cash is taken off whenever the snapshot's cash could
+     include it: the reconciliation that found it was read no later than
+     the snapshot's cash. The evening's snapshot is labelled with the close
+     but read after it, alongside that evening's reconciliation, so it
+     counts as holding everything up to midnight New York time that day;
+     a reconciliation that evening is taken off, and one on a later day,
+     after that snapshot's cash was read, is not. If the engine cannot tell
+     how long the snapshot's cash holds, it takes the new cash off. The
+     deposit is invested at the first decision after the reader's record
+     explains it;
    - **less cash than the book** (a withdrawal): every buy on the account
      waits, refused with the reason `pending-cash-decrease`, so no order is
      sized on cash that may not be there; sells and exits go on, as while

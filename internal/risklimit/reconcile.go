@@ -261,7 +261,8 @@ const pendingSessions = event.PendingCashReadSessions
 // reconciliation that found it, its cash component, and its window, the
 // transfers dated from from up to to, those it counted already excluded. to
 // is the as-of of the reading that found it, which a repeat leaves as it is:
-// a snapshot at or after to holds the difference (PendingCashIncrease).
+// a snapshot whose cash is held until to or later holds the difference
+// (PendingCashIncrease).
 type pendingCash struct {
 	inputID string
 	result  event.ReconciliationResultPayload
@@ -410,18 +411,23 @@ func (g *Gate) withheldOnCash() *pendingCash {
 }
 
 // PendingCashIncrease is the sum, in dollars, of every pending cash
-// increase still undecided that a broker snapshot taken at asOf holds: cash
-// IBKR shows that no journalled transfer or fill explains yet, found by a
-// reading at or before asOf. Buys are sized from the decision's snapshot's
-// cash less this, so a credit that is reversed or posted in error is never
-// invested; an increase found by a reading after the snapshot is not in its
-// cash, so it is not taken from it again. Once the Flex reader's records
-// explain an increase, it leaves the sum and the next decision invests it
-// (ADR 0019, point 3, amended 2026-10-21).
-func (g *Gate) PendingCashIncrease(asOf time.Time) float64 {
+// increase still undecided that snapshot's cash could hold: cash IBKR shows
+// that no journalled transfer or fill explains yet, found by a reading at
+// or before the moment the snapshot's cash is held until (reconcile.
+// HeldUntil: a snapshot stamped at the close was read after it, with the
+// evening's reconciliation, and holds the rest of that New York day; ADR
+// 0019, point 2). When that moment is not known, every pending increase
+// counts: the budget fails closed. Buys are sized from the snapshot's cash
+// less this, so a credit that is reversed or posted in error is never
+// invested; an increase found by a reading after the snapshot's cash was
+// read is not in that cash, so it is not taken from it again. Once the Flex
+// reader's records explain an increase, it leaves the sum and the next
+// decision invests it (ADR 0019, point 3, amended 2026-10-21).
+func (g *Gate) PendingCashIncrease(snapshot reconcile.Book) float64 {
+	until, err := reconcile.HeldUntil(snapshot)
 	var sum int64
 	for _, pc := range g.pendingCash {
-		if pc.cash.Residual > 0 && !pc.to.After(asOf) {
+		if pc.cash.Residual > 0 && (err != nil || !pc.to.After(until)) {
 			sum += pc.cash.Residual
 		}
 	}

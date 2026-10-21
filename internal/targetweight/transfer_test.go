@@ -136,10 +136,14 @@ func TestTransferInputsAreChecked(t *testing.T) {
 
 // TestAPendingCashIncreaseIsNotInvestedUntilTheReaderExplainsIt: while a
 // cash increase is pending a reading of IBKR's statement, the buys are
-// sized from the book's cash, the broker's less the unexplained increase,
+// sized from the decision's snapshot's cash less the unexplained increase,
 // so a credit that is reversed or posted in error is never invested; once
 // the reader's record explains it, the next decision invests it (ADR 0019,
-// amended 2026-10-21).
+// point 3, amended 2026-10-21). The snapshot is stamped at the close and
+// the reconciliation that finds the increase half an hour later, at its
+// true read time, as the adapter stamps the evening's batch: the
+// snapshot's cash, read with that reconciliation, holds the increase (ADR
+// 0019, point 2).
 func TestAPendingCashIncreaseIsNotInvestedUntilTheReaderExplainsIt(t *testing.T) {
 	const deposited = 2500
 	base := released(t, simulateMomentum(t, momentumOptions{}).decisions)[4:]
@@ -178,14 +182,16 @@ func TestAPendingCashIncreaseIsNotInvestedUntilTheReaderExplainsIt(t *testing.T)
 
 // TestAPendingCashIncreaseTheSnapshotNeverSawLeavesNoBudget: the budget is
 // the cash of the decision's snapshot, so a pending increase leaves it only
-// when that snapshot is taken at or after the reading that found it. A
-// deposit that lands after the snapshot, found by a reading after it, is not
-// in the snapshot's cash: the buys are sized from that cash, as if no
-// deposit came (ADR 0019, point 3, amended 2026-10-21).
+// when that snapshot's cash could hold it: the reading that found it is at
+// or before the moment the snapshot's cash is held until. A snapshot
+// stamped at the close holds that New York day (ADR 0019, point 2); a
+// deposit found the next morning is not in its cash, so the buys are sized
+// from that cash, as if no deposit came (ADR 0019, point 3, amended
+// 2026-10-21).
 func TestAPendingCashIncreaseTheSnapshotNeverSawLeavesNoBudget(t *testing.T) {
 	const deposited = 2500
 	base := released(t, simulateMomentum(t, momentumOptions{}).decisions)[4:]
-	late := simulateMomentum(t, momentumOptions{deposit: map[string]float64{"2025-02-28": deposited}, depositAfterSnapshot: true})
+	late := simulateMomentum(t, momentumOptions{deposit: map[string]float64{"2025-02-28": deposited}, depositNextDay: true})
 	results := ofType(late.decisions, event.ReconciliationResultEventType)
 	if len(results) != 1 {
 		t.Fatalf("want the pending result alone, got %d results", len(results))

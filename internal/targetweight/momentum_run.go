@@ -802,15 +802,16 @@ func (r *momentumRun) cash(s event.AccountCashSnapshotPayload) float64 {
 // First, cash that a snapshot newer than the decision's shows missing, beyond
 // what the sells' recorded fills explain, leaves the budget (ADR 0026, point
 // 2, "Budget"; an IRA never borrows), and so does a cash increase pending a
-// reading of IBKR's statement that the decision's snapshot holds, one found
-// by a reading at or before it, which the budget counts only once the Flex
-// reader's records explain it (ADR 0019, point 3, amended 2026-10-21).
+// reading of IBKR's statement that the decision's snapshot's cash could
+// hold, one found by a reading at or before the moment that cash is held
+// until, which the budget counts only once the Flex reader's records
+// explain it (ADR 0019, points 2 and 3, amended 2026-10-21).
 func (r *momentumRun) planBuys(b *emissions) {
 	reb := r.rebalance
 	if short := r.unexplainedCashDrop(reb); short > 0 {
 		reb.budget.Remove(short)
 	}
-	if unexplained := r.h.gate.PendingCashIncrease(reb.snapshot.AsOf); unexplained > 0 {
+	if unexplained := r.h.gate.PendingCashIncrease(reconcile.CashBook(reb.decisionID, reb.snapshot)); unexplained > 0 {
 		reb.budget.Remove(unexplained)
 	}
 	buys, skipped, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)

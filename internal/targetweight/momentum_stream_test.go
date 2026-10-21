@@ -232,16 +232,20 @@ type momentumOptions struct {
 	// the refusal says.
 	refusals map[string]string
 	// deposit is session -> dollars the owner deposits that day, before the
-	// Flex reader has read it: the reconciliation after the close, against
-	// the previous close's book, finds the cash it added, pending a reading
-	// (ADR 0019, amended 2026-10-21). depositRecorded has the reader record
-	// it after that close's snapshot, and a reconciliation then decide it.
+	// Flex reader has read it: the reconciliation of the batch's reading,
+	// stamped at its true read time half an hour after the close and sent
+	// ahead of the snapshot stamped at the close, as the IBKR adapter sends
+	// them (ADR 0019, "Reconciliation with every reading"), finds against
+	// the previous close's book the cash it added, pending a reading (ADR
+	// 0019, amended 2026-10-21). depositRecorded has the reader record it
+	// after that reading, and a reconciliation then decide it.
 	deposit         map[string]float64
 	depositRecorded bool
-	// depositAfterSnapshot lands the deposit after that close's snapshot:
-	// the snapshot does not hold it, and the reconciliation half an hour
-	// later, against that snapshot's book, finds it pending a reading.
-	depositAfterSnapshot bool
+	// depositNextDay lands the deposit the New York day after that close:
+	// the close's snapshot does not hold it, and the next morning's
+	// reconciliation, against that snapshot's book, finds it pending a
+	// reading.
+	depositNextDay bool
 	// brokerLast, when set, feeds every mark at version 2 with IBKR's last
 	// price beside it at brokerLast times the mark (the IBKR adapter's mark,
 	// ADR 0026 point 1, amended 2026-10-18).
@@ -457,10 +461,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			}
 		}
 		amount, deposits := opts.deposit[session]
-		if deposits && !opts.depositAfterSnapshot {
+		if deposits && !opts.depositNextDay {
 			acct.settled = float64(acct.settled + amount)
 			apply(flexStatusInput(t, s, event.FlexStateRead, previousDay(session), end.Add(-time.Hour)))
-			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("after-close:"+session, end)))
+			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("after-close:"+session, end.Add(30*time.Minute))))
 		}
 		if !opts.noSnapshot[session] {
 			asOf := end
@@ -469,15 +473,15 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			}
 			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, marks)))
 		}
-		if deposits && opts.depositAfterSnapshot {
+		if deposits && opts.depositNextDay {
 			acct.settled = float64(acct.settled + amount)
 			apply(flexStatusInput(t, s, event.FlexStateRead, previousDay(session), end.Add(-time.Hour)))
-			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("after-close:"+session, end.Add(30*time.Minute))))
+			apply(reconciliationInput(t, s, "reconciliation:"+session, acct.reconciliation("next-morning:"+session, end.Add(12*time.Hour))))
 		}
 		if deposits && opts.depositRecorded {
 			apply(movementInput(t, s, "D:"+session, amount, newYorkDay(session)))
-			apply(flexStatusInput(t, s, event.FlexStateRead, strings.ReplaceAll(session, "-", ""), end.Add(time.Minute)))
-			apply(reconciliationInput(t, s, "reconciliation:recorded:"+session, acct.reconciliation("after-reading:"+session, end.Add(2*time.Minute))))
+			apply(flexStatusInput(t, s, event.FlexStateRead, strings.ReplaceAll(session, "-", ""), end.Add(31*time.Minute)))
+			apply(reconciliationInput(t, s, "reconciliation:recorded:"+session, acct.reconciliation("after-reading:"+session, end.Add(32*time.Minute))))
 		}
 		if !opts.compact {
 			marked = ids
