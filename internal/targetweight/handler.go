@@ -198,7 +198,31 @@ import (
 //     journalled Halt already gave, and whose unexplained holdings were
 //     already reported, while the account stays Halted. A journal holding such a snapshot decides differently under
 //     1.19.0.
-const RulesVersion = "1.20.0"
+//   - 1.21.0 reads the Flex reader's journalled deposits and withdrawals
+//     (account.cash-movement version 2) and its status (account.flex-status),
+//     which the engine delivers from the instance's ledger, and its gate's
+//     cash rule changes (ADR 0019, amended 2026-10-21): a reconciliation adds
+//     each journalled deposit and subtracts each withdrawal dated after the
+//     book to the expected cash, listing them beside the fills; a difference
+//     in cash alone on a New York day the reader's status does not cover is
+//     a pending cash read (risk.reconciliation.result classified
+//     pending-cash-read, action alert), which moves no state; a pending
+//     decrease withholds every buy on the account (risk.order.refused,
+//     pending-cash-decrease, the first refusal of each pending difference
+//     flagged as its one alert), and a pending increase withholds none but
+//     is left out of the buy budget until the reader's records explain it;
+//     a later reconciliation that finds the same difference against the
+//     same book is that difference. It is decided at a later
+//     reconciliation: explained once the transfers recorded since account
+//     for it, else Degraded on cash once the reader has covered the day or
+//     more than two sessions have closed. A journalled withdrawal larger
+//     than the cash before it (a transfer dated by day alone counted after
+//     that day's fills), or a run with no reader status, degrades as
+//     before. The cash-drift bound, 1% of net
+//     liquidation, is unchanged. A journal holding a cash difference with a
+//     reader's status, or a transfer, decides differently under 1.20.0,
+//     which refuses both inputs.
+const RulesVersion = "1.21.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -262,7 +286,10 @@ type Options struct {
 //     naming the decision that released it and that order, which settles an
 //     order the adapter never sent: no venue will rule on it, so it is no
 //     longer awaited (applyClearance);
-//   - at any time after the configuration: market.corporate-action, which a
+//   - at any time after the configuration: account.cash-movement version 2
+//     and account.flex-status, the Flex reader's journalled transfers and its
+//     status, which a reconciliation's cash is bridged by and judged against
+//     (ADR 0019, amended 2026-10-21); market.corporate-action, which a
 //     reconciliation's book is bridged by; account.reconciliation, which
 //     classifies IBKR's positions and cash against the latest account
 //     snapshot and every fill and corporate action since it, and degrades or
@@ -482,6 +509,10 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return h.applyReconciliation(in)
 	case event.MarketCorporateActionEventType:
 		return nil, h.applyCorporateAction(in)
+	case event.CashMovementEventType:
+		return nil, h.applyCashMovement(in)
+	case event.FlexStatusEventType:
+		return nil, h.applyFlexStatus(in)
 	case event.AlertAcknowledgedEventType:
 		return nil, h.applyAcknowledgement(in)
 	case event.RebalanceClearedEventType:
@@ -1048,11 +1079,46 @@ func (h *Handler) applyReconciliation(in event.Envelope) ([]event.Envelope, erro
 		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
 	b := &emissions{h: h, in: in, at: p.AsOf}
-	b.add(r.ResultID, event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, r.Result)
-	if r.State != nil {
-		b.add(r.StateID, event.EngineStateEventType, r.StateSchemaVersion, *r.State)
+	// A pending cash difference this reconciliation decided is journalled
+	// before its own result, each with the state it moved (ADR 0019,
+	// amended 2026-10-21).
+	for _, settled := range append(r.Settled, r) {
+		b.add(settled.ResultID, event.ReconciliationResultEventType, event.ReconciliationResultSchemaVersion, settled.Result)
+		if settled.State != nil {
+			b.add(settled.StateID, event.EngineStateEventType, settled.StateSchemaVersion, *settled.State)
+		}
 	}
 	return b.result()
+}
+
+// applyCashMovement records a deposit or withdrawal the Flex reader
+// journalled, account.cash-movement version 2, as a change a
+// reconciliation's cash is bridged by (risklimit.Gate.ObserveCashMovement).
+// It changes no target or order: the next decision sizes from the account
+// snapshot, which holds the cash IBKR shows (ADR 0026, point 2).
+func (h *Handler) applyCashMovement(in event.Envelope) error {
+	p, err := decodeInput[event.CashMovementPayload](in, event.CashMovementTransferVersion)
+	if err != nil {
+		return err
+	}
+	if err := h.gate.ObserveCashMovement(in.ID, p); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return nil
+}
+
+// applyFlexStatus records the Flex reader's status, which tells a
+// reconciliation whether a cash difference's day has been read
+// (risklimit.Gate.ObserveFlexStatus). It decides nothing.
+func (h *Handler) applyFlexStatus(in event.Envelope) error {
+	p, err := decodeInput[event.FlexStatusPayload](in, event.FlexStatusSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if err := h.gate.ObserveFlexStatus(p); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return nil
 }
 
 // applyCorporateAction records a journalled corporate action, at any of the

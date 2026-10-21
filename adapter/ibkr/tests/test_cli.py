@@ -101,7 +101,7 @@ class CommandTests(unittest.TestCase):
         out = subprocess.run([sys.executable, "-m", "adapter.ibkr", "run", "--help"], cwd=str(repo),
                              capture_output=True, text=True, check=True).stdout
         for word in ("--config", "--pending", "--engine-log", "--socket", "--secrets", "--account-key",
-                     "--ibapi-record", "--versions", "--streams", "paper_sending_enabled"):
+                     "--ibapi-record", "--versions", "--streams", "--cash-ledger", "paper_sending_enabled"):
             self.assertIn(word, out)
 
     def test_an_ibapi_other_than_the_pinned_build_refuses_to_start_before_connecting(self):
@@ -278,6 +278,21 @@ class CommandTests(unittest.TestCase):
         self.assertIn(str(streams / "run-1"), self.err.getvalue())
         self.assertIn("StreamRefused", self.err.getvalue())
 
+    def test_another_instances_flex_ledger_is_refused_before_connecting(self):
+        # The ledger's records carry no account: each instance's is in its
+        # own folder, named as the engine's state folder is.
+        other = self.dir / "roth-ira"
+        other.mkdir()
+        self.assertEqual(self.run_main(self.argv("--cash-ledger", str(other / "cash-movements.jsonl"))), 1)
+        self.assertIn("roth-ira", self.err.getvalue())
+        self.assertEqual(self.fake.called("connect"), [])
+
+    def test_the_instances_own_flex_ledger_is_read(self):
+        own = self.dir / "flex" / self.engine_log.parent.name
+        own.mkdir(parents=True)
+        self.assertEqual(self.run_main(self.argv("--cash-ledger", str(own / "cash-movements.jsonl"))), 0,
+                         self.err.getvalue())
+
     def test_an_engine_log_that_cannot_be_read_stops_before_connecting(self):
         self.engine_log.unlink()
         self.assertEqual(self.run_main(self.argv()), 1)
@@ -302,6 +317,8 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(args.socket, "/run/ti-engine-boost/engine.sock")
         self.assertEqual(args.pending, "/var/lib/trend-investing/adapters/boost/pending.json")
         self.assertEqual(args.streams, "/var/lib/trend-investing/data/streams/boost")
+        self.assertEqual(args.cash_ledger, "/var/lib/trend-investing/flex/boost/cash-movements.jsonl")
+        self.assertIn("-/var/lib/trend-investing/flex/boost", unit)
         self.assertIn("LoadCredential=account:/etc/trend-investing/accounts/boost.env", unit)
         self.assertEqual(args.secrets, "/run/credentials/ti-adapter-boost.service/account")
         self.assertIn("Restart=no", unit)

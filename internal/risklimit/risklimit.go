@@ -188,6 +188,17 @@ type Gate struct {
 	// corporateActions is every corporate action recorded as a change, by
 	// envelope ID, so a redelivery is recognised and never counted twice.
 	corporateActions map[string]event.CorporateActionPayload
+	// cashMovements is every deposit and withdrawal the Flex reader
+	// journalled, recorded as a change, by envelope ID, so one is never
+	// counted twice.
+	cashMovements map[string]event.CashMovementPayload
+	// flex is the Flex reader's latest status the journal holds, nil before
+	// any: without it no cash difference is pending (ADR 0019, amended
+	// 2026-10-21).
+	flex *event.FlexStatusPayload
+	// pendingCash is every cash difference reported as a pending cash read
+	// and not yet decided, in the order reported.
+	pendingCash []pendingCash
 }
 
 // saleAttempt is one tag's record of its sale back to 98%, attempted once
@@ -258,6 +269,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		ledger: newSellLedger(), orders: make(map[string]*releasedOrder),
 		fills:            make(map[string]event.TargetWeightFillPayload),
 		corporateActions: make(map[string]event.CorporateActionPayload),
+		cashMovements:    make(map[string]event.CashMovementPayload),
 	}, nil
 }
 
@@ -519,6 +531,15 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineDegraded, fmt.Sprintf("the account is Degraded (scope %v): only risk-reducing sells go, and the scope's instruments are frozen", g.scope))}
 	case g.state == StateDegraded && !f.BrokerSet:
 		return Outcome{Refused: g.refusal(o, f, event.RefusedBrokerHolding, "the account is Degraded and no readable broker snapshot holds the quantity to size this sell from")}
+	case p.Side == event.OrderSideBuy:
+		// ADR 0019, amended 2026-10-21: a pending cash decrease may be a
+		// withdrawal, so no buy is sized on cash that may not be there;
+		// every refusal is journalled, and the first on the difference pages.
+		if pc := g.withheldOnCash(); pc != nil {
+			out := Outcome{Refused: g.refusal(o, f, event.RefusedPendingCashDecrease, fmt.Sprintf("reconciliation %s found a cash decrease of %s %s pending a reading of IBKR's statement: every buy is withheld until the Flex reader's records explain it or it is decided; sells and exits go", pc.inputID, cents(-pc.cash.Residual), pc.result.Currency))}
+			out.Refused.Alert, pc.alerted = !pc.alerted, true
+			return out
+		}
 	}
 	// After the engine-state and kill-switch refusals, so a stale snapshot
 	// never stops Boost's exit from firing the sale back to 98%.

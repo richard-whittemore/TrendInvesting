@@ -163,13 +163,27 @@ const (
 	ReconciliationUnexplained = "unexplained"
 	// ReconciliationUnverifiable: incomplete or inconsistent evidence.
 	ReconciliationUnverifiable = "unverifiable"
+	// ReconciliationPendingCashRead: a difference in cash alone, on a day
+	// the Flex reader has not yet read, which a deposit or withdrawal it has
+	// not yet recorded may explain. It alerts, moves no state and is
+	// checked again at the next reconciliation (ADR 0019, amended
+	// 2026-10-21, "a cash difference the reader has not yet read").
+	ReconciliationPendingCashRead = "pending-cash-read"
 )
 
-// The actions (ADR 0019, amended 2026-09-24: "continue, degrade or halt").
+// PendingCashReadSessions is how many sessions may close after a pending
+// cash read before it is decided whatever the Flex reader says: a reader set
+// aside for longer never keeps a difference pending, and the reporter's
+// alert names this cap (ADR 0019, amended 2026-10-21).
+const PendingCashReadSessions = 2
+
+// The actions (ADR 0019, amended 2026-09-24: "continue, degrade or halt";
+// amended 2026-10-21: alert, for a pending cash read, which moves no state).
 const (
 	ReconciliationActionContinue = "continue"
 	ReconciliationActionDegrade  = "degrade"
 	ReconciliationActionHalt     = "halt"
+	ReconciliationActionAlert    = "alert"
 )
 
 // ReconciliationComponent is one compared component: an instrument's
@@ -219,6 +233,13 @@ type ReconciliationResultPayload struct {
 	ScopeInstrumentIDs  []string `json:"scope_instrument_ids,omitempty"`
 	ScopeCashComponents []string `json:"scope_cash_components,omitempty"`
 	Detail              string   `json:"detail"`
+	// RepeatOf is the reconciliation ID of the reading that first found
+	// this pending cash difference, set on a later reading's result that
+	// found the same difference and on that result's decision: the
+	// difference has already paged, so the reporter does not page it again
+	// (ADR 0019, amended 2026-10-21: one difference, one reconciliation
+	// alert). Empty on every other result.
+	RepeatOf string `json:"repeat_of,omitempty"`
 }
 
 // Validate checks identity, the classification against its action, reasons
@@ -299,6 +320,16 @@ func (p ReconciliationResultPayload) Validate() error {
 		if !scoped || !slices.Equal(p.ScopeInstrumentIDs, unexplainedIDs) || !slices.Equal(p.ScopeCashComponents, unexplainedCash) {
 			errs = append(errs, errors.New("an unexplained result's scope is exactly its unexplained components, and is never empty"))
 		}
+	case ReconciliationPendingCashRead:
+		if p.Action != ReconciliationActionAlert {
+			errs = append(errs, fmt.Errorf("action %q does not follow %s, which alerts", p.Action, p.Classification))
+		}
+		if !slices.Equal(unexplainedCash, []string{ReconciliationComponentCash}) || len(unexplainedIDs) > 0 {
+			errs = append(errs, errors.New("a pending cash read is a difference in cash alone"))
+		}
+		if scoped {
+			errs = append(errs, errors.New("a pending cash read moves no state and names no scope"))
+		}
 	case ReconciliationUnverifiable:
 		if p.Action != ReconciliationActionHalt {
 			errs = append(errs, fmt.Errorf("action %q does not follow unverifiable, which halts", p.Action))
@@ -310,7 +341,15 @@ func (p ReconciliationResultPayload) Validate() error {
 			errs = append(errs, errors.New("a halt covers the whole account and names no scope"))
 		}
 	default:
-		errs = append(errs, fmt.Errorf("classification %q is not matched, explained, unexplained or unverifiable", p.Classification))
+		errs = append(errs, fmt.Errorf("classification %q is not matched, explained, unexplained, unverifiable or pending-cash-read", p.Classification))
+	}
+	if p.RepeatOf != "" {
+		if p.Classification == ReconciliationMatched || p.Classification == ReconciliationUnverifiable {
+			errs = append(errs, fmt.Errorf("a %s result is no repeat of a pending cash difference", p.Classification))
+		}
+		if p.RepeatOf == p.InputID {
+			errs = append(errs, errors.New("a repeat names an earlier reading, not its own input"))
+		}
 	}
 	if p.Classification != ReconciliationUnverifiable && len(p.Unverifiable) > 0 {
 		errs = append(errs, errors.New("only an unverifiable result names unverifiable reasons"))

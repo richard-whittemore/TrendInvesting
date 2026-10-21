@@ -14,6 +14,7 @@ usage error.
 import argparse
 import json
 import logging
+import os
 import re
 import signal
 import sys
@@ -119,6 +120,12 @@ def _parser():
                      help="the folder holding the engine's stream folders, one per run, as the data job writes "
                           "them: the run's own is DIR/<run>, <run> being --engine-log's name without .log. On the "
                           "server: /var/lib/trend-investing/data/streams/boost. Left out, no stream is delivered")
+    run.add_argument("--cash-ledger", metavar="FILE",
+                     help="the instance's Flex ledger of deposits and withdrawals (flex.py), whose journalled "
+                          "transfers the post-close cash check subtracts before its 1%% bound; it must be in a "
+                          "folder named for the instance, as --engine-log's is. On the server: "
+                          "/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl. Left out, none is "
+                          "subtracted")
     run.add_argument("--secrets", metavar="FILE",
                      help="a KEY=VALUE file holding the account number (with --account-key), when the "
                           "configuration does not name account_id. On the server: the adapter's own account file, "
@@ -156,6 +163,22 @@ def _parser():
                              "holds it) or after-approval; a recorded decision is never changed, and nothing is read "
                              "(docs/manual/reconciliation.md)")
     return parser
+
+
+def check_cash_ledger(ledger, engine_log):
+    """Refused unless ledger, when given, is in a folder named for the instance engine_log's folder is.
+
+    The Flex reader's records carry no account (flex.py): each instance's
+    ledger is in its own folder, flex/<instance>/, as the engine's state
+    folder is engines/<instance>/, so a ledger in another instance's folder
+    is another account's (ADR 0019, amended 2026-10-21)."""
+    if ledger is None:
+        return
+    instance = os.path.basename(os.path.dirname(os.path.abspath(ledger)))
+    state = os.path.basename(os.path.dirname(os.path.abspath(engine_log)))
+    if instance != state:
+        raise Refused("the Flex ledger {} is instance {}'s, but the engine's log is in {}'s folder: a ledger is read "
+                      "only by its own instance".format(ledger, instance, state))
 
 
 def _read_config(path):
@@ -254,6 +277,7 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
                             **({"sleep": flex_sleep} if flex_sleep else {}), **({"now": now} if now else {}))
     try:
         cfg = load_config(args)
+        check_cash_ledger(args.cash_ledger, args.engine_log)
         require_zones(zone_lookup or ZoneInfo)
         version = check_installed(args.ibapi_record, args.versions,
                                   **({"installed_version": ibapi_version} if ibapi_version else {}),
@@ -278,7 +302,7 @@ def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err
                     "on" if cfg.paper_sending_enabled else "off", version)
         loop = AdapterLoop(cfg, (api_factory or _real_api)(cfg),
                            (engine_connect or _engine_connect)(args.socket, ENGINE_TIMEOUT), args.pending,
-                           args.engine_log, poll=poll, streams=args.streams,
+                           args.engine_log, poll=poll, streams=args.streams, cash_ledger=args.cash_ledger,
                            **({"today": today} if today is not None else {}),
                            **({"now": now} if now is not None else {}))
         loop.run(should_stop)

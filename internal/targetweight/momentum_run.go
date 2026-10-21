@@ -244,6 +244,10 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return r.h.applyReconciliation(in)
 	case event.MarketCorporateActionEventType:
 		return nil, r.h.applyCorporateAction(in)
+	case event.CashMovementEventType:
+		return nil, r.h.applyCashMovement(in)
+	case event.FlexStatusEventType:
+		return nil, r.h.applyFlexStatus(in)
 	case event.AlertAcknowledgedEventType:
 		return nil, r.h.applyAcknowledgement(in)
 	case event.RunCompletedEventType:
@@ -797,11 +801,21 @@ func (r *momentumRun) cash(s event.AccountCashSnapshotPayload) float64 {
 // then each through the gate, committing what each released buy may cost.
 // First, cash that a snapshot newer than the decision's shows missing, beyond
 // what the sells' recorded fills explain, leaves the budget (ADR 0026, point
-// 2, "Budget"; an IRA never borrows).
+// 2, "Budget"; an IRA never borrows), and so does a cash increase pending a
+// reading of IBKR's statement that the decision's snapshot's cash could
+// hold, one found by a reading at or before the moment that cash is held
+// until, which the budget counts only once the Flex reader's records
+// explain it (ADR 0019, points 2 and 3, amended 2026-10-21).
 func (r *momentumRun) planBuys(b *emissions) {
 	reb := r.rebalance
 	if short := r.unexplainedCashDrop(reb); short > 0 {
 		reb.budget.Remove(short)
+	}
+	// The book's anchor is the decision ID, not the snapshot's envelope id:
+	// PendingCashIncrease reads only the book's AsOf (through HeldUntil), so
+	// the anchor is informational here.
+	if unexplained := r.h.gate.PendingCashIncrease(reconcile.CashBook(reb.decisionID, reb.snapshot)); unexplained > 0 {
+		reb.budget.Remove(unexplained)
 	}
 	buys, skipped, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
 	r.skipped(b, skipped)

@@ -130,6 +130,7 @@ var notYetCrossed = map[string]string{
 	"risk.order.released":                  "acted on by the IBKR adapter (ADR 0025), never by LEAN",
 	"risk.order.refused":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"operator.kill-switch":                 "recorded by the operator tool (cmd/operator) into cmd/engine's operator inbox (-operator), never by LEAN",
+	"account.flex-status":                  "read by cmd/engine from the IBKR Flex reader's status file (-cash-ledger), never by LEAN",
 	"account.broker.snapshot":              "sent by the IBKR adapter (ADR 0025), never by LEAN",
 	"risk.margin.alarm":                    "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"risk.sale.withheld":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",

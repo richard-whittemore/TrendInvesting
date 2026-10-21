@@ -1264,7 +1264,7 @@ func OrderReleasedVersions() []uint32 {
 
 // OrderRefusedVersions: see OrderPlannedVersions.
 func OrderRefusedVersions() []uint32 {
-	return []uint32{1, OrderRefusedSchemaVersion, OrderRefusedSafetyVersion}
+	return []uint32{1, OrderRefusedSchemaVersion, OrderRefusedSafetyVersion, OrderRefusedPendingCashVersion}
 }
 
 // checkSafetyVersion refuses a schema version outside 1 to latest, and one
@@ -1373,6 +1373,8 @@ const (
 //     broker-holding, sale-attempted and stale-broker-snapshot, and the
 //     refusal's alert (ADR 0019, amended 2026-10-15 and
 //     2026-10-17; ADR 0026, points 3 and 4).
+//   - Version 4 of OrderRefusedPayload adds the refusal reason
+//     pending-cash-decrease (ADR 0019, amended 2026-10-21).
 //
 // Each version reads every earlier version's fields, and refuses a later
 // version's.
@@ -1381,6 +1383,9 @@ const (
 	OrderReleasedSafetyVersion uint32 = 3
 	OrderRefusedSchemaVersion  uint32 = 2
 	OrderRefusedSafetyVersion  uint32 = 3
+	// OrderRefusedPendingCashVersion adds the refusal reason
+	// pending-cash-decrease (ADR 0019, amended 2026-10-21).
+	OrderRefusedPendingCashVersion uint32 = 4
 )
 
 // The closed set of reasons the risk gate refuses an order (ADR 0026, point 3).
@@ -1435,6 +1440,11 @@ const (
 	// snapshot is not success"). It changes no engine state; the sell is
 	// planned again at the next decision.
 	RefusedStaleBrokerSnapshot = "stale-broker-snapshot"
+	// RefusedPendingCashDecrease: a buy while a cash decrease is pending a
+	// reading of IBKR's statement, so it may be a withdrawal and the cash a
+	// buy is sized on may not be there (ADR 0019, amended 2026-10-21). It
+	// changes no engine state; sells and exits go.
+	RefusedPendingCashDecrease = "pending-cash-decrease"
 )
 
 // The prices a price band compares an order's reference price with
@@ -1620,10 +1630,12 @@ type OrderRefusedPayload struct {
 	// Alert marks the refusal that raises the urgent alert: the first
 	// stale-broker-snapshot refusal of the account's stale episode (ADR 0019,
 	// amendment of 2026-10-17, reading 10), or the first kill-switch refusal
-	// of one engagement (ADR 0026, point 3, kill switch: "alert once"). The
-	// later refusals of the same episode or engagement are recorded without
-	// it and send nothing. Only a journal recorded under rules version 1.16.0
-	// or later flags a kill-switch refusal.
+	// of one engagement (ADR 0026, point 3, kill switch: "alert once"), or
+	// the first pending-cash-decrease refusal of one pending cash difference
+	// (ADR 0019, amended 2026-10-21). The later refusals of the same episode,
+	// engagement or difference are recorded without it and send nothing.
+	// Only a journal recorded under rules version 1.16.0 or later flags a
+	// kill-switch refusal.
 	Alert bool `json:"alert,omitempty"`
 }
 
@@ -1631,6 +1643,8 @@ type OrderRefusedPayload struct {
 // version its reason joined at.
 func (p OrderRefusedPayload) need() uint32 {
 	switch p.Reason {
+	case RefusedPendingCashDecrease:
+		return OrderRefusedPendingCashVersion
 	case RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot:
 		return OrderRefusedSafetyVersion
 	case RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding:
@@ -1646,7 +1660,7 @@ func (p OrderRefusedPayload) SchemaVersion() uint32 {
 
 // ValidateSchema checks that p is one schemaVersion holds, then validates it.
 func (p OrderRefusedPayload) ValidateSchema(schemaVersion uint32) error {
-	if err := checkSafetyVersion(OrderRefusedEventType, schemaVersion, p.need(), OrderRefusedSafetyVersion); err != nil {
+	if err := checkSafetyVersion(OrderRefusedEventType, schemaVersion, p.need(), OrderRefusedPendingCashVersion); err != nil {
 		return err
 	}
 	return p.Validate()
@@ -1663,15 +1677,16 @@ func (p OrderRefusedPayload) Validate() error {
 	case RefusedUndecidedOrder, RefusedMarginExposure, RefusedOrderCount, RefusedOrderSize,
 		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted,
 		RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding,
-		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot:
+		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot,
+		RefusedPendingCashDecrease:
 	default:
 		errs = append(errs, fmt.Errorf("refusal reason %q is not recognised", p.Reason))
 	}
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a refusal without its figures cannot be checked"))
 	}
-	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot && p.Reason != RefusedKillSwitch {
-		errs = append(errs, errors.New("only a stale-broker-snapshot or kill-switch refusal raises the alert"))
+	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot && p.Reason != RefusedKillSwitch && p.Reason != RefusedPendingCashDecrease {
+		errs = append(errs, errors.New("only a stale-broker-snapshot, kill-switch or pending-cash-decrease refusal raises the alert"))
 	}
 	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {

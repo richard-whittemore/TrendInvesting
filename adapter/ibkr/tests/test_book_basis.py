@@ -82,6 +82,44 @@ class BookBasisTests(unittest.TestCase):
         self.assertEqual((unexplained.cash, unexplained.own), (Decimal("90.0"), True))
         self.assertIn("explained", unexplained.source)
 
+    # -- the records a transfer adds to the engine's log (ADR 0019, amended 2026-10-21) --
+    def transfer_log(self, settled_in_r2, r2_own):
+        """A run whose log holds the Flex reader's status, reconciliation r1 found pending a reading, and r2.
+
+        settled_in_r2 is the classification r2's group gives r1's pending
+        difference when it decides it (None: still pending); r2_own is
+        r2's own result.
+        """
+        def result(input_id, classification):
+            return {"type": "risk.reconciliation.result", "payload": {
+                "input_id": input_id, "classification": classification, "cash_compared": True}}
+        r2 = ([result("r1", settled_in_r2)] if settled_in_r2 else []) + [result("r2", r2_own)]
+        engine = LoggedEngine(str(self.root / "a.log"), approval=run_approval(ACCOUNT, starting_book=({}, 100.0)),
+                              decisions={"r1": [result("r1", "pending-cash-read")], "r2": r2})
+        commit(engine, "flex-status:a", kind="account.flex-status", payload={
+            "account_id": ACCOUNT, "state": "read", "checked_at": "2027-01-13T02:30:00Z", "covered_to": "20270111"})
+        commit(engine, "r1", kind="account.reconciliation", payload={
+            "as_of": "2027-01-13T15:00:00Z", "total_cash": 80.0, "unreadable": []})
+        commit(engine, "r2", kind="account.reconciliation", payload={
+            "as_of": "2027-01-14T15:00:00Z", "total_cash": 95.0, "unreadable": []})
+        return previous_close(str(self.root / "a.log"))[1]
+
+    def test_a_pending_cash_read_does_not_reset_the_unexplained_cash(self):
+        unexplained = self.transfer_log(None, "unexplained")
+        self.assertEqual(unexplained.cash, Decimal("100.0"), "neither reading's cash was explained: the starting book")
+
+    def test_a_pending_difference_settled_explained_makes_its_reading_the_basis(self):
+        # r2 decides r1's difference explained by the transfers the reader
+        # recorded since, and finds its own cash unexplained: r1's cash is the
+        # last the engine explained, not r2's.
+        unexplained = self.transfer_log("explained", "unexplained")
+        self.assertEqual(unexplained.cash, Decimal("80.0"), unexplained.source)
+        self.assertIn("r1", unexplained.source)
+
+    def test_a_pending_difference_settled_unexplained_resets_nothing(self):
+        unexplained = self.transfer_log("unexplained", "matched")
+        self.assertEqual(unexplained.cash, Decimal("95.0"), "r2's own cash matched: it is the basis")
+
     def test_a_chain_with_no_starting_book_takes_the_daily_basis_for_the_unexplained_cash(self):
         engine = LoggedEngine(str(self.root / "a.log"))
         self.assertEqual(previous_close(str(self.root / "a.log")), (None, None))

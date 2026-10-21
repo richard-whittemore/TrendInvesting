@@ -143,9 +143,19 @@ func TestTheServiceFileStartsTheEngineWithExplicitSettings(t *testing.T) {
 		t.Errorf("the Boost engine's settings declare TI_MODE=%q, want dry-run until the paper gate", env["TI_MODE"])
 	}
 	// The server's paths, moved to this test's directories.
-	state := t.TempDir()
+	root := t.TempDir()
+	state, flexDir := filepath.Join(root, "engines", "boost"), filepath.Join(root, "flex", "boost")
+	for _, d := range []string{state, flexDir} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if env["TI_FLEX_DIR"] != "/var/lib/trend-investing/flex/%i" {
+		t.Errorf("the unit's Flex folder is %q, want the instance's, where the provisioner creates it", env["TI_FLEX_DIR"])
+	}
 	env["TI_CONFIG"] = boostDeployCfg
 	env["TI_STATE_DIR"] = state
+	env["TI_FLEX_DIR"] = flexDir
 	socketDir := shortSocketDir(t)
 	args := expandExecStart(execStart, map[string]string{"%i": "boost", "%t": socketDir}, env)
 	if len(args) == 0 || args[0] != "/opt/trend-investing/bin/ti-engine" {
@@ -158,6 +168,8 @@ func TestTheServiceFileStartsTheEngineWithExplicitSettings(t *testing.T) {
 		"-log":    state + "/" + env["TI_RUN"] + ".log",
 		"-out":    state + "/" + env["TI_RUN"] + ".journal",
 		"-as-of":  env["TI_AS_OF"],
+		// The instance's Flex ledger (ADR 0019, amended 2026-10-21).
+		"-cash-ledger": flexDir + "/cash-movements.jsonl",
 	} {
 		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
 			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)

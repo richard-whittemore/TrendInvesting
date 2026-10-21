@@ -109,9 +109,9 @@ func (s *stream) refused(n int, clientID, reason string) {
 // flaggedRefusal is a kill-switch or stale-broker-snapshot refusal, which
 // the gate journals at the safety version, carrying alert as the gate set it.
 func (s *stream) flaggedRefusal(n int, clientID, reason string, alert bool) {
-	s.add(event.OrderRefusedEventType, event.OrderRefusedSafetyVersion, "refuse:"+clientID, day(n),
-		event.OrderRefusedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
-			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures", Figures: figures, Alert: alert})
+	p := event.OrderRefusedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
+		InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures", Figures: figures, Alert: alert}
+	s.add(event.OrderRefusedEventType, max(event.OrderRefusedSafetyVersion, p.SchemaVersion()), "refuse:"+clientID, day(n), p)
 }
 
 // staleSaleWithheld is a sale back to 98% the gate withheld because the

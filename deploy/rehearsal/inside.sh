@@ -408,6 +408,7 @@ line=${line//%t//run}
 line=${line//"\${TI_MODE}"/dry-run}
 line=${line//"\${TI_CONFIG}"/\/etc\/trend-investing\/engines\/boost.config}
 line=${line//"\${TI_STATE_DIR}"/\/var\/lib\/trend-investing\/engines\/boost}
+line=${line//"\${TI_FLEX_DIR}"/\/var\/lib\/trend-investing\/flex\/boost}
 line=${line//"\${TI_RUN}"/run-rehearsal}
 as_of=$(sed -n 's/^TI_AS_OF=//p' /root/deploy/etc/engines/run.env.example)
 line=${line//"\${TI_AS_OF}"/$as_of}

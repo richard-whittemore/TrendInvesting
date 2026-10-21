@@ -20,8 +20,10 @@ Two bases are read in one walk, newest first:
   adapter recorded from the same reading (delivery._derived names it), or
   the latest starting book; with every fill committed after it;
 - the unexplained-cash basis (its second): the latest reconciliation whose
-  cash the engine compared and explained (its risk.reconciliation.result,
-  matched or explained with cash_compared), or the latest starting book,
+  cash the engine compared and explained (a risk.reconciliation.result
+  naming it, matched or explained with cash_compared: a pending cash read
+  is neither until a later result settles it explained), or the latest
+  starting book,
   with every fill committed after it. A Boost book (account.snapshot
   version 3) states no cash, so the engine compares none, and the basis is
   then the starting book: the cash IBKR shows beyond it and every fill
@@ -143,14 +145,25 @@ def _book(payload, name):
             refused)
 
 
-def _explained_cash(group):
-    """Whether a committed reconciliation's group holds the engine's result explaining its cash."""
-    for _, kind, envelope in group[1:]:
-        payload = envelope["payload"]
-        if (kind == LOG_DECISION and envelope["type"] == RECONCILIATION_RESULT_TYPE and isinstance(payload, dict)
-                and payload.get("classification") in EXPLAINED and payload.get("cash_compared") is True):
-            return True
-    return False
+def _explained_cash(groups):
+    """The IDs of the reconciliation inputs of groups whose cash the engine's result explained.
+
+    A result names the input it classifies (input_id): its own group's, or,
+    for a cash difference found pending a reading of IBKR's statement and
+    decided later, the earlier reconciliation's, journalled in a later
+    group (ADR 0019, amended 2026-10-21). So a group's input counts only by
+    a result naming it, and a pending difference settled explained counts
+    for the reading that found it; one with no input_id is its own group's.
+    """
+    explained = set()
+    for group in groups:
+        own = group[0][2]["id"]
+        for _, kind, envelope in group[1:]:
+            payload = envelope["payload"]
+            if (kind == LOG_DECISION and envelope["type"] == RECONCILIATION_RESULT_TYPE and isinstance(payload, dict)
+                    and payload.get("classification") in EXPLAINED and payload.get("cash_compared") is True):
+                explained.add(payload.get("input_id") or own)
+    return explained
 
 
 def _walk(runs, own):
@@ -166,6 +179,7 @@ def _walk(runs, own):
         name = os.path.basename(path)
         mine = own and n == 0
         by_id = {group[0][2]["id"]: group[0][2] for group in groups if group[0][1] == LOG_INPUT}
+        explained = _explained_cash(groups)
         for group in reversed(groups):
             at, kind, envelope = group[0]
             kind_of = envelope["type"]
@@ -185,7 +199,7 @@ def _walk(runs, own):
                               fills_since(later, as_of),
                               "the previous close's account snapshot (as of {}) in {}".format(payload["as_of"], name),
                               mine, "", as_of)
-            elif kind_of == RECONCILIATION_TYPE and unexplained is None and _explained_cash(group):
+            elif kind_of == RECONCILIATION_TYPE and unexplained is None and envelope["id"] in explained:
                 as_of = _time(payload["as_of"])
                 unexplained = Basis({}, Decimal(str(payload["total_cash"])), fills_since(later, as_of),
                                     "the reconciliation {} in {}, whose cash the engine explained".format(

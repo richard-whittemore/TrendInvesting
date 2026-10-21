@@ -187,6 +187,19 @@ trading](paper-trading.md), "What can go wrong"); one the adapter refuses
 for good is settled `--never-sent` ([server](server.md), "Reading the logs
 and the kill switch on the server").
 
+## Your deposits and withdrawals
+
+Started with `-cash-ledger <file>`, the engine also reads the Flex reader's
+ledger of the account's deposits and withdrawals, and the reader's status
+beside it, and records each new record and status in its durable log before
+its next input from the adapter, as it does your instructions. The server's
+service file passes the account's own: `-cash-ledger
+/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl` (through
+`TI_FLEX_DIR`). The engine only reads it; a recorded transfer explains the
+cash it moved at the next reconciliation ([reconciliation](reconciliation.md),
+"Deposits and withdrawals, read from IBKR", which also lists what can go wrong
+with it).
+
 ## What can go wrong, and what the program does then
 
 Messages are quoted from the start of what the engine prints (after

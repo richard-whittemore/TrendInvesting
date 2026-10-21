@@ -178,6 +178,7 @@ from sender import NotReconciled, make_sender, release_to_request
 from account import NET_LIQUIDATION, TOTAL_CASH
 from book_basis import cash_change, fills_since, holdings_after, previous_close
 from book_basis import cents as _cents
+import flex
 from snapshot import (ACCOUNT_SNAPSHOT_TYPE, BROKER_SNAPSHOT_TYPE, CASH, NET, POSITIONS, RECONCILIATION_TYPE, Record,
                       account_snapshot_record, broker_snapshot_record, close_valuation, mark_record, read_account,
                       read_marks, reconciliation_record)
@@ -320,12 +321,16 @@ class AdapterLoop:
     today the session's New York date; new_id an input ID for an event type;
     poll how long one step waits for a callback (seconds). streams, when
     given, is the folder holding each run's stream folder (delivery.py);
-    without it no stream is delivered.
+    without it no stream is delivered. cash_ledger, when given, is the
+    instance's Flex ledger (flex.py), whose journalled deposits and
+    withdrawals the post-close reading's cash check subtracts before its
+    bound is applied (_transfers); without it none is.
     """
 
     def __init__(self, config, api, engine_connect, pending_path, engine_log_path, now=_utc_now, today=None,
-                 sleep=time.sleep, monotonic=time.monotonic, poll=1.0, new_id=_new_id, streams=None):
+                 sleep=time.sleep, monotonic=time.monotonic, poll=1.0, new_id=_new_id, streams=None, cash_ledger=None):
         self.config = config
+        self._cash_ledger = cash_ledger
         self._api = api
         self._engine_connect = engine_connect
         self._pending_path = pending_path
@@ -944,7 +949,14 @@ class AdapterLoop:
                            "unread), so the cash since cannot be checked".format(daily.source))
             return Decimal(0), Decimal(0), not daily.own
         cash = reading.balances[TOTAL_CASH].amount
-        drift = _cents(cash - (daily.cash + cash_change(fills)))
+        # A deposit or withdrawal the Flex reader journalled is subtracted
+        # before the bound is applied, the bound itself unchanged (ADR 0019,
+        # amended 2026-10-21); a ledger that cannot be read fails the check.
+        transfers, refused = self._transfers(daily.as_of, reading.as_of)
+        if refused:
+            reasons.append(refused)
+            failed = True
+        drift = _cents(cash - (daily.cash + cash_change(fills) + transfers))
         # The cash bound is part of the comparison (ADR 0019 condition 2): an
         # account that cannot be valued at the close is bounded by IBKR's
         # own net liquidation at the read, and with neither the check fails
@@ -966,8 +978,33 @@ class AdapterLoop:
             reasons.append(cumulative.refused)
             return drift, Decimal(0), not daily.own
         since = fills_since(cumulative.fills + pending, cumulative.as_of, reading.as_of)
-        unexplained = _cents(cash - (cumulative.cash + cash_change(since)))
+        transferred, _ = self._transfers(cumulative.as_of, reading.as_of)
+        unexplained = _cents(cash - (cumulative.cash + cash_change(since) + transferred))
         return drift, unexplained, failed and not daily.own
+
+    def _transfers(self, since, until):
+        """(total, refusal): the deposits less the withdrawals in the Flex ledger dated from the moment a basis as of
+        since holds transfers until and before until, and why the ledger cannot be read, if it cannot.
+
+        A basis stamped at its session's close was read after the close, so it holds the rest of that New York day,
+        as the reader takes it to (flex._held_until; ADR 0019, "the reading after the close counts as the close");
+        any other holds what came before it. Each line is checked as the reader writes it (flex.read_ledger); one
+        that is not refuses the whole ledger, and the cash check then fails rather than pass unchecked. With no
+        ledger configured, or none written yet, there is nothing to subtract."""
+        if self._cash_ledger is None:
+            return Decimal(0), None
+        try:
+            ledger = flex.read_ledger(self._cash_ledger)
+            start = flex._held_until(since)
+        except flex.StatementRefused as refused:
+            return Decimal(0), "the Flex ledger cannot be read, so the cash since the previous close cannot be " \
+                               "checked: {}".format(refused)
+        total = Decimal(0)
+        for record in ledger.values():
+            at = flex._parse_stamp(record["payload"]["as_of"])
+            if start <= at < until:
+                total += Decimal(str(record["payload"]["amount"]))
+        return total, None
 
     def _last_stamp(self, engine_log):
         """The latest as-of time of an account or broker snapshot engine_log holds committed, or None."""
