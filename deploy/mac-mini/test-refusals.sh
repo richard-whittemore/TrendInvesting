@@ -42,6 +42,7 @@ mkdir -p "$fake_home" "$work/bin"
 #   FAKE_VOLUMES=absent   no volume exists yet (default: all four exist)
 #   FAKE_VOLUME_LABELS    the labels of every existing volume, "<mac-mini label>|<checkout label>"
 #                         (default: this test's checkout, "<name>|$FAKE_CHECKOUT")
+#   FAKE_VOLUME_ERR       `docker volume inspect` fails with this message (not "no such volume")
 #   FAKE_MOUNTS           its mounts, "type name destination;" each (default: the four volumes)
 #   FAKE_ACTIVE           the engine and adapter units it reports running
 #   FAKE_LIST_FAILS=1     systemd in it does not answer `systemctl list-units`
@@ -60,8 +61,10 @@ case "$*" in
   "container inspect --format "*.State.Running*) echo true ;;
   "container inspect --format "*.Config.Image*) echo "${FAKE_IMAGE:-}" ;;
   "container inspect "*) test "${FAKE_EXISTS:-0}" = 1 ;;
-  "volume inspect --format "*) test "${FAKE_VOLUMES:-}" != absent || exit 1; printf '%s\n' "${FAKE_VOLUME_LABELS-$n|${FAKE_CHECKOUT:-}}" ;;
-  "volume inspect "*) test "${FAKE_VOLUMES:-}" != absent ;;
+  "volume inspect "*)
+    if test -n "${FAKE_VOLUME_ERR:-}"; then echo "$FAKE_VOLUME_ERR" >&2; exit 1; fi
+    if test "${FAKE_VOLUMES:-}" = absent; then echo "Error response from daemon: get volume: no such volume" >&2; exit 1; fi
+    case "$*" in "volume inspect --format "*) printf '%s\n' "${FAKE_VOLUME_LABELS-$n|${FAKE_CHECKOUT:-}}" ;; esac ;;
   *"systemctl list-units --state=active"*) test "${FAKE_LIST_FAILS:-0}" = 0 || exit 1; test -z "${FAKE_ACTIVE:-}" || printf '%s\n' $FAKE_ACTIVE ;;
   *"systemctl list-units --state=failed"*) test -z "${FAKE_FAILED:-}" || printf '%s\n' $FAKE_FAILED ;;
   *"systemctl is-system-running"*) echo "${FAKE_SYSTEM:-running}" ;;
@@ -331,6 +334,20 @@ refused_after "volumes made from another checkout" "docker volume rm ti-etc" --r
 grep -qF "/elsewhere" "$work/out" || fail "the refusal of another checkout's volumes does not name that checkout: $(cat "$work/out")"
 grep -qF "$co" "$work/out" || fail "the refusal of another checkout's volumes does not name this checkout: $(cat "$work/out")"
 refused_after "a container of this checkout on another checkout's volumes" "volumes" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_VOLUME_LABELS="ti|/elsewhere"
+# --recreate must not stop or remove anything before the volumes are checked.
+refused_after "--recreate of this checkout's container on another checkout's volumes" "volumes" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_VOLUME_LABELS="ti|/elsewhere"
+# Moving the checkout is the commonest cause: the refusal says the volumes are kept.
+refused_after "volumes made from another path" "volumes are kept" -- FAKE_VOLUME_LABELS="ti|/elsewhere"
+# A container on volumes of the earlier launcher: the safe way out, never -f.
+refused_after "a container on volumes from the launcher before the checkout label" "systemctl stop" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_VOLUME_LABELS="ti|"
+grep -qF "docker stop -t 60 ti" "$work/out" || fail "the refusal does not give docker stop -t 60: $(cat "$work/out")"
+grep -qF "docker rm ti" "$work/out" || fail "the refusal does not give docker rm: $(cat "$work/out")"
+grep -qF "docker volume rm ti-etc" "$work/out" || fail "the refusal does not give docker volume rm: $(cat "$work/out")"
+if grep -Eq 'rm (-f|--force)' "$work/out"; then fail "the refusal invites a forced removal: $(cat "$work/out")"; fi
+# Any failure of volume inspect but "no such volume" is an error, not a missing volume.
+refused_after "volume inspect failing for another reason" "cannot inspect" -- FAKE_VOLUME_ERR="Cannot connect to the Docker daemon"
+grep -qF "Cannot connect" "$work/out" || fail "the refusal does not show Docker's error: $(cat "$work/out")"
+if grep -q '^docker volume create' "$work/calls"; then fail "volumes were created after an inspect error: $(cat "$work/calls")"; fi
 refused_after "volumes without labels" "ti-etc" -- FAKE_VOLUME_LABELS="|"
 refused_after "volumes from the launcher before the checkout label" "before it recorded" -- FAKE_VOLUME_LABELS="ti|"
 if grep -q '^docker volume create' "$work/calls"; then fail "volumes were created over unlabelled ones: $(cat "$work/calls")"; fi

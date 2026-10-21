@@ -33,8 +33,9 @@
 # and a second up.sh for the same container while one runs (a lock in
 # ~/.trend-investing). It changes or removes an existing container only if
 # up.sh made it from this checkout (its labels) with the four volumes as its
-# only mounts, and reuses existing volumes only if they carry the same labels; it removes one only after systemd has stopped it, and never
-# while an engine or the adapter runs.
+# only mounts, and reuses existing volumes only if they carry the same
+# labels; it removes one only after systemd has stopped it, and never while an
+# engine or the adapter runs.
 #
 #   TI_MAC_NAME             container name and volume prefix (default ti)
 #   TI_DIST                 the built programs to install (default <checkout>/dist)
@@ -243,28 +244,34 @@ check_own() {
 # now; a missing one is created with both labels. A volume labelled by another
 # checkout, or by the launcher before it recorded the checkout, or not by up.sh
 # at all, would be provisioned over the programs and configuration of the
-# rehearsal that owns it, so it is refused and nothing is changed.
+# rehearsal that owns it, so it is refused and nothing is changed. Only
+# Docker's "no such volume" means missing; any other failure is an error.
 check_volumes() {
-  local v labels made from
+  local v labels made from err missing=""
   for v in etc state opt journal; do
-    if ! labels=$(docker volume inspect --format '{{index .Labels "org.trend-investing.mac-mini"}}|{{index .Labels "org.trend-investing.checkout"}}' "$name-$v" 2>/dev/null); then
-      continue
+    if ! labels=$(docker volume inspect --format '{{index .Labels "org.trend-investing.mac-mini"}}|{{index .Labels "org.trend-investing.checkout"}}' "$name-$v" 2>"$scratch/inspect-err"); then
+      err=$(cat "$scratch/inspect-err")
+      case $(printf '%s' "$err" | tr '[:upper:]' '[:lower:]') in
+        *"no such volume"*) missing="$missing $v"; continue ;;
+      esac
+      refuse "cannot inspect the volume $name-$v, so it is not known whether it is this checkout's: ${err:-no message from docker}. Nothing was changed"
     fi
     labels=${labels//<no value>/}
     made=${labels%%|*}
     from=${labels#*|}
     if test "$made" = "$name" && test -z "$from"; then
+      if test "${exists:-0}" = 1; then
+        refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's, and the container $name uses it. Nothing was changed. If it is your own rehearsal's and its contents may go: stop its adapter, then its engine (docker exec $name systemctl stop ti-adapter-boost ti-engine@boost), then docker stop -t 60 $name && docker rm $name, then remove the four volumes (docker volume rm $name-etc $name-state $name-opt $name-journal) or keep them and use another TI_MAC_NAME. Then run up.sh again, which creates them anew"
+      fi
       refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal's and its contents may go, remove the four volumes ($name-etc, $name-state, $name-opt, $name-journal) once no container uses them: docker volume rm $name-etc $name-state $name-opt $name-journal. Then run up.sh again, which creates them anew"
     fi
     if test "$made" != "$name" || test "$from" != "$repo"; then
-      refuse "the volume $name-$v is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. Either run up.sh from that checkout, or, if that rehearsal's contents may go, remove its volumes: docker volume rm $name-etc $name-state $name-opt $name-journal (once no container uses them)"
+      refuse "the volume $name-$v is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. If $from is this checkout's old place, move it (or a fresh clone) back there and run up.sh again; the volumes are kept. Otherwise run up.sh from the checkout that made them, or, if that rehearsal's contents may go, remove its volumes: docker volume rm $name-etc $name-state $name-opt $name-journal (once no container uses them)"
     fi
   done
-  for v in etc state opt journal; do
-    if ! docker volume inspect "$name-$v" >/dev/null 2>&1; then
-      docker volume create --label org.trend-investing.mac-mini="$name" --label org.trend-investing.checkout="$repo" "$name-$v" >/dev/null
-      say "created the volume $name-$v"
-    fi
+  for v in $missing; do
+    docker volume create --label org.trend-investing.mac-mini="$name" --label org.trend-investing.checkout="$repo" "$name-$v" >/dev/null
+    say "created the volume $name-$v"
   done
 }
 

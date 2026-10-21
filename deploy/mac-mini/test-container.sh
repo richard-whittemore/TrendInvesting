@@ -62,6 +62,10 @@ cleanup() {
   if test "${TI_TEST_KEEP:-0}" != 1; then
     # The test's own container only: its stand-in engine holds nothing.
     docker rm --force "$name" >/dev/null 2>&1 || true
+    # The foreign-volume step's container exists only if that refusal failed;
+    # it would restart by itself, so it is stopped and removed before its volumes.
+    docker stop -t 5 "$name-x" >/dev/null 2>&1 || true
+    docker rm --force "$name-x" >/dev/null 2>&1 || true
     for v in etc state opt journal; do docker volume rm "$name-$v" "$name-x-$v" >/dev/null 2>&1 || true; done
     if test -n "$shifted_image"; then docker image rm "$shifted_image" >/dev/null 2>&1 || true; fi
   fi
@@ -221,7 +225,7 @@ done
 for v in etc state opt journal; do
   docker volume create --label org.trend-investing.mac-mini="$name-x" --label org.trend-investing.checkout=/elsewhere "$name-x-$v" >/dev/null
 done
-if env TI_MAC_NAME="$name-x" TI_DIST="$work/dist" "$work/checkout/deploy/mac-mini/up.sh" >"$work/volumes-out" 2>&1; then cat "$work/volumes-out"; fail "up.sh provisioned over another checkout's volumes"; fi
+if env TI_MAC_NAME="$name-x" TI_DIST="$work/dist" TI_MAC_DASHBOARD_PORT="$((port + 1))" "$work/checkout/deploy/mac-mini/up.sh" >"$work/volumes-out" 2>&1; then cat "$work/volumes-out"; fail "up.sh provisioned over another checkout's volumes"; fi
 cat "$work/volumes-out"
 grep -q "docker volume rm $name-x-etc" "$work/volumes-out" || fail "the refusal does not give the owner's two choices"
 if docker container inspect "$name-x" >/dev/null 2>&1; then fail "a container was created on another checkout's volumes"; fi
