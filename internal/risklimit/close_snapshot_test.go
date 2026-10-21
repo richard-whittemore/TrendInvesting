@@ -534,3 +534,32 @@ func TestADelayedEarlierReadingDoesNotReplaceTheLatestClassifiedVerdict(t *testi
 		t.Fatalf("the latest verdict was 10, so a snapshot of 12 is a new difference: %+v", r.Result)
 	}
 }
+
+// TestADelayedEarlierReadingAfterAChangeDoesNotReplaceTheLatestVerdict: a
+// fill that clears the classified verdict does not make an older reading,
+// delivered afterwards, the latest one again (ADR 0019, amended 2026-10-21,
+// point 6).
+func TestADelayedEarlierReadingAfterAChangeDoesNotReplaceTheLatestVerdict(t *testing.T) {
+	g := booked(t)
+	o := order(event.OrderSideBuy, 1, 0)
+	o.Planned.InstrumentID = "TLT"
+	released(t, check(t, g, o)[0])
+	first := morningOf(1000, 12)
+	first.AsOf = at.Add(time.Hour)
+	reconcileWith(t, g, "reconciliation:1", first)
+	second := morningOf(1000, 10)
+	second.AsOf = at.Add(2 * time.Hour)
+	reconcileWith(t, g, "reconciliation:2", second)
+	if err := g.ObserveFill(event.TargetWeightFillPayload{
+		AccountID: "joint", ClientOrderID: "tw-buy", FillID: "exec-1", InstrumentID: "TLT",
+		Side: event.OrderSideBuy, Quantity: 1, Price: 1, Commission: 0, FilledAt: at.Add(30 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delayed := morningOf(1000, 12)
+	delayed.AsOf = at.Add(90 * time.Minute)
+	reconcileWith(t, g, "reconciliation:3", delayed)
+	if r, journal := checkBookWith(t, g, closeSnapshot(12, 240)); !journal {
+		t.Fatalf("the latest verdict was 10, so a snapshot of 12 is a new difference: %+v", r.Result)
+	}
+}

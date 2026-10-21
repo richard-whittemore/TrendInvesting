@@ -165,6 +165,11 @@ type Gate struct {
 	// positions classified holds: it applied only the changes dated before
 	// it (CheckBook). Only a reading at or after it replaces classified.
 	classifiedAsOf time.Time
+	// latestReadAsOf is the reading time of the latest reconciliation whose
+	// positions were classified against book. A recorded fill or corporate
+	// action clears classified but not this, so a reading taken before it
+	// never becomes the verdict afterwards; zero once book is set.
+	latestReadAsOf time.Time
 	// reported is the residual of each instrument a journalled result found
 	// unexplained against book, so the same difference is not reported
 	// twice (CheckBook); nil once book is set.

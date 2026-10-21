@@ -29,7 +29,7 @@ type Reconciliation struct {
 // those after the book's time. It checks nothing: the engine sets its book
 // through CheckBook.
 func (g *Gate) SetBook(b reconcile.Book) {
-	g.book, g.classified, g.reported, g.reportedAsOf = &b, nil, nil, nil
+	g.book, g.classified, g.latestReadAsOf, g.reported, g.reportedAsOf = &b, nil, time.Time{}, nil, nil
 }
 
 // CheckBook checks b, an account snapshot about to become the book, against
@@ -182,9 +182,11 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 	}
 	r := reconcile.Classify(g.book, g.changes, id, p)
 	// A reading taken before the latest classified one is older knowledge: it
-	// does not replace that verdict (ADR 0019, amended 2026-10-21, point 6).
+	// does not replace that verdict, even after a recorded change cleared it
+	// (ADR 0019, amended 2026-10-21, point 6).
 	if g.book != nil && p.Readable(event.ReconciliationComponentPositions) &&
-		(g.classified == nil || !p.AsOf.Before(g.classifiedAsOf)) {
+		!p.AsOf.Before(g.latestReadAsOf) {
+		g.latestReadAsOf = p.AsOf
 		g.classified = map[string]int64{}
 		for _, position := range p.Positions {
 			g.classified[position.InstrumentID] = position.Quantity
