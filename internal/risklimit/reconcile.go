@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
 	"github.com/richard-whittemore/TrendInvesting/internal/reconcile"
 )
 
@@ -21,6 +23,11 @@ type Reconciliation struct {
 	State              *event.EngineStatePayload
 	StateSchemaVersion uint32
 	StateID            string
+	// Settled is each pending cash difference this reconciliation decided,
+	// each with its own result and state, journalled before Result (ADR
+	// 0019, amended 2026-10-21, "a cash difference the reader has not yet
+	// read").
+	Settled []Reconciliation
 }
 
 // SetBook records the journal's book that later reconciliations start from:
@@ -109,7 +116,8 @@ func (g *Gate) classifiedStandsFor(b reconcile.Book) bool {
 	}
 	for _, c := range g.changes {
 		t := c.At.Truncate(time.Second)
-		if !t.Before(g.book.AsOf) && !t.Before(lo) && t.Before(hi) {
+		// A transfer moves cash alone, and this check compares holdings.
+		if c.Kind != reconcile.ChangeCashMovement && !t.Before(g.book.AsOf) && !t.Before(lo) && t.Before(hi) {
 			return false
 		}
 	}
@@ -143,6 +151,49 @@ func (g *Gate) ObserveCorporateAction(id string, p event.CorporateActionPayload)
 	// As for a fill: a reconciliation classified before this action did not
 	// see it (ADR 0019, amended 2026-10-21, point 6; CheckBook).
 	g.classified = nil
+	return nil
+}
+
+// ObserveCashMovement records a deposit or withdrawal the Flex reader
+// journalled (account.cash-movement version 2), envelope id, as a change a
+// reconciliation's cash is bridged by (ADR 0007; ADR 0019, amended
+// 2026-10-21). As a corporate action, it is one fact under its ID: a
+// redelivery changes nothing, and the ID stating a different movement is
+// refused, since a transfer counted twice would explain cash IBKR never
+// moved. It moves no holding, so it ends no reconciliation's standing for a
+// close snapshot's holdings (CheckBook).
+func (g *Gate) ObserveCashMovement(id string, p event.CashMovementPayload) error {
+	if err := p.ValidateSchema(event.CashMovementTransferVersion); err != nil {
+		return fmt.Errorf("risklimit: %w", err)
+	}
+	if id == "" {
+		return errors.New("risklimit: a cash movement needs its envelope ID")
+	}
+	if seen, ok := g.cashMovements[id]; ok {
+		if seen.AsOf.Equal(p.AsOf) && seen.Amount == p.Amount && seen.Currency == p.Currency && seen.TransactionID == p.TransactionID {
+			return nil
+		}
+		return fmt.Errorf("risklimit: cash movement %s is reused for a different movement", id)
+	}
+	g.cashMovements[id] = p
+	g.changes = append(g.changes, reconcile.CashMovementChange(id, p))
+	return nil
+}
+
+// ObserveFlexStatus records the Flex reader's status for the account: the
+// latest, by the time its reading started, is the one a cash difference is
+// judged against (ADR 0019, amended 2026-10-21). A status for another
+// account is refused.
+func (g *Gate) ObserveFlexStatus(p event.FlexStatusPayload) error {
+	if err := p.Validate(); err != nil {
+		return fmt.Errorf("risklimit: %w", err)
+	}
+	if p.AccountID != g.accountID {
+		return fmt.Errorf("risklimit: Flex status for account %q; this gate is %q", p.AccountID, g.accountID)
+	}
+	if g.flex == nil || !p.CheckedAt.Before(g.flex.CheckedAt) {
+		g.flex = &p
+	}
 	return nil
 }
 
@@ -180,7 +231,9 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 	if p.AccountID != g.accountID {
 		return Reconciliation{}, fmt.Errorf("risklimit: reconciliation for account %q; this gate is %q", p.AccountID, g.accountID)
 	}
-	r := reconcile.Classify(g.book, g.changes, id, p)
+	settled := g.settlePending(id, p)
+	o := reconcile.Reconcile(g.book, g.changes, id, p)
+	r := g.pend(id, o, p)
 	// A reading taken before the latest classified one is older knowledge: it
 	// does not replace that verdict, even after a recorded change cleared it
 	// (ADR 0019, amended 2026-10-21, point 6).
@@ -194,8 +247,141 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 		g.classifiedAsOf = p.AsOf
 	}
 	g.report(r, p.AsOf, g.book != nil && p.Readable(event.ReconciliationComponentPositions) && !p.AsOf.Before(g.book.AsOf))
-	return g.consequence(id, r), nil
+	out := g.consequence(id, r)
+	out.Settled = settled
+	return out, nil
 }
+
+// pendingSessions is how many sessions may close after a pending cash read
+// before it is decided whatever the Flex reader says: a reader set aside
+// for longer never keeps a difference pending (ADR 0019, amended
+// 2026-10-21).
+const pendingSessions = 2
+
+// pendingCash is one cash difference reported as a pending cash read: the
+// reconciliation that found it, its cash component, and its window, the
+// transfers dated from from up to to, those it counted already excluded.
+type pendingCash struct {
+	inputID string
+	result  event.ReconciliationResultPayload
+	cash    event.ReconciliationComponent
+	from    time.Time
+	to      time.Time
+	counted map[string]bool
+}
+
+// pend returns o's result as a pending cash read when the difference may be
+// a transfer the Flex reader has not yet recorded, and records it to be
+// decided later (settlePending): the difference is in the cash alone, no
+// journalled withdrawal is larger than the cash before it (IBKR refuses
+// one), the journal holds the reader's status, and that status does not
+// cover the observation's New York day. Otherwise it is o's result,
+// unchanged: a cash difference with no reader, or one the reader has
+// covered, degrades as before (ADR 0019, amended 2026-10-21).
+func (g *Gate) pend(id string, o reconcile.Outcome, p event.ReconciliationPayload) event.ReconciliationResultPayload {
+	r := o.Result
+	if r.Classification != event.ReconciliationUnexplained || len(r.ScopeInstrumentIDs) > 0 || o.Overdrawn ||
+		g.flex == nil || g.flex.Covers(p.AsOf) || g.book == nil {
+		return r
+	}
+	from, err := reconcile.HeldUntil(*g.book)
+	if err != nil {
+		return r
+	}
+	var cash event.ReconciliationComponent
+	for _, c := range r.Components {
+		if c.Component == event.ReconciliationComponentCash {
+			cash = c
+		}
+	}
+	counted := map[string]bool{}
+	for _, e := range cash.Explanations {
+		counted[e] = true
+	}
+	read := "has not read IBKR's statement since its reading of " + stamp(g.flex.CheckedAt) + " (" + g.flex.State + ")"
+	if g.flex.State == event.FlexStateRead {
+		read = "has read IBKR's cash transactions only through " + g.flex.CoveredTo
+	}
+	r.Classification, r.Action, r.ScopeCashComponents = event.ReconciliationPendingCashRead, event.ReconciliationActionAlert, nil
+	r.Detail = fmt.Sprintf("pending-cash-read: %s; the Flex reader %s, so a deposit or withdrawal it has not yet recorded may explain it: the account stays %s, buys are not stopped, and the difference is checked again at each reconciliation until the reader's records explain it, or it is Degraded on cash once the reader has covered %s or more than %d sessions have closed since",
+		strings.TrimPrefix(r.Detail, "unexplained: "), read, g.state, p.AsOf.In(nysecalendar.NewYork).Format("20060102"), pendingSessions)
+	g.pendingCash = append(g.pendingCash, pendingCash{inputID: id, result: r, cash: cash, from: from, to: p.AsOf, counted: counted})
+	return r
+}
+
+// settlePending decides each pending cash difference reported before p, the
+// reconciliation input id, against the transfers journalled since and the
+// Flex reader's status (ADR 0019, amended 2026-10-21):
+//
+//   - the transfers now journalled in its window explain it to the cent:
+//     explained, and it is settled;
+//   - otherwise, once the reader's status covers its day, or more than
+//     pendingSessions sessions have closed since it (or the calendar cannot
+//     count them), it is unexplained, and the account is Degraded on cash;
+//   - otherwise it stays pending, and nothing is journalled: one difference,
+//     one alert.
+//
+// Each result decided is journalled under its own ID, the pending
+// reconciliation's beside id.
+func (g *Gate) settlePending(id string, p event.ReconciliationPayload) []Reconciliation {
+	var out []Reconciliation
+	kept := g.pendingCash[:0]
+	for _, pc := range g.pendingCash {
+		if !p.AsOf.After(pc.to) {
+			kept = append(kept, pc)
+			continue
+		}
+		sum, ids, sumErr := reconcile.TransfersIn(g.changes, pc.from, pc.to, pc.counted)
+		sessions, _, calErr := nysecalendar.Closes(pc.to, p.AsOf)
+		r := pc.result
+		c := pc.cash
+		c.Explanations = append(slices.Clone(c.Explanations), ids...)
+		var why string
+		switch {
+		case sumErr == nil && sum == c.Residual:
+			c.Expected, c.Residual, c.Explained = c.Expected+sum, 0, true
+			r.Classification, r.Action = event.ReconciliationExplained, event.ReconciliationActionContinue
+			r.Detail = fmt.Sprintf("explained: the cash difference of %s %s that reconciliation %s found pending a reading is explained by the transfers the Flex reader has since recorded: %s",
+				cents(pc.cash.Residual), r.Currency, r.ReconciliationID, strings.Join(ids, ", "))
+		case sumErr != nil:
+			why = "the transfers recorded since cannot be summed: " + sumErr.Error()
+		case g.flex != nil && g.flex.Covers(pc.to):
+			why = "the Flex reader has covered " + pc.to.In(nysecalendar.NewYork).Format("20060102") + " and its records do not explain it"
+		case calErr != nil:
+			why = "the sessions since it cannot be counted: " + calErr.Error()
+		case sessions > pendingSessions:
+			why = fmt.Sprintf("%d sessions have closed since it, more than the two sessions a difference may wait for the Flex reader", sessions)
+		default:
+			kept = append(kept, pc)
+			continue
+		}
+		if why != "" {
+			if sumErr == nil {
+				c.Expected += sum
+				c.Residual -= sum
+			}
+			r.Classification, r.Action = event.ReconciliationUnexplained, event.ReconciliationActionDegrade
+			r.ScopeCashComponents = []string{event.ReconciliationComponentCash}
+			r.Detail = fmt.Sprintf("unexplained: total cash: the difference that reconciliation %s found pending a reading, now %s %s after the transfers recorded since (%s), is not explained: %s",
+				r.ReconciliationID, cents(c.Residual), r.Currency, strings.Join(ids, ", "), why)
+		}
+		r.InputID = pc.inputID
+		r.Components = []event.ReconciliationComponent{c}
+		out = append(out, g.consequence(id+":pending-cash:"+pc.inputID, r))
+	}
+	g.pendingCash = kept
+	return out
+}
+
+func cents(c int64) string {
+	sign := ""
+	if c < 0 {
+		sign, c = "-", -c
+	}
+	return fmt.Sprintf("%s%d.%02d", sign, c/100, c%100)
+}
+
+func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // report records the residual of each instrument r finds unexplained, the
 // differences journalled against the book in force, and forgets each

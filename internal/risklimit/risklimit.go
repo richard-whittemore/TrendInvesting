@@ -188,6 +188,17 @@ type Gate struct {
 	// corporateActions is every corporate action recorded as a change, by
 	// envelope ID, so a redelivery is recognised and never counted twice.
 	corporateActions map[string]event.CorporateActionPayload
+	// cashMovements is every deposit and withdrawal the Flex reader
+	// journalled, recorded as a change, by envelope ID, so one is never
+	// counted twice.
+	cashMovements map[string]event.CashMovementPayload
+	// flex is the Flex reader's latest status the journal holds, nil before
+	// any: without it no cash difference is pending (ADR 0019, amended
+	// 2026-10-21).
+	flex *event.FlexStatusPayload
+	// pendingCash is every cash difference reported as a pending cash read
+	// and not yet decided, in the order reported.
+	pendingCash []pendingCash
 }
 
 // saleAttempt is one tag's record of its sale back to 98%, attempted once
@@ -258,6 +269,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		ledger: newSellLedger(), orders: make(map[string]*releasedOrder),
 		fills:            make(map[string]event.TargetWeightFillPayload),
 		corporateActions: make(map[string]event.CorporateActionPayload),
+		cashMovements:    make(map[string]event.CashMovementPayload),
 	}, nil
 }
 

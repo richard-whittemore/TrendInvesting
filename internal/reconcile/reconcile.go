@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
 )
 
 // Book is the journal's book a reconciliation starts from: the latest
@@ -64,6 +65,9 @@ const (
 	ChangeFill     = "fill"
 	ChangeDividend = event.CorporateActionKindDividend
 	ChangeSplit    = event.CorporateActionKindSplit
+	// ChangeCashMovement is a deposit or withdrawal the Flex reader
+	// journalled (account.cash-movement version 2): it moves cash alone.
+	ChangeCashMovement = "cash-movement"
 )
 
 // Change is one journalled event that changes the book: a fill of a released
@@ -139,6 +143,65 @@ func CorporateActionChange(id string, p event.CorporateActionPayload) Change {
 		c.CashFault = fmt.Sprintf("corporate action %s: %v", id, err)
 	}
 	return c
+}
+
+// CashMovementChange is the change of a journalled deposit (a positive
+// Amount) or withdrawal, envelope id: its amount in whole cents, dated at its
+// as of (ADR 0007; ADR 0019, amended 2026-10-21). It moves no holding.
+func CashMovementChange(id string, p event.CashMovementPayload) Change {
+	c := Change{ID: id, Kind: ChangeCashMovement, At: p.AsOf, Currency: p.Currency}
+	var err error
+	if c.Cash, err = Cents(p.Amount); err != nil {
+		c.CashFault = fmt.Sprintf("cash movement %s: %v", id, err)
+	}
+	return c
+}
+
+// HeldUntil is the moment up to which book's cash holds every transfer: a
+// book stamped at its New York session's official close was read after the
+// close, so it holds the rest of that New York day, as the Flex reader
+// takes it to (adapter/ibkr/flex.py _held_until; ADR 0019, "the reading
+// after the close counts as the close"); any other book holds what came
+// before its own time. A book in a year the NYSE calendar does not hold is
+// an error: whether it is a close is not known.
+func HeldUntil(book Book) (time.Time, error) {
+	local := book.AsOf.In(nysecalendar.NewYork)
+	trading, err := nysecalendar.IsTradingDay(local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("whether the book as of %s is a close is not known: %w", stamp(book.AsOf), err)
+	}
+	if !trading {
+		return book.AsOf, nil
+	}
+	// SessionClose fails only for a day that is no session or is out of
+	// range, and IsTradingDay has just ruled out both.
+	if closed, _ := nysecalendar.SessionClose(local); !closed.Equal(book.AsOf) {
+		return book.AsOf, nil
+	}
+	y, m, d := local.Date()
+	return time.Date(y, m, d+1, 0, 0, 0, 0, nysecalendar.NewYork), nil
+}
+
+// TransfersIn sums, in whole cents, the journalled transfers among changes
+// dated from from up to, not including, to, leaving out those counted
+// already, and names them in journal order. A transfer whose amount is no
+// cent count, or a sum that does not fit an int64, is an error.
+func TransfersIn(changes []Change, from, to time.Time, counted map[string]bool) (sum int64, ids []string, err error) {
+	ids = []string{}
+	for _, c := range changes {
+		at := c.At.Truncate(time.Second)
+		if c.Kind != ChangeCashMovement || counted[c.ID] || at.Before(from) || !at.Before(to) {
+			continue
+		}
+		if c.CashFault != "" {
+			return 0, nil, errors.New(c.CashFault)
+		}
+		if sum, err = addCents(sum, c.Cash); err != nil {
+			return 0, nil, err
+		}
+		ids = append(ids, c.ID)
+	}
+	return sum, ids, nil
 }
 
 // Cents is x dollars in whole cents, rounded half away from zero on x's
@@ -236,12 +299,33 @@ func roundCents(d *big.Rat) (int64, error) {
 //     exactly the unexplained components: the action degrades. Otherwise the
 //     result continues, matched when no change was applied.
 func Classify(book *Book, changes []Change, inputID string, obs event.ReconciliationPayload) event.ReconciliationResultPayload {
-	return classify(book, changes, inputID, obs, "; the book states no cash, so cash is not compared")
+	return Reconcile(book, changes, inputID, obs).Result
 }
 
-// classify is Classify, with uncompared stating why cash is not compared
+// Outcome is one reconciliation's result, and whether a journalled
+// withdrawal was larger than the cash on hand before it.
+type Outcome struct {
+	Result event.ReconciliationResultPayload
+	// Overdrawn is set when a journalled withdrawal applied takes the
+	// expected cash below zero: IBKR refuses a withdrawal of more than the
+	// account's cash, so the difference it leaves is named in the detail and
+	// is never pending a reading (ADR 0019, amended 2026-10-21).
+	Overdrawn bool
+}
+
+// Reconcile is Classify, with the outcome's facts beside the result.
+//
+//   - A journalled deposit or withdrawal is applied to the cash alone when it
+//     is dated from the moment the book holds transfers until (HeldUntil) and
+//     before the observation; a book that states no cash ignores it.
+func Reconcile(book *Book, changes []Change, inputID string, obs event.ReconciliationPayload) Outcome {
+	r, overdrawn := classify(book, changes, inputID, obs, "; the book states no cash, so cash is not compared")
+	return Outcome{Result: r, Overdrawn: overdrawn}
+}
+
+// classify is Reconcile, with uncompared stating why cash is not compared
 // when the book states none.
-func classify(book *Book, changes []Change, inputID string, obs event.ReconciliationPayload, uncompared string) event.ReconciliationResultPayload {
+func classify(book *Book, changes []Change, inputID string, obs event.ReconciliationPayload, uncompared string) (event.ReconciliationResultPayload, bool) {
 	r := event.ReconciliationResultPayload{
 		AccountID: obs.AccountID, ReconciliationID: obs.ReconciliationID, InputID: inputID, Components: []event.ReconciliationComponent{},
 	}
@@ -252,7 +336,7 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	}
 	if book == nil {
 		reasons = append(reasons, "no account snapshot has been recorded, so the journal has no book to compare")
-		return finish(r, reasons, "", uncompared)
+		return finish(r, reasons, "", nil, uncompared), false
 	}
 	r.AnchorID = book.AnchorID
 	if obs.AsOf.Before(book.AsOf) {
@@ -287,13 +371,26 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	explained := map[string][]string{}
 	cash, cashExplained := book.Cash, []string{}
 	var parts cashParts
+	var overdrawn []string
+	heldUntil, heldErr := time.Time{}, error(nil)
+	if cashRead && slices.ContainsFunc(changes, func(c Change) bool { return c.Kind == ChangeCashMovement }) {
+		if heldUntil, heldErr = HeldUntil(*book); heldErr != nil {
+			reasons = append(reasons, heldErr.Error())
+		}
+	}
 	for _, c := range changes {
 		at := c.At.Truncate(time.Second)
-		if at.Before(book.AsOf) || !at.Before(obs.AsOf) {
+		if c.Kind == ChangeCashMovement {
+			// A transfer moves cash alone: it is applied only when cash is
+			// compared, from the moment the book holds transfers until.
+			if !cashRead || heldErr != nil || at.Before(heldUntil) || !at.Before(obs.AsOf) {
+				continue
+			}
+		} else if at.Before(book.AsOf) || !at.Before(obs.AsOf) {
 			continue
 		}
 		switch {
-		case c.Kind != ChangeFill && c.Kind != ChangeDividend && c.Kind != ChangeSplit:
+		case c.Kind != ChangeFill && c.Kind != ChangeDividend && c.Kind != ChangeSplit && c.Kind != ChangeCashMovement:
 			reasons = append(reasons, fmt.Sprintf("corporate action %s (%s of %s) is not one a target-weight book can apply", c.ID, c.Kind, c.InstrumentID))
 			continue
 		case r.CashCompared && c.Cash != 0 && c.Currency != "" && c.Currency != book.Currency:
@@ -302,6 +399,22 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 		}
 		if cashRead && c.CashFault != "" {
 			reasons = append(reasons, c.CashFault)
+			continue
+		}
+		if c.Kind == ChangeCashMovement {
+			next, err := addCents(cash, c.Cash)
+			if err == nil {
+				err = parts.add(c)
+			}
+			if err != nil {
+				reasons = append(reasons, fmt.Sprintf("%s: the expected cash: %v", c.ID, err))
+				continue
+			}
+			if c.Cash < 0 && next < 0 {
+				overdrawn = append(overdrawn, fmt.Sprintf("withdrawal %s of %s is more than the cash on hand before it, %s, which IBKR refuses", c.ID, dollars(-c.Cash), dollars(cash)))
+			}
+			cash = next
+			cashExplained = append(cashExplained, c.ID)
 			continue
 		}
 		nextShares, err := sharesAfter(expected[c.InstrumentID], c)
@@ -348,7 +461,8 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			})
 		}
 	}
-	return finish(r, reasons, parts.String(book.Cash), uncompared)
+	r = finish(r, reasons, parts.String(book.Cash), overdrawn, uncompared)
+	return r, len(overdrawn) > 0 && r.Classification == event.ReconciliationUnexplained
 }
 
 // appendEntry completes c's residual and whether it is explained, and adds it
@@ -365,7 +479,12 @@ func appendEntry(r *event.ReconciliationResultPayload, reasons *[]string, c even
 }
 
 // cashParts are the journalled parts of the expected cash, in whole cents.
-type cashParts struct{ fills, commissions, dividends, inLieu int64 }
+type cashParts struct {
+	fills, commissions, dividends, inLieu, transfers int64
+	// transferred is set once a transfer is counted, so a result with none
+	// states the terms it always has.
+	transferred bool
+}
 
 // add counts c in its part; it is an error, leaving p unchanged, when a part
 // no longer fits an int64.
@@ -384,6 +503,9 @@ func (p *cashParts) add(c Change) error {
 		next.dividends, err = addCents(next.dividends, c.Cash)
 	case ChangeSplit:
 		next.inLieu, err = addCents(next.inLieu, c.Cash)
+	case ChangeCashMovement:
+		next.transfers, err = addCents(next.transfers, c.Cash)
+		next.transferred = true
 	}
 	if err == nil {
 		*p = next
@@ -394,17 +516,22 @@ func (p *cashParts) add(c Change) error {
 // String states the book's cash and each part, the terms the expected cash
 // sums.
 func (p cashParts) String(book int64) string {
-	return fmt.Sprintf("book %s, fills %s, commissions %s, dividends %s, cash in lieu %s",
+	s := fmt.Sprintf("book %s, fills %s, commissions %s, dividends %s, cash in lieu %s",
 		dollars(book), dollars(p.fills), dollars(p.commissions), dollars(p.dividends), dollars(p.inLieu))
+	if p.transferred {
+		s += ", deposits and withdrawals " + dollars(p.transfers)
+	}
+	return s
 }
 
 // netCashLimit is the limit every result that compares cash states.
 const netCashLimit = "; cash is compared as one net total, IBKR's TotalCashValue, so unjournalled cash activities that offset one another are not detected"
 
 // finish classifies r from its components and the unverifiable reasons, and
-// states its detail; parts states the expected cash's journalled parts, and
-// uncompared why cash is not compared when it is not.
-func finish(r event.ReconciliationResultPayload, reasons []string, parts, uncompared string) event.ReconciliationResultPayload {
+// states its detail; parts states the expected cash's journalled parts,
+// overdrawn each withdrawal larger than the cash before it, and uncompared why
+// cash is not compared when it is not.
+func finish(r event.ReconciliationResultPayload, reasons []string, parts string, overdrawn []string, uncompared string) event.ReconciliationResultPayload {
 	var differences []string
 	events := map[string]bool{}
 	for _, c := range r.Components {
@@ -415,7 +542,11 @@ func finish(r event.ReconciliationResultPayload, reasons []string, parts, uncomp
 		case c.Explained:
 		case c.Component == event.ReconciliationComponentCash:
 			r.ScopeCashComponents = append(r.ScopeCashComponents, c.Component)
-			differences = append(differences, fmt.Sprintf("total cash: %s, expected %s %s, broker %s (residual %s)", parts, dollars(c.Expected), r.Currency, dollars(c.Observed), dollars(c.Residual)))
+			difference := fmt.Sprintf("total cash: %s, expected %s %s, broker %s (residual %s)", parts, dollars(c.Expected), r.Currency, dollars(c.Observed), dollars(c.Residual))
+			for _, o := range overdrawn {
+				difference += "; " + o
+			}
+			differences = append(differences, difference)
 		default:
 			r.ScopeInstrumentIDs = append(r.ScopeInstrumentIDs, c.InstrumentID)
 			differences = append(differences, fmt.Sprintf("%s: book %d, expected %d, broker %d (residual %+d)", c.InstrumentID, c.Book, c.Expected, c.Observed, c.Residual))

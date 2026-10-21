@@ -126,6 +126,9 @@ type wireGuard struct {
 	// stopGrace bounds how long a recorded cause waits for its reply; zero
 	// is defaultStopGrace.
 	stopGrace time.Duration
+	// ledger, when set, is the Flex ledger whose records and status are
+	// delivered after the operator inbox's, in the same hold (flexLedger).
+	ledger *flexLedger
 }
 
 // answer returns the committed group for input, applying input through
@@ -227,7 +230,7 @@ func (g *wireGuard) afterReply() {
 func deliveredThrough(cause error, at uint64, inputID string) error {
 	return &transport.SequencedError{
 		Sequence: at - 1,
-		Err:      fmt.Errorf("%w (operator inputs were recorded through sequence %d, so %s was not recorded)", cause, at-1, inputID),
+		Err:      fmt.Errorf("%w (operator or Flex inputs were recorded through sequence %d, so %s was not recorded)", cause, at-1, inputID),
 	}
 }
 
@@ -248,7 +251,9 @@ func sentWith(recorder *journal.Recorder, committed journal.Committed, sequence 
 	case committed.Sent != 0:
 		return sequence == committed.Sent
 	default:
-		moved := recorder.InputsRecordedBefore(committed.Input.ID, func(e event.Envelope) bool { return e.Source == operator.Source })
+		moved := recorder.InputsRecordedBefore(committed.Input.ID, func(e event.Envelope) bool {
+			return e.Source == operator.Source || e.Source == event.FlexSource
+		})
 		return sequence < recorded && sequence >= recorded-moved
 	}
 }
@@ -263,12 +268,23 @@ func (g *wireGuard) applyLocked(ctx context.Context, engine *replay.Engine, inpu
 	g.wg.Add(1)
 	defer g.wg.Done()
 
+	sent := input.Sequence
 	if inbox != nil {
 		sequence, failed := inbox.deliver(ctx, engine, input)
 		if failed != nil {
-			if sequence != input.Sequence {
+			if sequence != sent {
 				// Records before the failed one were journalled: the reply
 				// states the last sequence recorded, theirs.
+				return sequence, deliveredThrough(g.stopWith(failed), sequence, input.ID)
+			}
+			return sequence, g.stopWith(failed)
+		}
+		input.Sequence = sequence
+	}
+	if g.ledger != nil {
+		sequence, failed := g.ledger.deliver(ctx, engine, input)
+		if failed != nil {
+			if sequence != sent {
 				return sequence, deliveredThrough(g.stopWith(failed), sequence, input.ID)
 			}
 			return sequence, g.stopWith(failed)

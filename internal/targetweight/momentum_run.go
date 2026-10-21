@@ -244,6 +244,10 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return r.h.applyReconciliation(in)
 	case event.MarketCorporateActionEventType:
 		return nil, r.h.applyCorporateAction(in)
+	case event.CashMovementEventType:
+		return nil, r.h.applyCashMovement(in)
+	case event.FlexStatusEventType:
+		return nil, r.h.applyFlexStatus(in)
 	case event.AlertAcknowledgedEventType:
 		return nil, r.h.applyAcknowledgement(in)
 	case event.RunCompletedEventType:

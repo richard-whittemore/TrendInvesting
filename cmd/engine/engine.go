@@ -6,7 +6,7 @@
 // file. It is composition only and contains no rules
 // (cmd-is-composition-only, .golangci.yml; AGENTS.md rule 7).
 //
-//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]] [-approval <approval.json>] [-operator <inbox>]
+//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]] [-approval <approval.json>] [-operator <inbox>] [-cash-ledger <cash-movements.jsonl>]
 //
 // # Wire contract: the adapter's first input continues the engine's own
 //
@@ -25,6 +25,11 @@
 // is not a convenience: the journal this run writes is read back as ONE
 // input stream (configuration included), and a stream in which two records
 // both claim Sequence 1 fails its own replay.
+//
+// With -cash-ledger, the Flex reader's journalled deposits and withdrawals
+// and its status (flex.go) join the same sequence after the operator's
+// instructions, delivered the same way and moving the adapter's input the
+// same way.
 //
 // With -operator, the owner's recorded instructions (operator.go) join the
 // same sequence: before the adapter's input, every instruction not yet
@@ -129,7 +134,11 @@ type options struct {
 	// operator tool records the owner's kill switch and rebalance
 	// clearances for a run that can reach a broker.
 	operatorDir string
-	asOf        string
+	// cashLedger names the Flex reader's ledger of the instance's deposits
+	// and withdrawals (flex.go), whose records and status the engine
+	// delivers as inputs.
+	cashLedger string
+	asOf       string
 	// mode is required and is what the adapter on the socket does with the
 	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
 	// broker. A mode other than backtest requires logPath (ADR 0027).
@@ -190,6 +199,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 	if opts.operatorDir != "" && opts.mode == modeBacktest {
 		missing = append(missing, errors.New("-operator applies to a run that can reach a broker; a backtest takes no operator input"))
+	}
+	if opts.cashLedger != "" && opts.mode == modeBacktest {
+		missing = append(missing, errors.New("-cash-ledger applies to a run that can reach a broker; a backtest takes no Flex input"))
 	}
 	if opts.resumePath != "" && opts.logPath == "" {
 		missing = append(missing, errors.New("-resume requires -log: a resumed run streams its own durable log, which begins with the records it resumes (ADR 0027)"))
@@ -278,6 +290,12 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 			return err
 		}
 	}
+	var ledger *flexLedger
+	if opts.cashLedger != "" {
+		if ledger, err = openFlexLedger(opts, comp, &recovery, out); err != nil {
+			return err
+		}
+	}
 	if opts.logPath != "" {
 		logFile, err := createLogFile(opts.logPath)
 		if err != nil {
@@ -292,6 +310,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 	if inbox != nil {
 		inbox.recorder = recorder
+	}
+	if ledger != nil {
+		ledger.recorder = recorder
 	}
 
 	// wireEngine is the ONE replay.Engine this run ever constructs, wrapping
@@ -407,7 +428,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 
 	serveCtx, stopServing := context.WithCancelCause(ctx)
 	defer stopServing(nil)
-	guard := &wireGuard{stop: stopServing}
+	guard := &wireGuard{stop: stopServing, ledger: ledger}
 	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, recorder, strategyVersion, configurationHash, inbox), transport.ServerConfig{
 		MaxFrameBytes:   opts.maxFrameBytes,
 		DecisionTimeout: opts.decisionTimeout,
