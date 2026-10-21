@@ -9,7 +9,8 @@ you about it, so you do not have to go looking.
   something needs your attention, and optionally a daily summary: what you
   hold, what the strategy wanted, the orders and fills, and how your equity
   compares with SPY.
-- `dashboard` shows the same summary as a web page, one section per account.
+- `dashboard` shows the same summary as a web page, one section per account,
+  with a chart of your equity against SPY and a light or dark colour choice.
   It is read-only: you cannot click anything that changes the system.
 
 Neither can place, change or cancel an order, and neither talks to the broker.
@@ -358,6 +359,60 @@ for any other reason (missing, not readable, a record that fails its checks)
 it says "journal unavailable". Neither shows paths or figures, and with
 several `-journal` files one bad file blanks the whole page, not just its
 section.
+
+### Reading the page
+
+Nothing on the page can be clicked to change anything; the links only move you
+around the page, to the two data pages, or switch the colours. From the top:
+
+- **The header** says "Read-only" and holds the colour switch. Choose Light or
+  Dark and the page reloads in that colour scheme (the address gains
+  `?theme=light` or `?theme=dark`). With no choice the page follows your
+  device's own light or dark setting. The choice lives only in the address,
+  so it is not remembered: bookmark the address with the choice if you want
+  it every time. The page runs no scripts and loads nothing from anywhere
+  else.
+- **The left column** lists each account with its engine state (normal,
+  degraded or halted, written out as well as coloured) and links to
+  `/api/summary.json` and `/healthz`. On a narrow screen it moves above the
+  rest.
+- **The row of figures** gives each account's net liquidation (what the
+  broker says the account is worth) and its engine state. Click one to jump to
+  that account.
+- **One section per account.** Its first card is the equity comparison.
+  Below it come the day's holdings, the targets the strategy decided, the
+  orders, the refusals, the fills, and, only on a day that has them, the sales
+  back to 98% that were withheld and the trades skipped. "Inputs not read"
+  appears when the program left out an input that failed its checks. The
+  account's alerts close the section.
+
+**The equity card** compares your account with the benchmark (SPY) over every
+date on which the program has both your account's value and SPY's close. It
+shows the whole-period and the latest-day changes in words, then:
+
+- A line chart. Both lines start at 100 on the first of those dates, so the
+  chart shows how a starting balance would have grown in each. Your account is
+  the solid line with circles, SPY the dashed line with squares, so the two
+  can be told apart without colour. The figures at the right-hand end are
+  where each line stands today; the dates under the chart are its first and
+  last paired dates.
+- The number of paired points, the first and last dates, and the first,
+  previous and latest points with their values.
+- What the same starting balance would be worth had it been held in SPY.
+- One sentence saying what the comparison assumes. Today it counts price
+  return only: SPY's dividends are left out, and money you deposit or withdraw
+  is not taken out of the account's result, so a deposit can look like
+  outperformance.
+
+**The daily change card** draws, for each day between two paired dates, a pair
+of bars: your account's change on the left and SPY's on the right. Bars above
+the centre line are rises and bars below are falls, on one scale that is
+printed at the top and bottom. Green and red are never the only signal; up and
+down arrows and the bar positions say the same.
+
+If there are fewer than two paired dates, for example early in a run, a chart
+cannot be drawn. The card says "The chart needs two paired points" instead of
+drawing something misleading.
 
 ## What the summary shows, and its limits
 

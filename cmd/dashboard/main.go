@@ -11,7 +11,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -168,17 +167,40 @@ func newHandler(journals []string, benchmark string) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(accounts)
 	})
-	mux.HandleFunc("/{$}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		accounts, err := load(journals, benchmark)
 		if err != nil {
 			fail(w, err)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = page.Execute(w, accounts)
+		_ = page.Execute(w, pageData{Accounts: accounts, Theme: themeOf(r)})
 	})
 	return readOnly(mux)
 }
+
+// pageData is what the page renders: the accounts and the theme the reader
+// chose, "dark" or "light", or empty to follow the device's own setting.
+type pageData struct {
+	Accounts []account
+	Theme    string
+}
+
+// themeOf reads the ?theme= choice. Only "dark" and "light" are honoured; any
+// other value leaves the device's setting in charge. The choice is a link the
+// server answers, so the page needs no script and nothing is stored.
+func themeOf(r *http.Request) string {
+	switch t := r.URL.Query().Get("theme"); t {
+	case "dark", "light":
+		return t
+	}
+	return ""
+}
+
+// equityAssumption states in words what the equity comparison assumes. It is
+// one sentence, shown on every equity card, so a change in how the benchmark
+// side is built changes it in one place.
+const equityAssumption = "The comparison assumes price return only, no deposits or withdrawals: the benchmark's dividends are left out, and money you add or take out counts as the account's own gain or loss."
 
 // readOnly admits GET and HEAD and nothing else, whatever the route.
 func readOnly(next http.Handler) http.Handler {
@@ -244,29 +266,3 @@ func view(envelopes []event.Envelope, benchmark string) (account, error) {
 	}
 	return a, nil
 }
-
-var page = template.Must(template.New("page").Funcs(template.FuncMap{
-	"weight": func(v float64) string { return fmt.Sprintf("%.0f%%", v*100) },
-	"shares": event.FormatSkippedShares,
-	"pct":    func(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) },
-}).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trend Investing</title>
-<style>body{font:15px/1.4 system-ui,sans-serif;margin:1rem auto;max-width:56rem;padding:0 1rem}
-table{border-collapse:collapse}td,th{padding:.2rem .7rem;text-align:left;border-bottom:1px solid #8884}
-.urgent{font-weight:700}@media(prefers-color-scheme:dark){body{background:#111;color:#eee}}</style></head>
-<body><h1>Trend Investing (read-only)</h1>
-{{range .}}{{with .Summary}}<h2>{{.AccountID}} <small>{{.StrategyID}}, {{.Date}}, engine {{.EngineState}}</small></h2>
-{{if .HaveSnapshot}}<p>Net liquidation {{printf "%.2f" .NetLiquidation}} as of {{.HoldingsAsOf.UTC.Format "2006-01-02 15:04Z"}}</p>{{else}}<p>No account snapshot.</p>{{end}}
-<h3>Holdings</h3>{{if .Holdings}}<table>{{range .Holdings}}<tr><td>{{.InstrumentID}}</td><td>{{.Quantity}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
-<h3>Targets</h3>{{if .Decisions}}<table>{{range .Decisions}}<tr><td>{{.Outcome}}</td><td>{{.WithheldReason}}</td><td>{{range .Targets}}{{.InstrumentID}} {{weight .Weight}} {{end}}</td></tr>{{end}}</table>{{else}}<p>No decision today.</p>{{end}}
-<h3>Orders</h3>{{if .Orders}}<table>{{range .Orders}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}} {{.Quantity}} {{.InstrumentID}} @ {{printf "%.2f" .LimitPrice}}</td><td>{{.StatusText}}</td><td>{{.Reason}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
-<p>Refusals today: {{.Refusals}}</p>
-<h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{.Quantity}} @ {{printf "%.2f" .Price}}</td><td>{{.ClientOrderID}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
-{{if .SalesWithheld}}<h3>Sales back to 98% withheld</h3><table>{{range .SalesWithheld}}<tr><td>{{.ClientOrderID}}</td><td>{{.InstrumentID}}</td><td>{{.Reason}}</td><td>{{.Trigger}}</td><td>{{.Detail}}</td></tr>{{end}}</table>{{end}}
-{{if .Skipped}}<h3>Trades skipped</h3><table>{{range .Skipped}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}}</td><td>{{.InstrumentID}}</td><td>{{shares .Shares}} shares</td><td>{{.Reason}}</td></tr>{{end}}</table>{{end}}
-<h3>Equity against {{.Benchmark}}</h3>{{if .Equity.Available}}<p>{{.Equity.StartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>{{if .Equity.DayAvailable}}Day, {{.Equity.DayStartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.{{else}}Day: not available (no paired snapshot and {{.Benchmark}} close on {{.Date}}).{{end}}</p>{{else}}<p>Not enough paired snapshots and bars yet.</p>{{end}}
-{{if .RejectedInputs}}<p class="urgent">Inputs not read: {{.RejectedInputs}} (an unknown schema version or values that fail validation; they move no figure).</p>{{end}}{{end}}
-<h3>Alerts</h3>{{if .Alerts}}<table>{{range .Alerts}}<tr class="{{.Severity}}"><td>{{.At.UTC.Format "2006-01-02 15:04Z"}}</td><td>{{.Severity}}</td><td>{{.Title}}<p>{{.Body}}</p></td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
-{{end}}</body></html>
-`))

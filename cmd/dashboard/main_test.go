@@ -116,7 +116,7 @@ func TestDashboardShowsEachAlertsBody(t *testing.T) {
 func TestDashboardDatesTheEquityComparison(t *testing.T) {
 	render := func(e report.Equity) string {
 		var buf bytes.Buffer
-		if err := page.Execute(&buf, []account{{Summary: report.Summary{AccountID: "joint", Date: "2024-01-04", Benchmark: "SPY", Equity: e}}}); err != nil {
+		if err := execPage(&buf, []account{{Summary: report.Summary{AccountID: "joint", Date: "2024-01-04", Benchmark: "SPY", Equity: e}}}); err != nil {
 			t.Fatal(err)
 		}
 		return buf.String()

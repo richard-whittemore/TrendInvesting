@@ -228,3 +228,34 @@ func TestTheReporterReadsTheRefusalsTheGateWrites(t *testing.T) {
 		t.Errorf("the summary shows %d refused orders, want %d: %+v", refused, refusals, summary.Orders)
 	}
 }
+
+// TestEquityCarriesEveryPairedPointInDateOrder: the comparison's chart is
+// drawn from the paired points themselves, so the summary carries each date
+// where both the account's net liquidation and the benchmark's close are
+// recorded, with both values, oldest first.
+func TestEquityCarriesEveryPairedPointInDateOrder(t *testing.T) {
+	_, envelopes, err := report.Load(engineLog(t, []float64{100, 102, 105}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	date, _ := report.ClosedSessionDate(envelopes)
+	got, err := report.Summarize(envelopes, date, "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	points := got.Equity.Points
+	if len(points) != 3 {
+		t.Fatalf("paired points = %d, want 3: %+v", len(points), points)
+	}
+	for i, wantNet := range []float64{4000, 4100, 4200} {
+		if points[i].Net != wantNet || points[i].Benchmark != []float64{100, 102, 105}[i] {
+			t.Errorf("point %d = %+v", i, points[i])
+		}
+		if i > 0 && points[i].Date <= points[i-1].Date {
+			t.Errorf("points are not oldest first: %+v", points)
+		}
+	}
+	if points[0].Date != got.Equity.StartDate || points[2].Date != got.Equity.EndDate {
+		t.Errorf("the series must run from StartDate to EndDate: %+v", got.Equity)
+	}
+}

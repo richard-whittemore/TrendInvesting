@@ -100,6 +100,9 @@ type SkippedLine struct {
 // it, DayStartDate, which is more than one session back when points are
 // missing between them; they are available only when EndDate is the
 // summary's date, so an earlier day's change is never shown as today's.
+//
+// Points are the paired points themselves, oldest first, so a chart is drawn
+// from the same figures the returns are computed from.
 type Equity struct {
 	Available          bool
 	StartDate          string
@@ -111,6 +114,15 @@ type Equity struct {
 	DayStartDate       string
 	DayAccountReturn   float64
 	DayBenchmarkReturn float64
+	Points             []EquityPoint
+}
+
+// EquityPoint is one date on which the account's net liquidation and the
+// benchmark's split-adjusted close are both recorded.
+type EquityPoint struct {
+	Date      string
+	Net       float64
+	Benchmark float64
 }
 
 // Summary is one account's day.
@@ -380,6 +392,9 @@ func equityOf(points []equityPoint, date string) Equity {
 		Available: true, StartDate: first.date, EndDate: last.date,
 		AccountReturn:   last.net/first.net - 1,
 		BenchmarkReturn: last.benchmark/first.benchmark - 1,
+	}
+	for _, p := range points {
+		e.Points = append(e.Points, EquityPoint{Date: p.date, Net: p.net, Benchmark: p.benchmark})
 	}
 	e.Excess = e.AccountReturn - e.BenchmarkReturn
 	if last.date == date {
