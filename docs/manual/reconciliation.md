@@ -649,10 +649,10 @@ reading has checked everything, so a stopped reading leaves it as it was.
   the comparison of open orders; the joint account's cash; matching each cash
   activity to IBKR's activity rows rather than comparing one net total; and
   the outside heartbeat monitor. These are tracked as follow-up issues.
-- The engine and the adapter read the Flex reader's ledger, but the reporter
-  does not page when the reader is set aside (you see a failed unit only, and
-  after two sessions a pending cash read becomes Degraded), the
-  dashboard's comparison does not yet use the deposits and withdrawals, and
-  the dividends, interest and fees it reads are not yet recorded. An IRA's
-  reader runs only once that IRA's engine runs (its `run.env`) and you fill
-  in its account file.
+- The reporter does not page when the Flex reader is set aside (you see a
+  failed unit only, and after two sessions a pending cash read becomes
+  Degraded), and the dividends, interest and fees the reader reads are not
+  yet recorded; that is a follow-up issue. The engine's reconciliation, and
+  the daily summary and the dashboard, do read the ledger's deposits and
+  withdrawals (see the sections above). An IRA's reader runs only once that
+  IRA's engine runs (its `run.env`) and you fill in its account file.
