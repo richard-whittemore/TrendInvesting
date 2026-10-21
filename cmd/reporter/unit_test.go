@@ -177,10 +177,17 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 		"-secrets-file": credentials + "/secrets",
 		"-channel":      "ntfy,pagerduty",
 		"-account":      "boost",
+		"-clock-state":  reports + "/host-clock.json",
 	} {
 		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
 			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)
 		}
+	}
+	if i := indexOf(args, "-clock-check"); i < 0 || i+1 >= len(args) || args[i+1] != "/usr/local/libexec/trend-investing/clock-check.sh" {
+		t.Errorf("ExecStart %v does not run the installed clock check", args)
+	} else {
+		// The server's script is not on this machine: a stand-in that passes.
+		args[i+1] = newStandInCheck(t).path()
 	}
 	if indexOf(args, "-summary") < 0 {
 		t.Errorf("ExecStart %v does not send the daily summary", args)

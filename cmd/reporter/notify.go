@@ -345,10 +345,10 @@ func dedupKey(key string) string {
 }
 
 type pagerDutyEvent struct {
-	RoutingKey  string           `json:"routing_key"`
-	EventAction string           `json:"event_action"`
-	DedupKey    string           `json:"dedup_key"`
-	Payload     pagerDutyPayload `json:"payload"`
+	RoutingKey  string            `json:"routing_key"`
+	EventAction string            `json:"event_action"`
+	DedupKey    string            `json:"dedup_key"`
+	Payload     *pagerDutyPayload `json:"payload,omitempty"`
 }
 
 type pagerDutyPayload struct {
@@ -369,11 +369,28 @@ func (p pagerDutySender) send(a report.Alert, repeat int) error {
 	}
 	body, err := json.Marshal(pagerDutyEvent{
 		RoutingKey: p.routingKey, EventAction: "trigger", DedupKey: dedupKey(incident),
-		Payload: pagerDutyPayload{Summary: a.Title, Source: a.AccountID, Severity: severity, CustomDetails: map[string]string{"detail": a.Body, "alert_key": a.Key}},
+		Payload: &pagerDutyPayload{Summary: a.Title, Source: a.AccountID, Severity: severity, CustomDetails: map[string]string{"detail": a.Body, "alert_key": a.Key}},
 	})
 	if err != nil {
 		return errors.New("build request")
 	}
+	return p.post(body)
+}
+
+// resolve closes the incident triggered under the alert key key (the first
+// delivery's dedup key), so the next trigger under it opens a new incident
+// and pages again. A resolve carries no payload.
+func (p pagerDutySender) resolve(key string) error {
+	body, err := json.Marshal(pagerDutyEvent{RoutingKey: p.routingKey, EventAction: "resolve", DedupKey: dedupKey(key)})
+	if err != nil {
+		return errors.New("build request")
+	}
+	return p.post(body)
+}
+
+// post sends one event and reads the answer back: only HTTP 202 with status
+// "success" is an acknowledged delivery.
+func (p pagerDutySender) post(body []byte) error {
 	req, err := http.NewRequest(http.MethodPost, p.url, bytes.NewReader(body))
 	if err != nil {
 		return errors.New("build request")

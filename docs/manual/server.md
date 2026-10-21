@@ -185,7 +185,12 @@ reason `stale-broker-snapshot`:
 ```
 
 It prints `clock: ok ...` or says what is wrong and exits with an error. The
-reporter does not report the clock; this check is the way to see it.
+reporter runs this same check at every firing (every 5 minutes) and pages you
+once for the whole server when two checks in a row fail, with the skew it
+measured and the remedy, and resolves the page when a check passes; the daily summary
+ends with the last check's time and result ([alerts and
+dashboard](alerts-and-dashboard.md), "Alerts this chapter explains"). Running it
+by hand is how you confirm the fix.
 
 ## What you start by hand
 
@@ -278,7 +283,7 @@ already at IBKR in IBKR's own app.
 | The machine dies, or the reporter never runs | **Nothing outside the server tells you.** The outside heartbeat (Healthchecks.io in plan section 7) is not built, and nothing reads a `HEALTHCHECK_URL` line. A reporter on the machine cannot notice the machine dying | Check the dashboard or the server yourself until it exists (tracked in the issue "External heartbeat and a recorded clock input for the margin alarm's 30-minute rule") |
 | `provision.sh firewall` printed "SKIPPED firewall: Tailscale is not signed in yet" | The firewall is not changed, so the public door is still open | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh firewall` again |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing; the reporter cannot save its state | Free space, then resume or start as `docs/runbooks/durable-log.md` says |
-| The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |
+| The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that. The reporter's own clock check pages you first, within 10 minutes of the drift ("The server's clock failed its check") | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |
 | `provision.sh services` is run again after paper edits | The repository's dry-run `.env` and `.config` files come back; the paper engine refuses to start. The adapter's `boost.json` is kept | Redo the paper edits |
 | A disk is lost | Only a Lightsail snapshot, if any, can restore it | `docs/runbooks/durable-log.md`, "A log that cannot be read" |
 
