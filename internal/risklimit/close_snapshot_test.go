@@ -607,3 +607,32 @@ func TestADelayedReadingDoesNotRestoreAForgottenResidual(t *testing.T) {
 		t.Fatalf("the delayed reading recorded nothing, so the holding is reported: %+v", r.Result)
 	}
 }
+
+// TestAnUnreadableReadingLeavesEveryResidualIntact: a reading whose positions
+// could not be read names no instrument, which is not a statement that none
+// is held, so the residual an earlier reading recorded stays and a snapshot
+// holding the same difference is not reported twice (ADR 0019, amended
+// 2026-10-21, point 6).
+func TestAnUnreadableReadingLeavesEveryResidualIntact(t *testing.T) {
+	g := booked(t)
+	reconcileWith(t, g, "reconciliation:1", withIEF(60, true))
+	unrelatedSplit(t, g) // ends the first reading's standing, so only the recorded residual can suppress the report
+	blind := withIEF(120, false)
+	blind.Positions, blind.Unreadable = []event.AccountPosition{}, []string{event.ReconciliationComponentPositions}
+	reconcileWith(t, g, "reconciliation:2", blind)
+	if r, journal := checkBookWith(t, g, snapshotWithIEF(180)); journal {
+		t.Fatalf("the unreadable reading forgot nothing, so the difference is already reported: %+v", r.Result)
+	}
+}
+
+// TestAReadingBeforeTheBookLeavesEveryResidualIntact: a reading dated before
+// the book was taken is not a comparison with it, so its omission of an
+// instrument forgets nothing (ADR 0019, amended 2026-10-21, point 6).
+func TestAReadingBeforeTheBookLeavesEveryResidualIntact(t *testing.T) {
+	g := booked(t)
+	reconcileWith(t, g, "reconciliation:1", withIEF(-60, true))
+	reconcileWith(t, g, "reconciliation:2", withIEF(-30, false))
+	if r, journal := checkBookWith(t, g, snapshotWithIEF(180)); journal {
+		t.Fatalf("the earlier reading forgot nothing, so the difference is already reported: %+v", r.Result)
+	}
+}
