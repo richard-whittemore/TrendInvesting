@@ -31,13 +31,11 @@ reporter checks every 5 minutes, around the clock, seven days a week).
 3. **Decide.** At 147% under the standard 25% maintenance requirement the
    ratio is about 63%, so a warning means either a deep fall in SPY or a
    higher house requirement. If the requirement rose, the boost is riskier
-   than the backtest assumed: where the operator inbox exists and the engine
-   was started with `-operator`, you may engage the kill switch to stop the
-   next boost buy (`sudo -u ti-trader operator kill-switch ... -state engaged`),
-   which still lets the sale back to 98% go. Until the inbox exists, stop the
-   engine and the adapter instead
-   (`sudo systemctl stop ti-engine@<account> ti-adapter-boost`). Selling by
-   hand is your call; if you do, stop the engine and the adapter first, as
+   than the backtest assumed: you may engage the kill switch to stop the
+   next boost buy (`sudo -u ti-operator operator kill-switch ... -state engaged`),
+   which still lets the sale back to 98% go. Selling by
+   hand is your call; if you do, stop the engine and the adapter first
+   (`sudo systemctl stop ti-engine@<account> ti-adapter-boost`), as
    the manual's "Selling by hand safely" says
    (`docs/manual/states-and-kill-switch.md`): the kill switch does not stop
    the sale back to 98%, so the program could sell beside you.
@@ -71,7 +69,7 @@ reporter checks every 5 minutes, around the clock, seven days a week).
    (`gateway-login.md`).
 4. **After the sale**, the account stays Normal unless something else
    moved it; the boost may buy again when Boost's rule says so. If you want
-   it not to, engage the kill switch (where the inbox exists) or stop the
+   it not to, engage the kill switch or stop the
    engine.
 
 ## Day trades (legacy pattern-day-trader rule)

@@ -34,11 +34,7 @@ go wrong. The rules come from ADR 0019 (amended 2026-09-24, 2026-10-15,
 What is built today: the gate, the states, the kill switch input, the
 margin-cushion alarm and the sale, all recorded in the journal and replayed
 byte for byte, and the way you switch the kill switch on and off from the
-server: `operator kill-switch` ([operator](operator.md)). The tool is
-installed on the server, but its inbox (the folder the engine reads it from)
-is not: you create it and start the engine with `-operator`, as
-[operator](operator.md), "The operator inbox", says. Until then there is no
-kill switch on the server, only stopping the engine.
+server: `operator kill-switch` ([operator](operator.md)), run as `ti-operator`; the provisioner creates its inbox and the engine's service file passes it.
 
 The reporter alerts you when a state changes, and repeats that alert every
 30 minutes until you acknowledge it. It also alerts each change of the margin
@@ -92,8 +88,12 @@ down, and the instrument is added to the scope.
 
 The kill switch is your own input, recorded in the journal as
 `operator.kill-switch`. You record it with `operator kill-switch -state
-engaged` (or `released`); the engine records it before its next input from
-the adapter ([operator](operator.md)). While it is on:
+engaged` (or `released`), run as `ti-operator` on the server (`sudo -u
+ti-operator operator ...`); the engine records it before its next input from
+the adapter ([operator](operator.md)). Only that user can write it: the
+engine and the units that read data from outside run as `ti-trader`, which
+cannot write the inbox, so a switch in the log is yours ([operator](operator.md),
+"Who can write an instruction"). While it is on:
 
 - every order is refused (`kill-switch`), routine sells and the IRAs'
   included;
@@ -504,7 +504,7 @@ account's name; an IRA's alerts carry its own.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| `kill-switch`. Alert: `joint: order refused (kill-switch)`, for the first refusal of each engagement only | Refuses every order except the margin account's one sale back to 98%. The engine state does not change. A refused Boost order is planned again at the first close that decides after you release the switch | Nothing, if you meant it. Release it with `operator kill-switch -state released` ([operator](operator.md)). The switch does not cancel an order already working at IBKR: cancel that in IBKR's own app |
+| `kill-switch`. Alert: `joint: order refused (kill-switch)`, for the first refusal of each engagement only | Refuses every order except the margin account's one sale back to 98%. The engine state does not change. A refused Boost order is planned again at the first close that decides after you release the switch | Nothing, if you meant it. Release it with `sudo -u ti-operator operator kill-switch -state released` ([operator](operator.md)). The switch does not cancel an order already working at IBKR: cancel that in IBKR's own app |
 | `engine-degraded`. Alert: `joint: order refused (engine-degraded)` | The account is Degraded: every buy, and every order on an instrument in the scope, is refused. Sells elsewhere still go | Work the [halted-account runbook](../runbooks/halted-account.md) for the Degraded alert that came first |
 | `engine-halted`. Alert: `joint: order refused (engine-halted)` | The account is Halted: every order but the sale back to 98% is refused | The [halted-account runbook](../runbooks/halted-account.md) |
 | `undecided-order`. Alerts: `joint: order refused (undecided-order)` and `joint: engine halted (risk-limit-breached)` | An order (or a sale) named no recorded decision. That is a defect in the program's order path, so the account is Halted at once | Do not recover until the cause is found: keep the log, and report it as a defect. Then the [halted-account runbook](../runbooks/halted-account.md) |

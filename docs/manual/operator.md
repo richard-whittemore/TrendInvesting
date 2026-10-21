@@ -8,8 +8,8 @@ what can go wrong.*
 ## What it is
 
 `operator` (source: `cmd/operator`) is a small command you run on the
-server, **as the engine's user, `ti-trader`**: `sudo -u ti-trader operator
-...`. It never talks to IBKR and never changes a running engine's state
+server, **as the operator's user, `ti-operator`**: `sudo -u ti-operator
+operator ...` (except `approve`, below). It never talks to IBKR and never changes a running engine's state
 by itself. It writes your instruction down, checked, in a place the engine
 reads, and the engine records it in its durable log as one of its inputs
 before acting on it. That is the rule for everything a person tells the
@@ -18,15 +18,16 @@ setting the program glances at, so the log always shows who said what,
 when, and what the engine did next, and a replay of the log does the same
 thing again.
 
-**Run it as `ti-trader`.** The tool writes each file readable by the user
-that ran it only (mode `0600`), and the engine runs as `ti-trader`, so a file
-written as you, or as root, is one the engine cannot read: the engine would
-report it as waiting at every input and never act on it. So the tool checks
-who owns the inbox (that is the engine's user) and refuses to write when it
-is run as anyone else, saying `run it as the engine's user, sudo -u <engine
-user> operator ...`. Approval files are read by the engine too: write them
-as `ti-trader` as well, into a folder `ti-trader` can read. Every example
-below leaves out the `sudo -u ti-trader` in front to keep it short.
+**Run it as `ti-operator`.** The inbox belongs to `ti-operator`, and the
+tool refuses to write when it is run as anyone but the inbox's owner, saying
+`run it as the inbox's owner, sudo -u ti-operator operator ...`. It writes
+each file mode `0640` in the inbox's group, the engine's, so the engine can
+read it and only `ti-operator` can change it ("Who can write an
+instruction", below). `operator approve` is the exception: it reads the
+previous run's log and writes an approval file, not an instruction in the
+inbox, so run it as the engine's user, `sudo -u ti-trader operator approve
+...`, into a folder `ti-trader` can read. Every example below leaves out the
+`sudo -u ...` in front to keep it short.
 
 It has four commands:
 
@@ -44,35 +45,71 @@ use the same name (`joint: engine halted (...)`), and every alert key ends
 with `@joint`. An instruction for any other name is refused by the engine
 with no effect (see "What can go wrong" below).
 
+## Who can write an instruction
+
+An instruction counts only because it is yours, so the user that writes one
+is an identity of its own, which the engine and every unit that reads data
+from outside do not run as (ADR 0026, kill-switch amendment):
+
+| Who | Runs as | What it can do with the inbox |
+| --- | --- | --- |
+| You, with `operator` | `ti-operator`, a system user with no login shell that the provisioner creates, in the engine's group `ti-trader` | owns the inbox, and writes the instructions |
+| The engine | `ti-trader` | reads it through its group; cannot write it (and its unit mounts it read-only) |
+| The adapter, the data job, the reporter and the dashboard | `ti-trader`, each sandboxed | cannot reach it (`InaccessiblePaths=`), and can write nothing under the engines' folders |
+| Any other user | | nothing: the folder is mode `0750` |
+
+So a defect in a unit that reads IB Gateway's data, Massive's answers or a
+web request cannot write a `released` or an acknowledgement that the durable
+log would show as yours. The engine checks this each time it starts. It
+refuses an inbox its group or others can write to, one owned by root or by
+the user the engine itself runs as, any inbox when the engine runs as root,
+one others can read (the records are readable only through the group), and
+one it cannot list and read (owned by a group it is not in, whatever the
+mode, or a listing or a record it is denied), so a kill switch is never left unread while it
+decides. On a host other than the server (the Mac mini, a container), the
+inbox's owner is whichever user that host's engine does not run as: give the
+folder to that user, in a group the engine's user is in, mode `0750`.
+
+The engine writes nothing into the inbox. What it notes about each file
+(`.delivered` and `.refused`, below) goes in its own folder beside the inbox,
+the inbox's name followed by `-notes`
+(`/var/lib/trend-investing/engines/<account>/operator-notes` on the server),
+mode `0700`. It creates that folder at its first start, and refuses to start
+if the one there is another user's, others can write it, or it cannot list
+it: a note settles a file for good, so a forged one could silence your kill
+switch. For the same reason a `.delivered` or `.refused` file in the inbox
+itself means nothing to the engine: whoever can write the inbox could
+otherwise withhold an instruction as well as write one. Only the notes folder
+settles a file. While it runs, an inbox the engine cannot list, or a file in
+it the engine cannot open (one you put there by hand with another mode, for
+instance), stops the run with the error: it may be a kill switch, and the
+engine does not decide with it unread.
+
+**Upgrading from a build that wrote its notes into the inbox.** An earlier
+build wrote `.delivered` and `.refused` beside each file in the inbox; this
+build does not read them, and it refuses to start while the inbox holds one,
+naming the file, because a record that was refused (for a time ahead, say)
+would otherwise be read again and delivered once that time passed. So before
+the first start of this build, move every file that has a `.delivered` or
+`.refused` beside it out of the inbox, with its markers
+(`sudo mkdir /var/lib/trend-investing/engines/<account>/operator-old` and
+`sudo mv` them there); nothing the engine needs is lost, since the log holds
+what was recorded. A file already recorded in a log still in the engine's
+log folder is not recorded again (the log is the evidence), and the engine
+notes it in its own folder.
+
 ## The operator inbox
 
 Each engine is started with `-operator <folder>`, its inbox, a folder that
 must exist; a backtest takes none (the engine refuses to start with both:
-`-operator applies to a run that can reach a broker`).
-
-**On the server the inbox is not set up for you.** The provisioner
-(`deploy/provision.sh`) installs the `operator` tool itself, in
-`/opt/trend-investing/bin` and linked into `/usr/local/bin`, when
-`deploy/build-engine.sh` has built it. But it does not create the inbox
-folder, and the engine's service file (`ti-engine@.service`) does not pass
-`-operator`. Until you do both, an engine on the server reads no kill
-switch, clearance or acknowledgement. Do this once per account, before
-the engine starts:
-
-```
-sudo install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing/engines/boost/operator
-```
-
-and, in that account's `run.env`, put `-operator` with that folder into
-`TI_RESTART_ARGS` on every start, beside any `-approval` or `-resume`:
-
-```
-TI_RESTART_ARGS=-operator /var/lib/trend-investing/engines/boost/operator -approval /var/lib/trend-investing/engines/boost/approval-<new run>.json
-```
-
-The folder must belong to `ti-trader`: the tool refuses to write into a
-folder owned by anyone else, and an engine whose `-operator` folder is
-missing refuses to start (`engine: the operator inbox: ...`). The tool
+`-operator applies to a run that can reach a broker`). On the server you do nothing to set it up:
+the provisioner creates `/var/lib/trend-investing/engines/<account>/operator`
+for each account, owned by `ti-operator` in the engine's group `ti-trader`,
+mode `0750`, and the engine's service file passes it as `-operator`. Only by
+hand (a host the provisioner did not set up, or a folder removed by
+mistake), create it with `sudo install -d -o ti-operator -g ti-trader -m 0750
+/var/lib/trend-investing/engines/<account>/operator` and pass
+`-operator` with it. The tool
 writes one small file per instruction there, named by the time and the
 kind of instruction, for example `20261017T143005Z-operator.kill-switch.json`.
 Each time the adapter sends the engine something (a price, an account
@@ -89,8 +126,8 @@ recorded, as of that earlier time.
 
 The file stays in the inbox afterwards; the durable log, not the inbox, is
 the evidence. Once the engine has flushed an instruction to the log, it
-writes a marker beside the file, ending `.delivered`, saying where it was
-recorded. An instruction with that marker, or already recorded in any log
+writes a marker in its notes folder, under the file's name, ending
+`.delivered`, saying where it was recorded. An instruction with that marker, or already recorded in any log
 in the engine's log folder (including the one a crash resume continues), is
 never recorded again, so moving a damaged log into `quarantine`, or
 starting a run with its log in another folder, does not replay old
@@ -115,8 +152,8 @@ A file the engine cannot read (hand-edited, damaged, or holding more than
 one record) is never used.
 One the engine refuses (for another account, backdated before a later kill
 switch, or a clearance that does not match) is recorded with no effect. In
-every case the engine writes a note beside the file, under the file's own
-name, ending `.refused`, saying why, prints the same on its output
+every case the engine writes a note in its notes folder, under the file's
+own name, ending `.refused`, saying why, prints the same on its output
 (`journalctl -u ti-engine@<account>`), and never tries that file again.
 
 If the engine cannot write an instruction to the durable log (a disk fault
@@ -191,10 +228,10 @@ and the engine state does not change.
 **"recorded" here means written to the inbox, not yet taken by the engine.**
 To confirm the engine took it, look for any of these:
 
-- a marker beside the file, the same name ending `.delivered`, holding
-  `delivered: it is journalled at sequence <N>`:
-  `sudo -u ti-trader cat /var/lib/trend-investing/engines/boost/operator/<file>.delivered`.
-  If a `.refused` note sits beside it too, the engine recorded the
+- a marker in the engine's notes folder, under the file's name, ending
+  `.delivered`, holding `delivered: it is journalled at sequence <N>`:
+  `sudo -u ti-trader cat /var/lib/trend-investing/engines/boost/operator-notes/<file>.delivered`.
+  If a `.refused` note sits beside it there too, the engine recorded the
   instruction but refused it: it had no effect, and the note says why;
 - the engine's own line, `engine: recorded operator input <id> at sequence
   <N>`, in `journalctl -u ti-engine@boost`;
@@ -311,8 +348,8 @@ refused; run it again a second later.
 
 The engine refuses an acknowledgement stating a time more than five minutes
 ahead or a file it cannot read: it is never recorded, and you see a `.refused`
-note beside the file in the inbox and on the engine's output. One for
-another account is recorded and refused, with a `.refused` note
+note in the engine's notes folder and on the engine's output. One for
+another account is recorded and refused, with a `.refused` note there
 (`acknowledgement ... is for account ...; this run decides "joint"`): the
 reporter does not count it and the alert keeps repeating. Record the acknowledgement again with the right account and
 the current time.
@@ -392,8 +429,8 @@ force, degraded on SPY;total-cash, sale attempted false`, so an account
 Degraded on its cash alone reads `degraded on total-cash`. An approval an
 earlier build recorded (schema version 1, which could not state a cash scope)
 is read as it was recorded. Acknowledgements are not listed in this report
-yet: the reporter reads them from the log, and the `.delivered` marker beside
-the file in the inbox says at which sequence the engine recorded one.
+yet: the reporter reads them from the log, and the `.delivered` marker in the
+engine's notes folder says at which sequence the engine recorded one.
 
 `-account`, `-from`, `-to` and `-format csv|json` work as for the other
 reports ([journal-query](journal-query.md)).
@@ -401,7 +438,7 @@ reports ([journal-query](journal-query.md)).
 ## What can go wrong
 
 Every message below is what the tool prints, or what the engine writes in a
-`.refused` note and on its output (`journalctl -u ti-engine@<account>`).
+`.refused` note in its notes folder and on its output (`journalctl -u ti-engine@<account>`).
 When the tool refuses, it writes nothing; run it again once fixed.
 
 ### When you run the tool
@@ -411,11 +448,11 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `usage: operator <kill-switch\|rebalance-cleared\|acknowledge\|approve> [flags]` or `operator: unknown command "..."` | Nothing written | Use one of the four commands |
 | `flag provided but not defined: -...`, or `operator <command>: unexpected arguments [...]` | Nothing written: a misspelt flag, or a value with spaces not in quotes | Check the spelling; quote `-detail "..."` |
 | `operator: -inbox is required: the engine's operator inbox, its -operator folder` | Nothing written | Add `-inbox /var/lib/trend-investing/engines/<account>/operator` |
-| `operator: the inbox: stat ...: no such file or directory` | Nothing written: the inbox folder does not exist | Create it as "The operator inbox" says, and start the engine with `-operator` |
-| `operator: the inbox ... belongs to user <n>, the engine's user, but this tool runs as user <m> ...` | Nothing written: you ran it as yourself or root, and the engine could not read the file | Run it as `sudo -u ti-trader operator ...`. If the folder itself belongs to root, fix its owner (`sudo chown ti-trader:ti-trader <inbox>`) |
-| `operator: write into <inbox>: ... permission denied` (or `write`, `flush`, `install`) | Nothing written | Check the folder's owner and mode; check the disk is not full |
+| `operator: the inbox: stat ...: no such file or directory` | Nothing written: the inbox folder does not exist (the provisioner creates it on the server, so a path typed wrongly, or a folder removed by mistake) | Check the path against `/var/lib/trend-investing/engines/<account>/operator`; if it is gone, create it as "The operator inbox" says |
+| `operator: the inbox <inbox> belongs to user <n>, the user that writes the owner's instructions, but this tool runs as user <m>: run it as the inbox's owner, ``sudo -u ti-operator operator ...`` on the server` | Nothing written: you ran it as yourself, as root or as `ti-trader`, not as the inbox's owner | Run it again with `sudo -u ti-operator operator ...`. If the folder belongs to the wrong user, fix it as "Who can write an instruction" says (`sudo chown ti-operator:ti-trader <inbox>`). `operator approve` writes no instruction and is run as `ti-trader` |
+| `operator: write into <inbox>: ... permission denied` (or `make <file> readable by the engine's group`, `write`, `flush`, `install`) | Nothing written, or a file the engine cannot read (it then stops the run naming it) | Check you ran it as `ti-operator`, the folder's owner and mode (`ti-operator:ti-trader`, `0750`), and that the disk is not full |
 | `operator: <file> already holds a record, which is never overwritten (ADR 0018); record it again a second later` | Nothing written: two instructions of one kind in the same second (or the same `-at`) share a file name | Run it again a second later, or with a later `-at` |
-| `operator: flush the inbox <inbox>, so the record's name survives a power loss: ...` | The file was written, but the folder could not be flushed to disk | Check the disk. The record is in the inbox; look for its `.delivered` marker before recording it again |
+| `operator: flush the inbox <inbox>, so the record's name survives a power loss: ...` | The file was written, but the folder could not be flushed to disk | Check the disk. The record is in the inbox; look for its `.delivered` marker in the engine's notes folder before recording it again |
 | `operator: -state must be engaged or released, not "...": the switch is stated, never assumed` | Nothing written | Run it again with `-state engaged` or `-state released` |
 | `operator: -at must be an RFC 3339 time: ...` | Nothing written | Give a time like `2026-10-17T14:30:05Z`, or leave `-at` out |
 | `operator: invalid kill switch payload: account id is required` (or `operator is required`, `detail is required`) | Nothing written: `-account`, `-by` or `-detail` missing | Add the missing flag |
@@ -435,8 +472,8 @@ When the tool refuses, it writes nothing; run it again once fixed.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| No `.delivered` marker beside the file | Usually the engine has not read the inbox since: it is stopped, was started without `-operator`, or the adapter has sent it nothing. A missing marker alone does not prove that: the engine can record the instruction and then fail to write the marker (the `mark ... delivered` row below) | Run `journal-query operator <log>` first: if the instruction is listed, it is recorded and in force. If not, check the engine runs with `-operator` (`systemctl status ti-engine@<account>` shows its command line); nothing else is needed: it records the file before the adapter's next input |
-| `.delivered` marker and no `.refused` note | Recorded in the durable log at the sequence the marker states, and in force | Nothing; `journal-query operator <log>` shows it |
+| No `.delivered` marker for the file in the engine's notes folder | Usually the engine has not read the inbox since: it is stopped, was started without `-operator`, or the adapter has sent it nothing. A missing marker alone does not prove that: the engine can record the instruction and then fail to write the marker (the `mark ... delivered` row below) | Run `journal-query operator <log>` first: if the instruction is listed, it is recorded and in force. If not, check the engine runs with `-operator` (`systemctl status ti-engine@<account>` shows its command line); nothing else is needed: it records the file before the adapter's next input |
+| `.delivered` marker in the notes folder and no `.refused` note | Recorded in the durable log at the sequence the marker states, and in force | Nothing; `journal-query operator <log>` shows it |
 | `.delivered` and a `.refused` note: `kill switch for account "..."; this gate is "joint"` | Recorded with no effect: `-account` was not the configuration's name (the IBKR number, say) | Record it again with `-account joint` and the current time |
 | `.refused`: `kill switch <id> states <time>, earlier than <id>, already applied ...` | Recorded with no effect: backdated with `-at` before a kill switch already applied | Record it again with the current time |
 | `.refused`: `... states <time>, later than now (...) by more than the 5m0s the clocks may differ ...` | Never recorded: any instruction more than five minutes ahead of the engine's clock | Record it again with the current time |
@@ -446,15 +483,20 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `.refused`: `... names orders [...], but the orders not terminal are [...]`, `names <id>, but the rebalance in progress is <id>`, or `no rebalance is in progress ...` | Recorded with no effect | Clear again naming exactly the decision and orders the note lists |
 | `.refused`: `input type "operator.rebalance.cleared" is not one this handler reads` | A clearance sent to the Boost engine: recorded with no effect | Nothing; Boost has no rebalance to clear |
 | `engine: operator record <file> was not delivered, so it stays in the inbox and is delivered at the next start: ...` on the engine's output | No note; the run stops: the disk failed, or the log is full (the most records a run holds) | Resume the run, or after a full log start a fresh one ([restart](restart.md)); the instruction is recorded first |
-| `engine: list the operator inbox ...` or `engine: read the operator record ...: ...; it waits for the next input` | Nothing recorded meanwhile; it tries again at the next input | Fix the folder's or file's owner or mode (`ti-trader`) |
+| `engine: list the operator inbox <inbox>, so a kill switch in it could wait unread: ...`, `engine: read the operator record <file>, which could be a kill switch, so the run cannot decide with it unread: ...` or `engine: list the engine's operator notes <folder>, which say which records are settled, so the inbox cannot be read safely: ...` | The run stops with that error: it may be a kill switch, so nothing is decided with it unread | Fix the folder's or the file's owner or mode (`ti-operator:ti-trader`, `0750` for the folder, `0640` for a record; the notes folder is the engine's, `0700`), then resume the run ([restart](restart.md)) |
 | `engine: mark <file> delivered at ...: ...` | The instruction is in the log, but its marker could not be written | Check the disk; the log entry stands, and the engine does not record it twice |
 | The engine will not start: `engine: the operator inbox: ...` or `... is not a directory` | Nothing runs | Create the folder ("The operator inbox") or correct `-operator` in `run.env` |
+| The engine will not start: `engine: the operator inbox <inbox> is mode <m>, writable by its group or by others; the provisioner creates it 0750` | Nothing runs: a kill switch could be written by anyone who can write the folder | `sudo chmod 0750 <inbox>` |
+| The engine will not start: `engine: the operator inbox <inbox> is owned by root`, or `... is owned by the engine's own user (<n>), which could then write its own instructions`, or `engine: the engine runs as root, which can write any operator inbox ...` | Nothing runs: the owner of the inbox must be a user the engine does not run as, and the engine must not run as root | `sudo chown ti-operator:ti-trader <inbox>`; run the engine as `ti-trader` |
+| The engine will not start: `engine: cannot tell who owns the operator inbox <inbox> ...`, or `engine: the engine's groups, to check it can read the operator inbox ...` | Nothing runs: the owner or the engine's groups could not be read | Check the folder and the engine's user (`id ti-trader`); then start again |
+| The engine will not start: `engine: the operator inbox <inbox> is mode <m>, readable by others ...`, or `engine: the engine's user cannot list and read the operator inbox <inbox> ...`, or `engine: the engine cannot list the operator inbox ...`, or `engine: the engine cannot read the operator record <file> in <inbox> ...` | Nothing runs: the records are read only through the inbox's group, and a kill switch must not wait unread | `sudo chgrp ti-trader <inbox>` and `sudo chmod 0750 <inbox>`; for a record, `sudo chown ti-operator:ti-trader <file>` and `sudo chmod 0640 <file>`; then start again |
+| The engine will not start: `engine: the operator inbox <inbox> holds <file>, a marker an earlier layout wrote there (or a forged one) ...` | Nothing runs: an earlier build wrote `.delivered` and `.refused` markers in the inbox, and this build does not read them, so the record each names could be read again | Move every file that has a marker out of the inbox, with its markers, into `operator-old` beside it, as "Upgrading from a build that wrote its notes into the inbox" says; then start again |
+| The engine will not start: `engine: the engine's operator notes <folder> is mode <m>, writable by its group or by others`, or `... is not a directory`, or `... is not the engine's own (owner <n>, the engine runs as <m>)`, or `engine: the engine cannot list and read its operator notes <folder> ...`, or `engine: create the engine's operator notes ...`, or `engine: the engine's operator notes: ...` | Nothing runs: a forged note could silence your kill switch | For the engine's own folder in the wrong mode, `sudo chmod 0700 <folder>`. Otherwise move the folder aside; the engine creates it again. Move aside only a folder whose records are all in a log still in the log folder (the log, not the notes, stops an instruction being recorded twice); a record whose log you quarantined earlier would be recorded again, so move those records out of the inbox first |
 | The engine will not start: `-operator applies to a run that can reach a broker; a backtest takes no operator input` | Nothing runs | Leave `-operator` out of a backtest |
 | You record the switch while the engine is stopped | The engine records it before its first input from the adapter after it starts | Nothing more |
 | The engine is restarted fresh while the switch was on | The fresh run starts with the switch off; `operator approve` warns you | Record the switch again before starting it |
 | A Boost order refused under the switch, after you release it | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
 | An order is already working at IBKR when you engage the switch | The switch stops only new orders from this program; it does not cancel anything at IBKR | Cancel it in IBKR's own app. Stopping the Gateway is not a cancel: an order the engine released goes out once the Gateway is back the same day |
-| The server has no inbox yet, and you need to stop trading now | No recorded kill switch is possible | Stop the engine and the adapter (`sudo systemctl stop ti-engine@boost ti-adapter-boost`), and cancel at IBKR ([server](server.md), "Reading the logs and the kill switch on the server") |
 
 ## What backs this
 
@@ -475,7 +517,8 @@ Tests: `TestTheKillSwitchIsRecordedInTheInbox`,
 `TestTheApprovalWarnsOfTheSwitchThisAccountLeftEngaged`,
 `TestTheInboxAndApprovalDirectoriesAreFlushed`,
 `TestEachClearedOrderIDIsTrimmed`,
-`TestARecordTheEngineCouldNotReadIsRefused` (`cmd/operator`, what the
+`TestARecordTheEngineCouldNotReadIsRefused`,
+`TestARecordIsReadableThroughTheInboxsGroup` (`cmd/operator`, what the
 tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnOperatorInputIsDeliveredOnce`,
 `TestAnOperatorRecordTheEngineRefusesIsNoted`,
@@ -489,6 +532,15 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAnInputSentAgainIsCheckedAgainstTheSequenceItWasSentWith`,
 `TestAResumeWithAnApprovalStatesOneNextSequence`,
 `TestTheOperatorInboxIsForARunThatCanReachABroker`,
+`TestTheOperatorInboxMustNotBeWritableByOthers`,
+`TestTheOperatorInboxBelongsToAUserTheEngineDoesNotRunAs`,
+`TestTheEngineWritesNothingIntoTheOperatorInbox`,
+`TestTheEnginesNotesFolderIsItsOwn`, `TestAMarkerInTheInboxDoesNotSettleARecord`,
+`TestARecordAnEarlierLayoutDeliveredIsNotRecordedTwice`,
+`TestARecordUnreadableAtRunTimeStopsTheDelivery`,
+`TestAnUnlistableInboxAtRunTimeStopsTheDelivery`,
+`TestTheProvisionerCreatesTheOperatorInbox`,
+`TestNoNetworkFacingUnitCanWriteAnInstruction`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
 the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
 `TestTheOwnersClearanceEndsARebalanceInProgress`,
@@ -505,17 +557,15 @@ enveloped by the functions the engine delivers with, and no repeat after it
 on either channel); `TestAnAlertAcknowledgementIsDeliveredAndJournalled`
 (`cmd/engine`, the engine delivering and journalling it, with no refusal);
 `TestARefusalRecordedAtAnotherSequenceStatesIt` (`transport`);
-`TestRebalanceClearedValidate` (`internal/event`).
+`TestRebalanceClearedValidate` (`internal/event`);
+`deploy/rehearsal/test-operator-user.sh` (the provisioner gives an existing
+`ti-operator` the group `ti-trader`, or stops naming the mismatch).
 
 ## Not built yet
 
-- The inbox in the server's setup: `deploy/provision.sh` does not create
-  `/var/lib/trend-investing/engines/<account>/operator`, and
-  `ti-engine@.service` does not pass `-operator`. You add both by hand, as
-  "The operator inbox" says. The tool itself is built by
-  `deploy/build-engine.sh` and installed by the provisioner.
 - The momentum engines in the running program: only Boost is composed, so a
   rebalance clearance has nothing to act on yet.
-- Acknowledgements in `journal-query operator`: use the `.delivered` marker.
+- Acknowledgements in `journal-query operator`: use the `.delivered` marker
+  in the engine's notes folder.
 - A day-trade counter for the margin account (counted by hand for now: see
   the [margin-warning runbook](../runbooks/margin-warning.md)).

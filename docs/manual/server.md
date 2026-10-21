@@ -94,7 +94,7 @@ a command line. Edit these files with `sudo -e`.
 | Folder | What is in it |
 | --- | --- |
 | `/var/lib/trend-investing/data/` | the data step's recordings (never overwritten), `streams/boost/<TI_RUN>/` (the Boost engine's daily input files) and, when you need it, `quarantine/` |
-| `/var/lib/trend-investing/engines/<account>/` | each run's durable log (`<TI_RUN>.log`) and end-of-run journal (`<TI_RUN>.journal`), `run.env`, your approval files, `quarantine/` for a log set aside, and the operator inbox once you create it ([operator](operator.md), "The operator inbox": the provisioner does not create it yet) |
+| `/var/lib/trend-investing/engines/<account>/` | each run's durable log (`<TI_RUN>.log`) and end-of-run journal (`<TI_RUN>.journal`), `run.env`, your approval files, `quarantine/` for a log set aside, `operator/`, the operator inbox the provisioner creates (`ti-operator:ti-trader`, `0750`; [operator](operator.md), "Who can write an instruction"), and `operator-notes/`, the engine's own notes on it |
 | `/var/lib/trend-investing/reports/` | the reporter's own state file, `<account>.reporter.json` (the only folder its unit may write) |
 | `/var/lib/trend-investing/adapters/<account>/` | the adapter's pending file (`pending.json`) and the files beside it (the only folder its unit may write) |
 | `/var/lib/ti-gateway/`, `/var/log/ti-gateway/` | the Gateway's own files and IBC's log |
@@ -218,25 +218,38 @@ cold re-login, so one phone prompt serves both.
 ## Reading the logs and the kill switch on the server
 
 `journal-query` and `operator` are installed on the server, in
-`/usr/local/bin`: run them as the engine's user, `sudo -u ti-trader
-journal-query ...` and `sudo -u ti-trader operator ...`. `journal-query` only
-reads. The engine's operator inbox is not created by the provisioner, and the
-engine unit does not pass `-operator`: until you create the folder
-(`/var/lib/trend-investing/engines/<account>/operator`, owned by `ti-trader`)
-and add `-operator` with it to `TI_RESTART_ARGS` in `run.env` before the
-engine's start ([operator](operator.md), "The operator inbox"),
-`operator kill-switch` and `operator acknowledge` write files nothing reads.
-**Until then there is no recorded kill switch on the server:** to stop the
-program trading, stop the adapter (`sudo systemctl stop ti-adapter-boost`)
-and the engine (`sudo systemctl stop ti-engine@<account>`). An order the
-engine released that the adapter has not sent is never sent by the fresh
-run you start next: its adapter stops at start naming the order, and you
-settle it with the relay's `resolve --run-ended` command
-([paper trading](paper-trading.md), "What can go wrong"). An order the adapter
-refuses for good (released for an earlier session) is settled `--never-sent`
-with the same command, run on the server
-(`docs/runbooks/first-paper-order.md` shows it). Cancel anything already at
-IBKR in IBKR's own app.
+`/usr/local/bin`. Run `journal-query`, which only reads, and `operator
+approve` as the engine's user, `sudo -u ti-trader ...`. Run the
+instructions (`operator kill-switch`, `rebalance-cleared` and `acknowledge`)
+as `ti-operator`, the user that writes them: `sudo -u ti-operator operator
+...`. The provisioner creates `ti-operator` (a system user with no login
+shell, in the engine's group `ti-trader`) and each account's operator inbox,
+`/var/lib/trend-investing/engines/<account>/operator`, owned by `ti-operator`
+in the group `ti-trader`, mode `0750`; the engine unit passes it, so `sudo -u
+ti-operator operator kill-switch -inbox
+/var/lib/trend-investing/engines/<account>/operator ...` is read by the engine
+before its next input ([operator](operator.md), "The operator inbox"). The
+engine reads the inbox through its group and cannot write it, and the
+adapter, the data job, the reporter and the dashboard, which also run as
+`ti-trader`, cannot reach it (each unit's `InaccessiblePaths=`) and can write
+nothing under `/var/lib/trend-investing/engines`, so no unit that reads data
+from outside can write an instruction ([operator](operator.md), "Who can
+write an instruction"). The engine checks the inbox's owner and mode each
+time it starts: it refuses to start if the folder is missing, if its group
+or others can write it, if others can read it, if root or the engine's own
+user owns it, or if the engine cannot list the folder or read a record in it
+(for instance, its group is not one the engine's user is in). So a container or any other host that runs
+the engine (the Mac mini's) must create it the same way: owned by whichever
+user that host's engine does not run as (on the server, `ti-operator`), in a
+group the engine's user is in, mode `0750`. The recorded switch only works while the engine
+runs; to stop the program trading outright, also stop it (`sudo systemctl stop
+ti-engine@<account>`). Also stop the adapter
+(`sudo systemctl stop ti-adapter-boost`): an order the engine released that the
+adapter has not sent is never sent by the fresh run you start next (its adapter
+stops at start naming the order), and an order that must not
+go is settled `--never-sent` with the relay's `resolve` command, run on the
+adapter's machine (the first-paper-order runbook shows it). Cancel anything
+already at IBKR in IBKR's own app.
   Do not treat stopping the Gateway (`sudo systemctl stop ti-gateway`) as a
   kill switch: it only delays. An order the engine has released waits in the
   adapter and goes out once the Gateway is back the same day, and an order already at IBKR keeps

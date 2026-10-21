@@ -62,6 +62,32 @@ fetch() {
   mv "$dest.part" "$dest"
 }
 
+# The user that writes the owner's instructions into the operator inboxes
+# (ADR 0026, kill-switch amendment): not the engine's user, and no unit runs
+# as it, so no network-facing unit can write an instruction. Its group is
+# the engine's, so it reaches the engines' state directories (0750), and
+# the engine reads its records through that group. The base and services
+# steps both ensure it, so a server provisioned before it existed gains it
+# on a services upgrade. The tool gives each record the inbox's group, which
+# the process may do for any group it belongs to; the step checks the
+# primary group is ti-trader anyway, so a record's default group is the
+# engine's even where the tool did not set it, and so the user is a member
+# on a server where it was made another way. Another primary group is set,
+# or the step stops naming the mismatch.
+ensure_operator_user() {
+  if ! id ti-operator >/dev/null 2>&1; then
+    useradd --system --gid ti-trader --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ti-operator
+  fi
+  local group
+  group=$(id -gn ti-operator)
+  if test "$group" != ti-trader; then
+    log "ti-operator's primary group is $group; setting it to ti-trader"
+    usermod -g ti-trader ti-operator || die "ti-operator's primary group is $group, not ti-trader, and usermod -g ti-trader ti-operator failed; fix it by hand and run again"
+    group=$(id -gn ti-operator)
+    test "$group" = ti-trader || die "ti-operator's primary group is still $group, not ti-trader; fix it with usermod -g ti-trader ti-operator and run again"
+  fi
+}
+
 ensure_user() {
   local name=$1 home=$2
   if ! id "$name" >/dev/null 2>&1; then
@@ -81,6 +107,7 @@ step_base() {
   log "service users (non-root, no login shell)"
   ensure_user ti-gateway /var/lib/ti-gateway
   ensure_user ti-trader /var/lib/trend-investing
+  ensure_operator_user
 
   log "automatic security updates"
   install -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'CONF'
@@ -308,9 +335,10 @@ CONF
   # The reporter, the dashboard and the owner's two tools, built for the
   # server beside ti-engine by deploy/build-engine.sh (the server has no Go)
   # and copied to dist/ beside deploy/. A missing one is named here, and its
-  # unit fails when it runs, so the gap is seen. The owner runs the tools as
-  # `sudo -u ti-trader operator ...` and `sudo -u ti-trader journal-query ...`:
-  # sudo's PATH includes /usr/local/bin, where each is linked.
+  # unit fails when it runs, so the gap is seen. The owner records instructions
+  # as `sudo -u ti-operator operator ...` and runs `sudo -u ti-trader
+  # journal-query ...` and `sudo -u ti-trader operator approve ...`: sudo's
+  # PATH includes /usr/local/bin, where each is linked.
   local dist=${TI_DIST:-$here/../dist} b
   for b in ti-reporter ti-dashboard operator journal-query; do
     if test -f "$dist/$b"; then
@@ -331,11 +359,17 @@ CONF
   # adapter (ADR 0026 point 8: one engine per account).
   install -d -o root -g root -m 0700 "$etc/accounts"
   write_stub "$etc/accounts/boost.env" "$here/etc/accounts/boost.env.example"
+  ensure_operator_user
   install -d -o ti-trader -g ti-trader -m 0750 \
     /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines
   local a
   for a in boost trad-ira roth-ira; do
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a"
+    # The operator inbox (ti-engine@.service passes it as -operator). The owner
+    # records into it as ti-operator (sudo -u ti-operator operator ...); the
+    # engine reads it through its group and cannot write it, and no other user
+    # can (ADR 0026, kill-switch amendment; docs/manual/operator.md).
+    install -d -o ti-operator -g ti-trader -m 0750 "/var/lib/trend-investing/engines/$a/operator"
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
   done
   # The adapter's configuration carries no secret (the account number comes

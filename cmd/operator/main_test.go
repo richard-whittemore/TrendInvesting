@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -480,10 +481,11 @@ func TestEachClearedOrderIDIsTrimmed(t *testing.T) {
 	}
 }
 
-// TestARecordTheEngineCouldNotReadIsRefused: the tool writes a record only
-// its own user can read, so run as anyone but the inbox's owner (the
-// engine's user) it would leave a record the engine never reads; it refuses
-// instead, naming the user to run it as.
+// TestARecordTheEngineCouldNotReadIsRefused: the inbox belongs to the user
+// that writes the owner's instructions (ti-operator on the server), and a
+// record is readable through the inbox's group only, so run as anyone but
+// the inbox's owner the tool would leave a record in the wrong hands; it
+// refuses instead, naming the user to run it as.
 func TestARecordTheEngineCouldNotReadIsRefused(t *testing.T) {
 	originalOwner, originalUser := inboxOwner, effectiveUser
 	t.Cleanup(func() { inboxOwner, effectiveUser = originalOwner, originalUser })
@@ -506,6 +508,36 @@ func TestARecordTheEngineCouldNotReadIsRefused(t *testing.T) {
 	effectiveUser = func() int { return 4242 }
 	if _, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at); err != nil {
 		t.Errorf("the inbox's owner: %v", err)
+	}
+}
+
+// TestARecordIsReadableThroughTheInboxsGroup: the engine reads the inbox
+// through its group and runs as a user other than the record's writer
+// (ADR 0026, kill-switch amendment; docs/manual/operator.md, "Who can write
+// an instruction"), so each record is mode 0640 in the inbox's group: the
+// engine can read it, and only its writer can change it.
+func TestARecordIsReadableThroughTheInboxsGroup(t *testing.T) {
+	inbox := t.TempDir()
+	if _, err := invoke(t, "kill-switch", "-inbox", inbox, "-account", "joint", "-state", "engaged", "-by", "owner", "-detail", "x", "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Stat(inbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(inbox)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("the inbox holds %v (%v), want one record", entries, err)
+	}
+	info, err := os.Stat(filepath.Join(inbox, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Errorf("the record is mode %o, want 0640", info.Mode().Perm())
+	}
+	if got, want := info.Sys().(*syscall.Stat_t).Gid, dir.Sys().(*syscall.Stat_t).Gid; got != want {
+		t.Errorf("the record's group is %d, want the inbox's %d", got, want)
 	}
 }
 

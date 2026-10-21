@@ -136,21 +136,11 @@ journals it only when it takes its next input from the adapter, so with the
 engine stopped the repeats continue until it runs; the reporter's first run
 after that sends the alert no more.
 
-**On the server today this needs one step of yours first.** The engine reads
-`operator` files only from its operator inbox, the folder named by its
-`-operator` flag, and the server's engine unit does not pass that flag. Until
-you create the folder (`/var/lib/trend-investing/engines/<account>/operator`,
-owned by `ti-trader`) and add `-operator` with it to `TI_RESTART_ARGS` in the
-account's `run.env` before the engine's start ([operator](operator.md), "The
-operator inbox"), an acknowledgement you record is never read, and the
-repeats continue every 30 minutes for as long as that run's log is the one
-reported.
-
 Only an acknowledgement for the account counts. One recorded for another
 account has no effect, so the alert keeps coming until an acknowledgement for
 this account is in the log. One the engine refuses (its time is more than five
 minutes ahead of the engine's clock, or it cannot be read) is never recorded;
-you see a `.refused` note beside the file saying why in the engine's inbox and
+you see a `.refused` note saying why in the engine's notes folder beside its inbox (`operator-notes`) and
 on the engine's output (`journalctl -u ti-engine@<account>`). Record the
 acknowledgement again with the right account and the current time.
 
@@ -469,7 +459,7 @@ and whether the alert is urgent:
 | "reporter: write state: ..." | Alerts may have gone, but were not recorded, so the next firing sends them again | Free disk space, or fix the folder's owner (`ti-trader`) |
 | "the daily summary carries balances and never goes through a public relay such as ntfy.sh; ..." | Every alert still goes; the summary does not, because no private channel was named | Keep `pagerduty` in the unit's `-channel`, or set `TI_NTFY_SERVER` to your own ntfy server |
 | "reporter: the daily summary was not sent: ..." | Every alert still goes and is remembered; the summary is tried again at the next firing | Read the record it names with `journal-query`; if the record fails its checks, the log is damaged (row above on reading the journal) |
-| The repeats keep coming after you ran `operator acknowledge` | The engine records an acknowledgement only from its operator inbox, at its next input from the adapter. The server's engine unit passes no inbox unless you add one; one the engine refused leaves a `.refused` note beside the file | Check the engine was started with `-operator` and that inbox ("Repeated until you acknowledge it", above); read any `.refused` note and record the acknowledgement again |
+| The repeats keep coming after you ran `operator acknowledge` | The engine records an acknowledgement only from its operator inbox, at its next input from the adapter, so with the engine stopped the repeats continue until it runs. One the engine refused leaves a `.refused` note in its notes folder (`operator-notes`, beside the inbox); one for another account, or for a key with a typing slip, is recorded and does nothing | Check the engine is running and read any `.refused` note; record the acknowledgement again with the right account, the current time and the key copied from the alert ([operator](operator.md), "Acknowledging an alert") |
 
 ### The dashboard
 

@@ -44,6 +44,11 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/trend-investing/adapters/boost
 ReadOnlyPaths=/var/lib/trend-investing/engines/boost -/var/lib/trend-investing/data/streams/boost
+# No instruction can come from this unit: it runs as ti-trader, the engine's
+# user, and reads data from outside, so the operator inboxes are hidden from
+# it, and nothing under the engines' state is writable (ProtectSystem=strict;
+# ADR 0026, kill-switch amendment; docs/manual/server.md).
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

@@ -235,15 +235,12 @@ whether it is the crashed run. The message says which case it is.
       on, record it again with `operator kill-switch`: the engine reads it
       before the fresh run's first input from the adapter
       ([operator](../manual/operator.md), "An approval").
-      **Prerequisite:** this works only if the engine was started with
-      `-operator <inbox>`. The server's service file does not pass it yet,
-      so until it does, recording the file does not make a fresh run read the
-      switch, and a restart can release it. Before relying on this step,
-      confirm that the engine's command line includes `-operator` with the
-      inbox you recorded into ([operator](../manual/operator.md), "The
-      operator inbox"); if it does not, do not start the run until it
-      does, or stop the engine instead. There is no configuration
-      fallback, so:
+      The server's service file passes `-operator` with the account's
+      inbox, `/var/lib/trend-investing/engines/<account>/operator`, so record
+      the switch there ([operator](../manual/operator.md), "The operator
+      inbox"); an engine that is started some other way must be given the
+      inbox you recorded into, or a restart can release the switch. There is
+      no configuration fallback, so:
       - If the last readable log ended in an incident, carry it Halted
         under that ID.
       - If it ended Normal and you believe the lost log opened an incident,
