@@ -269,9 +269,9 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 
 // handSale is the hand-sale procedure a page sends the owner to while the
 // program's sells may still be working, in the order of "Selling by hand
-// safely" (docs/manual/states-and-kill-switch.md): stop the engine and the
-// adapter of the account (the kill switch does not stop the sale back to
-// 98%), cancel every open order on the instrument, the program's and the
+// safely" (docs/manual/states-and-kill-switch.md): stop the adapter, then the
+// engine, of the account (one command each; stop if the first fails; the
+// kill switch does not stop the sale back to 98%), cancel every open order on the instrument, the program's and the
 // owner's own, confirm none is open, sell, then start the fresh run only once
 // the sale has filled or been cancelled, its approval stating the book as it
 // is after the sale (read in IBKR right before approving; otherwise the
@@ -285,6 +285,7 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 // unit, wired to that engine's socket and log (deploy/systemd).
 func handSale(account string) []string {
 	return []string{"stop the engine and the adapter", "the adapter first: sudo systemctl stop ti-adapter-boost, then sudo systemctl stop ti-engine@boost",
+		"two commands, so a failed adapter stop ends the procedure before the engine is stopped",
 		"if the first fails, stop there and read journalctl -u ti-adapter-boost before going on",
 		"kill switch is not enough", "every open order on the instrument", "the program's and any of your own",
 		"IBKR's app", "confirm", "cancel-pending", "only then sell", "fresh run you approve",
@@ -306,6 +307,9 @@ func requireHandSale(t *testing.T, body, account string) {
 	}
 	if !strings.Contains(body, "operator approve -log <previous run's log> -account "+account+" ") {
 		t.Errorf("approval does not name the account %q: %q", account, body)
+	}
+	if strings.Contains(body, "does not order") {
+		t.Errorf("a reason the units' ordering does not support: %q", body)
 	}
 	last := -1
 	for _, want := range handSale(account) {
