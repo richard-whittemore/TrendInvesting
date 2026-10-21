@@ -4,9 +4,9 @@
 users, when each starts, where its configuration and secrets live, what is
 backed up, what you start by hand, and what can go wrong. The step-by-step
 setup is `docs/runbooks/lightsail-deployment.md`; this chapter is what you
-need to know to look after it. The first paper runs are on the Mac mini
-instead, in one container set up by the same provisioner and units:
-[mac-mini](mac-mini.md) says what differs there.*
+need to know to look after it. Paper trading runs here. The Mac mini's
+container is only a local rehearsal of this server, set up by the same
+provisioner and units: [mac-mini](mac-mini.md) says what differs there.*
 
 ## What it is and why
 

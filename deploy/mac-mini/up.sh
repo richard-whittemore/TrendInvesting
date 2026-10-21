@@ -1,11 +1,14 @@
 #!/bin/bash
-# Creates the Mac mini's container, or re-attaches to it, and provisions it
-# (Mac mini plan, option A, approved by the owner on 2026-10-18; section 5,
-# item 4). Run it on the Mac, from the checkout kept for builds and installs
+# Creates the Mac mini's rehearsal container, or re-attaches to it, and
+# provisions it. The container is a local rehearsal environment with a real
+# systemd, for trying the provisioner, the units and the owner's steps on the
+# Mac before they are done on the Lightsail server, where paper trading runs
+# (docs/manual/mac-mini.md; the steps are docs/runbooks/mac-mini.md). Run it
+# on the Mac, from a checkout outside the synced folders
 # (~/TrendInvesting-deploy), never from one on the Desktop:
 #
 #   deploy/mac-mini/up.sh              create the container, or start it and re-provision
-#   deploy/mac-mini/up.sh --recreate   remove the container (never its volumes) and create it again
+#   deploy/mac-mini/up.sh --recreate   stop and remove the container (never its volumes) and create it again
 #
 # The container is one long-running arm64 Ubuntu 24.04 machine with systemd as
 # PID 1 (the image is deploy/mac-mini/Dockerfile), restarted by Docker unless
@@ -24,9 +27,14 @@
 # it again changes nothing but what the checkout changed.
 #
 # Before it touches Docker it refuses a checkout or build folder under the
-# Desktop, Documents, iCloud Drive or another synced folder, and one holding an
+# Desktop, Documents, iCloud Drive or another synced folder, one holding an
 # iCloud sync duplicate ("name 2.ext" or "name 2"), which would otherwise be
-# copied into the programs (plan section 7, "iCloud sync duplicates files").
+# copied into the programs, or one it cannot read all of; a bad name or port;
+# and a second up.sh for the same container while one runs (a lock in
+# ~/.trend-investing). It changes or removes an existing container only if
+# up.sh made it from this checkout (its labels) with the four volumes as its
+# only mounts; it removes one only after systemd has stopped it, and never
+# while an engine or the adapter runs.
 #
 #   TI_MAC_NAME             container name and volume prefix (default ti)
 #   TI_DIST                 the built programs to install (default <checkout>/dist)
@@ -47,6 +55,14 @@ esac
 
 say() { printf 'up: %s\n' "$*"; }
 refuse() { printf 'up: %s\n' "$*" >&2; exit 1; }
+
+scratch=$(mktemp -d)
+lock=
+cleanup() {
+  rm -rf "$scratch"
+  if test -n "$lock" && test "$(readlink "$lock" 2>/dev/null)" = $$; then rm -f "$lock"; fi
+}
+trap cleanup EXIT
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -75,25 +91,52 @@ refuse_synced() {
   fi
 }
 
-# refuse_duplicates WHAT PATH: any "name 2.ext" or "name 2", file or folder.
+# refuse_duplicates WHAT PATH: any "name 2.ext" or "name 2", file or folder,
+# and any folder the scan cannot read through. The whole list is written to a
+# file and only its first five lines shown, so that no cut of the output ends
+# the scan early (under pipefail that would end up.sh without a word).
 refuse_duplicates() {
-  local found
-  found=$(find "$2" \( -name '* 2.*' -o -name '* 2' \) -print 2>/dev/null | head -n 5)
-  if test -n "$found"; then
-    refuse "refusing the $1 at $2: it holds what look like iCloud sync duplicates, which would be copied into the container: $(printf '%s' "$found" | tr '\n' ';') Delete them, or take a fresh checkout outside the synced folders."
+  local list=$scratch/duplicates status=0 count
+  find "$2" \( -name '* 2.*' -o -name '* 2' \) -print >"$list" 2>"$list.err" || status=$?
+  if test "$status" -ne 0; then
+    refuse "refusing the $1 at $2: could not read all of it, so it cannot be checked for iCloud sync duplicates: $(sed -n '1,3p' "$list.err" | tr '\n' ';') Fix the permissions, or take a fresh checkout outside the synced folders."
   fi
+  if test -s "$list"; then
+    count=$(wc -l <"$list" | tr -d ' ')
+    refuse "refusing the $1 at $2: it holds $count what look like iCloud sync duplicates, which would be copied into the container: $(sed -n '1,5p' "$list" | tr '\n' ';') Delete them, or take a fresh checkout outside the synced folders."
+  fi
+}
+
+# take_lock: one up.sh at a time for this container. The lock is a symbolic
+# link naming this process, made in one step; one left by a process no longer
+# running is taken over.
+take_lock() {
+  local path=$HOME/.trend-investing/up-$name.lock holder
+  mkdir -p "$HOME/.trend-investing"
+  if ! ln -s $$ "$path" 2>/dev/null; then
+    holder=$(readlink "$path" 2>/dev/null || true)
+    if test -n "$holder" && ps -p "$holder" >/dev/null 2>&1; then
+      refuse "another up.sh (process $holder) is working on the container $name; wait for it to finish (the lock is $path)"
+    fi
+    say "taking over the lock left by process ${holder:-unknown}, which is no longer running"
+    rm -f "$path"
+    ln -s $$ "$path" 2>/dev/null || refuse "another up.sh took the lock on $name first; wait for it to finish (the lock is $path)"
+  fi
+  lock=$path
 }
 
 case $name in
   '' | *[!a-z0-9-]* | -*) refuse "TI_MAC_NAME must be lower-case letters, digits and hyphens (it names Docker volumes, never a folder), not '$name'" ;;
 esac
 case $port in
-  '' | *[!0-9]*) refuse "TI_MAC_DASHBOARD_PORT must be a port number, not '$port'" ;;
+  '' | *[!0-9]* | 0* | ??????*) refuse "TI_MAC_DASHBOARD_PORT must be a port number from 1 to 65535, not '$port'" ;;
 esac
+test "$port" -le 65535 || refuse "TI_MAC_DASHBOARD_PORT must be a port number from 1 to 65535, not '$port'"
 refuse_synced checkout "$repo"
 refuse_synced "build folder" "$dist"
 refuse_duplicates checkout "$repo"
 if test -d "$dist"; then refuse_duplicates "build folder" "$dist"; fi
+take_lock
 
 # --- Docker, from here on.
 arch=$(docker info --format '{{.Architecture}}')
@@ -115,11 +158,45 @@ for v in etc state opt journal; do
   fi
 done
 
+# check_own: the existing container is one up.sh made, for this name, from
+# this checkout, and its only mounts are the four volumes; otherwise nothing
+# of it is changed or removed.
+check_own() {
+  local labels made from mounts want
+  labels=$(docker container inspect --format '{{index .Config.Labels "org.trend-investing.mac-mini"}}|{{index .Config.Labels "org.trend-investing.checkout"}}' "$name")
+  labels=${labels//<no value>/}
+  made=${labels%%|*}
+  from=${labels#*|}
+  if test "$made" != "$name" || test "$from" != "$repo"; then
+    refuse "the container $name is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. Use another TI_MAC_NAME, or run up.sh from the checkout that made it."
+  fi
+  mounts=$(docker container inspect --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination}};{{end}}' "$name" | tr ';' '\n' | sed '/^$/d' | LC_ALL=C sort)
+  want=$(printf 'volume %s-etc /etc/trend-investing\nvolume %s-state /var/lib/trend-investing\nvolume %s-opt /opt/trend-investing\nvolume %s-journal /var/log/journal\n' "$name" "$name" "$name" "$name" | LC_ALL=C sort)
+  if test "$mounts" != "$want"; then
+    refuse "the container $name's mounts are not the four volumes $name-etc, $name-state, $name-opt and $name-journal ($(printf '%s' "$mounts" | tr '\n' ';')). Nothing was changed: files kept outside those volumes would be lost."
+  fi
+}
+
 exists=0
 docker container inspect "$name" >/dev/null 2>&1 && exists=1
+if test "$exists" = 1; then check_own; fi
 if test "$exists" = 1 && test "$recreate" = 1; then
+  if test "$(docker container inspect --format '{{.State.Running}}' "$name")" = true; then
+    # Removing the container ends every process in it at once, which for an
+    # engine is a crash: its last group may be uncommitted (ADR 0027). The
+    # owner stops the engine and the adapter first (docs/manual/restart.md).
+    running=$(docker exec "$name" systemctl list-units --state=active,activating,deactivating,reloading --no-legend --plain 'ti-engine@*' 'ti-adapter-*' | awk '{print $1}' | tr '\n' ' ')
+    running=${running% }
+    if test -n "$running"; then
+      refuse "refusing to remove $name while $running runs: stop it first (docker exec $name systemctl stop ${running%% *}; the adapter before its engine), then run up.sh --recreate again"
+    fi
+    # systemd shuts its units down in order on the image's STOPSIGNAL; the
+    # bound is the container's --stop-timeout.
+    say "stopping the container $name (systemd stops its units, within 60 s)"
+    docker stop -t 60 "$name" >/dev/null
+  fi
   say "removing the container $name (its volumes are kept)"
-  docker rm --force "$name" >/dev/null
+  docker rm "$name" >/dev/null
   exists=0
 fi
 if test "$exists" = 1; then
@@ -133,12 +210,16 @@ else
   uuid=$(printf 'trend-investing mac mini %s' "$name" | shasum -a 256 | cut -c1-32)
   # Named volumes by --mount type=volume, which Docker never reads as a Mac
   # folder (a -v whose name had a slash in it would be a bind mount).
-  # --privileged: systemd as PID 1 exits at once without it under Docker
-  # Desktop, and the units' hardening (ProtectSystem=strict, PrivateTmp,
-  # RuntimeDirectory) needs mount namespaces. The privilege is inside
-  # Docker's own Linux VM, not the Mac (docs/manual/mac-mini.md).
+  # Not --privileged: systemd as PID 1 needs CAP_SYS_ADMIN (mount namespaces
+  # for the units' ProtectSystem, PrivateTmp and RuntimeDirectory, and its
+  # credentials) and a cgroup namespace of its own, whose cgroup tree the
+  # image's entrypoint makes writable. Docker's default seccomp filter stays,
+  # and the container gets no other device, no clock and no kernel parameter.
+  # CAP_SYS_ADMIN is still broad: what it exposes is in docs/manual/mac-mini.md,
+  # "What the container may do".
   docker create --name "$name" --hostname "$name" --platform linux/arm64 \
-    --privileged --restart unless-stopped --stop-timeout 60 \
+    --cap-add SYS_ADMIN --cgroupns private \
+    --restart unless-stopped --stop-timeout 60 \
     --tmpfs /run --tmpfs /run/lock \
     --env container_uuid="$uuid" \
     --add-host host.docker.internal:host-gateway \
@@ -148,6 +229,7 @@ else
     --mount "type=volume,source=$name-opt,target=/opt/trend-investing" \
     --mount "type=volume,source=$name-journal,target=/var/log/journal" \
     --label org.trend-investing.mac-mini="$name" \
+    --label org.trend-investing.checkout="$repo" \
     "$image" >/dev/null
   say "created the container $name"
 fi
@@ -162,9 +244,34 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 case $state in
-  running | degraded) ;;
+  running) ;;
+  degraded)
+    # Accepted only when every failed unit is one that fails, naming why,
+    # until the owner's first steps: the reporter and the dashboard until the
+    # Boost engine has run once, the data job until its key is filled in. Any
+    # other failed unit (mount-shared, journald, the clock check...) is a
+    # machine that is not fit to provision.
+    failed=$(docker exec "$name" systemctl list-units --state=failed --no-legend --plain | awk '{print $1}' | tr '\n' ' ')
+    failed=${failed% }
+    say "systemd in $name is degraded; failed: ${failed:-none listed}"
+    bad=
+    for u in $failed; do
+      case $u in ti-reporter@*.service | ti-dashboard.service | ti-data.service) ;; *) bad="$bad $u" ;; esac
+    done
+    if test -n "$bad"; then
+      refuse "refusing to provision $name: these units failed:$bad. See: docker exec $name journalctl -u ${bad# } -n 20"
+    fi
+    ;;
   *) refuse "systemd in $name did not finish starting (state '${state:-none}'); see: docker logs $name" ;;
 esac
+# What the units' credentials (LoadCredential) depend on, whatever the state:
+# a credential mounted by systemd's helper reaches /run/credentials only when
+# / has shared propagation, which mount-shared.service sets at boot.
+docker exec "$name" systemctl is-active --quiet mount-shared.service \
+  || refuse "mount-shared.service is not active in $name, so systemd cannot hand a unit its secrets; see: docker exec $name journalctl -u mount-shared.service"
+propagation=$(docker exec "$name" findmnt -n -o PROPAGATION /)
+test "$propagation" = shared \
+  || refuse "/ in $name has '$propagation' mount propagation, not shared, so systemd cannot hand a unit its secrets; run up.sh --recreate onto the current image"
 
 say "copying deploy/ and the built programs in"
 docker exec "$name" rm -rf /root/deploy /root/dist

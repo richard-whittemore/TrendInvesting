@@ -4,7 +4,7 @@
 # subcommand checks one thing against the running systemd and exits non-zero
 # with the reason if it does not hold; `fixtures` writes the test's own files.
 # Never run it in the owner's container: `fixtures` installs a stand-in
-# engine and fills secrets.env with loopback stand-ins.
+# engine and points secrets.env at the test's stand-in on the Mac.
 set -euo pipefail
 set +x
 
@@ -14,7 +14,7 @@ pass() { echo "CHECK ok: $*"; }
 state=/var/lib/trend-investing
 boost=$state/engines/boost
 log=$boost/run-rehearsal.log
-units_enabled="ti-data.timer ti-reporter@boost.timer ti-dashboard.service"
+units_enabled="ti-data.timer ti-reporter@boost.timer ti-clock-check.timer ti-dashboard.service"
 units_stopped="ti-engine@boost.service ti-adapter-boost.service"
 
 # The four volumes, and in each a root-only file and a service user's file.
@@ -30,48 +30,13 @@ wait_system() {
   echo "${s:-none}"
 }
 
-# A loopback stand-in for ntfy and PagerDuty, recording each request's path:
-# a unit of its own, started before the reporter at every boot of this
-# container (its files are in the container's own disk, so a re-created
-# container needs it installed again).
-start_sink() {
-  cat >/etc/test-sink.py <<'PY'
-import http.server
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        with open("/run/test-sink.posts", "a") as f:
-            f.write(self.path + "\n")
-        self.send_response(202)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"status":"success"}')
-
-    def log_message(self, *args):
-        pass
-
-http.server.HTTPServer(("127.0.0.1", 8099), Handler).serve_forever()
-PY
-  cat >/etc/systemd/system/test-sink.service <<'UNIT'
-[Unit]
-Description=Loopback stand-in for ntfy and PagerDuty (the Mac mini container test only)
-Before=ti-reporter@boost.service
-
-[Service]
-ExecStart=/usr/bin/python3 /etc/test-sink.py
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-  systemctl daemon-reload
-  systemctl enable --now --quiet test-sink.service
-  for _ in $(seq 50); do
-    python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8099), 1)' 2>/dev/null && return 0
-    sleep 0.1
-  done
-  fail "the loopback stand-in did not start"
-}
+# The stand-in for ntfy and PagerDuty runs on the Mac (test-container.sh
+# starts it), reached as host.docker.internal on SINK_PORT, so it is there
+# from the container's first boot, across restarts and re-creations, before
+# the reporter's timer can fire. It records each request's path; GET /posts
+# lists them and GET /reset clears them.
+sink=http://host.docker.internal:${SINK_PORT:-0}
+sink_posts() { curl -fsS "$sink/posts"; }
 
 case ${1:-} in
   # T1: systemd is PID 1 and the system is up. ALLOWED names the units that
@@ -127,9 +92,10 @@ ENGINE
     printf 'TI_RUN=run-rehearsal\nTI_AS_OF=2026-10-20T20:00:00Z\nTI_RESTART_ARGS=\n' >"$boost/run.env"
     chown ti-trader:ti-trader "$boost/run.env"
     chmod 0640 "$boost/run.env"
+    test "${SINK_PORT:-0}" != 0 || fail "SINK_PORT is not set: run this from test-container.sh"
     sed -i -e 's|^TI_NTFY_TOPIC=.*|TI_NTFY_TOPIC=rehearsal|' \
-      -e 's|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=http://127.0.0.1:8099|' \
-      -e 's|^TI_PAGERDUTY_ROUTING_KEY=.*|TI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue|' \
+      -e "s|^TI_NTFY_SERVER=.*|TI_NTFY_SERVER=$sink|" \
+      -e "s|^TI_PAGERDUTY_ROUTING_KEY=.*|TI_PAGERDUTY_ROUTING_KEY=fake\\nTI_PAGERDUTY_URL=$sink/v2/enqueue|" \
       /etc/trend-investing/secrets.env
     echo '# filled in by the owner (test sentinel)' >>/etc/trend-investing/secrets.env
     sed -i 's/"mark_timeout": 15/"mark_timeout": 16/' /etc/trend-investing/adapters/boost.json
@@ -155,7 +121,8 @@ ENGINE
     status=0
     (cd /etc/systemd/system && systemd-analyze verify ti-data.service ti-data.timer \
       ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-      ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service ti-adapter-boost.service) >"$verify_log" 2>&1 || status=$?
+      ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service ti-adapter-boost.service \
+      ti-clock-check.service ti-clock-check.timer) >"$verify_log" 2>&1 || status=$?
     # The Gateway's name is masked here, which verify refuses, so its file
     # from deploy/ is checked under another name.
     gw=$(mktemp -d)
@@ -179,7 +146,7 @@ ENGINE
     done
     pass "timers and dashboard enabled; engine and adapter installed and disabled"
 
-    for u in ti-data.service ti-reporter@boost.service ti-dashboard.service ti-engine@boost.service ti-adapter-boost.service; do
+    for u in ti-data.service ti-reporter@boost.service ti-dashboard.service ti-engine@boost.service ti-adapter-boost.service ti-clock-check.service; do
       got=
       for prop in ProtectSystem ProtectHome NoNewPrivileges PrivateTmp; do
         got="$got $prop=$(systemctl show "$u" -p "$prop" --value)"
@@ -200,11 +167,11 @@ ENGINE
     pass "ti-dashboard runs as ti-trader, answers on loopback, with / read-only and no new privileges in its namespace"
 
     # The reporter, fired by hand: its credential is handed over and used.
-    : >/run/test-sink.posts
-    start_sink
+    curl -fsS -o /dev/null "$sink/reset" || fail "the stand-in on the Mac does not answer at $sink"
     systemctl start ti-reporter@boost.service || fail "ti-reporter@boost failed: $(journalctl -u ti-reporter@boost -n 10 --no-pager -o cat)"
-    grep -q '^/rehearsal$' /run/test-sink.posts || fail "the reporter reached no ntfy stand-in"
-    grep -q '^/v2/enqueue$' /run/test-sink.posts || fail "the reporter reached no PagerDuty stand-in"
+    posts=$(sink_posts) || fail "the stand-in on the Mac does not list its requests"
+    grep -q '^/rehearsal$' <<<"$posts" || fail "the reporter reached no ntfy stand-in: $posts"
+    grep -q '^/v2/enqueue$' <<<"$posts" || fail "the reporter reached no PagerDuty stand-in: $posts"
     test "$(stat -c %U "$state/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state is not ti-trader's"
     pass "ti-reporter@boost runs under its unit, reads its secrets through LoadCredential and delivers to both stand-ins"
 
@@ -271,7 +238,7 @@ ENGINE
   # and the adapter are stopped, and the reporter's timer fires within 5
   # minutes of boot.
   after-restart)
-    for u in ti-data.timer ti-reporter@boost.timer; do
+    for u in ti-data.timer ti-reporter@boost.timer ti-clock-check.timer; do
       systemctl is-active --quiet "$u" || fail "$u is not active after the restart"
     done
     for _ in $(seq 30); do systemctl is-active --quiet ti-dashboard.service && break; sleep 1; done
@@ -282,7 +249,6 @@ ENGINE
     done
     test "$(systemctl show ti-engine@boost.service -p ExecMainStartTimestampMonotonic --value)" = 0 || fail "the engine was started during boot"
     pass "timers and dashboard back; engine and adapter stopped (the engine was running before)"
-    start_sink
     # Monotonic times count from the Docker VM's boot, which the container
     # shares; the container's own boot is when its systemd started.
     booted=$(systemctl show -p UserspaceTimestampMonotonic --value)
@@ -310,6 +276,9 @@ ENGINE
   # reference says the clock is an hour off.
   clock)
     TI_TARGET=mac-mini /root/deploy/provision.sh clock || fail "the clock step failed in the container"
+    # The timer's unit, under its own hardening.
+    systemctl start ti-clock-check.service || fail "ti-clock-check failed: $(journalctl -u ti-clock-check -n 5 --no-pager -o cat)"
+    journalctl -u ti-clock-check.service --no-pager -o cat | grep -q 'clock: ok, skew' || fail "ti-clock-check did not compare with a reference: $(journalctl -u ti-clock-check -n 5 --no-pager -o cat)"
     stubs=$(mktemp -d)
     cat >"$stubs/curl" <<'STUB'
 #!/bin/bash
@@ -319,7 +288,7 @@ STUB
     if PATH="$stubs:$PATH" TI_TARGET=mac-mini /root/deploy/provision.sh clock >/dev/null 2>"$stubs/err"; then fail "a clock an hour off was accepted"; fi
     grep -Eq 'skew of -(359[89]|360[012])s' "$stubs/err" || fail "the clock step failed for another reason: $(cat "$stubs/err")"
     rm -rf "$stubs"
-    pass "the clock step passes against a reference and refuses one an hour off"
+    pass "the clock step and ti-clock-check.service pass against a reference, and the step refuses one an hour off"
     ;;
 
   *) fail "usage: container-checks.sh boot|fixtures|units|tools|state-manifest|provision-manifest|after-restart|clock" ;;

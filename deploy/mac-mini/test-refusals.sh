@@ -1,16 +1,27 @@
 #!/bin/bash
-# Tests for deploy/mac-mini/up.sh's refusals, which come before it touches
-# Docker: a checkout under the Desktop, Documents or iCloud Drive (or another
-# synced folder), one holding an iCloud sync duplicate ("name 2.ext" or
-# "name 2"), a build folder in either state, and a container name that Docker
-# would read as a path. The plan's risk table (Mac mini plan, section 7, "iCloud
-# sync duplicates files or stalls") is why: a duplicate would be copied into
-# the container's programs, and a stalled sync can hang the copy.
+# Tests for deploy/mac-mini/up.sh's refusals. Before it touches Docker: a
+# checkout under the Desktop, Documents or iCloud Drive (or another synced
+# folder), one holding an iCloud sync duplicate ("name 2.ext" or "name 2"),
+# however many, or one it cannot read through; a build folder in either
+# state; a container name that Docker would read as a path; a dashboard port
+# outside 1 to 65535; another up.sh already running for the same container.
+# A duplicate would be copied into the container's programs, and a stalled
+# sync can hang the copy (docs/manual/mac-mini.md, "Why the checkout is not
+# on the Desktop").
+#
+# Once it reaches Docker: a container of the same name that up.sh did not make
+# from this checkout, or whose mounts are not the four volumes, is neither
+# changed nor removed; --recreate refuses while an engine or the adapter runs,
+# and otherwise stops the container (systemd's own shutdown, within a bound)
+# before removing it, never killing it; a degraded system is accepted only
+# when every failed unit is one that fails until the first engine run, and
+# the mount sharing systemd's credentials need is checked; the container is
+# created without --privileged.
 #
 # Each case runs a copy of up.sh from a temporary checkout under a fake home,
-# with a stand-in `docker` that records every call; a refusal must exit
-# non-zero, say why, and leave the record empty (no image, volume or
-# container was created or looked at). No Docker needed.
+# with a stand-in `docker` that records every call and answers as the FAKE_*
+# variables say; a refusal before Docker must exit non-zero, say why, and
+# leave the record empty. No Docker needed.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 work=$(mktemp -d)
@@ -22,13 +33,35 @@ fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 
 fake_home=$work/home
 mkdir -p "$fake_home" "$work/bin"
-# The stand-in docker: records the call; `docker info` names an x86_64 VM,
-# which up.sh refuses, so a run that passes every refusal stops there.
+# The stand-in docker: records the call and answers it. `docker info` names
+# an x86_64 VM unless FAKE_ARCH says otherwise, and up.sh refuses x86_64, so
+# a run that passes every refusal before Docker stops there by default.
+#   FAKE_EXISTS=1         a container of the name exists
+#   FAKE_LABELS           its labels, "<mac-mini label>|<checkout label>"
+#   FAKE_MOUNTS           its mounts, "type name destination;" each (default: the four volumes)
+#   FAKE_ACTIVE           the engine and adapter units it reports running
+#   FAKE_SYSTEM           what is-system-running says (default running)
+#   FAKE_FAILED           the failed units it lists
+#   FAKE_MOUNT_SHARED=1   mount-shared.service is not active
+#   FAKE_PROPAGATION      the propagation of / (default shared)
 cat >"$work/bin/docker" <<'STUB'
 #!/bin/bash
 echo "docker $*" >>"$DOCKER_CALLS"
-if test "${1:-}" = info; then echo x86_64; exit 0; fi
-exit 1
+n=${TI_MAC_NAME:-ti}
+case "$*" in
+  "info "*) echo "${FAKE_ARCH:-x86_64}" ;;
+  "container inspect --format "*org.trend-investing.mac-mini*) printf '%s\n' "${FAKE_LABELS:-}" ;;
+  "container inspect --format "*.Mounts*) printf '%s\n' "${FAKE_MOUNTS-volume $n-etc /etc/trend-investing;volume $n-state /var/lib/trend-investing;volume $n-opt /opt/trend-investing;volume $n-journal /var/log/journal;}" ;;
+  "container inspect --format "*.State.Running*) echo true ;;
+  "container inspect --format "*.Config.Image*) echo "${FAKE_IMAGE:-}" ;;
+  "container inspect "*) test "${FAKE_EXISTS:-0}" = 1 ;;
+  *"systemctl list-units --state=active"*) test -z "${FAKE_ACTIVE:-}" || printf '%s\n' $FAKE_ACTIVE ;;
+  *"systemctl list-units --state=failed"*) test -z "${FAKE_FAILED:-}" || printf '%s\n' $FAKE_FAILED ;;
+  *"systemctl is-system-running"*) echo "${FAKE_SYSTEM:-running}" ;;
+  *"systemctl is-active --quiet mount-shared.service"*) test "${FAKE_MOUNT_SHARED:-0}" = 0 ;;
+  *"findmnt"*) echo "${FAKE_PROPAGATION:-shared}" ;;
+  *) exit 0 ;;
+esac
 STUB
 chmod +x "$work/bin/docker"
 
@@ -96,6 +129,115 @@ rm "$work/dist/ti-data 2"
 # A name with a slash or a space is refused: it names volumes, never a folder.
 refused "a container name with a slash" "TI_MAC_NAME" "$clean" TI_MAC_NAME="$fake_home/Desktop/x"
 refused "a container name with a space" "TI_MAC_NAME" "$clean" TI_MAC_NAME="my ti"
+
+# The dashboard's port: a number from 1 to 65535, checked before Docker (a
+# bad one would otherwise fail `docker create` after --recreate had removed
+# the container).
+for bad in 0 65536 99999 00 8o88; do
+  refused "the dashboard port '$bad'" "TI_MAC_DASHBOARD_PORT" "$clean" TI_MAC_DASHBOARD_PORT="$bad"
+done
+
+# Many duplicates: the scan's output is cut to five, without the cut ending
+# the scan's pipe early and the refusal with it.
+mkdir "$clean/many"
+for i in $(seq 1 3000); do : >"$clean/many/file-$i 2.txt"; done
+refused "a checkout holding 3000 duplicates" "sync duplicates" "$clean"
+rm -rf "$clean/many"
+# A folder the scan cannot read through: refused, saying so, rather than
+# passed unseen or ended in silence.
+mkdir -p "$clean/locked/inner"
+chmod 000 "$clean/locked"
+refused "a checkout with a folder it cannot read" "could not read" "$clean"
+chmod 755 "$clean/locked"
+rm -rf "$clean/locked"
+
+# One up.sh at a time for a container: a second one, while the first holds
+# the lock, refuses before Docker. A lock left by a process no longer running
+# is taken over.
+# The lock is a link naming the process that holds it.
+lock=$fake_home/.trend-investing/up-ti.lock
+mkdir -p "$fake_home/.trend-investing"
+ln -s $$ "$lock"
+refused "a second up.sh while one runs" "another up.sh" "$clean" TI_DIST="$work/dist"
+test "$(readlink "$lock")" = $$ || fail "a refused up.sh changed the lock it did not hold"
+gone=$(sh -c 'echo $$')
+rm -f "$lock"
+ln -s "$gone" "$lock"
+if launch "$clean" TI_DIST="$work/dist"; then :; fi
+grep -q '^docker info' "$work/calls" || fail "a stale lock (process $gone) was not taken over: $(cat "$work/out")"
+test ! -L "$lock" || fail "up.sh left its lock behind"
+
+# --- Once Docker is reached (an arm64 VM).
+co=$(cd "$clean" && pwd -P)
+mine="ti|$co"
+mutated() { grep -Eq '^docker (rm|stop|kill|start|cp|create|restart|exec ti (rm|/root))' "$work/calls"; }
+# refused_after WHAT WORD [ARGS...] [-- ENV=VALUE...]: the launcher reaches
+# Docker, refuses, names WORD, and changes nothing.
+refused_after() {
+  local what=$1 word=$2
+  shift 2
+  local args=()
+  while test $# -gt 0 && test "$1" != --; do args+=("$1"); shift; done
+  test $# -gt 0 && shift
+  : >"$work/calls"
+  local status=0
+  env HOME="$fake_home" PATH="$work/bin:$PATH" DOCKER_CALLS="$work/calls" FAKE_ARCH=arm64 TI_DIST="$work/dist" "$@" \
+    "$clean/deploy/mac-mini/up.sh" ${args[@]+"${args[@]}"} >"$work/out" 2>&1 || status=$?
+  if test "$status" = 0; then fail "$what: accepted"; return; fi
+  grep -qiF -- "$word" "$work/out" || fail "$what: the refusal does not say '$word': $(cat "$work/out")"
+  if mutated; then fail "$what: the container was changed before the refusal: $(cat "$work/calls")"; fi
+}
+# run_after [ARGS...] [-- ENV=VALUE...]: the same, expected to succeed.
+run_after() {
+  local args=()
+  while test $# -gt 0 && test "$1" != --; do args+=("$1"); shift; done
+  test $# -gt 0 && shift
+  : >"$work/calls"
+  env HOME="$fake_home" PATH="$work/bin:$PATH" DOCKER_CALLS="$work/calls" FAKE_ARCH=arm64 TI_DIST="$work/dist" "$@" \
+    "$clean/deploy/mac-mini/up.sh" ${args[@]+"${args[@]}"} >"$work/out" 2>&1
+}
+
+# A container of the name that up.sh did not make, or made from another
+# checkout, or whose mounts are not the four volumes: never adopted, never
+# removed.
+refused_after "an unlabelled container" "not one up.sh made" -- FAKE_EXISTS=1 FAKE_LABELS="|"
+refused_after "an unlabelled container, --recreate" "not one up.sh made" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="|"
+refused_after "a container made from another checkout" "/elsewhere" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="ti|/elsewhere"
+refused_after "a container with a fifth mount" "mounts" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" \
+  FAKE_MOUNTS="volume ti-etc /etc/trend-investing;volume ti-state /var/lib/trend-investing;volume ti-opt /opt/trend-investing;volume ti-journal /var/log/journal;bind  /data;"
+refused_after "a container missing its state volume" "mounts" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" \
+  FAKE_MOUNTS="volume ti-etc /etc/trend-investing;volume ti-opt /opt/trend-investing;volume ti-journal /var/log/journal;"
+
+# --recreate while an engine or the adapter runs: refused, naming the unit.
+refused_after "--recreate while the engine runs" "ti-engine@boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service"
+refused_after "--recreate while the adapter runs" "ti-adapter-boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-adapter-boost.service"
+# Otherwise it stops the container (systemd shuts down within the bound),
+# then removes it; nothing is killed or force-removed.
+run_after --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" || fail "--recreate of up.sh's own stopped-engine container failed: $(cat "$work/out")"
+stop_line=$(grep -n '^docker stop -t 60 ti$' "$work/calls" | cut -d: -f1 || true)
+rm_line=$(grep -n '^docker rm ti$' "$work/calls" | cut -d: -f1 || true)
+test -n "$stop_line" || fail "--recreate does not stop the container with a 60 s bound first: $(cat "$work/calls")"
+test -n "$rm_line" && test -n "$stop_line" && test "$stop_line" -lt "$rm_line" || fail "--recreate does not remove the container after stopping it: $(cat "$work/calls")"
+if grep -Eq '^docker (kill|rm (-f|--force))' "$work/calls"; then fail "--recreate kills or force-removes the container: $(cat "$work/calls")"; fi
+# The container it creates: labelled with its name and this checkout, and
+# given only the capability systemd needs, not --privileged.
+create=$(grep '^docker create' "$work/calls" || true)
+case $create in *--privileged*) fail "the container is created --privileged: $create" ;; esac
+case $create in *"--cap-add SYS_ADMIN"*"--cgroupns private"*) ;; *) fail "the container is not created with --cap-add SYS_ADMIN --cgroupns private: $create" ;; esac
+case $create in *"--label org.trend-investing.mac-mini=ti"*"--label org.trend-investing.checkout=$co"*) ;; *) fail "the container is not labelled with its name and checkout: $create" ;; esac
+# Its own container, reused: provisioned.
+run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" || fail "re-provisioning up.sh's own container failed: $(cat "$work/out")"
+grep -q 'provision.sh all' "$work/calls" || fail "up.sh's own container was not provisioned: $(cat "$work/calls")"
+
+# A degraded system: accepted only when every failed unit is one that fails
+# until the first engine run, and listed either way.
+refused_after "a degraded system with mount-shared failed" "mount-shared.service" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_SYSTEM=degraded FAKE_FAILED="mount-shared.service"
+refused_after "a degraded system with journald failed" "systemd-journald.service" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_SYSTEM=degraded FAKE_FAILED="ti-reporter@boost.service systemd-journald.service"
+run_after -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_SYSTEM=degraded FAKE_FAILED="ti-reporter@boost.service ti-dashboard.service" || fail "a degraded system with only the reporter and dashboard failed was refused: $(cat "$work/out")"
+grep -qF "ti-reporter@boost.service" "$work/out" || fail "the failed units of a degraded system are not listed: $(cat "$work/out")"
+# The mount sharing systemd's credentials need, whatever the state says.
+refused_after "mount-shared.service not active" "mount-shared.service" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_MOUNT_SHARED=1
+refused_after "/ not shared" "propagation" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_PROPAGATION=private
 
 # The positive control: a clean checkout in the home folder passes every
 # refusal and reaches Docker, which the stand-in reports as x86_64.

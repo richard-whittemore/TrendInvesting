@@ -1,8 +1,8 @@
-# The Mac mini's container image: Ubuntu 24.04 for arm64 with systemd as
-# PID 1, and nothing of the program. deploy/mac-mini/up.sh builds it from
-# this file alone (no build context, so nothing is read from the checkout)
-# and then runs deploy/provision.sh inside, as on the Lightsail server (Mac
-# mini plan, section 5, item 4).
+# The Mac mini's rehearsal container image: Ubuntu 24.04 for arm64 with
+# systemd as PID 1, and nothing of the program. deploy/mac-mini/up.sh builds
+# it from this file alone (no build context, so nothing is read from the
+# checkout) and then runs deploy/provision.sh inside, as on the Lightsail
+# server (docs/manual/mac-mini.md).
 #
 # The base is pinned by digest (the multi-platform index of ubuntu:24.04 of
 # 2026-09-30); up.sh asks for its linux/arm64 image. The packages below are
@@ -54,4 +54,9 @@ RUN printf '%s\n' \
 
 # systemd shuts down cleanly on this signal (docker stop and docker restart).
 STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+# up.sh runs the container without --privileged, with CAP_SYS_ADMIN and a
+# cgroup namespace of its own, in which Docker mounts the cgroup tree
+# read-only; systemd cannot start without writing to it. The tree is the
+# container's own (the namespace hides the rest of the VM's), so it is made
+# writable here before systemd starts, at every start of the container.
+ENTRYPOINT ["/bin/sh", "-c", "mount -o remount,rw /sys/fs/cgroup && exec /sbin/init"]

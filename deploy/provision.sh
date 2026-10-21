@@ -22,14 +22,14 @@
 # systemd, a kernel firewall or a network identity.
 #
 # TI_TARGET selects the machine: lightsail (the default) or mac-mini, the
-# long-running arm64 Ubuntu 24.04 container under Docker Desktop that
-# deploy/mac-mini/up.sh creates (the owner's approval of the Mac mini plan,
-# option A, 2026-10-18: Mac_Mini_Paper_Deployment_Plan_2026-10-18.md, section
-# 5, item 1). On the Mac mini, IB Gateway is IBKR's macOS app outside the
+# local rehearsal container with a real systemd that deploy/mac-mini/up.sh
+# creates under Docker Desktop on the owner's Mac (docs/manual/mac-mini.md;
+# docs/runbooks/mac-mini.md). There IB Gateway is IBKR's macOS app outside the
 # container and nothing listens beyond the Mac's loopback, so the target
 # accepts arm64, installs no Tailscale, firewall or Linux Gateway, masks the
-# Gateway unit, makes systemd's journal persistent, and checks the clock
-# against a reference instead of syncing it. Every other step is the same.
+# Gateway unit, makes systemd's journal persistent, creates the service users
+# at fixed IDs, and checks the clock against a reference, at provisioning and
+# every 15 minutes, instead of syncing it. Every other step is the same.
 set -euo pipefail
 set +x
 
@@ -98,10 +98,27 @@ fetch() {
   mv "$dest.part" "$dest"
 }
 
+# ensure_user NAME HOME [ID]: the service user NAME, with its own group, and
+# its home. With ID, the user and its group are created at that UID and GID,
+# and a user already there at another ID, or another account holding ID, is
+# refused rather than adopted.
 ensure_user() {
-  local name=$1 home=$2
+  local name=$1 home=$2 want=${3:-} holder
   if ! id "$name" >/dev/null 2>&1; then
-    useradd --system --user-group --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
+    if test -n "$want"; then
+      holder=$(getent passwd "$want" | cut -d: -f1) || true
+      test -z "$holder" || die "UID $want is held by the account '$holder' in this image, so $name cannot be created at it; the files in the volumes are owned by $want. Remove that account from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
+      holder=$(getent group "$want" | cut -d: -f1) || true
+      test -z "$holder" || die "GID $want is held by the group '$holder' in this image, so $name's group cannot be created at it. Remove that group from the image (deploy/mac-mini/Dockerfile) and run up.sh --recreate"
+      groupadd --system --gid "$want" "$name"
+      useradd --system --uid "$want" --gid "$want" --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
+    else
+      useradd --system --user-group --home-dir "$home" --create-home --shell /usr/sbin/nologin "$name"
+    fi
+  elif test -n "$want"; then
+    local have
+    have="$(id -u "$name"):$(id -g "$name")"
+    test "$have" = "$want:$want" || die "$name is $have here, not $want:$want, which owns its files in the volumes; this container was provisioned before the IDs were fixed: run up.sh --recreate"
   fi
   install -d -o "$name" -g "$name" -m 0750 "$home"
 }
@@ -123,8 +140,18 @@ step_base() {
   fi
 
   log "service users (non-root, no login shell)"
-  ensure_user ti-gateway /var/lib/ti-gateway
-  ensure_user ti-trader /var/lib/trend-investing
+  if mac_mini; then
+    # /etc/passwd is on the container's own disk, not in a volume, so a
+    # container created again (up.sh --recreate, onto a changed image) creates
+    # these users again. Fixed IDs, above the range the image's packages take
+    # (system users are 100 to 999, the image's own user 1000), keep them the
+    # owners of their files in the volumes.
+    ensure_user ti-gateway /var/lib/ti-gateway 2001
+    ensure_user ti-trader /var/lib/trend-investing 2002
+  else
+    ensure_user ti-gateway /var/lib/ti-gateway
+    ensure_user ti-trader /var/lib/trend-investing
+  fi
 
   log "automatic security updates"
   install -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'CONF'
@@ -159,7 +186,7 @@ CONF
   install -m 0755 "$tmp/tailscale" "$tmp/tailscaled" /usr/local/bin/
   if test "$rehearsal" != 1; then
     # tailscaled's own unit, from the pinned tarball, pointed at /usr/local/bin.
-    sed 's|/usr/sbin/tailscaled|/usr/local/bin/tailscaled|' "$tmp/systemd/tailscaled.service" >/etc/systemd/system/tailscaled.service
+    sed 's|/usr/sbin/tailscaled|/usr/local/bin/tailscaled|' "$tmp/systemd/tailscaled.service" >"$unit_dir/tailscaled.service"
     install -m 0644 "$tmp/systemd/tailscaled.defaults" /etc/default/tailscaled
     systemctl daemon-reload
     systemctl enable --now tailscaled
@@ -169,7 +196,7 @@ CONF
 
 # systemd's journal kept on disk, in /var/log/journal (a volume of its own on
 # the Mac mini), so the reason a unit stopped survives a restart of the
-# container and its removal and re-creation (Mac mini plan, section 5, item 1).
+# container and its removal and re-creation (docs/manual/mac-mini.md).
 step_journal() {
   log "persistent journal"
   install -d -m 0755 /etc/systemd/journald.conf.d
@@ -197,10 +224,11 @@ step_clock() {
   install -d -m 0755 /etc/trend-investing # holds clock.conf, which the check reads
   install -m 0755 "$here"/libexec/clock-check.sh /usr/local/libexec/trend-investing/
   if mac_mini; then
-    # The Mac keeps the time and the container shares it, so no time daemon
-    # runs here even though systemd does; the check always compares the clock
-    # with an outside reference (TI_CLOCK_VERIFY=1), since "synchronised"
-    # inside the container would describe Docker's Linux VM, not the Mac.
+    # Docker's Linux VM keeps the time (Docker Desktop resynchronises it with
+    # the Mac) and the container shares it, so no time daemon runs here even
+    # though systemd does; the check always compares the clock with an outside
+    # reference (TI_CLOCK_VERIFY=1), since "synchronised" inside the container
+    # would describe the VM. ti-clock-check.timer repeats it every 15 minutes.
     log "Mac mini: the Mac keeps the time; checking the clock against a reference"
     TI_CLOCK_VERIFY=1 "$here/libexec/clock-check.sh" || die "the clock is not good: turn on the Mac's automatic date and time, then run 'provision.sh clock' again"
     return 0
@@ -453,8 +481,8 @@ CONF
       systemctl disable ti-reporter.timer
     fi
   fi
-  rm -f /etc/systemd/system/ti-reporter.service /etc/systemd/system/ti-reporter.timer \
-    /etc/systemd/system/timers.target.wants/ti-reporter.timer
+  rm -f "$unit_dir/ti-reporter.service" "$unit_dir/ti-reporter.timer" \
+    "$unit_dir/timers.target.wants/ti-reporter.timer"
   # On the Mac mini the Gateway's unit file is not installed: masking puts a
   # link to /dev/null in its place, which a real file there would block.
   local unit
@@ -464,6 +492,12 @@ CONF
   done
   if mac_mini && test -f "$unit_dir/ti-gateway.service" && ! test -L "$unit_dir/ti-gateway.service"; then
     rm -f "$unit_dir/ti-gateway.service"
+  fi
+  # On the Mac mini no time daemon runs in the container (step_clock), so the
+  # clock is compared with a reference every 15 minutes too, not only when
+  # provisioning runs (ADR 0019); a failed check is a failed unit.
+  if mac_mini; then
+    install -m 0644 "$here/mac-mini/systemd/ti-clock-check.service" "$here/mac-mini/systemd/ti-clock-check.timer" "$unit_dir/"
   fi
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
@@ -484,6 +518,9 @@ CONF
       systemctl enable ti-gateway.service
     fi
     systemctl enable --now ti-data.timer ti-reporter@boost.timer
+    if mac_mini; then
+      systemctl enable --now ti-clock-check.timer
+    fi
     systemctl enable ti-dashboard.service
     if ! systemctl restart ti-dashboard.service; then
       log "ti-dashboard did not start (see journalctl -u ti-dashboard); it fails until the Boost engine has run once"

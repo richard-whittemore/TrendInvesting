@@ -415,7 +415,7 @@ func TestTheProvisionerStartsWhatItEnablesAndStopsWhatItRemoves(t *testing.T) {
 	}
 	at("systemctl stop ti-reporter.service || true")
 	disable := at("systemctl disable ti-reporter.timer")
-	remove := at("rm -f /etc/systemd/system/ti-reporter.service")
+	remove := at(`rm -f "$unit_dir/ti-reporter.service"`)
 	if active >= 0 && disable >= 0 && remove >= 0 && (remove < active || remove < disable) {
 		t.Error("the old single reporter's files are removed before it is stopped and disabled")
 	}

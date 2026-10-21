@@ -1,0 +1,25 @@
+[Unit]
+Description=Check the Mac mini container's clock against an outside reference
+# No time daemon runs in the Mac mini's container: Docker's Linux VM keeps
+# the time. A clock behind IBKR's makes every broker snapshot stale and
+# withholds every sell (ADR 0019), so the clock is compared with an HTTPS
+# reference every 15 minutes (ti-clock-check.timer). A clock out of
+# tolerance, or no reference reachable, fails this unit: it is then listed by
+# `systemctl --failed`, the reason is in `journalctl -u ti-clock-check`, and
+# up.sh refuses to provision (docs/manual/mac-mini.md, "The clock").
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=TI_CLOCK_VERIFY=1
+ExecStart=/usr/local/libexec/trend-investing/clock-check.sh
+TimeoutStartSec=2min
+DynamicUser=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

@@ -1,23 +1,31 @@
 #!/bin/bash
-# The Mac mini's container, for real: run on the Mac mini (Apple silicon,
-# Docker Desktop running). It makes a throwaway container and volumes named
-# ti-test-<pid> with deploy/mac-mini/up.sh, from a copy of deploy/ outside the
-# synced folders, and checks against the running systemd (Mac mini plan,
-# section 5, tests T1, T2, T3 and T10):
+# The Mac mini's rehearsal container, for real: run on the Mac (Apple
+# silicon, Docker Desktop running). It makes a throwaway container and volumes
+# named ti-test-<pid> with deploy/mac-mini/up.sh, from a copy of deploy/
+# outside the synced folders, and checks against the running systemd
+# (docs/manual/mac-mini.md, "What backs this", says what each part backs):
 #
 #   T1   systemd is PID 1; every ti-* unit verifies; the Gateway is masked; the
 #        timers and the dashboard are enabled and start under their hardening;
 #        the engine and the adapter are installed and stopped.
-#   T2   sentinels in each volume (root 0600, ti-trader 0750), the durable log
-#        the engine wrote, the owner's filled-in files and a journal line are
-#        byte-identical, with the same owners and modes, after a container
-#        restart and after a full remove-and-recreate; journal-query still
-#        reads the log; a second provisioning pass changes nothing.
+#   T2   the selected durable files: sentinels in each volume (root 0600,
+#        ti-trader 0750), the durable log the engine wrote and the owner's
+#        filled-in files keep their bytes, owners (by number) and modes, and a
+#        journal line written before stays readable, after a container
+#        restart, after a full remove-and-recreate and after a re-creation
+#        onto a changed image whose own system user takes an ID first;
+#        journal-query still reads the log; a second provisioning pass
+#        changes nothing. Not compared: the rest of the volumes, which the
+#        services and systemd write to as they run (the journal, the
+#        reporter's state).
 #   T3   after each restart the timers and the dashboard are back, the engine
 #        (running before) and the adapter are stopped, and the reporter fires
 #        within 5 minutes.
 #   T10  every mount is a named volume inside Docker's VM; nothing is under
-#        the Desktop, Documents or iCloud Drive.
+#        the Desktop, Documents or iCloud Drive; the container is not
+#        privileged and has only CAP_SYS_ADMIN added.
+#
+# And up.sh refuses --recreate while the engine runs, leaving it running.
 #
 # And the container leaves the Docker VM's binfmt handlers alone: they are
 # listed before it is created and after every boot and must not change, and
@@ -26,8 +34,11 @@
 # TI_TEST_AMD64_BASELINE_BROKEN=1 to run the rest; the listing is still
 # compared and the amd64 check is reported as not run.
 #
-# It also runs the clock step in the container (passes, and refuses a
-# reference an hour off) and the rehearsal's checks of the owner's tools.
+# It also runs the clock step and the clock check's unit in the container
+# (passes, and refuses a reference an hour off) and the rehearsal's checks of
+# the owner's tools. The reporter's ntfy and PagerDuty stand-in runs on the
+# Mac, reached as host.docker.internal, so it is there before the reporter's
+# timer can fire after each boot.
 # It needs the network (the image's packages, the clock references) and takes
 # about 15 minutes, most of it waiting for the reporter's timer. The owner's
 # container (ti) and its volumes are never touched. TI_TEST_KEEP=1 keeps the
@@ -37,11 +48,17 @@ set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 name=ti-test-$$
 port=$((18000 + $$ % 1000))
+sink_port=$((19000 + $$ % 1000))
 work=$(mktemp -d)
+sink_pid=
+shifted_image=
 cleanup() {
+  if test -n "$sink_pid"; then kill "$sink_pid" 2>/dev/null || true; fi
   if test "${TI_TEST_KEEP:-0}" != 1; then
+    # The test's own container only: its stand-in engine holds nothing.
     docker rm --force "$name" >/dev/null 2>&1 || true
     for v in etc state opt journal; do docker volume rm "$name-$v" >/dev/null 2>&1 || true; done
+    if test -n "$shifted_image"; then docker image rm "$shifted_image" >/dev/null 2>&1 || true; fi
   fi
   rm -rf "$work"
 }
@@ -49,7 +66,9 @@ trap cleanup EXIT
 
 step() { printf '\n== %s\n' "$*"; }
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
-inside() { docker exec "$name" /root/deploy/mac-mini/container-checks.sh "$@"; }
+# docker exec passes the container's environment, not this one's: what a
+# check reads from here is passed by name.
+inside() { docker exec --env "ALLOWED=${ALLOWED:-}" --env "SINK_PORT=$sink_port" "$name" /root/deploy/mac-mini/container-checks.sh "$@"; }
 up() { env TI_MAC_NAME="$name" TI_DIST="$work/dist" TI_MAC_DASHBOARD_PORT="$port" "$work/checkout/deploy/mac-mini/up.sh" "$@"; }
 
 step "a checkout outside the synced folders, and the programs built for arm64"
@@ -62,6 +81,40 @@ for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journa
   (cd "$repo" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$work/dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
 echo "checkout $work/checkout, container $name, dashboard port $port"
+
+step "the stand-in for ntfy and PagerDuty, on the Mac's loopback port $sink_port"
+cat >"$work/sink.py" <<'SINK'
+import http.server, sys
+
+posts = []
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        posts.append(self.path)
+        self.send_response(202)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"success"}')
+
+    def do_GET(self):
+        if self.path == "/reset":
+            posts.clear()
+        body = "".join(p + "\n" for p in posts).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+SINK
+python3 -I "$work/sink.py" "$sink_port" &
+sink_pid=$!
+for _ in $(seq 50); do curl -fsS -o /dev/null "http://127.0.0.1:$sink_port/posts" 2>/dev/null && break; sleep 0.1; done
+curl -fsS -o /dev/null "http://127.0.0.1:$sink_port/posts" || fail "the stand-in did not start"
 
 image="trend-investing-mac-mini:$(shasum -a 256 "$repo/deploy/mac-mini/Dockerfile" | cut -c1-12)"
 docker image inspect "$image" >/dev/null 2>&1 || docker build --platform linux/arm64 --tag "$image" - <"$repo/deploy/mac-mini/Dockerfile" >/dev/null
@@ -111,7 +164,11 @@ docker exec "$name" getent hosts host.docker.internal >/dev/null || fail "host.d
 test "$(docker container inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name")" = unless-stopped || fail "the restart policy is not unless-stopped"
 docker exec "$name" grep -q '"host": "host.docker.internal"' /etc/trend-investing/adapters/boost.json || fail "the adapter's configuration does not point at host.docker.internal"
 test "$(docker exec "$name" uname -m)" = aarch64 || fail "the container is not arm64"
-echo "four named volumes in Docker's VM, no bind mount, dashboard on 127.0.0.1:$port only, host.docker.internal resolves, restart unless-stopped, arm64"
+test "$(docker container inspect --format '{{.HostConfig.Privileged}}' "$name")" = false || fail "the container is privileged"
+caps=$(docker container inspect --format '{{json .HostConfig.CapAdd}}' "$name")
+test "$caps" = '["SYS_ADMIN"]' || test "$caps" = '["CAP_SYS_ADMIN"]' || fail "the container's added capabilities are $caps, not SYS_ADMIN alone"
+test "$(docker container inspect --format '{{.HostConfig.CgroupnsMode}}' "$name")" = private || fail "the container has no cgroup namespace of its own"
+echo "four named volumes in Docker's VM, no bind mount, dashboard on 127.0.0.1:$port only, host.docker.internal resolves, restart unless-stopped, arm64, not privileged (SYS_ADMIN added, private cgroup namespace)"
 
 step "the test's files, then T1 against the running systemd"
 inside fixtures
@@ -132,6 +189,15 @@ docker exec "$name" grep -q '^# filled in by the owner' /etc/trend-investing/sec
 docker exec "$name" grep -q '"mark_timeout": 16' /etc/trend-investing/adapters/boost.json || fail "the owner's adapter setting was overwritten"
 echo "second pass: provisioning unchanged ($(wc -l <"$work/provision-1") lines), state and owner's files unchanged"
 docker exec "$name" systemctl is-active --quiet ti-engine@boost.service || fail "the engine stand-in stopped before the restart"
+
+step "up.sh --recreate refuses while the engine runs"
+old=$(docker container inspect --format '{{.Id}}' "$name")
+if up --recreate >"$work/recreate-out" 2>&1; then cat "$work/recreate-out"; fail "up.sh --recreate removed the container while the engine ran"; fi
+cat "$work/recreate-out"
+grep -q 'ti-engine@boost.service' "$work/recreate-out" || fail "the refusal does not name the engine"
+test "$(docker container inspect --format '{{.Id}}' "$name")" = "$old" || fail "the container changed although --recreate was refused"
+docker exec "$name" systemctl is-active --quiet ti-engine@boost.service || fail "the engine stopped although --recreate was refused"
+echo "refused, naming the engine; the container and the engine are untouched"
 
 step "T2, T3: docker restart"
 docker restart "$name" >/dev/null
@@ -155,5 +221,25 @@ inside provision-manifest >"$work/provision-4"
 diff "$work/provision-1" "$work/provision-4" || fail "provisioning a fresh container differs from the first (above)"
 inside tools
 echo "state byte-identical across the re-creation; provisioning identical; journal-query reads the log"
+
+step "T2: re-creation onto a changed image whose own system user takes an ID first"
+# /etc/passwd is on the container's own disk: the service users are created
+# again on the new image. The image's packages are stood in for by one more
+# system user, which takes the ID the first service user would have taken
+# had it no fixed one.
+printf '\n# The container test only: a system user added by the image.\nRUN useradd --system --user-group ti-shift\n' >>"$work/checkout/deploy/mac-mini/Dockerfile"
+shifted_image="trend-investing-mac-mini:$(shasum -a 256 "$work/checkout/deploy/mac-mini/Dockerfile" | cut -c1-12)"
+inside provision-manifest | grep -E '^ti-(trader|gateway):' >"$work/users-1"
+up --recreate
+test "$(docker container inspect --format '{{.Config.Image}}' "$name")" = "$shifted_image" || fail "the container is not on the changed image"
+shift_id=$(docker exec "$name" id -u ti-shift) || fail "the changed image has no ti-shift"
+echo "the changed image's ti-shift took UID $shift_id"
+inside boot
+inside provision-manifest | grep -E '^ti-(trader|gateway):' >"$work/users-2"
+diff "$work/users-1" "$work/users-2" || fail "the service users' IDs changed on the changed image (above)"
+inside state-manifest >"$work/state-5"
+diff "$work/state-1" "$work/state-5" || fail "the state changed across the re-creation onto a changed image (above)"
+inside tools
+echo "service users at the same IDs ($(cut -d: -f1,3,4 "$work/users-2" | tr '\n' ' ')), state byte-identical, journal-query reads the log"
 
 step "REAL CONTAINER TEST COMPLETE"

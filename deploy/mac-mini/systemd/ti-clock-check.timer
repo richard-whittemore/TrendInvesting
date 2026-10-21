@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the Mac mini container's clock every 15 minutes
+
+[Timer]
+# Once soon after boot, then every 15 minutes (ti-clock-check.service says
+# why: ADR 0019).
+OnBootSec=1min
+OnUnitActiveSec=15min
+Unit=ti-clock-check.service
+
+[Install]
+WantedBy=timers.target

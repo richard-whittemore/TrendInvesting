@@ -1,9 +1,11 @@
 # Runbook: the Mac mini (deploy/mac-mini)
 
-*Steps for the Mac mini's container. What it is and why: the manual chapter
-[mac-mini](../manual/mac-mini.md). This runbook grows with the Mac mini
-plan's slices. Today it has its first step: creating the container, or
-re-attaching to it.*
+*Steps for the Mac mini's rehearsal container: a local copy of the server
+with a real systemd, for trying the provisioner, the units and your own
+steps before doing them on the Lightsail server, where paper trading runs
+(`docs/runbooks/lightsail-deployment.md`). What it is and why: the manual
+chapter [mac-mini](../manual/mac-mini.md). Today this runbook has one step:
+creating the container, or re-attaching to it.*
 
 ## Before you start
 
@@ -53,12 +55,15 @@ re-attaching to it.*
    docker exec ti systemctl list-units 'ti-*' --all
    ```
 
-   Expect `running`, or `degraded` with only `ti-reporter@boost` failed
-   before the Boost engine has run once and `secrets.env` is filled in. Expect
-   `ti-data.timer` and `ti-reporter@boost.timer` active, `ti-gateway` masked,
-   and `ti-engine@boost` and `ti-adapter-boost` inactive.
+   Expect `running`, or `degraded` with only `ti-reporter@boost`,
+   `ti-dashboard` or `ti-data` failed before the Boost engine has run once
+   and `secrets.env` is filled in (up.sh refuses any other failed unit).
+   Expect `ti-data.timer`, `ti-reporter@boost.timer` and
+   `ti-clock-check.timer` active, `ti-gateway` masked, and `ti-engine@boost`
+   and `ti-adapter-boost` inactive.
 6. **Fill in the secrets inside the container** (never on the Mac, never in
-   a chat):
+   a chat). It is a rehearsal: use the paper account's details, or stand-ins,
+   never a live account's:
 
    ```
    docker exec -it ti nano /etc/trend-investing/secrets.env
@@ -66,10 +71,17 @@ re-attaching to it.*
    ```
 
 **If the launcher says the image changed**, or the container is damaged:
-`deploy/mac-mini/up.sh --recreate` removes the container and creates it
-again, keeping all four volumes. **Never** run `docker volume rm ti-...` or
-reset Docker Desktop: the volumes hold the configuration, the secrets and
-the durable logs, and no backup exists yet.
+stop the adapter and then the engine if they run
+(`docker exec ti systemctl stop ti-adapter-boost ti-engine@boost`), then run
+`deploy/mac-mini/up.sh --recreate`. It refuses while either runs; otherwise
+it stops the container (systemd shuts its units down, up to 60 seconds),
+removes it and creates it again, keeping all four volumes. Do not run
+`docker volume rm ti-...` or reset Docker Desktop unless you mean to start
+the rehearsal again from nothing: the volumes hold its configuration, its
+secrets and its durable logs, and nothing backs them up.
+
+**If up.sh says another up.sh is working on the container**, wait for it.
+If no such process exists any more, run up.sh again: it takes the lock over.
 
 ## Checking the launcher itself
 
@@ -79,6 +91,11 @@ On the Mac mini, from any clean checkout (the data job's build refuses uncommitt
 deploy/mac-mini/test-container.sh
 ```
 
-It uses a throwaway container and volumes named `ti-test-<number>` and
-removes them at the end. It never touches `ti`. It takes about 15 minutes
-and needs the network. It must end with `REAL CONTAINER TEST COMPLETE`.
+It uses a throwaway container and volumes named `ti-test-<number>`, and a
+stand-in for ntfy and PagerDuty on the Mac's loopback, and removes them at
+the end. It never touches `ti`. It takes about 20 minutes and needs the
+network. It must end with `REAL CONTAINER TEST COMPLETE`. If Intel (amd64)
+containers already fail on this Mac before the test (quitting and reopening
+Docker Desktop usually mends it), run it with
+`TI_TEST_AMD64_BASELINE_BROKEN=1`: it then prints `amd64 check NOT RUN` and
+compares only Docker's list of program handlers.
