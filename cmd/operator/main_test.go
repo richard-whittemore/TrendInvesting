@@ -683,7 +683,7 @@ func TestTheApprovalStatesAHandSaleAsTheIncidentsAttempt(t *testing.T) {
 	recovery := previousLog(t, logPath, halted)
 
 	stated := filepath.Join(dir, "stated.json")
-	out, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", stated, "-sale-attempted", "-at", at)
+	out, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", stated, "-sale-attempted", "-positions", "SPY=9", "-cash", "100", "-currency", "USD", "-at", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,22 +728,26 @@ func TestSaleAttemptedIsRefusedWhenThereIsNoSaleToState(t *testing.T) {
 			Sale: event.SaleFigures{Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit}})}
 	attempted := filepath.Join(dir, "attempted", "run-1.log")
 	normal := filepath.Join(dir, "normal", "run-1.log")
-	for _, d := range []string{filepath.Dir(attempted), filepath.Dir(normal)} {
+	unsold := filepath.Join(dir, "unsold", "run-1.log")
+	for _, d := range []string{filepath.Dir(attempted), filepath.Dir(normal), filepath.Dir(unsold)} {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	previousLog(t, attempted, halted, sale)
+	previousLog(t, unsold, halted)
 	normalLog := killSwitchLog(t, filepath.Dir(normal), "joint")
 
 	for name, c := range map[string]struct {
 		args []string
 		want string
 	}{
-		"the log already records the attempt": {[]string{"-log", attempted}, "already records"},
-		"the log ended normal":                {[]string{"-log", normalLog}, "no incident"},
-		"clearing the incident":               {[]string{"-log", attempted, "-clear-incident", "engine-state:joint:1"}, "-clear-incident"},
+		"the log already records the attempt": {[]string{"-log", attempted, "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "already records"},
+		"the log ended normal":                {[]string{"-log", normalLog, "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "no incident"},
+		"clearing the incident":               {[]string{"-log", attempted, "-clear-incident", "engine-state:joint:1", "-positions", "SPY=9", "-cash", "100", "-currency", "USD"}, "-clear-incident"},
 		"a first run":                         {[]string{"-first-run", "-positions", "", "-cash", "1", "-currency", "USD"}, "-first-run"},
+		"no starting book":                    {[]string{"-log", unsold}, "state the book after it"},
+		"half a starting book":                {[]string{"-log", unsold, "-positions", "SPY=9", "-cash", "100"}, "state the book after it"},
 	} {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
 		args := append([]string{"approve", "-account", "joint", "-by", "owner", "-out", path, "-sale-attempted", "-at", at}, c.args...)

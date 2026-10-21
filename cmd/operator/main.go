@@ -314,7 +314,7 @@ func approve(args []string, out io.Writer) error {
 	by := flags.String("by", "", "who approves")
 	outPath := flags.String("out", "", "where to write the approval, the engine's -approval file")
 	clearIncident := flags.String("clear-incident", "", "the incident the previous run ended in, to clear it (ADR 0019's recovery procedure)")
-	saleAttempted := flags.Bool("sale-attempted", false, "state the incident's one sale back to 98% as attempted, for a sale you made by hand that the log does not record (ADR 0019)")
+	saleAttempted := flags.Bool("sale-attempted", false, "state the incident's one sale back to 98% as attempted, for the sale you made by hand for that incident and the log does not record, with the book after it: -positions, -cash and -currency (ADR 0019)")
 	firstRun := flags.Bool("first-run", false, "approve the account's first run: no -log, and the starting book stated")
 	positions := flags.String("positions", "", "the starting book's holdings checked in IBKR, SYM=shares,...; empty when none")
 	cash := flags.String("cash", "", "the starting book's total cash (IBKR's TotalCashValue)")
@@ -332,6 +332,8 @@ func approve(args []string, out io.Writer) error {
 		return errors.New("operator: -first-run approves an account's first run, which has no incident to clear: leave out -clear-incident")
 	case *firstRun && *saleAttempted:
 		return errors.New("operator: -first-run approves an account's first run, which has no incident whose sale to state: leave out -sale-attempted")
+	case *saleAttempted && (!set["positions"] || !set["cash"] || !set["currency"]):
+		return errors.New("operator: -sale-attempted states a sale made by hand, so state the book after it: -positions, -cash and -currency, read in IBKR once the sale has filled")
 	case !*firstRun && *logPath == "":
 		return errors.New("operator: -log is required: the previous run's durable log (or -first-run for an account's first run)")
 	case *outPath == "":

@@ -86,10 +86,11 @@ approve.
 
 - **The approval is refused for the sale attempt**: the log records an
   attempt of the incident's sale and the approval says it was not attempted.
-  Write the approval with the tool (it reads the attempt from the log). If
-  you sold by hand, the log does not know: add `-sale-attempted` to the
-  command (`docs/manual/operator.md`, "An approval"); an approval saying
-  attempted is always accepted.
+  Write the approval with the tool, without `-sale-attempted`: it reads the
+  attempt from the log and carries it attempted. The flag is refused when the
+  log already records the attempt; it is only for an incident whose hand sale
+  the log does not record, with the book after the sale (step 6 of "Selling
+  by hand safely", `docs/manual/states-and-kill-switch.md`).
 - **The approval is refused for the incident**: you named an incident that is
   not the one the log ended in, or tried to carry it looser (Degraded when
   the log ended Halted, or on fewer instruments). A restart never loosens

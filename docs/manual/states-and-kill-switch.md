@@ -453,15 +453,18 @@ refuses fires that sale. So before any sale by hand in the margin account:
    ([redelivery](redelivery.md)). A fresh run's adapter never sends an
    earlier run's order (step 2). The approval carries the incident and
    whether its sale was attempted. `operator approve` writes that from the
-   log, so after a hand sale the log does not know about, add
-   `-sale-attempted` to the command ([operator](operator.md), "An approval");
-   it records `incident_in_force.sale_attempted: true`, which the engine
-   always accepts, since you sold by hand. The tool refuses the flag unless
-   the log ended in an incident whose sale it does not record as attempted. When the sale was the incident's (the account Halted, or
-   Degraded with the instrument in its scope), that is the one recorded
-   safeguard that stops the new run making that sale at all; an engagement's
-   or an alarm's sale is a new sale in the fresh run whatever the approval
-   says, sized from its first snapshot. Otherwise, if
+   log. If your sale was the incident's (the account Halted, or Degraded with
+   the instrument in its scope), add `-sale-attempted` to the command, with
+   the book after the sale, which the tool requires with the flag
+   ([operator](operator.md), "An approval"); it records
+   `incident_in_force.sale_attempted: true`, which the engine always accepts,
+   since you sold by hand, and which is the one recorded safeguard that stops
+   the new run making that sale at all. If your sale was not the incident's
+   (an instrument outside a Degraded incident's scope, or an engagement's or
+   an alarm's sale), leave the flag out: stating it would spend the
+   incident's one sale back to 98% and it would never be made, while an
+   engagement's or an alarm's sale is a new sale in the fresh run whatever
+   the approval says, sized from its first snapshot. Otherwise, if
    the program can still sell (each row of "The sale back to 98%" below
    says), the new run sizes that sale from its first readable, fresh IBKR
    snapshot, which shows your sale in the holding once it has filled, so it

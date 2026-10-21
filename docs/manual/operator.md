@@ -402,14 +402,16 @@ adapter, before any order is checked.
 hand sale the log does not know about, approve with the book as it is after
 your sale (`-positions ... -cash ... -currency USD`, typed right after
 reading the book in IBKR, below), or the fresh run halts on its first reading
-as unverifiable, and add `-sale-attempted`: the approval then states the
-incident's one sale back to 98% as attempted, so the fresh run never makes it,
-and the tool prints "stated by -sale-attempted". Do not edit the file the tool
-wrote. The flag is refused, and nothing is written, unless the log ended in an
+as unverifiable, and, when the sale was the incident's own, add
+`-sale-attempted`: the approval then states the incident's one sale back to
+98% as attempted, so the fresh run never makes it, and the tool prints "stated
+by -sale-attempted". The flag requires the book: without `-positions`,
+`-cash` and `-currency` it is refused. Do not edit the file the tool wrote.
+The flag is refused, and nothing is written, unless the log ended in an
 incident whose sale it does not record as attempted: not when the log ended
 normal, not with `-clear-incident` (that leaves no incident in force), not
 with `-first-run`, and not when the log already records the attempt (the
-approval then carries it attempted without the flag).
+approval then carries it attempted, so leave the flag out).
 
 **An account's first run** is approved too, with the book it starts from,
 since there is no previous log to read. Check the paper account's holdings
@@ -498,7 +500,7 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `operator: invalid alert acknowledged payload: account id is required` (or `alert key is required`, `acknowledged by is required`) | Nothing written | Add `-account`, `-alert` or `-by` |
 | `operator: -alert must hold no newline: ...` | Nothing written (spaces around the key are trimmed, a line break inside it is refused) | Copy the key from the alert again, in single quotes, on one line |
 | `operator: -log is required: the previous run's durable log (or -first-run for an account's first run)` or `operator: -out is required: where to write the approval` (`approve`) | Nothing written | Name the previous run's log with `-log`, or, for the account's first run (no previous log), add `-first-run` with `-positions`, `-cash` and `-currency`; and name where to write the approval with `-out` |
-| `operator: -first-run approves an account's first run, which has no previous log: leave out -log`, or `... which has no incident to clear: leave out -clear-incident` (`approve`) | Nothing written | Run it again for the first run with only `-account`, `-by`, `-positions`, `-cash`, `-currency` and `-out` |
+| `operator: -first-run approves an account's first run, which has no previous log: leave out -log`, `... which has no incident to clear: leave out -clear-incident`, or `... which has no incident whose sale to state: leave out -sale-attempted` (`approve`) | Nothing written | Run it again for the first run with only `-account`, `-by`, `-positions`, `-cash`, `-currency` and `-out` |
 | `operator: -<positions, cash or currency> is required: a starting book states the holdings (-positions, empty when none), the total cash (-cash) and its currency (-currency) checked in IBKR` | Nothing written: a starting book is all three or none | Read the holdings and `TotalCashValue` in IBKR and give all three |
 | `operator: -positions "...": "..." is not SYM=shares, a whole number of shares`, `... names <SYM> twice`, or `operator: -cash "..." is not an amount of cash` | Nothing written | Write holdings as `SPY=100` (several as `SPY=100,QQQ=5`), whole shares, each symbol once, and cash as a plain number |
 | `operator: starting book position <SYM> states a zero quantity; an instrument not held is left out` (`approve`) | Nothing written: a holding of zero shares is stated by leaving the instrument out | Leave that instrument out of `-positions` (`-positions ""` when nothing is held) |
@@ -507,6 +509,8 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `operator: open the previous log: ...` or `operator: <log> cannot be read as a durable log (docs/runbooks/durable-log.md): ...` | Nothing written | Check the path; a damaged log follows `docs/runbooks/durable-log.md`, "A log that cannot be read" |
 | `operator: <log> holds nothing past its configuration: its start was cut short, so resume it ...` | Nothing written | Resume that run with `-resume` ([restart](restart.md)) |
 | `restart: <log> records no incident, so there is none to clear: it ended normal`, or `restart: <log> ended <state> in incident <id>, so that is the incident to clear, not <id>` | Nothing written: `-clear-incident` names an incident the log did not end in | Leave `-clear-incident` out, or copy the incident ID from the tool's own output without it |
+| `operator: -sale-attempted states a sale made by hand, so state the book after it: -positions, -cash and -currency, read in IBKR once the sale has filled` (`approve`) | Nothing written: the flag states a hand sale, and the book after it is what the fresh run checks | Sell by hand first, read the book in IBKR once the sale has filled, and give all three with the flag; if you did not sell, leave the flag out |
+| `restart: -sale-attempted states the sale of an incident left in force, and -clear-incident leaves none in force: use one or the other`, `restart: <log> records no incident, so there is no sale to state as attempted: it ended normal`, or `restart: <log> already records an attempt of incident <id>'s one sale back to 98%, so the approval carries it attempted without -sale-attempted` (`approve`) | Nothing written: no incident is left in force whose sale the log lacks | Leave `-sale-attempted` out (the tool then carries a recorded attempt itself), or drop `-clear-incident` |
 | `restart: the approval is refused` followed, on the next line, by `invalid operator run approved payload: account id is required` (or `approved by is required`, one line each when both are missing); for a first run, one line: `operator: invalid operator run approved payload: account id is required` (or `approved by is required`) (`approve`) | Nothing written: `-account` or `-by` missing | Add `-account` or `-by` |
 | `engine: decode <id> in <log>: ...` (`approve`) | Nothing written: a record the approval depends on cannot be read | Treat the log as damaged: `docs/runbooks/durable-log.md` |
 | `operator: <file> already exists; an approval is evidence and is never overwritten (ADR 0018)` | Nothing written | Choose a new `-out` name |

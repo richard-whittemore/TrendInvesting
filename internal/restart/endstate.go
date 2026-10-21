@@ -140,8 +140,9 @@ func CheckSaleAttempt(entries []journal.Entry, approval event.OperatorRunApprove
 }
 
 // ApprovalRequest is what the owner supplies for an approval: which log,
-// who approves and when, and, to clear the incident the log ended in under
-// ADR 0019's recovery procedure, that incident's ID.
+// who approves and when, to clear the incident the log ended in under
+// ADR 0019's recovery procedure, that incident's ID, or, for a sale made by
+// hand that the log does not record, SaleAttempted.
 type ApprovalRequest struct {
 	AccountID            string
 	PreviousLog          string
@@ -160,7 +161,11 @@ type ApprovalRequest struct {
 // force with its state, scope (instruments and cash components) and sale
 // attempt, or, when the owner clears it, that incident cleared by its ID and
 // none in force (ADR 0027, amended 2026-10-17; ADR 0019, amended
-// 2026-09-24, "The state survives a restart"). Clearing an incident other than the one end holds is refused.
+// 2026-09-24, "The state survives a restart"). Clearing an incident other
+// than the one end holds is refused. req.SaleAttempted states an unrecorded
+// hand sale as the incident's one attempt, carried attempted with the
+// recorded one; it is refused with ClearIncident, on a log ending Normal,
+// and where end already records the attempt (ADR 0019, amended 2026-10-15).
 func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprovedPayload, error) {
 	p := event.OperatorRunApprovedPayload{
 		AccountID: req.AccountID, PreviousLog: req.PreviousLog, PreviousLogFinalHash: req.PreviousLogFinalHash,
