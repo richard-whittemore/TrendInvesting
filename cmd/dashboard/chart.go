@@ -22,6 +22,9 @@ const (
 	chartTop, chartBottom = 40.0, 160.0
 )
 
+// stripCap is the most paired points the strip draws, so bars stay visible.
+const stripCap = 120
+
 func f(v float64) string { return fmt.Sprintf("%.1f", v) }
 
 // tick is one labelled horizontal gridline.
@@ -101,11 +104,11 @@ func equityChart(s report.Summary) equityView {
 	return v
 }
 
-// bar is one day's two bars, the account's then the benchmark's.
+// bar is one pair of paired points' two bars, the account's then the benchmark's.
 type bar struct{ AX, AY, AH, BX, BY, BH string }
 
-// stripView is the daily-change strip: for each day between consecutive
-// paired points, the account's change and the benchmark's as a pair of bars
+// stripView is the strip of changes between paired points: for each pair of
+// consecutive paired points (at most the most recent stripCap), the account's change and the benchmark's as a pair of bars
 // about a zero line, above it for a rise and below for a fall, on one scale.
 type stripView struct {
 	Drawn                             bool
@@ -117,12 +120,16 @@ type stripView struct {
 	LabelX, TopText, MidText, BotText string
 	TopLabel, BottomLabel             string
 	StartDate, EndDate                string
+	Cap                               int
 }
 
 func dailyChangeStrip(s report.Summary) stripView {
 	pts := s.Equity.Points
 	if len(pts) < 2 {
 		return stripView{}
+	}
+	if len(pts) > stripCap+1 {
+		pts = pts[len(pts)-stripCap-1:]
 	}
 	days := len(pts) - 1
 	acct, bench := make([]float64, days), make([]float64, days)
@@ -147,12 +154,12 @@ func dailyChangeStrip(s report.Summary) stripView {
 		return mid - h, h
 	}
 	out := stripView{
-		Drawn: true, Benchmark: s.Benchmark, Width: f(slot * 0.4),
+		Drawn: true, Benchmark: s.Benchmark, Width: f(slot * 0.4), Cap: stripCap,
 		Left: f(chartLeft), Right: f(chartRight), TopY: f(chartTop), MidY: f(mid), BottomY: f(chartBottom),
 		LabelX: f(chartLeft - 8), TopText: f(chartTop + 4), MidText: f(mid + 4), BotText: f(chartBottom + 4),
 		TopLabel: fmt.Sprintf("+%.2f%%", maxAbs*100), BottomLabel: fmt.Sprintf("−%.2f%%", maxAbs*100),
-		StartDate: pts[1].Date, EndDate: pts[days].Date,
-		Label: fmt.Sprintf("%s, daily change from %s to %s, %d days: the account's change as one bar and %s's as the next, above the zero line for a rise and below for a fall, on a scale of plus or minus %.2f percent.",
+		StartDate: pts[0].Date, EndDate: pts[days].Date,
+		Label: fmt.Sprintf("%s, change between paired points from %s to %s, %d changes: the account's change as one bar and %s's as the next, above the zero line for a rise and below for a fall, on a scale of plus or minus %.2f percent.",
 			s.AccountID, pts[0].Date, pts[days].Date, days, s.Benchmark, maxAbs*100),
 	}
 	for i := 0; i < days; i++ {

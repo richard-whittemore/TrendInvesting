@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -151,5 +152,112 @@ func TestEngineStateIsGroupedByHowMuchAttentionItNeeds(t *testing.T) {
 		if got := stateClass(state); got != want {
 			t.Errorf("stateClass(%q) = %q, want %q", state, got, want)
 		}
+	}
+}
+
+// seriesFixture is a synthetic summary whose paired points carry exactly the
+// given account and benchmark values, one per consecutive date.
+func seriesFixture(nets, benches []float64) account {
+	a := pairedFixture(0)
+	for i := range nets {
+		a.Summary.Equity.Points = append(a.Summary.Equity.Points, report.EquityPoint{Date: fmt.Sprintf("d%05d", i), Net: nets[i], Benchmark: benches[i]})
+	}
+	a.Summary.Equity.Available = len(nets) >= 2
+	return a
+}
+
+var numberIn = regexp.MustCompile(`-?\d+(?:\.\d+)?`)
+
+func TestChartGeometryStaysInsidePlotForFlatFallingAndZeroChangeSeries(t *testing.T) {
+	flat := []float64{100, 100, 100, 100}
+	falling := []float64{100, 90, 70, 40}
+	oneZeroDay := []float64{100, 110, 110, 90}
+	for name, a := range map[string]account{
+		"flat":        seriesFixture(flat, flat),
+		"falling":     seriesFixture(falling, falling),
+		"zero-change": seriesFixture(oneZeroDay, flat),
+	} {
+		body := execThemed(t, "", []account{a})
+		if strings.Contains(body, "NaN") || strings.Contains(body, "Inf") {
+			t.Errorf("%s: the page has NaN or Inf", name)
+		}
+		for _, d := range [][]string{{"line-account"}, {"line-benchmark"}} {
+			for _, m := range pathOf(d[0]).FindAllStringSubmatch(body, -1) {
+				nums := numberIn.FindAllString(m[1], -1)
+				for i, s := range nums {
+					v, _ := strconv.ParseFloat(s, 64)
+					lo, hi := 56.0, 400.0
+					if i%2 == 1 {
+						lo, hi = 40, 160
+					}
+					if v < lo || v > hi {
+						t.Errorf("%s: %s coordinate %v outside [%v,%v]", name, d[0], v, lo, hi)
+					}
+				}
+			}
+		}
+		for _, m := range regexp.MustCompile(`<rect class="bar-[a-z]+" x="([^"]*)" y="([^"]*)" width="([^"]*)" height="([^"]*)"`).FindAllStringSubmatch(body, -1) {
+			x, _ := strconv.ParseFloat(m[1], 64)
+			y, _ := strconv.ParseFloat(m[2], 64)
+			w, _ := strconv.ParseFloat(m[3], 64)
+			h, _ := strconv.ParseFloat(m[4], 64)
+			if x < 56 || x+w > 400.1 || y < 40 || y+h > 160.1 || h <= 0 {
+				t.Errorf("%s: bar x=%v y=%v w=%v h=%v leaves the plot or has no height", name, x, y, w, h)
+			}
+		}
+	}
+}
+
+func TestDailyChangeStripIsCappedToTheMostRecentPairedPointsAndKeepsVisibleBars(t *testing.T) {
+	n := 5000
+	nets, benches := make([]float64, n), make([]float64, n)
+	for i := range nets {
+		nets[i], benches[i] = 1000+float64(i%7), 100+float64(i%5)
+	}
+	body := execThemed(t, "", []account{seriesFixture(nets, benches)})
+	bars := regexp.MustCompile(`<rect class="bar-account" x="([^"]*)" y="[^"]*" width="([^"]*)"`).FindAllStringSubmatch(body, -1)
+	if len(bars) != stripCap {
+		t.Fatalf("bars = %d, want the cap %d", len(bars), stripCap)
+	}
+	seen := map[string]bool{}
+	for _, b := range bars {
+		w, _ := strconv.ParseFloat(b[2], 64)
+		if w < 1 {
+			t.Fatalf("bar width %v is below the minimum of 1", w)
+		}
+		seen[b[1]] = true
+	}
+	if len(seen) != stripCap {
+		t.Errorf("bars share x positions: %d distinct of %d", len(seen), stripCap)
+	}
+	if !strings.Contains(body, fmt.Sprintf("most recent %d", stripCap)) {
+		t.Error("the card must state the cap")
+	}
+	if !strings.Contains(body, fmt.Sprintf("d%05d", n-1-stripCap)) {
+		t.Error("the strip must start at the first paired point of the window")
+	}
+}
+
+func TestDailyChangeStripPrintedStartDateEqualsItsScreenReaderLabel(t *testing.T) {
+	body := execThemed(t, "", []account{pairedFixture(6)})
+	m := regexp.MustCompile(`aria-label="[^"]*change between paired points from (\S+) to (\S+),`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("the strip label must say from <date> to <date>")
+	}
+	printed := regexp.MustCompile(`<text class="date" x="56.0" y="204">([^<]*)</text><text class="date" x="400.0" y="204" text-anchor="end">([^<]*)</text></svg>\n<p class="legend"><span><svg width="12"`).FindStringSubmatch(body)
+	if len(printed) != 3 || printed[1] != m[1] || printed[2] != m[2] {
+		t.Errorf("printed dates %v differ from the label's %v", printed, m[1:])
+	}
+}
+
+func TestDailyChangeStripSaysItsBarsSpanPairedPointsNotDays(t *testing.T) {
+	body := execThemed(t, "", []account{pairedFixture(6)})
+	for _, want := range []string{"Change between paired points", "Account, left bar of each pair", "several sessions apart"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("strip lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "<h3>Daily change</h3>") || strings.Contains(body, "left bar of each day") {
+		t.Error("the strip must not call a paired-point change a day")
 	}
 }

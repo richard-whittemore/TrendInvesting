@@ -394,8 +394,10 @@ shows the whole-period and the latest-day changes in words, then:
   chart shows how a starting balance would have grown in each. Your account is
   the solid line with circles, SPY the dashed line with squares, so the two
   can be told apart without colour. The figures at the right-hand end are
-  where each line stands today; the dates under the chart are its first and
-  last paired dates.
+  where each line stands on the latest paired day, which can be older than
+  today when today's snapshot or close is missing; the dates under the chart
+  are its first and last paired dates. The chart spaces paired dates evenly,
+  by paired point and not by calendar, so a missing day leaves no gap.
 - The number of paired points, the first and last dates, and the first,
   previous and latest points with their values.
 - What the same starting balance would be worth had it been held in SPY.
@@ -404,11 +406,20 @@ shows the whole-period and the latest-day changes in words, then:
   is not taken out of the account's result, so a deposit can look like
   outperformance.
 
-**The daily change card** draws, for each day between two paired dates, a pair
-of bars: your account's change on the left and SPY's on the right. Bars above
+**The change-between-paired-points card** draws, for each pair of consecutive
+paired dates, a pair of bars: your account's change on the left and SPY's on
+the right. A bar is the change from one paired date to the next, which can
+span several sessions when a snapshot or close is missing, so it is not always
+one day's move. Like the line chart, it spaces paired dates evenly, by paired
+point and not by calendar. It shows at most the most recent 120 changes (121
+paired points), so the bars stay wide enough to see; the dates under it are
+the first and last of those points. Bars above
 the centre line are rises and bars below are falls, on one scale that is
-printed at the top and bottom. Green and red are never the only signal; up and
-down arrows and the bar positions say the same.
+printed at the top and bottom. Your account's bars and SPY's are in the
+account and benchmark colours and are told apart by position, left and right;
+the sign is whether a bar sits above or below the centre line. Green and red,
+with up and down arrows, appear only on the return chips above the line chart,
+and are never the only signal there either.
 
 If there are fewer than two paired dates, for example early in a run, a chart
 cannot be drawn. The card says "The chart needs two paired points" instead of
