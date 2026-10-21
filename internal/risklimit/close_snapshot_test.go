@@ -308,3 +308,98 @@ func TestAReconciliationReadAfterTheSnapshotDoesNotStandForIt(t *testing.T) {
 		t.Fatalf("a snapshot read before the fill does not show it: %v %+v", journal, r.Result)
 	}
 }
+
+// TestAFillInAReadingsOwnSecondAgreesWithTheClassifier: the standing window
+// is half-open on whole seconds exactly as the classifier applies a change
+// (apply when !at.Before(book.AsOf) && at.Before(obs.AsOf)), so a fill
+// stamped at the reconciliation's second is skipped by it and lies in the
+// window, and one stamped at the snapshot's second is skipped by both
+// and lies outside it (ADR 0019, amended 2026-10-21, point 6).
+func TestAFillInAReadingsOwnSecondAgreesWithTheClassifier(t *testing.T) {
+	cases := []struct {
+		name                string
+		reconcileMin        int
+		snapshotMin         int
+		fillMin             int
+		reconciled          int64 // shares the reconciliation shows
+		snapshot            int64 // shares the snapshot shows
+		wantStandsAndSilent bool
+	}{
+		{"fill in the reconciliation's second, reconciliation first", 60, 180, 60, 10, 10, false},
+		{"fill in the snapshot's second, reconciliation first", 60, 180, 180, 10, 10, true},
+		{"fill in the reconciliation's second, snapshot first", 180, 60, 180, 10, 10, true},
+		{"fill in the snapshot's second, snapshot first", 180, 60, 60, 12, 12, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := booked(t)
+			released(t, check(t, g, order(event.OrderSideBuy, 2, 10))[0])
+			if err := g.ObserveFill(event.TargetWeightFillPayload{
+				AccountID: "joint", ClientOrderID: "tw-buy", FillID: "exec-1", InstrumentID: "SPY",
+				Side: event.OrderSideBuy, Quantity: 2, Price: 1, Commission: 0.5,
+				FilledAt: at.Add(time.Duration(c.fillMin) * time.Minute),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			p := morningOf(1000, c.reconciled)
+			p.AsOf = at.Add(time.Duration(c.reconcileMin) * time.Minute)
+			reconcileWith(t, g, "reconciliation:1", p)
+			r, journal := checkBookWith(t, g, closeSnapshot(c.snapshot, c.snapshotMin))
+			if journal == c.wantStandsAndSilent {
+				t.Fatalf("journalled %v, want %v: %+v", journal, !c.wantStandsAndSilent, r.Result)
+			}
+			if journal && r.Result.Classification != event.ReconciliationUnexplained {
+				t.Errorf("the snapshot is checked and unexplained: %+v", r.Result)
+			}
+		})
+	}
+}
+
+// TestASnapshotIsNotHaltedAgainForTheChangeAReconciliationHaltedOn: the
+// reconciliation read after a delisting halted the account; a snapshot with
+// the same holdings and the same unapplicable change is the same Halt, so it
+// is not journalled or paged a second time (ADR 0019, amended 2026-10-21,
+// point 6: one difference, one report).
+func TestASnapshotIsNotHaltedAgainForTheChangeAReconciliationHaltedOn(t *testing.T) {
+	g := booked(t)
+	delisting := event.CorporateActionPayload{InstrumentID: "TLT", Kind: event.CorporateActionKindDelisting, EffectiveAt: at.Add(70 * time.Minute)}
+	if err := g.ObserveCorporateAction("ca:tlt-delisting", delisting); err != nil {
+		t.Fatal(err)
+	}
+	p := morningOf(1000, 10)
+	p.AsOf = at.Add(2 * time.Hour)
+	if r := reconcileWith(t, g, "reconciliation:1", p); r.Result.Action != event.ReconciliationActionHalt || g.State() != risklimit.StateHalted {
+		t.Fatalf("the reconciliation halts: %+v state %s", r.Result, g.State())
+	}
+	if r, journal := checkBookWith(t, g, closeSnapshot(10, 180)); journal {
+		t.Fatalf("the same Halt is not journalled twice: %+v", r.Result)
+	}
+	// A change the first Halt did not name is a new Halt.
+	other := event.CorporateActionPayload{InstrumentID: "IEF", Kind: event.CorporateActionKindDelisting, EffectiveAt: at.Add(210 * time.Minute)}
+	if err := g.ObserveCorporateAction("ca:ief-delisting", other); err != nil {
+		t.Fatal(err)
+	}
+	if r, journal := checkBookWith(t, g, closeSnapshot(10, 270)); !journal || r.Result.Action != event.ReconciliationActionHalt {
+		t.Fatalf("a new unapplicable change is a new Halt: %v %+v", journal, r.Result)
+	}
+}
+
+// TestAnEarlierReadReconciliationDoesNotReopenAReportedDifference: a
+// reconciliation read before the one that reported a difference, delivered
+// late, says nothing about whether it was resolved (ADR 0019, amended
+// 2026-10-21, point 6).
+func TestAnEarlierReadReconciliationDoesNotReopenAReportedDifference(t *testing.T) {
+	g := booked(t)
+	late := morningOf(1000, 12)
+	late.AsOf = at.Add(2 * time.Hour)
+	if r := reconcileWith(t, g, "reconciliation:2", late); r.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("the later reading reports the difference: %+v", r.Result)
+	}
+	early := morningOf(1000, 10)
+	if r := reconcileWith(t, g, "reconciliation:1", early); r.Result.Classification != event.ReconciliationMatched {
+		t.Fatalf("the earlier reading matches: %+v", r.Result)
+	}
+	if r, journal := checkBookWith(t, g, closeSnapshot(12, 180)); journal {
+		t.Fatalf("the earlier reading did not resolve the difference: %+v", r.Result)
+	}
+}

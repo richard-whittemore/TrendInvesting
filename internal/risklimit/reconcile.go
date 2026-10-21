@@ -28,7 +28,9 @@ type Reconciliation struct {
 // 2). The changes journalled since stay recorded; the classifier applies
 // those after the book's time. It checks nothing: the engine sets its book
 // through CheckBook.
-func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified, g.reported = &b, nil, nil }
+func (g *Gate) SetBook(b reconcile.Book) {
+	g.book, g.classified, g.reported, g.reportedAsOf = &b, nil, nil, nil
+}
 
 // CheckBook checks b, an account snapshot about to become the book, against
 // the book in force and every change journalled since it
@@ -49,9 +51,9 @@ func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified, g.reported = &b
 //     IBKR adapter sends each reading's reconciliation ahead of its snapshot,
 //     and that reconciliation's result, matched or not, already stands for
 //     those holdings, so one difference is never reported twice. A new book,
-//     or a fill or corporate action recorded after that reconciliation or
-//     dated at or after its reading, ends its standing, so the snapshot is
-//     then checked (classifiedStandsFor);
+//     or a fill or corporate action recorded after that reconciliation, or
+//     dated between its reading and b's (whichever came first), ends its
+//     standing, so the snapshot is then checked (classifiedStandsFor);
 //   - never for a difference already reported against the same book: an
 //     unexplained result whose every instrument was already reported with
 //     the same residual, and whose cash is not in doubt, repeats a journalled
@@ -60,8 +62,10 @@ func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified, g.reported = &b
 //     is a new difference and is reported (ADR 0019, amended 2026-10-21,
 //     point 6: one difference, one report).
 //
-// An unverifiable snapshot halts and is always journalled: neither of the
-// last two cases ever suppresses a Halt.
+// An unverifiable snapshot halts and is journalled, unless the account is
+// already Halted on every one of its reasons (alreadyHaltedOn): neither of
+// the last two cases ever suppresses a Halt, and a Halt for a new change is
+// always journalled.
 func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
 	defer g.SetBook(b)
 	if g.book == nil {
@@ -72,8 +76,13 @@ func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
 	case r.Action == event.ReconciliationActionContinue:
 		return Reconciliation{}, false
 	case r.Action == event.ReconciliationActionHalt:
-		// An unverifiable snapshot is journalled whatever was classified or
-		// reported before: neither de-duplication suppresses a Halt.
+		// A Halt is never hidden by what was classified or reported as a
+		// difference, but the account already Halted on every one of these
+		// reasons is not halted again for them: a Halt for a new change is
+		// still journalled.
+		if g.alreadyHaltedOn(r) {
+			return Reconciliation{}, false
+		}
 	case g.classifiedStandsFor(b) || g.alreadyReported(r):
 		return Reconciliation{}, false
 	}
@@ -87,8 +96,8 @@ func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
 // are exactly its positions, and both checks applied the same changes, so
 // no recorded fill or corporate action after the book is dated, to the
 // second, between the reconciliation's reading and b's (ADR 0019, amended
-// 2026-10-21, point 6: a change dated at or after the reconciliation's
-// reading ends its standing).
+// 2026-10-21, point 6: a change dated between the two readings, whichever
+// came first, ends its standing).
 func (g *Gate) classifiedStandsFor(b reconcile.Book) bool {
 	if g.classified == nil || !maps.Equal(g.classified, b.Positions) {
 		return false
@@ -178,27 +187,49 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 		}
 		g.classifiedAsOf = p.AsOf
 	}
-	g.report(r)
+	g.report(r, p.AsOf)
 	return g.consequence(id, r), nil
 }
 
 // report records the residual of each instrument r finds unexplained, the
 // differences journalled against the book in force, and forgets each
 // instrument r finds explained, so a difference that recurs after it was
-// resolved is a new difference (ADR 0019, amended 2026-10-21, point 6).
-func (g *Gate) report(r event.ReconciliationResultPayload) {
+// resolved is a new difference (ADR 0019, amended 2026-10-21, point 6). r
+// was read at asOf: a reading before the one that reported an instrument
+// says nothing about whether it was resolved, so it forgets nothing.
+func (g *Gate) report(r event.ReconciliationResultPayload, asOf time.Time) {
 	for _, c := range r.Components {
 		switch {
 		case c.InstrumentID == "":
 		case c.Explained:
+			if at, ok := g.reportedAsOf[c.InstrumentID]; ok && asOf.Before(at) {
+				continue
+			}
 			delete(g.reported, c.InstrumentID)
+			delete(g.reportedAsOf, c.InstrumentID)
 		default:
 			if g.reported == nil {
-				g.reported = map[string]int64{}
+				g.reported, g.reportedAsOf = map[string]int64{}, map[string]time.Time{}
 			}
 			g.reported[c.InstrumentID] = c.Residual
+			g.reportedAsOf[c.InstrumentID] = asOf
 		}
 	}
+}
+
+// alreadyHaltedOn reports whether the account is Halted and every reason r,
+// an unverifiable result, gives was already given by a journalled Halt: the
+// same unapplicable change, not a new one.
+func (g *Gate) alreadyHaltedOn(r event.ReconciliationResultPayload) bool {
+	if g.state != StateHalted || len(r.Unverifiable) == 0 {
+		return false
+	}
+	for _, reason := range r.Unverifiable {
+		if !g.haltedOn[reason] {
+			return false
+		}
+	}
+	return true
 }
 
 // alreadyReported reports whether every difference of r, an unexplained
@@ -222,6 +253,14 @@ func (g *Gate) alreadyReported(r event.ReconciliationResultPayload) bool {
 func (g *Gate) consequence(id string, r event.ReconciliationResultPayload) Reconciliation {
 	out := Reconciliation{Result: r, ResultID: "reconciliation-result:" + g.accountID + ":" + id}
 	var state *event.EngineStatePayload
+	if r.Action == event.ReconciliationActionHalt {
+		if g.haltedOn == nil {
+			g.haltedOn = map[string]bool{}
+		}
+		for _, reason := range r.Unverifiable {
+			g.haltedOn[reason] = true
+		}
+	}
 	switch {
 	case r.Action == event.ReconciliationActionHalt && g.state != StateHalted:
 		state = &event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonReconciliationUnverifiable, Detail: "reconciliation " + r.ReconciliationID + " " + r.Detail}

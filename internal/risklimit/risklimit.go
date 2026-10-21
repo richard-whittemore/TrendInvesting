@@ -168,6 +168,15 @@ type Gate struct {
 	// unexplained against book, so the same difference is not reported
 	// twice (CheckBook); nil once book is set.
 	reported map[string]int64
+	// reportedAsOf is the reading time of the reconciliation that reported
+	// each instrument in reported: only a reading at or after it forgets the
+	// residual (report).
+	reportedAsOf map[string]time.Time
+	// haltedOn is every reason a journalled Halt result gave for being
+	// unverifiable, so a snapshot that finds only those reasons again is not
+	// halted a second time while the account stays Halted (CheckBook). A
+	// change is a fact of the journal, so it outlives each book.
+	haltedOn map[string]bool
 	// corporateActions is every corporate action recorded as a change, by
 	// envelope ID, so a redelivery is recognised and never counted twice.
 	corporateActions map[string]event.CorporateActionPayload
