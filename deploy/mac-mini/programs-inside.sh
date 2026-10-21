@@ -96,7 +96,7 @@ pass "the five Go programs are arm64 and run here; the engine's log names $versi
 # 2. The paper rehearsal, unchanged, with the arm64 engine built above. The
 # container has no Go or make, so deploy/rehearse-paper.sh's own `make engine`
 # is skipped by running the script it ends in, with the engine it would build.
-(cd /src && TI_REHEARSAL_ACCOUNT= TI_REHEARSAL_ENGINE=/dist/ti-engine python3 adapter/ibkr/tests/rehearse_paper.py) | tee "$work/paper.out"
+(cd /src && TI_REHEARSAL_ACCOUNT='' TI_REHEARSAL_ENGINE=/dist/ti-engine python3 adapter/ibkr/tests/rehearse_paper.py) | tee "$work/paper.out"
 grep -q "rehearsal passed" "$work/paper.out" || fail "the paper rehearsal did not pass"
 pass "the paper rehearsal passed inside the container"
 
