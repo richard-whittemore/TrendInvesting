@@ -123,9 +123,10 @@ func loadHostClock(path string) (hostClock, error) {
 // back, which is itself a failed check: it is counted, a new check is made
 // for the evidence, and the two are one failure. A failure pages once
 // clockPagesAfter checks in a row have failed; a passing check resolves the
-// incident on PagerDuty (through the channels in working order; one set aside
-// keeps it open on record) and forgets it, so the next failure pages anew. It
-// returns the check the summary shows, if any.
+// incident on each working PagerDuty channel that took it and forgets it for
+// every channel, so the next failure pages anew; the one exception is a
+// PagerDuty channel set aside this run, whose record is kept until a run in
+// which it works. It returns the check the summary shows, if any.
 func clockStep(path, command, host string, senders []sender, setAside []channelFault, clock func() time.Time, every time.Duration) (*report.ClockCheck, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -193,14 +194,16 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 		if err := resolveAll(senders, key, seen); err != nil {
 			return h.Last, err
 		}
-		// A channel set aside this run cannot close what it opened, so the
-		// record stays until a run in which it works.
+		// Each channel's record is cleared on its own (ADR 0019, "Alerting"):
+		// a working channel, or one no longer configured, forgets the
+		// incident at once so a new fault pages it again. Only a set-aside
+		// channel that can close incidents keeps its record, until a run in
+		// which it works and its resolve is sent.
+		keep := map[string]bool{}
 		for _, f := range setAside {
-			if seen[channelKey(f.channel, key)] {
-				return h.Last, nil
-			}
+			keep[f.channel] = f.channel == "pagerduty"
 		}
-		forgetAlert(key, seen, sent, repeats)
+		forgetAlert(key, keep, seen, sent, repeats)
 		return h.Last, record()
 	case !h.Last.Passed && h.Failures >= clockPagesAfter:
 		return h.Last, deliver(senders, report.ClockDriftAlert(host, *h.Last, h.Failures), seen, sent, repeats, now, every, record)
@@ -257,22 +260,27 @@ func hostName() string {
 	return h
 }
 
-// forgetAlert removes every channel's record of the alert keyed key, so the
-// incident is told afresh the next time it arises.
-func forgetAlert(key string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) {
+// forgetAlert removes every channel's record of the alert keyed key, except
+// for the channels named in keep, so the incident is told afresh to the rest
+// the next time it arises.
+func forgetAlert(key string, keep, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) {
 	suffix := channelKey("", key)
+	drop := func(k string) bool {
+		ch, _, _ := strings.Cut(k, "|")
+		return strings.HasSuffix(k, suffix) && !keep[ch]
+	}
 	for k := range seen {
-		if strings.HasSuffix(k, suffix) {
+		if drop(k) {
 			delete(seen, k)
 		}
 	}
 	for k := range sent {
-		if strings.HasSuffix(k, suffix) {
+		if drop(k) {
 			delete(sent, k)
 		}
 	}
 	for k := range repeats {
-		if strings.HasSuffix(k, suffix) {
+		if drop(k) {
 			delete(repeats, k)
 		}
 	}

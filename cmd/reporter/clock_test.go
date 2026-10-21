@@ -823,3 +823,67 @@ func TestAResolveWaitsForAPagerDutyChannelSetAside(t *testing.T) {
 		t.Fatalf("%d resolves once the channel works again, want 1", got)
 	}
 }
+
+// runWith runs the reporter for the clock with the given channel list and
+// environment, so a test can set one channel aside or leave one out.
+func runWith(t *testing.T, r http.RoundTripper, dir string, check standInCheck, channels string, getenv func(string) string, at time.Time) error {
+	t.Helper()
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", channels, "-repeat-interval", "30m", "-clock-check", check.path()}
+	return run(args, getenv, func() time.Time { return at }, &bytes.Buffer{}, &http.Client{Transport: r})
+}
+
+func ntfyClockPages(r *relay) int {
+	n := 0
+	for _, m := range r.to("ntfy.private.test") {
+		if strings.Contains(m, "-7s") {
+			n++
+		}
+	}
+	return n
+}
+
+// A passing check clears the record channel by channel: a channel that works
+// forgets the incident at once, so a new fault pages it again, while the set-
+// aside PagerDuty channel keeps its record until it can send the resolve.
+func TestAPassingCheckForgetsTheWorkingChannelsWhileOneIsSetAside(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	check := newStandInCheck(t)
+	dir := t.TempDir()
+	at := t0.Add(time.Hour)
+	failingTwice(t, r, dir, check, at)
+	before := ntfyClockPages(r)
+	if before == 0 {
+		t.Fatal("ntfy was never paged")
+	}
+	broken := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": "https://ntfy.private.test", "TI_PAGERDUTY_ROUTING_KEY": ""})
+	check.pass()
+	_ = runWith(t, r, dir, check, "ntfy,pagerduty", broken, at.Add(10*time.Minute))
+	check.fail(clockFailure)
+	for i := 2; i <= 3; i++ {
+		_ = runWith(t, r, dir, check, "ntfy,pagerduty", broken, at.Add(time.Duration(10+5*i)*time.Minute))
+	}
+	if got := ntfyClockPages(r); got <= before {
+		t.Errorf("ntfy was paged %d times after a new fault, was %d before: the passing check kept its record", got, before)
+	}
+}
+
+// A channel taken out of -channel is neither sending nor set aside, so its
+// record is dropped when a check passes: it cannot hold the rest back.
+func TestAPassingCheckDropsTheRecordOfAChannelNoLongerConfigured(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	check := newStandInCheck(t)
+	dir := t.TempDir()
+	at := t0.Add(time.Hour)
+	failingTwice(t, r, dir, check, at)
+	check.pass()
+	if err := runWith(t, r, dir, check, "ntfy", twoChannels(), at.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "host-clock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "pagerduty|") {
+		t.Errorf("the record of a channel no longer configured was kept: %s", raw)
+	}
+}
