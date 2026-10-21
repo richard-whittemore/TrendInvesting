@@ -213,7 +213,7 @@ Degraded and Halted; one sale back to 98% per incident). Tests:
 `TestAStartCutShortHoldsNothingPastItsConfiguration`,
 `TestAnAttemptAtAStartIsALogOfThatStartHoldingNothingPastIt`,
 `TestAReadFaultIsToldApartFromTheLatestRun` (`internal/restart`, where
-these rules live; `cmd/engine` only finds, orders and reads the logs);
+these rules live; the commands only list and read the logs);
 `TestAnApprovedFreshRunStartsFromTheApprovedLatch`, `TestApprovalInputRules`,
 `TestAFreshRunNeverAttemptsAnIncidentsSaleTwice`,
 `TestARecoveredDecisionNeverFollowsAnApproval`,

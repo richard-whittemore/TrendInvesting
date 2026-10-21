@@ -112,7 +112,7 @@ func TestChartsLabelAxesInWordsAndDates(t *testing.T) {
 }
 
 func TestThemeQueryIsHonouredAndLinksFlipIt(t *testing.T) {
-	h := newHandler([]string{writeJournal(t, t.TempDir())}, "SPY")
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, "SPY")
 	cases := []struct {
 		query, root string
 		absent      bool

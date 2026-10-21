@@ -1,24 +1,22 @@
 [Unit]
 Description=Read-only dashboard (loopback only; published to the tailnet by tailscale serve)
 After=network-online.target
-# No Condition: a missing binary or run.env fails the unit with a message,
-# so the owner sees a failed unit, never a silent skip.
+# No Condition: a missing binary fails the unit with a message, so the owner
+# sees a failed unit, never a silent skip.
 
 [Service]
 Type=simple
 User=ti-trader
 Group=ti-trader
 Environment=TZ=America/New_York
-# TI_RUN: the Boost engine's current run, whose durable log is shown. Read
-# at start: after a fresh run, restart the dashboard to follow the new log
-# (docs/runbooks/lightsail-deployment.md). Optional here ("-") so that its
-# absence reaches the check below, which names it.
-EnvironmentFile=-/var/lib/trend-investing/engines/boost/run.env
-ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/boost/run.env || { echo "ti-dashboard: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the Boost engine once first (it names the run whose durable log is shown)" >&2; exit 1; }'
+# The page finds the engine's current run in its log directory on every
+# request and follows the chain of runs back to the first, so a restart or an
+# upgrade of the engine needs no restart of this unit (a new dashboard build
+# does; docs/runbooks/lightsail-deployment.md).
 # Loopback only, on the port `tailscale serve --bg 8088` publishes; the
 # firewall also closes every non-Tailscale port. The dashboard needs no
 # secret, so it is handed none.
-ExecStart=/opt/trend-investing/bin/ti-dashboard -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log -addr 127.0.0.1:8088
+ExecStart=/opt/trend-investing/bin/ti-dashboard -engine-dir /var/lib/trend-investing/engines/boost -addr 127.0.0.1:8088
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
