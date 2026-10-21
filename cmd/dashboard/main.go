@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,11 +155,25 @@ type account struct {
 	Summary report.Summary
 	Alerts  []alertView
 	Warning string `json:",omitempty"`
-	// Name and Message, set for an engine directory that shows no run, are
+	// Name and Message, set for an engine directory that cannot be shown, are
 	// the whole card: the directory's name, and "<name>: <why>", in place of
 	// the account's figures. Every other account still renders in full.
 	Name    string `json:",omitempty"`
 	Message string `json:",omitempty"`
+	// Anchor is a message card's page anchor, "dir-<n>" by the directory's
+	// place in the list: no account's id can be taken for it, nor another
+	// directory of the same name.
+	Anchor string `json:"-"`
+}
+
+// MarshalJSON gives a message card its name and message alone, so a consumer
+// cannot take it for an account with a zero balance.
+func (a account) MarshalJSON() ([]byte, error) {
+	if a.Message != "" {
+		return json.Marshal(struct{ Name, Message string }{a.Name, a.Message})
+	}
+	type plain account
+	return json.Marshal(plain(a))
 }
 
 type alertView struct {
@@ -253,8 +268,9 @@ func readOnly(next http.Handler) http.Handler {
 // the page says so about rather than calling the journal unavailable.
 var errNoRun = errors.New("the engine directory holds no run yet")
 
-// errAbandoned is the engine directory holding only starts that never
-// recorded their approval: a run that started and crashed, not a first start.
+// errAbandoned is the engine directory whose logs hold nothing past their
+// header (no log holds a record, so the chain has no head): a run that started
+// and crashed, not a first start.
 var errAbandoned = errors.New("the engine directory holds only abandoned starts")
 
 // reason says why a journal is not shown, without naming the server's paths.
@@ -265,7 +281,7 @@ func reason(err error) string {
 	case errors.Is(err, errNoRun):
 		return "no run yet: the engine has not started a run"
 	case errors.Is(err, errAbandoned):
-		return "the engine started a run but recorded no approval"
+		return "the engine started a run but recorded nothing past its header"
 	case strings.Contains(err.Error(), "does not verify"):
 		return "journal does not verify"
 	}
@@ -297,38 +313,54 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 		path, warning, err := currentLogIn(dir, logs)
 		if err != nil {
 			// One directory's trouble is that account's card only.
-			name := filepath.Base(dir)
-			paths = append(paths, current{name: name, message: name + ": " + reason(err)})
+			paths = append(paths, current{name: filepath.Base(dir), message: filepath.Base(dir) + ": " + reason(err)})
 			continue
 		}
-		paths = append(paths, current{path: path, warning: warning})
+		paths = append(paths, current{path: path, warning: warning, name: filepath.Base(dir)})
 	}
 	var out []account
-	for _, c := range paths {
+	for i, c := range paths {
+		a, err := loadOne(c.path, c.warning, benchmark, logs)
+		if c.message == "" && err != nil && c.name != "" {
+			// An engine directory's head log that cannot be shown is that
+			// account's card; only a fixed journal fails the page.
+			c.message = c.name + ": " + reason(err)
+		}
 		if c.message != "" {
-			out = append(out, account{Name: c.name, Message: c.message})
+			out = append(out, account{Name: c.name, Message: c.message, Anchor: "dir-" + strconv.Itoa(i)})
 			continue
 		}
-		raw, err := logs.readFile(c.path)
-		if err != nil {
-			return nil, errors.New("read journal")
-		}
-		envelopes, recovery, err := report.LoadLog(raw)
 		if err != nil {
 			return nil, err
 		}
-		var history report.History
-		if recovery != nil {
-			history = report.EarlierRunsOfRecovery(c.path, *recovery, logs.earlier)
-		}
-		a, err := view(history, envelopes, benchmark)
-		if err != nil {
-			return nil, err
-		}
-		a.Warning = c.warning
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// loadOne reads, verifies and views the log at path.
+func loadOne(path, warning, benchmark string, logs *logCache) (account, error) {
+	if path == "" {
+		return account{}, nil
+	}
+	raw, err := logs.readFile(path)
+	if err != nil {
+		return account{}, errors.New("read journal")
+	}
+	envelopes, recovery, err := report.LoadLog(raw)
+	if err != nil {
+		return account{}, err
+	}
+	var history report.History
+	if recovery != nil {
+		history = report.EarlierRunsOfRecovery(path, *recovery, logs.earlier)
+	}
+	a, err := view(history, envelopes, benchmark)
+	if err != nil {
+		return account{}, err
+	}
+	a.Warning = warning
+	return a, nil
 }
 
 // currentLogIn returns the path of the current run in an engine's log

@@ -107,7 +107,7 @@ tr.urgent td:first-child{border-left:3px solid var(--neg)}
 <div class="wrap">
 <aside>
 <h2>Accounts</h2>
-<nav aria-label="Accounts">{{range .Accounts}}{{if .Message}}<a href="#acct-{{.Name}}"><span class="mono">{{.Name}}</span></a>{{else}}<a href="#acct-{{.Summary.AccountID}}"><span class="mono">{{.Summary.AccountID}}</span><span class="{{stateClass .Summary.EngineState}}" style="margin-left:auto;font-size:13px"><span class="dot {{stateClass .Summary.EngineState}}" aria-hidden="true"></span>{{.Summary.EngineState}}</span></a>{{end}}{{end}}</nav>
+<nav aria-label="Accounts">{{range .Accounts}}{{if .Message}}<a href="#{{.Anchor}}"><span class="mono">{{.Name}}</span></a>{{else}}<a href="#acct-{{.Summary.AccountID}}"><span class="mono">{{.Summary.AccountID}}</span><span class="{{stateClass .Summary.EngineState}}" style="margin-left:auto;font-size:13px"><span class="dot {{stateClass .Summary.EngineState}}" aria-hidden="true"></span>{{.Summary.EngineState}}</span></a>{{end}}{{end}}</nav>
 <h2>Pages</h2>
 <div class="links"><a href="/api/summary.json">/api/summary.json</a><a href="/healthz">/healthz</a></div>
 <p>GET and HEAD only. Anything else answers 405 &ldquo;read-only dashboard&rdquo;. Without a theme choice the page follows this device&rsquo;s setting; the page runs no scripts, and every request re-reads and verifies each current journal; an earlier run&rsquo;s log, and a log a resumed run copied, is read again only when its size or modification time changes.</p>
@@ -115,7 +115,7 @@ tr.urgent td:first-child{border-left:3px solid var(--neg)}
 <main>
 <div><h1>Trend Investing (read-only)</h1><p class="sub">The latest day each journal holds, with every alert&rsquo;s full text.</p></div>
 <div class="tiles">{{range .Accounts}}{{if not .Message}}{{with .Summary}}<a class="tile" href="#acct-{{.AccountID}}"><span class="row"><span class="mono">{{.AccountID}} &middot; {{.StrategyID}}</span><span class="{{stateClass .EngineState}}"><span class="dot {{stateClass .EngineState}}" aria-hidden="true"></span>{{.EngineState}}</span></span>{{if .HaveSnapshot}}<span class="big">{{money .NetLiquidation}}</span><span class="row">Net liquidation</span>{{else}}<span class="row">No account snapshot.</span>{{end}}</a>{{end}}{{end}}{{end}}</div>
-{{range .Accounts}}{{if .Message}}<section class="acct" id="acct-{{.Name}}"><header><h2>{{.Name}}</h2></header>
+{{range .Accounts}}{{if .Message}}<section class="acct" id="{{.Anchor}}"><header><h2>{{.Name}}</h2></header>
 <p class="warn">{{.Message}}.</p></section>{{else}}{{$warning := .Warning}}{{with .Summary}}<section class="acct" id="acct-{{.AccountID}}">
 <header><h2>{{.AccountID}} <small>{{.StrategyID}}, {{.Date}}, engine {{.EngineState}}</small></h2></header>{{if $warning}}
 <p class="warn">{{$warning}}.</p>{{end}}

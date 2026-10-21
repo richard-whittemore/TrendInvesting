@@ -303,8 +303,8 @@ func TestDashboardDegradesPerAccount(t *testing.T) {
 }
 
 // TestDashboardOfOnlyAbandonedStartsSaysTheEngineStarted: a directory holding
-// only a log with no approval is a run that started and crashed, not a first
-// start.
+// only a log with nothing past its header is a run that started and crashed,
+// not a first start.
 func TestDashboardOfOnlyAbandonedStartsSaysTheEngineStarted(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "boost")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -318,7 +318,110 @@ func TestDashboardOfOnlyAbandonedStartsSaysTheEngineStarted(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := get(newHandlerFor(nil, []string{dir}, "SPY"), http.MethodGet, "/").Body.String()
-	if !strings.Contains(body, "boost: the engine started a run but recorded no approval") || strings.Contains(body, "has not started a run") {
+	if !strings.Contains(body, "boost: the engine started a run but recorded nothing past its header") || strings.Contains(body, "has not started a run") {
 		t.Fatalf("body %q", body)
+	}
+}
+
+// twoEngineDirs writes a healthy boost directory and a trad-ira one holding a
+// run, and returns them with the root.
+func twoEngineDirs(t *testing.T) (boost, trad string) {
+	t.Helper()
+	root := t.TempDir()
+	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	boost, trad = filepath.Join(root, "boost"), filepath.Join(root, "trad-ira")
+	for _, d := range []string{boost, trad} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRun(t, boost, "run1.log", approval("", ""), 0, base, halted(t, 5))
+	writeRun(t, trad, "run1.log", approval("", ""), 0, base, halted(t, 5))
+	return boost, trad
+}
+
+// TestADirectoryWhoseHeadLogDoesNotVerifyIsItsOwnCard: a head log that fails
+// to verify, or cannot be read, after the directory's listing, shows that
+// account's card and never blanks the others (ADR 0027 point 5).
+func TestADirectoryWhoseHeadLogDoesNotVerifyIsItsOwnCard(t *testing.T) {
+	boost, trad := twoEngineDirs(t)
+	path := filepath.Join(boost, "run1.log")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-40] ^= 0xff
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(newHandlerFor(nil, []string{boost, trad}, "SPY"), http.MethodGet, "/")
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, "boost: journal does not verify") || !strings.Contains(body, "halted") {
+		t.Fatalf("status %d body %q, want boost's card and trad-ira's figures", rec.Code, body)
+	}
+}
+
+func TestADirectoryWhoseHeadLogCannotBeReadIsItsOwnCard(t *testing.T) {
+	boost, trad := twoEngineDirs(t)
+	fail := filepath.Join(boost, "run1.log")
+	readFile := func(p string) ([]byte, error) {
+		if p == fail {
+			return nil, os.ErrPermission
+		}
+		return os.ReadFile(p)
+	}
+	rec := get(newHandlerWith(source{dirs: []string{boost, trad}}, "SPY", readFile), http.MethodGet, "/")
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, "boost: journal unavailable") || !strings.Contains(body, "halted") {
+		t.Fatalf("status %d body %q", rec.Code, body)
+	}
+}
+
+// TestAMessageCardCarriesNoFigures: in /api/summary.json a degraded account
+// has its name and message and no summary or alerts, so it cannot be taken for
+// an account with a zero balance.
+func TestAMessageCardCarriesNoFigures(t *testing.T) {
+	boost, _ := twoEngineDirs(t)
+	empty := filepath.Join(t.TempDir(), "trad-ira")
+	if err := os.Mkdir(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(newHandlerFor(nil, []string{boost, empty}, "SPY"), http.MethodGet, "/api/summary.json")
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil || len(raw) != 2 {
+		t.Fatalf("body %q, err %v", rec.Body, err)
+	}
+	if _, ok := raw[0]["Summary"]; !ok {
+		t.Errorf("a healthy account lacks its summary: %v", raw[0])
+	}
+	for _, key := range []string{"Summary", "Alerts"} {
+		if _, ok := raw[1][key]; ok {
+			t.Errorf("the message card carries %s: %s", key, rec.Body)
+		}
+	}
+	if _, ok := raw[1]["Message"]; !ok {
+		t.Errorf("the message card lacks its message: %s", rec.Body)
+	}
+}
+
+// TestMessageCardAnchorsAreUnique: two directories of the same name, and a
+// healthy account, each get their own anchor.
+func TestMessageCardAnchorsAreUnique(t *testing.T) {
+	var dirs []string
+	for _, root := range []string{t.TempDir(), t.TempDir()} {
+		d := filepath.Join(root, "boost")
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		dirs = append(dirs, d)
+	}
+	body := get(newHandlerFor(nil, dirs, "SPY"), http.MethodGet, "/").Body.String()
+	for _, want := range []string{`id="dir-0"`, `id="dir-1"`, `href="#dir-1"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %s", want)
+		}
+	}
+	if strings.Contains(body, `id="acct-boost"`) {
+		t.Error("a message card must not use an account's anchor")
 	}
 }
