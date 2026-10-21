@@ -132,29 +132,67 @@ the Python client it unpacks, as root, under
 `/opt/trend-investing/twsapi/10.51.01/pythonclient`, installs that
 Python client (`source/pythonclient`) offline into a fresh
 environment, `/opt/trend-investing/adapter-venv` (protobuf first, offline),
-checks that `google.protobuf` is the pinned version and that it and the `ibapi` modules import from that environment, and only then writes `/opt/trend-investing/twsapi/INSTALLED`.
+checks that `google.protobuf` and the `ibapi` modules import from that environment, resolve under it and that `google.protobuf` is the pinned version, and only then writes `/opt/trend-investing/twsapi/INSTALLED`.
 
-The venv check is the step's last gate. With the adapter venv's Python
-(`python3 -I`) it imports `google.protobuf` and the `ibapi` modules, then
-asserts that `google.protobuf.__version__` equals the `PROTOBUF_VERSION` pinned
-in `versions.env` and that the real paths of `google.protobuf` and `ibapi` both
-lie under the venv's own prefix, since the venv is built with
-`--system-site-packages` and a system `google/__init__.py` could otherwise
-shadow its protobuf. The step removes any earlier `INSTALLED` before it
-installs, so a failed run leaves no record. Each failure stops the step with
-its own message and writes nothing: `provision: ibapi did not import from
-/opt/trend-investing/adapter-venv after installing it; not recording it`,
-`provision: protobuf X in /opt/trend-investing/adapter-venv, pinned Y; not
-recording it`, or `provision: google.protobuf resolves to PATH, outside
-/opt/trend-investing/adapter-venv; not recording it` (the same for `ibapi`).
-The remedy is to re-run `sudo deploy/provision.sh twsapi`, which rebuilds the
-venv from the verified wheels. If it fails again, the venv or the system
-packages are at fault: run the same import by hand with
+The venv check is the step's last gate, and `verify_adapter_venv` in
+`deploy/provision.sh` runs its checks in this order, stopping at the first
+failure:
+
+1. The venv directory must exist; its real path (symbolic links resolved) is
+   taken for the location checks below.
+2. With the adapter venv's Python (`python3 -I`, so nothing from the current
+   directory), `google.protobuf`, `ibapi.client`, `ibapi.contract`,
+   `ibapi.order` and `ibapi.wrapper` must import.
+3. The interpreter must be a real venv: its `sys.prefix` must differ from its
+   `sys.base_prefix`, as the adapter checks at start.
+4. `google.protobuf` must resolve under the real path of the venv directory.
+5. `ibapi` must resolve under the real path of the venv directory.
+6. `google.protobuf.__version__` must equal the `PROTOBUF_VERSION` pinned in
+   `versions.env`.
+
+The locations are checked before the version because the venv is built with
+`--system-site-packages`: a system `google/__init__.py` (a regular package) can
+shadow the venv's namespace `google`, and the shadowing system protobuf then
+has the system's version. A location refusal names the shadowing path; a
+version refusal would point at the wheel, which is the wrong remedy.
+
+Every refusal writes nothing, prints one line prefixed `provision: ` on
+standard error, and leaves no `INSTALLED` record (the step removes any earlier
+one before it installs). The messages, with `VENV` the venv argument as given,
+are:
+
+- `VENV does not exist; not recording it`: step 1 found no directory. Remedy:
+  re-run `sudo deploy/provision.sh twsapi`, which builds the venv afresh.
+- `ibapi did not import from VENV after installing it; not recording it`:
+  step 2 failed. The message does not name the module; run the import by hand
+  (below) to see the error. Remedy: fix the environment, then re-run the step.
+- `could not read where protobuf and ibapi resolve in VENV; not recording it`:
+  the venv's Python imported the modules but could not report their paths and
+  version (step 2's read-back failed). Remedy: run the import by hand (below),
+  fix the environment, and re-run the step.
+- `VENV is not a venv (its interpreter's sys.prefix is the base prefix BASE);
+  not recording it`: step 3 found the interpreter is not in a venv. Remedy:
+  re-run `sudo deploy/provision.sh twsapi`, which rebuilds the venv.
+- `google.protobuf resolves to PATH, outside VENV; not recording it`: step 4
+  found protobuf imported from outside the venv. `PATH` is the shadowing
+  package. Re-running the step rebuilds only the venv and cannot remove a
+  system package, so remove or move the package at `PATH` (or its system
+  `google` package), then re-run the step.
+- `ibapi resolves to PATH, outside VENV; not recording it`: as the protobuf
+  message, for `ibapi`.
+- `protobuf X in VENV, pinned Y; not recording it`: step 6 found protobuf `X`
+  where the pin is `Y`. Remedy: re-run `sudo deploy/provision.sh twsapi`, which
+  rebuilds the venv from the verified wheels. If it fails again, the venv or
+  the system packages are at fault: run the import by hand, fix the
+  environment, and re-run the step.
+
+If a re-run fails again, the venv or the system packages are at fault: run the
+same import by hand with
 `/opt/trend-investing/adapter-venv/bin/python3 -I -c 'import google.protobuf, ibapi.client; print(google.protobuf.__file__)'`
 to see the error or the path, fix the environment, and re-run the step. Do not
 write `INSTALLED` by hand; the adapter then refuses to start with
-`IbapiNotPinned` until the step passes. The adapter re-checks the same two
-things at start (below).
+`IbapiNotPinned` until the step passes. The adapter re-checks the same things
+at start (below).
 
 `sudo deploy/provision.sh adapter` installs this directory's code (not its
 tests) and `versions.env` under `/opt/trend-investing/adapter`. The adapter
