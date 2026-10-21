@@ -1,8 +1,9 @@
 // Command boost-demo plays the broker adapter for a dry-run Boost engine: it
 // connects to cmd/engine's socket and sends an invented SPY series, session
 // by session (the bar, the account snapshot, the mark, the session close),
-// with a simulated account in which every released order fills at the next
-// session's close, and prints the decision log from the engine's replies.
+// with a simulated account in which every released order fills a minute
+// before the next session's close, and prints the decision log from the
+// engine's replies.
 // The series is synthetic, never market data. It composes no strategy: every
 // decision is the engine's, so there is one composition root, cmd/engine.
 //
@@ -145,8 +146,8 @@ func readConfiguration(path string) (event.TargetWeightConfigurationPayload, err
 	return cfg, cfg.Validate()
 }
 
-// account is the simulated joint account: a released order fills at the next
-// session's close, and the venue reports the execution.
+// account is the simulated joint account: a released order fills a minute
+// before the next session's close, and the venue reports the execution.
 type account struct {
 	cash    float64
 	held    int64
@@ -203,12 +204,17 @@ func (f *feeder) session(i int, at time.Time, price float64) error {
 		}
 		a.held += quantity
 		a.cash -= float64(float64(quantity) * price)
-		// The venue reports each execution, which ends a sell's pending shares.
+		// The venue reports each execution, which ends a sell's pending
+		// shares. It is stamped a minute before the close, inside the
+		// session: a fill stamped in the close snapshot's second post-dates
+		// that snapshot, so the snapshot holding it would state holdings no
+		// fill explains (ADR 0019, amended 2026-10-21).
+		filledAt := at.Add(-time.Minute)
 		fill := event.TargetWeightFillPayload{
 			AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
-			Side: o.Side, Quantity: o.Quantity, Price: price, FilledAt: at,
+			Side: o.Side, Quantity: o.Quantity, Price: price, FilledAt: filledAt,
 		}
-		if err := f.send(event.FillEventType, event.FillTargetWeightVersion, fill.FillID, at, fill); err != nil {
+		if err := f.send(event.FillEventType, event.FillTargetWeightVersion, fill.FillID, filledAt, fill); err != nil {
 			return err
 		}
 	}

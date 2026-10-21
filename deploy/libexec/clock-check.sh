@@ -14,6 +14,15 @@
 # Run it by hand any time: /usr/local/libexec/trend-investing/clock-check.sh
 # Exit 0: the clock is good. Exit 1: it is not, and the reason is on stderr.
 #
+# Output (a contract: the reporter, cmd/reporter, reads it into its clock
+# alert, and deploy/rehearsal/test-clock.sh checks it). Every line begins
+# "clock: ". A measured skew (this clock minus the reference, a whole number of
+# seconds with an optional minus sign) appears as "clock: ok, skew <N>s
+# against <url>, within <T>s" on a pass and "clock: skew of <N>s against <url>
+# ..." on a failure. A failure with no measurement begins "clock: not
+# synchronised", "clock: no reference clock could be measured" or, for a bad
+# setting, "clock: TI_CLOCK_". Change these words only with the reporter.
+#
 #   TI_CLOCK_TOLERANCE_SECONDS   container tolerance in whole seconds (1 to 60, default 2)
 #   TI_CLOCK_CONTAINER_MARKERS  files whose presence means a container, besides systemd-detect-virt
 #   TI_CLOCK_MAX_ROUNDTRIP_SECONDS  longest request accepted as a measurement (default 2)

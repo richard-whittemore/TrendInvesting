@@ -155,6 +155,36 @@ type Gate struct {
 	// order; the classifier applies those inside its window (reconcile).
 	book    *reconcile.Book
 	changes []reconcile.Change
+	// classified is the positions of the latest-read reconciliation classified
+	// against book, when its positions were read (a reading taken before it,
+	// delivered later, does not replace it); nil when none has been
+	// since book was set or a fill or corporate action was recorded
+	// (CheckBook).
+	classified map[string]int64
+	// classifiedAsOf is the reading time of the reconciliation whose
+	// positions classified holds: it applied only the changes dated before
+	// it (CheckBook). Only a reading at or after it replaces classified.
+	classifiedAsOf time.Time
+	// latestReadAsOf is the reading time of the latest reconciliation whose
+	// positions were classified against book. A recorded fill or corporate
+	// action clears classified but not this, so a reading taken before it
+	// never becomes the verdict afterwards; zero once book is set.
+	latestReadAsOf time.Time
+	// reported is the residual of each instrument a journalled result found
+	// unexplained against book, so the same difference is not reported
+	// twice (CheckBook); nil once book is set.
+	reported map[string]int64
+	// reportedAsOf is the reading time of the latest reconciliation that
+	// reported, resolved or omitted each instrument (a compared reading that
+	// no longer names it forgets its residual), kept after a resolution or
+	// omission clears the residual from reported: only a reading at or after
+	// it changes what is recorded (report).
+	reportedAsOf map[string]time.Time
+	// haltedOn is every reason a journalled Halt result gave for being
+	// unverifiable, so a snapshot that finds only those reasons again is not
+	// halted a second time while the account stays Halted (CheckBook). A
+	// change is a fact of the journal, so it outlives each book.
+	haltedOn map[string]bool
 	// corporateActions is every corporate action recorded as a change, by
 	// envelope ID, so a redelivery is recognised and never counted twice.
 	corporateActions map[string]event.CorporateActionPayload

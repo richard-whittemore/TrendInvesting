@@ -140,7 +140,10 @@ func (p ReconciliationPayload) Validate() error {
 // ReconciliationResultEventType identifies the domain's classification of
 // one reconciliation input (ADR 0019, "Reconciliation evidence is an input;
 // its consequence is a decision"): recomputed from the recorded observation
-// and the journal's own book, never taken from the producer. An unexplained
+// and the journal's own book, never taken from the producer. It also records
+// a close-snapshot check that did not continue: an account snapshot whose
+// holdings the book and the fills since it do not explain (ADR 0019,
+// amended 2026-10-21). An unexplained
 // or unverifiable result is followed by a strategy.engine.state record when
 // it moves the engine state.
 const ReconciliationResultEventType = "risk.reconciliation.result"
@@ -195,9 +198,11 @@ type ReconciliationComponent struct {
 type ReconciliationResultPayload struct {
 	AccountID        string `json:"account_id"`
 	ReconciliationID string `json:"reconciliation_id"`
-	// InputID is the account.reconciliation envelope classified; AnchorID
-	// the account.snapshot envelope the book starts from, empty when there
-	// is none.
+	// InputID is the account.reconciliation envelope classified, or the
+	// account.snapshot envelope of a close-snapshot check, whose
+	// ReconciliationID is "close-snapshot:" and that ID (ADR 0019, amended
+	// 2026-10-21); AnchorID the account.snapshot envelope the book starts
+	// from, empty when there is none.
 	InputID        string `json:"input_id"`
 	AnchorID       string `json:"anchor_id"`
 	Classification string `json:"classification"`

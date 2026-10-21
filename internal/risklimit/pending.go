@@ -577,6 +577,10 @@ func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
 	o.fills = append(o.fills, p)
 	g.fills[p.FillID] = p
 	g.changes = append(g.changes, reconcile.FillChange(p))
+	// A reconciliation classified before this fill did not see it, so its
+	// verdict no longer stands for the next snapshot (ADR 0019, amended
+	// 2026-10-21, point 6; CheckBook).
+	g.classified = nil
 	if s := g.ledger.sells[p.ClientOrderID]; s != nil {
 		s.fills = append(s.fills, stamped{at: p.FilledAt, quantity: p.Quantity})
 	}

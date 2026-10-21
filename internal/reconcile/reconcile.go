@@ -236,6 +236,12 @@ func roundCents(d *big.Rat) (int64, error) {
 //     exactly the unexplained components: the action degrades. Otherwise the
 //     result continues, matched when no change was applied.
 func Classify(book *Book, changes []Change, inputID string, obs event.ReconciliationPayload) event.ReconciliationResultPayload {
+	return classify(book, changes, inputID, obs, "; the book states no cash, so cash is not compared")
+}
+
+// classify is Classify, with uncompared stating why cash is not compared
+// when the book states none.
+func classify(book *Book, changes []Change, inputID string, obs event.ReconciliationPayload, uncompared string) event.ReconciliationResultPayload {
 	r := event.ReconciliationResultPayload{
 		AccountID: obs.AccountID, ReconciliationID: obs.ReconciliationID, InputID: inputID, Components: []event.ReconciliationComponent{},
 	}
@@ -246,7 +252,7 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	}
 	if book == nil {
 		reasons = append(reasons, "no account snapshot has been recorded, so the journal has no book to compare")
-		return finish(r, reasons, "")
+		return finish(r, reasons, "", uncompared)
 	}
 	r.AnchorID = book.AnchorID
 	if obs.AsOf.Before(book.AsOf) {
@@ -342,7 +348,7 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			})
 		}
 	}
-	return finish(r, reasons, parts.String(book.Cash))
+	return finish(r, reasons, parts.String(book.Cash), uncompared)
 }
 
 // appendEntry completes c's residual and whether it is explained, and adds it
@@ -396,8 +402,9 @@ func (p cashParts) String(book int64) string {
 const netCashLimit = "; cash is compared as one net total, IBKR's TotalCashValue, so unjournalled cash activities that offset one another are not detected"
 
 // finish classifies r from its components and the unverifiable reasons, and
-// states its detail; parts states the expected cash's journalled parts.
-func finish(r event.ReconciliationResultPayload, reasons []string, parts string) event.ReconciliationResultPayload {
+// states its detail; parts states the expected cash's journalled parts, and
+// uncompared why cash is not compared when it is not.
+func finish(r event.ReconciliationResultPayload, reasons []string, parts, uncompared string) event.ReconciliationResultPayload {
 	var differences []string
 	events := map[string]bool{}
 	for _, c := range r.Components {
@@ -416,7 +423,7 @@ func finish(r event.ReconciliationResultPayload, reasons []string, parts string)
 	}
 	cash := netCashLimit
 	if !r.CashCompared {
-		cash = "; the book states no cash, so cash is not compared"
+		cash = uncompared
 	}
 	switch {
 	case len(reasons) > 0:

@@ -169,7 +169,7 @@ type momentumOptions struct {
 	beforeClose  func(s *stream, session string) []event.Envelope // inputs fed just before the session closes
 	neverClosed  map[string]bool                                  // calendar sessions with no bar and no close
 	withdraw     map[string]float64                               // session -> settled cash withdrawn after its close, in a snapshot an hour later
-	withdrawFill map[string]float64                               // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
+	withdrawFill map[string]float64                               // instrument -> settled cash withdrawn as its sell fills, in a snapshot read the second after the fill
 	// riskOffJanuary makes SPY fall over January's last six sessions too.
 	riskOffJanuary bool
 	// compact feeds the compact universe stream: bars only for SPY, IEF,
@@ -359,7 +359,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				}, event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID)
 				if amount, ok := opts.withdrawFill[o.InstrumentID]; ok && o.Side == event.OrderSideSell {
 					acct.settled = float64(acct.settled - amount)
-					venue(acct.snapshot(at, marks), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
+					// Read the second after the fill: a fill stamped in a
+					// snapshot's second post-dates it, so a snapshot of that
+					// second holding the fill states holdings no fill explains
+					// (ADR 0019, amended 2026-10-21).
+					venue(acct.snapshot(at.Add(time.Second), marks), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
 				}
 			}
 			if quantity < o.Quantity {
