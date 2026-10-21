@@ -155,6 +155,10 @@ type Gate struct {
 	// order; the classifier applies those inside its window (reconcile).
 	book    *reconcile.Book
 	changes []reconcile.Change
+	// classified is the positions of the latest reconciliation classified
+	// against book, when its positions were read; nil when none has been
+	// since book was set (CheckBook).
+	classified map[string]int64
 	// corporateActions is every corporate action recorded as a change, by
 	// envelope ID, so a redelivery is recognised and never counted twice.
 	corporateActions map[string]event.CorporateActionPayload

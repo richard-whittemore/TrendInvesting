@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352))
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490))
 - Date: 2026-09-17
 
 ## In plain English
@@ -715,3 +715,86 @@ Target-weight rules version 1.19.0 reads the new schema versions, and with
 them the margin alarm's basis above and the price band's comparison (ADR
 0026, point 3, amended 2026-10-18), so a journal holding one does not replay
 under 1.18.0.
+
+## Amendment (2026-10-21, #490): the engine checks every close snapshot's holdings against its own fills
+
+**Why.** The book a reconciliation starts from is the latest
+`account.snapshot` (*Reconcile with every reading*, above). Until this
+amendment the engine took each new snapshot as its book without checking it,
+so holdings that changed during a session through a trade the engine did not
+place (one made by hand, or by another client), or through a fill it was never
+given (a late execution the adapter passed over), arrived in that session's
+close snapshot as if they had always been so. Every later reconciliation then
+compared IBKR with a book that already held the difference. A difference that
+only the owner's acknowledgement records is not a check.
+
+**What the IBKR adapter already checks (the amendment of 2026-10-18), and
+what it leaves to the engine.** The adapter checks a reading taken after the
+close before it stamps it as the close: its holdings must be the previous
+close's book (the latest committed account snapshot back through the chain
+of runs, or the starting book a Run approval states) adjusted by the
+journalled fills since, share for share (condition 2). A reading that fails
+is stamped at its read time and the session is withheld; a run's first
+reading that fails is sent as its reconciliation alone, which the engine,
+holding no book, classifies unverifiable. Every batch also carries an
+`account.reconciliation` from the same reading, ahead of its snapshots once
+the engine holds a book, which the engine classifies against its book and the
+fills since. Together these catch an intra-session trade in the IBKR flow.
+But they are the adapter's checks: the engine adopted whatever snapshot it was
+given, so its safety rested on the adapter sending a reconciliation with every
+snapshot, from the same reading, and on the adapter's own comparison being
+right.
+
+**Decision: the engine checks the snapshot itself.** Every
+`account.snapshot` after a run's first is compared, before it becomes the
+book, with the book in force adjusted by every change journalled since it
+(fills, dividends and splits; *Explained means*), exactly as a reconciliation
+is classified, with the snapshot's holdings as the observation:
+
+1. **The same window and the same zero tolerance.** A change counts when it
+   is stamped from the book's second up to, not including, the snapshot's: a
+   fill stamped in a snapshot's second post-dates it, the convention every
+   book follows, so a snapshot that already holds such a fill states holdings
+   no fill explains, and is a difference (the safe side). The positions
+   compared are the union of the book's, the snapshot's and those a change
+   touched. One share counts.
+2. **Holdings only.** The snapshot's cash is not compared: it moves with
+   postings no event records yet (interest, fees), which the adapter's drift
+   bound (condition 2, 1% of net liquidation) and the daily summary's
+   unexplained cash watch.
+3. **A difference is unexplained.** The engine journals a
+   `risk.reconciliation.result` (schema version 1, unchanged) whose input is
+   the snapshot (`input_id` its envelope ID) and whose reconciliation ID is
+   `close-snapshot:<snapshot envelope ID>`, and the account goes Degraded on
+   exactly the instruments that differ (`strategy.engine.state`, reason
+   `reconciliation-unexplained`), as for any unexplained reconciliation. A
+   change no book can apply (a delisting, a merger, a symbol change) makes the
+   check unverifiable, and the account Halted (`reconciliation-unverifiable`).
+   The reporter's reconciliation alert pages the owner, urgent and repeated
+   until acknowledged, and the engine-state record the check caused is the
+   same incident. Recovery is the runbook's, as for any reconciliation.
+4. **The snapshot still becomes the book.** It is the book the planner sizes
+   from (ADR 0026, point 2), as before; the Degraded scope is what stops the
+   engine acting on the difference, and leaving it is never automatic.
+5. **Nothing is journalled for a check that continues**: a snapshot the fills
+   explain is the ordinary close, and every such journal keeps its bytes.
+6. **One difference, one report.** A snapshot whose holdings are exactly the
+   positions a reconciliation already classified against the same book is not
+   classified again: the adapter sends each reading's reconciliation ahead of
+   its snapshot, and that result, matched or not, already stands for those
+   holdings.
+7. **Not the run's first book.** A run's first snapshot has no book in the
+   engine to be checked against; the adapter checks that reading against the
+   previous close or the starting book (condition 2), and the Run approval
+   states the starting book.
+
+**What this does not cover.** A difference that arises and is reversed within
+one session (a round trip by another client) leaves the holdings unchanged and
+shows only in cash, which this check does not compare (the residual risk of
+the amendment of 2026-10-18). The after-fill, pre-order and scheduled
+reconciliations, the comparison of open orders and cash activity matching
+remain unbuilt.
+
+This changes what the engine decides from journalled inputs, so it is a rules
+change under ADR 0016: target-weight RulesVersion 1.20.0. No schema changes.
+

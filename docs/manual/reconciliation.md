@@ -35,27 +35,45 @@ A matching reconciliation changes nothing and sends nothing.
 ## What the morning check covers, and what it does not
 
 The book is replaced by every close's account snapshot, and that snapshot
-already contains the session's fills. So the morning check compares **the
-previous close's snapshot, plus the events the journal recorded since that
-close**, with IBKR's view the next morning. It covers only what changed
-between that close and the morning read:
+already contains the session's fills. Two checks keep a difference from
+slipping into it:
 
-- **It catches** a manual trade placed overnight or before the open, a
-  dividend, split or fee posted overnight, IBKR liquidating a position
-  overnight, and a fill the journal recorded after the close that IBKR does
-  not show (or the reverse).
-- **It does not catch** anything that happens during a session. Orders sent
-  at a close execute in the next session, before that session's own close
-  snapshot. A fill whose report the engine never received is therefore taken
-  into the next close's snapshot, and no check compares the morning book plus
-  the session's fills with that snapshot. A missing fill report, or a
-  difference that arises while the market is open, is caught only by the
-  after-fill and pre-order reconciliations ADR 0019 asks for, which are not
-  built yet (see the last section).
-- **The book is not itself verified.** ADR 0019 asks that the starting point
-  be a previously verified reconciliation or an opening baseline you approved.
-  As built, the starting point is simply the last snapshot read, so a
-  difference already inside that snapshot is not seen.
+- **The reconciliation with each delivery** compares IBKR's holdings and cash
+  with **the previous close's snapshot, plus the events the journal recorded
+  since that close**. It is taken when the session's market data is
+  delivered (normally the evening after the close), from the same reading as
+  the new snapshot, and goes ahead of it, so it covers the whole session as
+  well as the night before. It catches a manual trade placed overnight, before the open
+  or during the session, a dividend, split or fee posted overnight, IBKR
+  liquidating a position, a fill whose report the engine never received, and a
+  fill the journal recorded that IBKR does not show.
+- **The close-snapshot check** (built 2026-10-21, ADR 0019 amended): before a
+  new account snapshot becomes the book, the engine itself compares the
+  snapshot's holdings with the book in force plus the fills, dividends and
+  splits journalled since. A holding they do not explain (shares bought or
+  sold by hand during the session, or a fill the engine was never given) is an
+  unexplained difference: the account goes **Degraded** on that stock and you
+  get the reconciliation alert, its ID `close-snapshot:<snapshot ID>`. This
+  does not rely on the adapter: it holds for every snapshot after a run's
+  first, stamped at the close or at the read time, whether or not a
+  reconciliation came with it. When the delivery's reconciliation already
+  found the same holdings against the same book, the check sends nothing more:
+  one difference is one alert. It compares holdings only, never cash.
+
+What neither catches:
+
+- **A difference within one session that leaves the holdings as they were**,
+  such as a sale and a repurchase of the same shares by another program. It
+  shows only in cash, which is compared as one net total (below) and, for the
+  joint account, not at all.
+- **The run's first book.** The engine has nothing to compare a run's first
+  snapshot with; the adapter compares that reading with the previous run's
+  last close or the starting book you approved, and halts the account if it
+  differs ("What can go wrong").
+- **Anything between the checks while the market is open.** The after-fill,
+  pre-order and scheduled reconciliations ADR 0019 asks for are not built yet
+  (see the last section), so a difference that arises during a session is
+  found at that session's close, not when it happens.
 
 ## What "the book" is
 
@@ -128,7 +146,10 @@ The journal records, for every reconciliation:
   replay never asks IBKR again;
 - `risk.reconciliation.result`: the engine's verdict, with every component
   listed (unchanged ones too), its book, expected and observed figures, the
-  difference, and the events that explained it;
+  difference, and the events that explained it. A close-snapshot check that
+  found a difference is recorded the same way, its ID `close-snapshot:` and
+  the snapshot's ID, its input the `account.snapshot`, and cash not
+  compared;
 - `strategy.engine.state`, only when the state moved: Degraded with its scope,
   or Halted, with the reason `reconciliation-unexplained` or
   `reconciliation-unverifiable`.
@@ -174,9 +195,9 @@ own date), else at the read time ([paper trading](paper-trading.md), "A
 paper day"). The reconciliation always carries the read time, so it is
 never earlier than the book it is compared with.
 
-Today its main loop sends only the first: a broker snapshot ahead of each
-day's market data. The reconciliation record is built and tested but never
-sent, so the engine never receives one.
+Its main loop sends all three with every delivery of market data, the
+reconciliation ahead of the snapshots once the engine holds a book, and a
+reconciliation alone at every start and reconnect once it does.
 
 Every field is always stated. A list with nothing in it is sent as an empty
 list. Something IBKR did not deliver, or delivered in a form the engine cannot
@@ -207,14 +228,16 @@ Two conservative choices, both of which can only make a sale smaller:
 | Margin interest on the joint account | Not compared: Boost's book states no cash, so the result says cash is not compared. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
 | A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
 | A fill stamped in the same second as the morning read | It counts as after the read. If IBKR's figure includes it, the result is a difference and the account goes Degraded on that instrument: the safe side. | Check the fill at IBKR, then recover as for any difference. |
-| A fill report lost during a session, or a difference that arises while the market is open | Not caught by the morning check: the next close's snapshot absorbs it ("What the morning check covers"). | Compare IBKR with the journal yourself when anything looks wrong. |
+| A trade during a session that the engine did not place (one you made by hand in IBKR, or another program's), or a fill report the engine was never given. Alert: `<account>: reconciliation unexplained (close-snapshot:<snapshot ID>)` | The session's close snapshot holds shares that the book and the fills journalled since it do not explain. The engine records the check (`risk.reconciliation.result`, its input the snapshot) and the account goes **Degraded** on that stock: no buys, the stock frozen, the snapshot still taken as the book the next decision sizes from. If the delivery's reconciliation from the same reading already reported the same holdings, nothing more is sent: you get that reconciliation's alert instead. Nothing is recorded for a snapshot the fills explain. | Find the trade in IBKR's trade log for the session. Then follow `docs/runbooks/reconciliation.md`, "Recover", as for any unexplained difference: a fresh run whose approval clears the incident, or carries it in force. |
+| A difference that arises while the market is open | Found at that session's close, by the delivery's reconciliation or the close-snapshot check (above), not when it happens: the after-fill and pre-order reconciliations are not built. | Compare IBKR with the journal yourself when anything looks wrong during the day. |
 
 ## What is not built yet
 
 - The reconciliations ADR 0019 also asks for after every fill, before every
   order and on a timer (the start, reconnect and daily-delivery ones are
-  sent); until they exist, a difference that
-  arises during a session (a lost fill report among them) is not caught. Also
+  sent, and every close snapshot is checked); until they exist, a difference
+  that arises during a session (a lost fill report among them) is found only
+  at that session's close. Also
   the comparison of open orders; the joint account's cash; matching each cash
   activity to IBKR's activity rows rather than comparing one net total; and
   the outside heartbeat monitor. These are tracked as follow-up issues.

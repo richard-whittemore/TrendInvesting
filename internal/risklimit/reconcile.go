@@ -3,6 +3,7 @@ package risklimit
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -25,8 +26,40 @@ type Reconciliation struct {
 // SetBook records the journal's book that later reconciliations start from:
 // the latest account snapshot, which the planner sizes from (ADR 0026, point
 // 2). The changes journalled since stay recorded; the classifier applies
-// those after the book's time.
-func (g *Gate) SetBook(b reconcile.Book) { g.book = &b }
+// those after the book's time. It checks nothing: the engine sets its book
+// through CheckBook.
+func (g *Gate) SetBook(b reconcile.Book) { g.book, g.classified = &b, nil }
+
+// CheckBook checks b, an account snapshot about to become the book, against
+// the book in force and every change journalled since it
+// (reconcile.Holdings), moves the engine state as Reconcile does, and then
+// sets b as the book (ADR 0019, amended 2026-10-21): a holding no journalled
+// fill explains degrades the account on its instrument, and b still becomes
+// the book the planner sizes from, the Degraded scope freezing what differs.
+// It reports whether the check is to be journalled:
+//
+//   - never for the run's first book, which has none to be checked against
+//     (the IBKR adapter checks that reading against the previous close, or
+//     the starting book the Run approval states; ADR 0019, amended
+//     2026-10-18);
+//   - never when the check continues: a snapshot the fills explain is the
+//     ordinary close, and recording nothing keeps every such journal's bytes;
+//   - never when b's holdings are exactly the positions a reconciliation
+//     already classified against the same book: the IBKR adapter sends each
+//     reading's reconciliation ahead of its snapshot, and that
+//     reconciliation's result, matched or not, already stands for those
+//     holdings, so one difference is never reported twice.
+func (g *Gate) CheckBook(b reconcile.Book) (Reconciliation, bool) {
+	defer g.SetBook(b)
+	if g.book == nil {
+		return Reconciliation{}, false
+	}
+	r := reconcile.Holdings(g.accountID, g.book, g.changes, b)
+	if r.Action == event.ReconciliationActionContinue || g.classified != nil && maps.Equal(g.classified, b.Positions) {
+		return Reconciliation{}, false
+	}
+	return g.consequence(b.AnchorID, r), true
+}
 
 // ObserveCorporateAction records a journalled market.corporate-action,
 // envelope id, as a change a reconciliation's book is bridged by: a
@@ -90,11 +123,23 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 		return Reconciliation{}, fmt.Errorf("risklimit: reconciliation for account %q; this gate is %q", p.AccountID, g.accountID)
 	}
 	r := reconcile.Classify(g.book, g.changes, id, p)
+	if g.book != nil && p.Readable(event.ReconciliationComponentPositions) {
+		g.classified = map[string]int64{}
+		for _, position := range p.Positions {
+			g.classified[position.InstrumentID] = position.Quantity
+		}
+	}
+	return g.consequence(id, r), nil
+}
+
+// consequence journals r, the classification of input id, and moves the
+// engine state as Reconcile states.
+func (g *Gate) consequence(id string, r event.ReconciliationResultPayload) Reconciliation {
 	out := Reconciliation{Result: r, ResultID: "reconciliation-result:" + g.accountID + ":" + id}
 	var state *event.EngineStatePayload
 	switch {
 	case r.Action == event.ReconciliationActionHalt && g.state != StateHalted:
-		state = &event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonReconciliationUnverifiable, Detail: "reconciliation " + p.ReconciliationID + " " + r.Detail}
+		state = &event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonReconciliationUnverifiable, Detail: "reconciliation " + r.ReconciliationID + " " + r.Detail}
 		g.scope, g.cashScope = nil, nil
 		out.StateID = g.move(StateHalted, id)
 	case r.Action == event.ReconciliationActionDegrade && g.state != StateHalted:
@@ -105,7 +150,7 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 		g.scope, g.cashScope = scope, cash
 		state = &event.EngineStatePayload{
 			State: event.EngineStateDegraded, Reason: event.EngineStateReasonReconciliationUnexplained,
-			Detail:             "reconciliation " + p.ReconciliationID + " " + r.Detail,
+			Detail:             "reconciliation " + r.ReconciliationID + " " + r.Detail,
 			ScopeInstrumentIDs: slices.Clone(scope), ScopeCashComponents: slices.Clone(cash),
 		}
 		out.StateID = g.move(StateDegraded, id)
@@ -113,5 +158,5 @@ func (g *Gate) Reconcile(id string, p event.ReconciliationPayload) (Reconciliati
 	if state != nil {
 		out.State, out.StateSchemaVersion = state, event.EngineStateScopedVersion
 	}
-	return out, nil
+	return out
 }

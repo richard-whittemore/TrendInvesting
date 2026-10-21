@@ -220,7 +220,7 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	case event.SessionRetractedEventType:
 		return r.applyRetraction(in)
 	case event.AccountSnapshotEventType:
-		return nil, r.applySnapshot(in)
+		return r.applySnapshot(in)
 	case event.MarkRecordedEventType:
 		return nil, r.applyMark(in)
 	case event.SessionClosedEventType:
@@ -331,20 +331,19 @@ func (r *momentumRun) applyUniverse(in event.Envelope) error {
 	return nil
 }
 
-func (r *momentumRun) applySnapshot(in event.Envelope) error {
+func (r *momentumRun) applySnapshot(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeInput[event.AccountCashSnapshotPayload](in, event.AccountSnapshotCashVersion)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if p.AccountID != r.h.cfg.AccountID {
-		return fmt.Errorf("targetweight: snapshot for account %q; this run decides %q", p.AccountID, r.h.cfg.AccountID)
+		return nil, fmt.Errorf("targetweight: snapshot for account %q; this run decides %q", p.AccountID, r.h.cfg.AccountID)
 	}
 	if r.snapshot != nil && !p.AsOf.After(r.snapshot.AsOf) {
-		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, r.snapshot.AsOf)
+		return nil, fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, r.snapshot.AsOf)
 	}
 	r.snapshot = &p
-	r.h.gate.SetBook(reconcile.CashBook(in.ID, p))
-	return nil
+	return r.h.checkBook(in, reconcile.CashBook(in.ID, p), p.AsOf)
 }
 
 func (r *momentumRun) applyMark(in event.Envelope) error {
