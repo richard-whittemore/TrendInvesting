@@ -62,7 +62,7 @@ cleanup() {
   if test "${TI_TEST_KEEP:-0}" != 1; then
     # The test's own container only: its stand-in engine holds nothing.
     docker rm --force "$name" >/dev/null 2>&1 || true
-    for v in etc state opt journal; do docker volume rm "$name-$v" >/dev/null 2>&1 || true; done
+    for v in etc state opt journal; do docker volume rm "$name-$v" "$name-x-$v" >/dev/null 2>&1 || true; done
     if test -n "$shifted_image"; then docker image rm "$shifted_image" >/dev/null 2>&1 || true; fi
   fi
   rm -rf "$work"
@@ -211,6 +211,20 @@ grep -q 'ti-engine@boost.service' "$work/recreate-out" || fail "the refusal does
 test "$(docker container inspect --format '{{.Id}}' "$name")" = "$old" || fail "the container changed although --recreate was refused"
 docker exec "$name" systemctl is-active --quiet ti-engine@boost.service || fail "the engine stopped although --recreate was refused"
 echo "refused, naming the engine; the container and the engine are untouched"
+
+step "up.sh reuses volumes only when this checkout made them"
+for v in etc state opt journal; do
+  test "$(docker volume inspect --format '{{index .Labels "org.trend-investing.checkout"}}' "$name-$v")" = "$(cd "$work/checkout" && pwd -P)" || fail "the volume $name-$v is not labelled with the checkout that made it"
+done
+# Volumes of another checkout, kept after its container was removed, under a
+# name of their own so the container above is not involved.
+for v in etc state opt journal; do
+  docker volume create --label org.trend-investing.mac-mini="$name-x" --label org.trend-investing.checkout=/elsewhere "$name-x-$v" >/dev/null
+done
+if env TI_MAC_NAME="$name-x" TI_DIST="$work/dist" "$work/checkout/deploy/mac-mini/up.sh" >"$work/volumes-out" 2>&1; then cat "$work/volumes-out"; fail "up.sh provisioned over another checkout's volumes"; fi
+cat "$work/volumes-out"
+grep -q "docker volume rm $name-x-etc" "$work/volumes-out" || fail "the refusal does not give the owner's two choices"
+if docker container inspect "$name-x" >/dev/null 2>&1; then fail "a container was created on another checkout's volumes"; fi
 
 step "T2, T3: docker restart"
 # The ordered shutdown sends the engine (ti-trader) SIGTERM and ends well

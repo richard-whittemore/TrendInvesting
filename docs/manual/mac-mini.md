@@ -122,6 +122,11 @@ It is careful with what it did not make:
   make, or made from another checkout, or whose mounts are not exactly the
   four volumes, is neither provisioned nor removed: up.sh stops and says
   which label or mount is wrong.
+- **Only its own volumes.** The four volumes carry the same two labels, and
+  up.sh reuses existing ones only if they name this checkout, whether or not
+  a container uses them now. Volumes kept from another checkout's container,
+  or made by an earlier up.sh before it recorded the checkout, are never
+  adopted silently: up.sh stops and names them.
 - **One at a time.** Two `up.sh` runs for the same container at once would
   copy over each other's files. Each run holds a lock
   (`~/.trend-investing/up-ti.lock`) while it works; a second run stops and
@@ -294,6 +299,8 @@ restart ti`) has the server's rules:
 | `up: the container ti was made by an earlier up.sh, before it recorded the checkout` | Changes nothing and removes nothing: it cannot tell this container from another checkout's | If it is your own rehearsal container: stop its adapter, then its engine, then `docker stop -t 60 ti && docker rm ti` (the volumes are kept), and run `up.sh` again, which creates it anew on the same volumes |
 | `up: the container ti is not one up.sh made from this checkout` | Changes nothing and removes nothing | Use another `TI_MAC_NAME`, or run up.sh from the checkout that made it; remove the other container yourself only if you know what it holds |
 | `up: the container ti's mounts are not the four volumes` | Changes nothing and removes nothing: files kept outside the volumes would be lost | Find out what the extra or missing mount is before removing the container by hand |
+| `up: the volume ti-etc is not one up.sh made from this checkout` | Changes nothing and removes nothing: provisioning would overwrite the programs and configuration of the rehearsal that owns it | Run up.sh from the checkout that made it, or, if that rehearsal's contents may go, remove its volumes once no container uses them (`docker volume rm ti-etc ti-state ti-opt ti-journal`) |
+| `up: the volume ti-etc was made by an earlier up.sh, before it recorded the checkout` | Changes nothing and removes nothing: it cannot be told apart from another checkout's | If it is your own rehearsal's and its contents may go, remove the four volumes (`docker volume rm ti-etc ti-state ti-opt ti-journal`), then run `up.sh` again, which creates them anew |
 | `up: refusing to remove ti while ti-engine@boost.service runs` | `--recreate` changes nothing | Stop the adapter, then the engine, then run `up.sh --recreate` again |
 | `up: cannot ask systemd in ti which units run` | `--recreate` changes nothing: an engine might be running | Read `docker logs ti`; once `docker exec ti systemctl list-units` answers, check the engine and adapter are stopped and run `up.sh --recreate` again |
 | `up: systemd in ti did not finish starting` | Stops before copying anything in | Read `docker logs ti`; run `up.sh` again, or `up.sh --recreate` (the volumes are kept) |

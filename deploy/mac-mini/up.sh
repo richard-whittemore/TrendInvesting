@@ -33,7 +33,7 @@
 # and a second up.sh for the same container while one runs (a lock in
 # ~/.trend-investing). It changes or removes an existing container only if
 # up.sh made it from this checkout (its labels) with the four volumes as its
-# only mounts; it removes one only after systemd has stopped it, and never
+# only mounts, and reuses existing volumes only if they carry the same labels; it removes one only after systemd has stopped it, and never
 # while an engine or the adapter runs.
 #
 #   TI_MAC_NAME             container name and volume prefix (default ti)
@@ -216,13 +216,6 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
   docker build --platform linux/arm64 --tag "$image" - <"$here/Dockerfile" >/dev/null
 fi
 
-for v in etc state opt journal; do
-  if ! docker volume inspect "$name-$v" >/dev/null 2>&1; then
-    docker volume create --label org.trend-investing.mac-mini="$name" "$name-$v" >/dev/null
-    say "created the volume $name-$v"
-  fi
-done
-
 # check_own: the existing container is one up.sh made, for this name, from
 # this checkout, and its only mounts are the four volumes; otherwise nothing
 # of it is changed or removed.
@@ -245,9 +238,40 @@ check_own() {
   fi
 }
 
+# check_volumes: an existing volume is reused only if up.sh made it from this
+# checkout (the container's two labels), whether or not a container uses it
+# now; a missing one is created with both labels. A volume labelled by another
+# checkout, or by the launcher before it recorded the checkout, or not by up.sh
+# at all, would be provisioned over the programs and configuration of the
+# rehearsal that owns it, so it is refused and nothing is changed.
+check_volumes() {
+  local v labels made from
+  for v in etc state opt journal; do
+    if ! labels=$(docker volume inspect --format '{{index .Labels "org.trend-investing.mac-mini"}}|{{index .Labels "org.trend-investing.checkout"}}' "$name-$v" 2>/dev/null); then
+      continue
+    fi
+    labels=${labels//<no value>/}
+    made=${labels%%|*}
+    from=${labels#*|}
+    if test "$made" = "$name" && test -z "$from"; then
+      refuse "the volume $name-$v was made by an earlier up.sh, before it recorded the checkout, so it cannot be told apart from another checkout's. Nothing was changed. If it is your own rehearsal's and its contents may go, remove the four volumes ($name-etc, $name-state, $name-opt, $name-journal) once no container uses them: docker volume rm $name-etc $name-state $name-opt $name-journal. Then run up.sh again, which creates them anew"
+    fi
+    if test "$made" != "$name" || test "$from" != "$repo"; then
+      refuse "the volume $name-$v is not one up.sh made from this checkout: its labels name '${made:-none}' from '${from:-no checkout}', and this is $name from $repo. Nothing was changed. Either run up.sh from that checkout, or, if that rehearsal's contents may go, remove its volumes: docker volume rm $name-etc $name-state $name-opt $name-journal (once no container uses them)"
+    fi
+  done
+  for v in etc state opt journal; do
+    if ! docker volume inspect "$name-$v" >/dev/null 2>&1; then
+      docker volume create --label org.trend-investing.mac-mini="$name" --label org.trend-investing.checkout="$repo" "$name-$v" >/dev/null
+      say "created the volume $name-$v"
+    fi
+  done
+}
+
 exists=0
 docker container inspect "$name" >/dev/null 2>&1 && exists=1
 if test "$exists" = 1; then check_own; fi
+check_volumes
 if test "$exists" = 1 && test "$recreate" = 1; then
   if test "$(docker container inspect --format '{{.State.Running}}' "$name")" = true; then
     # Removing the container ends every process in it at once, which for an

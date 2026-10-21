@@ -39,6 +39,9 @@ mkdir -p "$fake_home" "$work/bin"
 # a run that passes every refusal before Docker stops there by default.
 #   FAKE_EXISTS=1         a container of the name exists
 #   FAKE_LABELS           its labels, "<mac-mini label>|<checkout label>"
+#   FAKE_VOLUMES=absent   no volume exists yet (default: all four exist)
+#   FAKE_VOLUME_LABELS    the labels of every existing volume, "<mac-mini label>|<checkout label>"
+#                         (default: this test's checkout, "<name>|$FAKE_CHECKOUT")
 #   FAKE_MOUNTS           its mounts, "type name destination;" each (default: the four volumes)
 #   FAKE_ACTIVE           the engine and adapter units it reports running
 #   FAKE_LIST_FAILS=1     systemd in it does not answer `systemctl list-units`
@@ -57,6 +60,8 @@ case "$*" in
   "container inspect --format "*.State.Running*) echo true ;;
   "container inspect --format "*.Config.Image*) echo "${FAKE_IMAGE:-}" ;;
   "container inspect "*) test "${FAKE_EXISTS:-0}" = 1 ;;
+  "volume inspect --format "*) test "${FAKE_VOLUMES:-}" != absent || exit 1; printf '%s\n' "${FAKE_VOLUME_LABELS-$n|${FAKE_CHECKOUT:-}}" ;;
+  "volume inspect "*) test "${FAKE_VOLUMES:-}" != absent ;;
   *"systemctl list-units --state=active"*) test "${FAKE_LIST_FAILS:-0}" = 0 || exit 1; test -z "${FAKE_ACTIVE:-}" || printf '%s\n' $FAKE_ACTIVE ;;
   *"systemctl list-units --state=failed"*) test -z "${FAKE_FAILED:-}" || printf '%s\n' $FAKE_FAILED ;;
   *"systemctl is-system-running"*) echo "${FAKE_SYSTEM:-running}" ;;
@@ -289,7 +294,7 @@ refused_after() {
   test $# -gt 0 && shift
   : >"$work/calls"
   local status=0
-  env HOME="$fake_home" PATH="$work/bin:$PATH" DOCKER_CALLS="$work/calls" FAKE_ARCH=arm64 TI_DIST="$work/dist" "$@" \
+  env HOME="$fake_home" PATH="$work/bin:$PATH" DOCKER_CALLS="$work/calls" FAKE_ARCH=arm64 FAKE_CHECKOUT="$co" TI_DIST="$work/dist" "$@" \
     "$clean/deploy/mac-mini/up.sh" ${args[@]+"${args[@]}"} >"$work/out" 2>&1 || status=$?
   if test "$status" = 0; then fail "$what: accepted"; return; fi
   grep -qiF -- "$word" "$work/out" || fail "$what: the refusal does not say '$word': $(cat "$work/out")"
@@ -301,7 +306,7 @@ run_after() {
   while test $# -gt 0 && test "$1" != --; do args+=("$1"); shift; done
   test $# -gt 0 && shift
   : >"$work/calls"
-  env HOME="$fake_home" PATH="$work/bin:$PATH" DOCKER_CALLS="$work/calls" FAKE_ARCH=arm64 TI_DIST="$work/dist" "$@" \
+  env HOME="$fake_home" PATH="$work/bin:$PATH" DOCKER_CALLS="$work/calls" FAKE_ARCH=arm64 FAKE_CHECKOUT="$co" TI_DIST="$work/dist" "$@" \
     "$clean/deploy/mac-mini/up.sh" ${args[@]+"${args[@]}"} >"$work/out" 2>&1
 }
 
@@ -319,6 +324,21 @@ refused_after "a container with a fifth mount" "mounts" --recreate -- FAKE_EXIST
   FAKE_MOUNTS="volume ti-etc /etc/trend-investing;volume ti-state /var/lib/trend-investing;volume ti-opt /opt/trend-investing;volume ti-journal /var/log/journal;bind  /data;"
 refused_after "a container missing its state volume" "mounts" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" \
   FAKE_MOUNTS="volume ti-etc /etc/trend-investing;volume ti-opt /opt/trend-investing;volume ti-journal /var/log/journal;"
+
+# Volumes are the rehearsal's records: reused only when they were made from
+# this checkout, with or without a container, and never adopted silently.
+refused_after "volumes made from another checkout" "docker volume rm ti-etc" --recreate -- FAKE_VOLUME_LABELS="ti|/elsewhere"
+grep -qF "/elsewhere" "$work/out" || fail "the refusal of another checkout's volumes does not name that checkout: $(cat "$work/out")"
+grep -qF "$co" "$work/out" || fail "the refusal of another checkout's volumes does not name this checkout: $(cat "$work/out")"
+refused_after "a container of this checkout on another checkout's volumes" "volumes" -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_VOLUME_LABELS="ti|/elsewhere"
+refused_after "volumes without labels" "ti-etc" -- FAKE_VOLUME_LABELS="|"
+refused_after "volumes from the launcher before the checkout label" "before it recorded" -- FAKE_VOLUME_LABELS="ti|"
+if grep -q '^docker volume create' "$work/calls"; then fail "volumes were created over unlabelled ones: $(cat "$work/calls")"; fi
+# New volumes carry the same two labels as the container.
+run_after -- FAKE_VOLUMES=absent || fail "a first run with no volumes failed: $(cat "$work/out")"
+for v in etc state opt journal; do
+  grep -qF "docker volume create --label org.trend-investing.mac-mini=ti --label org.trend-investing.checkout=$co ti-$v" "$work/calls" || fail "volume ti-$v is not created with both labels: $(cat "$work/calls")"
+done
 
 # --recreate while an engine or the adapter runs: refused, naming the unit.
 refused_after "--recreate while the engine runs" "ti-engine@boost.service" --recreate -- FAKE_EXISTS=1 FAKE_LABELS="$mine" FAKE_ACTIVE="ti-engine@boost.service"
