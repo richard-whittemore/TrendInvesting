@@ -268,6 +268,10 @@ type pendingCash struct {
 	from    time.Time
 	to      time.Time
 	counted map[string]bool
+	// transfers is the deposits and withdrawals among counted, the fills
+	// left out: with the book, the residual and the currency, they are the
+	// difference's identity (sameDifference).
+	transfers map[string]bool
 	// alerted is set once a buy refused on this difference has raised the
 	// urgent alert: one pending difference pages once (withheldOnCash).
 	alerted bool
@@ -286,12 +290,14 @@ type repeatedRead struct {
 
 // sameDifference returns the undecided pending difference r, found against
 // the book in force from from, repeats, or nil: the same book, the same
-// residual in the same currency, after the same transfers.
-func (g *Gate) sameDifference(r event.ReconciliationResultPayload, cash event.ReconciliationComponent, from time.Time, counted map[string]bool) *pendingCash {
+// residual in the same currency, after the same transfers. A fill is no
+// transfer: a reading after a fill against the same book that finds the
+// same residual finds the same difference (ADR 0019, amended 2026-10-21).
+func (g *Gate) sameDifference(r event.ReconciliationResultPayload, cash event.ReconciliationComponent, from time.Time, transfers map[string]bool) *pendingCash {
 	for i := range g.pendingCash {
 		pc := &g.pendingCash[i]
 		if pc.result.AnchorID == r.AnchorID && pc.from.Equal(from) && pc.result.Currency == r.Currency &&
-			pc.cash.Residual == cash.Residual && maps.Equal(pc.counted, counted) {
+			pc.cash.Residual == cash.Residual && maps.Equal(pc.transfers, transfers) {
 			return pc
 		}
 	}
@@ -322,9 +328,18 @@ func (g *Gate) pend(id string, o reconcile.Outcome, p event.ReconciliationPayloa
 			cash = c
 		}
 	}
-	counted := map[string]bool{}
+	movements := map[string]bool{}
+	for _, c := range g.changes {
+		if c.Kind == reconcile.ChangeCashMovement {
+			movements[c.ID] = true
+		}
+	}
+	counted, transfers := map[string]bool{}, map[string]bool{}
 	for _, e := range cash.Explanations {
 		counted[e] = true
+		if movements[e] {
+			transfers[e] = true
+		}
 	}
 	read := "has not read IBKR's statement since its reading of " + stamp(g.flex.CheckedAt) + " (" + g.flex.State + ")"
 	if g.flex.State == event.FlexStateRead {
@@ -341,7 +356,7 @@ func (g *Gate) pend(id string, o reconcile.Outcome, p event.ReconciliationPayloa
 	// judged against the first reading's day and decided with it, so its
 	// increase is left out of the budget once (ADR 0019, amended
 	// 2026-10-21).
-	same := g.sameDifference(r, cash, from, counted)
+	same := g.sameDifference(r, cash, from, transfers)
 	found, repeat := p.AsOf, ""
 	if same != nil {
 		found = same.to
@@ -351,10 +366,14 @@ func (g *Gate) pend(id string, o reconcile.Outcome, p event.ReconciliationPayloa
 	r.Detail = fmt.Sprintf("pending-cash-read: %s%s; the Flex reader %s, so a deposit or withdrawal it has not yet recorded may explain it; %s; %s; the difference is checked again at each reconciliation until the reader's records explain it, or it is Degraded on cash once the reader has covered %s or more than %d sessions have closed since",
 		repeat, strings.TrimPrefix(r.Detail, "unexplained: "), read, direction, g.stateClause(), found.In(nysecalendar.NewYork).Format("20060102"), pendingSessions)
 	if same != nil {
+		// The difference paged with its first reading: the repeat names
+		// it, so the reporter does not page again (one difference, one
+		// reconciliation alert).
+		r.RepeatOf = same.result.ReconciliationID
 		same.repeats = append(same.repeats, repeatedRead{inputID: id, reconciliationID: r.ReconciliationID})
 		return r
 	}
-	g.pendingCash = append(g.pendingCash, pendingCash{inputID: id, result: r, cash: cash, from: from, to: p.AsOf, counted: counted})
+	g.pendingCash = append(g.pendingCash, pendingCash{inputID: id, result: r, cash: cash, from: from, to: p.AsOf, counted: counted, transfers: transfers})
 	return r
 }
 
@@ -468,7 +487,7 @@ func (g *Gate) settlePending(id string, p event.ReconciliationPayload) []Reconci
 		// none is left undecided in the log (restart.CheckPendingCash).
 		for _, rep := range pc.repeats {
 			rr := r
-			rr.InputID, rr.ReconciliationID = rep.inputID, rep.reconciliationID
+			rr.InputID, rr.ReconciliationID, rr.RepeatOf = rep.inputID, rep.reconciliationID, r.ReconciliationID
 			out = append(out, g.consequence(id+":pending-cash:"+rep.inputID, rr))
 		}
 	}

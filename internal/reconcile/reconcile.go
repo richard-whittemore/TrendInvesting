@@ -486,10 +486,11 @@ func classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 // of the same time before them, in journal order. A transfer stamped at the
 // start of its New York day is one IBKR dated by day alone (the reader's
 // stamp, adapter/ibkr/flex.py, Posting.dated_only), which is not when the
-// cash moved: it runs after that day's other changes, as at the end of the
-// session, so a withdrawal the day's sells funded is no overdraft; a timed
-// transfer keeps its time. The order is the test's alone: the cash compared
-// is the same sum in any order.
+// cash moved: such a withdrawal runs after that day's other changes, as at
+// the end of the session, so one the day's sells funded is no overdraft,
+// and such a deposit keeps the start of its day, so it funds that day's
+// withdrawals; a timed transfer keeps its time. The order is the test's
+// alone: the cash compared is the same sum in any order.
 func overdrawnIn(book int64, applied []Change) []string {
 	ordered := slices.Clone(applied)
 	slices.SortStableFunc(ordered, func(a, b Change) int {
@@ -516,12 +517,14 @@ func overdrawnIn(book int64, applied []Change) []string {
 }
 
 // overdrawnAt is when c runs in the overdrawn test: its time to the second,
-// except that a transfer dated by day alone, stamped at the start of its New
-// York day, runs at the start of the next one, after every change of its own
-// day (overdrawnIn).
+// except that a withdrawal dated by day alone, stamped at the start of its
+// New York day, runs at the start of the next one, after every change of its
+// own day (overdrawnIn). A deposit dated by day alone keeps the start of its
+// day: it only adds cash, so counting it early gives the account the benefit
+// of the doubt.
 func overdrawnAt(c Change) time.Time {
 	at := c.At.Truncate(time.Second)
-	if c.Kind != ChangeCashMovement {
+	if c.Kind != ChangeCashMovement || c.Cash >= 0 {
 		return at
 	}
 	local := at.In(nysecalendar.NewYork)

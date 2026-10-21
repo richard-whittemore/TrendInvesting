@@ -108,9 +108,9 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     difference (ADR 0026, point 3, kill switch: "alert once"; ADR 0019,
 //     amendment of 2026-10-17, reading 10, and amended 2026-10-21), and an
 //     unflagged one sends nothing once an earlier record of the same reason
-//     in the journal carried the flag. Without that proof the journal may predate the flag,
-//     so an unflagged refusal alerts as any other (ADR 0019, "Alerting": an
-//     alert is a safety requirement).
+//     in the journal carried the flag. Without that proof the journal may
+//     predate the flag, so an unflagged refusal alerts as any other (ADR
+//     0019, "Alerting": an alert is a safety requirement).
 //   - A risk.sale.withheld the gate flagged opens the account's stale
 //     episode and is that episode's one urgent alert, as missing data
 //     (ADR 0019, amendment of 2026-10-17, reading 10, "Stale episode"); it
@@ -142,10 +142,14 @@ func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool
 //     all-unaffordable, which may rest on a bad valuation, and
 //     labels-missing, which may rest on a broken sector-label source; both
 //     are urgent.
-//   - A risk.reconciliation.result that degrades or halts is one incident,
-//     however many components it names; the engine-state record the same
-//     reconciliation caused is that incident too, not another alert. A
-//     result that continues sends nothing. The alert states the account's
+//   - A risk.reconciliation.result that degrades, halts or alerts is one
+//     incident, however many components it names; the engine-state record
+//     the same reconciliation caused is that incident too, not another
+//     alert. A result that continues sends nothing, nor does one that
+//     repeats a pending cash difference an earlier reading found, or
+//     decides such a repeat: that difference paged with its first reading
+//     and pages with its first decision (ADR 0019, amended 2026-10-21: one
+//     difference, one reconciliation alert). The alert states the account's
 //     state after the reconciliation, as the gate holds it: the record the
 //     reconciliation caused, or, when it caused none (the state did not
 //     move), the state already in force, from the latest engine-state record
@@ -214,7 +218,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				if !ok {
 					after = inForce.with(p)
 				}
-				out = append(out, reconciliationAlert(account, e, p, after))
+				if p.RepeatOf == "" {
+					out = append(out, reconciliationAlert(account, e, p, after))
+				}
 			}
 		case event.AlertAcknowledgedEventType:
 			// Only an acknowledgement for this account stops the repeats

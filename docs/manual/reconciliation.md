@@ -263,8 +263,8 @@ liquidation):
      (`<account>: order refused (pending-cash-decrease)`), once for the whole
      pending difference. Buys go again as soon as the difference is settled.
    A reconnect that reads the account again before the book changes finds
-   the same difference: its result says so and it is settled with the
-   first.
+   the same difference, even after a trade has filled: its result says so,
+   it sends no second alert, and it is settled with the first.
    The alert's private text says which, and the account's state as it is.
 2. **That evening**, the adapter compares the post-close reading with the
    previous close. The reader has not recorded the transfer yet, so a deposit
@@ -304,7 +304,8 @@ recorded withdrawal larger than the cash before it, which the result names
 (the cash is counted in time order, so a deposit and a withdrawal on the same
 day are never mistaken for an overdraft, and a withdrawal IBKR dates by day
 alone counts after that day's sales, so one the day's sales paid for is not
-either). Only a transfer in the account's own
+either, while a deposit IBKR dates by day alone counts from the start of its
+day). Only a transfer in the account's own
 currency explains a difference.
 
 **Do not approve a fresh run while a cash read is pending.** A fresh run
@@ -562,7 +563,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| Alert: `<account>: reconciliation <classification> (<id>)`, urgent, repeating until acknowledged; `<classification>` is `unexplained`, `unverifiable` or `pending-cash-read`, `<id>` the reconciliation's ID | Sent once per reconciliation that degrades or halts. Its text names what differs (or "evidence that could not be compared"), the account's whole state after it, what it still does and what it has stopped; on the public relay, no figures. It ends "Recovery is a person's: docs/runbooks/reconciliation.md." | Read the full text on PagerDuty or the dashboard. Follow `docs/runbooks/reconciliation.md`, "First, in every case". Acknowledge with `operator acknowledge` and the alert key the text ends with. |
+| Alert: `<account>: reconciliation <classification> (<id>)`, urgent, repeating until acknowledged; `<classification>` is `unexplained`, `unverifiable` or `pending-cash-read`, `<id>` the reconciliation's ID | Sent once per reconciliation that degrades or halts, and once per pending cash read: a later reading of the same pending difference, and its decision, send nothing more. Its text names what differs (or "evidence that could not be compared"), the account's whole state after it, what it still does and what it has stopped; on the public relay, no figures. It ends "Recovery is a person's: docs/runbooks/reconciliation.md." | Read the full text on PagerDuty or the dashboard. Follow `docs/runbooks/reconciliation.md`, "First, in every case". Acknowledge with `operator acknowledge` and the alert key the text ends with. |
 | `reconciliation-unexplained`. Alert: `<account>: reconciliation unexplained (<id>)` | A difference no journalled event accounts for. The account goes **Degraded** on exactly what differs: a holding's instrument is frozen, unexplained cash refuses every buy. A later difference widens the scope; a later match never brings it back to Normal. | `docs/runbooks/reconciliation.md`, "Find the cause", then "Recover": explain each difference at IBKR, then start a fresh run whose approval clears the incident (`operator approve -clear-incident <id>`), or carries it in force if something is still unexplained ([restart](restart.md)). |
 | `reconciliation-unverifiable`. Alert: `<account>: reconciliation unverifiable (<id>)` | The figures could not be compared, so the account goes **Halted**: no order is released, except, for the joint account, the one sale back to 98%. The private text lists why, for example `the broker's positions could not be read`, `the broker's total cash could not be read`, `no account snapshot has been recorded, so the journal has no book to compare`, `the observation as of ... precedes the book as of ...`, or `the broker's cash is in ...; the book's is in ...`. | Fix what could not be read (the adapter's link, `journalctl -u ti-adapter-boost`), then follow the runbook's "Recover". Leaving Halted is never automatic: it takes a fresh run you approve. |
 | `pending-cash-read`. Alert: `<account>: reconciliation pending-cash-read (<id>)` | Only the cash differs, on a day the Flex reader has not yet read, so a deposit or withdrawal it has not recorded yet may explain it. **No state changes.** More cash than the book: buys are not stopped, but are sized without the new cash until it is explained. Less cash: every buy is refused (`pending-cash-decrease`) until it is settled, the first refusal paging once; sells and exits go on. The private text says how far the reader has read. At each later reconciliation the difference is checked against the transfers recorded since: explained to the cent, it is settled (a result `explained` for it, no alert); once the reader has read its day with the difference still there, or after more than two sessions, the account goes **Degraded** on cash (the `unexplained` row below, same `<id>`). The alert text's account-state sentence may say "Degraded on instruments [] and cash []": the account is not; trust the engine state in `journal-query refusals` | If you moved money that day, nothing: it clears at the first reconciliation after the reader has covered the day, usually the next evening, sometimes the one after. Acknowledge the alert. If you did not, check IBKR's activity for what moved the cash. Do not approve a fresh run while a cash read is pending: `operator approve` refuses one unless you state the book you checked in IBKR after the transfer |

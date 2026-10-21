@@ -168,14 +168,17 @@ func TestWhetherABookHoldsItsEveningComesFromTheCalendar(t *testing.T) {
 
 func TestTheOverdrawnTestRunsInTimeOrderNotJournalOrder(t *testing.T) {
 	// The reader writes same-day transfers in (as of, transaction ID) order
-	// and may write an earlier one after a later one, so a withdrawal dated
-	// by day alone can be journalled before the deposit that funded it. The
-	// test is run in time order, IBKR's transaction ID breaking a tie: the
-	// $2,000 deposit (T10) comes before the $1,000 withdrawal (T20), so
-	// nothing was overdrawn, and the $12.30 still missing is an ordinary
-	// difference (ADR 0019, amended 2026-10-21).
-	changes := []reconcile.Change{transfer("T20", -1000, midnight), transfer("T10", 2000, midnight)}
-	o := reconcile.Reconcile(iraBook(), changes, "reconciliation:1", observed(1500, held("SPY", 147), held("TLT", 20)))
+	// and may write an earlier one after a later one, so a withdrawal can be
+	// journalled before the deposit that funded it. The test is run in time
+	// order, IBKR's transaction ID breaking a tie: of two transfers at 10
+	// a.m., the $2,000 deposit (T10) comes before the $1,000 withdrawal
+	// (T20), so nothing was overdrawn, and the $12.30 still missing is an
+	// ordinary difference (ADR 0019, amended 2026-10-21).
+	ten := midnight.Add(10 * time.Hour)
+	changes := []reconcile.Change{transfer("T20", -1000, ten), transfer("T10", 2000, ten)}
+	evening := observed(1500, held("SPY", 147), held("TLT", 20))
+	evening.AsOf = midnight.Add(17 * time.Hour)
+	o := reconcile.Reconcile(iraBook(), changes, "reconciliation:1", evening)
 	if o.Result.Classification != event.ReconciliationUnexplained {
 		t.Fatalf("got %s: %s", o.Result.Classification, o.Result.Detail)
 	}
@@ -244,5 +247,24 @@ func TestAnOverdrawnTestThatCannotRunInTimeOrderFindsNoOverdraft(t *testing.T) {
 	}
 	if o := reconcile.Reconcile(iraBook(), changes, "reconciliation:1", observed(512.3, held("SPY", 147), held("TLT", 20))); o.Overdrawn {
 		t.Errorf("no withdrawal is judged overdrawn: %q", o.Result.Detail)
+	}
+}
+
+func TestADepositDatedByDayAloneKeepsTheStartOfItsDay(t *testing.T) {
+	// Only a day-dated withdrawal runs after its day's other changes: a
+	// deposit can only add cash, so counting it from the start of its day
+	// is the account's benefit of the doubt. A $1,000 withdrawal at 10 a.m.
+	// that the day's $2,000 deposit funded is no overdraft, though the book
+	// holds $512.30; the $10 still missing is an ordinary difference (ADR
+	// 0019, amended 2026-10-21).
+	changes := []reconcile.Change{transfer("D1", 2000, midnight), transfer("W1", -1000, midnight.Add(10*time.Hour))}
+	evening := observed(512.3+2000-1000-10, held("SPY", 147), held("TLT", 20))
+	evening.AsOf = midnight.Add(17 * time.Hour)
+	o := reconcile.Reconcile(iraBook(), changes, "reconciliation:1", evening)
+	if o.Result.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("got %s: %s", o.Result.Classification, o.Result.Detail)
+	}
+	if o.Overdrawn || strings.Contains(o.Result.Detail, "more than the cash") {
+		t.Errorf("the day-dated deposit funded the timed withdrawal: %v %q", o.Overdrawn, o.Result.Detail)
 	}
 }

@@ -899,10 +899,13 @@ meet the money before the reader has recorded it.
      alert.
    A later reconciliation against the same book that finds the same
    difference (the same residual after the same transfers, as a reconnect's
-   does) is the same pending difference: its result is journalled
-   `pending-cash-read`, naming the reading that found it, and it is judged
-   against that reading's day and decided with it, each reading under its
-   own result, so its increase is left out of the buy budget once.
+   does; a fill between the readings is no transfer, so it does not make a
+   new difference) is the same pending difference: its result is journalled
+   `pending-cash-read`, naming the reading that found it (`repeat_of`), and
+   it is judged against that reading's day and decided with it, each reading
+   under its own result, so its increase is left out of the buy budget once.
+   A result naming the reading it repeats, and its decision, does not page:
+   the difference paged with its first reading and its first decision.
    A difference never pends for longer than two sessions, whatever the reader
    does: a reader set aside for a week does not keep a difference unreported.
 4. **What still degrades at once.** A difference in a holding; a cash
@@ -915,9 +918,10 @@ meet the money before the reader has recorded it.
    writes them), not journal order, since the reader may journal an earlier
    transfer after a later one. A transfer IBKR dates by day alone, which the
    reader stamps at the start of that New York day, is not timed: for this
-   test it runs after that day's fills, as at the end of the session, so a
-   withdrawal the day's sells funded is no overdraft; a timed transfer keeps
-   its time. A book the NYSE calendar cannot place is never
+   test such a withdrawal runs after that day's fills, as at the end of the
+   session, so a withdrawal the day's sells funded is no overdraft, and such
+   a deposit keeps the start of its day, since it only adds cash; a timed
+   transfer keeps its time. A book the NYSE calendar cannot place is never
    pending either.
 5. **The adapter's cash-drift bound subtracts journalled transfers before it
    is applied.** The IBKR adapter's post-close check (condition 2 of the

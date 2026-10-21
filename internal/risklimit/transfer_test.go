@@ -419,6 +419,9 @@ func TestARepeatedReadingOfAPendingDifferenceIsTheSameDifference(t *testing.T) {
 	if got := g.PendingCashIncrease(); got != 500 {
 		t.Fatalf("one difference of $500 pends, got %v", got)
 	}
+	if r.Result.RepeatOf != "morning" {
+		t.Errorf("the repeat names the reading that found it: %q", r.Result.RepeatOf)
+	}
 	rebook(g, 0, 1500)
 	deposited(t, g, "T1", 500, 30)
 	flexRead(t, g, "20250305", at.Add(12*time.Hour))
@@ -434,12 +437,50 @@ func TestARepeatedReadingOfAPendingDifferenceIsTheSameDifference(t *testing.T) {
 		if s.Result.InputID != input || s.Result.Classification != event.ReconciliationExplained {
 			t.Errorf("settled %d: %s %s", i, s.Result.InputID, s.Result.Classification)
 		}
+		if want := []string{"", "morning"}[i]; s.Result.RepeatOf != want {
+			t.Errorf("settled %d repeats %q, want %q", i, s.Result.RepeatOf, want)
+		}
 	}
 	if next.Settled[0].ResultID == next.Settled[1].ResultID {
 		t.Errorf("each has its own ID: %s", next.Settled[0].ResultID)
 	}
 	if got := g.PendingCashIncrease(); got != 0 {
 		t.Errorf("decided: %v pends", got)
+	}
+}
+
+func TestAPendingDifferenceReadAgainAfterAFillIsTheSameDifference(t *testing.T) {
+	// A difference's identity is its book, residual, currency and the
+	// transfers it counted, not the fills: a reconnect after the day's fill
+	// finds the same unexplained deposit, one pending difference whose
+	// increase is left out of the buy budget once, and the repeat names the
+	// reading that found it, so it does not page again (ADR 0019, amended
+	// 2026-10-21: the same residual after the same transfers; one
+	// difference, one reconciliation alert).
+	g := booked(t)
+	flexRead(t, g, "20250304", at.Add(-12*time.Hour))
+	released(t, check(t, g, order(event.OrderSideBuy, 2, 10))[0])
+	first := reconcileWith(t, g, "reconciliation:1", morningOf(1500, 10))
+	if first.Result.Classification != event.ReconciliationPendingCashRead || first.Result.RepeatOf != "" {
+		t.Fatalf("the first reading pends and repeats nothing: %s %q", first.Result.Classification, first.Result.RepeatOf)
+	}
+	if err := g.ObserveFill(event.TargetWeightFillPayload{
+		AccountID: "joint", ClientOrderID: "tw-buy", FillID: "exec-1", InstrumentID: "SPY",
+		Side: event.OrderSideBuy, Quantity: 2, Price: 1, Commission: 0.5, FilledAt: at.Add(90 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again := morningOf(1497.5, 12)
+	again.AsOf, again.ReconciliationID = again.AsOf.Add(time.Hour), "reconnect"
+	r := reconcileWith(t, g, "reconciliation:2", again)
+	if r.Result.Classification != event.ReconciliationPendingCashRead {
+		t.Fatalf("got %s: %s", r.Result.Classification, r.Result.Detail)
+	}
+	if r.Result.RepeatOf != "morning" {
+		t.Errorf("the repeat names the reading that found the difference: %q", r.Result.RepeatOf)
+	}
+	if got := g.PendingCashIncrease(); got != 500 {
+		t.Fatalf("one difference of $500 pends, got %v", got)
 	}
 }
 

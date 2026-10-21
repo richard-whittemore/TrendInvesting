@@ -7,6 +7,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
@@ -172,5 +173,59 @@ func TestAPendingCashIncreaseIsNotInvestedUntilTheReaderExplainsIt(t *testing.T)
 	buys = released(t, explained.decisions)[4:]
 	if got, want := buys[0].Figures.CashAvailable, base[0].Figures.CashAvailable+deposited; math.Abs(got-want) > 1e-6 {
 		t.Errorf("explained: the first buy is checked against %v, want %v, the budget with the deposit", got, want)
+	}
+}
+
+// TestAPendingDifferenceReadTwicePagesOnce: a reconnect's reading of the
+// same pending difference is journalled, but the reporter pages once for
+// the difference, and once for its decision (ADR 0019, amended 2026-10-21:
+// one difference, one reconciliation alert).
+func TestAPendingDifferenceReadTwicePagesOnce(t *testing.T) {
+	h, s, at := bookedIRA(t)
+	mustApply(t, h, flexStatusInput(t, s, event.FlexStateRead, "20250102", at.Add(30*time.Minute)))
+	// The reporter reads the account from the run's configuration.
+	journal := []event.Envelope{s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", at, momentumConfiguration())}
+	obs := observation(iraAccount, 10, 1500)
+	obs.AsOf = newYorkDay("2025-01-03").Add(15 * time.Hour)
+	journal = append(journal, mustApply(t, h, reconciliationInput(t, s, "reconciliation:1", obs))...)
+	obs.AsOf, obs.ReconciliationID = obs.AsOf.Add(time.Hour), "reconnect:1"
+	journal = append(journal, mustApply(t, h, reconciliationInput(t, s, "reconciliation:2", obs))...)
+	if got := len(ofType(journal, event.ReconciliationResultEventType)); got != 2 {
+		t.Fatalf("each reading is journalled: %d results", got)
+	}
+	pages := func() int {
+		alerts, err := report.Alerts(journal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, a := range alerts {
+			if a.Kind == report.KindReconciliation {
+				n++
+			}
+		}
+		return n
+	}
+	if got := pages(); got != 1 {
+		t.Fatalf("two readings of one difference page %d times, want once", got)
+	}
+	// That evening's close snapshot holds the cash, and the reader covers
+	// the day without recording a transfer: both readings are decided
+	// unexplained, and the decision pages once.
+	next := closeOf("2025-01-03")
+	mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:1", next, event.AccountCashSnapshotPayload{
+		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: iraAccount, AsOf: next, NetLiquidation: 30500, Currency: "USD",
+			Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 10}}},
+		SettledCash: 1500, TotalCash: 1500,
+	}))
+	mustApply(t, h, flexStatusInput(t, s, event.FlexStateRead, "20250103", newYorkDay("2025-01-03").Add(21*time.Hour+30*time.Minute)))
+	obs.AsOf, obs.ReconciliationID = newYorkDay("2025-01-06").Add(9*time.Hour), "morning:2"
+	decided := mustApply(t, h, reconciliationInput(t, s, "reconciliation:3", obs))
+	if got := len(ofType(decided, event.ReconciliationResultEventType)); got != 3 {
+		t.Fatalf("want both readings decided and the new reading's result, got %d results", got)
+	}
+	journal = append(journal, decided...)
+	if got := pages(); got != 2 {
+		t.Errorf("the difference and its decision page %d times, want twice", got)
 	}
 }

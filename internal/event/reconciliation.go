@@ -227,6 +227,13 @@ type ReconciliationResultPayload struct {
 	ScopeInstrumentIDs  []string `json:"scope_instrument_ids,omitempty"`
 	ScopeCashComponents []string `json:"scope_cash_components,omitempty"`
 	Detail              string   `json:"detail"`
+	// RepeatOf is the reconciliation ID of the reading that first found
+	// this pending cash difference, set on a later reading's result that
+	// found the same difference and on that result's decision: the
+	// difference has already paged, so the reporter does not page it again
+	// (ADR 0019, amended 2026-10-21: one difference, one reconciliation
+	// alert). Empty on every other result.
+	RepeatOf string `json:"repeat_of,omitempty"`
 }
 
 // Validate checks identity, the classification against its action, reasons
