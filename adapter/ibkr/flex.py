@@ -24,18 +24,33 @@ read from IBKR"). One reading:
    is not written (counted as in_first_book); one at or after it is always
    written, or the reading is set aside. A transfer IBKR dates by day alone
    on the approval's own New York day is taken as after it (counted as
-   date_only_on_approval_day): the owner read the book before approving, so
-   the book cannot hold it. Postings other than transfers are
+   date_only_on_approval_day) when the approval came before that session's
+   official close: the owner read the book before the day's business, so the
+   book cannot hold it. After the close (an evening approval, or a day with
+   no session) the day's business may be in the book or not: the reading is
+   set aside as an ambiguous transfer (state "ambiguous-transfer", the
+   transaction and its amount named) until the owner records which side it
+   is on (record_resolutions, `flex --resolve ID=in-first-book` or
+   `=after-approval`; the RESOLUTIONS_SUFFIX file beside the ledger), which
+   every later reading honours (counted as resolved). Postings other than
+   transfers are
    parsed, and kept on the Statement, but not written; a type KINDS does not
    know is counted in the status file (unknown_types) and said.
 
-Each reading's period (the statement's fromDate and toDate) is kept beside
-the ledger (COVERAGE_SUFFIX). A statement that starts later than the day
-after the last accepted reading ended leaves days in neither, and a transfer
-on them would be lost when it drops out of the query's window: the reading
-is refused as a coverage gap (state "coverage-gap", both days named),
-nothing is written, and the kept period is not moved on. The first reading
-has no period before it and is accepted.
+Each reading's period is kept beside the ledger (COVERAGE_SUFFIX): its
+fromDate and covered_to, the day before its toDate. The last day of a
+statement is not complete when it is read (IBKR may post a day's transfer
+after its own end-of-day processing, after the evening's reading), so it is
+covered only once a later statement reads it again; the ledger's IDs keep a
+transfer read twice from being written twice. A statement that starts later
+than the day after covered_to leaves days in neither, and a transfer on them
+would be lost when it drops out of the query's window: the reading is
+refused as a coverage gap (state "coverage-gap", both days named), nothing
+is written, and the kept period is not moved on. With no period kept (the
+first reading, or the coverage file lost), the statement must start on or
+before the New York day of the first run's approval, since every transfer
+from that day on is to be written; otherwise it is a coverage gap naming
+both days, read again by a statement whose period reaches back to it.
 
 The equity before a transfer (equity_before) is, in order:
 
@@ -63,9 +78,10 @@ an early close), found by the data job's NYSE calendar, the one the adapter
 stamps by (adapter/marketdata/nyse_calendar.py).
 
 A record once written is never changed. A transfer IBKR adds a reading late
-can belong in a figure already written from the same snapshot (a transfer
-before it, when its figure adds those since the snapshot; one after it,
-when its figure takes those from it on off the snapshot): it is written,
+can fall in the window an already-written figure counts (a later transfer's
+figure adds those since its snapshot; an earlier one's takes those from it
+on, up to its snapshot's reading, off that snapshot, whatever the basis of
+each): it is written,
 and its record says so (note, LATER_WRITTEN_FIRST or
 EARLIER_WRITTEN_FIRST; counted as out_of_order), the earlier-written
 record's equity_before not revised.
@@ -120,7 +136,12 @@ SOURCE = "ibkr-flex"
 ID_PREFIX = "ibkr-flex:"
 STATUS_SUFFIX = ".status.json"
 COVERAGE_SUFFIX = ".coverage.json"
-COVERAGE_FIELDS = ("from_date", "to_date")
+COVERAGE_FIELDS = ("from_date", "covered_to")
+# The owner's decisions on transfers dated by day alone on an evening approval's day: {transaction ID: decision}.
+RESOLUTIONS_SUFFIX = ".resolutions.json"
+IN_FIRST_BOOK = "in-first-book"
+AFTER_APPROVAL = "after-approval"
+DECISIONS = (IN_FIRST_BOOK, AFTER_APPROVAL)
 LOCK_SUFFIX = ".lock"
 
 # IBKR's Flex Web Service, version 3. GetStatement's address comes from
@@ -210,7 +231,13 @@ class StatementRefused(ValueError):
 
 
 class CoverageGap(StatementRefused):
-    """The statement starts later than the day after the last accepted reading ended: days are in neither."""
+    """The statement starts later than the day after the last accepted reading's covered_to (or, with none kept,
+    after the first run's approval day): days are in neither."""
+
+
+class AmbiguousTransfer(StatementRefused):
+    """A transfer dated by day alone on the day of a first-run approval given after that session's close, with no
+    decision recorded by the owner: whether the starting book holds it is not known."""
 
 
 class FlexRejected(Exception):
@@ -475,6 +502,20 @@ def _is_close_stamp(moment):
                                "a close is not known".format(_stamp(moment))) from None
 
 
+def _after_the_close(moment):
+    """Whether moment is at or after its New York session's official close, or on a day with no session: the day's
+    business is then before it, by the adapter's NYSE calendar."""
+    local = moment.astimezone(NEW_YORK)
+    try:
+        if not nyse_calendar.is_trading_day(local.date()):
+            return True
+        return local >= nyse_calendar.session_close(local.date())
+    except nyse_calendar.OutOfRange:
+        raise StatementRefused("the first run's approval at {} is in a year the NYSE calendar does not hold, so "
+                               "whether it came after that session's close is not known".format(_stamp(moment))
+                               ) from None
+
+
 def _held_until(snapshot_as_of):
     """The moment up to which a snapshot's net liquidation holds every transfer: a close snapshot is read after the
     close, so it holds the rest of its New York day; any other reading holds what came before it."""
@@ -584,44 +625,73 @@ def read_ledger(path):
     return records
 
 
-def _after_approval(posting, approved_at):
-    """Whether posting is after the first run's approval: dated at or after it, or dated by day alone on its New York
-    day, which the book the owner read before approving cannot hold (ADR 0027, starting-book amendment)."""
+def _after_approval(posting, approved_at, resolutions):
+    """(after, resolved) for posting against the first run's approval (ADR 0027, starting-book amendment), or None
+    when it cannot be told: dated at or after the approval is after it; dated by day alone on the approval's New York
+    day is after it when the approval came before that session's close (the book the owner read then cannot hold
+    it), and otherwise on the side the owner recorded in resolutions (resolved), or not known."""
     if posting.as_of >= approved_at:
-        return True
-    return posting.dated_only and (posting.as_of.astimezone(NEW_YORK).date()
-                                   == approved_at.astimezone(NEW_YORK).date())
+        return True, False
+    if not (posting.dated_only and posting.as_of.astimezone(NEW_YORK).date()
+            == approved_at.astimezone(NEW_YORK).date()):
+        return False, False
+    if not _after_the_close(approved_at):
+        return True, False
+    decision = resolutions.get(posting.transaction_id)
+    if decision is None:
+        return None
+    return decision == AFTER_APPROVAL, True
 
 
-def _written_first(snapshots, written, posting, basis_snapshot, basis):
-    """The note for posting when a record already written from the same snapshot holds a figure posting belongs in
-    (see the module), else None."""
+def _written_first(snapshots, written, posting):
+    """The note for posting when it falls in the window a record already written counts in its figure (see the
+    module; _equity_before), else None."""
     key = (posting.as_of, posting.transaction_id)
+    day = posting.as_of.astimezone(NEW_YORK).date()
     for at, ident, _ in written:
-        snapshot, their_basis = _interval(snapshots, at)
-        if snapshot is None or snapshot[0] != basis_snapshot[0] or their_basis != basis:
+        snapshot, basis = _interval(snapshots, at)
+        if snapshot is None:
             continue
-        if basis is None and (at, ident) > key:
-            return LATER_WRITTEN_FIRST
-        if basis is not None and (at, ident) < key:
-            return EARLIER_WRITTEN_FIRST
+        theirs = (at, ident)
+        if basis is None:
+            inside = key < theirs and posting.as_of >= _held_until(snapshot[0])
+        elif basis == SAME_DAY_SNAPSHOT_LESS_AMOUNT:
+            inside = key > theirs and posting.as_of >= snapshot[0] and day == at.astimezone(NEW_YORK).date()
+        else:
+            inside = key > theirs and posting.as_of < _held_until(snapshot[0])
+        if inside:
+            return LATER_WRITTEN_FIRST if theirs > key else EARLIER_WRITTEN_FIRST
     return None
 
 
-def new_movements(statement, ledger, approved_at, snapshots):
+def new_movements(statement, ledger, approved_at, snapshots, resolutions=None):
     """(records to write, transfers not written as in the first book and why, IDs of transfers dated by day alone on
-    the approval's day): each transfer of statement not yet in ledger and after the first run's approval
-    (_after_approval); StatementRefused when one cannot be written."""
+    the approval's day taken as after it, IDs of transfers placed by the owner's resolutions): each transfer of
+    statement not yet in ledger and after the first run's approval (_after_approval); AmbiguousTransfer naming each
+    one whose side is not known, StatementRefused when one cannot be written."""
+    resolutions = resolutions or {}
     transfers = sorted((p for p in statement.postings if p.kind == TRANSFER), key=lambda p: (p.as_of, p.transaction_id))
     known = {r["payload"]["transaction_id"]: (_parse_stamp(r["payload"]["as_of"]), r["payload"]["transaction_id"],
                                               Decimal(repr(float(r["payload"]["amount"]))))
              for r in ledger.values()}
     already = sorted(known.values())
+    sides = {p.transaction_id: _after_approval(p, approved_at, resolutions) for p in transfers
+             if p.transaction_id not in known}
+    unknown = [p for p in transfers if p.transaction_id in sides and sides[p.transaction_id] is None]
+    if unknown:
+        raise AmbiguousTransfer(
+            "the first run was approved at {}, after that session's close, and IBKR dates {} by that day alone, so "
+            "whether the starting book holds it is not known. Nothing is written. Check in IBKR when it was made, "
+            "then record which side it is on: {} (docs/manual/reconciliation.md)".format(
+                _stamp(approved_at),
+                "; ".join("transfer {} of {} {}".format(p.transaction_id, p.amount, p.currency) for p in unknown),
+                "; ".join("--resolve {0}={1} (the book you stated holds it) or --resolve {0}={2}".format(
+                    p.transaction_id, IN_FIRST_BOOK, AFTER_APPROVAL) for p in unknown)))
     for posting in transfers:
-        if _after_approval(posting, approved_at) and posting.transaction_id not in known:
+        if posting.transaction_id in sides and sides[posting.transaction_id][0]:
             known[posting.transaction_id] = (posting.as_of, posting.transaction_id, posting.amount)
     moved = sorted(known.values())
-    written, skipped, date_only = [], [], []
+    written, skipped, date_only, resolved = [], [], [], []
     for posting in transfers:
         recorded = ledger.get(ID_PREFIX + posting.transaction_id)
         if recorded is not None:
@@ -634,10 +704,13 @@ def new_movements(statement, ledger, approved_at, snapshots):
                         posting.transaction_id, stated["amount"], stated["currency"], stated["as_of"],
                         posting.amount, posting.currency, _stamp(posting.as_of)))
             continue
-        if not _after_approval(posting, approved_at):
-            skipped.append((posting.transaction_id, "dated {}, before the first run's approval at {}, so it is in the "
-                                                    "starting book".format(_stamp(posting.as_of),
-                                                                           _stamp(approved_at))))
+        after, by_owner = sides[posting.transaction_id]
+        if by_owner:
+            resolved.append(posting.transaction_id)
+        if not after:
+            skipped.append((posting.transaction_id, "recorded by the owner as in the starting book" if by_owner else
+                            "dated {}, before the first run's approval at {}, so it is in the starting book".format(
+                                _stamp(posting.as_of), _stamp(approved_at))))
             continue
         if posting.amount == 0:
             raise StatementRefused("transfer {} is of nothing".format(posting.transaction_id))
@@ -648,12 +721,10 @@ def new_movements(statement, ledger, approved_at, snapshots):
         if not equity > 0 or not equity + posting.amount > 0:
             raise StatementRefused("transfer {} of {} would take the equity before it, {}, to zero or below".format(
                 posting.transaction_id, posting.amount, equity))
-        if posting.as_of < approved_at:
+        if posting.as_of < approved_at and not by_owner:
             date_only.append(posting.transaction_id)
-        basis_snapshot, _ = _interval(snapshots, posting.as_of)
-        written.append(_record(posting, equity, currency, basis,
-                               _written_first(snapshots, already, posting, basis_snapshot, basis)))
-    return written, skipped, date_only
+        written.append(_record(posting, equity, currency, basis, _written_first(snapshots, already, posting)))
+    return written, skipped, date_only, resolved
 
 
 def _write_whole(path, text):
@@ -676,7 +747,7 @@ def _line(record):
 
 
 def read_coverage(path):
-    """{"from_date", "to_date"} of the last accepted reading, kept at path (None when there is none yet);
+    """{"from_date", "covered_to"} of the last accepted reading, kept at path (None when there is none yet);
     StatementRefused when the file is not as this reader writes it."""
     try:
         with open(path, encoding="utf-8") as f:
@@ -696,18 +767,73 @@ def read_coverage(path):
     return coverage
 
 
-def _check_coverage(statement, coverage):
-    """CoverageGap when statement starts later than the day after coverage (the last accepted reading) ended."""
-    if coverage is None:
-        return
-    covered_to = _flex_day(coverage["to_date"])
+def _day_text(day):
+    return day.strftime("%Y%m%d")
+
+
+def _check_coverage(statement, coverage, approved_at):
+    """CoverageGap when statement starts later than the day after coverage's covered_to (the last accepted
+    reading's), or, with no coverage kept, later than the New York day of the first run's approval at approved_at."""
     first = _flex_day(statement.from_date)
-    if first > covered_to + timedelta(days=1):
-        raise CoverageGap("the Flex statement starts on {}, but the last reading covered up to {}: the days between "
-                          "are in neither, so a transfer on them would be lost. Nothing is written; widen the Flex "
-                          "query's period in Client Portal to reach back to {} and start this reader again "
-                          "(docs/manual/reconciliation.md)".format(statement.from_date, coverage["to_date"],
-                                                                   coverage["to_date"]))
+    if coverage is None:
+        approval_day = approved_at.astimezone(NEW_YORK).date()
+        if first > approval_day:
+            raise CoverageGap(
+                "the Flex statement starts on {}, but no earlier reading is kept (the first reading, or its coverage "
+                "file lost) and the first run was approved on {}: a transfer between the two would be in no "
+                "statement. Nothing is written; set the Flex query's period in Client Portal to a custom range "
+                "from {}, start this reader once, then set it back (docs/manual/reconciliation.md)".format(
+                    statement.from_date, _day_text(approval_day), _day_text(approval_day)))
+        return
+    reread = _flex_day(coverage["covered_to"]) + timedelta(days=1)
+    if first > reread:
+        raise CoverageGap("the Flex statement starts on {}, but the last reading covered up to {} (its last day, {}, "
+                          "is read again): the days between are in neither, so a transfer on them would be lost. "
+                          "Nothing is written; widen the Flex query's period in Client Portal to reach back to {} "
+                          "and start this reader again (docs/manual/reconciliation.md)".format(
+                              statement.from_date, coverage["covered_to"], _day_text(reread), _day_text(reread)))
+
+
+def read_resolutions(path):
+    """{transaction ID: decision} the owner recorded, kept at path ({} when there is none); StatementRefused when
+    the file is not as this reader writes it."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return {}
+    except OSError as err:
+        raise StatementRefused("the resolutions file {} cannot be read: {}".format(path, err.strerror or err)) from None
+    try:
+        resolutions = json.loads(text)
+    except ValueError:
+        resolutions = None
+    if (not isinstance(resolutions, dict)
+            or not all(isinstance(k, str) and k.strip() == k and k and v in DECISIONS for k, v in resolutions.items())):
+        raise StatementRefused("the resolutions file {} is not as this reader writes it, so the owner's decisions on "
+                               "ambiguous transfers are not known; put it back from a backup".format(path))
+    return resolutions
+
+
+def record_resolutions(ledger_path, decisions):
+    """decisions ({transaction ID: IN_FIRST_BOOK or AFTER_APPROVAL}) added to the resolutions file beside
+    ledger_path, under the ledger's lock; StatementRefused, nothing recorded, when one would change a decision
+    already recorded (a transfer written as after the approval stays so)."""
+    path = ledger_path + RESOLUTIONS_SUFFIX
+    with open(ledger_path + LOCK_SUFFIX, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        resolutions = read_resolutions(path)
+        for transaction_id, decision in sorted(decisions.items()):
+            if decision not in DECISIONS:
+                raise StatementRefused("{} is not a decision ({} or {})".format(decision, IN_FIRST_BOOK,
+                                                                                AFTER_APPROVAL))
+            if resolutions.get(transaction_id, decision) != decision:
+                raise StatementRefused("transfer {} is already recorded as {}; a recorded decision is never "
+                                       "changed (docs/manual/reconciliation.md)".format(
+                                           transaction_id, resolutions[transaction_id]))
+        merged = dict(resolutions, **decisions)
+        if merged != resolutions:
+            _write_whole(path, json.dumps(merged, sort_keys=True) + "\n")
 
 
 def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_get, sleep=time.sleep,
@@ -730,10 +856,15 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
         try:
             ledger = read_ledger(ledger_path)
             coverage = read_coverage(coverage_path)
+            resolutions = read_resolutions(ledger_path + RESOLUTIONS_SUFFIX)
             statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep), account_id)
-            _check_coverage(statement, coverage)
             approved_at, snapshots = read_chain(engine_log_path)
-            written, skipped, date_only = new_movements(statement, ledger, approved_at, snapshots)
+            _check_coverage(statement, coverage, approved_at)
+            written, skipped, date_only, resolved = new_movements(statement, ledger, approved_at, snapshots,
+                                                                  resolutions)
+            for transaction_id in resolved:
+                say("flex: transfer {} placed by the owner's recorded decision ({})".format(
+                    transaction_id, resolutions[transaction_id]))
             for transaction_id, why in skipped:
                 say("flex: transfer {} not written: {}".format(transaction_id, why))
             for transaction_id in date_only:
@@ -758,15 +889,16 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
                 _write_whole(ledger_path, kept + "".join(_line(r) for r in written))
             # After the ledger: a reading stopped between the two leaves the period behind, which only asks the
             # next reading to cover more, and a transfer written twice is never possible (its ID is in the ledger).
-            covered_to = statement.to_date
-            if coverage is not None and coverage["to_date"] > covered_to:
-                covered_to = coverage["to_date"]
-            _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "to_date": covered_to},
+            # The statement's last day is read again by the next one (see the module).
+            covered_to = _day_text(_flex_day(statement.to_date) - timedelta(days=1))
+            if coverage is not None and coverage["covered_to"] > covered_to:
+                covered_to = coverage["covered_to"]
+            _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "covered_to": covered_to},
                                                    sort_keys=True) + "\n")
             status.update(written=len(written), period=[statement.from_date, statement.to_date],
                           covered_to=covered_to, postings=len(statement.postings), in_first_book=len(skipped),
-                          date_only_on_approval_day=len(date_only), out_of_order=len(out_of_order),
-                          unknown_types=unknown)
+                          date_only_on_approval_day=len(date_only), resolved=len(resolved),
+                          out_of_order=len(out_of_order), unknown_types=unknown)
             say("flex: read {} postings for {} to {}; wrote {} cash movement(s)".format(
                 len(statement.postings), statement.from_date, statement.to_date, len(written)))
             ok = True
@@ -776,8 +908,9 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             if isinstance(refused, FlexRejected):
                 reason += "; check the token and query ID in the secrets file (TI_IBKR_FLEX_TOKEN, " \
                           "TI_IBKR_FLEX_QUERY_ID) and the token's expiry in Client Portal"
-            status.update(state="coverage-gap" if isinstance(refused, CoverageGap) else "set-aside", reason=reason,
-                          code=getattr(refused, "code", None))
+            state = ("coverage-gap" if isinstance(refused, CoverageGap)
+                     else "ambiguous-transfer" if isinstance(refused, AmbiguousTransfer) else "set-aside")
+            status.update(state=state, reason=reason, code=getattr(refused, "code", None))
             say("flex: set aside: " + reason)
             ok = False
         _write_whole(status_path, json.dumps(status, sort_keys=True) + "\n")
@@ -808,8 +941,45 @@ def account_key(instance):
     return "IBKR_ACCOUNT_" + instance.upper().replace("-", "_")
 
 
+RESOLUTION = re.compile(r"([^\s=]+)=(.*)")
+
+
+def _resolutions(texts):
+    """{transaction ID: decision} of `--resolve ID=DECISION` texts; StatementRefused for one not so."""
+    decisions = {}
+    for text in texts:
+        match = RESOLUTION.fullmatch(text)
+        if not match or match.group(2) not in DECISIONS:
+            raise StatementRefused("--resolve {!r} is not TRANSACTION_ID={} or TRANSACTION_ID={}".format(
+                text, IN_FIRST_BOOK, AFTER_APPROVAL))
+        if decisions.get(match.group(1), match.group(2)) != match.group(2):
+            raise StatementRefused("--resolve names transfer {} twice, with both decisions".format(match.group(1)))
+        decisions[match.group(1)] = match.group(2)
+    return decisions
+
+
 def command(args, err, get=_get, sleep=time.sleep):
-    """`flex`'s exit status: 0 for a reading, 1 for a refusal or a set-aside (why on err)."""
+    """`flex`'s exit status: 0 for a reading or a recorded decision, 1 for a refusal or a set-aside (why on err).
+
+    With --resolve, the owner's decisions are recorded beside the ledger and nothing is read: the next reading
+    honours them."""
+    if args.resolve:
+        try:
+            decisions = _resolutions(args.resolve)
+            record_resolutions(args.ledger, decisions)
+        except (StatementRefused, OSError) as refusal:
+            print("refused: {}".format(mask(str(refusal))), file=err)
+            return 1
+        for transaction_id, decision in sorted(decisions.items()):
+            print("flex: transfer {} recorded as {}; the next reading honours it".format(transaction_id, decision),
+                  file=err)
+        return 0
+    missing = [flag for flag, value in (("--secrets", args.secrets), ("--account-secrets", args.account_secrets),
+                                        ("--instance", args.instance), ("--engine-log", args.engine_log))
+               if value is None]
+    if missing:
+        print("refused: a reading needs {}".format(", ".join(missing)), file=err)
+        return 1
     try:
         token = read_key(args.secrets, "TI_IBKR_FLEX_TOKEN")
         query_id = read_key(args.secrets, "TI_IBKR_FLEX_QUERY_ID")

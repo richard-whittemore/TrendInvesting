@@ -49,7 +49,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Its ledger, the ledger's status file and lock, and nothing else.
+# Its ledger, and beside it the status, coverage, resolutions and lock files
+# and the .tmp each whole-file write renames over its file, and nothing else.
 ReadWritePaths=/var/lib/trend-investing/flex/%i
 ReadOnlyPaths=/var/lib/trend-investing/engines/%i
 # No instruction can come from this unit: it runs as ti-trader, the engine's

@@ -228,7 +228,7 @@ class ReadOnceTests(unittest.TestCase):
         self.dir = Path(tmp.name)
         self.ledger = self.dir / "cash-movements.jsonl"
         self.out = io.StringIO()
-        self.chain("2026-10-17T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 8530.0),
+        self.chain("2027-01-12T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 8530.0),
                                             ("s2", "2027-01-14T21:00:00Z", 11030.0)))
 
     def chain(self, approved_at, snapshots, approved=True):
@@ -374,6 +374,57 @@ class ReadOnceTests(unittest.TestCase):
         status = self.status()
         self.assertEqual((status["in_first_book"], status["date_only_on_approval_day"]), (1, 0))
 
+    def evening_approval(self):
+        """A first run approved at 17:00 New York on the 14th, after that session's close, and a deposit IBKR dates
+        by the 14th alone: the starting book may or may not hold it."""
+        self.chain("2027-01-14T22:00:00Z", (("s1", "2027-01-15T21:00:00Z", 9030.0),))
+        return self.statement(("900000230", "20270114", "2500"), period=("20270114", "20270115"))
+
+    def test_a_date_only_transfer_on_an_evening_approvals_day_is_set_aside_as_ambiguous(self):
+        self.assertFalse(self.read(FakeFlex(statements=(self.evening_approval(),))))
+        status = self.status()
+        self.assertEqual(status["state"], "ambiguous-transfer")
+        for text in ("900000230", "2500", "--resolve 900000230=in-first-book", "--resolve 900000230=after-approval"):
+            self.assertIn(text, status["reason"])
+        self.assertNotIn(ACCOUNT, json.dumps(status) + self.out.getvalue())
+        self.assertFalse(self.ledger.exists())
+        self.assertFalse(Path(str(self.ledger) + flex.COVERAGE_SUFFIX).exists())
+
+    def test_an_ambiguous_transfer_resolved_after_the_approval_is_written(self):
+        statement = self.evening_approval()
+        flex.record_resolutions(str(self.ledger), {"900000230": flex.AFTER_APPROVAL})
+        self.assertTrue(self.read(FakeFlex(statements=(statement,))))
+        self.assertEqual(self.payloads()["900000230"], {
+            "as_of": "2027-01-14T05:00:00Z", "amount": 2500.0, "equity_before": 6530.0, "currency": "USD",
+            "transaction_id": "900000230", "equity_before_basis": "next-snapshot-less-amount"})
+        status = self.status()
+        self.assertEqual((status["resolved"], status["in_first_book"]), (1, 0))
+        self.assertTrue(self.read(FakeFlex(statements=(statement,))), "the decision is kept for later readings")
+
+    def test_an_ambiguous_transfer_resolved_in_the_first_book_is_not_written(self):
+        statement = self.evening_approval()
+        flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        self.assertTrue(self.read(FakeFlex(statements=(statement,))))
+        self.assertFalse(self.ledger.exists())
+        status = self.status()
+        self.assertEqual((status["resolved"], status["in_first_book"]), (1, 1))
+        self.assertIn("900000230", self.out.getvalue())
+        self.assertTrue(self.read(FakeFlex(statements=(statement,))), "the decision is kept for later readings")
+        self.assertFalse(self.ledger.exists())
+
+    def test_a_resolution_is_never_changed(self):
+        flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        flex.record_resolutions(str(self.ledger), {"900000230": flex.IN_FIRST_BOOK})
+        with self.assertRaises(flex.StatementRefused) as caught:
+            flex.record_resolutions(str(self.ledger), {"900000230": flex.AFTER_APPROVAL})
+        self.assertIn("900000230", str(caught.exception))
+        self.assertEqual(flex.read_resolutions(str(self.ledger) + flex.RESOLUTIONS_SUFFIX),
+                         {"900000230": flex.IN_FIRST_BOOK})
+
+    def test_a_resolutions_file_not_as_the_reader_writes_it_sets_the_reader_aside(self):
+        Path(str(self.ledger) + flex.RESOLUTIONS_SUFFIX).write_text('{"900000230": "maybe"}\n')
+        self.assert_set_aside(fixture("statement.xml"), "resolutions")
+
     def test_two_transfers_before_the_first_snapshot_each_take_it_less_those_up_to_it(self):
         # Approved 08:00 New York; +2500 at 10:00 and -300 at 14:00; the first close snapshot, 9030, holds both.
         self.chain("2027-01-14T13:00:00Z", (("s1", "2027-01-14T21:00:00Z", 9030.0),))
@@ -385,7 +436,7 @@ class ReadOnceTests(unittest.TestCase):
 
     def test_two_transfers_after_the_close_each_take_that_days_snapshot_less_those_from_it_on(self):
         # The close snapshot, 9600, is read after both: +500 at 16:30 and -200 at 18:00.
-        self.chain("2026-10-17T14:00:00Z", (("s1", "2027-01-14T21:00:00Z", 9600.0),))
+        self.chain("2027-01-12T14:00:00Z", (("s1", "2027-01-14T21:00:00Z", 9600.0),))
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(
             ("900000217", "20270114;163000", "500"), ("900000218", "20270114;180000", "-200")),))))
         self.assertEqual({k: (v["equity_before"], v.get("equity_before_basis")) for k, v in self.payloads().items()},
@@ -409,10 +460,10 @@ class ReadOnceTests(unittest.TestCase):
     def test_a_transfer_after_an_early_close_takes_that_days_snapshot_less_itself(self):
         # 26 November 2027 closes at 1 p.m. New York (adapter/marketdata/nyse_calendar.py): the close snapshot is
         # stamped 13:00 and read after it, so it holds a deposit at 14:00.
-        self.chain("2026-10-17T14:00:00Z", (("s1", "2027-11-24T21:00:00Z", 4900.0),
+        self.chain("2027-01-12T14:00:00Z", (("s1", "2027-11-24T21:00:00Z", 4900.0),
                                             ("s2", "2027-11-26T18:00:00Z", 6000.0)))
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(("900000220", "20271126;140000", "1000"),
-                                                                      period=("20271124", "20271126")),))))
+                                                                      period=("20270112", "20271126")),))))
         self.assertEqual((self.payloads()["900000220"]["equity_before"],
                           self.payloads()["900000220"].get("equity_before_basis")),
                          (5000.0, "same-day-snapshot-less-amount"))
@@ -425,6 +476,20 @@ class ReadOnceTests(unittest.TestCase):
                               (datetime(2027, 1, 14, 21, 0, 1, tzinfo=timezone.utc), False)):
             with self.subTest(moment=moment):
                 self.assertEqual(flex._is_close_stamp(moment), close)
+
+    def test_a_snapshot_outside_the_nyse_calendar_is_refused(self):
+        moment = datetime(flex.nyse_calendar.LAST_YEAR + 1, 1, 2, 21, 0, tzinfo=timezone.utc)
+        with self.assertRaises(flex.StatementRefused) as caught:
+            flex._is_close_stamp(moment)
+        self.assertIn("NYSE calendar", str(caught.exception))
+
+    def test_a_transfer_after_a_snapshot_outside_the_nyse_calendar_sets_the_reader_aside(self):
+        year = flex.nyse_calendar.LAST_YEAR + 1
+        self.chain("2027-01-12T14:00:00Z", (("s1", "{}-01-02T21:00:00Z".format(year), 9000.0),))
+        status = self.assert_set_aside(self.statement(("900000227", "{}0103;100000".format(year), "100"),
+                                                      period=("20270112", "{}0103".format(year))),
+                                       "NYSE calendar", "{}-01-02T21:00:00Z".format(year))
+        self.assertIsNone(status["code"])
 
     def test_a_transfer_after_the_approval_with_no_snapshot_yet_sets_the_reader_aside(self):
         self.chain("2027-01-14T13:00:00Z", ())
@@ -452,7 +517,7 @@ class ReadOnceTests(unittest.TestCase):
         # Evening of the 14th: X at 10:00, +1000, written from the 13th's close (8000). Evening of the 15th IBKR also
         # shows W at 09:00 the same day, +500: W is written from the same close, and says X was written first, whose
         # equity_before (8000, without W) is not revised.
-        self.chain("2026-10-17T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 8000.0),))
+        self.chain("2027-01-12T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 8000.0),))
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(("900000221", "20270114;100000", "1000")),))))
         first = self.ledger.read_text()
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(
@@ -476,6 +541,30 @@ class ReadOnceTests(unittest.TestCase):
         self.assertEqual(records["900000224"]["note"], flex.EARLIER_WRITTEN_FIRST)
         self.assertEqual(self.status()["out_of_order"], 1)
 
+    def test_a_late_added_evening_transfer_says_an_earlier_one_from_before_the_first_snapshot_was_written_first(self):
+        # Approved 08:00 New York on the 14th; +1000 at 10:00 is written from that day's close snapshot less the
+        # transfers up to its reading. A +200 at 18:00 IBKR adds a reading late is in that figure too (the snapshot,
+        # read later, holds it), so the new record says the earlier one was written first.
+        self.chain("2027-01-14T13:00:00Z", (("s1", "2027-01-14T21:00:00Z", 9200.0),))
+        self.assertTrue(self.read(FakeFlex(statements=(self.statement(("900000228", "20270114;100000", "1000")),))))
+        self.assertTrue(self.read(FakeFlex(statements=(self.statement(
+            ("900000228", "20270114;100000", "1000"), ("900000229", "20270114;180000", "200")),))))
+        records = {r["payload"]["transaction_id"]: r for r in self.records()}
+        self.assertEqual(records["900000228"]["payload"]["equity_before"], 8200.0)
+        self.assertEqual(records["900000229"]["payload"]["equity_before"], 9000.0)
+        self.assertEqual(records["900000229"]["note"], flex.EARLIER_WRITTEN_FIRST)
+        self.assertEqual(self.status()["out_of_order"], 1)
+
+    def test_a_late_added_transfer_before_the_first_snapshot_after_an_evening_one_carries_no_note(self):
+        # The evening transfer's figure takes only that evening's transfers off the snapshot, so a morning one added
+        # later is in no figure already written.
+        self.chain("2027-01-14T13:00:00Z", (("s1", "2027-01-14T21:00:00Z", 9200.0),))
+        self.assertTrue(self.read(FakeFlex(statements=(self.statement(("900000229", "20270114;180000", "200")),))))
+        self.assertTrue(self.read(FakeFlex(statements=(self.statement(
+            ("900000228", "20270114;100000", "1000"), ("900000229", "20270114;180000", "200")),))))
+        self.assertNotIn("note", {r["payload"]["transaction_id"]: r for r in self.records()}["900000228"])
+        self.assertEqual(self.status()["out_of_order"], 0)
+
     def test_a_ledger_note_not_one_the_reader_writes_sets_the_reader_aside(self):
         self.read(FakeFlex())
         good = self.ledger.read_text().splitlines()
@@ -489,14 +578,26 @@ class ReadOnceTests(unittest.TestCase):
         self.assertEqual([("note" in r) for r in self.records()], [False, False])
         self.assertEqual(self.status()["out_of_order"], 0)
 
-    def test_each_reading_keeps_the_period_it_covered(self):
+    def test_each_reading_keeps_the_period_it_covered_less_its_last_day(self):
+        # The statement's last day is not complete when it is read: a transfer that day can reach IBKR's report
+        # after the evening's reading, so it is covered only up to the day before.
         self.assertTrue(self.read(FakeFlex()))
-        self.assertEqual(self.coverage(), {"from_date": "20270112", "to_date": "20270115"})
+        self.assertEqual(self.coverage(), {"from_date": "20270112", "covered_to": "20270114"})
+        self.assertEqual(self.status()["covered_to"], "20270114")
 
-    def test_a_statement_starting_the_day_after_the_last_reading_ends_is_read(self):
+    def test_a_statement_starting_on_the_last_readings_last_day_is_read(self):
         self.assertTrue(self.read(FakeFlex()))
-        self.assertTrue(self.read(FakeFlex(statements=(self.statement(period=("20270116", "20270118")),))))
-        self.assertEqual(self.coverage(), {"from_date": "20270116", "to_date": "20270118"})
+        self.assertTrue(self.read(FakeFlex(statements=(self.statement(period=("20270115", "20270118")),))))
+        self.assertEqual(self.coverage(), {"from_date": "20270115", "covered_to": "20270117"})
+
+    def test_a_statement_starting_the_day_after_the_last_readings_last_day_is_a_coverage_gap(self):
+        # The last reading ended on the 15th, read that evening: a transfer IBKR posts for the 15th afterwards is in
+        # no statement that starts on the 16th.
+        self.assertTrue(self.read(FakeFlex()))
+        self.assertFalse(self.read(FakeFlex(statements=(self.statement(period=("20270116", "20270118")),))))
+        self.assertEqual(self.status()["state"], "coverage-gap")
+        self.assertIn("20270115", self.status()["reason"])
+        self.assertEqual(self.coverage(), {"from_date": "20270112", "covered_to": "20270114"}, "coverage not moved on")
 
     def test_a_statement_that_leaves_days_unread_since_the_last_reading_is_a_coverage_gap(self):
         # The last reading covered up to the 15th; one from the 17th leaves the 16th unread, and a transfer that day
@@ -510,14 +611,38 @@ class ReadOnceTests(unittest.TestCase):
         self.assertEqual(status["state"], "coverage-gap")
         self.assertIn("20270115", status["reason"])
         self.assertIn("20270117", status["reason"])
-        self.assertEqual(self.coverage(), {"from_date": "20270112", "to_date": "20270115"}, "coverage not moved on")
+        self.assertEqual(self.coverage(), {"from_date": "20270112", "covered_to": "20270114"}, "coverage not moved on")
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(
             ("900000225", "20270117;100000", "100"), period=("20270110", "20270120")),))))
         self.assertIn("900000225", self.payloads())
 
-    def test_the_first_reading_has_no_previous_period_and_is_read(self):
-        self.assertTrue(self.read(FakeFlex(statements=(self.statement(period=("20270301", "20270330")),))))
+    def test_the_first_reading_reaching_back_to_the_approval_day_is_read(self):
+        # The chain's first run was approved on 12 January (New York): a first statement from that day leaves none
+        # unread.
+        self.assertTrue(self.read(FakeFlex(statements=(self.statement(period=("20270112", "20270115")),))))
         self.assertEqual(self.status()["state"], "read")
+
+    def test_the_first_reading_starting_after_the_approval_day_is_a_coverage_gap(self):
+        # Approved 12 January; the reader first reads on 1 March with a 30-day window: a transfer between the two
+        # would be in no statement, so nothing is written until one reaches back to the approval day.
+        self.assertFalse(self.read(FakeFlex(statements=(self.statement(
+            ("900000226", "20270305;100000", "100"), period=("20270301", "20270330")),))))
+        status = self.status()
+        self.assertEqual(status["state"], "coverage-gap")
+        self.assertIn("20270112", status["reason"])
+        self.assertIn("20270301", status["reason"])
+        self.assertFalse(self.ledger.exists())
+        self.assertFalse(Path(str(self.ledger) + flex.COVERAGE_SUFFIX).exists(), "no coverage is kept from it")
+        self.assertTrue(self.read(FakeFlex(statements=(self.statement(
+            ("900000226", "20270305;100000", "100"), period=("20270112", "20270330")),))))
+        self.assertIn("900000226", self.payloads())
+
+    def test_a_lost_coverage_file_is_a_first_reading(self):
+        self.assertTrue(self.read(FakeFlex()))
+        Path(str(self.ledger) + flex.COVERAGE_SUFFIX).unlink()
+        self.assertFalse(self.read(FakeFlex(statements=(self.statement(period=("20270115", "20270118")),))))
+        self.assertEqual(self.status()["state"], "coverage-gap")
+        self.assertIn("20270112", self.status()["reason"])
 
     def test_a_statement_without_its_period_is_refused(self):
         for bad in (b'fromDate="20270112" ', b'toDate="20270115" '):
@@ -532,14 +657,14 @@ class ReadOnceTests(unittest.TestCase):
         self.assert_set_aside(fixture("statement.xml"), "coverage")
 
     def test_transfers_between_two_snapshots_count_toward_the_equity_before_the_next(self):
-        self.chain("2026-10-17T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 1000.0),))
+        self.chain("2027-01-12T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 1000.0),))
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(
             ("900000204", "20270114;100000", "5000"), ("900000205", "20270114;110000", "-2000")),))))
         self.assertEqual({k: (v["equity_before"], v.get("equity_before_basis")) for k, v in self.payloads().items()},
                          {"900000204": (1000.0, None), "900000205": (6000.0, None)})
 
     def test_a_transfer_already_in_the_ledger_counts_toward_a_later_one(self):
-        self.chain("2026-10-17T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 1000.0),))
+        self.chain("2027-01-12T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 1000.0),))
         self.read(FakeFlex(statements=(self.statement(("900000204", "20270114;100000", "5000")),)))
         self.assertTrue(self.read(FakeFlex(statements=(self.statement(
             ("900000204", "20270114;100000", "5000"), ("900000205", "20270114;110000", "-2000")),))))
@@ -658,7 +783,9 @@ class CommandTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name)
         self.log = self.dir / "run-1.log"
-        engine = LoggedEngine(str(self.log), approval=run_approval(ACCOUNT, starting_book=({}, 8000.0)))
+        approval = run_approval(ACCOUNT, starting_book=({}, 8000.0))
+        approval["approved_at"] = "2027-01-12T14:00:00Z"  # on the statement's first day, before that session's close
+        engine = LoggedEngine(str(self.log), approval=approval)
         snapshot(engine, "s1", "2027-01-13T21:00:00Z", 8530.0)
         snapshot(engine, "s2", "2027-01-14T21:00:00Z", 11030.0)
         self.secrets = self.dir / "secrets"
@@ -693,6 +820,28 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("1012", said)
         self.assertNotIn(TOKEN, said)
+
+    def test_resolve_records_the_owners_decision_and_reads_nothing(self):
+        err = io.StringIO()
+        service = FakeFlex()
+        code = main(["flex", "--ledger", str(self.ledger), "--resolve", "900000230=after-approval",
+                     "--resolve", "900000231=in-first-book"], err=err, flex_get=service)
+        self.assertEqual((code, service.calls), (0, []), err.getvalue())
+        self.assertEqual(flex.read_resolutions(str(self.ledger) + flex.RESOLUTIONS_SUFFIX),
+                         {"900000230": "after-approval", "900000231": "in-first-book"})
+
+    def test_resolve_refuses_a_decision_it_does_not_know(self):
+        for bad in ("900000230", "900000230=maybe", "=after-approval"):
+            with self.subTest(bad=bad):
+                err = io.StringIO()
+                self.assertEqual(main(["flex", "--ledger", str(self.ledger), "--resolve", bad], err=err), 1)
+                self.assertIn("in-first-book", err.getvalue())
+        self.assertFalse(Path(str(self.ledger) + flex.RESOLUTIONS_SUFFIX).exists())
+
+    def test_a_reading_needs_its_secrets_engine_log_and_instance(self):
+        err = io.StringIO()
+        self.assertEqual(main(["flex", "--ledger", str(self.ledger)], err=err, flex_get=FakeFlex()), 1)
+        self.assertIn("--secrets", err.getvalue())
 
     def test_a_missing_token_is_refused_before_anything_is_asked(self):
         bare = self.dir / "bare"

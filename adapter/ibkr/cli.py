@@ -134,21 +134,27 @@ def _parser():
         description="Read the owner's Flex query from IBKR's Flex Web Service once (flex.py; "
                     "docs/manual/reconciliation.md, \"Deposits and withdrawals, read from IBKR\") and add each "
                     "deposit or withdrawal not yet in the ledger to it. Exit status 0 for a reading, 1 when the "
-                    "reader is set aside (why on standard error and in the ledger's status file).")
-    reader.add_argument("--secrets", required=True, metavar="FILE",
+                    "reader is set aside (why on standard error and in the ledger's status file). With --resolve, "
+                    "only --ledger is needed: the owner's decision is recorded beside the ledger and nothing is read.")
+    reader.add_argument("--secrets", metavar="FILE",
                         help="a KEY=VALUE file holding TI_IBKR_FLEX_TOKEN and TI_IBKR_FLEX_QUERY_ID (on the server: "
                              "/etc/trend-investing/secrets.env, handed over as a credential)")
-    reader.add_argument("--account-secrets", required=True, metavar="FILE",
+    reader.add_argument("--account-secrets", metavar="FILE",
                         help="the KEY=VALUE file naming the instance's IBKR account (on the server: "
                              "/etc/trend-investing/accounts/<instance>.env)")
-    reader.add_argument("--instance", required=True, choices=("boost", "trad-ira", "roth-ira"),
+    reader.add_argument("--instance", choices=("boost", "trad-ira", "roth-ira"),
                         help="the account the reading is for; its line in --account-secrets is IBKR_ACCOUNT_ and the "
                              "instance in capitals, a dash as an underscore (IBKR_ACCOUNT_TRAD_IRA)")
-    reader.add_argument("--engine-log", required=True, metavar="FILE",
+    reader.add_argument("--engine-log", metavar="FILE",
                         help="the engine's durable log, read only, for the net liquidation before each transfer")
     reader.add_argument("--ledger", required=True, metavar="FILE",
                         help="the instance's cash-movement ledger, one record a line; its status file is beside it "
                              "(on the server: /var/lib/trend-investing/flex/<instance>/cash-movements.jsonl)")
+    reader.add_argument("--resolve", action="append", metavar="TRANSACTION_ID=DECISION",
+                        help="record the owner's decision on a transfer IBKR dates by day alone on the day of a "
+                             "first-run approval given after that session's close: in-first-book (the starting book "
+                             "holds it) or after-approval; a recorded decision is never changed, and nothing is read "
+                             "(docs/manual/reconciliation.md)")
     return parser
 
 

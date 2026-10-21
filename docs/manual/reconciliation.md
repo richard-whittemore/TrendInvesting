@@ -233,7 +233,10 @@ query*, to a program holding a *Flex token*. The reader asks for yours, reads
 its **Cash Transactions** section, and sorts each row by IBKR's type:
 deposits and withdrawals, dividends, broker interest paid and received,
 commission adjustments, and other fees, each with IBKR's own transaction ID,
-its date, amount and currency.
+its date, amount and currency. Which times are a session's close comes from
+the NYSE calendar the adapter and the data job share
+(`adapter/marketdata/nyse_calendar.py`), which holds 2022 to 2030; past its
+last year the reader refuses rather than guess (below, "What can go wrong").
 
 **What is written.** Each deposit or withdrawal not already recorded becomes
 one cash movement (`account.cash-movement`, version 2) in the account's
@@ -283,14 +286,23 @@ needs only each transfer's amount and date, which are exact.
   already in that book, so it is not written: the reader's log names it and
   the status file counts it (`in_first_book`). A transfer at or after that
   time is always written, never skipped. A transfer IBKR dates by **day
-  alone on the approval's own day** is taken as after the approval and
-  written: you read the book in IBKR before you approved, so the book cannot
-  hold a transfer that day whose time IBKR does not give. Its equity before
-  is the first close snapshot after it less the transfers up to it
-  (`next-snapshot-less-amount`), and the status file counts it
-  (`date_only_on_approval_day`). If such a transfer was in fact made before
-  you read the book, it is in both the book and the ledger: tell the
-  developer.
+  alone on the approval's own day** (IBKR usually dates deposits and
+  withdrawals so) depends on when you approved:
+  - **before that day's close** (4 p.m. New York, 1 p.m. on an early close):
+    it is taken as after the approval and written. You read the book in IBKR
+    before the day's business, so the book cannot hold it. Its equity before
+    is the first close snapshot after it less the transfers up to it
+    (`next-snapshot-less-amount`), and the status file counts it
+    (`date_only_on_approval_day`). If such a transfer was in fact made before
+    you read the book, it is in both the book and the ledger: tell the
+    developer.
+  - **after that day's close** (an evening approval, as after a restart or a
+    recovery, or on a weekend or holiday): the day's business may be in the
+    book you read or not, so the reader cannot tell. That reading writes
+    nothing and stops as an **ambiguous transfer**, naming the transfer and
+    its amount (below, "What can go wrong"), until you record which side it
+    is on. Every later reading honours what you recorded. To avoid this,
+    move no money on the day you approve a first run.
 - **Times.** The reader dates a posting by its Date/Time field alone
   (`dateTime`). IBKR's documentation gives it in New York time; that is
   taken as so until the first live statement has been checked against your
@@ -307,12 +319,19 @@ needs only each transfer's amount and date, which are exact.
   reader's log names it, and the status file counts it (`out_of_order`).
   The earlier record's `equity_before` stays off by this transfer's amount.
 - **No day is skipped.** Each reading keeps the days its statement covered
-  (`cash-movements.jsonl.coverage.json`, beside the ledger). A statement
-  that starts later than the day after the last good reading ended would
-  leave days unread, and a transfer on them would be lost once it dropped out
-  of the query's window, so that reading writes nothing and stops as a
-  **coverage gap** (below). The very first reading has nothing before it and
-  is read.
+  (`cash-movements.jsonl.coverage.json`, beside the ledger) up to the day
+  **before** its last day: IBKR may post a transfer for that last day after
+  the evening's reading, so the next statement must start on or before it
+  and read it again (a transfer read twice is still written once). A
+  statement that starts later would leave days unread, and a transfer on them
+  would be lost once it dropped out of the query's window, so that reading
+  writes nothing and stops as a **coverage gap** (below). The **first
+  reading** must reach back to the New York day you approved the first run,
+  since every transfer from then on is to be written: a 30-day query does
+  when you turn the reader on within 30 days of that approval. Otherwise the
+  first reading is a coverage gap naming both days, and you run the reader
+  once with a query whose period starts on the approval day (below). A
+  coverage file that is lost is treated the same way, as a first reading.
 - **Nothing the engine decides reads the ledger.** It is a separate file the
   engine never sees, so the reader cannot change an order, a state or a
   reconciliation. The cash-drift check stays as it is, and stays the
@@ -380,18 +399,19 @@ shows one JSON object, rewritten whole at each reading:
 
 | Field | When | What it says |
 | --- | --- | --- |
-| `state` | always | `"running"` from the moment a reading starts; `"read"`, `"set-aside"` or `"coverage-gap"` when it ends |
+| `state` | always | `"running"` from the moment a reading starts; `"read"`, `"set-aside"`, `"coverage-gap"` or `"ambiguous-transfer"` when it ends |
 | `checked_at` | always | when the reading started (UTC) |
 | `written` | `read` | how many cash movements this reading added to the ledger |
 | `period` | `read` | the statement's first and last day, as IBKR states them (`yyyyMMdd`) |
-| `covered_to` | `read` | the last day every reading so far has covered, kept in `cash-movements.jsonl.coverage.json`; the next statement must start on or before the day after it |
+| `covered_to` | `read` | the last complete day every reading so far has covered, the day before the latest statement's last day, kept in `cash-movements.jsonl.coverage.json`; the next statement must start on or before the day after it, so that last day is read again |
 | `postings` | `read` | how many detail rows the Cash Transactions section held |
 | `in_first_book` | `read` | how many transfers were dated before the first run's approval, so not written |
-| `date_only_on_approval_day` | `read` | how many transfers IBKR dated by day alone on the approval's day, so taken as after it and written |
+| `date_only_on_approval_day` | `read` | how many transfers IBKR dated by day alone on the approval's day, approved before that day's close, so taken as after it and written |
+| `resolved` | `read` | how many transfers were placed by a decision you recorded with `--resolve` (those in the starting book are counted in `in_first_book` too) |
 | `out_of_order` | `read` | how many transfers this reading wrote with a `note` that a record from the same stretch was written first |
 | `unknown_types` | `read` | each IBKR type the reader does not classify, with how many rows had it (`{}` when none) |
-| `reason` | `set-aside`, `coverage-gap` | why, in words |
-| `code` | `set-aside`, `coverage-gap` | IBKR's error code, or `null` when IBKR gave none |
+| `reason` | `set-aside`, `coverage-gap`, `ambiguous-transfer` | why, in words |
+| `code` | `set-aside`, `coverage-gap`, `ambiguous-transfer` | IBKR's error code, or `null` when IBKR gave none |
 
 A reading writes `"running"` before it asks IBKR for anything, so if it is
 stopped part way (its unit's 45-minute limit, a reboot, a kill), the file
@@ -427,11 +447,15 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | `ti-flex@<instance>` failed; its status file says the transfer **is in** another currency, is **of nothing**, or **would take the equity before it to zero or below** | Refused: none of these is a cash movement the engine can apply. Nothing written | Check the transfer in IBKR's activity statement and tell the developer |
 | `ti-flex@<instance>` failed; its status file says **the account snapshot ... is at version N, which this reader does not read** | Refused rather than read as if no snapshot were there, which would misdate every transfer. Nothing written | Tell the developer: the reader must be updated with the adapter |
 | `ti-flex@<instance>` failed; its status file says **the chain of runs ... ends without a first run's approval stating the starting book** | Refused: without the starting book's time the reader cannot tell a transfer in the first book from one after it | Tell the developer; check `run.env` names the account's current run |
-| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but the last reading covered up to D1** | Nothing written, and the kept days not moved on: a transfer between D1 and D2 would otherwise be lost. Every later reading stops the same way until a statement reaches back | In Client Portal, set the Flex query's period to reach back to D1 (a custom date range, or *Last 365 Calendar Days*), run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. A transfer already in the ledger is never written twice |
+| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but the last reading covered up to D1** (and names the day the next statement must start on or before, the day after D1) | Nothing written, and the kept days not moved on: a transfer between D1 and D2 would otherwise be lost. Every later reading stops the same way until a statement reaches back | In Client Portal, set the Flex query's period to reach back to the day it names (a custom date range, or *Last 365 Calendar Days*), run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. A transfer already in the ledger is never written twice |
+| `ti-flex@<instance>` failed; its status file says `"state": "coverage-gap"`: **the Flex statement starts on D2, but no earlier reading is kept ... and the first run was approved on D1** | The first reading (or the first after the coverage file was lost) starts after the approval day, so a transfer between D1 and D2 would be in no statement. Nothing written, no coverage kept | In Client Portal, set the Flex query's period to a custom date range starting on D1 and ending today, run `sudo systemctl start ti-flex@<instance>` and check it read; then set the period back to *Last 30 Calendar Days*. Turning the reader on within 30 days of the first run's approval avoids this |
+| `ti-flex@<instance>` failed; its status file says `"state": "ambiguous-transfer"`: **the first run was approved at T, after that session's close, and IBKR dates transfer N of AMOUNT by that day alone** | IBKR gives no time for the transfer, and you approved after the day's close, so the reader cannot tell whether the book you stated holds it. Nothing written, the account number never shown; every reading stops the same way until you decide. Trading is unaffected | Check in IBKR's activity when the transfer reached the account against when you read the book. Then record it, once: `sudo -u ti-trader env -C /opt/trend-investing/adapter /opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr flex --ledger /var/lib/trend-investing/flex/<instance>/cash-movements.jsonl --resolve N=in-first-book` if the book you read already held it, or `--resolve N=after-approval` if it came after; then `sudo systemctl start ti-flex@<instance>` and check it read. The decision is kept in `cash-movements.jsonl.resolutions.json` and never changed (a second, different `--resolve` for the same transfer is refused). Avoid it: move no money on the day you approve a first run |
+| `ti-flex@<instance>` failed; its status file says **the snapshot as of ... is in a year the NYSE calendar does not hold** (or the first run's approval is) | Refused rather than guess whether the snapshot is a session's close. Nothing written. From the first close snapshot past the calendar's last year (2030), every reading that has a new transfer is refused this way until the calendar is extended; the market-data job stops at the same year | Tell the developer to extend `adapter/marketdata/nyse_calendar.py` (checked against NYSE's published holidays and early closes) and install the new build; the next reading then writes the transfers, none lost while they are within the query's window (or a custom-period reading reaches back) |
+| `ti-flex@<instance>` failed; its status file says **the resolutions file ... is not as this reader writes it** | Refused: your recorded decisions on ambiguous transfers are not known | Put the file back from a backup or the server's snapshot; never edit it by hand. Without one, record each decision again with `--resolve` (above) |
 | `ti-flex@<instance>` failed; its status file says the Flex statement **does not state its period** | Refused: without its first and last day the reader cannot check that no day was skipped | Keep the query's date format at the default (`yyyyMMdd`); tell the developer if it is |
 | `ti-flex@<instance>` failed; its status file says **the coverage file ... is not as this reader writes it** | Refused: the days the last reading covered are not known, so no day can be checked | Put the file back from a backup or the server's snapshot; never edit it by hand. Without one, tell the developer |
 | A ledger record has a `note` that a later (or earlier) transfer in the same interval was written first; the status file's `out_of_order` is above 0 | Information only: the transfer reached IBKR's report a day late. It is written, with the right figure; the record written before it keeps an `equity_before` that leaves this transfer out, and is not rewritten | Nothing; keep it in mind when reading that record's `equity_before` |
-| The reader's log says "transfer N is dated by day alone on the first run's approval day" | Information only: written as after the approval (above, "The first book"); counted in `date_only_on_approval_day` | Check the transfer was made after you read the book in IBKR; if it was before, tell the developer |
+| The reader's log says "transfer N is dated by day alone on the first run's approval day" | Information only: the approval came before that day's close, so it is written as after the approval (above, "The first book"); counted in `date_only_on_approval_day` | Check the transfer was made after you read the book in IBKR; if it was before, tell the developer |
 | The status file says `"state": "running"` with a `checked_at` more than 45 minutes old | The reading was stopped part way (above, "The status file"); the ledger is as it was | Read `journalctl -u ti-flex@<instance>`; the next firing reads again |
 | The status file's `unknown_types` is not `{}` | Information only: those rows are read but not classified, so not written | Tell the developer the type's name, so the reader can learn it |
 | The reader's log says "transfer N not written: ... before the first run's approval" | Information only: that transfer is already in the starting book you stated; the status file counts it (`in_first_book`) | Nothing |
