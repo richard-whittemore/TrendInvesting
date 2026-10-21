@@ -13,8 +13,11 @@ approve.
 ## First, in every case
 
 1. **Do not trade by hand while a sale of the program's is working.** If you
-   must act at IBKR first, record the kill switch so the program sends
-   nothing new but the sale back to 98%:
+   must sell at IBKR, stop the engine and the adapter first, as the manual's
+   "Selling by hand safely" says (`docs/manual/states-and-kill-switch.md`):
+   the kill switch does not stop the sale back to 98%. To investigate
+   without trading, record the kill switch so the program sends nothing new
+   but the sale back to 98%:
    `sudo -u ti-operator operator kill-switch -inbox <inbox> -account <account> -state engaged -by owner -detail "halted: investigating"`
    (run the tool as `ti-operator`, the user that writes your instructions;
    the engine reads them through its group, docs/manual/operator.md,
@@ -35,9 +38,10 @@ approve.
    orders`), or withheld (`sale-withheld` in `journal-query refusals`). A
    withhold with reason `broker-values-unreadable` or `unknown-working-sell`
    counts as the attempt: the program will not try again, so you act by
-   hand. No alert tells you so yet
-   ([alerts-and-dashboard](../manual/alerts-and-dashboard.md), "Alerts the
-   reporter does not send").
+   hand. The reporter tells you so with the urgent alert
+   `<account>: sale of <instrument> withheld, sell by hand (<reason>)`
+   ([states and kill switch](../manual/states-and-kill-switch.md), "The sale
+   back to 98%"); sell as "Selling by hand safely" in that chapter says.
 
 ## Find the cause
 
@@ -57,7 +61,7 @@ approve.
 2. **Reconcile** positions, cash and open orders against the journal
    (`reconciliation.md`, *Recover*). Explain every difference; never edit a
    number to make it match.
-3. **Stop the engine** (`sudo systemctl stop ti-engine@<account>`). It writes
+3. **Stop the engine** (`sudo systemctl stop ti-engine@<instance>`). It writes
    its journal.
 4. **Write the approval** from the stopped run's log. To leave the incident
    behind, clear it by its ID:
@@ -82,8 +86,10 @@ approve.
 
 - **The approval is refused for the sale attempt**: the log records an
   attempt of the incident's sale and the approval says it was not attempted.
-  Write the approval with the tool (it reads the attempt from the log), or,
-  if you sold by hand, an approval saying attempted is always accepted.
+  Write the approval with the tool (it reads the attempt from the log). If
+  you sold by hand, the tool does not know: edit the file it wrote and change
+  `sale_attempted` to `true`, nothing else (`docs/manual/operator.md`, "An
+  approval"); an approval saying attempted is always accepted.
 - **The approval is refused for the incident**: you named an incident that is
   not the one the log ended in, or tried to carry it looser (Degraded when
   the log ended Halted, or on fewer instruments). A restart never loosens

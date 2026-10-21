@@ -66,7 +66,7 @@ stops ordering, not an order resting at the broker.
 ## Find the cause
 
 Read the engine's verdict on the server, from the account's durable log
-(`/var/lib/trend-investing/engines/<account>/<TI_RUN>.log`):
+(`/var/lib/trend-investing/engines/<instance>/<TI_RUN>.log`):
 
 - `grep '"risk.reconciliation.result"' <log> | tail -n 1` shows the last
   verdict: each component (each instrument, and the cash), the book, the
@@ -120,7 +120,7 @@ that is why the approval is your attestation and must follow a real check.
    it cancelled. For an IRA in the middle of a rebalance, record the
    clearance in the old run first (`docs/runbooks/missed-rebalance.md`):
    a fresh run does not know the earlier run's working orders.
-3. **Stop the engine**: `sudo systemctl stop ti-engine@<account>`. It writes
+3. **Stop the engine**: `sudo systemctl stop ti-engine@<instance>`. It writes
    its journal. Keep the log and the journal: they are evidence, never
    edited or deleted (ADR 0018).
 4. **To leave the incident behind** (every difference explained), write the
@@ -139,7 +139,7 @@ that is why the approval is your attestation and must follow a real check.
    runs as `ti-trader`:
 
    ```
-   sudo install -o ti-trader -g ti-trader -m 0600 <staged file> /var/lib/trend-investing/engines/<account>/<approval name>
+   sudo install -o ti-trader -g ti-trader -m 0600 <staged file> /var/lib/trend-investing/engines/<instance>/<approval name>
    ```
 
    Check that the file name the tool printed matches the log you copied.
@@ -201,7 +201,7 @@ the whole server is down, nothing will tell you.
    orders at IBKR, so nothing there protects them: for the joint account,
    check Excess Liquidity first, and act in IBKR's app if it is falling
    (`docs/runbooks/margin-warning.md`).
-2. On the server, `systemctl status ti-engine@<account>` says whether the
+2. On the server, `systemctl status ti-engine@<instance>` says whether the
    engine crashed or was stopped. A crash is resumed; anything else is a
    fresh run you approve (`docs/runbooks/durable-log.md`, "Restarting an
    engine"). Either way the engine comes back **in the state it was in**:
