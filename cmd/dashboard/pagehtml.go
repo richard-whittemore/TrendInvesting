@@ -134,7 +134,7 @@ tr.urgent td:first-child{border-left:3px solid var(--neg)}
 {{if gt (count .Equity) 1}}<dl class="pairs"><dt>First paired point</dt><dd class="mono">{{(first .Equity).Date}} &middot; {{money (first .Equity).Net}} &middot; {{.Benchmark}} {{money (first .Equity).Benchmark}}</dd>
 <dt>Before</dt><dd class="mono">{{(before .Equity).Date}} &middot; {{money (before .Equity).Net}} &middot; {{.Benchmark}} {{money (before .Equity).Benchmark}}</dd>
 <dt>Latest paired point</dt><dd class="mono">{{(last .Equity).Date}} &middot; {{money (last .Equity).Net}} &middot; {{.Benchmark}} {{money (last .Equity).Benchmark}}</dd></dl>
-<p class="assume">The {{.Benchmark}} shadow account is the starting balance held in {{.Benchmark}} at the first paired day&rsquo;s close, buying or selling {{.Benchmark}} at the close for each recorded deposit or withdrawal; {{if not .Equity.DollarsWithheld}}on {{.Equity.EndDate}} it is worth {{money .Equity.ShadowValue}}.{{end}}</p>{{end}}
+<p class="assume">The {{.Benchmark}} shadow account is the starting balance held in {{.Benchmark}} at the first paired day&rsquo;s close, buying or selling {{.Benchmark}} at the close for each recorded deposit or withdrawal{{if not .Equity.DollarsWithheld}}; on {{.Equity.EndDate}} it is worth {{money .Equity.ShadowValue}}{{end}}.</p>{{end}}
 {{else}}<p>Not enough paired snapshots and bars yet.</p>{{template "equity" chart .}}{{end}}
 </div>
 <div class="card"><h3>Change between paired points</h3>{{template "strip" strip .}}</div>

@@ -354,9 +354,9 @@ needs only each transfer's amount and date, which are exact.
   recorded a reading in its status file, they say the comparison assumes no
   transfer. They also read the status file's `covered_to` and say
   "transfers recorded through <day>", adding that deposits or
-  withdrawals from the last two days may not be recorded yet when the
-  summary's day is later (a transfer is in the summary two evenings after it
-  posts), and they take a
+  withdrawals from the last two trading sessions may not be recorded yet when
+  the summary's day is later (a transfer is in the summary two trading
+  sessions after it posts: a Friday transfer in Tuesday's), and they take a
   ledger only from the account's own `flex/<instance>` folder.
 
 **When.** `ti-flex@<instance>.timer` (one per account: `ti-flex@boost`,

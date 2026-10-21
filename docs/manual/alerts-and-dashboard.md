@@ -654,11 +654,11 @@ better than SPY, then you took most of it out), the shadow account stops at
 zero on that day. A withdrawal of exactly its value does the same. The
 verdict and the time-weighted returns are still shown, because they do not
 depend on the shadow's dollars, but the dollar gap and the dollar line are
-withheld and replaced by "the recorded withdrawals exceeded the SPY shadow's
+withheld and replaced by "the recorded withdrawals reached or exceeded the SPY shadow's
 value on <date>; dollar figures are not meaningful after that day". The
 shadow account restarts at the next deposit you make: that deposit buys SPY
 at that day's close, the dollar figures return from that day, and the
-sentence becomes "the recorded withdrawals exceeded the SPY shadow's value
+sentence becomes "the recorded withdrawals reached or exceeded the SPY shadow's value
 on <date>; dollar figures restart from <date of the deposit>". The restarted
 shadow holds only what you deposited since, so its dollars stand for that
 money, not for the original starting balance.
@@ -692,18 +692,21 @@ rise, which is why both are shown.
   ([reconciliation](reconciliation.md), "The status file"). The reader runs
   at 21:30 New York, after the close's summary is sent, and IBKR may post a
   day's transfer only the next evening, so when the summary's day is later
-  than that it adds "deposits or withdrawals from the last two days may not be
-  recorded yet; a transfer appears in the summary two evenings after it
-  posts". A transfer posted on day D is first in the statement the reader
-  reads on the evening of the next session, after that day's summary is
-  sent, so the summary two sessions after D is the first to include it: a
-  Friday (or weekend) transfer is in Tuesday's summary, a Thursday one in
-  Monday's. When the status file gives no
+  than that it adds "deposits or withdrawals from the last two trading
+  sessions may not be recorded yet; a transfer appears in the summary two
+  trading sessions after it posts (a Friday transfer on Tuesday's)". A
+  transfer posted on day D is first in the statement the reader reads on the
+  evening of the next session, after that day's summary is sent, so the
+  summary two sessions after D is the first to include it. A session is a
+  New York Stock Exchange trading day: weekends and exchange holidays are not
+  sessions and are skipped, so a Friday (or weekend) transfer is in Tuesday's
+  summary, a Thursday one in Monday's, and one posted before a holiday waits
+  for the extra session. When the status file gives no
   `covered_to` (no reading yet, or the last one running or set aside) it
   says "how far the Flex reader has recorded is not known; deposits or
-  withdrawals from the last two days may not be recorded yet". A reading that found no
-  transfer writes no ledger; its status file still counts, and the ledger is
-  taken as read and empty;
+  withdrawals from the last two trading sessions may not be recorded yet". A
+  reading that found no transfer writes no ledger; its status file still
+  counts, and the ledger is taken as read and empty;
 - "ledger not accepted: it belongs to <x>, not <y>; the comparison assumes
   none ..." when the ledger named is in another account's folder;
 - "deposits and withdrawals not yet recorded: the comparison assumes none,
@@ -915,8 +918,8 @@ passes `-clock-check`.
 | The equity card or the summary says "deposits and withdrawals not readable (<why>): the comparison assumes none ..." | The ledger exists but cannot be read (not readable by `ti-trader`), or a line of it is not a cash movement as the Flex reader writes it, or does not end with a whole line. Nothing of it is used, never a part | The Flex reader stops on the same ledger: follow its status file ([reconciliation](reconciliation.md), "What can go wrong"). Never edit the ledger by hand |
 | The equity card or the summary says "SPY price return only: dividends not counted" (or "price return only for <from>–<to>") | Some or all of SPY's bars in the period are of the older form, which carries no dividend-adjusted price, or the adjusted price's base changed between two runs on that step, so the SPY side leaves those dividends out | Nothing to do for a period already recorded; bars from the current market-data job carry the adjusted price. If new days still say so, check the data job ([market data](market-data.md)) |
 | The equity card or the summary says "ledger not accepted: it belongs to <x>, not <y>" | The `-cash-ledger` named is in another account's `flex/<instance>` folder than the engine folder it is paired with. Nothing of it is read, and the comparison assumes no transfer | Correct the unit's `-cash-ledger` to the account's own `/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl` ("Running the dashboard", above) |
-| The equity card or the summary says "deposits or withdrawals from the last two days may not be recorded yet; a transfer appears in the summary two evenings after it posts" (or "how far the Flex reader has recorded is not known ...") | The Flex reader has not yet read the summary's day: it runs at 21:30 New York, after the close's summary, and IBKR may post a day's transfer only the next evening. A transfer from the last two days is not in the comparison yet; it is in the summary two evenings after it posts | Nothing, if a later line says the day is recorded. If "not known" stays, check the reader's status file ([reconciliation](reconciliation.md), "What can go wrong") |
-| The equity card or the summary says "the recorded withdrawals exceeded the SPY shadow's value on <date>; dollar figures are not meaningful after that day" (or "... dollar figures restart from <date>") | Your recorded withdrawals took the SPY shadow account to zero that day, so its dollar figures (the gap and the dollar line) mean nothing until your next deposit restarts it; the verdict, which is time-weighted, stays | Nothing to fix: it is a true statement of the record. If the withdrawal was not yours, check the ledger's transfers against IBKR's activity ([reconciliation](reconciliation.md)) |
+| The equity card or the summary says "deposits or withdrawals from the last two trading sessions may not be recorded yet; a transfer appears in the summary two trading sessions after it posts (a Friday transfer on Tuesday's)" (or "how far the Flex reader has recorded is not known ...") | The Flex reader has not yet read the summary's day: it runs at 21:30 New York, after the close's summary, and IBKR may post a day's transfer only the next evening. A transfer from the last two trading sessions is not in the comparison yet; it is in the summary two trading sessions after it posts (a Friday transfer on Tuesday's) | Nothing, if a later line says the day is recorded. If "not known" stays, check the reader's status file ([reconciliation](reconciliation.md), "What can go wrong") |
+| The equity card or the summary says "the recorded withdrawals reached or exceeded the SPY shadow's value on <date>; dollar figures are not meaningful after that day" (or "... dollar figures restart from <date>") | Your recorded withdrawals took the SPY shadow account to zero that day, so its dollar figures (the gap and the dollar line) mean nothing until your next deposit restarts it; the verdict, which is time-weighted, stays | Nothing to fix: it is a true statement of the record. If the withdrawal was not yours, check the ledger's transfers against IBKR's activity ([reconciliation](reconciliation.md)) |
 | It will not start: "dashboard: -cash-ledger ... must be SOURCE=PATH ...", "... names ..., which is no -journal or -engine-dir", "... is given twice for ..." or "... names no ledger file" | It refuses to guess which account a ledger belongs to; a `-journal`'s ledger is always named | Name each ledger as `SOURCE=PATH` with SOURCE exactly the `-engine-dir` or `-journal` it belongs to ("Running the dashboard", above) |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 

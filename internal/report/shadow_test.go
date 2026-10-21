@@ -435,7 +435,7 @@ func TestAShadowThatHitsZeroKeepsTheVerdictAndWithholdsTheDollarFigures(t *testi
 	if !strings.HasPrefix(e.Verdict, "Beating SPY") && !strings.HasPrefix(e.Verdict, "Behind SPY") && !strings.HasPrefix(e.Verdict, "Level with SPY") {
 		t.Fatalf("the time-weighted verdict stays: %q", e.Verdict)
 	}
-	want := "the recorded withdrawals exceeded the SPY shadow's value on 2024-01-03; dollar figures are not meaningful after that day"
+	want := "the recorded withdrawals reached or exceeded the SPY shadow's value on 2024-01-03; dollar figures are not meaningful after that day"
 	if !e.DollarsWithheld || !strings.Contains(e.DollarNote, want) {
 		t.Fatalf("withheld %v, note %q", e.DollarsWithheld, e.DollarNote)
 	}
@@ -460,7 +460,7 @@ func TestADepositAfterTheShadowHitZeroRestartsIt(t *testing.T) {
 	if !near(e.Points[2].Shadow, 100) || !near(e.ShadowValue, 100) || !near(e.Gap, 12000) || e.DollarsWithheld {
 		t.Fatalf("restart: shadow %v, value %v, gap %v, withheld %v", e.Points[2].Shadow, e.ShadowValue, e.Gap, e.DollarsWithheld)
 	}
-	want := "the recorded withdrawals exceeded the SPY shadow's value on 2024-01-03; dollar figures restart from 2024-01-04"
+	want := "the recorded withdrawals reached or exceeded the SPY shadow's value on 2024-01-03; dollar figures restart from 2024-01-04"
 	if !strings.Contains(e.DollarNote, want) {
 		t.Fatalf("note %q", e.DollarNote)
 	}
@@ -472,8 +472,26 @@ func TestADepositAfterTheShadowHitZeroRestartsIt(t *testing.T) {
 func TestAWithdrawalOfExactlyTheShadowsValueStopsItLikeAnyOther(t *testing.T) {
 	s := shadowStopSeries(t)
 	e := summarizeWith(t, s, read(t, ledgerOf(t, transfer{"w1", startOfNewYorkDay(1), -5000})), "2024-01-04").Equity
-	if !e.DollarsWithheld || !strings.Contains(e.DollarNote, "exceeded the SPY shadow's value on 2024-01-03") || !near(e.ShadowValue, 0) {
+	if !e.DollarsWithheld || !strings.Contains(e.DollarNote, "reached or exceeded the SPY shadow's value on 2024-01-03") || !near(e.ShadowValue, 0) {
 		t.Fatalf("exact: withheld %v, note %q, shadow %v", e.DollarsWithheld, e.DollarNote, e.ShadowValue)
+	}
+}
+
+// The stop is at half a cent: a withdrawal leaving a cent keeps the shadow
+// running, and one leaving under half a cent stops it.
+func TestAResidualOfACentDoesNotStopTheShadow(t *testing.T) {
+	s := shadowStopSeries(t)
+	e := summarizeWith(t, s, read(t, ledgerOf(t, transfer{"w1", startOfNewYorkDay(1), -4999.99})), "2024-01-04").Equity
+	if e.DollarsWithheld || !near(e.Points[1].Shadow, 0.01) {
+		t.Fatalf("a cent left: withheld %v, shadow %v", e.DollarsWithheld, e.Points[1].Shadow)
+	}
+}
+
+func TestAResidualUnderHalfACentStopsTheShadow(t *testing.T) {
+	s := shadowStopSeries(t)
+	e := summarizeWith(t, s, read(t, ledgerOf(t, transfer{"w1", startOfNewYorkDay(1), -4999.996})), "2024-01-04").Equity
+	if !e.DollarsWithheld || !near(e.Points[1].Shadow, 0) || !near(e.ShadowValue, 0) {
+		t.Fatalf("0.004 left: withheld %v, shadow %v", e.DollarsWithheld, e.Points[1].Shadow)
 	}
 }
 
@@ -513,7 +531,7 @@ func TestTheAssumptionSaysHowFarTheFlexReaderHasRecorded(t *testing.T) {
 	lines := ledgerOf(t, transfer{"d1", startOfNewYorkDay(2), 5000})
 	behind := report.LoadCashLedger(ledger, fileSystem(map[string][]byte{ledger: lines, ledger + ".status.json": status("20240104")}))
 	got := summarizeWith(t, s, behind, "2024-01-05").Equity.Assumption
-	for _, want := range []string{"transfers recorded through 2024-01-04", "deposits or withdrawals from the last two days may not be recorded yet; a transfer appears in the summary two evenings after it posts"} {
+	for _, want := range []string{"transfers recorded through 2024-01-04", "deposits or withdrawals from the last two trading sessions may not be recorded yet; a transfer appears in the summary two trading sessions after it posts (a Friday transfer on Tuesday's)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("behind: assumption %q lacks %q", got, want)
 		}
@@ -537,7 +555,7 @@ func TestTheAssumptionSaysHowFarTheFlexReaderHasRecorded(t *testing.T) {
 		"unreadable": {ledger: lines, ledger + ".status.json": []byte("nope\n")},
 	} {
 		got = summarizeWith(t, s, report.LoadCashLedger(ledger, fileSystem(files)), "2024-01-05").Equity.Assumption
-		if !strings.Contains(got, "how far the Flex reader has recorded is not known; deposits or withdrawals from the last two days may not be recorded yet") {
+		if !strings.Contains(got, "how far the Flex reader has recorded is not known; deposits or withdrawals from the last two trading sessions may not be recorded yet") {
 			t.Errorf("%s: assumption %q", name, got)
 		}
 	}

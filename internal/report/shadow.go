@@ -165,7 +165,7 @@ func equityOf(points []equityPoint, bars map[string]benchBar, ledger CashLedger,
 	}
 	e.Verdict, e.VerdictTone = verdict(e.Excess, benchmark, first.date)
 	if stoppedOn != "" {
-		e.DollarNote = fmt.Sprintf("the recorded withdrawals exceeded the %s shadow's value on %s; ", benchmark, stoppedOn)
+		e.DollarNote = fmt.Sprintf("the recorded withdrawals reached or exceeded the %s shadow's value on %s; ", benchmark, stoppedOn)
 		if stopped {
 			e.DollarsWithheld = true
 			e.DollarNote += "dollar figures are not meaningful after that day"
@@ -233,7 +233,7 @@ func assumption(benchmark string, reinvestedAny bool, priceOnly [][2]string, lef
 		case ledger.CoveredTo == "":
 			parts = append(parts, "how far the Flex reader has recorded is not known; "+lastTwoDays)
 		case date > ledger.CoveredTo:
-			parts = append(parts, "transfers recorded through "+ledger.CoveredTo, lastTwoDays+"; a transfer appears in the summary two evenings after it posts")
+			parts = append(parts, "transfers recorded through "+ledger.CoveredTo, lastTwoDays+"; a transfer appears in the summary two trading sessions after it posts (a Friday transfer on Tuesday's)")
 		default:
 			parts = append(parts, "transfers recorded through "+ledger.CoveredTo)
 		}
@@ -249,7 +249,7 @@ func assumption(benchmark string, reinvestedAny bool, priceOnly [][2]string, lef
 // the statement read on the evening of the next session, so the summary two
 // sessions after D is the first to include it (reconciliation chapter,
 // "When"; a Friday transfer is in Tuesday's summary).
-const lastTwoDays = "deposits or withdrawals from the last two days may not be recorded yet"
+const lastTwoDays = "deposits or withdrawals from the last two trading sessions may not be recorded yet"
 
 // inWords joins items as a list in words: "a", "a and b", "a, b and c".
 func inWords(items []string) string {
