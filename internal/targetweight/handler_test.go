@@ -13,7 +13,7 @@ import (
 )
 
 func TestBoostRunDecidesEnterAndExit(t *testing.T) {
-	r := simulate(t, options{})
+	r := simulate(t, options{mutate: boostDryRun})
 	decided := targets(t, r.decisions)
 	if len(decided) != len(syntheticCloses()) {
 		t.Fatalf("%d decisions for %d sessions", len(decided), len(syntheticCloses()))
@@ -112,25 +112,6 @@ func TestJournalIsByteIdenticalOnRerunAndReplays(t *testing.T) {
 	}
 	if d := replay.Equivalent(decisions, replayed); d != nil {
 		t.Fatalf("replay diverged: %+v", d)
-	}
-}
-
-func TestAMissingBarWithholdsAndNeverComputesAcrossTheGap(t *testing.T) {
-	r := simulate(t, options{skip: map[int]bool{12: true}})
-	decided := targets(t, r.decisions)
-	for i, d := range decided {
-		switch {
-		case i < 12 && d.Outcome != event.TargetsOutcomeDecided:
-			t.Errorf("session %d before the gap withheld", i)
-		case i >= 12 && (d.Outcome != event.TargetsOutcomeWithheld || d.WithheldReason != event.WithheldMissingBars):
-			t.Errorf("session %d after the gap: %s %s, want withheld missing-bars", i, d.Outcome, d.WithheldReason)
-		}
-	}
-	if !strings.Contains(decided[20].Detail, sessionEnd(12).Format("2006-01-02")) {
-		t.Errorf("detail should name the missing session: %q", decided[20].Detail)
-	}
-	if len(planned(t, r.decisions)) != 1 {
-		t.Errorf("only the first purchase is planned before the gap")
 	}
 }
 

@@ -233,7 +233,7 @@ func TestReconciliationActionFollowsClassification(t *testing.T) {
 // and the engine decodes and validates them, so a field one side renames or
 // leaves unstated fails here.
 func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
-	read := func(name string, into interface{ Validate() error }) {
+	read := func(name string, version uint32, into interface{ Validate() error }) {
 		t.Helper()
 		raw, err := os.ReadFile(filepath.Join("..", "..", "adapter", "ibkr", "tests", "testdata", name))
 		if err != nil {
@@ -242,17 +242,39 @@ func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
 		if err := json.Unmarshal(raw, into); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if err := into.Validate(); err != nil {
+		validate := into.Validate
+		if v, ok := into.(interface{ ValidateSchema(uint32) error }); ok {
+			validate = func() error { return v.ValidateSchema(version) }
+		}
+		if err := validate(); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
+	// The adapter writes the broker snapshot and the mark at version 2 and
+	// the account snapshot Boost reads at version 3 (the owner's decision of
+	// 2026-10-18; ADR 0026 point 1, amended).
 	var snapshot event.BrokerSnapshotPayload
-	read("broker_snapshot.json", &snapshot)
-	if !snapshot.MarketOpen || len(snapshot.OpenOrders) != 2 || snapshot.Positions[0].Quantity != 147 {
+	read("broker_snapshot.json", event.BrokerSnapshotReadAtVersion, &snapshot)
+	if !snapshot.MarketOpen || len(snapshot.OpenOrders) != 2 || snapshot.Positions[0].Quantity != 147 || snapshot.AsOfClose || snapshot.NotAsOfClose == "" {
 		t.Errorf("broker snapshot %+v", snapshot)
 	}
+	var atClose event.BrokerSnapshotPayload
+	read("broker_snapshot_close.json", event.BrokerSnapshotReadAtVersion, &atClose)
+	if !atClose.AsOfClose || !atClose.ReadAt.After(atClose.AsOf) || atClose.MarketOpen {
+		t.Errorf("broker snapshot as of the close %+v", atClose)
+	}
+	var account event.AccountPositionsSnapshotPayload
+	read("account_snapshot.json", event.AccountSnapshotPositionsVersion, &account)
+	if account.NetLiquidation != 8530 || account.Quantity("SPY") != 147 || !account.AsOf.Equal(atClose.AsOf) {
+		t.Errorf("account snapshot %+v", account)
+	}
+	var mark event.MarkRecordedPayload
+	read("mark.json", event.MarkRecordedEvidenceVersion, &mark)
+	if mark.Price != 401.5 || !mark.BrokerLastSet || mark.BrokerLast != 401.17 {
+		t.Errorf("mark %+v", mark)
+	}
 	var reconciliation event.ReconciliationPayload
-	read("reconciliation.json", &reconciliation)
+	read("reconciliation.json", event.ReconciliationSchemaVersion, &reconciliation)
 	if reconciliation.TotalCash != -4700 || reconciliation.Currency != "USD" {
 		t.Errorf("reconciliation %+v", reconciliation)
 	}

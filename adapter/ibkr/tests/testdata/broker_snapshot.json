@@ -6,10 +6,35 @@
   "net_liquidation": 8530.0,
   "excess_liquidity": 5222.5,
   "positions": [
-    {"instrument_id": "SPY", "quantity": 147, "mark": 90.0, "mark_set": true}
+    {
+      "instrument_id": "SPY",
+      "quantity": 147,
+      "mark": 90.0,
+      "mark_set": true
+    }
   ],
   "open_orders": [
-    {"broker_order_id": "order:11:7", "client_order_id": "tw-1", "instrument_id": "SPY", "side": "sell", "status": "working", "remaining_quantity": 10},
-    {"broker_order_id": "perm:4242", "client_order_id": "", "instrument_id": "SPY", "side": "sell", "status": "working", "remaining_quantity": 5}
-  ]
+    {
+      "broker_order_id": "order:11:7",
+      "client_order_id": "tw-1",
+      "instrument_id": "SPY",
+      "side": "sell",
+      "status": "working",
+      "remaining_quantity": 10
+    },
+    {
+      "broker_order_id": "perm:4242",
+      "client_order_id": "",
+      "instrument_id": "SPY",
+      "side": "sell",
+      "status": "working",
+      "remaining_quantity": 5
+    }
+  ],
+  "read_at": "2027-01-15T08:00:00Z",
+  "as_of_close": false,
+  "not_as_of_close": "the reading is not on the session's own New York date",
+  "read_net_liquidation": 8530.0,
+  "cash_drift": 0,
+  "unexplained_cash": 0
 }

@@ -4,7 +4,8 @@
 //	operator kill-switch -inbox <dir> -account <id> -state engaged|released -by <name> -detail <text> [-at <RFC3339>]
 //	operator rebalance-cleared -inbox <dir> -account <id> -decision <decision id> -orders <id,id,...> -by <name> -detail <text> [-at <RFC3339>]
 //	operator acknowledge -inbox <dir> -account <id> -alert <alert key> -by <name> [-detail <text>] [-at <RFC3339>]
-//	operator approve -log <previous durable log> -account <id> -by <name> -out <approval.json> [-clear-incident <incident id>] [-at <RFC3339>]
+//	operator approve -log <previous durable log> -account <id> -by <name> -out <approval.json> [-clear-incident <incident id>] [-positions <SYM=N,...> -cash <amount> -currency <code>] [-at <RFC3339>]
+//	operator approve -first-run -account <id> -by <name> -positions <SYM=N,...> -cash <amount> -currency <code> -out <approval.json> [-at <RFC3339>]
 //
 // kill-switch, rebalance-cleared and acknowledge write one record into the
 // engine's operator inbox (the engine's -operator), which the engine
@@ -14,7 +15,11 @@
 // internal/operator).
 // approve writes the operator.run.approved file a fresh run is started with
 // (the engine's -approval; ADR 0027, amended 2026-10-17), stating what the
-// previous log ends in (internal/restart). Every input is validated before
+// previous log ends in (internal/restart); with -first-run, the approval of
+// an account's first run, which names no previous log and states the
+// starting book the owner checked in IBKR (-positions, -cash, -currency),
+// which a fresh run's approval may state too (ADR 0019 and ADR 0027,
+// amended 2026-10-18). Every input is validated before
 // anything is written, and nothing is ever overwritten (ADR 0018). It is
 // composition only (AGENTS.md rule 7).
 package main
@@ -25,10 +30,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +47,13 @@ import (
 )
 
 const usage = "usage: operator <kill-switch|rebalance-cleared|acknowledge|approve> [flags]; see docs/manual/operator.md"
+
+// accountCurrency is the one currency a starting book is stated in: the IBKR
+// adapter reads IBKR's balances in it (adapter/ibkr snapshot.BASE_CURRENCY)
+// and compares a reading's cash with the book's, so a book in another would
+// subtract cash in two currencies (ADR 0019 and ADR 0027, amended
+// 2026-10-18). Multi-currency accounts are out of scope.
+const accountCurrency = "USD"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -300,19 +314,56 @@ func approve(args []string, out io.Writer) error {
 	by := flags.String("by", "", "who approves")
 	outPath := flags.String("out", "", "where to write the approval, the engine's -approval file")
 	clearIncident := flags.String("clear-incident", "", "the incident the previous run ended in, to clear it (ADR 0019's recovery procedure)")
+	firstRun := flags.Bool("first-run", false, "approve the account's first run: no -log, and the starting book stated")
+	positions := flags.String("positions", "", "the starting book's holdings checked in IBKR, SYM=shares,...; empty when none")
+	cash := flags.String("cash", "", "the starting book's total cash (IBKR's TotalCashValue)")
+	currency := flags.String("currency", "", "the starting book's cash currency, such as USD")
 	atFlag := flags.String("at", "", "when, as an RFC 3339 time; now when omitted")
 	if err := parse(flags, args); err != nil {
 		return err
 	}
+	set := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	switch {
-	case *logPath == "":
-		return errors.New("operator: -log is required: the previous run's durable log")
+	case *firstRun && *logPath != "":
+		return errors.New("operator: -first-run approves an account's first run, which has no previous log: leave out -log")
+	case *firstRun && set["clear-incident"]:
+		return errors.New("operator: -first-run approves an account's first run, which has no incident to clear: leave out -clear-incident")
+	case !*firstRun && *logPath == "":
+		return errors.New("operator: -log is required: the previous run's durable log (or -first-run for an account's first run)")
 	case *outPath == "":
 		return errors.New("operator: -out is required: where to write the approval")
 	}
 	at, err := when(*atFlag)
 	if err != nil {
 		return err
+	}
+	book, err := startingBook(set, *positions, *cash, *currency, *firstRun)
+	if err != nil {
+		return err
+	}
+	// A starting book's approval time is its cutoff: the adapter counts
+	// only the fills at or after it (ADR 0019, amended 2026-10-18: a book
+	// and the movements that explain it share one cutoff). A time later
+	// than now would leave out fills already in the account, so it is
+	// refused; the owner approves right after reading the book.
+	if book != nil && at.After(time.Now()) {
+		return fmt.Errorf("operator: -at %s is later than now: a starting book's approval time is its cutoff, so approve right after reading the book in IBKR, leaving out -at (docs/runbooks/first-paper-order.md)", at.Format(time.RFC3339))
+	}
+	if *firstRun {
+		approval := event.OperatorRunApprovedPayload{
+			AccountID: *account, ApprovedBy: *by, ApprovedAt: at,
+			Boost: event.BoostStateInForce{Latched: new(false)}, StartingBook: book,
+		}
+		if err := approval.Validate(); err != nil {
+			return fmt.Errorf("operator: %w", err)
+		}
+		// A validated approval marshals (validated-payload-json).
+		raw, _ := json.MarshalIndent(approval, "", "  ")
+		if err := create(*outPath, append(raw, '\n')); err != nil {
+			return err
+		}
+		return describeFirstRun(out, approval, *outPath)
 	}
 	file, err := os.Open(*logPath)
 	if err != nil {
@@ -338,12 +389,86 @@ func approve(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if book != nil {
+		approval.StartingBook = book
+		if err := approval.Validate(); err != nil {
+			return fmt.Errorf("operator: %w", err)
+		}
+	}
 	// A validated approval marshals (validated-payload-json).
 	raw, _ := json.MarshalIndent(approval, "", "  ")
 	if err := create(*outPath, append(raw, '\n')); err != nil {
 		return err
 	}
 	return describe(out, name, end, approval, *outPath)
+}
+
+// startingBook reads the starting book from -positions, -cash and
+// -currency: nil when none of them is set and none is needed (a fresh run
+// that takes the previous run's book), else all three, read strictly, and
+// required for a first run. set names the flags given.
+func startingBook(set map[string]bool, positions, cash, currency string, required bool) (*event.StartingBook, error) {
+	if !required && !set["positions"] && !set["cash"] && !set["currency"] {
+		return nil, nil
+	}
+	for _, name := range []string{"positions", "cash", "currency"} {
+		if !set[name] {
+			return nil, fmt.Errorf("operator: -%s is required: a starting book states the holdings (-positions, empty when none), the total cash (-cash) and its currency (-currency) checked in IBKR", name)
+		}
+	}
+	if currency != accountCurrency {
+		return nil, fmt.Errorf("operator: -currency %q: the adapter reads IBKR's cash in %s, so state IBKR's %s TotalCashValue with -currency %s", currency, accountCurrency, accountCurrency, accountCurrency)
+	}
+	book := &event.StartingBook{Positions: []event.AccountPosition{}, Currency: currency}
+	seen := map[string]bool{}
+	if positions != "" {
+		for _, item := range strings.Split(positions, ",") {
+			symbol, shares, ok := strings.Cut(item, "=")
+			quantity, err := strconv.ParseInt(shares, 10, 64)
+			if !ok || symbol == "" || err != nil {
+				return nil, fmt.Errorf("operator: -positions %q: %q is not SYM=shares, a whole number of shares", positions, item)
+			}
+			if seen[symbol] {
+				return nil, fmt.Errorf("operator: -positions %q names %s twice", positions, symbol)
+			}
+			seen[symbol] = true
+			book.Positions = append(book.Positions, event.AccountPosition{InstrumentID: symbol, Quantity: quantity})
+		}
+	}
+	sort.Slice(book.Positions, func(i, j int) bool { return book.Positions[i].InstrumentID < book.Positions[j].InstrumentID })
+	amount, err := strconv.ParseFloat(cash, 64)
+	if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return nil, fmt.Errorf("operator: -cash %q is not an amount of cash", cash)
+	}
+	book.TotalCash = amount
+	if err := book.Validate(); err != nil {
+		return nil, fmt.Errorf("operator: %w", err)
+	}
+	return book, nil
+}
+
+// describeFirstRun says what a first run's approval states and what the
+// operator does next.
+func describeFirstRun(out io.Writer, approval event.OperatorRunApprovedPayload, path string) error {
+	var b strings.Builder
+	b.WriteString("the account's first run starts from the book you checked in IBKR: ")
+	writeBook(&b, *approval.StartingBook)
+	fmt.Fprintf(&b, "wrote %s: start the first run with -approval %s (docs/runbooks/first-paper-order.md)\n", path, path)
+	_, err := io.WriteString(out, b.String())
+	return err
+}
+
+// writeBook writes the holdings and cash of book, as the owner typed them,
+// and what the adapter does with it, so a typo is seen before the run starts.
+func writeBook(b *strings.Builder, book event.StartingBook) {
+	b.WriteString("holdings")
+	if len(book.Positions) == 0 {
+		b.WriteString(" none")
+	}
+	for _, p := range book.Positions {
+		fmt.Fprintf(b, " %s %d", p.InstrumentID, p.Quantity)
+	}
+	fmt.Fprintf(b, ", total cash %s %s; the adapter compares its first reading after a close with it\n", strconv.FormatFloat(book.TotalCash, 'f', -1, 64), book.Currency)
 }
 
 // create writes raw at path, refusing to replace anything there.
@@ -385,7 +510,12 @@ func describe(out io.Writer, name string, end restart.EndState, approval event.O
 	default:
 		b.WriteString("; it ended normal")
 	}
-	fmt.Fprintf(&b, "\nwrote %s: start the fresh run with -approval %s (docs/runbooks/durable-log.md, \"Restarting an engine\")\n", path, path)
+	b.WriteString("\n")
+	if approval.StartingBook != nil {
+		b.WriteString("the fresh run starts from the book you checked in IBKR, not the previous run's last close: ")
+		writeBook(&b, *approval.StartingBook)
+	}
+	fmt.Fprintf(&b, "wrote %s: start the fresh run with -approval %s (docs/runbooks/durable-log.md, \"Restarting an engine\")\n", path, path)
 	if end.KillSwitchEngaged {
 		b.WriteString("the kill switch was engaged when it ended; a fresh run starts with it released, so record it again with `operator kill-switch -state engaged` before starting the engine\n")
 	}

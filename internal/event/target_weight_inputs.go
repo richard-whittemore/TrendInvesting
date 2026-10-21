@@ -84,8 +84,25 @@ func (p AccountPositionsSnapshotPayload) Validate() error {
 // input, never a live read.
 const MarkRecordedEventType = "market.mark.recorded"
 
-// MarkRecordedSchemaVersion is the current schema version of MarkRecordedPayload.
+// MarkRecordedSchemaVersion is version 1 of MarkRecordedPayload.
 const MarkRecordedSchemaVersion uint32 = 1
+
+// MarkRecordedEvidenceVersion is version 2 of MarkRecordedPayload, the
+// version the IBKR adapter writes: version 1 with BrokerLast and
+// BrokerLastSet. Under the owner's decision of 2026-10-18 (ADR 0026 point 1,
+// amended) the mark is the delivered bar's official close, the price the
+// backtest marks at, and IBKR's last price is recorded beside it. Nothing
+// is sized from IBKR's price, but the gate's price band compares a checked
+// order's reference price with it when it is set, and with the official
+// close otherwise (ADR 0026 point 3, amended 2026-10-18), so the band has
+// teeth only when IBKR gives a price; no decision needs IBKR market-data
+// permissions.
+const MarkRecordedEvidenceVersion uint32 = 2
+
+// MarkRecordedVersions returns the versions a mark is read at.
+func MarkRecordedVersions() []uint32 {
+	return []uint32{MarkRecordedSchemaVersion, MarkRecordedEvidenceVersion}
+}
 
 // MarkRecordedPayload is one instrument's mark at AsOf, as Source reported it.
 type MarkRecordedPayload struct {
@@ -93,6 +110,12 @@ type MarkRecordedPayload struct {
 	AsOf         time.Time `json:"as_of"`
 	Price        float64   `json:"price"`
 	Source       string    `json:"source"`
+	// BrokerLast, from version 2, is IBKR's last price for the instrument
+	// read beside the mark, the price band's comparison when set (see
+	// MarkRecordedEvidenceVersion); BrokerLastSet is false, and
+	// BrokerLast zero, when IBKR gave none. Version 1 carries neither.
+	BrokerLast    float64 `json:"broker_last,omitempty"`
+	BrokerLastSet bool    `json:"broker_last_set,omitempty"`
 }
 
 // Validate checks the instrument, time, price and source.
@@ -108,8 +131,34 @@ func (p MarkRecordedPayload) Validate() error {
 	if p.Source == "" {
 		errs = append(errs, errors.New("source is required"))
 	}
+	switch {
+	case !isFinite(p.BrokerLast):
+		errs = append(errs, errors.New("broker last must be finite"))
+	case p.BrokerLastSet && p.BrokerLast <= 0:
+		errs = append(errs, errors.New("a broker last that is set must be positive"))
+	case !p.BrokerLastSet && p.BrokerLast != 0:
+		errs = append(errs, errors.New("broker last carries a value but none is set"))
+	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid mark recorded payload: %w", err)
+	}
+	return nil
+}
+
+// ValidateSchema is Validate at the version the mark arrived at: version 1
+// carries no broker evidence (MarkRecordedEvidenceVersion).
+func (p MarkRecordedPayload) ValidateSchema(version uint32) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	switch version {
+	case MarkRecordedSchemaVersion:
+		if p.BrokerLastSet || p.BrokerLast != 0 {
+			return errors.New("invalid mark recorded payload: version 1 carries no broker last; that is version 2's")
+		}
+	case MarkRecordedEvidenceVersion:
+	default:
+		return fmt.Errorf("invalid mark recorded payload: schema version %d is not one of %v", version, MarkRecordedVersions())
 	}
 	return nil
 }

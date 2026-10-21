@@ -102,10 +102,7 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 		return nil, err
 	}
 	if latest == "" {
-		if opts.approvalPath != "" {
-			return nil, fmt.Errorf("engine: -approval names an earlier run, but %s holds no earlier run's durable log (*%s); a first run needs no approval", dir, durableLogSuffix)
-		}
-		return nil, nil
+		return firstRunApproval(opts, comp, dir)
 	}
 	if opts.approvalPath == "" {
 		return nil, fmt.Errorf("engine: %s already holds an earlier run's durable log, %s, so this is a fresh run, and a fresh run decides nothing until the owner's approval is recorded: pass -approval with an operator.run.approved file naming %s and its final record hash (docs/runbooks/durable-log.md, \"Restarting an engine\"); after a crash, -resume that log instead",
@@ -132,6 +129,37 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 			earlier, earlier)
 	}
 	return approval, nil
+}
+
+// reachesAccount reports whether a run of mode can reach a broker account
+// whose holdings it must not adopt unchecked: paper and live. Its first run
+// is approved with the starting book (firstRunApproval).
+func reachesAccount(mode string) bool { return mode == modePaper || mode == modeLive }
+
+// firstRunApproval returns the approval a first run in dir records: a first
+// run's approval stating the starting book, the owner-confirmed holdings and
+// cash the IBKR adapter compares the run's first reading after a close with,
+// so IBKR's book is never adopted unchecked (ADR 0019 and ADR 0027, amended
+// 2026-10-18). A paper or live first run needs one; any other first run may
+// state one; a fresh run's approval, which names an earlier run, is refused.
+func firstRunApproval(opts options, comp composition, dir string) (*event.OperatorRunApprovedPayload, error) {
+	if opts.approvalPath == "" {
+		if reachesAccount(opts.mode) {
+			return nil, fmt.Errorf("engine: %s holds no earlier run, so this is the account's first run, and a first %s run decides nothing until the owner's approval states the starting book, the holdings and cash checked in IBKR that the adapter compares its first reading with: pass -approval with the file `operator approve -first-run` writes (docs/runbooks/first-paper-order.md)", dir, opts.mode)
+		}
+		return nil, nil
+	}
+	approval, err := readApproval(opts.approvalPath)
+	if err != nil {
+		return nil, err
+	}
+	if !approval.FirstRun() {
+		return nil, fmt.Errorf("engine: the approval in %s names an earlier run, %q, but %s holds no earlier run's durable log (*%s): this is a first run, approved with the starting book and no previous log (`operator approve -first-run`)", opts.approvalPath, approval.PreviousLog, dir, durableLogSuffix)
+	}
+	if approval.AccountID != comp.accountID {
+		return nil, fmt.Errorf("engine: the approval in %s is for account %q; this configuration decides %q", opts.approvalPath, approval.AccountID, comp.accountID)
+	}
+	return &approval, nil
 }
 
 // logOpeningWith returns the name of a log in the directory of -log,
@@ -200,6 +228,11 @@ func resumeApproval(opts options, comp composition) (*event.OperatorRunApprovedP
 		}
 	}
 	pending := before != ""
+	if restart.CutShort(recovery) && !pending && (opts.approvalPath != "" || reachesAccount(opts.mode)) {
+		// A first run cut short before its approval was recorded resumes
+		// with the approval it was started with, as a fresh run's does.
+		return firstRunApproval(opts, comp, dir)
+	}
 	switch {
 	case pending && opts.approvalPath == "":
 		return nil, fmt.Errorf("engine: %s holds nothing past its configuration, and %s holds an earlier run, %s, so its start was a fresh run whose approval was never recorded: resume it with -approval naming %s and its final record hash, the approval that run was started with (ADR 0027, the restart model)",
@@ -221,6 +254,9 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 	}
 	if approval.AccountID != comp.accountID {
 		return nil, fmt.Errorf("engine: the approval in %s is for account %q; this configuration decides %q", opts.approvalPath, approval.AccountID, comp.accountID)
+	}
+	if approval.FirstRun() {
+		return nil, fmt.Errorf("engine: the approval in %s is a first run's, but %s holds an earlier run, %s: approve the latest run, naming it and its final record hash (`operator approve -log`)", opts.approvalPath, dir, latest)
 	}
 	if approval.PreviousLog != latest {
 		return nil, fmt.Errorf("engine: the approval in %s names %s, but the latest earlier run in %s is %s; approve the latest run", opts.approvalPath, approval.PreviousLog, dir, latest)
@@ -475,8 +511,15 @@ func approvalEnvelope(approval event.OperatorRunApprovedPayload, comp compositio
 	if err != nil {
 		return event.Envelope{}, fmt.Errorf("engine: encode the approval payload: %w", err)
 	}
+	// A fresh run's approval is named by the run it follows; a first run's,
+	// which follows none, by its declared start and its own payload, so two
+	// first runs of other starts are two runs (the run's identity, ADR 0027).
+	id := "operator-run-approved:" + approval.PreviousLogFinalHash
+	if approval.FirstRun() {
+		id = "operator-run-approved:first-run:" + asOf.UTC().Format(time.RFC3339) + ":" + event.HashPayload(encoded)
+	}
 	return event.Envelope{
-		ID:                "operator-run-approved:" + approval.PreviousLogFinalHash,
+		ID:                id,
 		Type:              event.OperatorRunApprovedEventType,
 		SchemaVersion:     event.OperatorRunApprovedSchemaVersion,
 		EnvelopeVersion:   event.CurrentEnvelopeVersion,

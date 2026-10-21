@@ -11,9 +11,12 @@ import (
 // terminal withholds every later decision (rebalance-in-progress), and a
 // rebalance in progress sends nothing more until the owner clears it (ADR
 // 0026, point 5 and "A new rebalance is withheld while an earlier one's
-// orders are working"; plan.md section 3). It is a recorded input, never a
-// live read of a file or command, namespaced "operator." as
-// operator.kill-switch is.
+// orders are working"; plan.md section 3). Boost holds no rebalance and
+// reads it only as the owner's settlement of one released order the
+// adapter never sent, after relay.py resolve --never-sent: no venue will
+// rule on it, so it is no longer awaited (ADR 0026, point 2, "Boost",
+// amended 2026-10-18). It is a recorded input, never a live read of a file
+// or command, namespaced "operator." as operator.kill-switch is.
 const RebalanceClearedEventType = "operator.rebalance.cleared"
 
 // RebalanceClearedSchemaVersion is the current schema version of

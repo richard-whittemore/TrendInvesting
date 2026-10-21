@@ -472,6 +472,10 @@ class IbapiClient(TWSApi):
     def req_executions(self, req_id, account_id):
         flt = ExecutionFilter()
         flt.acctCode = account_id
+        # No client filter (0): every client's executions in the account.
+        # IBKR returns other clients' and TWS's only when this client ID is
+        # Gateway's Master API client ID (docs/manual/ibkr-adapter.md).
+        flt.clientId = 0
         self._client.reqExecutions(req_id, flt)
 
     def req_mkt_data(self, req_id, contract):

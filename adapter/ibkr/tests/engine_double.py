@@ -33,6 +33,33 @@ COMPACT = (",", ":")
 BROKER_SNAPSHOT_TYPE = "account.broker.snapshot"
 
 
+RUN_APPROVED = "operator.run.approved"
+
+
+def run_approval(account, previous_log="", previous_log_final_hash="", starting_book=None, latched=False):
+    """An operator.run.approved payload (schema version 3): a fresh run's naming previous_log, or a first run's.
+
+    starting_book is (positions, total_cash): a dict of symbol to shares and
+    the total cash the owner confirms, in USD; a first run's approval states
+    one (ADR 0019 and ADR 0027, amended 2026-10-18).
+    """
+    book = None
+    if starting_book is not None:
+        positions, cash = starting_book
+        book = {"positions": [{"instrument_id": s, "quantity": q} for s, q in sorted(positions.items())],
+                "total_cash": cash, "currency": "USD"}
+    return {"account_id": account, "previous_log": previous_log, "previous_log_final_hash": previous_log_final_hash,
+            "incident_id": "", "approved_by": "owner", "approved_at": "2026-10-17T14:00:00Z",
+            "boost": {"latched": latched}, "incident_in_force": None, "starting_book": book}
+
+
+def final_hash(log_path):
+    """The record hash of the last commit in the durable log at log_path, as the engine approves it."""
+    commits = [json.loads(line)["commit"] for line in Path(log_path).read_text(encoding="utf-8").splitlines()
+               if line.startswith('{"commit"')]
+    return commits[-1]["record_hash"]
+
+
 class EngineRefused(Exception):
     """The stand-in refused an input as the engine would, stopping its run."""
 
@@ -65,7 +92,8 @@ class LoggedEngine:
     """
 
     def __init__(self, log_path, decisions=None, configuration_hash=CONFIGURATION_HASH,
-                 strategy_version=STRATEGY_VERSION, started_at=STARTED_AT, configuration=None, snapshot_age=None):
+                 strategy_version=STRATEGY_VERSION, started_at=STARTED_AT, configuration=None, snapshot_age=None,
+                 approval=None):
         self.path = Path(log_path)
         self.decisions = decisions or {}
         self.snapshot_age = snapshot_age
@@ -102,6 +130,30 @@ class LoggedEngine:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(line + json.dumps({"commit": {"sequence": 1, "record_hash": last}}, separators=COMPACT) + "\n")
         self.next_sequence = 2
+        if approval is not None:
+            self._approve(approval, started_at)
+
+    def _approve(self, payload, started_at):
+        """Commit the owner's Run approval as the log's second input, before the socket opens, as cmd/engine does.
+
+        Named, as cmd/engine names it, by the previous log's final hash, or,
+        for a first run's (no previous log, the starting book stated), by the
+        run's start and its own payload's hash (schema version 3).
+        """
+        raw = json.dumps(payload, separators=COMPACT)
+        digest = hashlib.sha256(raw.encode()).hexdigest()
+        ident = ("operator-run-approved:first-run:{}:{}".format(started_at, digest) if not payload["previous_log"]
+                 else "operator-run-approved:" + payload["previous_log_final_hash"])
+        head = {"id": ident, "type": RUN_APPROVED, "envelope_version": 1, "schema_version": 3,
+                "event_time": started_at, "recorded_at": started_at, "sequence": 2, "source": "engine",
+                "strategy_version": self.strategy_version, "configuration_hash": self.configuration_hash,
+                "payload_hash": digest}
+        self.records += 1
+        last, line = self._record(self.records, "input", head, raw)
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(line + json.dumps({"commit": {"sequence": self.records, "record_hash": last}},
+                                      separators=COMPACT) + "\n")
+        self.next_sequence = 3
 
     @classmethod
     def resumed(cls, crashed_log, log_path, decisions=None):

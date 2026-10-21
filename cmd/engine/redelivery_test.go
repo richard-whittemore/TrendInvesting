@@ -15,13 +15,20 @@ import (
 )
 
 // paperBoostOptions is a paper Boost invocation writing into dir, whose
-// released orders are marked to be sent.
+// released orders are marked to be sent: an account's first run, approved
+// with its starting book, so the adapter's first input follows the approval
+// at paperFirstInput.
 func paperBoostOptions(t *testing.T, dir string) (options, event.TargetWeightConfigurationPayload) {
 	t.Helper()
 	opts := boostOptions(t, dir)
 	opts.mode, opts.configPath = modePaper, writeBoostConfiguration(t, dir, modePaper, "DU1234567")
+	opts.approvalPath = writeFirstRunApproval(t, "DU1234567")
 	return opts, boostConfiguration(t, opts.configPath)
 }
+
+// paperFirstInput is the sequence of the adapter's first input to a first
+// paper run: after its configuration and its approval.
+const paperFirstInput = approvalSequence + 1
 
 // feedUntilReleased feeds sessions until the engine releases an order, so
 // the feed's last input is the session close that released it.
@@ -74,7 +81,7 @@ func TestAnInputSentAgainIsAnsweredWithItsCommittedReply(t *testing.T) {
 	dir := t.TempDir()
 	opts, cfg := paperBoostOptions(t, dir)
 	stop := startEngine(t, opts)
-	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", 2)
+	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", paperFirstInput)
 	feedUntilReleased(t, feed)
 
 	again, err := feed.client.Decide(context.Background(), feed.last)
@@ -106,7 +113,7 @@ func TestAnotherInputUnderACommittedIDIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	opts, cfg := paperBoostOptions(t, dir)
 	stop := startEngine(t, opts)
-	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", 2)
+	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", paperFirstInput)
 	feedUntilReleased(t, feed)
 
 	other := feed.last
@@ -138,7 +145,7 @@ func TestAResumedEngineServesACommittedButUnsentOrderAgain(t *testing.T) {
 	first, cfg := paperBoostOptions(t, dir)
 	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
 	stop := startEngine(t, first)
-	feed := newBoostFeed(t, first.socketPath, cfg, "test-build", 2)
+	feed := newBoostFeed(t, first.socketPath, cfg, "test-build", paperFirstInput)
 	session := feedUntilReleased(t, feed)
 	// The adapter never acts on this reply: the engine stops before it is
 	// sent, as far as the adapter knows.
@@ -150,6 +157,7 @@ func TestAResumedEngineServesACommittedButUnsentOrderAgain(t *testing.T) {
 
 	resumed := first
 	resumed.logPath, resumed.outPath, resumed.resumePath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal"), first.logPath
+	resumed.approvalPath = "" // a crash resumes from its log, its approval included
 	stop = startEngine(t, resumed)
 	after := newBoostFeed(t, resumed.socketPath, cfg, "test-build", feed.sequence)
 	again, err := after.client.Decide(context.Background(), unsent)
@@ -206,7 +214,7 @@ func TestABoostEngineRecordsTheAcknowledgementOfAnOrderItReleased(t *testing.T) 
 	dir := t.TempDir()
 	opts, cfg := paperBoostOptions(t, dir)
 	stop := startEngine(t, opts)
-	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", 2)
+	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", paperFirstInput)
 	session := feedUntilReleased(t, feed)
 	order := feed.released[0]
 	at := boostSession(session).Add(time.Minute)
@@ -267,7 +275,7 @@ func TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged(t *testing.T)
 	dir := t.TempDir()
 	opts, cfg := paperBoostOptions(t, dir)
 	stop := startEngine(t, opts)
-	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", 2)
+	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", paperFirstInput)
 	session := feedUntilReleased(t, feed)
 	order := feed.released[0]
 

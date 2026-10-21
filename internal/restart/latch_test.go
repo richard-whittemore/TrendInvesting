@@ -89,6 +89,7 @@ func TestAVersion1ApprovalInTheApprovedLogStaysReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(keys["incident_in_force"].(map[string]any), "scope_cash_components")
+	delete(keys, "starting_book") // version 3's
 	raw, err := json.Marshal(keys)
 	if err != nil {
 		t.Fatal(err)

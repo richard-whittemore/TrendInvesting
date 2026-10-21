@@ -5,20 +5,18 @@ sends, what you will see, and what it does when something goes wrong.*
 
 **Where this stands.** The sending path, the adapter's main loop and its
 start command are built and tested against a stand-in for IB Gateway (a
-"fake gateway" that answers like IBKR, with invented accounts and prices)
-and a stand-in for the engine. No order has yet been sent to IBKR's real
-paper servers: that is the hand-run test in
-`docs/runbooks/first-paper-order.md`, and it is yours to run. The real IBKR
-client places an order only when the adapter's configuration switches
-sending on (`"paper_sending_enabled": true`, below); it ships switched off.
-The adapter now delivers each day's market data to the engine: the data
-job's file (SPY's bar and the session's close), behind a broker snapshot
-with SPY's mark ("A paper day", below). Two inputs the Boost engine reads
-before it decides a session are still not produced by anything: the
-account snapshot as of the close and the recorded mark. Without them the
-real engine withholds every session's decision ("stale-account-snapshot")
-and releases no order, so the first real paper order still waits for them
-("A paper day", "Not built yet").
+"fake gateway" that answers like IBKR, with invented accounts and prices),
+and the whole paper day is rehearsed with the real engine deciding Boost
+("The rehearsal", below). No order has yet been sent to IBKR's real paper
+servers: that is the hand-run test in `docs/runbooks/first-paper-order.md`,
+and it is yours to run. The real IBKR client places an order only when the
+adapter's configuration switches sending on (`"paper_sending_enabled":
+true`, below); it ships switched off. The adapter delivers each day's market
+data to the engine behind one account reading after the close, which stands
+for the account as of the close when nothing is working at IBKR, nothing
+has executed since and the account is the previous close's adjusted by the
+run's own fills (your decision of 2026-10-18; "A paper day", below), so
+every input the Boost engine needs to decide a session is now produced.
 
 ## What sends
 
@@ -236,22 +234,34 @@ deploy/rehearse-paper.sh --account
 
 From a checkout, on the machine that will run the test. It asks for your
 paper account at a hidden prompt (leave `--account` off for a synthetic
-one), then runs one whole paper day against stand-ins: the data job writes
-the run's warm-up and the day's file from invented Massive prices, and the
-adapter's own start command, with sending switched on, delivers them to a
-stand-in engine through the fake gateway. It prints a `PASS` line for each
-of: the data job's two files; the account read before the order; the
-warm-up delivered behind one broker snapshot, in order; the day's
-snapshot (with SPY's mark), bar and close, in that order; one SPY
-whole-share DAY limit order for your account, released by the day's close
-and sent only after it, tagged with its client order ID; IBKR's acceptance
-and two fills reaching the engine; a dropped link reconnected and matched
-again without sending the order again; a restart that sends and records
-nothing twice; and no market-data input sent twice. It ends "rehearsal
-passed: nothing was sent to IBKR", or exits with `FAIL:` and the reason.
-Nothing reaches Massive or IBKR and your account number is never printed.
-The stand-in engine releases the order itself: the rehearsal proves the
-delivery and the sending, not the Boost rule's decision.
+one), builds the real engine (`make engine`) and runs synthetic paper days
+with it, in paper mode, deciding Boost: the data job writes the run's
+warm-up and each day's file from invented Massive prices, and the adapter's
+own start command, with sending switched on, delivers them to the engine
+through the fake gateway. It prints a `PASS` line for each of:
+
+- the data job's warm-up, stamped with the engine's own identity;
+- the warm-up delivered the evening before the first day behind one
+  account reading as of that evening's close, with the start-of-run
+  reconciliation, which the engine matches;
+- the day's account and broker snapshots as of the close (read after it),
+  its bar, its mark from the bar's official close, then its close;
+- the engine's decision and its release of one buy, sent once, only after
+  it, as a whole-share SPY DAY limit order for your account tagged with its
+  client order ID, and IBKR's acceptance reaching the engine;
+- a dropped link and a restart, each reconciled again and matched by the
+  engine, sending nothing twice;
+- the next day's fills, after the close, so that day's reading is stamped
+  at its read time with the reason and the engine withholds the session
+  (`stale-account-snapshot`), ordering nothing;
+- a crash resume of the engine under a new run name, which takes the next
+  day's file from the run's own folder, once, and decides it;
+- a holding no order explains, found at the next start's reconciliation,
+  taking the engine out of Normal (Degraded on SPY).
+
+It ends "rehearsal passed: nothing was sent to IBKR", or exits with `FAIL:`
+and the reason. Nothing reaches Massive or IBKR and your account number is
+never printed.
 
 ### Turning sending on, and off again
 
@@ -277,29 +287,134 @@ job are running (New York times):
 | All day | The adapter keeps the link to IB Gateway up and passes IBKR's reports on any working order to the engine | `journalctl -u ti-adapter-boost` |
 | 4:00 p.m. (1 p.m. on an early close) | The market closes | |
 | 5:05 p.m. | The data job records SPY's settled session from Massive and writes the day's file, `boost-<date>.jsonl`, in the run's stream folder (retried at 6:05 and 8:05 if it fails) | `journalctl -u ti-data` |
-| Within seconds | The adapter reads the account at IBKR and SPY's last price, sends the engine the broker snapshot, then the day's SPY bar, then the session's close ([market data](market-data.md), "What happens to the file") | the adapter's log: `ibkr stream queued ...`, then one `answered with` line per input |
+| Within seconds | The adapter reads the account at IBKR once, checks that the reading can stand for the close (below), and sends the engine, in this order: its account snapshot, the broker snapshot, the day's SPY bar, SPY's mark, then the session's close ([market data](market-data.md), "What happens to the file") | the adapter's log: `ibkr broker snapshot read_at=... as_of=...`, `ibkr stream queued ...`, then one `answered with` line per input |
 | At the close's input | The engine decides the session. If it releases an order, the adapter sends it to IB Gateway once, as a DAY limit order for that session | the adapter's log: `ibkr sent client_order_id=...`; the engine's journal (`journal-query orders`) |
 | Next session | IBKR works the order; its acceptance and fills reach the engine as they happen | `journal-query orders`, `journal-query fills` |
 
-**What the broker snapshot says.** It is IBKR's account as read just
-before the day's file goes: holdings (each with IBKR's last traded price as
-its mark, or "no mark" when IBKR gave none), net liquidation, Excess
-Liquidity and every open order, and whether the market was open at that
-moment (after 5:05 p.m. it is not). The engine sizes sells and watches the
-margin cushion from it (ADR 0019).
+**The reading after the close stands for the close** (your decision of
+2026-10-18; ADR 0019, ADR 0025 point 5 and ADR 0026 point 1). The engine
+decides a session from the account as it was at that session's close. The
+adapter reads the account after the close, when the day's file arrives.
+Between the close and the next open the account changes only through an
+order still working, an execution, a corporate action IBKR books overnight
+(a split, say) or a cash posting (interest, a fee, a dividend). The adapter
+checks for each, so when, at the moment of the read:
+
+- the read is after the close and on the same New York date (IBKR's list of
+  executions reaches back only to midnight, so only then does it cover
+  everything since the close);
+- IBKR shows no open order for the account, from any client (working,
+  pending or cancel-pending), in either read of the account or in the last
+  list of open orders it returns;
+- IBKR reports no execution in the account at or since the close, from
+  any client it shows to the adapter (see the Master API client ID, below);
+- every holding has the day's official close in the file, so the account
+  can be valued at the close, and IBKR's own net liquidation is above zero;
+  and
+- **with no help from any client ID**, the holdings are exactly the
+  previous close's plus or minus the fills since, and the cash is the
+  previous close's adjusted by those fills, give or take at most **1% of
+  net liquidation** (room for a day's interest, a fee or a dividend; the
+  difference is recorded on the broker snapshot as `cash_drift`, and that
+  difference added up since the cash was last explained as
+  `unexplained_cash`; the daily summary shows both, so a small posting day
+  after day is still seen). A split, a transfer, a large posting or a trade
+  made by a client IBKR does not show the adapter fails this check. The
+  previous close is the last account snapshot of this run or of the earlier
+  runs its approvals name, or the **starting book** you stated when you
+  approved the account's first run (`operator approve -first-run`), so a
+  fresh run's first delivery is compared with the last run's close and the
+  first run's with your book; a first delivery that does not match is never
+  taken as the book (the engine halts on its reconciliation instead),
+
+the one reading is the account as of the close. The adapter then states
+both snapshots "as of" the close (4:00 p.m.) and records the real read time
+beside the broker snapshot as evidence (`read_at`). Otherwise it stamps
+both with the real read time and writes every reason into the broker
+snapshot (`not_as_of_close`); the engine finds no snapshot as of the close,
+withholds the session (`stale-account-snapshot`) and orders nothing, and
+the reporter pages you once, naming the reason
+([alerts](alerts-and-dashboard.md)). The target in force stays as it was;
+the next session that passes decides as usual.
+
+One residual you cover by a setting: a sale and a repurchase of the same
+shares by another client after the close leave the holdings unchanged and
+move the cash by little, so only IBKR's list of executions shows them, and
+IBKR shows other clients' executions only to the Gateway's Master API
+client ID. Set it to the adapter's client ID (below, and the runbook's A4);
+the unexplained cash in the daily summary is your check on it.
+
+**Set the Gateway's Master API client ID to the adapter's.** IBKR shows an
+API client the executions of other clients, and of TWS or IBKR's own app,
+only when that client's ID is the Gateway's "Master API client ID". Set it
+to Boost's client ID, 11 (the [first paper order runbook](../runbooks/first-paper-order.md),
+step A4, on the Mac mini and the server; [the IBKR adapter](ibkr-adapter.md)), so the list the adapter
+reads, which asks for every client's executions, has them all. The cash and
+holdings check above does not depend on it: a trade the adapter cannot see
+still changes the holdings, and the reading is then stamped at its read time.
+
+**What the snapshots say, and at what prices.** One price basis per rule
+(ADR 0019, amended 2026-10-18). A reading as of the close is valued **at the
+close**: the engine's account snapshot holds IBKR's positions and a net
+liquidation of the account's cash plus SPY at the day's official close, the
+price Boost's orders are valued at; the broker snapshot holds the same
+holdings marked at that close, the same net liquidation, IBKR's own net
+liquidation at the read beside it (`read_net_liquidation`), Excess
+Liquidity as IBKR read it, every open order, and whether the market was open
+at its stamp (at the close it is not). The sale back to 98% is sized from
+the broker snapshot's net liquidation and mark, both at the close; the
+margin cushion compares Excess Liquidity with IBKR's own net liquidation at
+the read, both IBKR's figures from the same moment. A reading stamped at its
+read time is IBKR's own reading throughout: its net liquidation, and each
+holding marked at IBKR's last price at the read (no mark when IBKR gives
+none).
+
+**The mark is the day's official close.** SPY's mark input
+(`market.mark.recorded`) is the delivered bar's official close: the number
+the backtest marks at. IBKR's last traded price is read too and recorded
+beside it (`broker_last`). The engine's price band compares a buy's
+reference price, the previous close, with IBKR's last price when IBKR gave
+one, and with the official close otherwise, and says which on the order
+(`mark_source`). **The band has teeth only when IBKR provides a price**:
+without one it compares the close with itself and passes, and the order's
+limit price is the only bound on the fill. This is the orchestrator's reading
+of your decision, put to you (ADR 0026, point 3, amended 2026-10-18).
+Nothing is sized from IBKR's price, so **no decision needs IBKR market-data
+permissions** on the paper login.
+
+**Reconciliation with every reading.** Every day's delivery also sends
+IBKR's positions and cash from the same reading. Once the engine holds a
+book it goes first, so the engine compares IBKR's holdings with the book it
+holds and the fills recorded since **before** the day's snapshot replaces
+that book: shares that no fill explains are unexplained, never quietly
+taken over. At a run's first delivery, before the engine holds a book, it
+goes behind the snapshots, for the engine to compare against the book it has
+just recorded. At every later start of the adapter and every reconnect it
+sends them again, read only once every trade IBKR replayed has its
+commission and its fill has reached the engine, and before any of the day's
+market data. A difference no journalled fill or corporate action explains
+takes the account out of Normal (ADR 0019: Degraded on the instrument, or
+Halted when it cannot be compared), and you are paged
+([reconciliation](reconciliation.md)).
 
 **Keep the adapter running through the evening.** An order the engine
 releases at a close is for that session's date. If the adapter is stopped
-when the file is written and you start it the next morning, it delivers
-the file then, and the order is refused as released for an earlier session
-(the row "The link stayed down past the end of the order's day", below).
+when the file is written and you start it the next morning, the reading is
+on a later date than the close, so the session is withheld and nothing is
+ordered for it; and an order released the evening before is refused as
+released for an earlier session (the row "The link stayed down past the end
+of the order's day", below).
 
 **The first paper day.** Start in this order: the engine; the data job's
 one-time warm-up ([market data](market-data.md), "The one-time warm-up"),
 which writes the run's first file and its folder; then the adapter, which
 refuses to start until that folder exists ("the run's stream folder ...
 does not exist"). It delivers the warm-up straight away, behind one
-snapshot. From then on the timer writes each day's file at 5:05 p.m.
+reading, with the start-of-run reconciliation. Do this **the evening before
+the first paper day** (after that day's 5:05 p.m. file would be too late,
+and the morning of it is fine): the warm-up's reading is stamped with its
+own close, or its read time, and the first day's snapshot must come after
+it. From then on the timer writes each day's file at 5:05 p.m.
 
 **What can go wrong.** Each of these stops the adapter with a message
 naming the file, and nothing from that file is sent; the settling steps are
@@ -313,46 +428,12 @@ too, with the file left in place. A link that drops while the snapshot is
 read stops nothing: the adapter waits, and delivers once the link is back
 and matched.
 
-**Not built yet.** These are known gaps, each needing your decision before
-the first real paper order:
+**Not built yet.** Nothing further is needed before the first real paper
+order. Still to come, and not needed for it:
 
-- **The account snapshot as of the close, and the recorded mark.** The
-  Boost engine decides a session only from an account snapshot taken at
-  that session's close (`account.snapshot`), and checks a buy's price
-  against a mark recorded at or after that close (`market.mark.recorded`;
-  a buy with none is refused, "missing-mark", and the account goes
-  Degraded). Nothing produces either in paper yet, so the engine withholds
-  every session ("stale-account-snapshot") and releases nothing. The broker
-  snapshot's mark is a different figure, read only by the sale back to 98%.
-  Where the recorded mark comes from (IBKR's last price, which the adapter
-  already reads for the broker snapshot, or the data job's close) is your
-  decision. The adapter reads the
-  account after the close, so an account snapshot "as of the close" would
-  be the adapter's statement that nothing changed between the close and its
-  read; whether that is acceptable is a rule decision (ADR 0026 point 1).
-- **The broker snapshot is taken after the close.** The adapter reads it
-  just before it sends the day's file, and records every line of the file
-  at the time it sends it, so, while the server's clock keeps time with
-  IBKR's, the snapshot is never stamped later than the close it serves, and
-  a sell the engine plans at that close finds it fresh (within the
-  configured 30-minute limit) and is sized against it. If the server's
-  clock is behind IBKR's, the snapshot's IBKR time comes out later than
-  the close's recorded time; the engine counts that as stale (ADR 0019)
-  and blocks every sell (reason `stale-broker-snapshot`), failing closed:
-  the sale back to 98% is withheld (`risk.sale.withheld`) and any other
-  sell is refused (`risk.order.refused`);
-  check the server's clock (run `clock-check.sh`; [the server](server.md),
-  "The clock") and see [market data](market-data.md), "What happens to the
-  file". It is
-  the account some minutes after the close, not at it: whether a reading
-  taken after the close may serve a decision made at the close is ADR
-  0019's rule question, and choosing when the adapter takes it (after the
-  close, as now, or shortly before it) is your decision.
-- **The morning reconciliation record.** The engine compares IBKR's
-  positions and cash against its book, which comes from the account
-  snapshot. With no account snapshot recorded, a reconciliation is
-  "unverifiable" and would halt the account, so the adapter does not send
-  one yet.
+- the after-fill, pre-order and scheduled reconciliations (ADR 0019): only
+  the start, reconnect and daily-delivery ones are sent;
+- the IRA accounts' inputs: only Boost's stream is delivered.
 
 ## What never sends
 
@@ -409,6 +490,7 @@ the first real paper order:
 | The adapter stops at start: "awaits its reply from an earlier engine run" | The adapter stopped last time while it waited for the engine's answer to one input, and the engine now running is a fresh run, not that run resumed. A fresh run starts from the account as it is and decides afresh, so it never takes the earlier run's input and never sends an order the earlier run decided. The message names the input, the earlier run's log, whether that run recorded an answer, and any order in that answer the adapter never sent (one "being handed over" may have reached IBKR). Nothing is sent. | If you meant to resume a crashed engine, stop it and resume the crashed run instead ([the durable log runbook](../runbooks/durable-log.md), "Restarting an engine"): the adapter then asks that run for its answer. Otherwise check IBKR for every order the message names, and **cancel at IBKR** any of them still working, and any order the earlier run sent that is still open (orders under the engine's client ID, open orders view), and confirm each is cancelled before the adapter is started: the fresh run has no record of such an order, and a later fill of it would be recorded into a run that never released it. Then, with the adapter stopped, settle the input with the command the message gives: `python3 adapter/ibkr/relay.py resolve --run-ended PENDING_FILE INPUT_ID --journal ENGINE_LOG --reason "a fresh run after ..."`, where `ENGINE_LOG` is the running engine's `-log` file. The input and those orders are recorded as refused, "run ended", in `PENDING_FILE.run-ended`: they are never sent, now or later. So is every report waiting in `PENDING_FILE.outbox` on an order an earlier run released (IBKR's reports recorded while the earlier run's engine decided): it belongs to that run, so it is struck off unsent and kept in the same record, never sent to the fresh run. Anything else waiting there stays and is sent to the fresh run when the adapter starts: another program, such as the session's close, may have recorded it for the fresh run while the adapter was stopped, and an input that may be the running run's is never thrown away. The command refuses an input of the run now running ("belongs to the run now running"), another input than the one waiting, a missing `--journal`, an input whose recorded time cannot be read ("has no recorded_at that can be read": the pending file is not as the adapter writes it, and the adapter stops at start with the same message; leave it stopped and investigate, never edit the file), and an input with no record of the engine run it was sent to ("has no record of the run it was sent to": see [re-delivery](redelivery.md), "What can go wrong"). Start the adapter: it goes on with the fresh run's own inputs, and its start reconciliation and the morning reconciliation show the account as it is (ADR 0025 point 5). |
 | The adapter stops: "EngineUnavailable" or "the engine refused the input" | The engine stopped, or refused an input. The input stays in the pending file; nothing is lost and nothing is sent. | For a stopped engine, follow `docs/runbooks/durable-log.md` ("Restarting an engine") to resume it, then start the adapter: it asks for that input again first. A refusal is a fault to investigate before starting again. |
 | IB Gateway's Read-Only API is still on when an order goes out | Not yet observed against IBKR. IBKR refuses API orders while Read-Only is on, with its error 321 ("Error validating request ... Read-Only mode") under the order's number. The adapter has written "sent" by then, so it never sends it again; it records IBKR's refusal for the engine as the order refused (`invalid`) with IBKR's reason, so the engine reads the order as ended. The same holds for IBKR's other codes that refuse a newly placed order before it works (103 duplicate order number, 110 price off the minimum tick, 200 no security definition, 203 security not allowed for the account), but only for an order this adapter placed in this session that IBKR has not yet shown working. If the adapter stops after it placed the order but before it read IBKR's refusal, no report is recorded: IBKR does not repeat error messages, and the order, already written "sent", is not sent again, so the engine holds it as released with no report. | Read IBKR's reason in the engine's record. If no report was recorded (the adapter stopped first), the reporter's not-acknowledged alert shows the order: confirm in IBKR that it was refused or that no order carries that client order ID, and settle it by hand as an order IBKR never took ([re-delivery](redelivery.md), "What can go wrong"). Otherwise, confirm in IBKR that no order carries that client order ID. Turn Read-Only off before the next order; the next rebalance places a fresh order if one is still wanted. |
+| You are paged: a decision withheld (`stale-account-snapshot`), "The adapter's reading after the close could not stand for the close" | An order was still working at IBKR after the close, something executed in the account since the close, or the reading was taken on a later date than the close (the adapter was not running that evening). The reading was stamped at its read time and the session withheld; nothing was ordered and the target in force is unchanged | Read the reason in the page. Check the account in IBKR: an order still working, or a trade you placed after the close, explains it. Nothing to do if the next session's reading passes: it decides as usual. If the reason is a trade you made by hand, the next start's reconciliation will report it ([reconciliation](reconciliation.md)) |
 | The adapter stops: "the stream file ... is refused" | A market-data file is not as the data job writes it, is not this run's, or is older than one already delivered. Nothing from it was sent | [Market data](market-data.md), "What happens to the file": move the file aside, run the data job again, start the adapter |
 | The adapter stops at start: "the run's stream folder ... does not exist" | The data job has not written this run's warm-up yet. Nothing was read or sent. After a crash resume this means the first run's log, through which the run's folder is found, is missing from the engine's folder | Run the warm-up ([market data](market-data.md), "The one-time warm-up"), then start the adapter. After a crash resume, do not: the adapter then says "the log <path> already holds N committed delivered inputs beyond its configuration" instead (N counts delivered inputs only: market data and the adapter's broker snapshots); restore the first run's log, unchanged, from the backup ([market data](market-data.md), "A crash resume") |
 | The adapter stops at start: "nothing shows it is that run's crash resume" | The run has the identity of the run whose stream folder it found but is not shown to be its crash resume. One of three cases: the engine's first run started again without an approval; a resume of a first run that crashed having committed only its configuration; or a log that is not a copy of that run's records, record hash for record hash. Nothing was read or sent | For the first two, start a fresh run with its approval and its own warm-up; for the third, resume the crashed run's own log with `engine -resume` ([market data](market-data.md), "A crash resume") |
@@ -423,7 +505,16 @@ the first real paper order:
 - ADR 0025 point 3 and the engine's configuration rule: a paper
   configuration names a paper account, and a live one does not.
 - ADR 0025 point 5: on every start and reconnect, IBKR's orders, trades and
-  balances are matched before any order is accepted.
+  balances are matched before any order is accepted, and the engine is sent
+  IBKR's positions and cash to reconcile against its book.
+- ADR 0019, ADR 0025 point 5 and ADR 0026 point 1, amended 2026-10-18 (your
+  decision): one reading after the close, with no order working or pending
+  at IBKR and no execution since the close, is the account as of that
+  close, when the account is also the previous close's adjusted by the
+  fills since (cash within 1% of net liquidation; the previous close found
+  back through the chain of runs, or your starting book), valued at the close;
+  the mark is the delivered bar's official close, with IBKR's last price
+  beside it, which the price band compares with when it is set.
 - ADR 0027 and [re-delivery](redelivery.md): journal before send, and each
   order sent once.
 - ADR 0022 and ADR 0026 point 2: what IBKR's reports become, and the order
@@ -531,11 +622,28 @@ the first real paper order:
 - `adapter/ibkr/tests/test_cli.py`: the start command, its refusals, the
   account read from one place and never shown, and the server's unit and
   shipped configuration checked against it.
+- `adapter/ibkr/tests/test_post_close.py`, the reading after the close
+  against the fake gateway and the stand-in engine: the account and broker
+  snapshots as of the close with the read time beside it, then the bar,
+  the mark from the bar's official close (IBKR's last price beside it),
+  then the close; a reading as of the close valued at the official close
+  with IBKR's own net liquidation beside it, one at its read time IBKR's
+  own; no market-data permission changes nothing decided; a catch-up batch
+  marks and stamps only its last session; an order working at IBKR, one in
+  the last open-order list, an execution since the close, a holding with no
+  close, holdings no fill explains, cash beyond the drift bound, a reading
+  on a later date or before the close stamps the read time and says why; a
+  fill of the run explains holdings and cash, a small posting is recorded
+  as drift; an execution during the last read reads again; a later batch
+  follows the last stamp the engine holds; the first batch carries the
+  start-of-run reconciliation, every later batch its reconciliation ahead
+  of its snapshots, and every later start and reconnect reconciles once
+  the engine holds a book, only after a replayed fill's commission.
 - `adapter/ibkr/tests/test_delivery.py`, the day's market data against the
   fake gateway and the stand-in engine: a file reaches the engine after the
-  broker snapshot, in file order, as written but for the engine's sequence;
-  SPY's mark asked of IBKR by its contract, and a holding with no mark or
-  no contract number stated without one; files in session order, once
+  account and broker snapshots, in file order, as written but for the
+  engine's sequence; IBKR's last price asked by the contract, and a holding
+  with no bar stated without a mark; files in session order, once
   each, across a restart, each later batch behind its own snapshot; a file
   stopped partway resumes at its next line; a stop between the record and
   the outbox write, or after the write and before the record closes,
@@ -547,12 +655,20 @@ the first real paper order:
   back; the delivery record is read strictly; an earlier run's lines left
   in the outbox are dropped unsent; the market's hours by the NYSE
   calendar.
-- `adapter/ibkr/tests/test_snapshot.py`, `MarkTests`: IBKR's last price is
-  the mark, and an error, a price not finite and positive, a previous close
-  or no answer give none.
+- `adapter/ibkr/tests/test_snapshot.py`, `MarkTests`: IBKR's last price
+  (evidence beside the mark) is its LAST tick, and an error, a price not
+  finite and positive, a previous close or no answer give none;
+  `PostCloseReadingTests`: the payloads, each the contract file
+  `internal/event`'s `TestTheIBKRAdapterPayloadsDecodeAndValidate` reads.
+- `internal/targetweight`, `TestAPostCloseReadingDecidesAsAReadingAtTheClose`
+  (decisions identical to readings taken at the close),
+  `TestThePriceBandComparesIBKRsLastPriceWhenIBKRGivesOne` and
+  `TestAReadingStampedAtItsReadTimeWithholds`; `internal/risklimit`,
+  `TestAPostCloseSnapshotsAlarmIsOnIBKRsOwnReading`.
+- `internal/report`, `TestAStaleWithholdSaysWhyThePostCloseReadingWasNotTheClose`.
 - `adapter/ibkr/tests/test_rehearsal.py`: `deploy/rehearse-paper.sh`'s
-  rehearsal of a whole paper day passes, and fails when the adapter stops
-  or refuses a stream.
+  rehearsal of the paper days with the real engine passes, and fails when
+  the adapter stops or refuses a stream.
 
 Not yet tested: sending to IBKR's real paper servers, installing `ibapi`
 on the server, and Gateway 10.50.1f with API 10.51.01. They are the
