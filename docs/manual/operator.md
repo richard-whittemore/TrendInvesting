@@ -398,21 +398,18 @@ a fresh run starts with the switch released, so record it again with
 engine reads that record before the fresh run's first input from the
 adapter, before any order is checked.
 
-`operator approve` has no option to state the attempt: it writes what the
-log records. After a hand sale the log does not know about, approve with
-the book as it is after your sale (`-positions ... -cash ... -currency USD`,
-typed right after reading the book in IBKR, below), or the fresh run halts
-on its first reading as unverifiable; then edit the file it
-wrote (the path on its `wrote` line). Open it in a plain-text editor (TextEdit
-in plain-text mode, or any code editor; not a word processor, which swaps in
-curly quotes). Find `"sale_attempted": false` inside `incident_in_force`
-and change `false` to `true`, with no quotes around `true`. Save, and change
-nothing else: leave every comma, quote and brace as it is, because the engine
-checks the rest of the file against the log, and leave the sale's client order
-ID as the tool wrote it. If `incident_in_force` is `null` there is nothing to
-change. An edit that leaves the file malformed is refused when the engine
-starts ([restart](restart.md), "Starting a fresh run"): it starts nothing
-and changes nothing, so fix the file and start again.
+`operator approve` takes the incident's sale attempt from the log. After a
+hand sale the log does not know about, approve with the book as it is after
+your sale (`-positions ... -cash ... -currency USD`, typed right after
+reading the book in IBKR, below), or the fresh run halts on its first reading
+as unverifiable, and add `-sale-attempted`: the approval then states the
+incident's one sale back to 98% as attempted, so the fresh run never makes it,
+and the tool prints "stated by -sale-attempted". Do not edit the file the tool
+wrote. The flag is refused, and nothing is written, unless the log ended in an
+incident whose sale it does not record as attempted: not when the log ended
+normal, not with `-clear-incident` (that leaves no incident in force), not
+with `-first-run`, and not when the log already records the attempt (the
+approval then carries it attempted without the flag).
 
 **An account's first run** is approved too, with the book it starts from,
 since there is no previous log to read. Check the paper account's holdings

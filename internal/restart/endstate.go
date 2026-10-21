@@ -149,6 +149,10 @@ type ApprovalRequest struct {
 	ApprovedBy           string
 	ApprovedAt           time.Time
 	ClearIncident        string
+	// SaleAttempted states the incident held in force as having had its one
+	// sale back to 98% attempted, for a sale the owner made by hand that the
+	// log does not record.
+	SaleAttempted bool
 }
 
 // ProposeApproval builds the approval of a fresh run after a log ending in
@@ -163,6 +167,12 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 		ApprovedBy: req.ApprovedBy, ApprovedAt: req.ApprovedAt, Boost: event.BoostStateInForce{Latched: new(end.Latched)},
 	}
 	switch {
+	case req.SaleAttempted && req.ClearIncident != "":
+		return event.OperatorRunApprovedPayload{}, errors.New("restart: -sale-attempted states the sale of an incident left in force, and -clear-incident leaves none in force: use one or the other")
+	case req.SaleAttempted && end.IncidentID == "":
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s records no incident, so there is no sale to state as attempted: it ended normal", req.PreviousLog)
+	case req.SaleAttempted && end.SaleAttempted:
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s already records an attempt of incident %s's one sale back to 98%%, so the approval carries it attempted without -sale-attempted", req.PreviousLog, end.IncidentID)
 	case req.ClearIncident != "" && end.IncidentID == "":
 		return event.OperatorRunApprovedPayload{}, fmt.Errorf("restart: %s records no incident, so there is none to clear: it ended normal", req.PreviousLog)
 	case req.ClearIncident != "" && req.ClearIncident != end.IncidentID:
@@ -172,7 +182,7 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 	case end.IncidentID != "":
 		p.IncidentInForce = &event.IncidentInForce{
 			IncidentID: end.IncidentID, State: end.State, ScopeInstrumentIDs: end.Scope, ScopeCashComponents: end.ScopeCash,
-			SaleAttempted: new(end.SaleAttempted), SaleClientOrderID: end.SaleClientOrderID,
+			SaleAttempted: new(end.SaleAttempted || req.SaleAttempted), SaleClientOrderID: end.SaleClientOrderID,
 		}
 	}
 	if err := p.Validate(); err != nil {

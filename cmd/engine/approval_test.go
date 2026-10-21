@@ -948,6 +948,45 @@ func TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt(t *testing.T) {
 	}
 }
 
+// TestAnApprovalMayStateAHandSaleAsTheIncidentsAttempt: the previous run
+// ended Halted without attempting the incident's one sale, and the owner sold
+// by hand, so the approval states it attempted (operator approve
+// -sale-attempted) though the log records none; the fresh run starts, since
+// stating an attempt is always accepted (ADR 0019, amended 2026-10-15).
+func TestAnApprovalMayStateAHandSaleAsTheIncidentsAttempt(t *testing.T) {
+	dir := t.TempDir()
+	comp, err := compose(boostConfigPath, "test-build", boostSession(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion, Payload: raw}
+	previous := craftedLog(t, filepath.Join(dir, "run-1.log"), comp, halted)
+
+	approval, err := json.Marshal(event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: previous.FinalRecordHash,
+		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+		Boost:           event.BoostStateInForce{Latched: new(false)},
+		IncidentInForce: &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath, fresh.asOf = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal"), laterAsOf
+	fresh.approvalPath = filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(fresh.approvalPath, approval, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stop := startEngine(t, fresh)
+	if err := stop(); err != nil {
+		t.Fatalf("the approved run: %v", err)
+	}
+}
+
 // writeFirstRunApproval writes a first run's approval for account, stating
 // the starting book, and returns its path.
 func writeFirstRunApproval(t *testing.T, account string) string {

@@ -87,9 +87,9 @@ approve.
 - **The approval is refused for the sale attempt**: the log records an
   attempt of the incident's sale and the approval says it was not attempted.
   Write the approval with the tool (it reads the attempt from the log). If
-  you sold by hand, the tool does not know: edit the file it wrote and change
-  `sale_attempted` to `true`, nothing else (`docs/manual/operator.md`, "An
-  approval"); an approval saying attempted is always accepted.
+  you sold by hand, the log does not know: add `-sale-attempted` to the
+  command (`docs/manual/operator.md`, "An approval"); an approval saying
+  attempted is always accepted.
 - **The approval is refused for the incident**: you named an incident that is
   not the one the log ended in, or tried to carry it looser (Degraded when
   the log ended Halted, or on fewer instruments). A restart never loosens
