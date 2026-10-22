@@ -993,3 +993,42 @@ func TestAStaleSampleOfAFailedRunIsNotCountedTwice(t *testing.T) {
 		t.Errorf("the episode counted %d later failed runs, want %d (R2 and R3 once each)", got, want)
 	}
 }
+
+// TestAUnitThatFailsOnceAndStaysFailedIsRemindedHourly: a unit that fails one
+// run and is never restarted is sampled under the run that paged, at every
+// firing, and is still reminded once an hour, with no run count since only one
+// run is known (ADR 0019, "Alerting": each incident once, reminded while the
+// fault lasts).
+func TestAUnitThatFailsOnceAndStaysFailedIsRemindedHourly(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	const unit = "ti-engine@boost.service"
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start, unit); err != nil {
+		t.Fatal(err)
+	}
+	systemd.fail(unit)
+	for i := 1; i <= 36; i++ { // three hours of firings that find it still failed
+		if err := firing(t, r, dir, systemd, start.Add(time.Duration(i)*5*time.Minute), unit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, unit); n != 1 {
+			t.Errorf("%s took %d pages for one episode, want 1", host, n)
+		}
+		reminders := 0
+		for _, m := range r.to(host) {
+			if strings.Contains(m, unit+" still failing") {
+				reminders++
+				if !strings.Contains(m, "still failing since "+start.UTC().Format(time.RFC3339)+",") || strings.Contains(m, "failed runs") {
+					t.Errorf("%s: the reminder must name the start and no count:\n%s", host, m)
+				}
+			}
+		}
+		if reminders != 3 {
+			t.Errorf("%s took %d reminders in 3 hours, want 3", host, reminders)
+		}
+	}
+}

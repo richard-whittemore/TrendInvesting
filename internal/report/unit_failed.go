@@ -60,8 +60,9 @@ func UnitFailedAlert(host, unit, invocation, reason string, at time.Time) Alert 
 
 // UnitStillFailedAlert is the reminder for a failure episode that goes on: the
 // unit is still failing since the page of since, the episode's first. runs is
-// the count of later failed runs the episode has; a count below two (none was
-// named for a later run, so it is unknown) is left out rather than said wrong.
+// the episode's failed runs known, its first included (1 plus the later runs
+// counted); the count is shown from two, and below two no later run was
+// counted, so it is left out rather than said wrong.
 // It is sent under the episode's key, at most once an hour (the caller's
 // interval), and carries no journal line.
 func UnitStillFailedAlert(host, unit, invocation string, since time.Time, runs int, at time.Time) Alert {

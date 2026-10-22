@@ -205,8 +205,15 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 	if episode != "" && run != "" && run != episode && !sampledAt.IsZero() && !latestRun(u, report.UnitFailedKey(unit, episode)).Before(sampledAt) {
 		run = ""
 	}
-	if episode == "" || episode == run {
+	if episode == "" {
 		return errors.Join(append(errs, pageRun(u, unit, run, journalctl, secrets, senders, at, every))...)
+	}
+	if episode == run {
+		// The unit is failed under the run that opened the episode: still
+		// the same failure, so a reminder falls due even though no later run
+		// was named.
+		errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
+		return errors.Join(append(errs, remindRun(u, unit, episode, "", senders, at))...)
 	}
 	// A channel that has not yet taken the episode's page is sent it first.
 	errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
@@ -246,7 +253,8 @@ func remindedKey(channel, key string) string { return channelKey("reminded:"+cha
 // remindRun counts run, a later failed run of the episode begun by episode
 // (none when run is empty), and reminds each channel that took the episode's page an
 // unitReminderInterval or more since its page or its last reminder: "still
-// failing since <time>, N failed runs", under the episode's key. A channel
+// failing since <time>", with ", N failed runs" once two or more runs are
+// known, under the episode's key. A channel
 // whose reminder fails is reminded at the next failed run.
 func remindRun(u *unitState, unit, episode, run string, senders []sender, at time.Time) error {
 	key := report.UnitFailedKey(unit, episode)
