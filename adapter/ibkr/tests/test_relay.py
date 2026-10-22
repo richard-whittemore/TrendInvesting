@@ -1503,6 +1503,55 @@ class RetireTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertIsNone(self.pending.load(), "the relay went on to the next input")
 
+    def test_an_owners_retirement_a_stop_left_unfinished_is_finished_and_never_sent(self):
+        # The retire command records the retirement for the engine first and
+        # marks the order never sent last. Stopped between the two, and the
+        # cause then fixed, the adapter started again finds the retirement
+        # begun and finishes it before it asks whether the order can now be
+        # sent: the engine is told the order was never sent, so it is never
+        # sent (the owner's decision of 2026-10-22; fail closed, AGENTS.md).
+        for stop in ("record_decision", "mark"):
+            with self.subTest(stop=stop):
+                self.pending.clear()
+                self.sent.clear()
+                for path in (self.outbox.path, self.pending.decisions_path, self.pending.handover_path):
+                    Path(path).unlink(missing_ok=True)
+                log = {}
+                decisions = {"session:0": [released("tw-1")]}
+                self.stuck_on_unsendable(log, decisions)
+                real = getattr(self.pending, stop)
+
+                def die(*args, **kwargs):
+                    raise OSError("stopped at the " + stop)
+
+                setattr(self.pending, stop, die)
+                with self.assertRaises(OSError):
+                    retire(self.pending, "tw-1", "richard", "no IBKR contract for SPY configured",
+                           now=lambda: RETIRED_AT, today=date(2026, 10, 17))
+                setattr(self.pending, stop, real)
+                self.assertEqual(self.pending.handovers(), {}, "the stop left the order unmarked")
+                fixed = self.relay(Restarts(log, decisions), mapper=to_request)
+                fixed.exchange(envelope(1))
+                fixed.close()
+                self.assertEqual(self.sent, [], "an order retired for the engine is never sent")
+                self.assertEqual(len(self.retired_entries()), 1, "the retirement is journalled once")
+                self.assertEqual([d["decision"] for d in self.pending.decisions()], ["retired"])
+                self.assertIsNone(self.pending.load(), "the relay went on to the next input")
+
+    def test_never_sent_is_refused_for_an_order_ibkr_can_never_accept(self):
+        # An order of a shape IBKR can never accept is settled only by the
+        # retire command, which tells the engine; settling it as never sent
+        # would leave the engine holding it as released (the owner's decision
+        # of 2026-10-22).
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        self.stuck_on_unsendable(log, decisions)
+        with self.assertRaises(ResolveRefused) as refused:
+            resolve(self.pending, "tw-1", "never-sent", "no contract configured", today=date(2026, 10, 17))
+        self.assertIn("relay.py retire", str(refused.exception))
+        self.assertEqual(self.pending.handovers(), {})
+        self.assertEqual(self.pending.decisions(), [])
+
     def test_the_retire_command_refuses_an_order_that_is_not_stopped_as_unsendable(self):
         today = date(2026, 10, 17)
         with self.assertRaises(ResolveRefused):

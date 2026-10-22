@@ -1,12 +1,16 @@
 package targetweight_test
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 // TestARetiredOrderIsReplannedAtTheNextDecision: the first purchase of 39
@@ -181,5 +185,196 @@ func TestAVenueReportOnARetiredOrderIsRefused(t *testing.T) {
 	fill := (&account{}).fill(o, "late-fill", 1, o.LimitPrice, at)
 	if err := applyAfter(t, r, event.FillEventType, event.FillTargetWeightVersion, "late-fill", at, fill); err == nil || !strings.Contains(err.Error(), "retired") {
 		t.Errorf("a fill of the retired order was read, err %v; want it refused as contradicting the retirement", err)
+	}
+}
+
+// saleOf is the sale back to 98% released under tag, the first attempt's.
+func saleOf(t *testing.T, r run, tag string) event.OrderReleasedPayload {
+	t.Helper()
+	id := orderplan.SaleClientOrderID(tag, "SPY")
+	for _, e := range ofType(r.decisions, event.OrderReleasedEventType) {
+		var p event.OrderReleasedPayload
+		decode(t, e, &p)
+		if p.ClientOrderID == id {
+			return p
+		}
+	}
+	t.Fatalf("setup: no sale back to 98%% %s released under %s", id, tag)
+	return event.OrderReleasedPayload{}
+}
+
+// TestARetiredSaleBackTo98IsReattempted: the kill switch refuses Boost's
+// exit at session 19, which fires the sale back to 98%, released from
+// session 20's broker snapshot, never by a decided session's order, so it
+// is not among the orders awaiting the venue's word. The adapter never
+// sends it and retires it at session 21. Boost reads the retirement by the
+// sale's own rule: it ends with nothing filled, the gate no longer counts
+// its shares as being sold, and, since nothing was sent, the attempt is not
+// spent (ADR 0019, amended 2026-10-17, reading 4, as the owner's decision
+// of 2026-10-22 reads it), so the sale is attempted again at the next
+// opportunity, session 21's broker snapshot, under a client order ID of its
+// own and for the same shares (ADR 0026, point 2, "Boost", amended
+// 2026-10-22).
+func TestARetiredSaleBackTo98IsReattempted(t *testing.T) {
+	first := orderplan.SaleClientOrderID("kill:19", "SPY")
+	r := simulate(t, options{brokers: true, kill: map[int]bool{19: true}, retireIDs: map[int][]string{21: {first}}})
+	sold := sales(t, r.decisions)
+	if len(sold) != 2 {
+		t.Fatalf("sales %+v, want the retired sale and its second attempt", sold)
+	}
+	if sold[0].ClientOrderID != first || sold[1].ClientOrderID == first {
+		t.Errorf("sales %s then %s, want %s then a client order ID of its own", sold[0].ClientOrderID, sold[1].ClientOrderID, first)
+	}
+	if sold[1].Quantity != sold[0].Quantity || sold[1].Tag != "kill:19" {
+		t.Errorf("second attempt %+v, want the same %d shares under kill:19", sold[1], sold[0].Quantity)
+	}
+	again := saleOf(t, r, "kill:19")
+	if again.ClientOrderID != first {
+		t.Fatalf("setup: %s", again.ClientOrderID)
+	}
+	for _, e := range ofType(r.decisions, event.OrderReleasedEventType) {
+		var p event.OrderReleasedPayload
+		decode(t, e, &p)
+		if p.ClientOrderID == sold[1].ClientOrderID && !e.EventTime.Equal(sessionEnd(21)) {
+			t.Errorf("second attempt released at %s, want the next opportunity, session 21's broker snapshot", e.EventTime)
+		}
+	}
+}
+
+// TestARetiredUrgentSaleReleasedOutsideADecisionIsReattempted: the margin
+// alarm turns urgent at session 20's broker snapshot, outside any decided
+// session, and fires the sale back to 98%; the adapter never sends it and
+// retires it at session 21, while the alarm is still urgent. The
+// retirement is read, the sale's shares are no longer counted as being
+// sold, and the next broker snapshot, still urgent, attempts the sale again
+// (ADR 0019, amended 2026-10-17, readings 1 and 4, as the owner's decision
+// of 2026-10-22 reads them).
+func TestARetiredUrgentSaleReleasedOutsideADecisionIsReattempted(t *testing.T) {
+	urgent := func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.15 * b.NetLiquidation }
+	opts := options{brokers: true, brokerMutate: map[int]func(*event.BrokerSnapshotPayload){20: urgent, 21: urgent}, closes: syntheticCloses()[:22]}
+	setup := simulate(t, opts)
+	sold := sales(t, setup.decisions)
+	if len(sold) != 1 || sold[0].Sale.Kind != event.SaleKindUrgent {
+		t.Fatalf("setup: sales %+v, want one urgent sale", sold)
+	}
+	first := sold[0].ClientOrderID
+	opts.retireIDs = map[int][]string{21: {first}}
+	r := simulate(t, opts)
+	sold = sales(t, r.decisions)
+	if len(sold) != 2 || sold[1].ClientOrderID == first || sold[1].Tag != sold[0].Tag {
+		t.Fatalf("sales %+v, want the retired urgent sale attempted again under its tag and an ID of its own", sold)
+	}
+}
+
+// TestAVenueReportOnARetiredSaleIsRefused: a retired sale never left the
+// adapter, so a venue's report on it proves the retirement wrong and stops
+// the run, as on any retired order (fail closed, AGENTS.md).
+func TestAVenueReportOnARetiredSaleIsRefused(t *testing.T) {
+	first := orderplan.SaleClientOrderID("kill:19", "SPY")
+	r := simulate(t, options{brokers: true, kill: map[int]bool{19: true}, retireIDs: map[int][]string{21: {first}}})
+	o := saleOf(t, r, "kill:19")
+	at := sessionEnd(len(syntheticCloses()) - 1).Add(time.Hour)
+	fill := (&account{}).fill(o, "late-fill", 1, o.LimitPrice, at)
+	if err := applyAfter(t, r, event.FillEventType, event.FillTargetWeightVersion, "late-fill", at, fill); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Errorf("a fill of the retired sale was read, err %v; want it refused as contradicting the retirement", err)
+	}
+}
+
+// TestARetiredOrderSurvivesARecoveryFromAWithheldDecision: the first
+// purchase is never sent and is retired at session 1, whose decision is
+// withheld for want of an account snapshot, so it records the purchase as
+// the watched order, ended. A run restarted from that decision knows the
+// purchase was retired, as the full run does: a venue fill naming it is
+// refused, and the re-plan at session 2 is the full run's (ADR 0026, point
+// 5: recovered, never recomputed).
+func TestARetiredOrderSurvivesARecoveryFromAWithheldDecision(t *testing.T) {
+	opts := options{retire: map[int][]int{1: {0}}, noSnap: map[int]bool{1: true}}
+	full := simulate(t, opts)
+	decisions := ofType(full.decisions, event.TargetsDecidedEventType)
+	if d := targets(t, full.decisions)[1]; d.Outcome != event.TargetsOutcomeWithheld {
+		t.Fatalf("setup: session 1 is %s, want withheld", d.Outcome)
+	}
+	assertRecoveredAsTheFullRun(t, opts, 1)
+	o := releasedBy(t, full.decisions, 0)[0]
+	recovery := decisions[1]
+	at := sessionEnd(1).Add(time.Hour)
+	recovered := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reports: venueReports(full.inputs, 1), closes: syntheticCloses()[:2]})
+	fill := (&account{}).fill(o, "late-fill", 1, o.LimitPrice, at)
+	for name, r := range map[string]run{"the full run": simulate(t, options{retire: opts.retire, noSnap: opts.noSnap, closes: syntheticCloses()[:2]}), "the recovered run": recovered} {
+		if err := applyAfter(t, r, event.FillEventType, event.FillTargetWeightVersion, "late-fill", at, fill); err == nil || !strings.Contains(err.Error(), "retired") {
+			t.Errorf("%s read a fill of the retired order, err %v; want it refused as contradicting the retirement", name, err)
+		}
+	}
+}
+
+// TestARetirementOfASaleAVenueReportedOnIsRefused: the sale back to 98% is
+// retired by its own rule only while no venue has named it or reported an
+// execution of it: one that did was sent, and its retirement is refused (fail
+// closed, AGENTS.md).
+func TestARetirementOfASaleAVenueReportedOnIsRefused(t *testing.T) {
+	first := orderplan.SaleClientOrderID("kill:19", "SPY")
+	at := sessionEnd(len(syntheticCloses()) - 1).Add(time.Hour)
+	retirement := func(o event.OrderReleasedPayload) event.OrderRetiredPayload {
+		return event.OrderRetiredPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side,
+			Quantity: o.Quantity, LimitPrice: o.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "session over",
+			RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+	}
+	sent := simulate(t, options{brokers: true, kill: map[int]bool{19: true}})
+	o := saleOf(t, sent, "kill:19")
+	if err := applyAfter(t, sent, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:late", at, retirement(o)); err == nil || !strings.Contains(err.Error(), "named") {
+		t.Errorf("the retirement of a sale IBKR acknowledged: %v, want it refused as named", err)
+	}
+	unsent := simulate(t, options{brokers: true, kill: map[int]bool{19: true}, unsentIDs: []string{first}})
+	s := &stream{hash: unsent.hash, sequence: uint64(len(unsent.inputs))}
+	fill := (&account{}).fill(o, "fill:only", 1, o.LimitPrice, at)
+	if _, err := unsent.recorder.Apply(context.Background(), s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, "fill:only", at, fill)); err != nil {
+		t.Fatalf("setup: the execution of the sale: %v", err)
+	}
+	_, err := unsent.recorder.Apply(context.Background(), s.envelope(t, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:late", at, retirement(o)))
+	if err == nil || !strings.Contains(err.Error(), "named") {
+		t.Errorf("the retirement of a sale with an execution: %v, want it refused", err)
+	}
+}
+
+// TestARecoveredRetiredOrderTheGateKnowsIsRefused: a recovered decision
+// lists a retired order under the client order ID of a sale a broker
+// snapshot released before the recovery, so the gate already knows it; the
+// recovery is refused rather than restore one order over another (fail
+// closed, AGENTS.md).
+func TestARecoveredRetiredOrderTheGateKnowsIsRefused(t *testing.T) {
+	cfg := testConfiguration()
+	h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: sessionEnd(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := journal.NewRecorder(h)
+	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
+	apply := func(e event.Envelope) ([]event.Envelope, error) { return rec.Apply(context.Background(), e) }
+	at := sessionEnd(0).Add(-time.Hour)
+	if _, err := apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", at, cfg)); err != nil {
+		t.Fatal(err)
+	}
+	broker := (&account{cash: -4000, held: 60}).broker(at, 100)
+	broker.ExcessLiquidity = 0.1 * broker.NetLiquidation
+	out, err := apply(s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:pre", at, broker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sale event.OrderReleasedPayload
+	for _, e := range ofType(out, event.OrderReleasedEventType) {
+		decode(t, e, &sale)
+	}
+	if sale.ClientOrderID == "" {
+		t.Fatalf("setup: the urgent snapshot released no sale: %d decisions", len(out))
+	}
+	full := simulate(t, options{retire: map[int][]int{1: {0}}})
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[1]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	p.Boost.RetiredOrders = append(p.Boost.RetiredOrders, event.BoostRetiredOrder{ClientOrderID: sale.ClientOrderID, Side: sale.Side,
+		Released: sale.Quantity, LimitPrice: sale.LimitPrice, RetiredAt: at})
+	_, err = apply(s.envelope(t, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, recovery.ID, at, p))
+	if err == nil || !strings.Contains(err.Error(), "recovered decision") || !strings.Contains(err.Error(), sale.ClientOrderID) {
+		t.Errorf("a recovered retired order the gate already knows: %v, want the recovery refused naming it", err)
 	}
 }

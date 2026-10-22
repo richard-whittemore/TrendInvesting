@@ -186,8 +186,8 @@ func TestBoostVerdictsRetireAnOrderNeverSent(t *testing.T) {
 		t.Errorf("a word on a retired order: %v, count %d; want none, still 1", got, v.Rejections())
 	}
 	for _, c := range []struct{ id, want string }{
-		{"unsent", "already ruled on"},
-		{"missing", "already ruled on"},
+		{"unsent", "not among the orders awaiting"},
+		{"missing", "not among the orders awaiting"},
 		{"young", "already named"},
 	} {
 		if err := v.Retire("retire:2", c.id); err == nil || !strings.Contains(err.Error(), c.want) {

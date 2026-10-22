@@ -140,6 +140,10 @@ type Gate struct {
 	saleTags map[string]bool
 	attempts map[string]*saleAttempt
 	pending  map[string]bool
+	// retiredSales counts, per tag and instrument (saleKey), the attempts of
+	// a sale back to 98% retired as never sent (RetireSale): each spent
+	// nothing, and the next attempt has a client order ID of its own.
+	retiredSales map[string]int
 	// ledger holds every fact the pending rule reads: the released sells,
 	// their reports and the snapshots. account is the view of the latest
 	// account snapshot, the snapshot a planner sizes from, which PendingSells
@@ -265,7 +269,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		accountID: accountID, limits: limits, mode: mode, decided: make(map[string]bool),
 		state: StateNormal, alarmLevel: event.MarginAlarmClear, maxSnapshotAge: maxSnapshotAge,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
-		attempts: make(map[string]*saleAttempt), pending: make(map[string]bool),
+		attempts: make(map[string]*saleAttempt), pending: make(map[string]bool), retiredSales: make(map[string]int),
 		ledger: newSellLedger(), orders: make(map[string]*releasedOrder),
 		fills:            make(map[string]event.TargetWeightFillPayload),
 		corporateActions: make(map[string]event.CorporateActionPayload),

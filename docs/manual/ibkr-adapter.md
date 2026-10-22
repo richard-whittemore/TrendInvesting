@@ -113,7 +113,7 @@ adapter/ibkr/relay.py ...`.
 | --- | --- | --- |
 | `resolve ... --sent` | An order IBKR shows in any form (working, filled or cancelled): it is never sent again | — (it is always the safe answer once IBKR shows the order) |
 | `resolve ... --resend` | An order committed **today** that IBKR has no trace of today: sent once more at its original limit, the same day only | For an order IBKR shows at all, or one from an earlier day (refused) |
-| `resolve ... --never-sent` | The one order the adapter is refusing before it wrote "about to send", and always will: kept as a refusal with your reason; the engine is not told | For a link that is merely down today: that order goes out once the link is back. For an order IBKR can never accept: `retire` tells the engine too |
+| `resolve ... --never-sent` | The one order the adapter is refusing before it wrote "about to send", and always will: kept as a refusal with your reason; the engine is not told | For a link that is merely down today: that order goes out once the link is back. For an order IBKR can never accept (refused): `retire` is its only settlement, since it tells the engine |
 | `retire PENDING_FILE CLIENT_ORDER_ID --by NAME --reason "..."` | The order the adapter stopped at because IBKR can never accept it as it stands: journalled for the engine as a refusal with your name and reason, and the adapter goes on. Owner only, as `ti-trader` | For any other stop (refused) |
 | `acknowledge-correction` | IBKR's correction of a trade already recorded: passed over, never a second fill | When the original was never recorded as a fill (refused) |
 | `acknowledge-late-fill` | A trade on an order already recorded as ended: passed over, left to reconciliation | For a trade the log holds as a fill (refused) |

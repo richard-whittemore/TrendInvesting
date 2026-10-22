@@ -137,15 +137,21 @@ retired`, with your name and your reason, and when you start the adapter
 again it goes on. You then get the same routine "order … retired (owner
 retired)" message.
 
-Either way the engine reads the retirement as an order that ended with
-nothing filled. Boost no longer waits for IBKR's word on it, no longer counts
-a retired sell as shares being sold, and plans the difference to its target
-again at its next decision (recorded as a re-plan for an `unfilled` order,
-[boost](boost.md)). The reporter counts it as the engine does: a retired
-order no longer awaits IBKR's word in Boost's count of rejections in a row,
-so the state-at-start message never names it as a rejection that stops buys.
-A momentum rebalance whose orders are all finished
-completes, so the next decision decides afresh. A report from IBKR on a
+Either way, in every strategy, the engine reads the retirement as an order
+that ended with nothing filled. Boost no longer waits for IBKR's word on it,
+no longer counts a retired sell as shares being sold, and plans the
+difference to its target again at its next decision (recorded as a re-plan
+for an `unfilled` order, [boost](boost.md)). The sale back to 98% is read the
+same way: nothing was sent, so its one attempt is not used up, and it is
+tried again by its own rule at the next chance (the next broker reading
+while what fired it still holds), as a new order with a client order ID of
+its own. The reporter counts it as the engine does: a retired order no
+longer awaits IBKR's word in Boost's count of rejections in a row, so the
+state-at-start message never names it as a rejection that stops buys. In a
+momentum rebalance a retired sell ends the rebalance's buying: its buys,
+which would have been bought from that decision's prices and cash, are never
+planned, and once its orders are all finished the next decision decides
+afresh. A report from IBKR on a
 retired order afterwards proves the retirement wrong: the engine refuses it
 and the reporter raises the "venue report … not read" alert for it. A
 dry-run never sends an order, so the engine refuses any retirement there.
@@ -169,7 +175,9 @@ incident reach a person; an order IBKR never acknowledged is one.
 - The owner's decision of 2026-10-22 (ADR 0026, point 2, "Boost", amended
   2026-10-22): an order whose session is over is retired by the adapter and
   reported as a routine notice; one IBKR can never accept stops the adapter
-  and is retired by the owner.
+  and is retired by the owner. Every retirement ends the order with nothing
+  filled, the sale back to 98% included, which spends no attempt (ADR 0019,
+  amended 2026-10-17, reading 4, as refined 2026-10-22).
 
 ## The tests
 
@@ -219,8 +227,25 @@ incident reach a person; an order IBKR never acknowledged is one.
   `TestARetirementOfAnOrderAVenueMayHaveIsRefused`,
   `TestAVenueReportOnARetiredOrderIsRefused`,
   `TestARunWithARetirementIsByteIdenticalAndReplays`,
-  `TestARetiredOrderIsRecoveredAsTheFullRun` and
-  `TestRetiredOrdersEndARebalanceInProgress`.
+  `TestARetiredOrderIsRecoveredAsTheFullRun`,
+  `TestARetiredOrderSurvivesARecoveryFromAWithheldDecision`,
+  `TestRetiredOrdersEndARebalanceInProgress` and
+  `TestRetiringARebalancesSellsNeverStartsItsBuys`.
+- `internal/targetweight`, `TestARetiredSaleBackTo98IsReattempted`,
+  `TestARetiredUrgentSaleReleasedOutsideADecisionIsReattempted`,
+  `TestAVenueReportOnARetiredSaleIsRefused` and
+  `TestARetirementOfASaleAVenueReportedOnIsRefused`; `internal/risklimit`,
+  `TestARetiredSaleSpendsNoAttempt` and
+  `TestARetiredUrgentSaleIsAttemptedAgainWhileTheAlarmIsUrgent`;
+  `internal/restart`, `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`: a
+  retired sale back to 98% spent no attempt and is tried again as a new
+  order.
+- `internal/report`,
+  `TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule` and
+  `TestARetirementOfAnOrderTheVenueNamedLeavesItsRejectionCounted`.
+- `adapter/ibkr`, `RetireTests`:
+  `test_an_owners_retirement_a_stop_left_unfinished_is_finished_and_never_sent`
+  and `test_never_sent_is_refused_for_an_order_ibkr_can_never_accept`.
 - `cmd/engine`, `TestABoostEngineRecordsTheAcknowledgementOfAnOrderItReleased`
   and `TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged`: a real
   paper engine, fed over its socket, records the order and its states.

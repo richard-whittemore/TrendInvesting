@@ -42,11 +42,15 @@ relay goes on. One IBKR can never accept as it stands
 (sender.UnsendableOrder: not a limit order, a fraction of a share, no
 contract ID) stops every exchange (OrderUnsendable), and the owner retires
 it with `relay.py retire` once the cause is found, which journals the same
-refusal with the owner's reason. Any other refusal for good stops every
-exchange too. Each stop records which order the relay is refusing, for
-which input, beside the pending file, and the owner settles any refused
-order, and only that one, as never sent (`resolve ... --never-sent`), a
-refusal kept with its reason, never a cancel of an order at IBKR. The relay
+refusal with the owner's reason; that is its only settlement, since only it
+tells the engine. A retirement a stop left unmarked is finished on restart
+before the order is judged sendable again. Any other refusal for good stops
+every exchange too. Each stop records which order the relay is refusing, for
+which input, beside the pending file, and the owner settles that order, and
+only that one, as never sent (`resolve ... --never-sent`), a refusal kept
+with its reason, never a cancel of an order at IBKR; resolve refuses it for
+an order IBKR can never accept, whose remedies are fixing the cause and
+`retire`. The relay
 passes over a never-sent order only after the same check at IBKR as any
 other: if IBKR shows an order or execution carrying its tag, the owner's
 judgement that it never left the process is contradicted, so the relay
@@ -1090,6 +1094,11 @@ class Relay:
                 continue
             if broker is None:
                 broker = _tags(self._broker_orders())
+            if mark is None and _finish_retirement(self._pending, cid, self._today()):
+                # A retirement a stop left unmarked is finished before the
+                # order could be judged sendable again: the engine is told it
+                # was never sent, so it never is.
+                mark = NEVER_SENT
             if mark == NEVER_SENT:
                 # Honoured only once IBKR shows no order or execution under
                 # its tag: the settlement says it never left the process.
@@ -1299,6 +1308,10 @@ def _resolve(pending, client_order_id, decision, reason, today):
         if refusal["client_order_id"] != client_order_id:
             raise ResolveRefused("the adapter is refusing order {} ({}), not {}; check the client order ID".format(
                 refusal["client_order_id"], refusal["reason"], client_order_id))
+        if refusal["unsendable"]:
+            raise ResolveRefused("the adapter refused order {} as a shape IBKR can never accept ({}): settle it only "
+                                 "with relay.py retire once the cause is found, which tells the engine it was never "
+                                 "sent (docs/manual/ibkr-adapter.md)".format(client_order_id, refusal["reason"]))
         pending.record_decision(recorded)
         pending.mark(client_order_id, NEVER_SENT)
         return
@@ -1375,6 +1388,31 @@ def retire_order(pending, order, reason, detail, by, at, today):
     pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": detail,
                              "retired": reason, "retired_by": by, "at": stamp, "session_date": today.isoformat()})
     pending.mark(cid, NEVER_SENT)
+
+
+def _finish_retirement(pending, cid, today):
+    """Finish a retirement of cid that a stop left unmarked, and say whether one was begun.
+
+    retire_order records the retirement for the engine first (the outbox),
+    then among the decisions, then marks the order never sent. A stop
+    before the mark leaves an order the engine will be told was never sent
+    that the record does not mark, so it is finished here, before the order
+    is judged sendable again: the decision recorded from the outbox entry if
+    the stop came before it, and the order marked never sent (the owner's
+    decision of 2026-10-22; fail closed, AGENTS.md).
+    """
+    begun = any(d.get("client_order_id") == cid and d.get("decision") == DECIDE_RETIRED
+                for d in pending.decisions())
+    entry = next((e for e in Outbox(pending.path + OUTBOX_SUFFIX).load() if e["id"] == RETIRED_ID + cid), None)
+    if not begun and entry is None:
+        return False
+    if not begun:
+        p = entry["payload"]
+        pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": p.get("detail"),
+                                 "retired": p.get("reason"), "retired_by": p.get("retired_by"),
+                                 "at": p.get("retired_at"), "session_date": today.isoformat()})
+    pending.mark(cid, NEVER_SENT)
+    return True
 
 
 def _effective_user():

@@ -633,7 +633,7 @@ func entriesOf(s *stream) []journal.Entry {
 	for _, e := range s.out {
 		kind := journal.KindDecision
 		switch e.Type {
-		case event.RebalanceClearedEventType, event.OrderRetiredEventType, event.OrderLifecycleEventType, event.FillEventType, event.OperatorRunApprovedEventType, event.TargetWeightConfigurationEventType:
+		case event.RebalanceClearedEventType, event.OrderRetiredEventType, event.OrderLifecycleEventType, event.FillEventType, event.OperatorRunApprovedEventType, event.TargetWeightConfigurationEventType, event.BrokerSnapshotEventType:
 			kind = journal.KindInput
 		}
 		out = append(out, journal.Entry{Kind: kind, Envelope: e})
@@ -763,26 +763,45 @@ func boostDecisionOf(r *logRun, tag string) {
 		Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100}})
 }
 
-// TestABoostRetirementTheCountRefusesRetiresNothing: in a Boost run the
-// engine retires only an order its count holds as awaiting the venue's word
-// (targetweight.BoostVerdicts.Retire), so a retirement of an order that
-// describes its release but that no Boost decision released, such as the
-// sale back to 98%, retires nothing on the reporter's side either (ADR 0026,
-// point 2, "Boost", amended 2026-10-22; fail closed).
-func TestABoostRetirementTheCountRefusesRetiresNothing(t *testing.T) {
+// TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule: in a
+// Boost run the engine reads the retirement of an order its count does not
+// hold as awaiting the venue's word, such as the sale back to 98%, by the
+// order's own rule: it is retired when no venue has named it, by a report,
+// an execution or a broker snapshot's open-order listing (ADR 0026, point
+// 2, "Boost", amended 2026-10-22; fail closed). The reporter reads it alike.
+func TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule(t *testing.T) {
 	l := newBoostLog(t)
 	l.decide(0)
-	alarm := event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:alarm", Tag: "alarm:u", ClientOrderID: "alarm-1",
-		InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures}
-	l.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm", day(1), alarm)
-	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:alarm", day(1), event.OrderRetiredPayload{
-		AccountID: "joint", ClientOrderID: "alarm-1", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95,
-		Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(1)})
+	sale := func(id string) event.OrderReleasedPayload {
+		return event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:" + id, Tag: "alarm:u", ClientOrderID: id,
+			InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures}
+	}
+	retired := func(id string) event.OrderRetiredPayload {
+		return event.OrderRetiredPayload{AccountID: "joint", ClientOrderID: id, InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95,
+			Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(1)}
+	}
+	l.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm-1", day(1), sale("alarm-1"))
+	l.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm-2", day(1), sale("alarm-2"))
+	l.add(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:1", day(1), event.BrokerSnapshotPayload{
+		AccountID: "joint", AsOf: day(1), NetLiquidation: 10000, ExcessLiquidity: 10000, Positions: []event.BrokerPosition{},
+		OpenOrders: []event.BrokerOrder{{BrokerOrderID: "7", ClientOrderID: "alarm-2", InstrumentID: "SPY", Side: event.OrderSideSell,
+			Status: event.BrokerOrderWorking, RemainingQuantity: 10}}})
+	// Another account's snapshot, and one that cannot be read, name nothing.
+	l.add(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:ira", day(1), event.BrokerSnapshotPayload{
+		AccountID: "ira", AsOf: day(1), NetLiquidation: 10000, ExcessLiquidity: 10000, Positions: []event.BrokerPosition{},
+		OpenOrders: []event.BrokerOrder{{BrokerOrderID: "8", ClientOrderID: "alarm-1", InstrumentID: "SPY", Side: event.OrderSideSell,
+			Status: event.BrokerOrderWorking, RemainingQuantity: 10}}})
+	l.add(event.BrokerSnapshotEventType, 99, "broker:unread", day(1), map[string]string{})
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:alarm-1", day(1), retired("alarm-1"))
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:alarm-2", day(1), retired("alarm-2"))
 	orders, _, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o := stateOf(t, orders, "alarm-1"); o.State == report.LifecycleRetired {
-		t.Errorf("order %+v retired, though the Boost count never held it as awaiting the venue's word", o)
+	if o := stateOf(t, orders, "alarm-1"); o.State != report.LifecycleRetired {
+		t.Errorf("order %+v not retired, though no venue named it", o)
+	}
+	if o := stateOf(t, orders, "alarm-2"); o.State == report.LifecycleRetired {
+		t.Errorf("order %+v retired, though IBKR listed it, so it was sent", o)
 	}
 }

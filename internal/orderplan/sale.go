@@ -41,6 +41,12 @@ type SaleInput struct {
 	// snapshot may be then.
 	At             time.Time
 	MaxSnapshotAge time.Duration
+	// Retired is how many earlier attempts of this sale were retired as
+	// never sent, which spent nothing (ADR 0019, amended 2026-10-17,
+	// reading 4; ADR 0026, point 2, "Boost", amended 2026-10-22): each
+	// attempt after one is its own order, under a client order ID of its
+	// own (SaleAttemptClientOrderID).
+	Retired int
 }
 
 // Sale is a planned sale back to 98%, or the reason none was planned:
@@ -55,6 +61,18 @@ type Sale struct {
 // from the incident, like a restored stop").
 func SaleClientOrderID(tag, instrumentID string) string {
 	return ClientOrderID(tag, instrumentID, salePhase)
+}
+
+// SaleAttemptClientOrderID derives the client order ID of a sale's attempt
+// after retired earlier attempts were retired as never sent: the first
+// attempt's is SaleClientOrderID's, and each later one has its own, so a
+// venue report naming a retired attempt is never taken for a later one's
+// (ADR 0026, point 2, "Order identity" and "Boost", amended 2026-10-22).
+func SaleAttemptClientOrderID(tag, instrumentID string, retired int) string {
+	if retired == 0 {
+		return SaleClientOrderID(tag, instrumentID)
+	}
+	return ClientOrderID(tag, instrumentID, fmt.Sprintf("%s#%d", salePhase, retired+1))
 }
 
 // PlanSale plans one sell-only order bringing the instrument toward Target
@@ -85,7 +103,7 @@ func PlanSale(in SaleInput) (Sale, error) {
 	if err := in.validate(); err != nil {
 		return Sale{}, err
 	}
-	clientID := SaleClientOrderID(in.Tag, in.InstrumentID)
+	clientID := SaleAttemptClientOrderID(in.Tag, in.InstrumentID, in.Retired)
 	withheld := func(reason, detail string) (Sale, error) {
 		return Sale{Withheld: &event.SaleWithheldPayload{
 			AccountID: in.AccountID, Tag: in.Tag, ClientOrderID: clientID, InstrumentID: in.InstrumentID,
@@ -177,6 +195,9 @@ func (in SaleInput) validate() error {
 	}
 	if in.WorkingSells < 0 {
 		errs = append(errs, errors.New("a sale's working sells must not be negative"))
+	}
+	if in.Retired < 0 {
+		errs = append(errs, errors.New("a sale's retired attempts must not be negative"))
 	}
 	if in.MaxSnapshotAge <= 0 {
 		errs = append(errs, errors.New("a sale needs a positive maximum snapshot age"))

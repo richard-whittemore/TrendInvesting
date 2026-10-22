@@ -72,7 +72,13 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     BoostFigures.GapSessions, the sessions with no bar the decision's
 //     readings span (ADR 0026, point 5, amended 2026-10-18). Each is omitted
 //     when unset.
-const TargetsDecidedSchemaVersion uint32 = 6
+//   - Version 7 records BoostFigures.RetiredOrders, the orders retired as
+//     never sent (execution.order.retired), each with its release and when
+//     it was retired, so a run restarted from the decision refuses a venue
+//     report on one as the full run does (ADR 0026, point 2, "Boost", and
+//     point 5, amended 2026-10-22). It is omitted when none, so a decision
+//     with no retired order has version 6's bytes.
+const TargetsDecidedSchemaVersion uint32 = 7
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -243,6 +249,15 @@ type BoostFigures struct {
 	// them (ADR 0026, point 2, "Boost", amended 2026-10-18, and point 5).
 	// Omitted when none.
 	ClearedOrders []BoostUndecidedOrder `json:"cleared_orders,omitempty"`
+	// RetiredOrders are the orders retired as never sent
+	// (execution.order.retired), in the order retired, each with its release
+	// and when it was retired: ended with nothing filled, so a venue report
+	// on one proves the retirement wrong and is refused. None is also
+	// undecided, cleared or working; the watched order, if retired, is among
+	// them as well as in Watched. A run restarted from the decision restores
+	// them (ADR 0026, point 2, "Boost", and point 5, amended 2026-10-22).
+	// Omitted when none.
+	RetiredOrders []BoostRetiredOrder `json:"retired_orders,omitempty"`
 	// WorkingOrders are the orders the venue accepted (an execution, or any
 	// lifecycle report but submitted) that still work, neither fully filled
 	// nor ended, besides the watched order, in the order the venue accepted
@@ -305,6 +320,17 @@ type BoostUndecidedOrder struct {
 	Released      int64   `json:"released,omitempty"`
 	LimitPrice    float64 `json:"limit_price,omitempty"`
 	VenueOrderID  string  `json:"venue_order_id,omitempty"`
+}
+
+// BoostRetiredOrder is an order retired as never sent
+// (BoostFigures.RetiredOrders): its client order ID, its side, shares and
+// limit as released, and when it was retired.
+type BoostRetiredOrder struct {
+	ClientOrderID string    `json:"client_order_id"`
+	Side          string    `json:"side"`
+	Released      int64     `json:"released"`
+	LimitPrice    float64   `json:"limit_price"`
+	RetiredAt     time.Time `json:"retired_at"`
 }
 
 // carriesRelease reports whether o records any of the order as released.
@@ -383,7 +409,7 @@ func (b BoostFigures) IsZero() bool {
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
 		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
 		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero() && b.VenueRejections == 0 &&
-		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.ClearedOrders) == 0 && len(b.WorkingOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
+		len(b.RejectedInARow) == 0 && len(b.UndecidedOrders) == 0 && len(b.ClearedOrders) == 0 && len(b.RetiredOrders) == 0 && len(b.WorkingOrders) == 0 && len(b.RejectedWhileStopped) == 0 && b.RejectionsWhileStopped == 0 &&
 		b.UndecidedBeforeRejection == 0 && b.NoVenue == ""
 }
 
@@ -1048,8 +1074,39 @@ func (b BoostFigures) validateRejections() []error {
 	case b.NoVenue == "":
 	case b.NoVenue != TradingModeDryRun:
 		errs = append(errs, fmt.Errorf("boost records no venue only for a dry-run, not %q", b.NoVenue))
-	case len(b.UndecidedOrders) > 0 || b.VenueRejections > 0 || len(b.ClearedOrders) > 0 || len(b.WorkingOrders) > 0:
-		errs = append(errs, errors.New("a dry-run boost decision lists no undecided, cleared or working order and counts no rejection: no venue receives its orders, so there is nothing to rule on or clear"))
+	case len(b.UndecidedOrders) > 0 || b.VenueRejections > 0 || len(b.ClearedOrders) > 0 || len(b.RetiredOrders) > 0 || len(b.WorkingOrders) > 0:
+		errs = append(errs, errors.New("a dry-run boost decision lists no undecided, cleared, retired or working order and counts no rejection: no venue receives its orders, so there is nothing to rule on, clear or retire"))
+	}
+	// A retired order is one retired as never sent: named once, in no list
+	// but Watched's of the orders still awaited or working, its release as
+	// released and when it was retired.
+	retired := map[string]bool{}
+	for _, o := range b.RetiredOrders {
+		switch {
+		case o.ClientOrderID == "":
+			errs = append(errs, errors.New("a retired boost order names its client order ID"))
+		case retired[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost names retired order %s twice", o.ClientOrderID))
+		case seen[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both retired and undecided", o.ClientOrderID))
+		case cleared[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both retired and cleared", o.ClientOrderID))
+		case rejected[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both retired and rejected", o.ClientOrderID))
+		}
+		retired[o.ClientOrderID] = true
+		switch {
+		case o.Side != OrderSideBuy && o.Side != OrderSideSell, o.Released <= 0, !isFinite(o.LimitPrice), o.LimitPrice <= 0:
+			errs = append(errs, fmt.Errorf("retired boost order %s records its side, released shares and positive limit; got %q %d at %v",
+				o.ClientOrderID, o.Side, o.Released, o.LimitPrice))
+		case o.RetiredAt.IsZero():
+			errs = append(errs, fmt.Errorf("retired boost order %s records when it was retired", o.ClientOrderID))
+		case !writableTime(o.RetiredAt):
+			errs = append(errs, fmt.Errorf("retired boost order %s: retired_at %v cannot be written as RFC 3339", o.ClientOrderID, o.RetiredAt))
+		}
+	}
+	if w := b.Watched; retired[w.ClientOrderID] && (w.Filled > 0 || w.Status != OrderLifecycleStatusCanceled) {
+		errs = append(errs, fmt.Errorf("the watched order %s is retired, so it ended canceled with nothing filled; got %q with %d filled", w.ClientOrderID, w.Status, w.Filled))
 	}
 	// A working order is an accepted one that works besides the watched
 	// order: named, still working, named once, and in no other list. An
@@ -1084,6 +1141,8 @@ func (b BoostFigures) validateRejections() []error {
 			errs = append(errs, fmt.Errorf("boost order %s is both working and cleared", o.ClientOrderID))
 		case rejected[o.ClientOrderID]:
 			errs = append(errs, fmt.Errorf("boost order %s is both working and rejected", o.ClientOrderID))
+		case retired[o.ClientOrderID]:
+			errs = append(errs, fmt.Errorf("boost order %s is both working and retired", o.ClientOrderID))
 		}
 		working[o.ClientOrderID] = true
 	}

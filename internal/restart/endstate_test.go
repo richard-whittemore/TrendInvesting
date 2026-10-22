@@ -60,6 +60,24 @@ func saleWithheldEntry(t *testing.T, tag, reason string) journal.Entry {
 
 const incidentID = "engine-state:joint:1"
 
+// retiredEntry is the adapter's retirement of order client as never sent.
+func retiredEntry(t *testing.T, client string) journal.Entry {
+	return recorded(t, journal.KindInput, "retired:"+client, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, event.OrderRetiredPayload{
+		AccountID: "joint", ClientOrderID: client, InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 5, LimitPrice: 90,
+		Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter,
+		RetiredAt: time.Date(2026, time.October, 17, 14, 0, 0, 0, time.UTC),
+	})
+}
+
+// incidentSaleAgain is the incident's sale attempted again, after an
+// earlier attempt was retired, under a client order ID of its own.
+func incidentSaleAgain(t *testing.T, tag string) journal.Entry {
+	return recorded(t, journal.KindDecision, "order-planned:sale-2", event.OrderPlannedEventType, event.OrderPlannedSafetyVersion, event.OrderPlannedPayload{
+		AccountID: "joint", Tag: tag, ClientOrderID: "joint-sale-2", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Sale: event.SaleFigures{Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit},
+	})
+}
+
 // TestReadEndStateFindsWhatAFreshRunMustBeToldOf: the state a fresh run
 // cannot recompute from bars is read from the approved log's own records:
 // Boost's latch (ADR 0026, point 5), the incident it ended in with its
@@ -93,6 +111,12 @@ func TestReadEndStateFindsWhatAFreshRunMustBeToldOf(t *testing.T) {
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true}},
 		{"halted, sale withheld from a stale snapshot", []journal.Entry{halted, saleWithheldEntry(t, incidentID, event.SaleWithheldStaleBrokerSnapshot)},
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted}},
+		{"halted, the sale retired as never sent", []journal.Entry{halted, incidentSale(t, incidentID), retiredEntry(t, "joint-sale-1")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted}},
+		{"halted, another order retired", []journal.Entry{halted, incidentSale(t, incidentID), retiredEntry(t, "tw-other")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-1"}},
+		{"halted, the sale retired and attempted again", []journal.Entry{halted, incidentSale(t, incidentID), retiredEntry(t, "joint-sale-1"), incidentSaleAgain(t, incidentID)},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-2"}},
 		{"halted, the engagement's sale", []journal.Entry{halted, incidentSale(t, "k1")},
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted}},
 		{"an inherited incident whose sale was attempted", []journal.Entry{inherited},
@@ -115,7 +139,7 @@ func TestReadEndStateFindsWhatAFreshRunMustBeToldOf(t *testing.T) {
 // read as nothing.
 func TestReadEndStateRefusesAnUndecodableRecord(t *testing.T) {
 	halted := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x"})
-	for _, broken := range []journal.Entry{decidedEntry(t, true), killSwitchEntry(t, "k1", true), incidentSale(t, incidentID), saleWithheldEntry(t, incidentID, event.SaleWithheldUnreadable)} {
+	for _, broken := range []journal.Entry{decidedEntry(t, true), killSwitchEntry(t, "k1", true), incidentSale(t, incidentID), saleWithheldEntry(t, incidentID, event.SaleWithheldUnreadable), retiredEntry(t, "joint-sale-1")} {
 		broken.Envelope.Payload = json.RawMessage(`not json`)
 		if _, err := restart.ReadEndState([]journal.Entry{halted, broken}, "joint", "run-1.log"); err == nil || !strings.Contains(err.Error(), broken.Envelope.ID) || !strings.Contains(err.Error(), "run-1.log") {
 			t.Errorf("%s: ReadEndState = %v, want a refusal naming it in run-1.log", broken.Envelope.ID, err)

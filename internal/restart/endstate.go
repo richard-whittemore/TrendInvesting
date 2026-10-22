@@ -103,9 +103,12 @@ func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState,
 // attempted in the approved log: planned under the incident's tag, withheld
 // under it for a person (event.SaleWithheldPayload.Attempted), or carried in
 // force as attempted by the log's own approval (ADR 0019, amended
-// 2026-10-15: one attempt per incident, never retried automatically). It
-// returns the attempt's client order ID when the sale was sent. A log that
-// ended Normal has no incident and no attempt.
+// 2026-10-15: one attempt per incident, never retried automatically). A
+// sale retired as never sent after it was planned is no attempt, since
+// nothing was sent (ADR 0019, amended 2026-10-17, reading 4, as the owner's
+// decision of 2026-10-22 reads it). It returns the attempt's client order
+// ID when the sale was sent. A log that ended Normal has no incident and no
+// attempt.
 func saleAttemptAtEnd(entries []journal.Entry, incident, logName string) (attempted bool, clientOrderID string, err error) {
 	if incident == "" {
 		return false, "", nil
@@ -134,6 +137,17 @@ func saleAttemptAtEnd(entries []journal.Entry, incident, logName string) (attemp
 			}
 			if p.Tag == incident && p.Attempted() {
 				attempted = true
+			}
+		case entry.Kind == journal.KindInput && env.Type == event.OrderRetiredEventType:
+			// A sale retired as never sent spent nothing: it was not an
+			// attempt (ADR 0019, amended 2026-10-17, reading 4, as the
+			// owner's decision of 2026-10-22 reads it).
+			var p event.OrderRetiredPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				return false, "", fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+			}
+			if attempted && clientOrderID != "" && p.ClientOrderID == clientOrderID {
+				attempted, clientOrderID = false, ""
 			}
 		}
 	}

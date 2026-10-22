@@ -208,20 +208,27 @@ func (v *BoostVerdicts) ClearNeverSent(inputID string, p event.RebalanceClearedP
 	return nil
 }
 
+// Holds reports whether order id is among the orders awaiting the venue's
+// word, so its retirement is this count's to read (Retire).
+func (v *BoostVerdicts) Holds(id string) bool {
+	return slices.ContainsFunc(v.undecided, func(o undecidedOrder) bool { return o.id == id })
+}
+
 // Retire takes order id off the orders awaiting the venue's word when it is
 // retired as never sent (execution.order.retired, journalled as input
 // inputID): its session ended before the adapter could send it, or the owner
 // retired one the adapter can never send, so no venue will ever rule on it,
 // and it is counted neither accepted nor rejected (ADR 0026, point 2,
-// "Boost", amended 2026-10-22). It must still await the venue's word and
-// never have been named by the venue, else it is refused and nothing
-// changes (fail closed): an order the venue has named, even only as
-// submitted, was sent.
+// "Boost", amended 2026-10-22). It applies only to an order the count holds
+// (Holds), which must never have been named by the venue, else it is
+// refused and nothing changes (fail closed): an order the venue has named,
+// even only as submitted, was sent. An order the count does not hold, the
+// sale back to 98% among them, is retired by the caller's own rule.
 func (v *BoostVerdicts) Retire(inputID, id string) error {
 	i := slices.IndexFunc(v.undecided, func(o undecidedOrder) bool { return o.id == id })
 	switch {
 	case i < 0:
-		return fmt.Errorf("targetweight: retirement %s names order %s, which the venue has already ruled on; it was sent, and only an order no venue received is retired", inputID, id)
+		return fmt.Errorf("targetweight: retirement %s names order %s, which is not among the orders awaiting the venue's word", inputID, id)
 	case v.undecided[i].venueID != "":
 		return fmt.Errorf("targetweight: retirement %s names order %s, which the venue has already named as order %s; it was sent, and only an order no venue received is retired", inputID, id, v.undecided[i].venueID)
 	}

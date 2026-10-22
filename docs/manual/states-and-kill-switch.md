@@ -312,7 +312,12 @@ ADR 0026, points 2.5 and 4).
 **Once per incident.** An incident runs from the first move out of Normal
 until recovery. Going from Degraded to Halted is the same incident. Under the
 kill switch, it is once per engagement. For the urgent alarm, it is once per
-alarm.
+alarm. A sale the adapter never sent and retired (its day was over, or you
+retired it because IBKR could never accept it) used nothing up: nothing was
+sent, so it is tried again at the next IBKR reading while the exit is still
+refused or the alarm still urgent, as a new order with a client order ID of
+its own ([order lifecycle](order-lifecycle.md), "An order IBKR can never
+accept").
 
 **When it does not go.** It is *withheld*, and recorded as
 `risk.sale.withheld`, when:

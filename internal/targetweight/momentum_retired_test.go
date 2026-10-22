@@ -116,3 +116,52 @@ func TestAMomentumRetirementMustNameAnOrderNoVenueReceived(t *testing.T) {
 	}
 	simulateMomentum(t, dry)
 }
+
+// TestRetiringARebalancesSellsNeverStartsItsBuys: the IRA holds FFF, which
+// January's rebalance sells, and its buys wait on that sell. The sell is
+// never sent, and the adapter retires it at February's close as an order
+// whose session is over. The retirement ends the rebalance: its buy phase,
+// planned from January's targets, prices and cash, is never started, and
+// February decides and plans afresh (the owner's decision of 2026-10-22;
+// ADR 0026, point 5, amended 2026-10-22).
+func TestRetiringARebalancesSellsNeverStartsItsBuys(t *testing.T) {
+	setup := momentumOptions{silentVenue: true, held: map[string]int64{"FFF": 100}, stopAfter: "2025-01-31"}
+	january := released(t, simulateMomentum(t, setup).decisions)
+	var sells []event.OrderReleasedPayload
+	for _, o := range january {
+		if o.Side != event.OrderSideSell {
+			t.Fatalf("setup: January released %s %s before its sells ended", o.Side, o.InstrumentID)
+		}
+		sells = append(sells, o)
+	}
+	if len(sells) == 0 {
+		t.Fatal("setup: January's rebalance released no sell")
+	}
+	r := simulateMomentum(t, momentumOptions{silentVenue: true, held: map[string]int64{"FFF": 100}, beforeClose: func(s *stream, session string) []event.Envelope {
+		if session != "2025-02-28" {
+			return nil
+		}
+		var out []event.Envelope
+		for _, o := range sells {
+			out = append(out, retiredAt(t, s, "retired:"+o.ClientOrderID, session, o))
+		}
+		return out
+	}})
+	for _, o := range planned(t, r.decisions) {
+		if o.Tag == januaryDecision && o.Side == event.OrderSideBuy {
+			t.Errorf("January's buy of %s was planned after its sells were retired", o.InstrumentID)
+		}
+	}
+	if got := withheldReasons(t, r); !equalStrings(got, []string{"decided:", "decided:"}) {
+		t.Fatalf("decisions %v, want February decided once January's sells are retired", got)
+	}
+	var february int
+	for _, o := range planned(t, r.decisions) {
+		if o.Tag != januaryDecision {
+			february++
+		}
+	}
+	if february == 0 {
+		t.Error("February planned no orders after the retirements")
+	}
+}

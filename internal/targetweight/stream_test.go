@@ -132,7 +132,7 @@ func (a *account) take(t *testing.T, out []event.Envelope) {
 // dropUnsent takes off the queue every order opts says the adapter never
 // sends.
 func (a *account) dropUnsent(opts options) {
-	a.pending = slices.DeleteFunc(a.pending, func(p event.OrderReleasedPayload) bool { return opts.neverReaches(p.Tag) })
+	a.pending = slices.DeleteFunc(a.pending, opts.neverReaches)
 }
 
 // fillAtMost fills every queued order at price, each for at most limit
@@ -284,15 +284,29 @@ type options struct {
 	// sends: the venue is told of none, so none is acknowledged and none
 	// executes. Every session in clear is one.
 	unsent []int
+	// unsentIDs are orders, by client order ID, the adapter never sends, a
+	// sale back to 98% among them; retireIDs retires, at the start of
+	// session i as retire does, the orders named.
+	unsentIDs []string
+	retireIDs map[int][]string
 	// startHeld is the SPY the account holds before the first session,
 	// bought on margin at the first close, so its net liquidation is still
 	// $4,000.
 	startHeld int64
 }
 
-// neverReaches reports whether the adapter never sends the order released
-// by the decision tagged tag.
-func (o options) neverReaches(tag string) bool {
+// neverReaches reports whether the adapter never sends the released order
+// p.
+func (o options) neverReaches(p event.OrderReleasedPayload) bool {
+	tag := p.Tag
+	if slices.Contains(o.unsentIDs, p.ClientOrderID) {
+		return true
+	}
+	for _, ids := range o.retireIDs {
+		if slices.Contains(ids, p.ClientOrderID) {
+			return true
+		}
+	}
 	if slices.ContainsFunc(o.unsent, func(n int) bool { return decisionTag(n) == tag }) {
 		return true
 	}
@@ -570,6 +584,13 @@ func simulate(t *testing.T, opts options) run {
 		for _, j := range opts.retire[i] {
 			for _, o := range acct.all {
 				if o.Tag == decisionTag(j) {
+					apply(retired(t, s, o, at.Add(-6*time.Hour), opts.retireBy))
+				}
+			}
+		}
+		for _, id := range opts.retireIDs[i] {
+			for _, o := range acct.all {
+				if o.ClientOrderID == id {
 					apply(retired(t, s, o, at.Add(-6*time.Hour), opts.retireBy))
 				}
 			}

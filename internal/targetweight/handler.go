@@ -239,14 +239,20 @@ import (
 //     the owner's retirement of one the adapter can never send (the owner's
 //     decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
 //     2026-10-22). The order must be one the run released, as released,
-//     that no venue has reported on; it ends with nothing filled. In Boost
-//     it leaves the orders awaiting the venue's word, a retired sell is no
-//     longer counted as being sold, and the watched order so retired is
-//     re-planned at the next decided session as unfilled; a momentum
-//     rebalance whose orders are all terminal then completes. A venue
-//     report on a retired order is refused. A dry-run refuses every
-//     retirement. 1.22.0 refused the input, so a journal holding one
-//     decides differently.
+//     that no venue has reported on; it ends with nothing filled, in every
+//     strategy. In Boost one awaiting the venue's word leaves those orders,
+//     and any other, the sale back to 98% included, is retired by its own
+//     rule; a retired sell is no longer counted as being sold, the watched
+//     order so retired is re-planned at the next decided session as
+//     unfilled, and a retired sale back to 98% spent no attempt, so it is
+//     attempted again under its own rule, under a client order ID of its
+//     own. Each Boost decision records the retired orders (decision schema
+//     7), so a restart refuses a venue report on one as the full run does.
+//     A momentum rebalance with a retired sell never starts its buy phase,
+//     and once its orders are all terminal it completes. A venue report on
+//     a retired order is refused. A dry-run refuses every retirement.
+//     1.22.0 refused the input, so a journal holding one decides
+//     differently.
 const RulesVersion = "1.23.0"
 
 // source names this handler on every envelope it emits.
@@ -395,9 +401,15 @@ type Handler struct {
 	// the gate still, so a decision records them for a restart to restore.
 	cleared []string
 	// retired are the orders the adapter or the owner retired as never sent
-	// (applyRetired), in the order retired: ended with nothing filled, so a
-	// venue report on one is refused.
-	retired []string
+	// (applyRetired), in the order retired, each with its release and when
+	// (BoostFigures.RetiredOrders): ended with nothing filled, so a venue
+	// report on one is refused, and a decision records them for a restart to
+	// restore.
+	retired []event.BoostRetiredOrder
+	// named are the orders a venue has named, by client order ID: a lifecycle
+	// report, an execution or a broker snapshot's open-order listing, which
+	// show the order reached IBKR, so it is never retired.
+	named map[string]bool
 	// working are the orders the venue accepted that were not fully filled
 	// or ended when last read, in the order the venue accepted them, whichever order is watched
 	// now (BoostFigures.WorkingOrders): a later order replaces them as the
@@ -697,6 +709,23 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 			h.release(o)
 		}
 		h.cleared = append(h.cleared, r.ClientOrderID)
+	}
+	// A retired order is restored as released and ended at its retirement,
+	// so a venue report on it is refused after a restart as in the full run
+	// (ADR 0026, point 5: recovered, never recomputed). The watched one is
+	// restored above, ended.
+	for _, r := range p.Boost.RetiredOrders {
+		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
+			o := event.OrderReleasedPayload{
+				AccountID: h.cfg.AccountID, ClientOrderID: r.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
+				Side: r.Side, Quantity: r.Released, LimitPrice: r.LimitPrice,
+			}
+			if err := h.gate.RestoreReleased(o, nil, r.RetiredAt, ""); err != nil {
+				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+			}
+			h.release(o)
+		}
+		h.retired = append(h.retired, r)
 	}
 	// An accepted order still working beside the watched one is restored
 	// with its executions, latest first so the gate keeps release order,
@@ -1066,12 +1095,13 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	if slices.Contains(h.cleared, p.ClientOrderID) {
 		return h.contradictsClearance(in, p.ClientOrderID)
 	}
-	if slices.Contains(h.retired, p.ClientOrderID) {
+	if h.isRetired(p.ClientOrderID) {
 		return h.contradictsRetirement(in, p.ClientOrderID)
 	}
 	if err := h.gate.ObserveFill(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	h.name(p.ClientOrderID)
 	// An execution shows the venue accepted the order.
 	h.observeOutcome(p.ClientOrderID, false)
 	return nil
@@ -1205,6 +1235,7 @@ func (h *Handler) learnListings(listed []event.BrokerOrder) {
 		if !ok || l.ClientOrderID == "" || o.InstrumentID != l.InstrumentID {
 			continue
 		}
+		h.name(l.ClientOrderID)
 		h.learnVenueID(l.ClientOrderID, l.BrokerOrderID)
 	}
 }
@@ -1296,7 +1327,7 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if slices.Contains(h.cleared, p.ClientOrderID) {
 		return h.contradictsClearance(in, p.ClientOrderID)
 	}
-	if slices.Contains(h.retired, p.ClientOrderID) {
+	if h.isRetired(p.ClientOrderID) {
 		return h.contradictsRetirement(in, p.ClientOrderID)
 	}
 	if !p.Describes(o) {
@@ -1309,6 +1340,7 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	h.name(p.ClientOrderID)
 	h.learnVenueID(p.ClientOrderID, p.OrderID)
 	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && p.Terminal() && w.status == "" {
 		w.status, w.endedAt = p.Status, p.OccurredAt.UTC()
@@ -1430,18 +1462,22 @@ func (h *Handler) applyClearance(in event.Envelope) error {
 // (execution.order.retired): its session ended before the adapter could
 // send it, or the owner retired an order the adapter can never send (the
 // owner's decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
-// 2026-10-22). No venue received it, so none will ever rule on it: it
-// leaves the orders awaiting the venue's word, counted neither accepted nor
-// rejected, and ends with nothing filled, so the gate no longer counts a
-// retired sell as being sold (ADR 0019, amended 2026-10-15, "net of every
-// working sell"). The watched order so retired ends as canceled at its
-// retirement, so the session's close re-plans it as unfilled (settleWatch),
-// as an order that expired unfilled is. It must name an order of this
-// account that this run released, as released (event's Describes), still
-// undecided and never named by the venue, and neither cleared nor retired
-// before; anything else is refused, so a retirement never ends an order
-// that may be working (fail closed). A dry-run sends nothing, so it refuses
-// every retirement.
+// 2026-10-22). No venue received it, so none will ever rule on it, and it
+// ends with nothing filled, so the gate no longer counts a retired sell as
+// being sold (ADR 0019, amended 2026-10-15, "net of every working sell").
+// It must name an order of this account that this run released, as
+// released (event's Describes), neither cleared nor retired before. An
+// order among those awaiting the venue's word leaves them by that count's
+// rule (BoostVerdicts.Retire), counted neither accepted nor rejected; any
+// other, the sale back to 98% and any order released outside a decided
+// session among them, by its own: no venue may have named it or reported an
+// execution of it. A retired sale back to 98% spent no attempt, so it is
+// attempted again under its own rule at the next opportunity
+// (risklimit.Gate.RetireSale). The watched order so retired ends as
+// canceled at its retirement, so the session's close re-plans it as
+// unfilled (settleWatch), as an order that expired unfilled is. Anything
+// else is refused, so a retirement never ends an order that may be working
+// (fail closed). A dry-run sends nothing, so it refuses every retirement.
 func (h *Handler) applyRetired(in event.Envelope) error {
 	p, err := decodeInput[event.OrderRetiredPayload](in, event.OrderRetiredSchemaVersion)
 	if err != nil {
@@ -1460,14 +1496,20 @@ func (h *Handler) applyRetired(in event.Envelope) error {
 		return fmt.Errorf("targetweight: retirement %s names order %s, which this run did not release", in.ID, id)
 	case slices.Contains(h.cleared, id):
 		return fmt.Errorf("targetweight: retirement %s names order %s, which the owner cleared as never sent already", in.ID, id)
-	case slices.Contains(h.retired, id):
+	case h.isRetired(id):
 		return fmt.Errorf("targetweight: retirement %s names order %s, which is retired already", in.ID, id)
 	case !p.Describes(o):
 		return fmt.Errorf("targetweight: retirement %s retires %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
 			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, id, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
 	}
-	if err := h.verdicts.Retire(in.ID, id); err != nil {
-		return err
+	held := h.verdicts.Holds(id)
+	switch {
+	case held:
+		if err := h.verdicts.Retire(in.ID, id); err != nil {
+			return err
+		}
+	case h.named[id]:
+		return fmt.Errorf("targetweight: retirement %s names order %s, which a venue has named or reported executed; it was sent, and only an order no venue received is retired", in.ID, id)
 	}
 	// The gate ends the order as a cancellation with nothing filled would.
 	// The report is the engine's own and is never journalled: it is marked
@@ -1481,11 +1523,27 @@ func (h *Handler) applyRetired(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(end); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
-	h.retired = append(h.retired, id)
+	if !held {
+		h.gate.RetireSale(id)
+	}
+	h.retired = append(h.retired, event.BoostRetiredOrder{ClientOrderID: id, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice, RetiredAt: p.RetiredAt.UTC()})
 	if w := h.watch; w != nil && w.order.ClientOrderID == id && w.status == "" {
 		w.status, w.endedAt = event.OrderLifecycleStatusCanceled, p.RetiredAt.UTC()
 	}
 	return nil
+}
+
+// isRetired reports whether order id was retired as never sent.
+func (h *Handler) isRetired(id string) bool {
+	return slices.ContainsFunc(h.retired, func(r event.BoostRetiredOrder) bool { return r.ClientOrderID == id })
+}
+
+// name records that a venue named order id.
+func (h *Handler) name(id string) {
+	if h.named == nil {
+		h.named = map[string]bool{}
+	}
+	h.named[id] = true
 }
 
 // recordRejections moves the rejections held for the next decision into
@@ -1601,7 +1659,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
 		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(), WorkingOrders: h.workingFigures(),
-		VenueRejections: h.verdicts.rejections, RejectedInARow: slices.Clone(h.verdicts.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(),
+		VenueRejections: h.verdicts.rejections, RejectedInARow: slices.Clone(h.verdicts.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(), RetiredOrders: slices.Clone(h.retired),
 		UndecidedBeforeRejection: h.verdicts.olderThanRejection, RejectionsWhileStopped: h.verdicts.whileStopped, NoVenue: h.noVenue(),
 	}
 }

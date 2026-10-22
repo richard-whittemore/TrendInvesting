@@ -1422,15 +1422,42 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   reason `owner retired`, retired by the owner named, owner only. Any other
   refusal is not retired.
 - **The rule.** The engine reads a retirement only for an order of its
-  account it released, as released, that no venue has reported on (and, in
-  Boost, that the venue has not named and the owner has not cleared). The
-  order ends with nothing filled: in Boost it leaves the orders awaiting the
-  venue's word, counted neither accepted nor rejected, the gate no longer
-  counts a retired sell as being sold, and the watched order so retired is
-  re-planned at the next decided session as `unfilled`; in a momentum run
-  it is terminal by the shared report rule, so a rebalance whose orders are
-  all terminal completes and the next decision decides afresh. A venue
-  report on a retired order proves the retirement wrong and is refused. A
-  dry-run sends nothing, so it refuses every retirement.
+  account it released, as released, that no venue has reported on and the
+  owner has not cleared (in Boost: that no venue has named, by a report, an
+  execution or a broker snapshot's open-order listing). Every session-over
+  retirement, and every owner's retirement, ends the order with nothing
+  filled, in every strategy, the sale back to 98% included. In Boost an
+  order among those awaiting the venue's word leaves them, counted neither
+  accepted nor rejected; any other order Boost released, the sale back to
+  98% and any order released outside a decided session among them, is
+  retired by the same rule without that count. The gate no longer counts a
+  retired sell as being sold, and the watched order so retired is
+  re-planned at the next decided session as `unfilled`. A retired sale back
+  to 98% sent nothing, so ADR 0019's readings of 2026-10-17 count it as no
+  attempt (reading 4): the sale is attempted again under its own rule at
+  the next opportunity, its tag and trigger unchanged, as reading 1 retries
+  a sale withheld from a snapshot that could not size it (the next readable,
+  fresh, positive broker snapshot while what fired it is in force, or its
+  trigger's next firing), and a fresh run's approval does not state it
+  attempted. Each attempt after a retired one is its own order, with a
+  client order ID of its own (point 2, "Order identity": the sale's phase
+  numbered by attempt), so a venue report naming the retired one is never
+  read as the new one's. In a momentum run the order is terminal by the
+  shared report rule; a retired sell ends the rebalance's buy phase, which
+  is never started, since it would buy from the decision's targets, prices
+  and cash after a session that sold nothing it planned, and once the
+  rebalance's orders are all terminal the next decision decides afresh. A
+  venue report on a retired order proves the retirement wrong and is
+  refused. Each Boost decision records the orders retired
+  (`retired_orders`, `strategy.targets.decided` version 7), so a run
+  restarted from it refuses such a report as the full run does (point 5:
+  recovered, never recomputed). A dry-run sends nothing, so it refuses every
+  retirement.
+- **The adapter.** The owner's `retire` command is the only settlement of
+  an order IBKR can never accept: `resolve --never-sent`, which tells the
+  engine nothing, is refused for it. A retirement the adapter or the command
+  began and a stop left unfinished is finished when the adapter starts
+  again, before the order is judged sendable, so an order the engine is
+  told was never sent is never sent.
 - **Replay.** Rules version 1.22.0 refused the input, so a journal holding
   a retirement decides differently and does not replay across the two.

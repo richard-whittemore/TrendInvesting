@@ -267,6 +267,12 @@ func (g *Gate) LapseExitSale() *event.SaleWithheldPayload {
 // sale is still withheld, the gate journals one" lapse (ADR 0019, amendment
 // of 2026-10-17, reading 1, "Lapse").
 func (g *Gate) lapseExit(why string) *event.SaleWithheldPayload {
+	if g.exitWithheld == nil {
+		// Armed by a retired sale (RetireSale), not by a withhold: nothing
+		// was withheld, so nothing lapses.
+		g.exitRetry = ""
+		return nil
+	}
 	w := *g.exitWithheld
 	g.exitRetry, g.exitWithheld = "", nil
 	if armed(g.urgentWithheld, w.ClientOrderID) {
@@ -392,8 +398,9 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	default:
 		return orderplan.Sale{}, false, nil
 	}
+	retired := g.retiredSales[saleKey(tag, instrumentID)]
 	if g.saleAttemptedFor(tag, instrumentID) {
-		g.disarm(orderplan.SaleClientOrderID(tag, instrumentID))
+		g.disarm(orderplan.SaleAttemptClientOrderID(tag, instrumentID, retired))
 		return orderplan.Sale{}, false, nil
 	}
 	// Sized net of every sell the gate counts against the latest broker
@@ -403,7 +410,7 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	sale, err := orderplan.PlanSale(orderplan.SaleInput{
 		AccountID: g.accountID, Tag: tag, InstrumentID: instrumentID, Kind: kind, Trigger: trigger,
 		Target: target, PriceBand: band, SnapshotID: g.brokerID, Snapshot: g.broker, Recognised: g.released,
-		WorkingSells: working, At: at, MaxSnapshotAge: g.maxSnapshotAge,
+		WorkingSells: working, At: at, MaxSnapshotAge: g.maxSnapshotAge, Retired: retired,
 	})
 	if err != nil {
 		return orderplan.Sale{}, false, fmt.Errorf("risklimit: %w", err)
@@ -443,6 +450,45 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	}
 	return sale, true, nil
 }
+
+// RetireSale reads the retirement of order clientOrderID as never sent, when
+// it is a sale back to 98% this gate released, and reports whether it was
+// one. Nothing was sent, so the attempt is not spent (ADR 0019, amended
+// 2026-10-17, reading 4, as the owner's decision of 2026-10-22 reads it;
+// ADR 0026, point 2, "Boost", amended 2026-10-22): the sale is attempted
+// again under its own rule at the next opportunity, its tag and trigger
+// unchanged, as reading 1 retries a sale withheld from a snapshot that could
+// not size it: the next readable, fresh, positive broker snapshot, while
+// what fired it is still in force (the exit still refused, or the alarm
+// still urgent), or the trigger's next firing. The next attempt has a
+// client order ID of its own (orderplan.SaleAttemptClientOrderID). The
+// caller ends the order in the ledger, as a cancellation with nothing
+// filled would, so its shares are no longer counted as being sold.
+func (g *Gate) RetireSale(clientOrderID string) bool {
+	o := g.orders[clientOrderID]
+	if o == nil || o.planned.Sale == (event.SaleFigures{}) {
+		return false
+	}
+	tag, instrumentID := o.planned.Tag, o.planned.InstrumentID
+	if a := g.attempts[tag]; a != nil {
+		delete(a.instruments, instrumentID)
+	}
+	g.retiredSales[saleKey(tag, instrumentID)]++
+	switch o.planned.Sale.Trigger {
+	case event.SaleTriggerMarginUrgent:
+		if g.alarmLevel == event.MarginAlarmUrgent && g.alarmID == tag {
+			g.urgentRetry, g.urgentInstrument, g.urgentWithheld = true, instrumentID, nil
+		}
+	case event.SaleTriggerExit:
+		if g.refusesExit(instrumentID) {
+			g.exitRetry, g.exitWithheld = instrumentID, nil
+		}
+	}
+	return true
+}
+
+// saleKey keys a sale back to 98% by its tag and instrument.
+func saleKey(tag, instrumentID string) string { return tag + "\x00" + instrumentID }
 
 // saleAttemptedFor reports whether the sale for tag and instrumentID was
 // already attempted: planned, or withheld for a person (ADR 0019, amended

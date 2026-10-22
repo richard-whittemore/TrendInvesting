@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4)
 - Date: 2026-09-17
 
 ## In plain English
@@ -441,7 +441,11 @@ here so that all eleven are in one place.
 4. **A withheld sale counts as the attempt only in two cases: the broker's
    values cannot be read, or a working sell is unknown.** An unreadable
    latest snapshot is one way the broker's values cannot be read (reading
-   1's snapshot rule). A released order always consumes the attempt. No
+   1's snapshot rule). A released order always consumes the attempt, unless
+   it is retired as never sent *(the owner's decision of 2026-10-22, ADR
+   0026's amendment of that date: nothing was sent, so it is no attempt, and
+   the sale is attempted again under its own rule at the next opportunity,
+   as a new order with a client identifier of its own)*. No
    other withhold does: not "nothing to sell" (below), and not reading 1's
    `stale-broker-snapshot` or `non-positive-broker-values` withholds, which
    leave the attempt unspent and are re-evaluated as reading 1 states. In
