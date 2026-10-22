@@ -3,6 +3,7 @@ package report
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -82,7 +83,12 @@ type Order struct {
 // nothing and raises no alert: it is reconciliation's to explain (ADR 0019).
 // In a momentum run the owner's clearance (operator.rebalance.cleared) is
 // read by event.OrderReports too, as the engine reads it, so a report on an
-// order it cleared is refused as on a terminal order.
+// order it cleared is refused as on a terminal order. In a Boost run the
+// clearance is judged by the Boost count's rule (boostRejections), and one
+// the engine refuses, whether the reporter cannot read it or its rule refuses
+// it as a whole, is returned as unread too, with its order IDs, and alerts as
+// an operator clearance, not a venue report. Any other strategy reads no
+// clearance (isBoost, isMomentum).
 // A dry-run momentum run's synthetic report on an order it never sent, a
 // decision, ends the order by the same rule and acknowledges nothing
 // (endSynthetic). A fill in a Boost run is read as the Boost engine reads it,
@@ -101,9 +107,21 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 	byID := map[string]*Order{}
 	reports := event.NewOrderReports()
 	fills := newBoostFills()
-	var group string // the input whose group the current record belongs to
+	var group string           // the input whose group the current record belongs to
+	var boost *boostRejections // the Boost engine's count, to judge a clearance as it does
+	if isBoost(strategyID) {
+		var envelopes []event.Envelope
+		for _, entry := range entries {
+			envelopes = append(envelopes, entry.Envelope)
+		}
+		account, _, _ := AccountOf(envelopes) // unknown: no clearance is judged by account
+		boost = newBoostRejections(account, strategyID)
+	}
 	for _, entry := range entries {
 		e := entry.Envelope
+		if boost != nil {
+			boost.observe(e, entry.Kind)
+		}
 		if entry.Kind == journal.KindInput {
 			group = e.ID
 			for _, o := range orders {
@@ -111,15 +129,16 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 					o.State = LifecycleReleased
 				}
 			}
-			if e.Type == event.RebalanceClearedEventType && strategyID == event.TargetWeightStrategyMomentum {
-				applyClearance(e, reports)
-				continue
-			}
 			if e.Type == event.RebalanceClearedEventType {
-				// The Boost engine refuses a clearance it cannot read.
-				var p event.RebalanceClearedPayload
-				if err := read(e, clearedVersions, &p); err != nil {
-					unread = append(unread, UnreadReport{InputID: e.ID, Type: e.Type, Reason: err.Error(), At: e.RecordedAt})
+				switch {
+				case boost != nil:
+					// The Boost engine refuses a clearance it cannot read
+					// and one its rule refuses as a whole.
+					if u := boost.judgeClearance(e); u != nil {
+						unread = append(unread, *u)
+					}
+				case isMomentum(strategyID):
+					applyClearance(e, reports)
 				}
 				continue
 			}
@@ -153,6 +172,9 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 		byID[p.ClientOrderID] = o
 		reports.Release(p)
 		fills.release(p)
+		if boost != nil {
+			boost.release(p)
+		}
 	}
 	out := make([]Order, len(orders))
 	for i, o := range orders {
@@ -178,22 +200,57 @@ func endSynthetic(e event.Envelope, reports *event.OrderReports) error {
 	return nil
 }
 
-// UnreadReport is a venue's report the log holds that the engine did not
-// read: InputID is the input, ClientOrderID the order it names (empty when
+// UnreadReport is a venue's report, or the owner's clearance
+// (operator.rebalance.cleared), the log holds that the engine did not read:
+// InputID is the input, ClientOrderID the order a report names (empty when
 // its payload is at a version not read or does not decode), Reason why it
-// was not read, and At when it was recorded.
+// was not read, and At when it was recorded. For a clearance, OrderIDs are
+// the orders it names, as far as its payload can be decoded, and Refused is
+// true when it was read and the engine's rule refuses it as a whole, false
+// when it could not be read at all.
 type UnreadReport struct {
 	InputID, Type, ClientOrderID, Reason string
 	At                                   time.Time
+	OrderIDs                             []string
+	Refused                              bool
 }
 
-// UnreadReportAlerts returns an urgent alert for each venue report the
-// engine did not read, one incident per input however often the reporter
+// clearanceTitle is the title of a clearance's alert.
+func clearanceTitle(account string, u UnreadReport) string {
+	if u.Refused {
+		return fmt.Sprintf("%s: operator clearance %s refused", account, u.InputID)
+	}
+	return fmt.Sprintf("%s: operator clearance %s not read", account, u.InputID)
+}
+
+// orderList names a clearance's orders, or says they are unknown.
+func orderList(ids []string) string {
+	if len(ids) == 0 {
+		return "not known"
+	}
+	return strings.Join(ids, ", ")
+}
+
+// UnreadReportAlerts returns an urgent alert for each venue report, and each
+// operator clearance, the engine did not read, one incident per input however often the reporter
 // runs (ADR 0019, "Alerting"). Such a report acknowledges nothing, so an
 // order it names stays unacknowledged and alerts in its own right.
 func UnreadReportAlerts(account string, unread []UnreadReport) []Alert {
 	out := make([]Alert, 0, len(unread))
 	for _, u := range unread {
+		if u.Type == event.RebalanceClearedEventType {
+			verdict := "not read"
+			if u.Refused {
+				verdict = "refused"
+			}
+			out = append(out, Alert{
+				Key: "venue-report-unread:" + u.InputID + "@" + account, Kind: KindVenueReportUnread, Severity: Urgent, AccountID: account, At: u.At,
+				Title: clearanceTitle(account, u),
+				Body: fmt.Sprintf("The log holds your clearance %s (orders %s), recorded at %s, which the engine did not apply (%s): %s. It clears nothing, so each order it names still counts as awaiting the venue's word. Check which Boost orders were never sent before clearing them again; the reporter's other alerts are unaffected.",
+					u.InputID, orderList(u.OrderIDs), u.At.UTC().Format(time.RFC3339), verdict, u.Reason),
+			})
+			continue
+		}
 		out = append(out, Alert{
 			Key: "venue-report-unread:" + u.InputID + "@" + account, Kind: KindVenueReportUnread, Severity: Urgent, AccountID: account, At: u.At,
 			Title: fmt.Sprintf("%s: venue report %s not read", account, u.InputID),
@@ -212,7 +269,7 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 	unread := func(clientID, reason string) *UnreadReport {
 		return &UnreadReport{InputID: e.ID, Type: e.Type, ClientOrderID: clientID, Reason: reason, At: e.RecordedAt}
 	}
-	momentum := strategyID == event.TargetWeightStrategyMomentum
+	momentum := isMomentum(strategyID)
 	var client, status string
 	var at time.Time
 	var refused error

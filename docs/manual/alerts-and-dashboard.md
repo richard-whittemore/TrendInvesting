@@ -320,12 +320,14 @@ The delivery rules:
   by a rejection); a fill the rule refuses, a report that does not describe
   the order as released, and a report on an order cleared as never sent
   count for nothing, as the engine refuses them; on a Boost account, a
-  clearance the engine's Boost rule refuses (it names an order twice, or an
-  order this run never released) is named on the page, and a clearance
-  record the reporter cannot read or validate, which the engine also
-  refuses, is paged with the unreadable records, one urgent alert for each
-  (the same alert as a venue report the engine did not read), and its
-  record ID is also shown on the page with "cannot be read"; a Boost
+  clearance the engine's Boost rule refuses (it names an order this run
+  never released, or one the venue has already named) is paged on every
+  channel as an urgent "operator clearance <id> refused" alert naming its
+  orders, and named on the page; a clearance record the reporter cannot read
+  or validate (a record that names an order twice does not validate), which
+  the engine also refuses, is paged the same way as "operator clearance <id>
+  not read", and its record ID is also shown on the page with "cannot be
+  read"; a Boost
   account is the one whose configuration names Boost, so a clearance
   journalled after a fresh run's approval and before its first decision is
   judged the same way; a momentum account's clearances are never read
@@ -903,6 +905,8 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: reconciliation <classification> (<id>)` | urgent, repeated until acknowledged | [reconciliation](reconciliation.md) |
 | `<account>: reconciliation pending-cash-read (<id>)`. Its text begins "<account>: cash differs from the book by <amount> (<direction>) on <day>; the Flex reader has not covered that day yet; the account stays <state>; <buys>; it becomes Degraded if unexplained after the Flex reader covers <day> or more than 2 sessions close since, whichever comes first.", where `<state>` is the state already in force, and the sentence reads "the account is <state>" instead of "stays" when the same reconciliation input also moved the state (it settled an earlier pending difference as Degraded on cash), `<direction>` is "an increase, like a deposit" or "a decrease, like a withdrawal", and `<buys>` is "buys continue, sized without the increase until the reader explains it" or "buys are withheld until the reader explains it, and sells and exits continue". The account's state does not change; the public relay's copy leaves the amount out; a later reading of the same difference sends nothing, its settling sends nothing, and only its turning Degraded sends the reconciliation alert above | urgent, repeated until acknowledged | [reconciliation](reconciliation.md), "A deposit or withdrawal you make" |
 | `<account>: venue report <id> not read` | urgent | [order lifecycle](order-lifecycle.md) |
+| `<account>: operator clearance <id> not read`. Its text names the clearance's order IDs when its record can be read that far | urgent | [order lifecycle](order-lifecycle.md) |
+| `<account>: operator clearance <id> refused`. Its text names the clearance's order IDs | urgent | [order lifecycle](order-lifecycle.md) |
 | `<account>: order <id> not acknowledged` | urgent | [order lifecycle](order-lifecycle.md) |
 | `<account>: order <id> acknowledged` | routine | [order lifecycle](order-lifecycle.md) |
 | `<host>: the server's clock failed its check` (the server's name, not an account's) | urgent | this chapter, below, and [server](server.md), "The clock" |

@@ -1,11 +1,13 @@
 package report
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
@@ -80,13 +82,13 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 				// already known stays named with its orders; a momentum
 				// account has no Boost stop.
 				line := fmt.Sprintf("The decision record %s cannot be read: treat the buy stop as possibly in force.", e.ID)
-				if strategy == event.TargetWeightStrategyMomentum {
+				if isMomentum(strategy) {
 					line = fmt.Sprintf("The decision record %s cannot be read: check the account's latest decision before relying on it.", e.ID)
 				}
 				unreadable = []string{line, line}
 				continue
 			}
-			if p.StrategyID == event.TargetWeightStrategyBoost {
+			if isBoost(p.StrategyID) {
 				stopped, unreadable = nil, nil
 				lastBoost, lastFigures = e, p.Boost
 				rej.decided(e.ID, p.Boost)
@@ -155,7 +157,7 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 		switch {
 		case stopped != nil:
 			headline = "Normal, Boost's buys stopped"
-		case unreadable != nil && strategy == event.TargetWeightStrategyMomentum:
+		case unreadable != nil && isMomentum(strategy):
 			headline = "Normal, a decision record cannot be read"
 		case unreadable != nil:
 			headline = "Normal, Boost's buys possibly stopped"
@@ -268,23 +270,59 @@ func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
 		// Only a Boost account's clearance runs through the Boost count,
 		// whatever the run has decided so far: the momentum engine applies
 		// it through its own order reports.
-		if r.strategy != event.TargetWeightStrategyBoost {
+		if !isBoost(r.strategy) {
 			return targetweight.VerdictNone
 		}
-		var p event.RebalanceClearedPayload
-		if read(e, clearedVersions, &p) != nil {
-			// The engine refuses a clearance it cannot decode or validate.
-			r.unread = append(r.unread, e.ID)
-		} else if p.AccountID == r.account {
-			sideOf := func(id string) string { return r.released[id].Side }
-			if err := r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf); err != nil {
-				// The engine refuses it as a whole; the reporter names the
-				// record and goes on.
+		if u := r.judgeClearance(e); u != nil {
+			if u.Refused {
 				r.refused = append(r.refused, e.ID)
+			} else {
+				r.unread = append(r.unread, e.ID)
 			}
 		}
 	}
 	return targetweight.VerdictNone
+}
+
+// judgeClearance reads the owner's clearance e as the Boost engine does and
+// applies it to the count, returning it as unread when the engine refuses it:
+// Refused false when it cannot decode or validate it, true when its rule
+// (targetweight.BoostVerdicts.ClearNeverSent) refuses it as a whole. Another
+// account's clearance is no business of this one's.
+func (r *boostRejections) judgeClearance(e event.Envelope) *UnreadReport {
+	var p event.RebalanceClearedPayload
+	if err := read(e, clearedVersions, &p); err != nil {
+		// Whatever the payload names, for the alert.
+		var named event.RebalanceClearedPayload
+		_ = json.Unmarshal(e.Payload, &named)
+		return &UnreadReport{InputID: e.ID, Type: e.Type, Reason: err.Error(), At: e.RecordedAt, OrderIDs: named.ClientOrderIDs}
+	}
+	if p.AccountID != r.account {
+		return nil
+	}
+	sideOf := func(id string) string { return r.released[id].Side }
+	if err := r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf); err != nil {
+		return &UnreadReport{InputID: e.ID, Type: e.Type, Reason: err.Error(), At: e.RecordedAt, OrderIDs: p.ClientOrderIDs, Refused: true}
+	}
+	return nil
+}
+
+// observe keeps the count as the log's records move it, in recording order
+// (kind is the record's journal kind): a fresh run's approval ends it, a Boost
+// decision recovers it, a release adds to it elsewhere, and a venue's report
+// or fill moves it. A clearance is judged by judgeClearance.
+func (r *boostRejections) observe(e event.Envelope, kind string) {
+	switch {
+	case e.Type == event.OperatorRunApprovedEventType:
+		r.freshRun()
+	case e.Type == event.TargetsDecidedEventType:
+		var p event.TargetsDecidedPayload
+		if read(e, decidedVersions, &p) == nil && isBoost(p.StrategyID) {
+			r.decided(e.ID, p.Boost)
+		}
+	case kind == journal.KindInput && (e.Type == event.OrderLifecycleEventType || e.Type == event.FillEventType):
+		r.venue(e)
+	}
 }
 
 // boostStopped names Boost's stop: the count the engine holds, the orders

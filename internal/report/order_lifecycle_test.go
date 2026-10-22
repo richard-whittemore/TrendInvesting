@@ -9,6 +9,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
@@ -520,6 +521,126 @@ func TestAnUnreadableBoostClearanceIsAnUnreadRecordTheReporterPages(t *testing.T
 		}
 		if len(unread) != want || (want == 1 && (unread[0].InputID != "cleared:bad" || unread[0].Type != event.RebalanceClearedEventType)) {
 			t.Errorf("%s: unread %+v, want %d", strategy, unread, want)
+		}
+	}
+}
+
+// entriesOf is a stream as the durable log holds it: the owner's, the
+// venue's and the run's inputs as inputs, the engine's decisions and
+// releases as decisions.
+func entriesOf(s *stream) []journal.Entry {
+	out := make([]journal.Entry, 0, len(s.out))
+	for _, e := range s.out {
+		kind := journal.KindDecision
+		switch e.Type {
+		case event.RebalanceClearedEventType, event.OrderLifecycleEventType, event.FillEventType, event.OperatorRunApprovedEventType, event.TargetWeightConfigurationEventType:
+			kind = journal.KindInput
+		}
+		out = append(out, journal.Entry{Kind: kind, Envelope: e})
+	}
+	return out
+}
+
+// TestARefusedBoostClearanceIsAnUnreadRecordTheReporterPages: a clearance the
+// reporter can read and the Boost engine refuses as a whole (it names an
+// order twice, or one this run never released) is paged on every channel as
+// the unreadable one is, naming the clearance and its orders; a clearance the
+// engine applies pages nothing (ADR 0019, "Alerting"; ADR 0026, point 2,
+// "Boost", amended 2026-10-18).
+func TestARefusedBoostClearanceIsAnUnreadRecordTheReporterPages(t *testing.T) {
+	never := orderplan.ClientOrderID("targets:1", "SPY", event.OrderSideBuy)
+	for name, c := range map[string]struct {
+		orders  []string
+		want    int
+		verdict string
+	}{
+		"applied":    {[]string{never}, 0, ""},
+		"twice":      {[]string{never, never}, 1, "not read"},
+		"unreleased": {[]string{never, "zz-unreleased"}, 1, "refused"},
+	} {
+		l := newBoostLog(t)
+		l.decide(0)
+		l.decide(1, never)
+		l.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:x", day(2), event.RebalanceClearedPayload{
+			AccountID: "joint", AsOf: day(2), DecisionID: "targets:1", ClientOrderIDs: c.orders, Operator: "owner", Detail: "never sent"})
+		_, unread, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unread) != c.want {
+			t.Fatalf("%s: unread %+v, want %d", name, unread, c.want)
+		}
+		if c.want == 0 {
+			continue
+		}
+		a := report.UnreadReportAlerts("joint", unread)[0]
+		if a.Severity != report.Urgent || !strings.Contains(a.Title, "operator clearance cleared:x "+c.verdict) || strings.Contains(a.Title+a.Body, "venue report") || !strings.Contains(a.Body, never) {
+			t.Errorf("%s: alert %+v must name the refused clearance and its orders", name, a)
+		}
+	}
+}
+
+// TestAnUnreadableClearanceAlertNamesTheClearanceNotAVenueReport: the alert
+// for a clearance the engine cannot read says so, not that a venue report was
+// not read, and names the orders when the payload can be partly read (ADR
+// 0019, "Alerting").
+func TestAnUnreadableClearanceAlertNamesTheClearanceNotAVenueReport(t *testing.T) {
+	run := &logRun{t: t}
+	run.add(journal.KindInput, event.RebalanceClearedEventType, 99, "cleared:bad", day(1), map[string]string{})
+	_, unread, err := report.OrderLifecycles(run.out, event.TargetWeightStrategyBoost)
+	if err != nil || len(unread) != 1 {
+		t.Fatalf("unread %+v, %v", unread, err)
+	}
+	a := report.UnreadReportAlerts("joint", unread)[0]
+	if !strings.Contains(a.Title, "operator clearance cleared:bad not read") || strings.Contains(a.Title+a.Body, "venue report") {
+		t.Errorf("alert %+v must name the operator clearance", a)
+	}
+}
+
+// TestAStrategyThatIsNeitherBoostNorMomentumReadsNoClearance: the two
+// places that classify a strategy agree that anything not Boost is not
+// Boost and anything not momentum is not momentum, so a clearance in a run of
+// an unknown strategy is neither paged as a Boost one nor applied as a
+// momentum one (fail closed for the Boost-only count).
+func TestAStrategyThatIsNeitherBoostNorMomentumReadsNoClearance(t *testing.T) {
+	run := &logRun{t: t}
+	run.add(journal.KindInput, event.RebalanceClearedEventType, 99, "cleared:bad", day(1), map[string]string{})
+	_, unread, err := report.OrderLifecycles(run.out, "mystery")
+	if err != nil || len(unread) != 0 {
+		t.Errorf("unread %+v, %v; want none", unread, err)
+	}
+}
+
+// TestAClearanceIsJudgedAgainstTheCurrentRunsCountAndOwnAccount: a fresh
+// run's approval ends the count, so a clearance of an order the last run
+// released is refused after it, and another account's clearance is no
+// business of this one's (ADR 0026, point 2, "Boost", amended 2026-10-18;
+// ADR 0027).
+func TestAClearanceIsJudgedAgainstTheCurrentRunsCountAndOwnAccount(t *testing.T) {
+	never := orderplan.ClientOrderID("targets:1", "SPY", event.OrderSideBuy)
+	clearOrder := func(l *boostLog, id, account string) {
+		l.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, id, day(3), event.RebalanceClearedPayload{
+			AccountID: account, AsOf: day(3), DecisionID: "targets:1", ClientOrderIDs: []string{never}, Operator: "owner", Detail: "never sent"})
+	}
+	for name, c := range map[string]struct {
+		approve bool
+		account string
+		want    int
+	}{
+		"same run":          {false, "joint", 0},
+		"after a fresh run": {true, "joint", 1},
+		"another account":   {true, "other", 0},
+	} {
+		l := newBoostLog(t)
+		l.decide(0)
+		l.decide(1, never)
+		if c.approve {
+			l.add(event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approved:2", day(2), *approvalOf("", ""))
+		}
+		clearOrder(l, "cleared:x", c.account)
+		_, unread, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
+		if err != nil || len(unread) != c.want {
+			t.Errorf("%s: unread %+v, %v; want %d", name, unread, err, c.want)
 		}
 	}
 }
