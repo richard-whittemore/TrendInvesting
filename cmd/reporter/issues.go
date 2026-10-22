@@ -83,6 +83,9 @@ type issueTracker interface {
 	// Listed returns the numbers of the issues in the alert listing, the
 	// same listing Latest reads.
 	Listed(ctx context.Context) (map[int]bool, error)
+	// Closed reports whether the issue is closed or has no such issue on
+	// GitHub, whatever its labels.
+	Closed(ctx context.Context, number int) (bool, error)
 	// Create opens an issue and returns its number.
 	Create(ctx context.Context, title, body string, labels []string) (int, error)
 	// OwnComments returns the bodies of every comment on the issue written
@@ -141,7 +144,10 @@ type issuesSender struct {
 	// closing is, for each key resolve has read the issue of in this firing,
 	// that issue's number.
 	closing map[string]int
-	pruned  bool
+	// pruned is true once this firing has pruned the unclosed records against
+	// a listing read whole (latest); it stays false when Listed fails, so the
+	// next listing read tries the prune again.
+	pruned bool
 	// asked is, for each key resolve has sent a write to GitHub for in this
 	// firing (a comment, the close or the label swap), true: a close that
 	// failed before any write was never asked of GitHub.
@@ -288,8 +294,8 @@ func (s *issuesSender) addComment(a report.Alert, id, heading string) error {
 
 // latest is the tracker's newest issue holding marker, and, the first time in
 // a firing the listing is read, prunes the records of issues left open
-// (unclosedKey) whose issue has left the listing, so a record stays only
-// until its issue leaves it.
+// (unclosedKey) that are neither listed nor closed on GitHub, so a record
+// stays while its issue may still be open, whatever its labels.
 func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue, bool, error) {
 	issue, found, err := s.tracker.Latest(ctx, marker)
 	if err != nil || s.pruned {
@@ -308,7 +314,14 @@ func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue,
 			continue
 		}
 		numText, _, _ := strings.Cut(rest, ":")
-		if n, err := strconv.Atoi(numText); err == nil && !listed[n] {
+		n, err := strconv.Atoi(numText)
+		if err != nil || listed[n] {
+			continue
+		}
+		// Off the listing is not gone: a label taken off an open issue leaves
+		// it unlisted, so the record goes only once GitHub says it is closed
+		// or has no such issue. A failed check keeps the record.
+		if closed, err := s.tracker.Closed(ctx, n); err == nil && closed {
 			delete(s.records, k)
 		}
 	}
@@ -317,7 +330,7 @@ func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue,
 
 // unclosedKey is the record (issuesSender.records) that issue number n of an
 // alert was left open when its close was given up. It stays until that issue
-// leaves the listing, so the issue never suppresses a later incident, however
+// is closed or gone, so the issue never suppresses a later incident, however
 // the issues that replaced it end: the replacement chain is the local
 // record's, never the listing's.
 func unclosedKey(key string, n int) string {
@@ -803,6 +816,21 @@ func (g *githubTracker) Listed(ctx context.Context) (map[int]bool, error) {
 		return nil, err
 	}
 	return maps.Clone(g.listed), nil
+}
+
+// Closed reads the issue itself (https://docs.github.com/en/rest/issues/issues#get-an-issue),
+// so a label taken off it does not make it look gone; GitHub's 404 is gone.
+func (g *githubTracker) Closed(ctx context.Context, number int) (bool, error) {
+	var issue ghIssue
+	_, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues/%d", number), nil, &issue)
+	var status *statusError
+	if errors.As(err, &status) && status.code == http.StatusNotFound {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return issue.State == "closed", nil
 }
 
 // Create opens an issue. Only an answer that names the new issue is a

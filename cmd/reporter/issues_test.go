@@ -97,6 +97,16 @@ func (f *fakeTracker) Create(ctx context.Context, title, body string, labels []s
 	return len(f.issues), nil
 }
 
+func (f *fakeTracker) Closed(ctx context.Context, number int) (bool, error) {
+	if err := f.call(ctx); err != nil {
+		return false, err
+	}
+	if number < 1 || number > len(f.issues) {
+		return true, nil
+	}
+	return !f.issues[number-1].open, nil
+}
+
 func (f *fakeTracker) Listed(ctx context.Context) (map[int]bool, error) {
 	if err := f.call(ctx); err != nil {
 		return nil, err

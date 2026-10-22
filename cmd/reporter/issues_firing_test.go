@@ -709,8 +709,9 @@ func TestOnlyARefusedCloseRequestIsCounted(t *testing.T) {
 	}
 }
 
-// The record of an issue left open stays only until that issue leaves the
-// alert listing; it is pruned at the next listing.
+// The record of an issue left open stays while the issue is listed, or open
+// on GitHub with its label off; it is pruned at the next listing once the
+// issue is closed.
 func TestAnUnclosedRecordLeavesWithItsIssue(t *testing.T) {
 	tr := &fakeTracker{}
 	s := newIssues(tr)
@@ -752,5 +753,51 @@ func TestAnUnclosedRecordLeavesWithItsIssue(t *testing.T) {
 	}
 	if _, kept := repeats[unclosedKey(a.Key, 1)]; kept {
 		t.Fatalf("repeats=%v: the record of an issue gone from the listing must be pruned", repeats)
+	}
+}
+
+// An abandoned issue that is still open keeps its record while its alert
+// label is off: when the label comes back, the alert's next incident opens its
+// own issue and is not absorbed by the abandoned one (ADR 0019, "Alerting":
+// once per incident).
+func TestALabelRemovedAndRestoredStillLetsTheNextIncidentOpen(t *testing.T) {
+	tr := &fakeTracker{}
+	s := newIssues(tr)
+	prefix := report.HistoryUnavailableKeyPrefix("joint")
+	a := forgottenAlert()
+	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
+	s.records = repeats
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0, time.Minute, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	forget(prefix, seen, sent, repeats)
+	tr.closeFailing = fmt.Errorf("GitHub answered 422")
+	for range maxCloseTries {
+		s := newIssues(tr)
+		s.records = repeats
+		_ = closeForgotten([]sender{s}, []string{prefix}, seen, sent, repeats)
+	}
+	tr.closeFailing = nil
+	if repeats[unclosedKey(a.Key, 1)] != 1 {
+		t.Fatalf("repeats=%v: the abandoned issue must be recorded", repeats)
+	}
+	// The owner takes the alert label off the abandoned issue, which stays open.
+	tr.issues[0].labels = nil
+	s = newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 0); err != nil {
+		t.Fatal(err)
+	}
+	// The label goes back on, and the alert's next incident arrives.
+	tr.issues[0].labels = []string{alertLabel}
+	forget(prefix, seen, sent, repeats)
+	s = newIssues(tr)
+	s.records = repeats
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(20*time.Hour), time.Minute, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// Issue 2 is the other alert's; the next incident of a is issue 3.
+	if len(tr.issues) != 3 || !tr.issues[2].open {
+		t.Fatalf("%d issues, want a third, open issue for the next incident", len(tr.issues))
 	}
 }
