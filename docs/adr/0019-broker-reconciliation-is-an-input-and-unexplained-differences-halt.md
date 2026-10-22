@@ -578,10 +578,10 @@ stops; one the ended log released more than once; one whose last decision
 was recorded in another run; a never-sent mark no decision backs; one the
 ended log retires; and one the ended log or the adapter's outbox shows
 reported on or executed (a retirement still queued in the outbox is struck
-off, not a refusal). The owner's `resolve --sent` on such an order records
-the finding first and strikes any queued retirement of it after, before
-the mark that lets the relay go on, so a stop part way still leaves it
-refused. Only the refusals the owner must act on are listed; an
+off, not a refusal). The owner's `resolve --sent` on such an order marks
+it `at-broker` first, then records the finding and strikes any queued
+retirement of it, before the mark that lets the relay go on, so a stop
+part way still leaves it refused and stopped at on every start. Only the refusals the owner must act on are listed; an
 order simply sent is counted, not listed. With no input waiting, the log
 must be that of the run the adapter's decisions last record (each decision
 carries the run of its input), or the command refuses, saying so; with no

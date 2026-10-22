@@ -1088,6 +1088,51 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(pending.handovers(), {"tw-paper-1": "sent"})
         self.assertEqual(self.queued_retirements(), [])
 
+    def test_marking_sent_a_never_sent_order_stopped_after_any_step_delivers_no_retirement_on_restart(self):
+        # --sent on an order marked never sent marks it at the broker first,
+        # then records the owner's finding, strikes its queued retirements and
+        # marks it sent last, so a stop after any step leaves the order the
+        # restarted relay stops at, whatever IBKR shows by then, with no
+        # retirement of it left to reach the engine (ADR 0026, amended
+        # 2026-10-22, "The adapter": an order IBKR shows is never retired;
+        # fail closed, AGENTS.md).
+        steps = {
+            "at-broker mark": (PendingInput, "mark", lambda cid, state: state == "at-broker"),
+            "decision": (PendingInput, "record_decision", lambda d: d.get("decision") == "sent"),
+            "strike": (Outbox, "strike_all", lambda ids: bool(list(ids))),
+        }
+        for step, (cls, name, applies) in steps.items():
+            with self.subTest(stopped_after=step):
+                self.setUp()
+                self.left_waiting_by_the_first_run("session:1", commits=True)
+                pending = PendingInput(self.pending)
+                order = json.loads((TESTDATA / "paper_released.json").read_text())
+                retire_order(pending, order, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+                self.assertEqual(len(self.queued_retirements()), 1)
+                real = getattr(cls, name)
+
+                def stopped(target, *args, real=real, applies=applies, step=step):
+                    real(target, *args)
+                    if applies(*args):
+                        raise OSError("stopped after the {}".format(step))
+                with mock.patch.object(cls, name, stopped):
+                    with self.assertRaises(OSError):
+                        resolve(pending, "tw-paper-1", "sent", "IBKR shows it working", today=SESSION)
+                restarted = relay_module.Relay(
+                    connect=lambda: self.engine, sender=SimpleNamespace(check=print, send=print), pending=pending,
+                    to_request=lambda order, session: order, today=lambda: SESSION,
+                    broker_orders=lambda: SimpleNamespace(open_orders=[], executions=[]))
+                with self.assertRaises(relay_module.NeverSentAtBroker):
+                    restarted.exchange(pending.load())
+                restarted.close()
+                self.assertEqual(self.queued_retirements(), [], "no retirement of an order IBKR showed is delivered")
+                self.assertEqual(pending.load()["id"], "session:1", "the input stays awaiting its reply")
+                self.assertEqual(relay_main(["resolve", self.pending, "tw-paper-1", "--sent", "--reason",
+                                             "IBKR shows it working"]), 0)
+                self.assertEqual(pending.handovers(), {"tw-paper-1": "sent"})
+                self.assertEqual(self.queued_retirements(), [])
+
     def test_run_ended_strikes_a_queued_retirement_of_an_order_the_relay_found_at_ibkr(self):
         # A stop after the at-broker decision or mark, before the strike,
         # leaves a retirement queued; settling the input as run ended
@@ -1104,6 +1149,37 @@ class LoopTests(unittest.TestCase):
                 self.assertEqual(self.queued_retirements(), [])
                 [settled] = PendingInput(self.pending).run_ended()
                 self.assertEqual([e["id"] for e in settled["outbox"]], ["order-retired:tw-paper-1"])
+
+    def test_run_ended_strikes_a_queued_retirement_of_any_order_an_earlier_run_of_the_chain_released(self):
+        # A retirement queued for an order an earlier run released, which
+        # that run's engine never read, is one the fresh run's engine refuses
+        # (it did not release the order), so it is settled with the input and
+        # struck off, never drained into the fresh run, even when the
+        # session-bounded walk (run_logs) leaves out the run that released it
+        # because the retirement settles the order (ADR 0026, amended
+        # 2026-10-22, "The adapter"; fail closed, AGENTS.md).
+        for walk in ("bounded walk reaches the run", "bounded walk leaves the run out"):
+            with self.subTest(walk):
+                self.setUp()
+                second = self.left_waiting_by_the_first_run("session:1", commits=True)
+                pending = PendingInput(self.pending)
+                order = json.loads((TESTDATA / "paper_released.json").read_text())
+                retire_order(pending, order, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+                self.assertEqual(len(self.queued_retirements()), 1)
+                omitted = mock.patch.object(relay_module, "_earlier_logs", return_value=[]) \
+                    if walk.endswith("out") else contextlib.nullcontext()
+                with omitted:
+                    self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                                 str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+                self.assertEqual(self.queued_retirements(), [])
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual([e["id"] for e in settled["outbox"]], ["order-retired:tw-paper-1"])
+                loop = self.loop(engine=second, engine_log=second.path)
+                loop.start()
+                self.settle(loop)
+                loop.close()
+                self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
 
     def committed_report(self, event_type, version, payload, input_id=None):
         """A report input engine.log commits after the waiting input, as the ended run's engine read it."""

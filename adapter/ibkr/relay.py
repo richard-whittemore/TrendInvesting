@@ -673,7 +673,8 @@ class PendingInput:
         returned, or a person found it at IBKR), NEVER_SENT (a person settled
         an order the sender refused for good, or the order was retired:
         retire_order), AT_BROKER (IBKR shows an order settled never sent:
-        _record_at_broker) or "resend:YYYY-MM-DD" (a person allowed it to be
+        _record_at_broker, or the owner's --sent on one, before its later
+        steps: _resolve) or "resend:YYYY-MM-DD" (a person allowed it to be
         sent again in that session).
         """
         marks = self.handovers()
@@ -709,7 +710,13 @@ class PendingInput:
         return decisions
 
     def record_decision(self, decision):
-        """Append one decision durably; the file is kept for the owner, and read only by settled_orders.
+        """Append one decision durably; the file is kept for the owner and read strictly by decisions.
+
+        decisions' readers are settled_orders, the relay's checks of each
+        released order (_settle: _finish_retirement, _found_at_broker), and
+        the ended-run commands (resolve_run_ended, settle_ended_run), so a
+        line that cannot be read stops the live adapter as well as every
+        later resolve and settlement (fail closed, AGENTS.md).
 
         A decision for the input whose run is recorded (record_run) carries
         that run under "run" unless it names one, so the decisions say which
@@ -719,9 +726,9 @@ class PendingInput:
 
         Written whole or not at all: every decision recorded, byte for byte,
         then this one, to a temporary file flushed and renamed over the
-        file, so a stop mid-write never leaves a torn line, which the strict
-        readers (settled_orders) would refuse at every later start, resolve
-        and settlement (fail closed, AGENTS.md). Every writer holds the
+        file, so a stop mid-write never leaves a torn line, which decisions
+        would refuse at every later start, resolve and settlement (fail
+        closed, AGENTS.md). Every writer holds the
         pending file's lock (Relay, resolve, retire, settle_ended_run), so no
         decision is lost between the read and the rename.
         """
@@ -1486,14 +1493,17 @@ def _resolve(pending, client_order_id, decision, reason, today):
     mark = marks[client_order_id]
     if mark in (NEVER_SENT, AT_BROKER) and decision == DECIDE_SENT:
         # IBKR shows the order after all (NeverSentAtBroker), so it was
-        # sent. As _record_at_broker does, the owner's finding is recorded
-        # durably first, so a stop or a failed write after it leaves the
-        # order no settlement reads as never sent; then any retirement of it
-        # a stop left queued is struck off; and only then is it marked sent,
-        # the mark that no longer stops the relay, so no retirement of it
-        # reaches the engine (ADR 0026, amended 2026-10-22, "The adapter":
-        # an order IBKR shows is never retired; fail closed, AGENTS.md).
-        # Running --sent again finishes a stop part way.
+        # sent. It is marked AT_BROKER durably first, the mark the relay
+        # stops at on every start (finishing the strike: _record_at_broker),
+        # so a stop or a failed write at any later step leaves no settlement
+        # reading it as never sent and no retirement of it deliverable; then
+        # the owner's finding is recorded; then any retirement of it a stop
+        # left queued is struck off; and only then is it marked sent, the
+        # mark that no longer stops the relay (ADR 0026, amended 2026-10-22,
+        # "The adapter": an order IBKR shows is never retired; fail closed,
+        # AGENTS.md). Running --sent again finishes a stop part way.
+        if mark != AT_BROKER:
+            pending.mark(client_order_id, AT_BROKER)
         pending.record_decision(recorded)
         _strike_retirements(pending, client_order_id)
         pending.mark(client_order_id, SENT)
@@ -1913,9 +1923,11 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
     IBKR's reports (lifecycle and fill inputs) on an order a run of the
     chain before engine_log_path released (run_logs from the input's
     session), recorded while that run's engine decided, and every
-    retirement of an order of the input the relay found IBKR showing
-    (at-broker, which a stop before its strike left queued), which no
-    engine is ever told. Each is recorded
+    retirement of an order a run of the chain before engine_log_path
+    released, however old (run_chain), which the fresh run's engine did not
+    release and would refuse, or of an order of the input the relay found
+    IBKR showing (at-broker, which a stop before its strike left queued),
+    which no engine is ever told. Each is recorded
     with the settlement and struck off unsent, never drained into the fresh
     run under its identity. Every other entry stays in the outbox and is
     sent to the fresh run: a producer in another process (the session's
@@ -1970,10 +1982,24 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
         at_broker = {cid for cid, mark in pending.handovers().items() if mark == AT_BROKER}
         at_broker |= {d["client_order_id"] for d in pending.decisions()
                       if d["decision"] == DECIDE_AT_BROKER and d.get("input_id") == input_id}
+        # A retirement of an order any earlier run of the chain released,
+        # however old (run_chain, not the session-bounded run_logs, which
+        # leaves out a run whose orders the retirement itself settles), was
+        # never read by that run's engine, and the fresh run's engine, which
+        # did not release the order, refuses it (internal/targetweight
+        # RetirementVerdict), so it is settled with the input too; one of an
+        # order the fresh run released is its own, and stays (ADR 0026,
+        # amended 2026-10-22, "The adapter"; fail closed, AGENTS.md).
+        fresh = os.path.realpath(engine_log_path)
+        retired = set(at_broker)
+        for path, _, _ in run_chain(engine_log_path):
+            if os.path.realpath(path) != fresh:
+                retired |= released_client_order_ids(path)
+        retired -= released_client_order_ids(engine_log_path) - at_broker
         behind = [e for e in outbox.load() if e["id"] != input_id and e["id"] not in recorded
-                  and (e["event_type"] in (LIFECYCLE_TYPE, FILL_TYPE)
-                       and e["payload"].get("client_order_id") in earlier
-                       or e["event_type"] == RETIRED_TYPE and e["payload"].get("client_order_id") in at_broker)]
+                  and ((e["event_type"] in (LIFECYCLE_TYPE, FILL_TYPE)
+                        and e["payload"].get("client_order_id") in earlier)
+                       or (e["event_type"] == RETIRED_TYPE and e["payload"].get("client_order_id") in retired))]
         if input_id not in recorded or behind:
             pending.record_run_ended({
                 "input": waiting, "refused": RUN_ENDED, "reason": reason, "run": ended.run,

@@ -48,10 +48,13 @@ and records everything, and marks every order "do not send".
      only Boost (`compose.go`);
    - the durable log or the journal it is told to write already exists
      (a run name is never reused);
-   - another engine of the instance is running: before it creates its log,
+   - another engine of the instance is running: before it reads your
+     approval or any earlier run's log, and before it creates its own log,
      the engine locks `engine.lock` in its state folder (the folder of
      `-log`) and holds it for as long as it runs, whatever log it writes, a
-     resume's new log included, so two never run side by side; and an
+     resume's new log included, so two never run side by side and the
+     approval it checks against the latest run stays true while it runs;
+     `-log` and `-out` may not name that file; and an
      engine that cannot take that lock at all (a filesystem without
      `flock`) does not start either, leaving no log behind. The IBKR
      adapter's `settle-ended-run` reads the same lock as its proof that a
@@ -241,6 +244,7 @@ Read them with `journalctl -u ti-engine@<instance> -n 20`.
 | `systemctl status` says the unit was skipped because a condition was not met | The engine never ran: the binary, the account's `.env` or its `.config` is not installed. | Run `deploy/build-engine.sh`, then `deploy/provision.sh`. For an IRA this is expected: it has no configuration. |
 | `-as-of must be an RFC 3339 time` or `-as-of must be nonzero` | Refuses. | Write `TI_AS_OF` as `2026-10-20T20:00:00Z`, say. |
 | `-log and -out both name ...` | Refuses: the log and the journal must be two files. | Nothing on the server (the unit names them `<TI_RUN>.log` and `<TI_RUN>.journal`). |
+| `-log names ...` or `-out names ..., the instance lock an engine holds in the folder of -log` | Refuses before it writes anything: the log or the journal would be `engine.lock`, the file the engine locks for as long as it runs, so the journal could never be installed when it stops. | Nothing on the server (`TI_RUN` names `<TI_RUN>.log` and `<TI_RUN>.journal`); by hand, choose another file name. |
 | `... already exists: a durable log is recorded evidence and is never appended to or overwritten`, or `... already exists: a journal is recorded evidence and is never overwritten` | Refuses: `TI_RUN` names a run that already has a log or journal. | Set `TI_RUN` to a new name. Never delete or move the old files. |
 | `another engine of this instance runs: it holds .../engine.lock, the instance lock ...` | Refuses before it writes anything: another engine of the same account is running from the same state folder. | Check `systemctl status ti-engine@<instance>` and any engine you started by hand; stop the other one before starting this one. Never delete `engine.lock`. |
 | `take the instance lock .../engine.lock: ...: the engine does not start without it ...` (`no locks available`, `operation not supported`), or `open the instance lock ...` | Refuses before it writes anything: the state folder's filesystem cannot hold the lock (a network or unusual mount), or the folder cannot be written. No log is left behind, so the same `TI_RUN` can be used again. | Keep `/var/lib/trend-investing/engines/<instance>/` on the server's local disk with its usual owner and mode (`provision.sh`), then start again. |
@@ -294,6 +298,8 @@ it sells again, sized from the 14 shares held.
 - Tests of the instance lock, in `cmd/engine`:
   `TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites`,
   `TestTheEngineRefusesToStartWhileItsInstanceLockIsHeld`,
+  `TestASecondEngineRefusesAtTheInstanceLockBeforeItReadsTheApprovalOrTheRuns`,
+  `TestTheJournalAndTheDurableLogNeverNameTheInstanceLock`,
   `TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog`.
 - The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
   introduced for momentum in target-weight rules version 1.11.0 and for

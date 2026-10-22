@@ -241,6 +241,29 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if opts.logPath != "" && samePath(opts.logPath, opts.outPath) {
 		return fmt.Errorf("engine: -log and -out both name %s: the durable log is streamed during the run and the journal is installed when it stops, so they must be two files", opts.outPath)
 	}
+	// The instance lock is a fixed name in the folder of -log, held for the
+	// whole run: neither the log nor the journal may be that file, or the
+	// run would start only to fail to install its journal when it stops
+	// (ADR 0018; ADR 0019, amended 2026-10-22).
+	if opts.logPath != "" {
+		lock := instanceLockPath(opts.logPath)
+		for _, named := range []struct{ flag, path string }{{"-log", opts.logPath}, {"-out", opts.outPath}} {
+			if samePath(named.path, lock) {
+				return fmt.Errorf("engine: %s names %s, the instance lock an engine holds in the folder of -log for as long as it runs (ADR 0019, amended 2026-10-22): choose another file name", named.flag, named.path)
+			}
+		}
+		// Taken before the approval is read or validated and before any of
+		// the instance's run history is read (freshRunApproval, the resume),
+		// so the history the approval is checked against is the one that
+		// holds while this run runs: no other engine of the instance can
+		// start, run and end between the check and the start (ADR 0019,
+		// amended 2026-10-22; ADR 0027; fail closed, AGENTS.md).
+		instance, err := lockInstance(opts.logPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = instance.Close() }()
+	}
 
 	// The configuration selects the strategy: the target-weight handler
 	// with its risk gate, or the Turtle reducer (compose.go).
@@ -281,13 +304,6 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// journal below is written exactly as before either way.
 	recorder := journal.NewRecorder(reducer)
 	logHeader := journal.NewLogHeader(configurationHash, strategyVersion)
-	if opts.logPath != "" {
-		instance, err := lockInstance(opts.logPath)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = instance.Close() }()
-	}
 	var recovery journal.Recovery
 	if opts.resumePath != "" {
 		if recovery, err = recoverLogFile(opts.resumePath); err != nil {
