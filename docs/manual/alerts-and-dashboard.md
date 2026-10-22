@@ -777,14 +777,23 @@ the reporter and the dashboard do the matching:
 - **A commission is counted once.** A commission posting whose IBKR ID is a
   logged fill's execution ID, or a correction of that execution (IBKR keeps
   the first part of the ID and changes the last), is that fill's commission
-  and is left out of the ledger's total. The text under the table says how
-  many were left out.
+  and is left out of the ledger's total; and a fill logged again as a
+  correction of the same execution is counted once, at its latest
+  commission. The text under the table says how many postings were left
+  out. IBKR's Cash Transactions normally holds only "Commission
+  Adjustments", under IBKR's numeric transaction IDs, so the per-trade
+  commissions come from the fills; the matching is **an assumption until the
+  first live statement is checked** (reconciliation chapter, "The reader
+  writes every commission, and the reporter counts each once").
 - **Only this account's folder is read.** As for the cash ledger, a costs
   ledger in another account's folder is not read ("not accepted"), and
   nothing from it is counted.
 - **A day after the summary's is never counted**, so an earlier day's summary
-  does not change when the ledger grows. A cost is dated by IBKR's date,
-  read as a UTC day for the month and year.
+  does not change when the ledger grows. A cost, and a fill's commission,
+  is dated by its New York day for the month and year, the day the first
+  run's approval cut-off is read by, so a fee IBKR posts at 8:30 p.m. New
+  York on the last day of a month is that month's, as on IBKR's own
+  statement.
 - **Costs before the account's start are not counted.** The reader writes
   none dated before the New York day you approved the first run: they belong
   to the account before the book you stated.
@@ -797,24 +806,30 @@ last two sessions' costs may not be there yet (the text says so, and says
 "costs recorded through <day>"). Until the Flex reader has written a costs
 ledger, the card shows the commissions on fills only and says "fees and
 interest not yet recorded by the Flex reader"; the daily summary's costs line
-ends with the same words in brackets. A ledger that cannot be read, or that
+ends with the same words in brackets. The costs are read in their own step,
+so they can be set aside while deposits and withdrawals are still recorded;
+whenever the costs reading is not "read", or has fallen more than two
+sessions behind the summary's day, the line ends "(costs incomplete: the
+Flex reader is set aside as of <day>)", "(… is behind as of <day>)" or
+"(… the Flex reader's reading of <day> did not finish)", and the card says the
+same: the figures are then partial. A ledger that cannot be read, or that
 belongs to another account, is named the same way; the commissions on fills
 are still counted. A fill that did not read is counted as an input not read, not
 here, and the text says how many commissions are therefore left out.
 
 **A worked example** (made-up numbers). In March 2027 the account is worth
 about 10,000.00 all month. On the 3rd it buys, and IBKR charges 1.25 for the
-trade: the fill in the log carries 1.25, and the next evening the Flex reader
-writes IBKR's own commission posting of -1.25 for the same execution; the
-reporter counts 1.25 once. On the 10th IBKR posts a market-data fee of
+trade: the fill in the log carries 1.25, and the reporter counts it from the
+fill (the Flex reader's statement has no posting for it). On the 10th IBKR posts a market-data fee of
 -10.00, on the 12th interest paid of -3.21 (a short margin loan) and on the
 12th interest received of 0.42. The month's column reads commissions 1.25,
 fees 10.00, interest paid 3.21, interest received 0.42, net cost 14.04, and
 the daily summary's line reads "Costs this month: commissions 1.25, fees
 10.00, interest 2.79". If this is the account's first month, the net cost
 since the start is 14.04, 0.14% of an average net liquidation of 10,000.00.
-The same IBKR commission read twice, by the fill and by the ledger, would have
-shown 2.50 and 15.29; that is what the matching prevents.
+Had IBKR also listed that commission in Cash Transactions under the
+execution's ID, the matching would leave it out, rather than show 2.50 and
+15.29.
 
 This card changes no order and no limit; it reports. It is also why the cash
 checks have less to allow for: a fee or an interest posting is now recorded

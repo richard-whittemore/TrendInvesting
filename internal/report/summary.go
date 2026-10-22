@@ -445,8 +445,9 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark str
 // reads: its header and final record hash, its first two records (its
 // configuration and approval, ADR 0027), every configuration and approval
 // input after them (FollowChain refuses a second approval), every account
-// snapshot, every fill (the costs block counts their commissions) and every
-// bar of benchmark (pairEarlier). A log holding nothing
+// snapshot, of every fill only its ID, commission, time and version, which
+// the costs block counts (earlierFillOf), and every bar of benchmark
+// (pairEarlier). A log holding nothing
 // past its configuration keeps that one record, so restart.CutShort reads it
 // as it reads the whole log.
 func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
@@ -457,8 +458,10 @@ func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
 		keep := i < 2
 		switch {
 		case e.Kind != journal.KindInput:
-		case env.Type == event.TargetWeightConfigurationEventType, env.Type == event.OperatorRunApprovedEventType, env.Type == event.AccountSnapshotEventType, env.Type == event.FillEventType:
+		case env.Type == event.TargetWeightConfigurationEventType, env.Type == event.OperatorRunApprovedEventType, env.Type == event.AccountSnapshotEventType:
 			keep = true
+		case env.Type == event.FillEventType:
+			e.Envelope, keep = earlierFillOf(env), true
 		case env.Type == event.CompletedBarEventType:
 			if p, _, err := readBar(env); err == nil && p.InstrumentID == benchmark {
 				keep = true

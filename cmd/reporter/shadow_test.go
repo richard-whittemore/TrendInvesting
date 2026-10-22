@@ -153,6 +153,9 @@ func TestTheDailySummaryGivesThisMonthsCostsFromTheLedgerBesideTheCashLedger(t *
 	if err := os.WriteFile(filepath.Join(dir, "costs.jsonl"), []byte(lines.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "costs.jsonl.status.json"), []byte(`{"state":"read","checked_at":"2024-01-04T02:30:00Z","covered_to":"20240103"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	now := func() time.Time { return t0.AddDate(0, 0, 1).Add(time.Hour) }
 	var out bytes.Buffer
 	args := []string{"-journal", journalPath, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-summary", "-cash-ledger", filepath.Join(dir, "cash-movements.jsonl")}

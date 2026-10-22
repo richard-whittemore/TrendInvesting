@@ -45,9 +45,24 @@ read from IBKR"). One reading:
    journal also holds it as the commission of a fill: the reader cannot see
    the journal, so the reporter takes a commission whose transaction ID is a
    journalled fill's execution ID out of the total (internal/report,
-   Costs). A cost of nothing is not written. Dividends and withholding tax
-   are parsed, and kept on the Statement, but not written; a type KINDS does
-   not know is counted in the status file (unknown_types) and said.
+   Costs). Cash Transactions is expected to hold only "Commission
+   Adjustments" under IBKR's numeric transaction IDs, the per-trade
+   commissions being on the fills (dotted execution IDs); that the two never
+   meet otherwise is an assumption until the first live statement is checked
+   against the owner's activity statement (docs/manual/reconciliation.md). A
+   cost of nothing is not written. Dividends and withholding tax are parsed,
+   and kept on the Statement, but not written; a type KINDS does not know is
+   counted in the status file (unknown_types) and said.
+
+   The costs are read in their own step, after the cash ledger, its period
+   and its status are written (_read_costs_once), so a cost IBKR restates or
+   a costs line not as written sets aside the costs alone and never stops a
+   transfer being recorded: a pending cash read becomes Degraded (ADR 0019,
+   amended 2026-10-21) while trading-side cash waits on it. The costs keep
+   their own status file ("running" first, as the cash status) and their own
+   period (COVERAGE_SUFFIX beside the costs ledger), checked as the cash
+   ledger's is, so a first costs reading reaches back to the first run's
+   approval day even where the cash ledger was read before.
 
 Each reading's period is kept beside the ledger (COVERAGE_SUFFIX): its
 fromDate and covered_to, the day before its toDate. The last day of a
@@ -101,9 +116,9 @@ record's equity_before not revised.
 The ledger is the instance's own file of cash movements, one JSON record a
 line, beside its status file (STATUS_SUFFIX). The costs ledger follows the
 same conventions (one JSON record a line, a record's ID ID_PREFIX and the
-transaction ID, a restated posting refusing the reading, a torn or foreign
-line refusing it before anything is appended, the cash ledger's lock, and a
-copy of the reading's status beside it saying how far it covers); the engine
+transaction ID, a restated posting refusing the costs reading, a torn or
+foreign line refusing it before anything is appended, the cash ledger's lock,
+and its own status and period files beside it saying how far it covers); the engine
 does not read it, and nothing it holds can place an order. It is the seen-IDs state: a
 record's ID is ID_PREFIX and IBKR's transaction ID, so a transfer already
 in it is never written again, however often its statement is read, and one
@@ -122,7 +137,8 @@ Fail closed (AGENTS.md): any refusal, a token IBKR rejects or a service
 error sets the reader aside for this reading. Nothing is written to the
 ledger, the status file records "set-aside" with why (and IBKR's error
 code), and read_once returns False, which the command turns into exit
-status 1, a failed unit. The next firing reads again; a good reading
+status 1, a failed unit. A costs refusal alone sets aside the costs alone
+(their status file says why) and also returns False. The next firing reads again; a good reading
 clears it. Trading does not depend on it: while it is set aside, a cash
 difference waits at most two sessions for it before the account is Degraded
 on cash. Standard library only, and the adapter's own reader of the engine's
@@ -795,6 +811,9 @@ def read_costs(path):
         return {}
     except OSError as err:
         raise StatementRefused("the costs ledger {} cannot be read: {}".format(path, err.strerror or err)) from None
+    except UnicodeDecodeError:
+        raise StatementRefused("the costs ledger {} is not UTF-8 text, so not as this reader writes it; it is never "
+                               "appended to until it is put back".format(path)) from None
     if lines[-1] != "":
         raise StatementRefused("the costs ledger {} does not end with a whole line".format(path))
     records = {}
@@ -877,6 +896,9 @@ def read_coverage(path):
         return None
     except OSError as err:
         raise StatementRefused("the coverage file {} cannot be read: {}".format(path, err.strerror or err)) from None
+    except UnicodeDecodeError:
+        raise StatementRefused("the coverage file {} is not UTF-8 text, so the days the last reading covered are not "
+                               "known; put it back from a backup".format(path)) from None
     try:
         coverage = json.loads(text)
     except ValueError:
@@ -1024,8 +1046,9 @@ def record_resolutions(ledger_path, decisions, wait=LOCK_WAIT, sleep=time.sleep)
 
 def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_get, sleep=time.sleep,
               now=lambda: datetime.now(timezone.utc), err=None):
-    """One reading (see the module): True when the statement was read and every new transfer written, False when
-    the reader was set aside. Either way the status file beside ledger_path says which, and why."""
+    """One reading (see the module): True when the statement was read, every new transfer written and every new cost
+    written, False when the reader, or its costs alone, were set aside. Either way the status file beside ledger_path,
+    and the costs ledger's own beside it, say which, and why."""
     def say(text):
         if err is not None:
             print(mask(text, token, account_id), file=err)
@@ -1035,14 +1058,17 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
     costs_file = costs_path(ledger_path)
     coverage_path = ledger_path + COVERAGE_SUFFIX
     status = {"state": "read", "checked_at": checked_at}
+    statement = approved_at = None
     with open(ledger_path + LOCK_SUFFIX, "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # Said first, so a reading stopped part way (its unit's timeout, a kill) leaves "running" with its time,
-        # never the previous reading's "read" (docs/manual/reconciliation.md, "The status file").
-        _write_whole(status_path, json.dumps({"state": "running", "checked_at": checked_at}, sort_keys=True) + "\n")
+        # never the previous reading's "read" (docs/manual/reconciliation.md, "The status file"); the costs
+        # ledger's status the same, as the reporter reads it alone (internal/report, LoadCostLedgerFor).
+        running = json.dumps({"state": "running", "checked_at": checked_at}, sort_keys=True) + "\n"
+        _write_whole(status_path, running)
+        _write_whole(costs_file + STATUS_SUFFIX, running)
         try:
             ledger = read_ledger(ledger_path)
-            costs = read_costs(costs_file)
             coverage = read_coverage(coverage_path)
             resolutions = read_resolutions(ledger_path + RESOLUTIONS_SUFFIX)
             statement = parse_statement(fetch_statement(token, query_id, get=get, sleep=sleep), account_id)
@@ -1050,7 +1076,6 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             _check_coverage(statement, coverage, approved_at, now().astimezone(NEW_YORK).date())
             written, skipped, date_only, resolved = new_movements(statement, ledger, approved_at, snapshots,
                                                                   resolutions)
-            cost_records, costs_before = new_costs(statement, costs, approved_at)
             for transaction_id in resolved:
                 say("flex: transfer {} placed by the owner's recorded decision ({})".format(
                     transaction_id, resolutions[transaction_id]))
@@ -1070,15 +1095,6 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             for ibkr_type, count in sorted(unknown.items()):
                 say("flex: {} posting(s) of type {!r}, which the reader does not classify, not written".format(
                     count, ibkr_type))
-            for transaction_id in costs_before:
-                say("flex: cost {} is dated before the first run's approval day, so it is not written".format(
-                    transaction_id))
-            if cost_records:
-                kept = ""
-                if costs:
-                    with open(costs_file, encoding="utf-8") as f:
-                        kept = f.read()
-                _write_whole(costs_file, kept + "".join(_line(r) for r in cost_records))
             if written:
                 kept = ""
                 if ledger:
@@ -1088,36 +1104,83 @@ def read_once(token, query_id, account_id, engine_log_path, ledger_path, get=_ge
             # After the ledger: a reading stopped between the two leaves the period behind, which only asks the
             # next reading to cover more, and a transfer written twice is never possible (its ID is in the ledger).
             # The statement's last day is read again by the next one (see the module).
-            covered_to = _day_text(_flex_day(statement.to_date) - timedelta(days=1))
-            if coverage is not None and coverage["covered_to"] > covered_to:
-                covered_to = coverage["covered_to"]
+            covered_to = _covered_to(statement, coverage)
             _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "covered_to": covered_to},
                                                    sort_keys=True) + "\n")
             status.update(written=len(written), period=[statement.from_date, statement.to_date],
                           covered_to=covered_to, postings=len(statement.postings), in_first_book=len(skipped),
                           date_only_on_approval_day=len(date_only), resolved=len(resolved),
-                          out_of_order=len(out_of_order), unknown_types=unknown, costs_written=len(cost_records))
-            say("flex: read {} postings for {} to {}; wrote {} cash movement(s) and {} cost(s)".format(
-                len(statement.postings), statement.from_date, statement.to_date, len(written), len(cost_records)))
+                          out_of_order=len(out_of_order), unknown_types=unknown)
+            say("flex: read {} postings for {} to {}; wrote {} cash movement(s)".format(
+                len(statement.postings), statement.from_date, statement.to_date, len(written)))
             ok = True
         except (StatementRefused, FlexRejected, FlexUnavailable, ResolveRefused, OSError) as refused:
             # Each sets the reader aside, named; anything else is a defect and stops the command.
-            reason = mask(str(refused), token, account_id)
-            if isinstance(refused, FlexRejected):
-                reason += "; check the token and query ID in the secrets file (TI_IBKR_FLEX_TOKEN, " \
-                          "TI_IBKR_FLEX_QUERY_ID) and the token's expiry in Client Portal"
-            state = ("coverage-gap" if isinstance(refused, CoverageGap)
-                     else "ambiguous-transfer" if isinstance(refused, AmbiguousTransfer) else "set-aside")
-            status.update(state=state, reason=reason, code=getattr(refused, "code", None))
+            status.update(_set_aside(refused, token, account_id))
             if isinstance(refused, AmbiguousTransfer):
                 status["ambiguous"] = sorted(refused.ids)
-            say("flex: set aside: " + reason)
+            say("flex: set aside: " + status["reason"])
             ok = False
         _write_whole(status_path, json.dumps(status, sort_keys=True) + "\n")
-        # The costs ledger's own status, the same reading's: how far its costs are recorded (internal/report,
-        # LoadCostLedger).
-        _write_whole(costs_file + STATUS_SUFFIX, json.dumps(status, sort_keys=True) + "\n")
-    return ok
+        # The costs after the cash ledger and in their own step, so a cost IBKR restates or a costs line not as
+        # written never stops a transfer being recorded (ADR 0019: a pending cash read becomes Degraded).
+        costs_status = _read_costs_once(statement, approved_at, status, costs_file, now, say, token, account_id)
+        _write_whole(costs_file + STATUS_SUFFIX, json.dumps(costs_status, sort_keys=True) + "\n")
+    return ok and costs_status["state"] == "read"
+
+
+def _covered_to(statement, coverage):
+    """The last day statement covers, the day before its toDate, never earlier than coverage's covered_to."""
+    covered_to = _day_text(_flex_day(statement.to_date) - timedelta(days=1))
+    if coverage is not None and coverage["covered_to"] > covered_to:
+        covered_to = coverage["covered_to"]
+    return covered_to
+
+
+def _set_aside(refused, token, account_id):
+    """The status fields of a reading set aside by refused: its state, its reason (masked) and IBKR's code."""
+    reason = mask(str(refused), token, account_id)
+    if isinstance(refused, FlexRejected):
+        reason += "; check the token and query ID in the secrets file (TI_IBKR_FLEX_TOKEN, " \
+                  "TI_IBKR_FLEX_QUERY_ID) and the token's expiry in Client Portal"
+    state = ("coverage-gap" if isinstance(refused, CoverageGap)
+             else "ambiguous-transfer" if isinstance(refused, AmbiguousTransfer) else "set-aside")
+    return {"state": state, "reason": reason, "code": getattr(refused, "code", None)}
+
+
+def _read_costs_once(statement, approved_at, status, costs_file, now, say, token, account_id):
+    """The costs ledger's status after writing statement's new costs into costs_file: read with its own period
+    (COVERAGE_SUFFIX beside it), so a costs ledger read later than the cash ledger first reaches back to the first
+    run's approval day as the cash ledger's first reading did. A statement the cash reading did not get, status
+    saying why, sets the costs aside with it; a costs refusal sets aside the costs alone."""
+    costs_status = {"state": "read", "checked_at": status["checked_at"]}
+    coverage_path = costs_file + COVERAGE_SUFFIX
+    try:
+        if statement is None or approved_at is None:
+            raise StatementRefused("no statement was read for the costs: " + status.get("reason", ""))
+        costs = read_costs(costs_file)
+        coverage = read_coverage(coverage_path)
+        _check_coverage(statement, coverage, approved_at, now().astimezone(NEW_YORK).date())
+        cost_records, costs_before = new_costs(statement, costs, approved_at)
+        for transaction_id in costs_before:
+            say("flex: cost {} is dated before the first run's approval day, so it is not written".format(
+                transaction_id))
+        if cost_records:
+            kept = ""
+            if costs:
+                with open(costs_file, encoding="utf-8") as f:
+                    kept = f.read()
+            _write_whole(costs_file, kept + "".join(_line(r) for r in cost_records))
+        covered_to = _covered_to(statement, coverage)
+        _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "covered_to": covered_to},
+                                               sort_keys=True) + "\n")
+        costs_status.update(costs_written=len(cost_records), period=[statement.from_date, statement.to_date],
+                            covered_to=covered_to)
+        say("flex: wrote {} cost(s)".format(len(cost_records)))
+    except (StatementRefused, OSError) as refused:
+        costs_status.update(_set_aside(refused, token, account_id))
+        say("flex: costs set aside: " + costs_status["reason"])
+    return costs_status
 
 
 def read_key(path, key):

@@ -280,7 +280,9 @@ func TestWhatTheLedgerCouldNotGiveIsSaid(t *testing.T) {
 			t.Errorf("%s: note %q lacks %q", name, got.Note, tc.want)
 		}
 	}
-	if got := summarizeCosts(t, s, readCosts(t), "2024-01-05").Costs; strings.Contains(got.Note, "not yet recorded") || got.Incomplete != "" {
+	empty := readCosts(t)
+	empty.State, empty.CoveredTo = "read", "2024-01-05"
+	if got := summarizeCosts(t, s, empty, "2024-01-05").Costs; strings.Contains(got.Note, "not yet recorded") || got.Incomplete != "" {
 		t.Errorf("a ledger read and empty is costs of nothing: %+v", got)
 	}
 }
@@ -300,30 +302,13 @@ func TestTheCostsLineInTheDailySummary(t *testing.T) {
 	ledger := readCosts(t,
 		cost{"c1", event.CostCommission, at(3), -1}, cost{"c2", event.CostFee, at(3), -10},
 		cost{"c3", event.CostInterestPaid, at(4), -3.21}, cost{"c4", event.CostInterestReceived, at(4), 0.42})
+	ledger.State, ledger.CoveredTo = "read", "2024-01-04"
 	text := report.RenderText(summarizeCosts(t, s, ledger, "2024-01-05"))
 	if !strings.Contains(text, "Costs this month: commissions 1.00, fees 10.00, interest 2.79\n") {
 		t.Errorf("text lacks the costs line:\n%s", text)
 	}
 	if bare := report.RenderText(summarizeCosts(t, s, report.CostLedger{}, "2024-01-05")); !strings.Contains(bare, "Costs this month: commissions 0.00, fees 0.00, interest 0.00 (fees and interest not yet recorded") {
 		t.Errorf("a day with no ledger says so:\n%s", bare)
-	}
-}
-
-func TestForHistoryKeepsAnEarlierRunsFills(t *testing.T) {
-	s := costSeries(t)
-	s.fillWithCommission(1, "e1.01", 1)
-	var entries []journal.Entry
-	for _, e := range s.out {
-		entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: e})
-	}
-	whole := journal.Recovery{Entries: entries, FinalRecordHash: "sha256:" + strings.Repeat("1", 64)}
-	kept := report.ForHistory(whole, "SPY")
-	found := false
-	for _, e := range kept.Entries {
-		found = found || e.Envelope.Type == event.FillEventType
-	}
-	if !found {
-		t.Fatal("an earlier run's fills are kept: their commissions count since the start")
 	}
 }
 
@@ -343,5 +328,172 @@ func TestAFillThatDoesNotReadIsSaidAndItsCommissionIsNotCounted(t *testing.T) {
 	got := summarizeCosts(t, s, report.CostLedger{}, "2024-01-05").Costs
 	if got.Since.Commissions != 0 || got.FillsNotRead != 1 || !strings.Contains(got.Note, "1 fill(s) that did not read") {
 		t.Errorf("costs %+v", got)
+	}
+}
+
+func TestCostsAreIncompleteWhenTheReaderIsSetAsideOrBehind(t *testing.T) {
+	s := costSeries(t)
+	for name, tc := range map[string]struct {
+		ledger report.CostLedger
+		want   string
+	}{
+		"set aside":     {report.CostLedger{Read: true, State: "set-aside", CheckedAt: "2024-01-05", CoveredTo: "2024-01-03"}, "costs incomplete: the Flex reader is set aside as of 2024-01-05"},
+		"coverage gap":  {report.CostLedger{Read: true, State: "coverage-gap", CheckedAt: "2024-01-05"}, "costs incomplete: the Flex reader is set aside as of 2024-01-05"},
+		"stopped":       {report.CostLedger{Read: true, State: "running", CheckedAt: "2024-01-05", CoveredTo: "2024-01-03"}, "costs incomplete: the Flex reader's reading of 2024-01-05 did not finish"},
+		"behind":        {report.CostLedger{Read: true, State: "read", CoveredTo: "2024-01-02"}, "costs incomplete: the Flex reader is behind as of 2024-01-02"},
+		"unknown reach": {report.CostLedger{Read: true, State: "read"}, "costs incomplete: how far the Flex reader has recorded costs is not known"},
+		"no status":     {report.CostLedger{Read: true, CoveredTo: "2024-01-04"}, "costs incomplete: how far the Flex reader has recorded costs is not known"},
+	} {
+		got := summarizeCosts(t, s, tc.ledger, "2024-01-05")
+		if got.Costs.Incomplete != tc.want {
+			t.Errorf("%s: incomplete %q, want %q", name, got.Costs.Incomplete, tc.want)
+		}
+		if text := report.RenderText(got); !strings.Contains(text, "("+tc.want+")\n") {
+			t.Errorf("%s: the summary line lacks the bracket:\n%s", name, text)
+		}
+	}
+	// The reader's normal lag, two sessions, is said in the note but is not incomplete.
+	if got := summarizeCosts(t, s, report.CostLedger{Read: true, State: "read", CoveredTo: "2024-01-03"}, "2024-01-05").Costs; got.Incomplete != "" {
+		t.Errorf("within the lag: incomplete %q", got.Incomplete)
+	}
+}
+
+func TestCostLedgerCarriesItsReadingsStateAndDay(t *testing.T) {
+	files := map[string][]byte{
+		"/var/lib/flex/boost/costs.jsonl":             costLedgerOf(t, cost{"c1", event.CostFee, at(3), -10}),
+		"/var/lib/flex/boost/costs.jsonl.status.json": []byte(`{"state":"set-aside","checked_at":"2024-01-06T02:30:00Z","reason":"x"}`),
+	}
+	readFile := func(path string) ([]byte, error) {
+		if raw, ok := files[path]; ok {
+			return raw, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	got := report.LoadCostLedgerFor("/var/lib/flex/boost/cash-movements.jsonl", "boost", readFile)
+	if !got.Read || got.State != "set-aside" || got.CheckedAt != "2024-01-05" {
+		t.Fatalf("ledger %+v: the New York day of the reading", got)
+	}
+	delete(files, "/var/lib/flex/boost/costs.jsonl")
+	if got := report.LoadCostLedgerFor("/var/lib/flex/boost/cash-movements.jsonl", "boost", readFile); !got.Read || got.State != "set-aside" {
+		t.Errorf("a reading set aside before any cost was written is said: %+v", got)
+	}
+}
+
+func TestACorrectedExecutionsCommissionIsCountedOnceTheLatest(t *testing.T) {
+	s := costSeries(t)
+	s.fillWithCommission(1, "0001f4e8.65a1b2c3.01.01", 1.25)
+	s.fillWithCommission(2, "0001f4e8.65a1b2c3.01.02", 1.30)
+	got := summarizeCosts(t, s, report.CostLedger{}, "2024-01-05").Costs
+	if !near(got.Since.Commissions, 1.30) {
+		t.Errorf("commissions %v, want the correction's 1.30 alone", got.Since.Commissions)
+	}
+}
+
+func TestMonthsAndYearsAreCutAtNewYorkDays(t *testing.T) {
+	s := costSeries(t)
+	// 20:30 New York on 2024-01-31 is 01:30 UTC on 2024-02-01.
+	evening := time.Date(2024, time.February, 1, 1, 30, 0, 0, time.UTC)
+	ledger := readCosts(t, cost{"eve", event.CostFee, evening, -7})
+	ledger.State, ledger.CoveredTo = "read", "2024-02-01"
+	got := summarizeCosts(t, s, ledger, "2024-02-01").Costs
+	if got.Month.Fees != 0 || got.Since.Fees != 7 {
+		t.Errorf("month %v since %v: the fee is January's, as IBKR's New York day", got.Month.Fees, got.Since.Fees)
+	}
+	newYear := readCosts(t, cost{"nye", event.CostFee, time.Date(2025, time.January, 1, 2, 0, 0, 0, time.UTC), -3})
+	if got := summarizeCosts(t, s, newYear, "2025-01-01").Costs; got.Year.Fees != 0 || got.Since.Fees != 3 {
+		t.Errorf("year %v since %v: New Year's Eve in New York is last year's", got.Year.Fees, got.Since.Fees)
+	}
+}
+
+func TestForHistoryKeepsOnlyWhatTheCostsReadOfAnEarlierFill(t *testing.T) {
+	s := costSeries(t)
+	s.fillWithCommission(1, "e1.01", 1.25)
+	var entries []journal.Entry
+	for _, e := range s.out {
+		entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: e})
+	}
+	whole := journal.Recovery{Entries: entries, FinalRecordHash: "sha256:" + strings.Repeat("1", 64)}
+	kept := report.ForHistory(whole, "SPY")
+	var fills []event.Envelope
+	for _, e := range kept.Entries {
+		if e.Envelope.Type != event.CompletedBarEventType && e.Envelope.Type != event.AccountSnapshotEventType && e.Envelope.Type != event.TargetWeightConfigurationEventType && e.Envelope.Type != event.OperatorRunApprovedEventType {
+			fills = append(fills, e.Envelope)
+		}
+	}
+	if len(fills) != 1 {
+		t.Fatalf("kept %d fills", len(fills))
+	}
+	f := fills[0]
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(f.Payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 3 || fields["fill_id"] == nil || fields["commission"] == nil || fields["filled_at"] == nil || f.SchemaVersion != event.FillTargetWeightVersion {
+		t.Errorf("kept %s at version %d: only the fill's ID, commission, time and version", f.Payload, f.SchemaVersion)
+	}
+	if f.ID != "" || f.Source != "" || f.CorrelationID != "" {
+		t.Errorf("the envelope's other fields are not kept: %+v", f)
+	}
+	current := newStream(t)
+	current.bar(4, "SPY", 100)
+	current.snapshot(4, 10000, 0)
+	var earlier []event.Envelope
+	for _, e := range kept.Entries {
+		earlier = append(earlier, e.Envelope)
+	}
+	got, err := report.SummarizeWithCosts(report.History{Earlier: earlier}, report.CashLedger{}, report.CostLedger{}, current.out, "2024-01-06", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Costs.Since.Commissions != 1.25 || got.Costs.FillsNotRead != 0 {
+		t.Errorf("costs %+v: the kept fill's commission still counts", got.Costs)
+	}
+}
+
+func TestWhatCannotBeReadOfTheCostsStatusOrAKeptFillIsSaid(t *testing.T) {
+	files := map[string][]byte{
+		"/var/lib/flex/boost/costs.jsonl":             costLedgerOf(t, cost{"c1", event.CostFee, at(3), -10}),
+		"/var/lib/flex/boost/costs.jsonl.status.json": []byte(`{`),
+	}
+	readFile := func(path string) ([]byte, error) {
+		if raw, ok := files[path]; ok {
+			return raw, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	s := costSeries(t)
+	ledger := report.LoadCostLedgerFor("/var/lib/flex/boost/cash-movements.jsonl", "boost", readFile)
+	if got := summarizeCosts(t, s, ledger, "2024-01-05").Costs; ledger.State != "" || got.Incomplete != "costs incomplete: how far the Flex reader has recorded costs is not known" {
+		t.Errorf("a status file that does not read: ledger %+v, incomplete %q", ledger, got.Incomplete)
+	}
+	// A recorded day the calendar cannot place is behind: how far is not known.
+	if got := summarizeCosts(t, s, report.CostLedger{Read: true, State: "read", CoveredTo: "not a day"}, "2024-01-05").Costs; got.Incomplete == "" {
+		t.Error("a day not read is not taken as current")
+	}
+	earlier := costSeries(t)
+	earlier.fillWithCommission(1, "e1.01", 1.25)
+	earlier.out[len(earlier.out)-1].Payload = []byte(`{`)
+	earlier.fillWithCommission(2, "", 1.25)
+	var entries []journal.Entry
+	for _, e := range earlier.out {
+		entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: e})
+	}
+	var kept []event.Envelope
+	for _, e := range report.ForHistory(journal.Recovery{Entries: entries}, "SPY").Entries {
+		kept = append(kept, e.Envelope)
+	}
+	current := newStream(t)
+	current.bar(4, "SPY", 100)
+	current.snapshot(4, 10000, 0)
+	got, err := report.SummarizeWithCosts(report.History{Earlier: kept}, report.CashLedger{}, report.CostLedger{}, current.out, "2024-01-06", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Costs.FillsNotRead != 2 || got.Costs.Since.Commissions != 0 {
+		t.Errorf("costs %+v: an earlier fill that did not read is counted as not read", got.Costs)
+	}
+	forged := event.Envelope{Type: kept[len(kept)-1].Type, EventTime: day(2), Payload: []byte(`{"fill_id":"","commission":1,"filled_at":"2024-01-03T21:00:00Z"}`)}
+	if got, _ := report.SummarizeWithCosts(report.History{Earlier: []event.Envelope{forged}}, report.CashLedger{}, report.CostLedger{}, current.out, "2024-01-06", "SPY"); got.Costs.FillsNotRead != 1 {
+		t.Errorf("a kept fill without its ID: %+v", got.Costs)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
 )
 
 // costsFileName is the Flex reader's costs ledger, in the same folder as its
@@ -37,12 +38,18 @@ type CostPosting struct {
 // (docs/manual/alerts-and-dashboard.md, "Costs"). Its fields mean what
 // CashLedger's do: Read when the ledger was read whole, Unreadable when it
 // exists and was not, NotAccepted when it belongs to another account, and
-// CoveredTo the last day the reader's last accepted reading covered.
+// CoveredTo the last day the reader's last accepted reading covered. State
+// is the costs status file's state ("read", "running", "set-aside",
+// "coverage-gap"; "" when there is none) and CheckedAt the New York day of
+// that reading: the costs are read in their own step, so they can be set
+// aside while the cash ledger is read (adapter/ibkr/flex.py, read_once).
 type CostLedger struct {
 	Read        bool
 	Unreadable  string
 	NotAccepted string
 	CoveredTo   string
+	State       string
+	CheckedAt   string
 	Postings    []CostPosting
 }
 
@@ -65,21 +72,49 @@ func LoadCostLedgerFor(cashLedgerPath, instance string, readFile func(string) ([
 	}
 	path := filepath.Join(dir, costsFileName)
 	coveredTo := coveredToOf(path+flexStatusSuffix, readFile)
+	state, checkedAt := costsStatusOf(path+flexStatusSuffix, readFile)
 	raw, err := readFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		if coveredTo == "" {
+		if coveredTo == "" && state == "" {
 			return CostLedger{}
 		}
-		return CostLedger{Read: true, CoveredTo: coveredTo}
+		return CostLedger{Read: true, CoveredTo: coveredTo, State: state, CheckedAt: checkedAt}
 	}
 	if err != nil {
 		return CostLedger{Unreadable: fmt.Sprintf("the costs ledger cannot be read: %v", withoutPath(err))}
 	}
 	ledger := ParseCostLedger(raw)
 	if ledger.Read {
-		ledger.CoveredTo = coveredTo
+		ledger.CoveredTo, ledger.State, ledger.CheckedAt = coveredTo, state, checkedAt
 	}
 	return ledger
+}
+
+// costsStatusOf is the state of the costs status file at path and the New
+// York day of its checked_at, "" for either it does not hold.
+func costsStatusOf(path string, readFile func(string) ([]byte, error)) (state, checkedAt string) {
+	raw, err := readFile(path)
+	if err != nil {
+		return "", ""
+	}
+	var status struct {
+		State     string    `json:"state"`
+		CheckedAt time.Time `json:"checked_at"`
+	}
+	if json.Unmarshal(raw, &status) != nil {
+		return "", ""
+	}
+	if !status.CheckedAt.IsZero() {
+		checkedAt = newYorkDateOf(status.CheckedAt)
+	}
+	return status.State, checkedAt
+}
+
+// newYorkDateOf is the New York day of at: IBKR's day, by which the Flex
+// reader cuts the first run's approval day (adapter/ibkr/flex.py,
+// new_costs), and so the day the costs are counted on.
+func newYorkDateOf(at time.Time) string {
+	return at.In(nysecalendar.NewYork).Format(time.DateOnly)
 }
 
 // ParseCostLedger reads a costs ledger's bytes, strictly as ParseCashLedger
@@ -190,9 +225,47 @@ type fillCost struct {
 	at         time.Time
 }
 
+// earlierFillType is the type of what ForHistory keeps of an earlier run's
+// fill: its ID, commission and time (earlierFill) at the fill's version,
+// so a cache of earlier logs holds no more of a fill than the costs read.
+// It is never journalled.
+const earlierFillType = "report.earlier-fill-cost"
+
+// earlierFill is the payload of an earlierFillType envelope.
+type earlierFill struct {
+	FillID     string    `json:"fill_id"`
+	Commission float64   `json:"commission"`
+	FilledAt   time.Time `json:"filled_at"`
+}
+
+// earlierFillOf is what ForHistory keeps of the fill e: an earlierFillType
+// envelope at e's version and event time, whose payload is empty when e
+// does not read (readFillCost then refuses it, so it is counted as a fill
+// not read).
+func earlierFillOf(e event.Envelope) event.Envelope {
+	kept := event.Envelope{Type: earlierFillType, SchemaVersion: e.SchemaVersion, EventTime: e.EventTime}
+	if f, err := readFillCost(e); err == nil {
+		kept.Payload, _ = json.Marshal(earlierFill{f.id, f.commission, f.at})
+	}
+	return kept
+}
+
 // readFillCost decodes a fill at either version this build reads
-// (readFill) for its ID, commission and time.
+// (readFill), or what ForHistory kept of one, for its ID, commission and
+// time.
 func readFillCost(e event.Envelope) (fillCost, error) {
+	if e.Type == earlierFillType {
+		var p earlierFill
+		dec := json.NewDecoder(bytes.NewReader(e.Payload))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&p); err != nil {
+			return fillCost{}, err
+		}
+		if p.FillID == "" || p.FilledAt.IsZero() {
+			return fillCost{}, errors.New("an earlier fill without its ID or time")
+		}
+		return fillCost{p.FillID, p.Commission, p.FilledAt}, nil
+	}
 	if e.SchemaVersion == event.FillTargetWeightVersion {
 		var p event.TargetWeightFillPayload
 		if err := read(e, targetWeightFillVersions, &p); err != nil {
@@ -220,7 +293,12 @@ func executionBase(id string) string {
 
 // costMatchesFill reports whether a commission posting with transaction ID
 // id is the commission of a fill whose execution ID is among fills: the same
-// ID, or a correction of the same execution.
+// ID, or a correction of the same execution. Cash Transactions is expected
+// to hold only commission adjustments under IBKR's numeric transaction IDs,
+// the per-trade commissions being on the fills under dotted execution IDs;
+// that a posting under an execution ID is the fill's is an assumption until
+// the first live statement is checked (docs/manual/reconciliation.md, "The
+// reader writes every commission").
 func costMatchesFill(id string, fills, bases map[string]bool) bool {
 	return fills[id] || (executionBase(id) != "" && bases[executionBase(id)])
 }
@@ -233,7 +311,7 @@ func costsOf(earlier, envelopes []event.Envelope, end time.Time, date string, le
 	month, year := date[:7], date[:4]
 	c.MonthStart, c.YearStart = month+"-01", year+"-01-01"
 	count := func(kind string, at time.Time, paid float64) {
-		d := dateOf(at)
+		d := newYorkDateOf(at)
 		if d > date {
 			return
 		}
@@ -248,10 +326,15 @@ func costsOf(earlier, envelopes []event.Envelope, end time.Time, date string, le
 			c.Month.add(kind, paid)
 		}
 	}
+	// One commission per execution: a redelivery has its ID, a correction
+	// its base with another last segment (adapter/ibkr/reports.py,
+	// _exec_base), and the latest recorded is the execution's.
 	fills, bases := map[string]bool{}, map[string]bool{}
+	var executions []string
+	latest := map[string]fillCost{}
 	for _, list := range [][]event.Envelope{earlier, envelopes} {
 		for _, e := range list {
-			if e.Type != event.FillEventType || !e.EventTime.Before(end) {
+			if (e.Type != event.FillEventType && e.Type != earlierFillType) || !e.EventTime.Before(end) {
 				continue
 			}
 			f, err := readFillCost(e)
@@ -259,15 +342,20 @@ func costsOf(earlier, envelopes []event.Envelope, end time.Time, date string, le
 				c.FillsNotRead++
 				continue
 			}
-			if fills[f.id] {
-				continue // a redelivery of one execution
-			}
 			fills[f.id] = true
+			key := f.id
 			if b := executionBase(f.id); b != "" {
-				bases[b] = true
+				bases[b], key = true, b
 			}
-			count(event.CostCommission, f.at, f.commission)
+			if _, seen := latest[key]; !seen {
+				executions = append(executions, key)
+			}
+			latest[key] = f
 		}
+	}
+	for _, key := range executions {
+		f := latest[key]
+		count(event.CostCommission, f.at, f.commission)
 	}
 	for _, p := range ledger.Postings {
 		switch {
@@ -295,7 +383,10 @@ func costsOf(earlier, envelopes []event.Envelope, end time.Time, date string, le
 }
 
 // costsNote says what the figures count (note) and, when the Flex reader's
-// costs are missing, the short reason (incomplete).
+// costs are missing, the short reason (incomplete), which the summary line
+// carries: the costs are incomplete whenever their reading is not "read" or
+// has fallen behind the summary's day by more than the reader's lag
+// (costsBehind).
 func costsNote(c Costs, ledger CostLedger, date string) (incomplete, note string) {
 	parts := []string{"commissions on fills as the journal holds them"}
 	switch {
@@ -304,6 +395,19 @@ func costsNote(c Costs, ledger CostLedger, date string) (incomplete, note string
 		parts = append(parts, fmt.Sprintf("costs ledger not accepted: %s; fees, interest and other commissions are not counted", ledger.NotAccepted))
 	case ledger.Read:
 		parts = append(parts, "fees, interest and other commissions as recorded by the Flex reader")
+		switch {
+		case ledger.State == "running":
+			incomplete = fmt.Sprintf("costs incomplete: the Flex reader's reading of %s did not finish", ledger.CheckedAt)
+		case ledger.State != "" && ledger.State != "read":
+			incomplete = "costs incomplete: the Flex reader is set aside as of " + ledger.CheckedAt
+		case ledger.State == "" || ledger.CoveredTo == "":
+			incomplete = "costs incomplete: how far the Flex reader has recorded costs is not known"
+		case costsBehind(ledger.CoveredTo, date):
+			incomplete = "costs incomplete: the Flex reader is behind as of " + ledger.CoveredTo
+		}
+		if incomplete != "" && ledger.CoveredTo != "" {
+			parts = append(parts, incomplete)
+		}
 		switch {
 		case ledger.CoveredTo == "":
 			parts = append(parts, "how far the Flex reader has recorded is not known; "+lastTwoDaysCosts)
@@ -329,6 +433,20 @@ func costsNote(c Costs, ledger CostLedger, date string) (incomplete, note string
 		parts = append(parts, fmt.Sprintf("%d fill(s) that did not read are not counted", c.FillsNotRead))
 	}
 	return incomplete, "Counted: " + strings.Join(parts, "; ") + ". Interest received is taken off the net cost."
+}
+
+// costsBehind reports whether costs recorded through coveredTo have fallen
+// behind the summary's date by more than the reader's lag, two NYSE
+// sessions (lastTwoDaysCosts). A day the calendar does not hold is behind,
+// since how far behind is not known.
+func costsBehind(coveredTo, date string) bool {
+	from, err1 := time.ParseInLocation(time.DateOnly, coveredTo, nysecalendar.NewYork)
+	through, err2 := time.ParseInLocation(time.DateOnly, date, nysecalendar.NewYork)
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	n, _, err := nysecalendar.Closes(from.AddDate(0, 0, 1), through.AddDate(0, 0, 1))
+	return err != nil || n > 2
 }
 
 // lastTwoDaysCosts is the reader's lag, as for transfers (lastTwoDays): a
