@@ -135,6 +135,8 @@ scenario() {
   : >"$work/calls"
   rm -rf "${work:?}/etc" "${work:?}/units" "${work:?}/tmp" "${work:?}/cwd"
   mkdir -p "$work/etc/adapters" "$work/units" "$work/tmp" "$work/cwd"
+  # The owner's checkout, which the service users cannot enter.
+  chmod 0700 "$work/cwd"
   printf '%s\n' "${FAKE_PASSWD-$default_passwd}" | sed '/^$/d' >"$work/passwd"
   # Each user's primary group, named after the first user that has it (ti-operator
   # shares ti-trader's).
@@ -233,7 +235,18 @@ scenario() {
     # Unpacking IBC, or running a vendor installer, is where the Gateway case
     # stops, explicitly.
     unzip() { record unzip "$@"; record "STOPPED at unzip"; exit 75; }
-    runuser() { record runuser "$@"; record "STOPPED at runuser"; exit 75; }
+    # The install4j installer cds back to the folder it started in; where that
+    # folder is closed to the service user (the owner's checkout, mode 0700),
+    # the real one prints this line, so the stand-in does too.
+    runuser() {
+      record runuser "$@"
+      case $(stat -c %a . 2>/dev/null || stat -f %Lp .) in
+        *[1357]) ;;
+        *) echo "installer.sh: 820: cd: can't cd to $PWD" >&2 ;;
+      esac
+      record "STOPPED at runuser"
+      exit 75
+    }
     # Temporary folders are made inside the test's tree (macOS's mktemp may
     # not follow TMPDIR).
     mktemp() {
@@ -517,6 +530,26 @@ status=0
 scenario "" x86_64 gateway || status=$?
 test "$status" = 75 || fail "Lightsail's gateway step did not stop at its stand-in (status $status): $(cat "$work/out")"
 called "fetch https://github.com/IbcAlpha" || fail "Lightsail's gateway step no longer fetches IBC: $(cat "$work/calls")"
+# The same step with IBC unpacked, so that it reaches the Gateway installer:
+# the installer must start in a folder its user can enter, not the owner's
+# checkout (the real one prints "can't cd" there, after a successful install).
+status=0
+TEST_LEAK='unzip() { record unzip "$@"; }; rm() { record rm "$@"; }; cp() { record cp "$@"; }; touch() { record touch "$@"; }' \
+  scenario "" x86_64 gateway || status=$?
+# The stand-in's exit ends only the installer's own subshell, so the step goes on
+# to its missing-binary refusal.
+test "$status" != 0 || fail "Lightsail's gateway step finished although the installer stand-in made nothing: $(cat "$work/out")"
+said "ibgateway is missing" || fail "Lightsail's gateway step did not end with its missing-binary refusal: $(cat "$work/out")"
+called "STOPPED at runuser" || fail "Lightsail's gateway step never ran the installer: $(cat "$work/calls")"
+if grep -q "can't cd" "$work/out"; then fail "Lightsail's gateway installer starts in a folder its user cannot enter: $(cat "$work/out")"; fi
+
+# The download folder is made absolute where it is read, because the installers
+# start from "/": a relative TI_DOWNLOAD_CACHE would point somewhere else
+# there. An empty one is refused.
+rel_cache=$(cd "$work/cwd" && TI_DOWNLOAD_CACHE=rel/cache bash -c '. "$1/deploy/provision.sh"; printf %s "$dl_cache"' _ "$work") || fail "a relative TI_DOWNLOAD_CACHE was refused"
+test "$rel_cache" = "$work/cwd/rel/cache" || fail "a relative TI_DOWNLOAD_CACHE is not made absolute (got '$rel_cache')"
+if (cd "$work/cwd" && TI_DOWNLOAD_CACHE='' bash -c '. "$1/deploy/provision.sh"' _ "$work") >"$work/out" 2>&1; then fail "an empty TI_DOWNLOAD_CACHE was accepted"; fi
+said "TI_DOWNLOAD_CACHE" || fail "the empty TI_DOWNLOAD_CACHE refusal does not name it: $(cat "$work/out")"
 
 # The owner's own ntfy server: fetched against its pin on Lightsail; with no
 # Tailscale address it is installed and not configured; an address outside the
