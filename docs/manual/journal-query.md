@@ -52,12 +52,12 @@ Reports:
 | `refusals` | refused orders, withheld sales back to 98% and engine-state changes (degraded, halted) |
 | `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row |
 | `positions` | the holding after each fill, rebuilt from the fills; a recorded symbol change moves the holding to the new id |
-| `reconcile` | whether the fills agree with the account snapshots recorded in the journal; it fails, rather than report a clean result, when the log is empty or cut short or nothing was compared. This is not the engine's morning reconciliation; the [glossary](glossary.md) ("Reconciled, reconciliation") tells the three apart |
+| `reconcile` | whether the fills agree with the account snapshots recorded in the journal; it fails, rather than report a clean result, when the log is empty or cut short, any journal compared nothing, or fills came after an account's last snapshot (`-allow-trailing-fills` accepts those). This is not the engine's morning reconciliation; the [glossary](glossary.md) ("Reconciled, reconciliation") tells the three apart |
 | `operator` | your own instructions the engine recorded: kill switches and rebalance clearances, with who recorded them and the detail they gave, and fresh-run approvals, with the approver, the latch and the incident cleared or carried. Alert acknowledgements are not listed ([operator](operator.md), "Seeing what was recorded") |
 
 Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 `-to 2026-12-31` (UTC dates, both ends inclusive of the whole day) and
-`-format text|csv|json` (default `text`). You can name several journals. The
+`-format text|csv|json` (default `text`); `reconcile` also takes `-allow-trailing-fills`. You can name several journals. The
 `orders`, `fills`, `refusals`, `positions`, `reconcile` and `operator`
 reports show the source journal in the first column; `totals` combines all selected journals.
 
@@ -171,7 +171,7 @@ sell. A Turtle fill's `kind` is entry, add, stop or exit; a target-weight
 (Boost or momentum IRA) fill's `kind` is its side, buy or sell. At every
 later snapshot the tool compares the position the fills imply with the one
 the snapshot reports, instrument by instrument, and lists every comparison,
-not only the failures. After a comparison the snapshot becomes the new
+not only the failures. A later snapshot of an account holding nothing, after a baseline holding nothing, is still a comparison (one row, instrument `-`, 0 against 0). Fills recorded after an account's last snapshot are not yet checked against anything: `reconcile` prints the table and then exits with status 1 and `N fills not yet covered by a snapshot`, unless you give `-allow-trailing-fills`. After a comparison the snapshot becomes the new
 starting point, so one mismatch is reported once and not repeated.
 
 Turtle fills do not name an account. They are counted toward the journal's
@@ -195,7 +195,7 @@ The tool prints its error on one line and exits with status 1. Apart from
 | --- | --- | --- |
 | `usage: journal-query <orders\|fills\|refusals\|totals\|positions\|reconcile\|operator> [flags] journal [journal ...]` | Nothing named: no report given. | Name a report first. |
 | `unknown report "..."` | Refuses before reading any file. | Use one of the seven reports above. |
-| `flag provided but not defined: -...`, followed by the list of flags | Refuses before reading any file. | Use `-account`, `-instrument`, `-from`, `-to` or `-format`. |
+| `flag provided but not defined: -...`, followed by the list of flags | Refuses before reading any file. | Use `-account`, `-instrument`, `-from`, `-to`, `-format` or (for `reconcile`) `-allow-trailing-fills`. |
 | `name at least one journal to query` | Refuses. | Name a log or journal after the flags. |
 | `format "..." is not text, csv or json` | Refuses before reading any file. | Use one of those. |
 | `from "..." is not a YYYY-MM-DD date` (or `to`), or `the range runs backwards: from ... is after to ...` | Refuses before reading any file. | Write dates as `2026-01-31`, the earlier one first. |
@@ -209,8 +209,9 @@ The tool prints its error on one line and exits with status 1. Apart from
 | `...: record N: fill "..." conflicts with record M, which used the same fill id differently` | Refuses. The same fill id with the same execution (an absent and an empty unit list are the same, and one instant is the same in any UTC offset) is one execution, counted once; with different content it is a conflict. | Open an issue with both records. |
 | `...: record N: the fill cannot be attributed to an account: the journal names K accounts and a fill names none` | `positions` and `reconcile` refuse rather than guess which account a Turtle fill belongs to. | Nothing for Boost or the IRAs: their fills name their account. |
 | `...: record N: the fill takes ... past the largest position that can be reported (int64 overflow)` (or a rename that overflows) | Refuses rather than print a wrong figure. | Open an issue: no real position is that large. |
-| `reconcile refused: ... holds no committed record`, `... was cut short: it ends after record N (byte B) ...`, or `... records input (...) after the run was stopped ...` | `reconcile` prints no table. A log with nothing committed, a log whose last group was never committed (a crash, or read while the engine was mid-write) or a journal with input after a deliberate stop cannot stand as the whole run, so comparing it would pass for a check it was not. The other reports still read what is committed. | Read it again once the engine has finished writing, or use the run's other file. If it stays cut short, keep it as evidence and treat the run as unreconciled; compare with IBKR (`docs/runbooks/reconciliation.md`). |
-| `reconcile compared nothing: no account snapshot after the first met the selection ...` | Exits with status 1 and prints no table: no fill was checked against any broker figure, which is not a pass. | Widen `-account`, `-instrument`, `-from` and `-to`, or check that the journal holds at least two account snapshots. |
+| `reconcile refused: ... holds no committed record`, `... was cut short: it ends after record N (byte B) ...`, or `... records input (...) after the run was stopped ...` | `reconcile` prints no table. A log with nothing committed, a log whose last group was never committed (a crash, or read while the engine was mid-write) or a journal or log with input after the adapter recorded that the run stopped (a delisting, say) cannot stand as the whole run, so comparing it would pass for a check it was not. The other reports still read what is committed. | A live engine mid-append shows the same state: read it again once the engine has finished writing, or use the run's other file. If it stays cut short, keep it as evidence and treat the run as unreconciled; compare with IBKR (`docs/runbooks/reconciliation.md`). |
+| `reconcile compared nothing in <journal>: no account snapshot after the baseline met the selection ...` | Exits with status 1 and prints no table: no fill in that journal was checked against any broker figure, which is not a pass. With several journals, one that compares nothing fails the whole run. | Widen `-account`, `-instrument`, `-from` and `-to`, or name only journals that hold a snapshot after the account's first. Before the first snapshot after the baseline (a first paper order, say) this is the expected result: it is no evidence yet. |
+| `N fills not yet covered by a snapshot` | Prints the table of what was compared, then exits with status 1: those fills came after the account's last snapshot, so nothing has checked them. | Run it again after the next snapshot, or give `-allow-trailing-fills` when you accept that those fills are unchecked. |
 | The `reconcile` table with rows marked `DISAGREES`, then `N disagreement(s) between the fills and the account snapshots` | Prints the whole table, then exits with the error. It does not decide which side is right. | Investigate before trusting either the fills or the snapshot: compare with IBKR (`docs/runbooks/reconciliation.md`). |
 
 ## What it reads, and what it does not

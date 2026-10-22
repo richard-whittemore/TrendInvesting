@@ -78,8 +78,8 @@ Read the engine's verdict on the server, from the account's durable log
 - `journal-query refusals <log>` shows the state change and its scope.
   Run it on the server as `sudo -u ti-trader journal-query ...`
   ([server](../manual/server.md)). `journal-query reconcile` fails, saying so
-  in words, on a log that is empty, cut short or compared nothing; that is
-  not a clean result ([journal-query](../manual/journal-query.md)).
+  in words, on a log that is empty, cut short, compared nothing or has fills no
+  snapshot has covered; that is not a clean result ([journal-query](../manual/journal-query.md)).
 
 Then compare with IBKR's own records: its activity statement and trade,
 order and cash history in Client Portal. Each kind of difference has a

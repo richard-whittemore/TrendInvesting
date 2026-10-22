@@ -1168,3 +1168,93 @@ func TestReconcileRefusesInputRecordedAfterAStop(t *testing.T) {
 		t.Fatalf("want a refusal about input after the stop, got %v", err)
 	}
 }
+
+func TestReconcileOfAnAllCashAccountCountsEmptyAgainstEmptyAsCompared(t *testing.T) {
+	js := []journalquery.Journal{load(t, "cash.jsonl", build(t, snap(at(time.March, 2)), snap(at(time.March, 3))))}
+	tab, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err != nil || len(tab.Rows) != 1 || cell(tab, 0, "status") != "ok" || cell(tab, 0, "fills") != "0" || cell(tab, 0, "snapshot") != "0" {
+		t.Fatalf("an empty snapshot after an empty baseline is a comparison: %v %v", tab.Rows, err)
+	}
+}
+
+func TestReconcileOfABaselineAloneStillComparedNothing(t *testing.T) {
+	js := []journalquery.Journal{load(t, "one.jsonl", build(t, snap(at(time.March, 2))))}
+	if _, err := journalquery.Reconcile(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "compared nothing") {
+		t.Fatalf("want compared nothing, got %v", err)
+	}
+}
+
+func TestReconcileReportsFillsAfterTheLastSnapshotAsNotCovered(t *testing.T) {
+	recs := append(reconcilable(), fillRec(event.FillKindEntry, "AAA", 2, 0.1, at(time.March, 4)))
+	js := []journalquery.Journal{load(t, "trail.jsonl", build(t, recs...))}
+	tab, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "1 fills not yet covered by a snapshot") || len(tab.Rows) != 1 {
+		t.Fatalf("want the trailing fill reported with the table, got %v %v", tab.Rows, err)
+	}
+	var d *journalquery.DisagreementError
+	if errors.As(err, &d) {
+		t.Errorf("a trailing fill is not a disagreement: %v", err)
+	}
+	allowed := journalquery.Filter{AllowTrailingFills: true}
+	if tab, err := journalquery.Reconcile(js, allowed); err != nil || len(tab.Rows) != 1 {
+		t.Fatalf("the trailing fills were allowed: %v %v", tab.Rows, err)
+	}
+}
+
+func TestReconcileFailsWhenOneJournalAmongSeveralComparesNothing(t *testing.T) {
+	good := load(t, "good.jsonl", build(t, reconcilable()...))
+	other := load(t, "other.jsonl", build(t, fillRec(event.FillKindEntry, "BBB", 3, 0.1, at(time.April, 2))))
+	_, err := journalquery.Reconcile([]journalquery.Journal{good, other}, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "compared nothing") || !strings.Contains(err.Error(), "other.jsonl") {
+		t.Fatalf("want the journal that compared nothing named, got %v", err)
+	}
+}
+
+func TestCheckFinalHashRefusesAnEmptyAnchor(t *testing.T) {
+	j := load(t, "j", build(t, reconcilable()...))
+	l := load(t, "l", buildLog(t, false, reconcilable()...))
+	for name, journal := range map[string]journalquery.Journal{"journal": j, "log": l, "zero": {}} {
+		if err := journal.CheckFinalHash(""); err == nil || !strings.Contains(err.Error(), "no anchor given") {
+			t.Errorf("%s: an empty anchor must be an error, got %v", name, err)
+		}
+	}
+}
+
+func TestReconcileRefusesInputRecordedAfterAStopInADurableLog(t *testing.T) {
+	d := at(time.March, 2)
+	stop := rec{journal.KindInput, event.AdapterRunStoppedEventType, 1, d, event.AdapterRunStoppedPayload{Reason: event.AdapterRunStoppedReasonDelisted, InstrumentID: "AAA", Detail: "delisted at the venue"}}
+	base := reconcilable()
+	js := []journalquery.Journal{load(t, "stopped.log", buildLog(t, false, base[0], base[1], stop, base[2]))}
+	_, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "after the run was stopped") {
+		t.Fatalf("want a refusal about input after the stop, got %v", err)
+	}
+}
+
+func TestADurableLogMayCompleteOnceAfterAStopButTakeNoOtherInput(t *testing.T) {
+	d := at(time.March, 2)
+	stop := rec{journal.KindInput, event.AdapterRunStoppedEventType, 1, d, event.AdapterRunStoppedPayload{Reason: event.AdapterRunStoppedReasonDelisted, InstrumentID: "AAA", Detail: "delisted at the venue"}}
+	completed := rec{journal.KindInput, event.RunCompletedEventType, 1, d, map[string]any{}}
+	decision := dec(event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, d, event.OrderSkippedPayload{AccountID: "A", Tag: "t", ClientOrderID: "c-1", InstrumentID: "AAA", Side: event.OrderSideBuy,
+		Phase: event.OrderSideBuy, Reason: event.OrderSkippedBelowOneShare, Shares: 0.5, TargetWeight: 0.5, NetLiquidation: 1, ReferencePrice: 3})
+	base := reconcilable()
+	ok := load(t, "ok.log", buildLog(t, false, base[1], stop, decision, completed))
+	if why := ok.Incomplete(); why != "" {
+		t.Errorf("one completion after a stop is allowed, got %q", why)
+	}
+	twice := load(t, "twice.log", buildLog(t, false, base[1], stop, completed, base[2]))
+	if why := twice.Incomplete(); !strings.Contains(why, "after the run was stopped") {
+		t.Errorf("input after the completion must be refused, got %q", why)
+	}
+}
+
+func TestReconcileNamesTrailingFillsBesideDisagreements(t *testing.T) {
+	d := at(time.March, 2)
+	recs := []rec{snap(d), fillRec(event.FillKindEntry, "AAA", 5, 0.1, d), snap(at(time.March, 3), event.AccountPosition{InstrumentID: "AAA", Quantity: 4}), fillRec(event.FillKindEntry, "AAA", 1, 0.1, at(time.March, 4))}
+	js := []journalquery.Journal{load(t, "both.jsonl", build(t, recs...))}
+	_, err := journalquery.Reconcile(js, journalquery.Filter{})
+	var dis *journalquery.DisagreementError
+	if !errors.As(err, &dis) || dis.Trailing != 1 || !strings.Contains(err.Error(), "1 fills not yet covered by a snapshot") {
+		t.Fatalf("want the disagreement naming the trailing fill, got %v", err)
+	}
+}

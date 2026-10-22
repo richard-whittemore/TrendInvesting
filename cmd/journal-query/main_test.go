@@ -3,16 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
-	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 )
 
 func TestFillsForAnInstrumentListsEachFillWithQuantityPriceAndCommission(t *testing.T) {
@@ -311,11 +310,11 @@ func TestNoQueryChangesAJournalByAByte(t *testing.T) {
 	}
 	for _, report := range []string{"orders", "fills", "refusals", "totals", "positions", "reconcile"} {
 		for _, format := range []string{"text", "csv", "json"} {
-			// reconcile exits non-zero on the disagreement in positionsJournal.
+			// reconcile exits non-zero on these fixtures (a disagreement, or a
+			// journal with no snapshot to compare); only the bytes matter here.
 			args := append([]string{report, "-format", format}, paths...)
 			_, err := query(t, args...)
-			var disagreement *journalquery.DisagreementError
-			if err != nil && (report != "reconcile" || !errors.As(err, &disagreement)) {
+			if err != nil && report != "reconcile" {
 				t.Fatalf("%s %s: %v", report, format, err)
 			}
 		}
@@ -423,7 +422,7 @@ func TestTheOperatorReportShowsTheKillSwitch(t *testing.T) {
 	}
 }
 
-func TestReconcileOfACutShortLogExitsWithAMessageInWords(t *testing.T) {
+func TestReconcileOfAnEmptyLogExitsWithAMessageInWords(t *testing.T) {
 	var buf syncBuffer
 	if _, err := journal.CreateLog(&buf, journal.NewLogHeader("sha256:synthetic", "synthetic/1")); err != nil {
 		t.Fatal(err)
@@ -438,10 +437,56 @@ func TestReconcileOfACutShortLogExitsWithAMessageInWords(t *testing.T) {
 	}
 }
 
+func TestReconcileOfATornTailLogExitsWithAMessageInWords(t *testing.T) {
+	var buf syncBuffer
+	log, err := journal.CreateLog(&buf, journal.NewLogHeader("sha256:synthetic", "synthetic/1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		raw := []byte(`{"n":1}`)
+		entry := journal.Entry{Kind: journal.KindInput, Envelope: event.Envelope{
+			ID: fmt.Sprintf("e%d", i), Type: "synthetic.input", EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: 1,
+			EventTime: time.Date(2026, 1, i, 21, 0, 0, 0, time.UTC), RecordedAt: time.Date(2026, 1, i, 21, 0, 0, 0, time.UTC),
+			Sequence: uint64(i), Source: "fixture", StrategyVersion: "s", ConfigurationHash: "h", PayloadHash: event.HashPayload(raw), Payload: raw,
+		}}
+		if err := log.Append([]journal.Entry{entry}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Drop the final commit line: the last group is then an uncommitted tail.
+	trimmed := bytes.TrimRight(buf.Bytes(), "\n")
+	data := trimmed[:bytes.LastIndexByte(trimmed, '\n')+1]
+	path := filepath.Join(t.TempDir(), "torn.log")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "cut short") || out != "" {
+		t.Fatalf("want a cut-short refusal and no table, got %q, %v", out, err)
+	}
+}
+
 func TestReconcileThatComparedNothingExitsNonZero(t *testing.T) {
 	path := writeJournal(t, "nosnap.jsonl", fill(event.FillKindEntry, "AAA", 5, 10, 0, day(2026, 1, 5)))
 	out, err := query(t, "reconcile", path)
 	if err == nil || !strings.Contains(err.Error(), "compared nothing") || out != "" {
 		t.Fatalf("want a compared-nothing refusal and no table, got %q, %v", out, err)
+	}
+}
+
+func TestReconcileWithFillsAfterTheLastSnapshotFailsUnlessAllowed(t *testing.T) {
+	path := writeJournal(t, "trailing.jsonl",
+		snapshot("A1", day(2026, 1, 2), pos("AAA", 100)),
+		fill(event.FillKindEntry, "AAA", 50, 10, 0, day(2026, 1, 5)),
+		snapshot("A1", day(2026, 1, 10), pos("AAA", 150)),
+		fill(event.FillKindEntry, "AAA", 5, 10, 0, day(2026, 1, 12)),
+	)
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "1 fills not yet covered by a snapshot") || !strings.Contains(out, "ok") {
+		t.Fatalf("want the table and the trailing-fill error, got %q, %v", out, err)
+	}
+	if _, err := query(t, "reconcile", "-allow-trailing-fills", path); err != nil {
+		t.Fatalf("the trailing fill was allowed: %v", err)
 	}
 }

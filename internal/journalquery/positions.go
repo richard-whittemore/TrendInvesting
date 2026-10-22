@@ -1,7 +1,6 @@
 package journalquery
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -49,21 +48,20 @@ func addQuantity(a, b int64) (int64, bool) {
 // single account; a journal naming several accounts has no way to say which
 // one such a fill hit, so rebuild refuses it rather than guess. A
 // target-weight fill (version 5) names its own account.
-func rebuild(j Journal) ([]step, []check, error) {
+func rebuild(j Journal) (steps []step, checks []check, trailing []step, err error) {
 	items, err := decode(j)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	accounts := namedAccounts(items)
 	books := map[string]map[string]int64{}
 	started := map[string]bool{}
-	var steps []step
-	var checks []check
+	pending := map[string][]step{}
 	for _, it := range items {
 		switch {
 		case it.fill != nil:
 			if it.account == "" && len(accounts) > 1 {
-				return nil, nil, fmt.Errorf("%s: record %d: the fill cannot be attributed to an account: the journal names %d accounts and a fill names none", j.Name, it.seq, len(accounts))
+				return nil, nil, nil, fmt.Errorf("%s: record %d: the fill cannot be attributed to an account: the journal names %d accounts and a fill names none", j.Name, it.seq, len(accounts))
 			}
 			book := books[it.account]
 			if book == nil {
@@ -74,10 +72,12 @@ func rebuild(j Journal) ([]step, []check, error) {
 			change := signedQuantity(it.fill.Kind, it.fill.Quantity)
 			sum, ok := addQuantity(book[it.fill.InstrumentID], change)
 			if !ok {
-				return nil, nil, fmt.Errorf("%s: record %d: the fill takes %s past the largest position that can be reported (int64 overflow)", j.Name, it.seq, it.fill.InstrumentID)
+				return nil, nil, nil, fmt.Errorf("%s: record %d: the fill takes %s past the largest position that can be reported (int64 overflow)", j.Name, it.seq, it.fill.InstrumentID)
 			}
 			book[it.fill.InstrumentID] = sum
-			steps = append(steps, step{it, it.fill.InstrumentID, change, book[it.fill.InstrumentID]})
+			s := step{it, it.fill.InstrumentID, change, book[it.fill.InstrumentID]}
+			steps = append(steps, s)
+			pending[it.account] = append(pending[it.account], s)
 		case it.renamed != nil:
 			// The holding continues under the new id without a fill (ADR
 			// 0024), in every account that holds it.
@@ -85,7 +85,7 @@ func rebuild(j Journal) ([]step, []check, error) {
 				if q, ok := book[it.renamed.InstrumentID]; ok {
 					sum, ok := addQuantity(book[it.renamed.NewInstrumentID], q)
 					if !ok {
-						return nil, nil, fmt.Errorf("%s: record %d: renaming %s to %s overflows the position quantity (int64 overflow)", j.Name, it.seq, it.renamed.InstrumentID, it.renamed.NewInstrumentID)
+						return nil, nil, nil, fmt.Errorf("%s: record %d: renaming %s to %s overflows the position quantity (int64 overflow)", j.Name, it.seq, it.renamed.InstrumentID, it.renamed.NewInstrumentID)
 					}
 					book[it.renamed.NewInstrumentID] = sum
 					delete(book, it.renamed.InstrumentID)
@@ -112,13 +112,27 @@ func rebuild(j Journal) ([]step, []check, error) {
 				for _, id := range sorted {
 					checks = append(checks, check{it, id, books[it.account][id], reported[id]})
 				}
+				if len(sorted) == 0 {
+					// No holdings against no holdings is still a comparison:
+					// an all-cash account's later snapshot checked something.
+					checks = append(checks, check{it: it, instrument: noHoldings})
+				}
 			}
+			delete(pending, it.account)
 			started[it.account] = true
 			books[it.account] = reported
 		}
 	}
-	return steps, checks, nil
+	for _, fills := range pending {
+		trailing = append(trailing, fills...)
+	}
+	sort.Slice(trailing, func(a, b int) bool { return trailing[a].it.seq < trailing[b].it.seq })
+	return steps, checks, trailing, nil
 }
+
+// noHoldings stands in the instrument column of a comparison in which both
+// the fills and the snapshot hold nothing.
+const noHoldings = "-"
 
 // Positions lists each fill with the position it leaves in its instrument,
 // rebuilt from the account's baseline snapshot. The running position never
@@ -129,7 +143,7 @@ func Positions(journals []Journal, f Filter) (Table, error) {
 	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "kind", "change", "position"}}
 	for _, j := range journals {
-		steps, _, err := rebuild(j)
+		steps, _, _, err := rebuild(j)
 		if err != nil {
 			return Table{}, err
 		}
@@ -148,38 +162,58 @@ func Positions(journals []Journal, f Filter) (Table, error) {
 
 // DisagreementError reports fills and snapshots that do not agree. Reconcile
 // returns it together with the full table, so the rows are never hidden.
-type DisagreementError struct{ Count int }
+// Trailing counts the fills that no snapshot has covered yet, when they were
+// not allowed.
+type DisagreementError struct{ Count, Trailing int }
 
 func (e *DisagreementError) Error() string {
-	return fmt.Sprintf("%d disagreement(s) between the fills and the account snapshots", e.Count)
+	msg := fmt.Sprintf("%d disagreement(s) between the fills and the account snapshots", e.Count)
+	if e.Trailing > 0 {
+		msg += fmt.Sprintf("; %d fills not yet covered by a snapshot", e.Trailing)
+	}
+	return msg
+}
+
+// TrailingFillsError reports fills recorded after the last snapshot of their
+// account. Reconcile returns it together with the full table: what was
+// compared agrees, but a pass would cover fills no snapshot has checked.
+type TrailingFillsError struct{ Count int }
+
+func (e *TrailingFillsError) Error() string {
+	return fmt.Sprintf("%d fills not yet covered by a snapshot: the comparisons above agree, but those fills have not been checked against the broker's positions (use -allow-trailing-fills to accept this)", e.Count)
 }
 
 // Reconcile compares, at every account snapshot after the account's first,
 // the positions the fills imply with the positions the snapshot reports. It
 // lists every comparison and, when any disagree, returns a *DisagreementError
 // along with the table. A check that compared nothing is not a pass: a
-// journal that is empty or cut short, or a selection that leaves no
-// comparison, is an error in words and no table (ADR 0017, ADR 0027).
+// journal that is empty or cut short, or one with no snapshot after its
+// baseline in the selection, is an error in words and no table (ADR 0017,
+// ADR 0027). Fills recorded after an account's last snapshot are not yet
+// checked, so they are reported as a *TrailingFillsError with the table unless
+// f.AllowTrailingFills accepts them.
 func Reconcile(journals []Journal, f Filter) (Table, error) {
 	if err := distinct(journals); err != nil {
 		return Table{}, err
 	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "fills", "snapshot", "status"}}
-	disagreements := 0
+	disagreements, trailing := 0, 0
 	for _, j := range journals {
 		if why := j.Incomplete(); why != "" {
 			return Table{}, fmt.Errorf("reconcile refused: %s", why)
 		}
 	}
 	for _, j := range journals {
-		_, checks, err := rebuild(j)
+		_, checks, tail, err := rebuild(j)
 		if err != nil {
 			return Table{}, err
 		}
+		compared := 0
 		for _, c := range checks {
 			if !f.keep(c.it, c.instrument) {
 				continue
 			}
+			compared++
 			status := "ok"
 			if c.fills != c.snapshot {
 				status = "DISAGREES"
@@ -190,12 +224,23 @@ func Reconcile(journals []Journal, f Filter) (Table, error) {
 				c.instrument, strconv.FormatInt(c.fills, 10), strconv.FormatInt(c.snapshot, 10), status,
 			})
 		}
+		if compared == 0 {
+			return Table{}, fmt.Errorf("reconcile compared nothing in %s: no account snapshot after the baseline met the selection, so no fills there were checked against the broker's positions", j.Name)
+		}
+		for _, s := range tail {
+			if f.keep(s.it, s.instrument) {
+				trailing++
+			}
+		}
 	}
-	if len(t.Rows) == 0 {
-		return Table{}, errors.New("reconcile compared nothing: no account snapshot after the first met the selection, so no fills were checked against the broker's positions")
+	if f.AllowTrailingFills {
+		trailing = 0
 	}
 	if disagreements > 0 {
-		return t, &DisagreementError{Count: disagreements}
+		return t, &DisagreementError{Count: disagreements, Trailing: trailing}
+	}
+	if trailing > 0 {
+		return t, &TrailingFillsError{Count: trailing}
 	}
 	return t, nil
 }

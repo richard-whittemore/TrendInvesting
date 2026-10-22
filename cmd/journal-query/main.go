@@ -48,6 +48,7 @@ func run(args []string, out io.Writer) error {
 	instrument := flags.String("instrument", "", "exact instrument ID to report")
 	from := flags.String("from", "", "first UTC date to report, YYYY-MM-DD, inclusive")
 	format := flags.String("format", journalquery.FormatText, "output form: text, csv or json")
+	allowTrailing := flags.Bool("allow-trailing-fills", false, "reconcile: accept fills recorded after an account's last snapshot")
 	to := flags.String("to", "", "last UTC date to report, YYYY-MM-DD, inclusive")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -62,6 +63,7 @@ func run(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	filter.AllowTrailingFills = *allowTrailing
 	build, ok := reports[report]
 	if !ok {
 		return fmt.Errorf("unknown report %q", report)
@@ -79,10 +81,11 @@ func run(args []string, out io.Writer) error {
 		journals = append(journals, j)
 	}
 	table, buildErr := build(journals, filter)
-	// A reconciliation that finds disagreements returns its full table with
+	// A reconciliation that finds disagreements or fills no snapshot has covered returns its full table with
 	// the error: print the rows, then fail, so nothing is hidden.
 	var disagreement *journalquery.DisagreementError
-	if buildErr != nil && !errors.As(buildErr, &disagreement) {
+	var trailing *journalquery.TrailingFillsError
+	if buildErr != nil && !errors.As(buildErr, &disagreement) && !errors.As(buildErr, &trailing) {
 		return buildErr
 	}
 	if err := table.Write(out, *format); err != nil {

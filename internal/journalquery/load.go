@@ -129,8 +129,10 @@ func sameHistory(a, b Journal) bool {
 	return shared
 }
 
-// FinalRecordHash is the hash of the journal's last record, the value a run
-// registry anchors (ADR 0017), or empty when the journal holds no record.
+// FinalRecordHash is the hash of the journal's last record, or empty when the
+// journal holds no record. Only an end-of-run journal's final hash is what a
+// run registry anchors (ADR 0017); a durable log's chain is its own (ADR
+// 0027).
 func (j Journal) FinalRecordHash() string {
 	switch {
 	case j.Verification != nil:
@@ -145,6 +147,9 @@ func (j Journal) FinalRecordHash() string {
 // registry recorded. A journal that has lost records from its end still
 // verifies by chain alone, so this comparison is what detects it (ADR 0017).
 func (j Journal) CheckFinalHash(want string) error {
+	if want == "" {
+		return fmt.Errorf("%s: no anchor given: an absent registry entry is not agreement with a final record hash", j.Name)
+	}
 	if got := j.FinalRecordHash(); got != want {
 		return fmt.Errorf("%s: the final record hash is %q but %q was recorded, so the file is not the run's complete history", j.Name, got, want)
 	}
@@ -161,10 +166,35 @@ func (j Journal) Incomplete() string {
 		return fmt.Sprintf("%s holds no committed record", j.Name)
 	}
 	if j.Recovery != nil && j.Recovery.Torn != nil {
-		return fmt.Sprintf("%s was cut short: it ends after record %d (byte %d), and the %d bytes after that were never committed", j.Name, len(j.Records), j.Recovery.Torn.Offset, j.Recovery.Torn.Length)
+		return fmt.Sprintf("%s ends after record %d (byte %d), followed by %d bytes not committed (yet): if the engine is still writing, read it again once it has finished; otherwise the log was cut short", j.Name, len(j.Records), j.Recovery.Torn.Offset, j.Recovery.Torn.Length)
 	}
-	if j.Verification != nil && j.Verification.InputAfterStop != "" {
-		return fmt.Sprintf("%s records input (%s) after the run was stopped, so it is not one run's complete history", j.Name, j.Verification.InputAfterStop)
+	if after := j.inputAfterStop(); after != "" {
+		return fmt.Sprintf("%s records input (%s) after the run was stopped, so it is not one run's complete history", j.Name, after)
+	}
+	return ""
+}
+
+// inputAfterStop names the first input recorded after the adapter stopped the
+// run, other than the one run-completed record the reducer allows (ADR 0012),
+// or returns "". An end-of-run journal's verification states it; a durable
+// log has no verification, so its records are read the same way.
+func (j Journal) inputAfterStop() string {
+	if j.Verification != nil {
+		return j.Verification.InputAfterStop
+	}
+	stopped, completed := false, false
+	for _, r := range j.Records {
+		if r.Kind != journal.KindInput {
+			continue
+		}
+		switch {
+		case stopped && r.Envelope.Type == event.RunCompletedEventType && !completed:
+			completed = true
+		case stopped:
+			return r.Envelope.Type
+		case r.Envelope.Type == event.AdapterRunStoppedEventType:
+			stopped = true
+		}
 	}
 	return ""
 }
