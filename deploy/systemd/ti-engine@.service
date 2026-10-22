@@ -2,6 +2,11 @@
 Description=Trend Investing engine for account %i (own adapter client ID, config, durable log)
 After=ti-gateway.service
 Wants=ti-gateway.service
+# When this unit fails, ti-unit-failed@%n sends one urgent page through the
+# reporter's channels naming it, its last journal line and the manual row to
+# read (ADR 0019, "Alerting"; docs/manual/alerts-and-dashboard.md, "A failed
+# unit").
+OnFailure=ti-unit-failed@%n.service
 # Skipped, not failed, until the stamped binary (deploy/build-engine.sh) and
 # the account's configuration are installed. The IRA engines have no
 # configuration yet.

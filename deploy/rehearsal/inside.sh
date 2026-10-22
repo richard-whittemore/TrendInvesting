@@ -282,7 +282,7 @@ for _ in $(seq 50); do
   python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8099), 1)' 2>/dev/null && break
   sleep 0.1
 done
-printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\n' >"$rep/creds/secrets"
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\nTI_HEARTBEAT_URL=http://127.0.0.1:8099/hb\n' >"$rep/creds/secrets"
 chown ti-trader:ti-trader "$rep/creds/secrets"
 chmod 0400 "$rep/creds/secrets"
 line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
@@ -299,11 +299,37 @@ test -s "$rep/reports/boost.reporter.json" || fail "the reporter wrote no state 
 test "$(stat -c %U "$rep/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state file is not ti-trader's"
 grep -q '^/rehearsal$' "$rep/posts" || fail "the reporter reached no ntfy topic"
 grep -q '^/v2/enqueue$' "$rep/posts" || fail "the reporter reached no PagerDuty endpoint"
-sent=$(wc -l <"$rep/posts")
+# The heartbeat pings (POST /hb) are not alerts: counted apart.
+alerts_sent() { { grep -v '^/hb$' "$rep/posts" || true; } | wc -l; }
+sent=$(alerts_sent)
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter's second run failed"
-test "$(wc -l <"$rep/posts")" = "$sent" || fail "the reporter's second run sent its alerts again"
-pass "the reporter runs as its unit runs it, as ti-trader, delivers to both channels once, and keeps its state"
+test "$(alerts_sent)" = "$sent" || fail "the reporter's second run sent its alerts again"
+test "$(grep -c '^/hb$' "$rep/posts")" = 2 || fail "the reporter did not ping the outside heartbeat once per clean firing (stand-in endpoint saw $(grep -c '^/hb$' "$rep/posts"))"
+pass "the reporter runs as its unit runs it, as ti-trader, delivers to both channels once, keeps its state, and pings the outside heartbeat once per firing"
+
+# The failed-unit page: the hook unit's own command line, for the engine's
+# failure, as ti-trader against the same stand-in channels. It pages both
+# channels once and sends nothing on a second run; the record sits beside the
+# reporter's state.
+hook=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-unit-failed@.service)
+hook=${hook//%i/ti-engine@boost.service}
+hook=${hook//%d/$rep/creds}
+hook=${hook//\/var\/lib\/trend-investing\/reports/$rep/reports}
+case $hook in *'$'* | *%*) fail "the hook's ExecStart has a variable the rehearsal does not expand: $hook" ;; esac
+before=$(alerts_sent)
+# shellcheck disable=SC2086
+sudo -u ti-trader env -i PATH=/usr/bin:/bin $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
+test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook did not page both channels once"
+grep -q 'ti-engine@boost.service failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
+test -s "$rep/reports/unit-failures.json" || fail "the hook wrote no record of the page"
+# shellcheck disable=SC2086
+sudo -u ti-trader env -i PATH=/usr/bin:/bin $hook >/dev/null || fail "the failed-unit hook's second run failed"
+test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook paged again for the same failure"
+for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service; do
+  grep -qx 'OnFailure=ti-unit-failed@%n.service' "/etc/systemd/system/$unit" || fail "$unit does not hand its failure to the hook"
+done
+pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once and not again, and the three trading units name it in OnFailure="
 
 # The clock check. The reporter ran the installed check as ti-trader above:
 # the host clock state must hold what the check said, not that it could not
@@ -378,7 +404,7 @@ verify_log=$(mktemp)
 verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service ti-adapter-boost.service ti-ntfy.service \
+  ti-reporter@boost.service ti-reporter@boost.timer ti-unit-failed@ti-engine@boost.service ti-dashboard.service ti-adapter-boost.service ti-ntfy.service \
   ti-flex@boost.service ti-flex@boost.timer ti-flex@trad-ira.service ti-flex@trad-ira.timer \
   ti-flex@roth-ira.service ti-flex@roth-ira.timer >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"
@@ -428,7 +454,7 @@ for a in boost trad-ira roth-ira; do
 done
 # shellcheck disable=SC2016
 grep -q -- '-operator ${TI_STATE_DIR}/operator' /etc/systemd/system/ti-engine@.service || fail "the engine unit does not pass -operator"
-for unit in ti-adapter-boost.service ti-data.service ti-reporter@.service ti-dashboard.service ti-flex@.service; do
+for unit in ti-adapter-boost.service ti-data.service ti-reporter@.service ti-unit-failed@.service ti-dashboard.service ti-flex@.service; do
   grep -q '^InaccessiblePaths=.*-/var/lib/trend-investing/engines/boost/operator' "/etc/systemd/system/$unit" || fail "$unit can reach the operator inbox"
 done
 pass "ti-operator writes the instructions: each account's inbox is ti-operator:ti-trader 0750, the engine unit passes it, and no network-facing unit can reach it"

@@ -2,6 +2,11 @@
 Description=IBKR adapter for the Boost engine (sends only in paper, with paper_sending_enabled on)
 After=ti-gateway.service ti-engine@boost.service
 Wants=ti-gateway.service
+# When this unit fails, ti-unit-failed@%n sends one urgent page through the
+# reporter's channels naming it, its last journal line and the manual row to
+# read (ADR 0019, "Alerting"; docs/manual/alerts-and-dashboard.md, "A failed
+# unit").
+OnFailure=ti-unit-failed@%n.service
 # Skipped, not failed, until ibapi is installed and recorded (provision.sh
 # twsapi), the adapter's code is installed (provision.sh adapter), and its
 # configuration exists (provision.sh services creates it from the example).

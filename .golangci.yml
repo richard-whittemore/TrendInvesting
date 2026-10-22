@@ -115,6 +115,14 @@ linters:
         linters:
           - gosec
         text: G304
+      # The reporter runs the systemctl and journalctl its operator named on
+      # the command line, on a unit name the hook checks against the shape of
+      # a unit name before any call; no path or argument comes from a log, a
+      # channel or the network.
+      - path: ^cmd/reporter/
+        linters:
+          - gosec
+        text: G204
       # The composition root and the adapter boundary legitimately touch the
       # outside world; determinism is enforced in the domain.
       - path: ^cmd/

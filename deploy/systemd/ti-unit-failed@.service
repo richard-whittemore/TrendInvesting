@@ -1,0 +1,40 @@
+[Unit]
+Description=Page the owner that %i failed
+# Started by OnFailure= on the engine, the adapter and the reporter, with the
+# failed unit's name as the instance. It sends one urgent page through the
+# reporter's channels (PagerDuty and the owner's own ntfy) naming the unit, its
+# last journal line and the manual row to read; the page is not sent again
+# while the unit stays failed, and a firing of the reporter pages a failure
+# this unit could not deliver (ADR 0019, "Alerting"; docs/manual/alerts-and-dashboard.md,
+# "The reporter itself", the row "A trading unit failed"). No Condition: a missing binary fails this unit with a
+# message, so the owner sees a failed unit, never a silent skip.
+
+[Service]
+Type=oneshot
+# Each send is bounded at 30 seconds and the journal read at 15, so a hung
+# channel ends this unit rather than leaving it activating.
+TimeoutStartSec=2min
+User=ti-trader
+Group=ti-trader
+# The failed unit's last journal line is the page's reason.
+SupplementaryGroups=systemd-journal
+Environment=TZ=America/New_York
+# TI_NTFY_TOPIC, TI_NTFY_SERVER and TI_PAGERDUTY_ROUTING_KEY from %d/secrets,
+# never printed; the same credential file the reporter reads.
+LoadCredential=secrets:/etc/trend-investing/secrets.env
+# The record of failed-unit pages is the host's, beside the reporters' state
+# files: the reporter's firings read it to resolve a page and to skip a unit
+# already paged.
+ExecStart=/opt/trend-investing/bin/ti-reporter notify-unit-failed -state /var/lib/trend-investing/reports/unit-failures.json -secrets-file %d/secrets -channel ntfy,pagerduty %i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/reports
+# No instruction can come from this unit: it runs as ti-trader, the engine's
+# user, and reaches the network, so the operator inboxes are hidden from it
+# (ProtectSystem=strict; ADR 0026, kill-switch amendment; docs/manual/server.md).
+InaccessiblePaths=-/var/lib/trend-investing/engines/boost/operator -/var/lib/trend-investing/engines/trad-ira/operator -/var/lib/trend-investing/engines/roth-ira/operator
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
