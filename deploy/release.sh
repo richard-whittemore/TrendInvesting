@@ -14,7 +14,9 @@
 #   sudo deploy/release.sh --install
 #                              copy this script to /usr/local/sbin/ti-release
 #   ti-release --unverified v1.2.3
-#                              the rehearsal container only: install without
+#                              the rehearsal container only (it works only
+#                              where TI_REHEARSAL=1, which the rehearsal sets;
+#                              the server refuses it): install without
 #                              checking the build attestation, with a warning
 #
 # The release is built by .github/workflows/release.yml from the tagged commit
@@ -29,7 +31,12 @@
 # tampered release. The attestation must be signed by this repository's
 # release workflow on a GitHub-hosted runner, for the requested tag's ref and
 # for the commit the tag names (read from the GitHub API), so an older
-# release's programs and attestation cannot be served under a newer tag.
+# release's programs and attestation cannot be served under a newer tag. That
+# commit must also be on main, asked of the API (compare main...commit is
+# identical or behind): the workflow's own on-main check runs from the tagged
+# commit, which a moved tag controls. An answer that cannot be read is a
+# refusal. The owner protects v* tags with a repository ruleset as well
+# (docs/runbooks/lightsail-deployment.md).
 #
 # The engine is never restarted: a program replaced under a running process
 # leaves that process on the build it started with, and a new engine build
@@ -71,7 +78,7 @@ programs="ti-engine ti-reporter ti-dashboard operator journal-query"
 
 die() { printf 'ti-release: %s\n' "$*" >&2; exit 1; }
 log() { printf 'ti-release: %s\n' "$*"; }
-usage() { echo "usage: ti-release <tag> | --rollback | --install | --unverified <tag>" >&2; exit 1; }
+usage() { echo "usage: ti-release <tag> | --rollback | --install" >&2; exit 1; }
 
 sha() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
@@ -82,6 +89,7 @@ mode=
 tag=
 unverified=0
 if test "${1:-}" = --unverified; then
+  test "${TI_REHEARSAL:-0}" = 1 || die "--unverified is for the rehearsal container only; this is not it, so nothing was installed"
   unverified=1
   shift
   test $# -eq 1 || usage
@@ -147,17 +155,18 @@ listed() {
   done
 }
 
-# check_dir DIR [all]: every program DIR/checksums.txt lists is present and
-# matches; with `all`, all five must be listed (a release); a kept
-# hand-installed build may lack one.
+# check_dir DIR: every program DIR/checksums.txt lists is present and
+# matches, and all five are listed; only the hand-installed build (initial)
+# may lack one, so a lost line cannot mix two builds.
 check_dir() {
   local dir=$1 p want got n=0
   test -f "$dir/checksums.txt" || { echo "no checksums.txt in $dir" >&2; return 1; }
   for p in $programs; do
     want=$(awk -v f="$p" '$2 == f { print $1 }' "$dir/checksums.txt")
     if test -z "$want"; then
-      test "${2:-}" != all || { echo "$p is not listed in checksums.txt" >&2; return 1; }
-      continue
+      test "$(basename "$dir")" != initial || continue
+      echo "$p is not listed in checksums.txt" >&2
+      return 1
     fi
     test -f "$dir/$p" || { echo "$p is missing" >&2; return 1; }
     got=$(sha "$dir/$p")
@@ -191,8 +200,9 @@ require_native_programs() {
   done
 }
 
-# fetch URL OUT: a download with a connect timeout, an overall time limit and
-# a size cap, so a stalled or oversized transfer cannot hold the lock.
+# fetch URL OUT: a download with a connect timeout, a time limit of five
+# minutes per attempt (up to four attempts with the retries) and a size cap,
+# so a stalled or oversized transfer cannot hold the lock for long.
 fetch() {
   curl -fsSL --retry 3 --connect-timeout 20 --max-time "$max_time" --max-filesize "$max_bytes" -o "$2" "$1"
 }
@@ -210,6 +220,16 @@ tag_commit() {
     fetch "$api_url/repos/$repo_slug/git/tags/$sha" "$out" || return 1
   done
   return 1
+}
+
+# commit_on_main COMMIT: the API says COMMIT is main's head or an ancestor of
+# it (compare main...COMMIT is identical or behind); anything else, or an
+# answer that cannot be read, is no.
+commit_on_main() {
+  local out=$releases/.staging/compare.json status
+  fetch "$api_url/repos/$repo_slug/compare/main...$1" "$out" || return 1
+  status=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["status"])' "$out" 2>/dev/null) || return 1
+  test "$status" = identical || test "$status" = behind
 }
 
 # install_from DIR: install every program DIR/checksums.txt lists. Each is
@@ -321,15 +341,21 @@ if test "$mode" = release; then
   for f in $programs checksums.txt attestation.sigstore.json; do
     fetch "$base_url/$tag/$f" "$stage/$f" || die "could not fetch $base_url/$tag/$f (or it is over $max_bytes bytes); nothing installed"
   done
-  check_dir "$stage" all || die "$tag failed its checksums; nothing installed"
+  check_dir "$stage" || die "$tag failed its checksums; nothing installed"
   require_native_programs "$stage"
   if test "$unverified" = 0; then
     commit=$(tag_commit) || die "could not read the commit $tag names from $api_url; nothing installed"
+    commit_on_main "$commit" || die "$tag names commit $commit, which the API does not show to be on main (or its answer could not be read); nothing installed"
     for p in $programs; do
       "$gh" attestation verify "$stage/$p" --repo "$repo_slug" --bundle "$stage/attestation.sigstore.json" \
         --signer-workflow "$repo_slug/.github/workflows/release.yml" --source-ref "refs/tags/$tag" \
-        --source-digest "$commit" --deny-self-hosted-runners >/dev/null 2>&1 \
-        || die "$p failed its build attestation for $tag (commit $commit); nothing installed"
+        --source-digest "$commit" --deny-self-hosted-runners >/dev/null 2>"$stage/gh.err" \
+        || {
+          # gh's message says why (an older gh, a login prompt, no route to the
+          # trust root); a token-shaped string is masked before it is shown.
+          head -c 2000 "$stage/gh.err" | sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/\1***/g; s/^/gh: /' >&2
+          die "$p failed its build attestation for $tag (commit $commit); nothing installed"
+        }
     done
     log "checksums and build attestation verified ($tag, commit $commit)"
   else
@@ -349,9 +375,19 @@ if test "$mode" = release; then
   fi
   # Keep the new build; a folder of the same tag (the previous build, when its
   # tag is released again) is replaced only now that the release succeeded.
+  # If keeping it fails, the old build is put back and nothing is recorded.
   rm -rf "$releases/.replaced"
-  if test -d "$releases/$tag"; then mv "$releases/$tag" "$releases/.replaced"; fi
-  mv "$stage" "$releases/$tag"
+  kept=1
+  if test -d "$releases/$tag" && ! mv "$releases/$tag" "$releases/.replaced"; then kept=0; fi
+  if test "$kept" = 1 && ! mv "$stage" "$releases/$tag"; then
+    kept=0
+    if test -d "$releases/.replaced"; then mv "$releases/.replaced" "$releases/$tag" || true; fi
+  fi
+  if test "$kept" = 0; then
+    log "$tag was installed but could not be kept under $releases; putting $cur back"
+    put_back "$cur" || true
+    die "release $tag not recorded; the previous build ($cur) was put back"
+  fi
   write_state previous "$cur"
   write_state current "$tag"
   prune "$tag" "$cur"
@@ -364,6 +400,8 @@ cur=$(read_state current)
 prev=$(read_state previous)
 test -n "$prev" && test -d "$releases/$prev" || die "no previous build to roll back to"
 check_dir "$releases/$prev" || die "the previous build ($prev) is damaged; nothing changed"
+test -n "$cur" && test -d "$releases/$cur" || die "the current build's folder is missing, so it could not be put back; nothing changed"
+check_dir "$releases/$cur" || die "the kept copy of the current build ($cur) failed its checksums, so it could not be put back; nothing changed"
 refuse_if_engine_busy
 if ! install_from "$releases/$prev" || ! restart_dashboard_verified; then
   log "rolling back to $prev failed, or the dashboard did not stay up on it; putting $cur back"

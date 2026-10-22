@@ -601,6 +601,8 @@ export TI_RELEASE_URL=file:///root/fake-release TI_SYSTEMCTL="$ctl_stub/systemct
 if /root/deploy/release.sh v9.9.9 >/root/release.out 2>&1; then fail "ti-release installed without gh"; fi
 cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine >/dev/null 2>&1 && fail "ti-release without gh changed ti-engine"
 test ! -e /opt/trend-investing/releases/current || fail "ti-release without gh recorded a build"
+if env -u TI_REHEARSAL /root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1; then fail "ti-release --unverified ran without the rehearsal marker"; fi
+test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_REHEARSAL"
 /root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --unverified v9.9.9 failed"; }
 grep -q WARNING /root/release.out || fail "ti-release --unverified did not warn"
 for b in ti-engine ti-reporter ti-dashboard operator journal-query; do

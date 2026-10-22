@@ -17,7 +17,7 @@ repo=$(cd "$here/../.." && pwd)
 script=$repo/deploy/release.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-unset TI_RELEASE_URL TI_RELEASE_API TI_PREFIX TI_LINK_DIR TI_SYSTEMCTL TI_GH TI_RELEASE_MAX_BYTES TI_RELEASE_SETTLE
+unset TI_RELEASE_URL TI_RELEASE_API TI_PREFIX TI_LINK_DIR TI_SYSTEMCTL TI_GH TI_RELEASE_MAX_BYTES TI_RELEASE_SETTLE TI_REHEARSAL
 
 failures=0
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
@@ -49,11 +49,14 @@ reseal() {
   { printf 'commit %s\nref refs/tags/%s\n' "$(str_sha "commit-$tag")" "$tag"
     for p in $programs; do printf 'digest %s\n' "$(sha "$d/$p")"; done; } >"$d/attestation.sigstore.json"
 }
+# set_compare TAG BODY: the API's answer to "is the tag's commit on main".
+set_compare() { printf '%s\n' "$2" >"$work/api/repos/$slug/compare/main...$(str_sha "commit-$1")"; }
 # make_release TAG [DASHBOARD_BODY]: a fake release folder with correct
-# checksums and bundle, and the API's record of its annotated tag.
+# checksums and bundle, and the API's record of its annotated tag (on main).
 make_release() {
   local tag=$1 dash=${2:-} d=$work/rel/$1 p api=$work/api/repos/$slug/git
-  mkdir -p "$d" "$api/ref/tags" "$api/tags"
+  mkdir -p "$d" "$api/ref/tags" "$api/tags" "$work/api/repos/$slug/compare"
+  set_compare "$tag" '{"status":"behind"}'
   for p in $programs; do fake_program "$d/$p" "echo $p $tag"; done
   if test -n "$dash"; then fake_program "$d/ti-dashboard" "echo $dash"; fi
   reseal "$tag"
@@ -101,6 +104,7 @@ cat >"$work/stub/gh" <<'STUB'
 #!/bin/bash
 echo "$*" >>"$FAKE_GH_LOG"
 test -z "${FAKE_GH_FAIL:-}" || exit 1
+test -z "${FAKE_GH_STDERR:-}" || { echo "$FAKE_GH_STDERR" >&2; exit 1; }
 test "$1 $2" = "attestation verify" || { echo "unexpected gh $*" >&2; exit 9; }
 file=$3; shift 3
 repo= workflow= bundle= ref= digest= deny=
@@ -262,7 +266,51 @@ grep -q "gh" "$work/out" || fail "the refusal without gh does not name gh: $(cat
 expect "bin untouched without gh" "echo ti-engine hand" "$(installed ti-engine)"
 not_current "no release recorded without gh" v1.0.0
 
-# Downloads have a time limit and a size cap.
+# A tag moved to a commit that is not on main (the workflow at that commit is
+# the attacker's, so only the server can check): refused unless the API says
+# the commit is identical to or behind main, and on any answer it cannot read.
+make_release v0.9.6
+for st in ahead diverged; do
+  set_compare v0.9.6 "{\"status\":\"$st\"}"
+  expect "a tag whose commit is $st of main is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+  grep -q "main" "$work/out" || fail "the $st refusal does not say main: $(cat "$work/out")"
+  expect "bin untouched when the commit is $st of main" "echo ti-engine hand" "$(installed ti-engine)"
+  not_current "no release recorded when the commit is $st of main" v0.9.6
+done
+set_compare v0.9.6 '{"status":"identical"}'
+expect "a tag at main's head installs" 0 "$(run v0.9.6)"
+fresh_server
+for body in 'not json' '[]' '{}' '{"status":["behind"]}' '{"status":"behindish"}' ''; do
+  set_compare v0.9.6 "$body"
+  expect "a compare answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+  expect "bin untouched after the compare answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
+done
+rm -f "$work/api/repos/$slug/compare/main...$(str_sha commit-v0.9.6)"
+expect "no compare answer is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+not_current "no release recorded without a compare answer" v0.9.6
+
+# A malformed tag answer never reaches gh as a source digest.
+api=$work/api/repos/$slug/git
+make_release v0.9.7
+for body in '[]' 'not json' '{"object":{"type":"commit","sha":"../../x"}}' '{"object":{"type":"commit","sha":"abc123"}}' \
+  "{\"object\":{\"type\":\"tag\",\"sha\":\"$(str_sha tagself)\"}}"; do
+  printf '%s\n' "$body" >"$api/ref/tags/v0.9.7"
+  printf '%s\n' "$body" >"$api/tags/$(str_sha tagself)"
+  : >"$work/gh.log"
+  expect "a malformed tag answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.7)")"
+  expect "gh not called for the tag answer '$body'" 0 "$(wc -l <"$work/gh.log" | tr -d ' ')"
+  expect "bin untouched after the tag answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
+  not_current "no release recorded after the tag answer '$body'" v0.9.7
+done
+
+# gh's own message reaches the operator (an old gh, a login prompt, no trust
+# root) so a tooling fault is not reported as a tampered release; a token in
+# it never does.
+expect "a gh that fails with a message is refused" nonzero "$(nonzero "$(FAKE_GH_STDERR='unknown flag: --source-ref token ghp_abcdefghijklmnopqrstuvwxyz0123456789ab' run v1.0.0)")"
+grep -q "unknown flag: --source-ref" "$work/out" || fail "gh's message is not shown: $(cat "$work/out")"
+if grep -q "ghp_abcdefghijklmnop" "$work/out"; then fail "a token in gh's message was printed"; fi
+expect "bin untouched after a gh failure" "echo ti-engine hand" "$(installed ti-engine)"
+
 : >"$work/curl.log"
 expect "a download over the size cap is refused" nonzero "$(nonzero "$(TI_RELEASE_MAX_BYTES=20 run v1.0.0)")"
 expect "bin untouched after an oversized download" "echo ti-engine hand" "$(installed ti-engine)"
@@ -276,6 +324,17 @@ expect "an install whose rename fails is nonzero" nonzero "$(nonzero "$(FAKE_MV_
 all_are "a failed rename puts the hand build back" hand
 not_current "no release recorded after a failed rename" v1.0.0
 rm -f "$TI_PREFIX/bin/ti-reporter.failed-once"
+
+# The save step after a successful install fails (a rename onto the kept
+# build's folder): the old build is put back and the release is not recorded,
+# so asking for the tag again installs it.
+fresh_server
+expect "a release whose save fails is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run v1.0.0)")"
+all_are "a failed save puts the hand build back" hand
+not_current "no release recorded after a failed save" v1.0.0
+rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
+expect "the tag installs when asked again" 0 "$(run v1.0.0)"
+all_are "the tag after a failed save" v1.0.0
 
 # The first release.
 fresh_server
@@ -304,7 +363,12 @@ if grep -q '^restart' "$work/ctl.log"; then fail "a repeat restarted the dashboa
 # --unverified (the rehearsal container only): installs without gh, warning
 # loudly that the attestation was not checked.
 fresh_server
-expect "--unverified installs without gh" 0 "$(TI_GH=$work/stub/no-such-gh run --unverified v1.0.0)"
+expect "--unverified is refused on a server (no rehearsal marker)" nonzero "$(nonzero "$(TI_GH=$work/stub/no-such-gh run --unverified v1.0.0)")"
+grep -q "rehearsal" "$work/out" || fail "the --unverified refusal does not say why: $(cat "$work/out")"
+expect "bin untouched by a refused --unverified" "echo ti-engine hand" "$(installed ti-engine)"
+not_current "no release recorded by a refused --unverified" v1.0.0
+if "$script" 2>&1 | grep -q -- '--unverified'; then fail "the usage line advertises --unverified"; fi
+expect "--unverified installs without gh in the rehearsal" 0 "$(TI_REHEARSAL=1 TI_GH=$work/stub/no-such-gh run --unverified v1.0.0)"
 grep -q "WARNING" "$work/out" || fail "--unverified does not warn: $(cat "$work/out")"
 grep -qi "attestation not verified" "$work/out" || fail "--unverified does not say the attestation was not verified"
 all_are "--unverified" v1.0.0
@@ -356,6 +420,26 @@ expect "bin untouched after the refused rollback" "echo ti-reporter v1.0.0" "$(i
 expect "an engine mid-restart blocks rollback" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY=1 run --rollback)")"
 expect "a late engine restart blocks rollback" nonzero "$(nonzero "$(FAKE_ENGINE_BUSY_FROM=2 run --rollback)")"
 
+# A saved tagged build must list all five programs: only the hand-installed
+# build may lack one, so a lost checksum line cannot mix two builds.
+fresh_server
+run v1.0.0 >/dev/null
+run v1.1.0 >/dev/null
+cp "$TI_PREFIX/releases/v1.0.0/checksums.txt" "$work/keep"
+grep -v journal-query "$work/keep" >"$TI_PREFIX/releases/v1.0.0/checksums.txt"
+expect "rollback to a build missing a checksum line is refused" nonzero "$(nonzero "$(run --rollback)")"
+all_are "bin untouched after a refusal for a missing checksum line" v1.1.0
+mv "$work/keep" "$TI_PREFIX/releases/v1.0.0/checksums.txt"
+
+# Rollback checks the kept copy of the current build first, like a release:
+# if it is damaged it could not be put back, so nothing changes.
+printf 'x\n' >>"$TI_PREFIX/releases/v1.1.0/ti-reporter"
+: >"$work/ctl.log"
+expect "rollback over a damaged current build is refused" nonzero "$(nonzero "$(run --rollback)")"
+all_are "bin untouched over a damaged current build" v1.1.0
+if grep -q '^restart' "$work/ctl.log"; then fail "rollback restarted the dashboard over a damaged current build"; fi
+grep -q "v1.1.0" "$work/out" || fail "the refusal does not name the current build: $(cat "$work/out")"
+
 # Rollback with no previous build.
 fresh_server
 expect "rollback with nothing to roll back to is refused" nonzero "$(nonzero "$(run --rollback)")"
@@ -398,6 +482,19 @@ test -d "$TI_PREFIX/releases/v1.3.0" || fail "the previous build's folder was re
 expect "rollback after the failed re-release succeeds" 0 "$(run --rollback)"
 all_are "rollback to the kept v1.3.0" v1.3.0
 make_release v1.3.0
+
+# gh is installed pinned, like every other download the server trusts: the key
+# by its published fingerprints, the package by version, both in versions.env.
+book=$repo/docs/runbooks/lightsail-deployment.md
+# shellcheck source=/dev/null
+( . "$repo/deploy/versions.env"
+  [[ ${GH_VERSION:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+  [[ ${GH_KEY_FINGERPRINTS:-} =~ ^[0-9A-F]{40}\ [0-9A-F]{40}$ ]] ) || fail "versions.env does not pin gh's version and key fingerprints"
+# shellcheck disable=SC2016  # the runbook holds the literal $GH_VERSION
+grep -Fq 'apt install gh="$GH_VERSION"' "$book" || fail "the runbook does not install the pinned gh version"
+if grep -Eq 'apt install gh([^=]|$)' "$book"; then fail "the runbook installs an unpinned gh"; fi
+grep -Fq 'GH_KEY_FINGERPRINTS' "$book" || fail "the runbook does not check gh's key fingerprints"
+if grep -Fq -- '--unverified' "$book" && grep -F -- '--unverified' "$book" | grep -Fq 'sudo ti-release'; then fail "the runbook offers --unverified on the server"; fi
 
 # The release workflow: tags only (no deploy on a merge), every action pinned
 # by commit SHA, the attestation step present, no build cache (the attested
