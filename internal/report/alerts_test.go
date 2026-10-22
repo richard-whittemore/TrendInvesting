@@ -158,6 +158,30 @@ func TestAlertsRefuseAWithheldSaleTheyCannotRead(t *testing.T) {
 	}
 }
 
+// TestADecisionRecordedAtVersion7IsRead: a log an earlier build wrote holds
+// its decisions at version 7, and the reporter reads them as written, so a
+// fresh run's reporter still reads the run before it; a version 7 decision
+// carrying a field only version 8 records is refused (ADR 0015).
+func TestADecisionRecordedAtVersion7IsRead(t *testing.T) {
+	s := newStream(t)
+	s.withheld(0, event.WithheldMissingBars)
+	s.out[len(s.out)-1].SchemaVersion = event.TargetsDecidedRetiredVersion
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatalf("a version 7 decision was refused: %v", err)
+	}
+	if len(got) != 1 || got[0].Kind != report.KindMissingData {
+		t.Fatalf("kinds = %v", kinds(got))
+	}
+	s.rewrite(len(s.out)-1, event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+		Outcome: event.TargetsOutcomeWithheld, WithheldReason: event.WithheldMissingBars, Detail: "detail",
+		Boost: event.BoostFigures{InstrumentID: "SPY", RestoredSale: &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true,
+			Order: &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit, Named: true}}}})
+	if _, err := report.Alerts(s.out); err == nil || !strings.Contains(err.Error(), "version 8") {
+		t.Errorf("a version 7 decision recording a version 8 field was read as %v, want it refused", err)
+	}
+}
+
 func TestADegradedOrHaltedStateAlertsOncePerIncident(t *testing.T) {
 	s := newStream(t)
 	s.engineState(0, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "SPY")

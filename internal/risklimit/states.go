@@ -583,58 +583,64 @@ func (g *Gate) saleAttemptedFor(tag, instrumentID string) bool {
 	return a != nil && (a.earlier || a.instruments[instrumentID])
 }
 
+// OwnSale is the sale back to 98% this run attempted itself and released,
+// as OwnLiveSale reports it: the order as planned, whose Sale figures name
+// what fired it; the attempt it is, the first being 1; its venue order ID
+// once a venue report or listing named one; and the fill reports applied to
+// it so far, in the order applied.
+type OwnSale struct {
+	Order        event.OrderPlannedPayload
+	Attempt      int
+	VenueOrderID string
+	Fills        []event.TargetWeightFillPayload
+}
+
 // OwnLiveSale is the sale back to 98% under tag for instrumentID that this
 // run attempted itself and released, while it is still live: no earlier
-// run's attempt spent the sale, it has not ended and no fill of it is
-// reported. A decision records it so a run restarted from the decision
-// holds it as this run's own attempt, which a retirement as never sent
-// frees (ADR 0019, amended 2026-10-17, reading 4; ADR 0026, point 5:
-// recovered, never recomputed). ok is false otherwise.
-func (g *Gate) OwnLiveSale(tag, instrumentID string) (event.OrderPlannedPayload, bool) {
+// run's attempt spent the sale, and it has neither ended nor filled in full,
+// whether or not a venue has named it and whether or not part of it has
+// filled. A decision records it so a run restarted from the decision holds
+// it as this run's own attempt, released, with the executions reported so
+// far: the venue's later reports on it are read as in the full run, and a
+// retirement of it as never sent, while no venue has named it, frees the
+// attempt (ADR 0019, amended 2026-10-17, reading 4; ADR 0026, point 2,
+// "Boost", and point 5: recovered, never recomputed). ok is false
+// otherwise.
+func (g *Gate) OwnLiveSale(tag, instrumentID string) (OwnSale, bool) {
 	a := g.attempts[tag]
 	if a == nil || a.earlier || !a.instruments[instrumentID] {
-		return event.OrderPlannedPayload{}, false
+		return OwnSale{}, false
 	}
-	id := orderplan.SaleAttemptClientOrderID(tag, instrumentID, g.restoredRetired(tag)+g.retiredSales[saleKey(tag, instrumentID)])
+	attempt := g.restoredRetired(tag) + g.retiredSales[saleKey(tag, instrumentID)]
+	id := orderplan.SaleAttemptClientOrderID(tag, instrumentID, attempt)
 	o, s := g.orders[id], g.ledger.sells[id]
-	if o == nil || o.planned.Sale == (event.SaleFigures{}) || s == nil || s.ended || o.reported != 0 || len(s.fills) != 0 {
-		return event.OrderPlannedPayload{}, false
+	if o == nil || o.planned.Sale == (event.SaleFigures{}) || s == nil || s.ended || o.reported >= o.planned.Quantity {
+		return OwnSale{}, false
 	}
-	return o.planned, true
+	return OwnSale{Order: o.planned, Attempt: attempt + 1, VenueOrderID: s.venueID, Fills: slices.Clone(o.fills)}, true
 }
 
 // RestoreOwnSale restores, from a recovered decision, the sale back to 98%
 // that the run which made the decision attempted itself and released, still
-// live (OwnLiveSale): o, fired by trigger, under the incident whose attempt
-// RestoreSaleAttempt restored as not spent by an earlier run. It is held as
-// this run's own attempt, released, so a retirement of it as never sent
-// frees the attempt as in the full run (RetireSale), and it is never
-// attempted again while it stands (ADR 0019, amended 2026-10-15 and
-// 2026-10-17, reading 4; ADR 0026, point 5: recovered, never recomputed).
-// Its client order ID must be the attempt's that follows every retired one
-// (ADR 0026, point 2, "Order identity"); anything else is refused (fail
-// closed, AGENTS.md).
-func (g *Gate) RestoreOwnSale(o event.OrderReleasedPayload, trigger string) error {
-	a := g.attempts[o.Tag]
-	switch {
-	case o.Tag == "" || o.Tag != g.restored || a == nil || a.earlier:
-		return fmt.Errorf("risklimit: restored sale %s is under %q, not the incident whose attempt was restored as not spent by an earlier run", o.ClientOrderID, o.Tag)
-	case a.instruments[o.InstrumentID]:
-		return fmt.Errorf("risklimit: incident %q's sale of %s is attempted already; its order %s is restored once", o.Tag, o.InstrumentID, o.ClientOrderID)
-	case o.Side != event.OrderSideSell:
-		return fmt.Errorf("risklimit: restored sale %s is a %s; a sale back to 98%% is a sell", o.ClientOrderID, o.Side)
-	case trigger != event.SaleTriggerExit && trigger != event.SaleTriggerMarginUrgent:
-		return fmt.Errorf("risklimit: restored sale %s was fired by %q, not exit or margin-urgent", o.ClientOrderID, trigger)
-	}
-	if want := orderplan.SaleAttemptClientOrderID(o.Tag, o.InstrumentID, g.restoredRetired(o.Tag)+g.retiredSales[saleKey(o.Tag, o.InstrumentID)]); o.ClientOrderID != want {
-		return fmt.Errorf("risklimit: restored sale %s is not the next attempt of incident %q's sale, whose client order ID is %s", o.ClientOrderID, o.Tag, want)
-	}
-	if err := g.RestoreReleased(o, nil, time.Time{}, ""); err != nil {
-		return err
-	}
-	g.orders[o.ClientOrderID].planned.Sale = event.SaleFigures{Kind: event.SaleKindIncident, Trigger: trigger}
-	g.recordAttempt(o.Tag, o.InstrumentID)
-	return nil
+// live (OwnLiveSale): o, fired by trigger, the attempt numbered attempt (the
+// first is 1), with the executions fills its fill reports stated and its
+// venue order ID venueOrderID (empty when none was known), under the
+// incident whose attempt RestoreSaleAttempt restored as not spent by an
+// earlier run. It is held as this run's own attempt, released and filled as
+// far as fills go, so its remaining shares are still being sold, an
+// execution restored, sent again, changes nothing, IBKR's listing of it with
+// no client order ID echoed is matched by venueOrderID (RestoreReleased), a
+// retirement of it as never sent frees the attempt as in the full run
+// (RetireSale), and it is never attempted again while it stands (ADR 0019,
+// "Explained means", and amended 2026-10-15 and 2026-10-17, reading 4; ADR
+// 0026, point 5: recovered, never recomputed). Its client order ID must be
+// the attempt's that follows every retired one, and attempt that attempt's
+// number (ADR 0026, point 2, "Order identity"); attempt 0 is a decision
+// recorded at version 7, which states none, whose client order ID alone is
+// checked. Anything else is refused, and nothing is restored (fail closed,
+// AGENTS.md).
+func (g *Gate) RestoreOwnSale(o event.OrderReleasedPayload, trigger string, attempt int, fills []event.TargetWeightFillPayload, venueOrderID string) error {
+	return g.RestoreRecovery(Recovery{OwnSale: &RestoredOwnSale{RestoredOrder: RestoredOrder{Order: o, Fills: fills, VenueOrderID: venueOrderID}, Trigger: trigger, Attempt: attempt}})
 }
 
 // recordAttempt adds instrumentID's sale under tag to the tag's one attempt
