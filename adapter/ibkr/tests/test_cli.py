@@ -354,7 +354,7 @@ class DeployTests(unittest.TestCase):
         loads = [line for line in unit.splitlines() if line.startswith("LoadCredential=")]
         # Loaded from the copy ti-unlock decrypts into a root-only tmpfs after
         # each boot; until then systemd refuses to start the adapter, naming
-        # the file (owner decision 2026-10-22: the account file rests on disk
+        # the file (ADR 0028: the account file rests on disk
         # only encrypted).
         self.assertEqual(loads, ["LoadCredential=account:/run/trend-investing/secrets/accounts/boost.env"])
         self.assertRegex(unit, r"(?m)^AssertPathExists=/run/trend-investing/secrets/accounts/boost\.env$")

@@ -25,7 +25,7 @@ const (
 	provisionPath     = "../../deploy/provision.sh"
 	// unlockedSecrets is where ti-unlock decrypts secrets.env after a boot,
 	// on a root-only tmpfs: the units load it from there and from nowhere
-	// else (owner decision 2026-10-22; docs/manual/server.md, "Unlocking the
+	// else (ADR 0028; docs/manual/server.md, "Unlocking the
 	// secrets after a boot").
 	unlockedSecrets = "/run/trend-investing/secrets/secrets.env"
 	unlockedDir     = "/run/trend-investing/secrets/"

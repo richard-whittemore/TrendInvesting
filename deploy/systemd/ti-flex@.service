@@ -20,7 +20,7 @@ ConditionPathExists=/opt/trend-investing/adapter/adapter/ibkr/flex.py
 # The secrets rest on disk only encrypted; ti-unlock decrypts them after
 # each boot into a root-only tmpfs, and this unit loads its credential
 # from there. Until then systemd refuses to start it ("Assertion failed")
-# (owner decision 2026-10-22; docs/manual/server.md, "Unlocking the
+# (ADR 0028; docs/manual/server.md, "Unlocking the
 # secrets after a boot").
 AssertPathExists=/run/trend-investing/secrets/secrets.env
 AssertPathExists=/run/trend-investing/secrets/accounts/%i.env

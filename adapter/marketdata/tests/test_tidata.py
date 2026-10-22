@@ -226,8 +226,8 @@ class UnitTest(unittest.TestCase):
     def test_locked_secrets_refuse_the_start_naming_the_file(self):
         # The key is loaded from the copy ti-unlock decrypts into a root-only
         # tmpfs after each boot; until then systemd refuses the start and
-        # names the file, and the next firing after the unlock runs (owner
-        # decision 2026-10-22).
+        # names the file, and the next firing after the unlock runs (ADR
+        # 0028).
         self.assertRegex(self.service, r"(?m)^AssertPathExists=/run/trend-investing/secrets/secrets\.env$")
         self.assertRegex(self.service, r"(?m)^LoadCredential=secrets:/run/trend-investing/secrets/secrets\.env$")
 

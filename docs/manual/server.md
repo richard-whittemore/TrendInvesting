@@ -106,15 +106,19 @@ the same disk as the files, and a snapshot would carry both.
 | --- | --- | --- |
 | `ibkr-login.env` | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
 | `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY`, `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
-| `accounts/boost.env` (and `accounts/trad-ira.env`, `accounts/roth-ira.env` for the IRAs' Flex readers) | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter only (`ti-adapter-boost.service`) |
+| `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
+| `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@trad-ira.service`) |
+| `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
 
 What each program actually reads today:
 
 - `ti-data` reads **only** `MASSIVE_API_KEY` from that file.
-- **No program reads** `IBKR_ACCOUNT_TRAD_IRA` or `IBKR_ACCOUNT_ROTH_IRA` yet.
-  The Boost adapter reads `IBKR_ACCOUNT_BOOST` from its own file and from no
-  other. The account an engine trades is the `account_id` in its
-  configuration file.
+- Each account's Flex reader reads that account's number from its own
+  account file (`accounts/<account>.env`), and no other account's. No
+  program reads the `IBKR_ACCOUNT_TRAD_IRA` or `IBKR_ACCOUNT_ROTH_IRA` lines
+  of `secrets.env`. The Boost adapter reads `IBKR_ACCOUNT_BOOST` from its own
+  file and from no other. The account an engine trades is the `account_id`
+  in its configuration file.
 - The reporter reads `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` (your own server's
   URL, which `provision.sh ntfy` prints; empty means the public ntfy.sh relay,
   which never gets the daily summary) and `TI_PAGERDUTY_ROUTING_KEY` from that file
@@ -143,9 +147,28 @@ editor, and when you save and quit encrypts it again (the old encrypted file
 is replaced only once the new one is checked), updates the unlocked copy if
 the secrets are unlocked, and removes the plain text. Each unit reads the new
 value at its next start: the reporter at its next firing, the Gateway after
-`sudo systemctl restart ti-gateway`. A wrong passphrase, or quitting without
-a change, writes nothing. `sudo ti-secrets status` lists each file as
-encrypted or not and unlocked or locked, and shows no secret.
+`sudo systemctl restart ti-gateway`. A wrong passphrase writes nothing, and
+quitting without a change writes nothing either (except that an unlocked
+copy that is not the encrypted file is made again from it). `sudo ti-secrets
+status` lists each file as encrypted or not and unlocked or locked, and shows
+no secret.
+
+The editor is `$SUDO_EDITOR`, `$VISUAL` or `$EDITOR` if you set one, else
+Ubuntu's `editor` (nano, unless you chose another), `nano` or `vi`. It runs
+with its home and temporary folder in the in-memory folder, so the swap,
+backup and history files an editor keeps are in memory and removed with the
+plain text. vim (and vi, nvim) is also given `-n` (no swap file), no viminfo,
+and that folder as its `directory` and `backupdir`; nano is given
+`--nobackup`. Another editor is safe only if it keeps its files in its home
+folder, its temporary folder or beside the file: do not point it at a folder
+of your own for backups. Core dumps are off for the command and the editor.
+
+If an edit is cut short after the new encrypted file is written (a crash, a
+lost connection), the file's unlocked copy is missing, never the old value:
+its units refuse to start until `sudo ti-unlock`, or the same edit quit
+without a change, makes it again. Only one `ti-secrets` or `ti-unlock` runs
+at a time; a second says "another ti-secrets or ti-unlock is running" and
+changes nothing (an edit holds that lock until you quit the editor).
 
 ## Unlocking the secrets after a boot
 
@@ -167,9 +190,20 @@ firing of each timer runs normally; the data job's next firing catches up
 every session it missed.
 
 **Changing the passphrase:** `sudo ti-secrets passphrase`. It asks for the
-current one, then the new one twice (at least 12 characters), and re-encrypts
-every file with it; each file is replaced only after its new copy is checked.
-The old passphrase then opens nothing.
+current one, then the new one twice (at least 12 characters). It writes a new
+copy of every file under the new passphrase and checks each by decrypting
+it, and only then renames them over the old files, one after another. The
+old passphrase then opens nothing. A journal,
+`/etc/trend-investing/.passphrase-change` (file names only, no secret),
+records each step.
+
+**If a passphrase change is cut short** (a crash or a lost connection during
+the renames), some files are under the old passphrase and some under the
+new. `ti-unlock`, `edit` and `migrate` then refuse, and `status` says so. Run
+`sudo ti-secrets passphrase --resume`: it asks for the old passphrase, then
+the new one twice, opens each file with whichever it is under, and finishes
+the change, so every file is under the new one. Cut short before the first
+rename, nothing changed and no journal is left.
 
 **Never lose the passphrase.** It is stored nowhere, on the server or
 anywhere else, and there is no recovery: without it the encrypted files can
@@ -184,8 +218,29 @@ program already running keeps the copy it was handed until it stops.
 **Moving from the earlier plain-text files.** `sudo deploy/provision.sh
 services` finds any secret file still in plain text, encrypts it, checks the
 encrypted copy decrypts to the same text, and only then shreds the plain
-text. The first time, it asks you to choose the passphrase. Lightsail
-snapshots taken before that still hold the plain text: delete them.
+text. The first time, it asks you to choose the passphrase. If a plain-text
+file and its encrypted copy are both there and differ (a migration cut
+short, or a file put back by hand), it stops and changes nothing: `sudo
+ti-secrets diff <name>` shows how they differ (it prints both to the
+terminal), then keep the right one as the message says and run it again.
+
+**Shredding is not a guarantee.** On a journaling file system (Ubuntu's
+ext4) on a cloud volume, which is SSD and copy-on-write storage underneath,
+`shred` may overwrite new blocks while the old ones, holding the plain text,
+stay on the volume. The real protection is that, after the migration, plain
+text never touches the disk again: it lives only in memory. So delete every
+Lightsail snapshot taken before the migration, since they hold the plain
+text, and rotate the secrets that were on the disk in plain text (the IBKR
+password, the Massive key, the PagerDuty routing key, the GitHub token, the
+Flex token), since anyone who later gets the old volume or a snapshot of it
+may read them.
+
+**Swap.** The in-memory folder is mounted `noswap` (Ubuntu 24.04's kernel
+has it), so the decrypted files are never paged to disk; if that mount
+fails, nothing is decrypted. A Lightsail Ubuntu instance has no swap unless
+you add some; if swap is on, `ti-unlock` and `ti-secrets` warn and name it,
+since gpg, the editor and the command itself could still be paged there.
+Keep swap off (`sudo swapoff -a`, and remove it from `/etc/fstab`).
 
 
 

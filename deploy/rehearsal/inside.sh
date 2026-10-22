@@ -17,7 +17,7 @@ cp -a /deploy /root/deploy
 cp -a /dist /root/dist
 p=/root/deploy/provision.sh
 
-# The secret files rest on disk only encrypted (owner decision 2026-10-22).
+# The secret files rest on disk only encrypted (ADR 0028).
 # The owner types the passphrase; here it comes on a test-only descriptor,
 # which ti-secrets honours only where TI_REHEARSAL=1, as this container sets.
 test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_REHEARSAL"

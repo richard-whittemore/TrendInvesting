@@ -3,7 +3,7 @@
 # Ubuntu 24.04, systemd 255), with / mounted shared so that systemd can hand a
 # unit its credentials (LoadCredential=) as on the server.
 #
-# First the locked secrets (owner decision 2026-10-22; docs/manual/server.md,
+# First the locked secrets (ADR 0028; docs/manual/server.md,
 # "Unlocking the secrets after a boot"): the secret files are encrypted and
 # nothing is decrypted, so systemd refuses to start every installed unit that
 # loads a secret, naming the decrypted file it asserts, and a timer whose

@@ -23,10 +23,11 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$repo/deploy/rehearsal/platform.sh"
 platform=$(rehearsal_platform)
 goarch=$(rehearsal_goarch "$platform")
-# The secrets ti-unlock decrypts go on a tmpfs of their own, as on the
-# server; this container lacks the capability to mount one itself, so it is
-# given one.
-args=(create -e TI_REHEARSAL=1 --tmpfs /run/trend-investing/secrets:mode=0700 --platform "$platform")
+# The secrets ti-unlock decrypts go on a tmpfs of their own, which
+# ti-secrets mounts itself, noswap, as on the server: the container is given
+# the capability to mount (CAP_SYS_ADMIN), since Docker's --tmpfs cannot set
+# noswap.
+args=(create -e TI_REHEARSAL=1 --cap-add SYS_ADMIN --platform "$platform")
 if test -z "${TI_REHEARSAL_PLATFORM:-}"; then
   args+=(-e TI_REHEARSAL_ANY_ARCH=1 -e TI_REHEARSAL_SKIP_INSTALLER=1)
 fi

@@ -22,8 +22,8 @@
 # root-only stubs, names only, for the owner to fill in under
 # /etc/trend-investing/, outside the repository, and has ti-secrets
 # (deploy/secrets.sh) encrypt every secret file still in plain text, a stub
-# or an earlier server's file, so none rests on disk unencrypted (owner
-# decision 2026-10-22). ti-secrets asks the owner for the passphrase at the
+# or an earlier server's file, so none rests on disk unencrypted (ADR
+# 0028). ti-secrets asks the owner for the passphrase at the
 # terminal only when there is something to encrypt. Do not run it with
 # `bash -x`.
 #

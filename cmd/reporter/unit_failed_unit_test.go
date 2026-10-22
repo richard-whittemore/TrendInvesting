@@ -136,7 +136,7 @@ func TestTheSecretsExampleNamesTheHeartbeatURL(t *testing.T) {
 
 // TestEveryUnitThatLoadsASecretRefusesToStartWhileTheSecretsAreLocked: the
 // secret files rest on disk only encrypted, and ti-unlock decrypts them after
-// each boot into a root-only tmpfs (owner decision 2026-10-22). Every unit
+// each boot into a root-only tmpfs (ADR 0028). Every unit
 // that loads a secret loads it from that tmpfs, never from /etc, and asserts
 // the decrypted file exists, so until the owner unlocks, systemd refuses to
 // start it ("Assertion failed"; AssertPathExists=; a refused timer

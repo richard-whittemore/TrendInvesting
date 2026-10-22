@@ -1273,7 +1273,7 @@ class DeploymentTests(unittest.TestCase):
     def test_the_service_reads_the_flex_secrets_and_the_instances_account_file(self):
         # Both from the copies ti-unlock decrypts into a root-only tmpfs after
         # each boot, each asserted, so a locked server refuses the reading
-        # and names the file (owner decision 2026-10-22).
+        # and names the file (ADR 0028).
         for source in ("/run/trend-investing/secrets/secrets.env", "/run/trend-investing/secrets/accounts/%i.env"):
             self.assertRegex(self.service, r"(?m)^AssertPathExists={}$".format(re.escape(source)))
         self.assertIn("LoadCredential=secrets:/run/trend-investing/secrets/secrets.env", self.service)
