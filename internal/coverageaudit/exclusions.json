@@ -925,7 +925,15 @@
       "file": "internal/targetweight/handler.go",
       "function": "(*Handler).applyRecovery",
       "statement": "return fmt.Errorf(\"targetweight: recovered decision %s: %w\", in.ID, err)",
-      "occurrence": 5,
+      "occurrence": 4,
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.RestoreSaleAttempt refuses an empty incident ID, fewer than none retired attempts, and an incident that already has its attempt record. TargetsDecidedPayload.Validate, run by decodeInput above, refuses a restored sale with no incident or fewer than none retired attempts (TestBoostRestoredSaleValidate), and applyRecovery runs once, straight after the configuration and never after an approval, bar or session (its own guard above), so the gate is the one New built, with no attempt record: only an approval (RestoreSaleAttempt) or Sale writes one, and Sale runs only from a session close or a broker snapshot."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRecovery",
+      "statement": "return fmt.Errorf(\"targetweight: recovered decision %s: %w\", in.ID, err)",
+      "occurrence": 6,
       "category": "unreachable-by-construction",
       "reason": "risklimit.Gate.RestoreRetiredSale refuses only an empty tag, an empty instrument or an attempt below 1. It is reached only for a retired order recording a sale tag; TargetsDecidedPayload.Validate, run by decodeInput above, refuses a retired order recording a tag without an attempt or an attempt below 1 (TestBoostRetiredSaleAndNamedOrdersValidate), and the instrument is the configuration's Boost instrument, which TargetWeightConfigurationPayload.Validate requires (TestTargetWeightConfigurationValidate)."
     },
@@ -994,6 +1002,14 @@
       "statement": "panic(fmt.Sprintf(\"nysecalendar: load %s: %v\", name, err))",
       "category": "unreachable-by-construction",
       "reason": "The package imports time/tzdata, so America/New_York loads from the embedded zone database whatever the host has."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRetired",
+      "statement": "return err",
+      "occurrence": 3,
+      "category": "unreachable-by-invariant",
+      "reason": "BoostVerdicts.Retire refuses only an order not among those awaiting the venue's word or one the venue has named there (its retirable rule). It is reached only when RetirementVerdict reported the order held, which it does only after that same retirable rule passed against the same count (TestRetirementVerdictIsTheEngineRule), and nothing changes the count between the two calls."
     },
     {
       "file": "internal/targetweight/handler.go",

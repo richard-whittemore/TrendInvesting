@@ -710,6 +710,15 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		}
 		h.cleared = append(h.cleared, r.ClientOrderID)
 	}
+	// The sale attempt the approved run's approval restored is restored as
+	// that run held it, before the sales it retired, so the next attempt's
+	// client order ID follows every retired one (ADR 0026, point 2, "Order
+	// identity", and point 5: recovered, never recomputed).
+	if r := p.Boost.RestoredSale; r != nil {
+		if err := h.gate.RestoreSaleAttempt(r.IncidentID, r.Attempted, r.RetiredAttempts); err != nil {
+			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+		}
+	}
 	// A retired order is restored as released and ended at its retirement,
 	// so a venue report on it is refused after a restart as in the full run
 	// (ADR 0026, point 5: recovered, never recomputed). The watched one is
@@ -1503,33 +1512,16 @@ func (h *Handler) applyRetired(in event.Envelope) error {
 		return err
 	}
 	id := p.ClientOrderID
-	if h.cfg.Mode == event.TradingModeDryRun {
-		return fmt.Errorf("targetweight: retirement %s names order %s in a dry-run, which sends no order and ends each it releases with its own synthetic cancel, so it has nothing to retire: find what fed it before going on", in.ID, id)
+	held, err := RetirementVerdict(h.retirementState(), in.ID, p)
+	if err != nil {
+		return err
 	}
-	if p.AccountID != h.cfg.AccountID {
-		return fmt.Errorf("targetweight: retirement %s is for account %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
-	}
-	o, ok := h.released[id]
-	switch {
-	case !ok:
-		return fmt.Errorf("targetweight: retirement %s names order %s, which this run did not release", in.ID, id)
-	case slices.Contains(h.cleared, id):
-		return fmt.Errorf("targetweight: retirement %s names order %s, which the owner cleared as never sent already", in.ID, id)
-	case h.isRetired(id):
-		return fmt.Errorf("targetweight: retirement %s names order %s, which is retired already", in.ID, id)
-	case !p.Describes(o):
-		return fmt.Errorf("targetweight: retirement %s retires %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
-			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, id, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
-	}
-	held := h.verdicts.Holds(id)
-	switch {
-	case held:
+	if held {
 		if err := h.verdicts.Retire(in.ID, id); err != nil {
 			return err
 		}
-	case h.named[id]:
-		return fmt.Errorf("targetweight: retirement %s names order %s, which a venue has named or reported executed; it was sent, and only an order no venue received is retired", in.ID, id)
 	}
+	o := h.released[id]
 	// The gate ends the order as a cancellation with nothing filled would.
 	// The report is the engine's own and is never journalled: it is marked
 	// synthetic and names no venue order, so the gate cannot take it for a
@@ -1557,6 +1549,17 @@ func (h *Handler) applyRetired(in event.Envelope) error {
 		w.status, w.endedAt = event.OrderLifecycleStatusCanceled, p.RetiredAt.UTC()
 	}
 	return nil
+}
+
+// retirementState is what this run holds of the orders a retirement may
+// name, for RetirementVerdict.
+func (h *Handler) retirementState() RetirementState {
+	return RetirementState{
+		AccountID: h.cfg.AccountID, DryRun: h.cfg.Mode == event.TradingModeDryRun,
+		Released: func(id string) (event.OrderReleasedPayload, bool) { o, ok := h.released[id]; return o, ok },
+		Cleared:  func(id string) bool { return slices.Contains(h.cleared, id) },
+		Retired:  h.isRetired, Named: func(id string) bool { return h.named[id] }, Verdicts: &h.verdicts,
+	}
 }
 
 // isRetired reports whether order id was retired as never sent.
@@ -1689,6 +1692,9 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		UndecidedBeforeRejection: h.verdicts.olderThanRejection, RejectionsWhileStopped: h.verdicts.whileStopped, NoVenue: h.noVenue(),
 	}
 	b.NamedOrders = h.namedFigures(b)
+	if incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(); ok {
+		b.RestoredSale = &event.BoostRestoredSale{IncidentID: incident, Attempted: attempted, RetiredAttempts: retired}
+	}
 	return b
 }
 

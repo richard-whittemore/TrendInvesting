@@ -1458,7 +1458,11 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   order ID of its own (point 5: recovered, never recomputed). A fresh run's
   approval carries how many of the incident's sales were retired
   (`operator.run.approved` version 4, ADR 0027), counted only from
-  retirements the engine applied, so its next attempt follows them too. A
+  retirements the engine applied, by the engine's one rule for applying a
+  retirement, which the reporter and the restart reading call too, so its
+  next attempt follows them too; each of the fresh run's decisions records
+  the sale attempt its approval restored (`restored_sale`), so a run
+  restarted from one restores it as the approved run held it. A
   retired urgent sale is attempted again while the alarm stays urgent
   whatever its tag: one fired while Halted, Degraded on the instrument or
   under the kill switch carries the incident's or the engagement's tag. A

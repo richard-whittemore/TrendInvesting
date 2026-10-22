@@ -324,29 +324,28 @@ func (r *boostRejections) judgeClearance(e event.Envelope) *UnreadReport {
 
 // retire reads a retirement e (execution.order.retired) of an order never
 // sent as the Boost engine does, and reports whether the engine applies it:
-// it must read, be this account's, describe an order released as released,
-// neither cleared nor retired before, and then pass the count's rule
-// (targetweight.BoostVerdicts.Retire) when the count holds the order as
-// awaiting the venue's word, which takes it off them, so a later report on
-// it, which the engine refuses, counts for nothing; any other order, the sale
-// back to 98% among them, by its own: no venue may have named it (ADR 0026,
-// point 2, "Boost", amended 2026-10-22). Any other retirement changes
-// nothing.
+// it must read, and then pass the engine's own rule
+// (targetweight.RetirementVerdict) against what the reporter holds of the
+// order: its release, the clearances and retirements the engine applied, the
+// venue's names the engine read and the Boost count. An order the count
+// holds as awaiting the venue's word leaves it, so a later report on it,
+// which the engine refuses, counts for nothing (ADR 0026, point 2, "Boost",
+// amended 2026-10-22). Any other retirement changes nothing.
 func (r *boostRejections) retire(e event.Envelope) bool {
 	var p event.OrderRetiredPayload
-	if read(e, retiredVersions, &p) != nil || p.AccountID != r.account {
+	if read(e, retiredVersions, &p) != nil {
 		return false
 	}
 	id := p.ClientOrderID
-	if o, ok := r.released[id]; !ok || !p.Describes(o) || r.cleared[id] || r.retired[id] {
-		return false
-	}
-	switch {
-	case r.verdicts.Holds(id):
-		if r.verdicts.Retire(e.ID, id) != nil {
-			return false
-		}
-	case r.named[id]:
+	held, err := targetweight.RetirementVerdict(targetweight.RetirementState{
+		AccountID: r.account,
+		Released:  func(id string) (event.OrderReleasedPayload, bool) { o, ok := r.released[id]; return o, ok },
+		Cleared:   func(id string) bool { return r.cleared[id] },
+		Retired:   func(id string) bool { return r.retired[id] },
+		Named:     func(id string) bool { return r.named[id] },
+		Verdicts:  &r.verdicts,
+	}, e.ID, p)
+	if err != nil || held && r.verdicts.Retire(e.ID, id) != nil {
 		return false
 	}
 	r.retired[id] = true

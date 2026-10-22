@@ -1402,13 +1402,20 @@ def _finish_retirement(pending, cid, input_id, today):
     that the record does not mark, so it is finished here, before the order
     is judged sendable again: the decision recorded from the outbox entry if
     the stop came before it, and the order marked never sent (the owner's
-    decision of 2026-10-22; fail closed, AGENTS.md). Only a retirement
-    recorded for input_id, the input awaiting its reply, was begun for this
-    order: one recorded for another input, an earlier run's under a reused
-    client order ID, is not this order's, which is judged as any other.
+    decision of 2026-10-22; fail closed, AGENTS.md). A retirement recorded
+    for input_id, the input awaiting its reply, was begun for this order; one
+    recorded for another input, an earlier run's under a reused client order
+    ID, is not this order's, which is judged as any other. A retirement
+    recorded with no input_id (by a relay before the field, or edited by
+    hand) is unknown, not another input's: it is read as this order's unless
+    a later retirement recorded for another input follows it, so the order
+    is never sent on a record that cannot say whose it is (fail closed on
+    missing, AGENTS.md).
     """
-    begun = any(d.get("client_order_id") == cid and d.get("decision") == DECIDE_RETIRED
-                and d.get("input_id") == input_id for d in pending.decisions())
+    retired = [d for d in pending.decisions()
+               if d.get("client_order_id") == cid and d.get("decision") == DECIDE_RETIRED]
+    begun = (any(d.get("input_id") == input_id for d in retired)
+             or bool(retired) and not retired[-1].get("input_id"))
     entry = next((e for e in Outbox(pending.path + OUTBOX_SUFFIX).load() if e["id"] == RETIRED_ID + cid), None)
     if not begun and entry is None:
         return False

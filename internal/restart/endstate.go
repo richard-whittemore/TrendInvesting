@@ -10,6 +10,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 // EndState is the state an approved log ends in that a fresh run cannot
@@ -162,7 +163,7 @@ func saleAttemptAtEnd(entries []journal.Entry, incident, accountID, logName stri
 			if err := decode(env, &p); err != nil {
 				return false, "", 0, err
 			}
-			if !r.retire(p) || !sales[p.ClientOrderID] {
+			if !sales[p.ClientOrderID] || !r.retire(env.ID, p) {
 				continue
 			}
 			// A sale retired as never sent spent nothing: it was not an
@@ -181,22 +182,33 @@ func saleAttemptAtEnd(entries []journal.Entry, incident, accountID, logName stri
 	return attempted, clientOrderID, retired, nil
 }
 
-// retirements reads a log's retirements by the rule the engine applies one
-// by (targetweight's applyRetired), from what the log records of each
-// order: the release, the owner's clearance and every venue report,
-// execution and broker listing naming it.
+// retirements reads a log's retirements of the incident's sales back to 98%
+// by the engine's own rule (targetweight.RetirementVerdict), against what
+// the log records of each sale as the engine reads it: its first release,
+// the retirements applied, and the venue's reports, executions and broker
+// listings naming it that the engine reads (ADR 0026, point 2, "Boost",
+// amended 2026-10-22, and point 5: recovered, never recomputed). No
+// clearance the engine applies names a sale: it clears only an order its
+// Boost count holds as awaiting a decided session's verdict
+// (targetweight.BoostVerdicts.ClearNeverSent), which a sale never is, so
+// neither a clearance nor the count is read.
 type retirements struct {
 	account  string
 	released map[string]event.OrderReleasedPayload
-	ended    map[string]bool // cleared or retired already
-	named    map[string]bool // named by a venue: it was sent
+	retired  map[string]bool // retirements applied
+	named    map[string]bool // named by a venue as the engine reads it: it was sent
 }
 
 func newRetirements(account string) *retirements {
-	return &retirements{account: account, released: map[string]event.OrderReleasedPayload{}, ended: map[string]bool{}, named: map[string]bool{}}
+	return &retirements{account: account, released: map[string]event.OrderReleasedPayload{}, retired: map[string]bool{}, named: map[string]bool{}}
 }
 
-// observe records what entry says of an order a retirement may name. A
+// observe records what entry says of an order a retirement may name, as the
+// engine reads it: a lifecycle report of its account, at the version the
+// engine reads, describing the order as released (event's Describes); an
+// execution of its account; and a broker snapshot of its account listing
+// the order under its instrument. A report or execution on an order retired
+// already contradicts the retirement and is refused, naming nothing. A
 // record that cannot be decoded refuses, through decode.
 func (r *retirements) observe(entry journal.Entry, decode func(event.Envelope, any) error) error {
 	env := entry.Envelope
@@ -210,52 +222,57 @@ func (r *retirements) observe(entry journal.Entry, decode func(event.Envelope, a
 			r.released[p.ClientOrderID] = p
 		}
 	case entry.Kind != journal.KindInput:
-	case env.Type == event.OrderLifecycleEventType, env.Type == event.FillEventType:
-		var p struct {
-			ClientOrderID string `json:"client_order_id"`
-		}
+	case env.Type == event.OrderLifecycleEventType:
+		var p event.LimitOrderLifecyclePayload
 		if err := decode(env, &p); err != nil {
 			return err
 		}
-		r.named[p.ClientOrderID] = true
+		if o, ok := r.released[p.ClientOrderID]; ok && env.SchemaVersion == event.OrderLifecycleLimitVersion && p.AccountID == r.account && !r.retired[p.ClientOrderID] && p.Describes(o) {
+			r.named[p.ClientOrderID] = true
+		}
+	case env.Type == event.FillEventType:
+		var p event.TargetWeightFillPayload
+		if err := decode(env, &p); err != nil {
+			return err
+		}
+		if _, ok := r.released[p.ClientOrderID]; ok && p.AccountID == r.account && !r.retired[p.ClientOrderID] {
+			r.named[p.ClientOrderID] = true
+		}
 	case env.Type == event.BrokerSnapshotEventType:
 		var p struct {
+			AccountID  string `json:"account_id"`
 			OpenOrders []struct {
 				ClientOrderID string `json:"client_order_id"`
+				InstrumentID  string `json:"instrument_id"`
 			} `json:"open_orders"`
 		}
 		if err := decode(env, &p); err != nil {
 			return err
 		}
-		for _, o := range p.OpenOrders {
-			r.named[o.ClientOrderID] = true
-		}
-	case env.Type == event.RebalanceClearedEventType:
-		var p struct {
-			ClientOrderIDs []string `json:"client_order_ids"`
-		}
-		if err := decode(env, &p); err != nil {
-			return err
-		}
-		for _, id := range p.ClientOrderIDs {
-			r.ended[id] = true
+		for _, l := range p.OpenOrders {
+			if o, ok := r.released[l.ClientOrderID]; ok && p.AccountID == r.account && l.ClientOrderID != "" && o.InstrumentID == l.InstrumentID {
+				r.named[l.ClientOrderID] = true
+			}
 		}
 	}
 	return nil
 }
 
-// retire reports whether the engine applies retirement p: for the log's
-// account, of an order released to a venue as p describes it, neither
-// cleared nor retired before, and that no venue has named (ADR 0026, point
-// 2, "Boost", amended 2026-10-22). Every name is read strictly, so a
-// retirement the engine may have refused is never taken as applied (fail
-// closed, AGENTS.md).
-func (r *retirements) retire(p event.OrderRetiredPayload) bool {
-	o, ok := r.released[p.ClientOrderID]
-	if !ok || p.AccountID != r.account || o.Mode == event.TradingModeDryRun || !p.Describes(o) || r.ended[p.ClientOrderID] || r.named[p.ClientOrderID] {
+// retire reports whether the engine applies retirement p, journalled as
+// input inputID, by its own rule (targetweight.RetirementVerdict), and
+// records it when it does. A retirement the engine may have refused is
+// never taken as applied (fail closed, AGENTS.md).
+func (r *retirements) retire(inputID string, p event.OrderRetiredPayload) bool {
+	_, err := targetweight.RetirementVerdict(targetweight.RetirementState{
+		AccountID: r.account,
+		Released:  func(id string) (event.OrderReleasedPayload, bool) { o, ok := r.released[id]; return o, ok },
+		Retired:   func(id string) bool { return r.retired[id] },
+		Named:     func(id string) bool { return r.named[id] },
+	}, inputID, p)
+	if err != nil {
 		return false
 	}
-	r.ended[p.ClientOrderID] = true
+	r.retired[p.ClientOrderID] = true
 	return true
 }
 

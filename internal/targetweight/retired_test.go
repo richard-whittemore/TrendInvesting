@@ -497,3 +497,33 @@ func TestARecoveredRetiredSaleUnderAnotherAttemptsIDIsRefused(t *testing.T) {
 		t.Errorf("a retired sale recorded under another attempt's ID: %v, want the recovery refused", err)
 	}
 }
+
+// TestARunRecoveredFromAnApprovedRunsDecisionKeepsItsRetiredSales: the
+// owner's approval of a fresh run carries one of the incident's sales
+// retired as never sent; the fresh run retires nothing itself, and each of
+// its decisions records the sale attempt the approval restored, so a run
+// restarted from one plans the next attempt under the second attempt's
+// client order ID, never the retired order's, as the approved run would
+// (ADR 0026, point 2, "Order identity", and point 5: recovered, never
+// recomputed).
+func TestARunRecoveredFromAnApprovedRunsDecisionKeepsItsRetiredSales(t *testing.T) {
+	state := haltedState(t)
+	p := approval(false)
+	p.IncidentInForce = &event.IncidentInForce{IncidentID: state.ID, State: event.EngineStateHalted, SaleAttempted: new(false), SaleRetiredAttempts: 1}
+	s := &stream{hash: event.TargetWeightConfigurationHash(testConfiguration())}
+	approved := simulate(t, options{brokers: true, recorded: []event.Envelope{s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", sessionEnd(0), p)}, closes: syntheticCloses()[:18]})
+	decisions := ofType(approved.decisions, event.TargetsDecidedEventType)
+	recovery := decisions[len(decisions)-1]
+	var d event.TargetsDecidedPayload
+	decode(t, recovery, &d)
+	if want := (event.BoostRestoredSale{IncidentID: state.ID, RetiredAttempts: 1}); d.Boost.RestoredSale == nil || *d.Boost.RestoredSale != want {
+		t.Fatalf("the approved run's decision records the restored sale as %+v, want %+v", d.Boost.RestoredSale, want)
+	}
+	full := simulate(t, options{brokers: true})
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state}, brokerMutate: urgent})
+	sold := sales(t, r.decisions)
+	if want := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 1); len(sold) != 1 || sold[0].ClientOrderID != want {
+		t.Fatalf("sales %+v, want one under %s, the second attempt's ID, not the retired %s", sold, want, orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0))
+	}
+}

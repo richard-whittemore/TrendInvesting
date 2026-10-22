@@ -545,6 +545,30 @@ func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
 	}
 }
 
+// TestARestoredSaleAttemptIsReportedAsRestored: the gate reports the sale
+// attempt the owner's approval restored, as restored, so a decision records
+// it and a run restarted from the decision restores it (ADR 0026, point 2,
+// "Order identity", and point 5); a gate that restored none reports none,
+// and an attempt this run made is not one restored.
+func TestARestoredSaleAttemptIsReportedAsRestored(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	halt(t, g)
+	if _, ok := requestSale(t, g, event.SaleTriggerExit); !ok {
+		t.Fatal("setup: no sale")
+	}
+	if id, _, _, ok := g.RestoredSaleAttempt(); ok {
+		t.Errorf("a gate that restored no attempt reports %q restored", id)
+	}
+	restored := gate(t, limits(), event.TradingModeDryRun)
+	if err := restored.RestoreSaleAttempt("incident-1", true, 2); err != nil {
+		t.Fatal(err)
+	}
+	if id, attempted, retired, ok := restored.RestoredSaleAttempt(); !ok || id != "incident-1" || !attempted || retired != 2 {
+		t.Errorf("restored attempt %q %v %d %v, want incident-1, attempted, 2 retired", id, attempted, retired, ok)
+	}
+}
+
 // TestAnApprovedIncidentRestoresItsState: a fresh run approved with an
 // incident in force resumes in the incident's state and scope before any
 // order is checked, under the same never-loosen rule as a recorded state

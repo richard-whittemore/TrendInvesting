@@ -108,6 +108,31 @@ func otherRetiredEntry(t *testing.T, client, account string, quantity int64) jou
 	})
 }
 
+// reportOn is a venue's report on order client for account, of quantity
+// shares.
+func reportOn(t *testing.T, client, account string, quantity int64) journal.Entry {
+	return recorded(t, journal.KindInput, "lifecycle:"+account+":"+client, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, event.LimitOrderLifecyclePayload{
+		AccountID: account, ClientOrderID: client, OrderID: "ib-1", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.OrderLifecycleStatusSubmitted,
+		Quantity: quantity, LimitPrice: 90, OccurredAt: time.Date(2026, time.October, 17, 13, 30, 0, 0, time.UTC),
+	})
+}
+
+// fillOf is a venue's execution of one share of order client for account.
+func fillOf(t *testing.T, client, account string) journal.Entry {
+	return recorded(t, journal.KindInput, "fill:"+account+":"+client, event.FillEventType, event.FillTargetWeightVersion, event.TargetWeightFillPayload{
+		AccountID: account, ClientOrderID: client, FillID: "x-1", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 1, Price: 90,
+		FilledAt: time.Date(2026, time.October, 17, 13, 30, 0, 0, time.UTC),
+	})
+}
+
+// listingOf is account's broker snapshot listing order client open under
+// instrument.
+func listingOf(t *testing.T, client, account, instrument string) journal.Entry {
+	return recorded(t, journal.KindInput, "broker:"+account+":"+client, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, map[string]any{
+		"account_id": account, "open_orders": []map[string]any{{"broker_order_id": "7", "client_order_id": client, "instrument_id": instrument}},
+	})
+}
+
 // incidentSaleAgain is the incident's sale attempted again, after an
 // earlier attempt was retired, under a client order ID of its own.
 func incidentSaleAgain(t *testing.T, tag string) journal.Entry {
@@ -165,8 +190,27 @@ func TestReadEndStateFindsWhatAFreshRunMustBeToldOf(t *testing.T) {
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-1"}},
 		{"halted, the retirement of a sale IBKR listed", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), saleListed(t, "joint-sale-1"), retiredEntry(t, "joint-sale-1")},
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-1"}},
-		{"halted, the retirement of a sale the owner cleared", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), saleCleared(t, "joint-sale-1"), retiredEntry(t, "joint-sale-1")},
+		// The engine refuses a clearance of a sale back to 98%, which never
+		// awaits a decided session's verdict (BoostVerdicts.ClearNeverSent),
+		// so the sale's retirement after it is applied.
+		{"halted, the retirement of a sale the owner's refused clearance named", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), saleCleared(t, "joint-sale-1"), retiredEntry(t, "joint-sale-1")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleRetiredAttempts: 1}},
+		{"halted, two sales retired, the first after a refused clearance", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), saleCleared(t, "joint-sale-1"), retiredEntry(t, "joint-sale-1"),
+			incidentSaleAgain(t, incidentID), saleReleased(t, "joint-sale-2"), retiredEntry(t, "joint-sale-2")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleRetiredAttempts: 2}},
+		// A venue report or listing the engine refuses names no order.
+		{"halted, a sale's retirement after another account's report on it", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), reportOn(t, "joint-sale-1", "ira", 5), retiredEntry(t, "joint-sale-1")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleRetiredAttempts: 1}},
+		{"halted, a sale's retirement after a report not describing it", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), reportOn(t, "joint-sale-1", "joint", 6), retiredEntry(t, "joint-sale-1")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleRetiredAttempts: 1}},
+		{"halted, the retirement of a sale a venue reported executed", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), fillOf(t, "joint-sale-1", "joint"), retiredEntry(t, "joint-sale-1")},
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-1"}},
+		{"halted, a sale's retirement after another account's execution of it", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), fillOf(t, "joint-sale-1", "ira"), retiredEntry(t, "joint-sale-1")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleRetiredAttempts: 1}},
+		{"halted, a sale's retirement after another account's listing of it", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), listingOf(t, "joint-sale-1", "ira", "SPY"), retiredEntry(t, "joint-sale-1")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleRetiredAttempts: 1}},
+		{"halted, a sale's retirement after a listing under another instrument", []journal.Entry{halted, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), listingOf(t, "joint-sale-1", "joint", "QQQ"), retiredEntry(t, "joint-sale-1")},
+			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleRetiredAttempts: 1}},
 		{"halted, the retirement of a sale never released", []journal.Entry{halted, incidentSale(t, incidentID), retiredEntry(t, "joint-sale-1")},
 			restart.EndState{IncidentID: incidentID, State: event.EngineStateHalted, SaleAttempted: true, SaleClientOrderID: "joint-sale-1"}},
 		{"an inherited retired attempt, and one more retired", []journal.Entry{inheritedRetired, incidentSale(t, incidentID), saleReleased(t, "joint-sale-1"), retiredEntry(t, "joint-sale-1")},
@@ -199,7 +243,7 @@ func TestReadEndStateFindsWhatAFreshRunMustBeToldOf(t *testing.T) {
 func TestReadEndStateRefusesAnUndecodableRecord(t *testing.T) {
 	halted := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x"})
 	for _, broken := range []journal.Entry{decidedEntry(t, true), killSwitchEntry(t, "k1", true), incidentSale(t, incidentID), saleWithheldEntry(t, incidentID, event.SaleWithheldUnreadable), retiredEntry(t, "joint-sale-1"),
-		saleReleased(t, "joint-sale-1"), saleReported(t, "joint-sale-1"), saleListed(t, "joint-sale-1"), saleCleared(t, "joint-sale-1")} {
+		saleReleased(t, "joint-sale-1"), saleReported(t, "joint-sale-1"), saleListed(t, "joint-sale-1"), fillOf(t, "joint-sale-1", "joint")} {
 		broken.Envelope.Payload = json.RawMessage(`not json`)
 		if _, err := restart.ReadEndState([]journal.Entry{halted, broken}, "joint", "run-1.log"); err == nil || !strings.Contains(err.Error(), broken.Envelope.ID) || !strings.Contains(err.Error(), "run-1.log") {
 			t.Errorf("%s: ReadEndState = %v, want a refusal naming it in run-1.log", broken.Envelope.ID, err)

@@ -144,6 +144,9 @@ type Gate struct {
 	// a sale back to 98% retired as never sent (RetireSale): each spent
 	// nothing, and the next attempt has a client order ID of its own.
 	retiredSales map[string]int
+	// restored is the incident whose sale attempt RestoreSaleAttempt
+	// restored, "" when none was.
+	restored string
 	// ledger holds every fact the pending rule reads: the released sells,
 	// their reports and the snapshots. account is the view of the latest
 	// account snapshot, the snapshot a planner sizes from, which PendingSells
@@ -314,7 +317,22 @@ func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool, retired int
 		return fmt.Errorf("risklimit: incident %q's sale attempt is restored once, before its sale is attempted", incidentID)
 	}
 	g.attempts[incidentID] = &saleAttempt{earlier: attempted, retired: retired, instruments: make(map[string]bool)}
+	g.restored = incidentID
 	return nil
+}
+
+// RestoredSaleAttempt is the sale attempt RestoreSaleAttempt restored, as it
+// was restored: its incident, whether an earlier run attempted it and how
+// many of its attempts earlier runs retired, so a decision records it and a
+// run restarted from the decision restores it as this run holds it (ADR
+// 0026, point 2, "Order identity", and point 5: recovered, never
+// recomputed). ok is false when none was restored.
+func (g *Gate) RestoredSaleAttempt() (incidentID string, attempted bool, retired int, ok bool) {
+	if g.restored == "" {
+		return "", false, 0, false
+	}
+	a := g.attempts[g.restored]
+	return g.restored, a.earlier, a.retired, true
 }
 
 // RestoreRetiredSale records, from a recovered decision, that the attempt

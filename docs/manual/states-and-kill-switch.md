@@ -320,10 +320,12 @@ its own ([order lifecycle](order-lifecycle.md), "An order IBKR can never
 accept"). That holds for an urgent-alarm sale made while Halted, Degraded or
 under the kill switch too, though it carries the incident's or the
 engagement's tag. The new order's ID survives a restart: each decision
-records the retired sale and its attempt number, and `operator approve`
+records the retired sale and its attempt number, `operator approve`
 writes how many of the incident's sales were retired into the fresh run's
-approval (`sale_retired_attempts`), so no attempt ever reuses a retired
-order's ID.
+approval (`sale_retired_attempts`), and each decision of that fresh run
+records the count its approval carried (`restored_sale`), so a run
+restarted from any of them, or a later fresh run, never gives an attempt
+a retired order's ID.
 
 **When it does not go.** It is *withheld*, and recorded as
 `risk.sale.withheld`, when:

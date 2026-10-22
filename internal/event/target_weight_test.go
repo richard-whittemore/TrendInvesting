@@ -861,6 +861,9 @@ func TestBoostNoVenueValidate(t *testing.T) {
 	expectInvalid(t, "a working order", v, func(p *P) {
 		p.Boost.WorkingOrders = []event.BoostWatchedOrder{{ClientOrderID: "tw-1", Side: event.OrderSideBuy, Released: 37, LimitPrice: 105}}
 	}, "dry-run")
+	// The refusal names every list a dry-run leaves empty, a named order's
+	// among them.
+	expectInvalid(t, "a named order", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-1"} }, "retired, named or working order")
 }
 
 // TestBoostWorkingOrdersValidate: an order the venue accepted that still
@@ -1012,4 +1015,24 @@ func TestBoostRetiredSaleAndNamedOrdersValidate(t *testing.T) {
 	expectInvalid(t, "named twice", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-0", "tw-0"} }, "named")
 	expectInvalid(t, "an order not listed", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-9"} }, "named")
 	expectInvalid(t, "a retired order", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-r"} }, "named")
+}
+
+// TestBoostRestoredSaleValidate: the sale attempt an approval restored names
+// its incident and counts no fewer than no retired attempts, and figures
+// recording one are not empty (ADR 0026, point 2, "Order identity", and
+// point 5).
+func TestBoostRestoredSaleValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", RetiredAttempts: 1}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a restored sale is valid: %v", err)
+	}
+	if (event.BoostFigures{RestoredSale: &event.BoostRestoredSale{IncidentID: "engine-state:joint:1"}}).IsZero() {
+		t.Error("figures recording a restored sale are empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "no incident", v, func(p *P) { p.Boost.RestoredSale = &event.BoostRestoredSale{RetiredAttempts: 1} }, "restored sale")
+	expectInvalid(t, "fewer than none retired", v, func(p *P) {
+		p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", RetiredAttempts: -1}
+	}, "restored sale")
 }
