@@ -1330,6 +1330,557 @@ class LoopTests(unittest.TestCase):
                 loop.close()
                 self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
 
+    def test_run_ended_refuses_a_malformed_or_unsupported_queued_retirement_and_changes_nothing(self):
+        # A queued retirement is struck only once it reads as one the relay
+        # writes (retire_order): its version, an integer, its fields and no
+        # others, each value of its type (the order's identity, side,
+        # quantity and limit as the engine's retirement input requires),
+        # one of the two reasons with who retired it fitting the reason and
+        # its detail, a client order ID of the engine's shape, real
+        # whole-second times with the entry's not before the retirement's
+        # session, and an entry ID named after that order or after the order
+        # and an input. Anything else is not a record the relay wrote, so the
+        # whole settlement is refused naming the entry, with nothing struck
+        # and nothing recorded, never struck as an earlier run's unread
+        # (fail closed, AGENTS.md; ADR 0026, amended 2026-10-22, "The
+        # adapter"; internal/event OrderRetiredPayload.Validate).
+        def owner_by_adapter(e):
+            e["payload"].update(reason="owner retired", retired_by="adapter")
+
+        def unnamed_owner(e):
+            e["payload"].update(reason="owner retired", retired_by=" ")
+
+        def session_over_by_owner(e):
+            e["payload"]["retired_by"] = "richard"
+
+        def unknown_reason(e):
+            e["payload"]["reason"] = "cancelled"
+
+        def no_detail(e):
+            e["payload"]["detail"] = ""
+
+        def no_client_order_id(e):
+            e["payload"]["client_order_id"] = None
+
+        def unsupported_version(e):
+            e["schema_version"] = 2
+
+        def another_orders_id(e):
+            e["id"] = "order-retired:tw-paper-9"
+
+        def empty_input_id(e):
+            e["id"] = "order-retired:tw-paper-1:"
+
+        def unrecognised_id(e):
+            e["id"] = "retired-tw-paper-1"
+
+        def retirement_id_of_another_type(e):
+            e["event_type"] = "execution.order.cancelled"
+
+        def payload(**values):
+            def damage(e):
+                e["payload"].update(values)
+            damage.__name__ = "payload " + ", ".join("{}={!r}".format(k, v) for k, v in values.items())
+            return damage
+
+        def entry_field(**values):
+            def damage(e):
+                e.update(values)
+            damage.__name__ = "entry " + ", ".join("{}={!r}".format(k, v) for k, v in values.items())
+            return damage
+
+        def no_side(e):
+            del e["payload"]["side"]
+
+        def client_order_id_of_another_shape(e):
+            e["payload"]["client_order_id"] = "ibkr-1"
+            e["id"] = "order-retired:ibkr-1"
+
+        def client_order_id_with_a_colon(e):
+            e["payload"]["client_order_id"] = "tw-paper-1:session"
+            e["id"] = "order-retired:tw-paper-1:session"
+
+        def input_id_with_a_space(e):
+            e["id"] = "order-retired:tw-paper-1:session 1"
+
+        def oversized_limit_price(e):
+            e["payload"]["limit_price"] = 10 ** 400
+
+        damages = (oversized_limit_price, owner_by_adapter, unnamed_owner, session_over_by_owner, unknown_reason, no_detail,
+                   no_client_order_id, unsupported_version, another_orders_id, empty_input_id, unrecognised_id,
+                   retirement_id_of_another_type, no_side, client_order_id_of_another_shape,
+                   client_order_id_with_a_colon, input_id_with_a_space,
+                   payload(account_id=None), payload(account_id=""), payload(instrument_id={}),
+                   payload(side="unknown"), payload(quantity=-9), payload(quantity=0), payload(quantity=9.0),
+                   payload(quantity=True), payload(quantity="9"), payload(limit_price=None), payload(limit_price=0),
+                   payload(limit_price=-401.5), payload(limit_price=True), payload(limit_price="401.5"),
+                   payload(detail=7), payload(retired_by=None), payload(reason=None),
+                   payload(retired_at="2026-99-99T99:99:99Z"), payload(retired_at="2026-02-30T20:30:00Z"),
+                   payload(retired_at="2026-10-16T20:30:00.5Z"), payload(retired_at="2026-10-16T20:30:00+25:00"),
+                   payload(retired_at=None), payload(tag="targets-decided:DU0000001:2026-10-16"),
+                   entry_field(event_time=None), entry_field(event_time="2026-10-16T99:30:00Z"),
+                   entry_field(event_time="2026-10-16T20:30:00.5Z"), entry_field(event_time="2026-10-15T20:30:00Z"),
+                   entry_field(schema_version=True), entry_field(schema_version=1.0), entry_field(schema_version="1"),
+                   entry_field(run="run-1"))
+        for damage in damages:
+            with self.subTest(damage.__name__):
+                self.setUp()
+                second = self.left_waiting_by_the_first_run("session:1", commits=True)
+                pending = PendingInput(self.pending)
+                order = json.loads((TESTDATA / "paper_released.json").read_text())
+                retire_order(pending, order, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+                outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+                entries = outbox.load()
+                [entry] = [e for e in entries if e["id"] == "order-retired:tw-paper-1"]
+                damage(entry)
+                outbox._write(entries)
+                before = [outbox.load(), pending.load(), pending.run_ended(), pending.decisions()]
+                with self.assertRaises(HandoverRecordInvalid) as refused:
+                    relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot",
+                                                   str(second.path), today=SESSION)
+                self.assertIn(entry["id"], str(refused.exception), "the refusal names the outbox entry")
+                printed = io.StringIO()
+                with contextlib.redirect_stderr(printed):
+                    self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                                 str(second.path), "--reason", "a fresh run after a reboot"]), 1)
+                self.assertIn(entry["id"], printed.getvalue())
+                self.assertEqual([outbox.load(), pending.load(), pending.run_ended(), pending.decisions()], before,
+                                 "nothing is struck and nothing is recorded")
+
+    def test_run_ended_settles_well_formed_queued_retirements_in_either_id_form_and_keeps_the_fresh_runs_own(self):
+        # A retirement as retire_order queues one, named after its order or
+        # after the order and an input, by the adapter or by the owner, is
+        # read as a retirement: an earlier run's order's is settled with the
+        # input and struck off, and the fresh run's own order's stays for
+        # its engine (ADR 0026, amended 2026-10-22, "The adapter"; fail
+        # closed, AGENTS.md rule 5).
+        second, own = self.fresh_run_released("tw-paper-2")
+        pending = PendingInput(self.pending)
+        earlier = json.loads((TESTDATA / "paper_released.json").read_text())
+        older = dict(earlier, client_order_id="tw-paper-3")
+        at = datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc)
+        retire_order(pending, earlier, "session over", "its session is over", "adapter", at, SESSION, "session:1")
+        retire_order(pending, older, "owner retired", "IBKR has no contract for it", "richard", at, SESSION,
+                     "session:0", entry_id="order-retired:tw-paper-3:session:0")
+        retire_order(pending, own, "session over", "its session is over", "adapter", at, SESSION, "fresh:1")
+        retire_order(pending, own, "owner retired", "IBKR has no contract for it", "richard", at, SESSION,
+                     "fresh:1", entry_id="order-retired:tw-paper-2:fresh:1")
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        self.assertEqual([e["id"] for e in self.queued_retirements()],
+                         ["order-retired:tw-paper-2", "order-retired:tw-paper-2:fresh:1"])
+        [settled] = pending.run_ended()
+        self.assertEqual([e["id"] for e in settled["outbox"]],
+                         ["order-retired:tw-paper-1", "order-retired:tw-paper-3:session:0"])
+        self.assertNotIn("set_aside", settled)
+        self.assertFalse(Path(self.pending + OUTBOX_SUFFIX + ".set-aside").exists())
+
+    def damaged_retirement_left_by_the_first_run(self, damage):
+        """The first run's input left waiting, with its order's queued retirement damaged by damage; the fresh run."""
+        second = self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        order = json.loads((TESTDATA / "paper_released.json").read_text())
+        retire_order(pending, order, "session over", "its session is over", "adapter",
+                     datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+        outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+        entries = outbox.load()
+        [entry] = [e for e in entries if e["id"] == "order-retired:tw-paper-1"]
+        damage(entry)
+        outbox._write(entries)
+        return second, entry
+
+    def test_run_ended_with_set_aside_malformed_moves_each_malformed_retirement_aside_and_settles(self):
+        # The owner's remedy for a queued retirement the relay could not have
+        # written: resolve --run-ended --set-aside-malformed moves it, whole
+        # and never deleted, into the outbox's .set-aside file, prints it
+        # with the by-hand sale it may leave, records it with the
+        # settlement, and settles the input; without the option the refusal
+        # stands. The fresh run's engine refuses an earlier run's retirement
+        # anyway, so none is lost to it, and the order's sale stays
+        # attempted (fail closed, AGENTS.md; ADR 0026, amended 2026-10-22,
+        # "The adapter"; ADR 0019, amended 2026-10-17, reading 4).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        def float_version(e):
+            e["schema_version"] = 1.0
+
+        def impossible_retired_at(e):
+            e["payload"]["retired_at"] = "2026-99-99T99:99:99Z"
+
+        def extra_payload_field(e):
+            e["payload"]["tag"] = "targets-decided:DU0000001:2026-10-16"
+
+        def extra_entry_field(e):
+            e["run"] = "run-1"
+
+        def oversized_limit_price(e):
+            e["payload"]["limit_price"] = 10 ** 400
+
+        for damage in (bool_version, float_version, impossible_retired_at, extra_payload_field, extra_entry_field,
+                       oversized_limit_price):
+            with self.subTest(damage.__name__):
+                self.setUp()
+                second, damaged = self.damaged_retirement_left_by_the_first_run(damage)
+                args = ["resolve", "--run-ended", self.pending, "session:1", "--journal", str(second.path),
+                        "--reason", "a fresh run after a reboot"]
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(relay_main(args), 1, "without the option the refusal stands")
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(args + ["--set-aside-malformed"]), 0)
+                aside = self.pending + OUTBOX_SUFFIX + ".set-aside"
+                with open(aside, encoding="utf-8") as f:
+                    self.assertEqual(json.load(f), [damaged], "set aside whole, never deleted")
+                raw = json.dumps(damaged, separators=(",", ":"))
+                for part in ("order-retired:tw-paper-1", aside, "tw-paper-1", "by hand", raw):
+                    self.assertIn(part, printed.getvalue())
+                self.assertEqual(self.queued_retirements(), [])
+                self.assertIsNone(PendingInput(self.pending).load())
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual(settled["set_aside"], [raw], "named as the outbox held it")
+                self.assertEqual(settled["outbox"], [])
+                loop = self.loop(engine=second, engine_log=second.path)
+                loop.start()
+                self.settle(loop)
+                loop.close()
+                self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
+
+    def test_set_aside_malformed_after_a_stop_part_way_sets_each_aside_once(self):
+        # A stop after the set-aside copy and before the settlement is
+        # recorded leaves the entry in the outbox too; the rerun sets it
+        # aside again without a second copy and settles the input (fail
+        # closed, AGENTS.md).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+        pending = PendingInput(self.pending)
+        with mock.patch.object(PendingInput, "record_run_ended", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot", str(second.path),
+                                               today=SESSION, set_aside_malformed=True)
+        self.assertEqual(len(self.queued_retirements()), 1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                         str(second.path), "--reason", "a fresh run after a reboot",
+                                         "--set-aside-malformed"]), 0)
+        with open(self.pending + OUTBOX_SUFFIX + ".set-aside", encoding="utf-8") as f:
+            self.assertEqual(json.load(f), [damaged])
+        self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[json.dumps(damaged, separators=(",", ":"))]])
+
+    def set_aside_args(self, second):
+        """The owner's resolve --run-ended --set-aside-malformed of the first run's input, against the fresh run."""
+        return ["resolve", "--run-ended", self.pending, "session:1", "--journal", str(second.path), "--reason",
+                "a fresh run after a reboot", "--set-aside-malformed"]
+
+    def test_set_aside_malformed_keeps_each_entry_byte_for_byte_even_with_numbers_no_writer_writes(self):
+        # The set-aside file and the settlement keep each malformed entry as
+        # the outbox holds it, byte for byte, never written again from what
+        # was read: one whose numbers the outbox's reader accepts but the
+        # adapter never writes (an exponent past a float's range, NaN,
+        # Infinity), or whose spacing is not the adapter's, is still set
+        # aside whole, printed as it is, and struck off (fail closed,
+        # AGENTS.md).
+        cases = (('"limit_price":401.5', '"limit_price":1e309'),
+                 ('"limit_price":401.5', '"limit_price":NaN'),
+                 ('"limit_price":401.5', '"limit_price":-Infinity'),
+                 ('"schema_version":1,', '"schema_version" :  true,'))
+        for old, new in cases:
+            with self.subTest(new):
+                self.setUp()
+                second, entry = self.damaged_retirement_left_by_the_first_run(lambda e: None)
+                path = self.pending + OUTBOX_SUFFIX
+                text = Path(path).read_text(encoding="utf-8")
+                compact = json.dumps(entry, separators=(",", ":"))
+                self.assertIn(compact, text)
+                self.assertIn(old, compact)
+                damaged = compact.replace(old, new)
+                Path(path).write_text(text.replace(compact, damaged), encoding="utf-8")
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+                self.assertIn(damaged, Path(path + ".set-aside").read_text(encoding="utf-8"))
+                self.assertIn(damaged, printed.getvalue())
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual(settled["set_aside"], [damaged])
+                self.assertEqual(self.queued_retirements(), [])
+                self.assertIsNone(PendingInput(self.pending).load())
+
+    def test_set_aside_malformed_after_a_stop_between_the_record_and_the_strike_records_and_copies_once(self):
+        # A stop after the settlement is recorded and before the strike
+        # leaves the entry in the outbox and named by the settlement; the
+        # rerun records no second settlement, copies the entry aside once,
+        # prints it, and strikes it off (fail closed, AGENTS.md).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+        pending = PendingInput(self.pending)
+        with mock.patch.object(Outbox, "strike", side_effect=OSError("disk full")), \
+                mock.patch.object(Outbox, "strike_all", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot", str(second.path),
+                                               today=SESSION, set_aside_malformed=True)
+        self.assertEqual(len(self.queued_retirements()), 1)
+        self.assertEqual(len(pending.run_ended()), 1)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+        raw = json.dumps(damaged, separators=(",", ":"))
+        with open(self.pending + OUTBOX_SUFFIX + ".set-aside", encoding="utf-8") as f:
+            self.assertEqual(json.load(f), [damaged])
+        self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[raw]])
+        for part in (raw, "tw-paper-1", "by hand"):
+            self.assertIn(part, printed.getvalue())
+        self.assertEqual(self.queued_retirements(), [])
+        self.assertIsNone(pending.load())
+
+    def test_set_aside_malformed_prints_the_by_hand_sale_again_after_a_stop_before_the_input_is_cleared(self):
+        # Each entry set aside, and the by-hand sale it may leave, is
+        # printed from the settlement's own record of it (its set_aside) on
+        # every rerun until the input is settled, so a stop after the strike
+        # and before the pending file is cleared, which leaves no such entry
+        # in the outbox, still prints it (fail closed, AGENTS.md; ADR 0019,
+        # amended 2026-10-17, reading 4).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        for option in (["--set-aside-malformed"], []):
+            with self.subTest(option=option):
+                self.setUp()
+                second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+                pending = PendingInput(self.pending)
+                with mock.patch.object(PendingInput, "clear", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot",
+                                                       str(second.path), today=SESSION, set_aside_malformed=True)
+                self.assertEqual(self.queued_retirements(), [])
+                self.assertIsNotNone(pending.load())
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)[:-1] + option), 0)
+                raw = json.dumps(damaged, separators=(",", ":"))
+                for part in (raw, "tw-paper-1", "by hand", self.pending + OUTBOX_SUFFIX + ".set-aside"):
+                    self.assertIn(part, printed.getvalue())
+                self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[raw]])
+                self.assertIsNone(pending.load())
+
+    def test_set_aside_malformed_prints_the_by_hand_sale_on_every_rerun_after_a_stop_past_the_clear(self):
+        # A stop after the pending file is cleared and before the notice is
+        # printed leaves no input awaiting its reply; each rerun still finds
+        # the entries set aside in the input's own settlement (its
+        # set_aside) and prints each, with its order, every time, so the
+        # by-hand sale is never left untold (fail closed, AGENTS.md; ADR
+        # 0019, amended 2026-10-17, reading 4).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+        pending = PendingInput(self.pending)
+        clear = PendingInput.clear
+
+        def stop_after_the_clear(self_):
+            clear(self_)
+            raise OSError("stopped")
+
+        with mock.patch.object(PendingInput, "clear", stop_after_the_clear):
+            with self.assertRaises(OSError):
+                relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot", str(second.path),
+                                               today=SESSION, set_aside_malformed=True)
+        self.assertIsNone(pending.load())
+        raw = json.dumps(damaged, separators=(",", ":"))
+        for option in (["--set-aside-malformed"], [], ["--set-aside-malformed"]):
+            with self.subTest(option=option):
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)[:-1] + option), 0)
+                self.assertEqual(printed.getvalue().count("by hand"), 1)
+                for part in (raw, "'tw-paper-1'", self.pending + OUTBOX_SUFFIX + ".set-aside"):
+                    self.assertIn(part, printed.getvalue())
+        self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[raw]])
+
+    def test_set_aside_malformed_keeps_line_ends_byte_for_byte(self):
+        # The outbox and the set-aside file are read as bytes, never with a
+        # newline translated: an entry holding CRLF or a bare CR is set aside,
+        # recorded and printed with each "\r" kept, and an entry already set
+        # aside keeps its own line ends when another is added (fail closed,
+        # AGENTS.md).
+        for new in ('"schema_version":\r\ntrue,', '"schema_version":\rtrue,'):
+            with self.subTest(new=new):
+                self.setUp()
+                second, entry = self.damaged_retirement_left_by_the_first_run(lambda e: None)
+                path = self.pending + OUTBOX_SUFFIX
+                data = Path(path).read_bytes()
+                compact = json.dumps(entry, separators=(",", ":"))
+                damaged = compact.replace('"schema_version":1,', new)
+                self.assertNotEqual(damaged, compact)
+                Path(path).write_bytes(data.replace(compact.encode(), damaged.encode()))
+                earlier = '{"id":"set-aside-before",\r\n"payload":{}}'
+                Path(path + ".set-aside").write_bytes(("[" + earlier + "]").encode())
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+                aside = Path(path + ".set-aside").read_bytes()
+                self.assertIn(damaged.encode(), aside)
+                self.assertIn(earlier.encode(), aside)
+                self.assertIn(damaged, printed.getvalue())
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual(settled["set_aside"], [damaged])
+
+    def test_strike_all_copies_each_kept_entry_as_the_outbox_holds_it(self):
+        # A strike rewrites the outbox by copying each kept entry's own text,
+        # never by writing it again from what was read, so a kept entry
+        # holding a number the adapter never writes (NaN, Infinity, an
+        # exponent past a float's range) never makes the strike raise, and
+        # is kept byte for byte (fail closed, AGENTS.md).
+        for number in ("NaN", "-Infinity", "1e309"):
+            with self.subTest(number=number):
+                path = os.path.join(self.dir.name, "strike-" + number + OUTBOX_SUFFIX)
+                gone = '{"event_time":"2026-10-16T20:30:00Z","event_type":"x","id":"gone","payload":{},"schema_version":1}'
+                kept = ('{"event_time":"2026-10-16T20:30:00Z",\r\n "event_type":"x","id":"kept",'
+                        '"payload":{"price":' + number + '},"schema_version":1}')
+                Path(path).write_bytes(("[" + gone + "," + kept + "]").encode())
+                outbox = Outbox(path)
+                outbox.strike_all(["gone"])
+                self.assertEqual(Path(path).read_bytes(), ("[" + kept + "]").encode())
+                self.assertEqual([e["id"] for e in outbox.load()], ["kept"])
+
+    def test_strike_of_one_entry_copies_each_kept_entry_as_the_outbox_holds_it(self):
+        # The single-entry strike copies each kept entry's own text, as
+        # strike_all does, so an outbox also holding a number the adapter
+        # never writes (NaN, Infinity, an exponent past a float's range)
+        # never makes it raise, and the kept entries stay byte for byte
+        # (fail closed, AGENTS.md).
+        for number in ("NaN", "-Infinity", "1e309"):
+            with self.subTest(number=number):
+                path = os.path.join(self.dir.name, "strike-one-" + number + OUTBOX_SUFFIX)
+                gone = '{"event_time":"2026-10-16T20:30:00Z","event_type":"x","id":"gone","payload":{},"schema_version":1}'
+                kept = ('{"event_time":"2026-10-16T20:30:00Z",\r\n "event_type":"x","id":"kept",'
+                        '"payload":{"price":' + number + '},"schema_version":1}')
+                Path(path).write_bytes(("[" + gone + "," + kept + "]").encode())
+                outbox = Outbox(path)
+                outbox.strike("gone")
+                self.assertEqual(Path(path).read_bytes(), ("[" + kept + "]").encode())
+                outbox.strike("absent")
+                self.assertEqual(Path(path).read_bytes(), ("[" + kept + "]").encode())
+
+    def test_run_ended_refuses_a_queued_retirement_quantity_past_the_engines_int64(self):
+        # The engine reads a retirement's quantity as an int64 (internal/event
+        # OrderRetiredPayload), so a quantity above 2**63-1 is not one the
+        # relay queues: the settlement is refused naming the entry, and with
+        # --set-aside-malformed it is set aside (fail closed, AGENTS.md).
+        def quantity(value):
+            def damage(e):
+                e["payload"]["quantity"] = value
+            return damage
+
+        for value in (2 ** 63, 2 ** 64 + 1):
+            with self.subTest(quantity=value):
+                self.setUp()
+                second, damaged = self.damaged_retirement_left_by_the_first_run(quantity(value))
+                printed = io.StringIO()
+                with contextlib.redirect_stderr(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)[:-1]), 1)
+                self.assertIn("order-retired:tw-paper-1", printed.getvalue())
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual([json.loads(t) for t in settled["set_aside"]], [damaged])
+        with self.subTest(quantity=2 ** 63 - 1):
+            self.setUp()
+            second, _ = self.damaged_retirement_left_by_the_first_run(quantity(2 ** 63 - 1))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(relay_main(self.set_aside_args(second)[:-1]), 0)
+            [settled] = PendingInput(self.pending).run_ended()
+            self.assertEqual([e["id"] for e in settled["outbox"]], ["order-retired:tw-paper-1"])
+
+    def fresh_run_released(self, client_order_id):
+        """The first run's input left waiting, and a fresh run whose own log released order client_order_id."""
+        second = self.left_waiting_by_the_first_run("session:1", commits=True)
+        own = json.loads((TESTDATA / "paper_released.json").read_text())
+        own["client_order_id"] = client_order_id
+        second.decisions["fresh:1"] = [{"type": RELEASED, "payload": own}]
+        raw = json.dumps({"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]}, separators=(",", ":"))
+        second.decide({"id": "fresh:1", "type": "market.session.closed", "envelope_version": 1,
+                       "schema_version": 1, "event_time": SESSION_CLOSED, "recorded_at": "2026-10-17T14:05:00Z",
+                       "sequence": second.next_sequence, "source": SOURCE, "configuration_hash": CONFIGURATION_HASH,
+                       "strategy_version": STRATEGY_VERSION,
+                       "payload": json.loads(raw), "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+        return second, own
+
+    def test_set_aside_malformed_refuses_a_malformed_retirement_of_an_order_the_fresh_run_released(self):
+        # A malformed queued retirement of an order the fresh run's own log
+        # released, named so by its payload or by its entry ID, may be the
+        # fresh run's own, which its engine reads, so it is never set aside:
+        # the command refuses naming it, with nothing struck, copied or
+        # recorded (fail closed, AGENTS.md rule 5; ADR 0026, amended
+        # 2026-10-22, "The adapter").
+        def bool_version(e):
+            e["schema_version"] = True
+
+        def no_client_order_id(e):
+            e["payload"]["client_order_id"] = None
+
+        for damage in (bool_version, no_client_order_id):
+            with self.subTest(damage.__name__):
+                self.setUp()
+                second, own = self.fresh_run_released("tw-paper-2")
+                pending = PendingInput(self.pending)
+                retire_order(pending, own, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "fresh:1")
+                outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+                entries = outbox.load()
+                [entry] = [e for e in entries if e["id"] == "order-retired:tw-paper-2"]
+                damage(entry)
+                outbox._write(entries)
+                before = [outbox.load(), pending.load(), pending.run_ended(), pending.decisions()]
+                printed = io.StringIO()
+                with contextlib.redirect_stderr(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 1)
+                for part in ("order-retired:tw-paper-2", "tw-paper-2", "released"):
+                    self.assertIn(part, printed.getvalue())
+                self.assertEqual([outbox.load(), pending.load(), pending.run_ended(), pending.decisions()], before,
+                                 "nothing is struck and nothing is recorded")
+                self.assertFalse(Path(self.pending + OUTBOX_SUFFIX + ".set-aside").exists())
+
+    def test_run_ended_reads_a_settlements_set_aside_strictly(self):
+        # A settlement's set_aside is read as resolve --run-ended writes it:
+        # a non-empty list, each item the outbox's own text of one outbox
+        # entry. Anything else stops the start naming the line; a settlement
+        # that set nothing aside reads without it (fail closed, AGENTS.md).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+        path = Path(PendingInput(self.pending).run_ended_path)
+        [line] = path.read_text(encoding="utf-8").splitlines()
+        written = json.loads(line)
+        raw = written["set_aside"][0]
+        for bad in ([], "x", None, {}, [{}], [damaged], ["x"], ["{}"], ["[]"], [raw, 7]):
+            with self.subTest(set_aside=bad):
+                path.write_text(json.dumps(dict(written, set_aside=bad)) + "\n", encoding="utf-8")
+                with self.assertRaises(HandoverRecordInvalid) as refused:
+                    PendingInput(self.pending).run_ended()
+                self.assertIn("line 1", str(refused.exception))
+        with self.subTest("an extra field"):
+            path.write_text(json.dumps(dict(written, aside=[raw])) + "\n", encoding="utf-8")
+            with self.assertRaises(HandoverRecordInvalid):
+                PendingInput(self.pending).run_ended()
+        without = {k: v for k, v in written.items() if k != "set_aside"}
+        path.write_text(json.dumps(without) + "\n", encoding="utf-8")
+        self.assertEqual(PendingInput(self.pending).run_ended(), [without])
+
+    def test_set_aside_malformed_is_only_for_run_ended(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stderr(printed):
+            self.assertEqual(relay_main(["resolve", self.pending, "tw-paper-1", "--sent", "--reason", "IBKR shows it",
+                                         "--set-aside-malformed"]), 1)
+        self.assertIn("--set-aside-malformed is only for --run-ended", printed.getvalue())
+
     def committed_report(self, event_type, version, payload, input_id=None):
         """A report input engine.log commits after the waiting input, as the ended run's engine read it."""
         raw = json.dumps(payload, separators=(",", ":"))
