@@ -123,7 +123,12 @@ func sessionClosedEnvelope(t *testing.T, bar event.CompletedBarPayload, sequence
 // access amendment) — unlike t.TempDir(), whose directories are 0755.
 func shortSocketDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "eng-")
+	// The triage gate names its run's own socket folder (docs/development.md, "Ending processes").
+	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
+	if !ok || root == "" { // set but empty is unset
+		root = "/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "eng-")
 	if err != nil {
 		t.Fatalf("create a short-path socket directory: %v", err)
 	}

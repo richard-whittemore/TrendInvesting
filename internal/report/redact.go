@@ -20,16 +20,19 @@ const Redacted = "[redacted]"
 // not control the readers of (docs/live-trading/plan.md section 7: the public
 // text carries no balance; docs/manual/alerts-and-dashboard.md): an IBKR
 // account id (U or DU and digits, as the broker issues them), a GitHub token,
-// a Tailscale host name or address (the 100.64.0.0/10 range), and a dollar
-// figure.
-var redactPatterns = []*regexp.Regexp{
+// and a Tailscale host name or address (the 100.64.0.0/10 range), which name
+// the account or reach it; and a dollar figure (dollarFigure).
+var identifierPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(?:DU|U)\d{4,}\b`),
 	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}`),
 	regexp.MustCompile(`\bgh[opsur]_[A-Za-z0-9]{20,}`),
 	regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9.-]*\.ts\.net\b`),
 	regexp.MustCompile(`\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b`),
-	regexp.MustCompile(`[-+]?\$\s?\d[\d,]*(?:\.\d+)?`),
 }
+
+// dollarFigure is a dollar amount, removed whole before the other figures so
+// its sign and grouping go with it.
+var dollarFigure = regexp.MustCompile(`[-+]?\$\s?\d[\d,]*(?:\.\d+)?`)
 
 // withheldParts are the parts of a field's or a query column's name that
 // mark its value as a figure of the account or a name of it: a balance, a
@@ -111,16 +114,26 @@ func jsonEscaped(s string, html bool) string {
 // Text returns s with every literal value, every pattern and every figure
 // removed.
 func (r Redactor) Text(s string) string {
+	return removeFigures(dollarFigure.ReplaceAllString(r.Identifiers(s), Redacted))
+}
+
+// Identifiers returns s with every literal value and every identifier
+// pattern removed, as Text removes them, and its figures kept: the check of
+// code bound for a public repository, where numbers are the code's own
+// (the triage job's pre-push check, whose input already never held a
+// figure: the job hands Claude only text through Text). Prose bound for a
+// public place goes through Text.
+func (r Redactor) Identifiers(s string) string {
 	for _, l := range r.literals {
 		s = strings.ReplaceAll(s, l, Redacted)
 	}
 	for _, w := range r.words {
 		s = replaceWord(s, w)
 	}
-	for _, p := range redactPatterns {
+	for _, p := range identifierPatterns {
 		s = p.ReplaceAllString(s, Redacted)
 	}
-	return removeFigures(s)
+	return s
 }
 
 // replaceWord replaces w in s wherever it stands alone: not next to a letter

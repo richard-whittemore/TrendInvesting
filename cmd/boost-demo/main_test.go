@@ -27,7 +27,12 @@ func startEngine(t *testing.T) (socket, log string, stop func()) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the engine: %v\n%s", err, out)
 	}
-	socketDir, err := os.MkdirTemp("/tmp", "demo-")
+	// The triage gate names its run's own socket folder (docs/development.md, "Ending processes").
+	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
+	if !ok || root == "" { // set but empty is unset
+		root = "/tmp"
+	}
+	socketDir, err := os.MkdirTemp(root, "demo-")
 	if err != nil {
 		t.Fatal(err)
 	}

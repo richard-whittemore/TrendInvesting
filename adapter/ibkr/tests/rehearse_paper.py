@@ -620,7 +620,7 @@ def main(argv=None):
         print("FAIL: TI_REHEARSAL_ACCOUNT does not begin DU, so it is not an IBKR paper account")
         return 1
     # A short directory: a Unix-domain socket path is limited to about 100 bytes.
-    base = "/tmp" if os.path.isdir("/tmp") and os.access("/tmp", os.W_OK) else None
+    base = os.environ.get("TI_TEST_SOCKET_DIR") or ("/tmp" if os.path.isdir("/tmp") and os.access("/tmp", os.W_OK) else None)
     with tempfile.TemporaryDirectory(prefix="ti-rehearse-", dir=base) as work:
         try:
             rehearse(Path(work), account)

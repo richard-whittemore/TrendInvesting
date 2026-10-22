@@ -1906,7 +1906,7 @@ class RealEngineResumeTests(unittest.TestCase):
         work = tempfile.TemporaryDirectory()
         self.addCleanup(work.cleanup)
         root = Path(work.name)
-        sockets = tempfile.mkdtemp(dir="/tmp")
+        sockets = tempfile.mkdtemp(dir=os.environ.get("TI_TEST_SOCKET_DIR", "/tmp"))
         self.addCleanup(lambda: shutil.rmtree(sockets, True))
         env = dict(os.environ, GOTOOLCHAIN="local")
 

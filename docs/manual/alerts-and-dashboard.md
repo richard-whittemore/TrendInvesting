@@ -20,6 +20,10 @@ you about it, so you do not have to go looking.
 Neither can place, change or cancel an order, and neither talks to the broker.
 They only read.
 
+A third, the triage job on the Mac mini, reads each alert issue and writes
+one comment analysing it, with Claude Code ("Alerts analysed by Claude",
+below). It too places nothing and only reads the server.
+
 ## What they read
 
 A run leaves one of two files, and both programs read either.
@@ -566,6 +570,339 @@ is sent again at the next firing, and an issue is made then.
 Never paste the token into an issue, a chat or the repository. The reporter
 never prints it: it is removed from every message and issue.
 
+## Alerts analysed by Claude
+
+A job on the Mac mini reads each alert issue, asks Claude Code what
+happened, and writes the answer as one comment on the issue, usually within
+minutes of the issue opening. The comment says what happened, which rule
+applied (the ADR or manual section), and which of three kinds it is: a
+**code defect**, a **data problem**, or an **owner action**. For a code
+defect it may also open a fix as a draft pull request. For an owner action
+it says what you must do, and never does it.
+
+**Two repositories.** The alert issues live in a **private** repository of
+their own (the alerts repository, `-alerts-repo`); the code, and every fix
+PR, stay in the public one (the code repository, `-code-repo`). Given only
+one of the two settings, the job uses that repository for both. The
+reporter's `TI_GITHUB_ISSUES_REPO` on the server must name the same private
+alerts repository, so the issues the reporter opens are the ones the job
+reads. A fix PR, being public, links its alert issue by the issue's full
+address (`https://github.com/<owner>/<alerts-repo>/issues/<n>`), which only
+you can open, and quotes none of the issue's text: its words are Claude's,
+through the redactor.
+
+**How it works.** launchd runs `ti-triage` every five minutes, as the
+macOS user `ti-triage` (setup: `docs/runbooks/mac-mini.md`, "2. The alert
+triage job"). Each run is one poll:
+
+1. It first removes any gate run folder older than a day (left by a job
+   killed during a check). Then it lists the alerts repository's issues
+   with the label `alert`, then those with `alert-resolved` (an alert that
+   cleared between two polls has swapped one for the other; "Design note: a
+   resolved issue leaves the alert label", above; listing `alert` first
+   means an issue relabelled between the two listings is in the second, and
+   no other issue or pull request can fill a listing and keep an alert out
+   of reach): the open ones, newest first, opened since the job was first
+   switched on, and the closed ones only if they closed in the last 30
+   days. Issues opened before the job was switched on are left alone, so
+   switching the job on never sweeps up old incidents. Every poll lists all
+   of them, every page; the job's state file records each issue it has handled (analysed,
+   skipped past the daily limit, or failed), and an issue in that record is
+   not read further. A listing read while the reporter relabels an issue can
+   miss one (the pages of `alert` shift by one), so a listing is never taken
+   as proof that an issue was handled: one it missed is not in the record,
+   and the next poll lists and analyses it. An issue closed more than 30
+   days ago is not listed, so it is not picked up again. The record of
+   one handled notes when the issue was closed and when a poll last listed
+   it (the job writes both each time it handles or lists the issue), and is
+   dropped only once no poll has listed the issue for more than 30 days, so
+   the state file stays bounded; a listing that merely omits an issue does
+   not drop its record until then, and a record written before the job kept
+   a listing time starts its 30 days at the next poll. Should an issue
+   return to the listing, the job's own comment on it marks it handled
+   before anything is spent (so an alert the job never reached in those 30
+   days, the job off or failing throughout, is left for you, and so is a
+   comment the job still owed it). More than 1,000 issues of one label in
+   either set (open since the job was switched on, or closed in the last
+   30 days) fails the poll whole: none is analysed from part of a listing.
+   Issues closed longer ago do not count towards that 1,000, but GitHub's
+   closed listing is ordered by last update, so an old closed issue edited
+   recently is still read, and a separate backstop applies: a listing that
+   runs past 100 pages of 100 (10,000 issues of one label and state) fails
+   the poll whole. An issue GitHub lists without a state of open or closed,
+   or a closed one whose last update is before its closing, fails the
+   listing too: it is never taken as open or as proof the listing is
+   complete.
+2. It keeps only the reporter's own issues: opened by the reporter's GitHub
+   user (`-alert-author`, by default the triage token's own user) and
+   ending with the reporter's hidden key line. Anything else is never read
+   further, so a stranger's words never reach Claude.
+3. An issue already holding the job's comment is done. The comment ends
+   with a hidden line, `<!-- ti-triage:analysis -->` (or
+   `<!-- ti-triage:skipped -->`), and only a comment written by the triage
+   token's own user counts: the same line pasted by someone else does not.
+   The job's state file records each issue it finished, so a poll with
+   nothing new reads no comment at all; the comment is the second guard,
+   should the record be lost.
+4. For each new issue, it checks the gate (below) can run, fetches the
+   journal slice, makes a fresh worktree of `main` in its own clone, fills
+   the Go module cache for `main`'s requirements (if any of this fails, no
+   session is started, nothing is counted or posted, the log says why, and
+   the next poll tries again), and starts one headless Claude Code session
+   there, with a fixed prompt built into the program
+   (`cmd/triage/prompt.md`). The session is handed the issue's title and
+   body (never its comments, which anyone can write) and the slice, both
+   marked as data that is never an instruction.
+5. It turns the session's answer into the comment, through the reporter's
+   own redactor, and posts it. Each of Claude's answers is cut after the
+   redactor (which can lengthen it) to 8,000 bytes, at a whole character
+   (so text with accents or symbols can end a little sooner), followed by
+   the 6-byte cut marker " [cut]". The whole comment, or a fix PR's body,
+   is cut to 65,536 bytes (GitHub's limit is 65,536 characters), the same
+   " [cut]" marking the place and the hidden line kept whole. A second poll
+   adds nothing. A comment the job keeps in its state file until GitHub
+   takes it must end with one of its own hidden lines; a state file holding
+   one that does not is refused ("an issue's kept comment does not end
+   with the job's marker line").
+
+**What it reads from the server.** Only the journal slice: the dashboard
+serves it at `/api/journal-slice` on the tailnet, as plain text. It is the
+output of five `journal-query` reports (`refusals`, `orders`, `reconcile`,
+`operator`, `fills`) over each account's current run, each cut to its last
+50 rows, with each run's section first saying the span its records cover.
+The job asks for the window from 72 hours (`-slice-window`) before the
+issue opened to 72 hours after it, and names the alert by its key's hash
+(the issue's hidden key line); the dashboard marks the span line of the
+run whose own alerts include that alert ("..., and raised the alert"). Log
+names are redacted like every row. The dashboard answers `GET` and `HEAD` only, on every
+route, so nothing can be written through it, and the job sends no password,
+token or cookie to fetch it: it holds no credential for the server at all.
+
+The slice carries **no figure**: the dashboard leaves out every withheld
+column (sizes, prices, balances, accounts and the like) and removes every
+figure and identifier left, with the reporter's own redactor, so it is no
+wider than the dashboard's page. The job then passes the slice and the
+issue through the same full redactor again before the session sees them:
+no account id, token, Tailscale host, this Mac's names or figure reaches
+Claude, and so none can reach Anthropic, a test, a commit or a push. Dates
+and words stay. The analysis works from what happened, not from the
+amounts.
+
+The job checks the slice covers the alert: the run that raised it, the
+alert's own account's, must have begun before the issue opened and reach
+into the window; another account's run never counts. If it does not (the
+run was replaced since, say, or the alert is not one a journal raises),
+the session is told so instead of being
+handed rows of another run, and the comment says "**Journal slice.** The
+journal slice did not cover the alert's run and time".
+
+**What the session and the gate can and cannot do.**
+
+The session (Claude Code, as `ti-triage`):
+
+- **Can** read and search the worktree, edit files in it, and ask for
+  exactly `go test ./...`, `go vet ./...`, `gofmt -l .`, `git diff`,
+  `git status`, `git log -n 100` and `git show`, with no other flag, each
+  through the job's own program (`ti-triage tool go-test` and so on: the
+  only command lines allowed). That program runs nothing itself: it sends
+  the command's name, and nothing else, to the job over a socket in a
+  folder only `ti-triage` can open, and prints the answer. The job,
+  outside the session's sandbox, runs that name's fixed command: `go test`,
+  `go vet` and `gofmt` in the gate (below), as `ti-triage-gate`, over a
+  copy of the worktree as the session left it, its new files included;
+  the four `git` commands itself, in the worktree, with git's system and
+  global settings cut off and no hook or file-system monitor, so git runs
+  nothing the session wrote. So no code the session wrote ever runs as
+  `ti-triage`, the user that holds the Claude token. Which cancellations count:
+  a command the session gives up on (Claude Code's own time limit for a
+  command, or the session's deadline) while the session's own command
+  (`go test`, `go vet`, `gofmt`) runs in the gate is an interrupted
+  command, never a gate outage; it is stopped in the gate too, and the job
+  does not keep the alert for a later try because of it. A cancellation seen
+  before the launcher process (`sudo`) has been started, whether the
+  command had not begun or starting it failed with the session already
+  stopped, is an interruption too. Once that process has started, a
+  cancellation does not excuse a command that left no launch mark: that is
+  a gate outage. Any failure or overrun of a
+  gate-side step is a gate outage, always, whatever the session did
+  meanwhile: reading the objects and making the copy (with its archive),
+  reading the ports in use, the launcher (`sudo`, `sandbox-exec` and `env`
+  starting a command), and ending the gate user's processes after it. Each
+  of the first two steps runs under a time limit of its own, 60 seconds,
+  safely under Claude Code's default two-minute limit for a command, and
+  does not follow the session's cancellation; a step inside another (the
+  ports read for the copy) ends no later than the step around it. The
+  `sudo` that starts the session's own command is part of that command's
+  own time, not a step with a limit of its own. Nothing else is allowed,
+  and in a headless session nothing can be asked: the web, every MCP
+  server, `git commit` and `git push`, `go build`, `gh`, `ssh`, `curl`,
+  `tailscale`, `sudo` and the like are denied.
+- **Cannot** reach the network from any command it runs: every command
+  runs in Claude Code's own sandbox (`--settings`: `sandbox.enabled`, which
+  must be available or the session does not start, no command let out of
+  it, no network domain allowed and no Unix socket but the job's, writes
+  only in the worktree, reads under `/Users` denied but for the worktrees
+  and the job's program, and the token folders unreadable). The session runs in a
+  process group of its own, ended whole at its time or the job's stop. Its file tools cannot leave the
+  worktree (`--restricted`, and reads outside the working folder are
+  blocked). Your own Claude Code settings are not loaded.
+- **Cannot** use a GitHub token, an SSH key, a git credential helper or an
+  Anthropic API key: none is in its environment (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN` and any key helper are cleared; git's system and
+  global settings are cut off, so the macOS keychain is never asked; `gh`
+  points at a configuration that does not exist).
+- **Holds** one secret: the Claude token, in Claude Code's own
+  environment, which is how it signs in and bills your subscription.
+  Nothing the session wrote can read it: its tests run as
+  `ti-triage-gate`, which cannot read another user's processes or files,
+  and the only program the session's commands start as `ti-triage` is the
+  job's own wrapper, which reads nothing and runs nothing (Claude Code's
+  sandbox also unsets the token for it). What remains: Claude Code itself,
+  and the model's own words, which the job passes through its redactor
+  (the token's text is removed from everything it posts or pushes; an
+  encoded copy of a token the model never sees is not a risk it can pose).
+- **Never** performs an owner action. It has no way to: the job holds no
+  SSH key and no login for the server, the broker or the secrets file, and
+  the slice is read-only. An owner action is stated in the comment under
+  "What you must do", in the runbook's words, and left to you.
+- **Never** merges, marks a pull request ready, asks for a review, or
+  mentions anyone: every `@` mention is taken out of what it writes, so it
+  never calls `@coderabbitai` or `@greptileai`.
+
+The gate (the code the session wrote, when the job tests a fix):
+
+- **Runs** as a second macOS user, `ti-triage-gate`, with a group of its
+  own (never the job's user, never root: the job checks), which cannot read
+  `ti-triage`'s home or its token folder, through one fixed `sudo` rule,
+  inside `sandbox-exec` with a profile that denies the network except
+  loopback (so a test's own local servers work; DNS is denied too), and on
+  loopback every port another program on the Mac listens on when the
+  command starts and IB Gateway's and TWS's API ports (4001, 4002, 7496,
+  7497); every Unix socket but those in its run folder and its run's own
+  socket folder (`/tmp/tig-<run>`, named to the tests in
+  `TI_TEST_SOCKET_DIR`), so no host service's socket under `/tmp` is in
+  reach; every write outside its run folder and the shared temporary
+  folders; and every read under `/Users` but its run folder, the module
+  cache, the vulnerability database, the golden folder and the Go
+  toolchain. The ports in use are read again just before each command.
+  What remains: a program that starts listening on loopback while a
+  command runs (up to `-check-timeout`, 45 minutes) is not denied to that
+  command; IB Gateway's ports are always denied, so what is left is
+  whatever else you run on the Mac mini's loopback during a check.
+- **Runs** over a fresh copy of one commit (a check's), or of the
+  worktree as the session left it (the session's own `go test`, `go vet`
+  and `gofmt`, in one run for the whole session, so its build cache
+  serves its next command), which the gate user itself
+  unpacks and makes a git repository, so git never refuses it as another
+  user's; the job starts `sudo` from `/` and the gate user enters the copy
+  (`env -C`), since the copy is the gate user's alone; never in the job's clone or worktree, with an environment the job builds whole: an empty home, the
+  module cache read-only and offline (`GOFLAGS=-mod=readonly`,
+  `GOPROXY=off`), Go's vulnerability database from a file, and no token of
+  any kind. Afterwards every process the gate user still runs is ended
+  (`pkill -KILL -U` with the gate user's own UID, the only target the job
+  ever gives it, after `sudo -l` confirms the rule allows exactly that),
+  the job checks with `ps` that none is left (a process still listed is
+  sent the same `pkill` once more, then checked again), and the copy is
+  removed. If they cannot all be ended, or `ps` cannot list them (it fails
+  or runs out of time), the command does not count as passed: the gate is
+  unavailable for that run, and for a session's own command the issue is
+  tried again later, whatever the session answered.
+- **Checks** exactly the tree that is pushed: the job writes the copy's
+  archive itself from git's objects, file by file, so a `.gitattributes`
+  the session wrote (`export-ignore`, `export-subst`) cannot leave a file
+  out of the copy or change one. It writes each archive into a fresh folder
+  of its own that the gate user can read but not change, and the run
+  folder is sticky, so nothing the gate's code left there (a link where the
+  archive was) can turn the job's write onto a file of the job's.
+- **Cannot** reach either token, the network, the job's state, or the
+  clone the job pushes from. If the gate user, `sandbox-exec`, the `sudo`
+  rule or the gate's folder is missing or wrong, no session is started,
+  nothing is spent, and the log says "gate unavailable"; the issue is
+  analysed once the gate runs. If the gate cannot run a fix's red or green
+  check (its run folder, the commit's copy, `sudo`, `sandbox-exec` or `env`
+  failing, the check's program not on the gate's `PATH`, or the gate
+  user's processes not all ended after it), that is the gate's failure,
+  never the change's (each command marks itself started, as the gate user,
+  just before it runs; one with no mark never ran): the issue is
+  analysed again at the next poll, once; a second time, the analysis is
+  posted with "No fix PR was opened: gate unavailable".
+
+**What a comment holds.** "Triage", then **What happened**, **Which rule
+applied**, **Kind**, then **Journal slice** if the slice did not cover the
+alert, and for an owner action **What you must do**, or for a code defect
+**Fix**. Every word Claude wrote goes through the same redactor as the alert
+issues ("What is kept out", above): no secret, account id, token, Tailscale
+host or figure reaches the comment; only dates and ADR numbers keep their
+digits. The one thing not redacted is the link to a fix PR, which the job
+builds from GitHub's own answer. Each of Claude's answers is cut at 8,000
+bytes, at a whole character, followed by the 6-byte cut marker " [cut]".
+
+**A code defect's fix.** Only for a code defect, the session may change the
+worktree, tests first. The job then takes the change through the
+repository's normal flow, mechanically, and opens it only if every step
+passes:
+
+1. Every changed file must be eligible: a fix is only `*.go` files under
+   `cmd/`, `internal/` and `transport/`, and files under `docs/`; its tests
+   only `*_test.go` files and `testdata/` fixtures under those folders. A
+   change touching anything else (the Makefile, scripts, CI configuration,
+   `.claude/`, `deploy/`, `go.mod`, `go.sum`) or holding a binary file, a
+   link or an oversize file is not opened, and neither is one with no test
+   or only tests.
+2. It commits the tests alone, then the rest, as `TrendInvesting triage`.
+3. **Red.** In the gate, at the tests' commit, it runs `go test -run` over
+   the test functions the tests' commit adds. One of them must **fail by
+   name**: a test that passes, a test file that does not compile, a
+   failure of some other test, a timeout or a commit adding no test
+   function is not red, and a build failure anywhere in the output counts,
+   even one long before the end the job keeps. **Green.** In the gate, at the fix's commit, it
+   runs `-check-cmd` (default `make check`), which must **pass**.
+4. It checks the commits' messages, every path they add, rename or remove,
+   and every added line with the reporter's identifier rules, and pushes
+   nothing that holds an account id, a token, a secret or a host name, or
+   any binary file, which no line check can read.
+5. It pushes the branch `triage/alert-<issue>` to the code repository
+   (never forced, never to `main`) and opens a **draft** pull request into
+   `main`, whose body links the alert issue and says the tests came first.
+   The comment links it.
+
+The draft then waits for you: mark it ready to start the review bots and
+the merge gate as for any other PR, or close it. When any step fails, the
+comment's **Fix** line says which, and nothing is opened.
+
+**What it costs, and the cap.** A poll that finds no issue without its
+comment makes no model call; it only lists issues on GitHub. Each issue gets
+one session: the call is recorded in the state file, and synced to disk,
+before it is made, so a run that dies during it does not make it again (the
+issue then gets "triage failed: the analysis did not finish"). The one
+exception is the job's own stop: a session ended by a SIGTERM or launchd's
+`bootout` (an upgrade, say) leaves no comment, and the next poll analyses
+the issue again, once; stopped a second time, it is spent (a gate that
+could not run a fix's checks shares that one retry). A session is
+bounded by `-max-turns` (default 60) and `-claude-timeout` (default 20
+minutes). At most `-daily-cap` sessions (default 10) are made in a New York
+day, counted on the day of each call, read once the session's preparation
+is done, immediately before it starts; past it, each new issue gets the
+comment "triage skipped: daily limit" once, and is never analysed later.
+A session uses the Claude subscription of the login it is given
+(`-claude-token-file`), never a pay-per-use key.
+
+**Switching it off.** Create the file `OFF` in the job's folder, as the
+`ti-triage` user: `sudo -u ti-triage touch /Users/ti-triage/triage/OFF`.
+Every poll after that reads nothing, calls nothing and writes nothing, and
+says "triage: off" in its log. Delete the file to switch it back on; issues
+opened while it was off are then analysed (each within the cap). To stop
+launchd starting it at all, `sudo launchctl bootout
+system/com.trendinvesting.triage`; to start it again, `sudo launchctl
+bootstrap system /Library/LaunchDaemons/com.trendinvesting.triage.plist`.
+
+**Its log.** `/Users/ti-triage/triage/triage.log`. It holds errors and the
+job's notices only: a poll that fails names the issue and why ("triage:
+issue #41: GitHub answered 502 Bad Gateway"), and the next poll tries
+again. A quiet log does not show the job is running (launchd's `print`
+shows its last exit and runs), nor that nothing was analysed (the issues'
+comments show that). Its rows are in "The triage job", below.
+
 ## Running the reporter
 
 On the server it runs as `ti-reporter@boost.service`, started by its timer,
@@ -633,6 +970,21 @@ On the server it runs as `ti-dashboard.service`:
 Port 8088 is the program's default, the unit's, and the one the Lightsail
 runbook publishes to your tailnet (`sudo tailscale serve --bg 8088`). It reads
 no secret and is given none.
+
+Besides the page and `/api/summary.json`, it serves `/api/journal-slice`:
+the output of `journal-query`'s `refusals`, `orders`, `reconcile`,
+`operator` and `fills` over each account's current run, each cut to its
+last 50 rows, as plain text, headed by the log's file name (never its
+path) and the span its records cover (`## <log>: covers <first> to
+<last>`). It takes an optional window, `from` and `to` as RFC 3339 times
+(`?from=2026-10-19T15:00:00Z&to=2026-10-22T15:00:00Z`), and keeps the rows
+of the days it touches; a malformed window is answered 400. It carries no
+figure: withheld columns are left out and every figure and identifier left
+is removed, as in an alert issue, so it shows no more than the page. It is
+what the triage job reads ("Alerts analysed by Claude", above); like every
+route, it answers `GET` and `HEAD` only. The tailnet's policy admits only
+your devices and the Mac mini to it (`docs/runbooks/lightsail-deployment.md`,
+step 12).
 
 `-engine-dir` names the folder the engine keeps its logs in. On every request
 the page finds the account's current run there, the newest link of the chain
@@ -1334,6 +1686,32 @@ passes `-clock-check`.
 | It will not start: "dashboard: -cash-ledger ... must be SOURCE=PATH ...", "... names ..., which is no -journal or -engine-dir", "... is given twice for ..." or "... names no ledger file" | It refuses to guess which account a ledger belongs to; a `-journal`'s ledger is always named | Name each ledger as `SOURCE=PATH` with SOURCE exactly the `-engine-dir` or `-journal` it belongs to ("Running the dashboard", above) |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 
+### The triage job
+
+`/Users/ti-triage/triage/triage.log` on the Mac mini shows every poll's
+error and the job's notices; a quiet log proves neither that the job runs
+nor that nothing was analysed ("Its log", above).
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| No triage comment appears on a new alert issue | Possible causes: the job is off (the `OFF` file, or launchd's job is not loaded), the Mac mini is asleep or off the tailnet, the token expired, or the issue is not the reporter's (another author, or no hidden key line), or it was opened before the job was first switched on. The alert itself is unaffected: PagerDuty and ntfy have it | Read the log. `sudo launchctl print system/com.trendinvesting.triage` shows whether launchd runs it. Check `-alert-author` names the reporter's GitHub user if the two tokens belong to different users |
+| "triage: off (/Users/ti-triage/triage/OFF exists); nothing read, nothing written" in the log | Every poll does nothing while the file is there | Delete the file to switch the job back on |
+| "triage skipped: daily limit" on an issue | The day's `-daily-cap` sessions were made, so this issue was not analysed, and never will be | Read the alert and its journal yourself. Raise `-daily-cap` in the plist only if the cost is worth it |
+| "triage failed: ..." on an issue (the analysis failed, ran past its time, named no known kind, or did not finish) | That issue's one session is spent; it is not tried again | Read the alert and its journal yourself, and the log for the reason |
+| "triage: issue #N: no session was started, and the issue is tried again at the next poll: gate unavailable: ..." in the log | No session was started and nothing was spent: the gate's user `ti-triage-gate` (a user of its own, not `ti-triage`, not root), `/usr/bin/sandbox-exec`, the `sudo` rule (both its lines: `sudo -l` must allow the `pkill` line exactly), `netstat`, or the gate's folder (`-gate-dir`, the job's own, mode 750) is missing or wrong, and the gate never runs the session's code without them | Set the gate up again (runbook, "2. The alert triage job", steps 2 and 3); the issue is analysed at the first poll after |
+| "triage: issue #N: the repository could not be prepared ..." in the log | The fetch of `main` or the module downloads failed: no session was started and nothing was spent | Check the Mac mini's network; the next poll tries again |
+| "triage: issue #N: gate unavailable: ..." in the log after a session | The gate could not run a fix's red or green check, or serve the session's own commands (its run folder or the job's socket failing), or end the gate user's processes after one: the issue is analysed again at the next poll, once; a second time its comment says "No fix PR was opened: gate unavailable" | As for the gate's row above |
+| "**Journal slice.** The journal slice did not cover the alert's run and time" in a comment | The run that raised the alert, the alert's own account's, does not span it in the slice (the run was replaced since, the dashboard serves another account, or the alert is one no journal raises, such as a failed unit), so the session was told and worked from the alert alone | Read that run's journal yourself with `journal-query` on the server |
+| "**Fix.** No fix PR was opened: ..." in a comment | The session found a code defect, but its change failed a step of the gate: a file outside the Go code and `docs/`, a binary, no test, only tests, no new test function, the new test did not fail by name before the fix, the check failed, it held an identifier, or the push or the PR failed. Nothing was opened; if the push worked, the branch `triage/alert-<issue>` is on GitHub | Treat it as a defect report: fix it the normal way, or delete the branch |
+| "triage: issue #N: the job was stopped during the session" in the log | The job was stopped (a SIGTERM, or `launchctl bootout`) while Claude worked: no comment, and the next poll analyses that issue again, once | Nothing; if it happens twice the issue gets "triage failed: the analysis did not finish" |
+| "triage: list the alert issues: more than 1000 issues carry the label ... and are open and opened since the job began" (or "... and are closed in the last 30 days") in the log | More than 1,000 issues of one label in one set, open since the job was first switched on or closed in the last 30 days: no poll analyses anything, since the job does not act on part of a listing. Issues closed longer ago do not count towards the 1,000, but the listing as a whole also fails past 100 pages of 100 | Something may be raising alerts in a loop, so look at the reporter first. Then move `/Users/ti-triage/triage/state.json` aside: the next poll starts a new record from that moment, issues already analysed are recognised by their comments, and older ones are left for you |
+| A draft PR from `triage/alert-<issue>` | The job's proposed fix, tests first, never merged by the job | Review it; mark it ready to start the review bots and the merge gate, or close it |
+| "triage: the state file is not understood, so nothing is done (...)" or "the state file cannot be read" | No poll runs: the record does not parse, or lacks a field or breaks a rule (no start, a day that is not a date, no count of calls or one below zero, no issues' records), and without it the job cannot tell which issues it already made a session for | Move `/Users/ti-triage/triage/state.json` aside. The next poll starts a new record: issues already analysed are recognised by their comments; one opened before that poll is left alone |
+| "triage: issue #N: GitHub answered 401 Unauthorized" (or 403, 404) | The poll writes nothing for that issue; the next poll tries again | The triage token expired, was revoked, or lacks a permission (Issues on the alerts repository; Contents and Pull requests on the code repository): make a new one (runbook, step 5) |
+| "triage: another poll is running; this one does nothing" | A poll started by hand while launchd's ran, or the other way round | Nothing |
+| "triage: -token-file must be a file only you can read (chmod 600)" | The job does not start | `chmod 600` the file, as `ti-triage` |
+| A comment saying "The journal slice could not be fetched" | The dashboard could not be reached over the tailnet, so the analysis used the alert issue alone | Check the dashboard (`systemctl status ti-dashboard`) and that the Mac mini is on the tailnet |
+
 ## What backs this
 
 - ADR 0019, amendment of 2026-09-24, "Alerting": what alerts, once per
@@ -1393,6 +1771,45 @@ passes `-clock-check`.
   `TestTheCostsCardSitsUnderTheEquityComparisonWithEveryPeriodAndKind`,
   `TestTheDashboardTotalsTheCostsLedgerBesideEachAccountsCashLedger` and
   `TestTheServiceFileServesTheBoostLogOnTheOnePort`.
+- Tests in `cmd/triage`, among them
+  `TestAFakeAlertIssueGetsOneAnalysisCommentAndASecondPollAddsNothing`,
+  `TestAPollWithNothingNewSpendsNoModelUsage`,
+  `TestTheDailyCapSkipsWithOneCommentAndNoModelCall`,
+  `TestAResolvedIssueNeverAnalysedIsAnalysed`, `TestTheOffFileStopsTheJob`,
+  `TestAnInvocationIsRecordedBeforeTheModelIsCalled`,
+  `TestTheStateIsSyncedBeforeTheModelIsCalled`,
+  `TestAnInterruptedSessionLeavesTheIssueEligibleOnce`,
+  `TestTheDailyCapCountsTheDayOfEachCall`,
+  `TestAnIncompleteOrInvalidStateFileStopsTheJob`,
+  `TestHandledIssuesAreNeverReadAgain`,
+  `TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItWasLastListed`,
+  `TestARecordWhoseIssueDisappearsFromListingsIsBounded`,
+  `TestAClosedIssueHandledJustBeforeDay30KeepsItsRecordUntilUnlistedFor30Days`,
+  `TestAnAlertShiftedPastAPageByARelabelIsAnalysedAtTheNextPoll`,
+  `TestFieldsThatGrowUnderRedactionStillFitOneComment`,
+  `TestADefectGoesThroughTheGateToADraftPullRequestOnGitHub`,
+  `TestAlertsAreListedFromOneRepositoryAndThePROpenedInAnother`,
+  `TestTheGateCommitsTheTestFirstRedThenTheFixGreenAndPushesTheBranch`,
+  `TestTheRedCheckMustShowTheNewTestFailingByName`,
+  `TestTheGateCommandRunsAsItsOwnUserInASandbox`,
+  `TestTheSandboxDeniesTheNetwork`, `TestAnUnavailableGateRefuses`,
+  `TestALinkTheGatePlantsNeverRedirectsTheJobsWrites`,
+  `TestTheGatesCopyIgnoresTheSessionsExportRules`,
+  `TestAGateFailureDuringTheSessionsCommandsIsTheGates`,
+  `TestAnAlertOpenedBetweenTheTwoListingsIsInTheNext`,
+  `TestOnlyGoCodeAndDocsAreOpenedAsAFix`,
+  `TestThePrePushCheckReadsFileNamesAndRefusesBinaries`,
+  `TestAnOwnerActionIsStatedAndNeverDone`,
+  `TestNoSecretAccountIDOrFigureReachesACommentOrPR`,
+  `TestClaudeIsHandedTheSliceAndTheIssueWithEveryFigureRemoved`,
+  `TestASliceThatDoesNotCoverTheAlertIsSaidSo`,
+  `TestTheSliceIsAPlainGETWithNoCredential`,
+  `TestTheClaudeSessionIsHeadlessWithItsToolsRestricted` and
+  `TestTheSessionRunsInClaudeCodesSandboxWithExactCommands`; in
+  `cmd/dashboard`, `TestTheJournalSliceServesTheJournalQueryReportsOfEachCurrentRun`,
+  `TestTheJournalSliceCarriesNoFigure`,
+  `TestTheJournalSliceTakesAWindowAndSaysWhatEachRunCovers`
+  and `TestEveryRouteRefusesEveryWritingMethod`, which covers the slice.
 - Tests in `internal/report` for the costs block:
   `TestTotalsPerKindForTheMonthTheYearAndSinceTheStart`,
   `TestACommissionAlreadyOnAFillIsNotCountedTwice`,

@@ -302,6 +302,48 @@ So when the corpus asks you to add scenarios, ask of each one whether the previo
 
 `-update-decision-corpus` never overwrites a changed hash for the CURRENT version, flag or no flag: that refusal is the tripwire itself. If it fired unexpectedly, the change was not the refactor it looked like; find out what state it changes before touching `RulesVersion`.
 
+## Ending processes
+
+A program that ends processes ends only the ones it started, never "every
+process it may signal" (owner rule, 2026-10-22, after a test's stand-in ran
+`kill -KILL -1` as the owner and ended every program of the owner's
+session):
+
+- A command started in a group of its own (`Setpgid`) is ended with
+  `procgroup.Kill(pid)` (`internal/procgroup`), which refuses any pid of 1 or
+  below, so its target is never -1 (every process) or 0 (the caller's own
+  group). Nothing else calls `kill(2)`.
+- The triage job's gate ends the gate user's processes in one function,
+  `pkillGateUser` (`cmd/triage`), which resolves the gate user's UID and
+  refuses unless it exists, is not the job's own and is not root, asks
+  `sudo -l` whether the gate's fixed rule allows exactly
+  `pkill -KILL -U <that UID>`, runs it, and fails while `ps` still shows a
+  live process of that UID's; a failure makes the gate unavailable, never
+  a passed check. No other source names `kill`, `pkill` or `killall` as a
+  command, and none passes `-1` beside one.
+- A test never reaches either for real, and signals nothing itself (it
+  asks `ps` whether a process it started still runs): a stand-in `sudo` or
+  `sandbox-exec` refuses (exit 97) any command line naming `kill`, `pkill`
+  or `killall` anywhere in any argument, a `sh -c` payload included; a gate
+  built in a test ends its processes through a fake, and `pkillGateUser`'s
+  own test hands it a stand-in `sudo` that records its arguments and runs
+  nothing.
+
+`internal/procgroup`'s `TestNoKillOutsideTheGuardedFunctions` fails the
+build if any source under `cmd/`, `internal/` or `transport/`, tests and
+shell scripts included, calls `kill(2)` other than through
+`procgroup.Kill` (`syscall`'s or `x/sys/unix`'s `Kill`, under any import
+name), or names a signalling program as a command (a path to one, one
+started by `exec`, or one followed by its arguments, in any string a test
+writes as a script or hands to `sh -c`) outside its short list of guarded
+declarations; `TestTheAuditCatchesEverySeededKill` proves it catches each
+form, the exact `kill -KILL -1` among them.
+
+A test that binds a Unix socket under `/tmp` (for a path short enough for
+the socket's bound) makes its folder under `TI_TEST_SOCKET_DIR` when that
+is set and not empty: the triage gate allows sockets only in each run's own
+folder.
+
 ## Package boundaries
 
 - `cmd/` contains executable composition only.
@@ -365,7 +407,8 @@ Bot reviews are metered, so:
   Skipped reviews are free. Scoping by path therefore saves money only on PRs
   that touch no safety path; a mixed PR still costs a full review. Listed in
   `ignorePatterns` ahead of need: `cmd/reporter/`, `cmd/dashboard/`,
-  `internal/report/`, `/tools/` (not all exist yet). The Turtle-only packages
+  `cmd/triage/`, `internal/report/`, `internal/procgroup/`, `/tools/` (not
+  all exist yet). The Turtle-only packages
   `internal/strategy`, `internal/sizing`, `internal/indicator` and
   `internal/universe` are ignored because they are off the live path (owner
   approved their retirement in principle, 2026-10-17); `/transport/` is the live

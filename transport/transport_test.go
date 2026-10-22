@@ -58,7 +58,12 @@ func awaitDecider(t *testing.T, entered <-chan struct{}, exchange <-chan error) 
 // they assert.
 func socketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "tt-")
+	// The triage gate names its run's own socket folder (docs/development.md, "Ending processes").
+	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
+	if !ok || root == "" { // set but empty is unset
+		root = "/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "tt-")
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
 	}

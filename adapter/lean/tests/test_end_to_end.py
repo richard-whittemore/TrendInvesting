@@ -96,7 +96,7 @@ class EndToEndTests(OrderTestCase):
     def serve(self):
         """Start cmd/engine on a socket in a private directory short enough
         for sun_path (ADR 0014, consequence 2)."""
-        socket_dir = tempfile.mkdtemp(dir="/tmp")
+        socket_dir = tempfile.mkdtemp(dir=os.environ.get("TI_TEST_SOCKET_DIR", "/tmp"))
         self.addCleanup(shutil.rmtree, socket_dir, True)
         self.socket = os.path.join(socket_dir, "s.sock")
         self.journal = os.path.join(self.work, "journal-{}.jsonl".format(self.id().rsplit(".", 1)[-1]))
