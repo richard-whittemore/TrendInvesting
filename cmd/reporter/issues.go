@@ -651,8 +651,13 @@ func githubIssuesFrom(getenv func(string) string, client *http.Client) (sender, 
 	if err := checkAPIURL(api, getenv("TI_GITHUB_API_ALLOW_HOST")); err != nil {
 		return nil, err
 	}
+	// The token goes only to the address checked above: a redirect is
+	// refused, never followed (net/http would re-send the header to the same
+	// host over http or to its subdomains).
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &issuesSender{
-		tracker:  &githubTracker{api: strings.TrimRight(api, "/"), base: strings.TrimRight(api, "/") + "/repos/" + owner + "/" + name, token: token, client: client},
+		tracker:  &githubTracker{api: strings.TrimRight(api, "/"), base: strings.TrimRight(api, "/") + "/repos/" + owner + "/" + name, token: token, client: &noRedirect},
 		redactor: report.NewRedactor(append([]string{token}, hostLiterals()...)),
 		timeout:  client.Timeout,
 	}, nil
@@ -796,7 +801,9 @@ func (g *githubTracker) callURL(ctx context.Context, method, target string, in, 
 	}
 	if int64(len(answer)) > limit {
 		// A prefix is never parsed as the whole answer.
-		return nil, fmt.Errorf("GitHub's answer is larger than %d bytes (%w)", limit, errUnavailable)
+		// It fails this one call: only the listing, which note remembers, and
+		// the channel's identity take the rest of the firing with them.
+		return nil, fmt.Errorf("GitHub's answer is larger than %d bytes", limit)
 	}
 	if resp.StatusCode/100 != 2 {
 		// A limit GitHub applies, or a fault of its own, is the channel's
@@ -1074,7 +1081,7 @@ func withIssueEvidence(senders []sender, journalPath string) {
 // journal that cannot be read is said so; the alert still opens its issue.
 func issueEvidence(path string, r report.Redactor) string {
 	if info, err := os.Stat(path); err == nil && info.Size() > maxEvidenceJournal {
-		return "The journal is too large to show here; it is on the server."
+		return evidenceWithheld
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -1086,7 +1093,7 @@ func issueEvidence(path string, r report.Redactor) string {
 		return "The journal could not be read for this issue."
 	}
 	if len(raw) > maxEvidenceJournal {
-		return "The journal is too large to show here; it is on the server."
+		return evidenceWithheld
 	}
 	_, envelopes, err := report.Load(raw)
 	if err != nil {
@@ -1176,9 +1183,15 @@ func withRedaction(senders []sender, secrets []string) {
 }
 
 const (
-	// maxAnswerBytes is the most one GitHub answer is read to: a listing page
-	// of 100 issues, each of up to maxIssueText characters of up to 4 bytes.
-	maxAnswerBytes = 4 * 100 * maxIssueText
+	// maxAnswerBytes is the most one GitHub answer is read to: a page of 100
+	// items, a listing of issues or a page of comments, each of up to
+	// maxIssueText characters in its body. A character is at most 4 bytes
+	// raw, but 6 once JSON escapes it (a control character is \u00XX), so
+	// each body is counted at 6 bytes a character, plus itemAllowanceBytes
+	// for the item's own fields (its user, reactions and URLs).
+	maxAnswerBytes = 100 * (6*maxIssueText + itemAllowanceBytes)
+	// itemAllowanceBytes is what one item of a page takes besides its body.
+	itemAllowanceBytes = 16 << 10
 	// maxEvidenceJournal is the largest journal read into memory for an
 	// issue's evidence.
 	maxEvidenceJournal = 64 << 20
@@ -1186,6 +1199,9 @@ const (
 	// evidence.
 	maxEvidenceLine = 4096
 	evidenceLineCut = " [cut]"
+	// evidenceWithheld is the issue's evidence when the journal is over
+	// maxEvidenceJournal.
+	evidenceWithheld = "evidence withheld: journal over the limit"
 )
 
 // boundedLine is s cut to maxEvidenceLine bytes at a whole character, and

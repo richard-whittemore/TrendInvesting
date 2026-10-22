@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -451,7 +453,8 @@ func TestAnAnswerOverTheReadLimitIsAnError(t *testing.T) {
 	}
 }
 
-// A journal too large to hold in memory is not read for the issue's evidence.
+// A journal too large to hold in memory is not read for the issue's evidence,
+// and the issue's body says the evidence is withheld.
 func TestAJournalOverTheEvidenceLimitIsNotRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal")
 	f, err := os.Create(path)
@@ -462,9 +465,88 @@ func TestAJournalOverTheEvidenceLimitIsNotRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = f.Close()
-	got := issueEvidence(path, report.NewRedactor(nil))
-	if !strings.Contains(got, "too large") {
-		t.Fatalf("evidence of an oversized journal: %q", got)
+	const note = "evidence withheld: journal over the limit"
+	if got := issueEvidence(path, report.NewRedactor(nil)); got != note {
+		t.Fatalf("evidence of an oversized journal: %q, want the one-line note %q", got, note)
+	}
+	gh := &fakeGitHub{}
+	s := githubChannel(t, fakeGitHubServer(t, gh), time.Second)
+	withIssueEvidence([]sender{s}, path)
+	if err := s.send(haltAlert(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if issues := gh.snapshot(); len(issues) != 1 || !strings.Contains(issues[0].body, note) {
+		t.Fatalf("the issue does not say its evidence is withheld: %+v", issues)
+	}
+}
+
+// One issue's comments page over the read limit fails that one delivery. It
+// does not trip the channel's latch, so a second alert in the same firing is
+// still delivered (only the listing, the identity and transport failures are
+// remembered for the firing).
+func TestAnOversizedCommentsPageFailsOnlyThatDelivery(t *testing.T) {
+	gh := &fakeGitHub{}
+	url := fakeGitHubServer(t, gh)
+	a, b := haltAlert(), haltAlert()
+	b.Key = "reconciliation:x@joint"
+	for _, x := range []report.Alert{a, b} {
+		if err := githubChannel(t, url, time.Second).send(x, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gh.mu.Lock()
+	gh.issues[0].comments = []string{strings.Repeat("x", 20000)}
+	gh.issues[0].strangers = map[int]bool{0: true}
+	gh.mu.Unlock()
+	s := githubChannel(t, url, time.Second)
+	s.tracker.(*githubTracker).maxAnswer = 8192
+	err := s.send(a, 1)
+	if err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("the oversized comments page was not refused as such: %v", err)
+	}
+	if err := s.send(b, 1); err != nil {
+		t.Fatalf("a second alert in the firing failed on the first one's page: %v", err)
+	}
+	if issues := gh.snapshot(); len(issues[1].comments) != 1 {
+		t.Fatalf("the second alert's repeat was not delivered: %d comments", len(issues[1].comments))
+	}
+}
+
+// The limit is the largest legitimate page: 100 items, each of up to
+// maxIssueText characters, every one escaped at the widest the JSON encoding
+// goes, plus the item's own fields.
+func TestTheReadLimitHoldsAPageOfEscapedBodies(t *testing.T) {
+	page := make([]map[string]string, 100)
+	for i := range page {
+		page[i] = map[string]string{"body": strings.Repeat("\x01", maxIssueText)}
+	}
+	raw, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) > maxAnswerBytes {
+		t.Fatalf("a legitimate page of %d bytes is over the read limit %d", len(raw), int64(maxAnswerBytes))
+	}
+}
+
+// The token is sent only to the address that was checked: a redirect is
+// refused, never followed, so it cannot carry the token to another address.
+func TestARedirectIsNeverFollowed(t *testing.T) {
+	var reached atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(other.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+	if err := githubChannel(t, redirector.URL, time.Second).send(haltAlert(), 0); err == nil {
+		t.Fatal("a redirected answer counted as delivered")
+	}
+	if n := reached.Load(); n != 0 {
+		t.Fatalf("the redirect was followed %d times", n)
 	}
 }
 
