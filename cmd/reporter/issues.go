@@ -699,7 +699,7 @@ func checkAPIURL(api, allow string) error {
 type githubTracker struct {
 	api, base, token string
 	client           *http.Client
-	maxAnswer        int64 // 0: maxAnswerBytes
+	maxAnswer        int64 // tests only: when set, the read limit of every answer in place of its endpoint's own
 
 	mu     sync.Mutex
 	loaded bool
@@ -819,10 +819,13 @@ func (g *githubTracker) callURL(ctx context.Context, method, target string, limi
 		dec := json.NewDecoder(lr)
 		err := dec.Decode(out)
 		if err == nil {
-			// Anything but white space after the value is not an answer.
-			var syntax *json.SyntaxError
-			if _, tail := dec.Token(); tail == nil || errors.As(tail, &syntax) {
+			// Only a clean end after the value is an answer: a token there is
+			// trailing data, and a tail that fails any other way fails the
+			// answer as a cut-off value does.
+			if _, tail := dec.Token(); tail == nil {
 				err = errTrailingData
+			} else if !errors.Is(tail, io.EOF) {
+				err = tail
 			}
 		}
 		switch {
@@ -1238,8 +1241,9 @@ const (
 	// answer is therefore about 3 times its limit: about 69 MiB for a page of
 	// comments (limit 23 MiB), about 230 MiB for the listing (limit 77 MiB),
 	// which only the channel's own issues, written to 65,536 characters at
-	// most, fill. Answers are not kept after they are decoded, so a firing's
-	// peak is that of its largest answer, not the sum of its requests.
+	// most, fill. A firing's peak is the largest answer plus the channel's own
+	// comment bodies kept from every page of one issue's comments (up to 1,000
+	// of up to 64 KiB, about 64 MiB), not the sum of its requests.
 	maxListingAnswerBytes  = listingPageSize * (12*maxIssueText + itemAllowanceBytes)
 	maxCommentsAnswerBytes = commentsPageSize * (12*maxIssueText + itemAllowanceBytes)
 	// maxComments is the most comments of one issue that are read; an issue

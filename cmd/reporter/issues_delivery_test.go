@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -469,6 +471,76 @@ func TestAnAnswerOverTheReadLimitIsAnError(t *testing.T) {
 	gh.mu.Unlock()
 	if listings != 1 {
 		t.Fatalf("the oversized listing was read %d times in one firing, want 1", listings)
+	}
+}
+
+// answerBody serves an answer's bytes, then either a clean end or a transport
+// failure: a connection reset in the tail after the answer.
+type answerBody struct {
+	data  *strings.Reader
+	reset bool
+}
+
+func (b *answerBody) Read(p []byte) (int, error) {
+	if b.data.Len() > 0 {
+		return b.data.Read(p)
+	}
+	if b.reset {
+		return 0, errors.New("read tcp 10.0.0.1:443: connection reset by peer")
+	}
+	return 0, io.EOF
+}
+
+func (b *answerBody) Close() error { return nil }
+
+// answerTransport answers every request with one body.
+type answerTransport struct{ body *answerBody }
+
+func (t answerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{}, Body: t.body, Request: r}, nil
+}
+
+// An answer is one JSON value with nothing after it but white space. Only a
+// clean end after the value makes it an answer: data after the value is a
+// decode fault, and a tail cut off mid-token or failed in transit is the same
+// failure as an answer cut off mid-value (ADR 0019, "Alerting").
+func TestOnlyACleanEndAfterTheAnswerMakesItAnAnswer(t *testing.T) {
+	for _, c := range []struct {
+		name, body  string
+		reset       bool
+		want        string // empty: the answer is taken; else the error's text
+		unavailable bool   // the failure is remembered for the firing
+	}{
+		{name: "a clean answer", body: `[]`},
+		{name: "white space after the value", body: "[]\n \t"},
+		{name: "data after the value", body: `[] x`, want: "not understood"},
+		{name: "a token after the value", body: `[] [`, want: "not understood"},
+		{name: "a cut-off string after the value", body: `[]"x`, want: "did not arrive whole", unavailable: true},
+		{name: "a cut-off literal after the value", body: `[]tru`, want: "did not arrive whole", unavailable: true},
+		{name: "a cut-off number after the value", body: `[]-`, want: "did not arrive whole", unavailable: true},
+		{name: "a transport failure after the value", body: `[]`, reset: true, want: "did not arrive whole", unavailable: true},
+		{name: "an answer cut off mid-value", body: `[{"id":`, want: "did not arrive whole", unavailable: true},
+		{name: "a value of the wrong shape", body: `{}`, want: "not understood"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := &githubTracker{api: "http://github.test", base: "http://github.test", token: "t",
+				client: &http.Client{Transport: answerTransport{&answerBody{data: strings.NewReader(c.body), reset: c.reset}}}}
+			var out []struct {
+				ID int `json:"id"`
+			}
+			_, err := g.call(context.Background(), http.MethodGet, "/x", 1<<20, nil, &out)
+			switch {
+			case c.want == "" && err != nil:
+				t.Fatalf("a complete answer was refused: %v", err)
+			case c.want == "":
+			case err == nil:
+				t.Fatalf("%q was taken as an answer", c.body)
+			case !strings.Contains(err.Error(), c.want):
+				t.Fatalf("error %q, want it to say %q", err, c.want)
+			case errors.Is(err, errUnavailable) != c.unavailable:
+				t.Fatalf("remembered for the firing: %v, want %v (%v)", errors.Is(err, errUnavailable), c.unavailable, err)
+			}
+		})
 	}
 }
 
