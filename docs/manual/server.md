@@ -58,7 +58,7 @@ Two things it never does. It never restarts an engine: a running engine keeps th
 
 `sudo ti-release --rollback` puts the previous build back. It refuses while an engine unit is starting or stopping; wait and run it again. The step-by-step is in `docs/runbooks/lightsail-deployment.md`, "Upgrading: tag, release, `ti-release`".
 
-If the server has no `gh` installed, `ti-release` says it could not check the build attestation and checks the checksums only. Install `gh` on the server to have it checked.
+`ti-release` checks, before it installs anything, that each program matches the release's checksums, that each is a Linux program for this server, and that GitHub's build attestation says it was built by this repository's release workflow from exactly the commit the tag names, so an older release cannot be passed off under a newer tag. That check needs `gh`, which the first install puts on the server; without `gh`, `ti-release` refuses and installs nothing. It also refuses while any engine unit is starting or stopping (it asks again just before it swaps the programs), and treats a dashboard that comes up and then stops within a few seconds as not come back. If any step of the install fails, it puts the build that was current back and records nothing.
 
 ## Where the configuration lives
 

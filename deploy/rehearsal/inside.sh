@@ -576,10 +576,12 @@ test ! -e /etc/systemd/system/ti-flex-boost.service && test ! -e /etc/systemd/sy
 grep -q '"paper_sending_enabled": false' /etc/trend-investing/adapters/boost.json || fail "adapter configuration not created from the example"
 pass "adapter state directory and configuration in place, sending off"
 # ti-release, run against a local fake release (file://) on the programs
-# installed above, with a stand-in systemctl (no systemd runs here) and no gh
-# (so the attestation is reported as not verified). A release of different
-# bytes installs over the installed ones and keeps them as the previous build;
-# --rollback puts them back byte for byte; the engine is not restarted.
+# installed above, with a stand-in systemctl (no systemd runs here) and no gh.
+# Without gh it refuses, installing nothing; with --unverified (this container
+# only) it installs, warning that the attestation was not checked. A release
+# of different bytes installs over the installed ones and keeps them as the
+# previous build; --rollback puts them back byte for byte; the engine is not
+# restarted.
 install -m 0755 /root/dist/ti-engine /opt/trend-investing/bin/ti-engine
 rel=/root/fake-release
 mkdir -p "$rel/v9.9.9"
@@ -596,7 +598,11 @@ STUB
 chmod +x "$ctl_stub/systemctl"
 : >/root/release-ctl.log
 export TI_RELEASE_URL=file:///root/fake-release TI_SYSTEMCTL="$ctl_stub/systemctl" TI_GH=/nonexistent/gh TI_RELEASE_ANY_ARCH=1
-/root/deploy/release.sh v9.9.9 >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release v9.9.9 failed"; }
+if /root/deploy/release.sh v9.9.9 >/root/release.out 2>&1; then fail "ti-release installed without gh"; fi
+cmp "$rel/v9.9.9/ti-engine" /opt/trend-investing/bin/ti-engine >/dev/null 2>&1 && fail "ti-release without gh changed ti-engine"
+test ! -e /opt/trend-investing/releases/current || fail "ti-release without gh recorded a build"
+/root/deploy/release.sh --unverified v9.9.9 >/root/release.out 2>&1 || { cat /root/release.out; fail "ti-release --unverified v9.9.9 failed"; }
+grep -q WARNING /root/release.out || fail "ti-release --unverified did not warn"
 for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
   cmp "$rel/v9.9.9/$b" "/opt/trend-investing/bin/$b" || fail "ti-release did not install $b"
 done
@@ -607,5 +613,5 @@ grep -Eq 'ti-engine@' /root/release-ctl.log && grep -E '^(restart|stop|start|kil
 for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "rollback did not restore $b byte for byte"
 done
-pass "ti-release installs a fake release, restarts only the dashboard, and --rollback restores the previous build"
+pass "ti-release refuses without gh, installs a fake release with --unverified, restarts only the dashboard, and --rollback restores the previous build"
 echo "REHEARSAL COMPLETE"
