@@ -342,8 +342,8 @@ class Connection:
         IBKR echoes every order placed with an openOrder outside any list:
         that row is matched to the placement by its order ID and is no
         stray, so the next read is not pumped quiet for it. A row of any
-        other order with no list outstanding is still a stray (ADR 0019: a
-        list not read in full is unread).
+        other order with no list outstanding, or a later row for this one,
+        is still a stray (ADR 0019: a list not read in full is unread).
         """
         self._placed.add(order_id)
 
@@ -604,7 +604,10 @@ class Connection:
     def _is_echo(self, event):
         """Whether an openOrder row is IBKR's echo of an order this client placed on this session (see placing)."""
         order_id, order = event.args[0], event.args[2]
-        return order_id in self._placed and getattr(order, "clientId", None) == self.config.client_id
+        if order_id in self._placed and getattr(order, "clientId", None) == self.config.client_id:
+            self._placed.discard(order_id)  # taken once: a later row for the ID is a stray
+            return True
+        return False
 
     def _apply_error(self, code):
         if code in (CODE_CONNECTIVITY_LOST, CODE_SERVER_LINK_BROKEN):
