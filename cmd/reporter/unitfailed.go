@@ -375,7 +375,7 @@ func journalLines(out string) []string {
 // and every line of the secrets file.
 func secretValues(getenv func(string) string, secretsFile string) []string {
 	var values []string
-	for _, k := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_PAGERDUTY_URL", "TI_HEARTBEAT_URL"} {
+	for _, k := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_PAGERDUTY_URL", "TI_HEARTBEAT_URL", "TI_GITHUB_ISSUES_TOKEN"} {
 		if v := getenv(k); v != "" {
 			values = append(values, v)
 		}

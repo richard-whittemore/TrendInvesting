@@ -80,7 +80,7 @@ then refuses to start in paper, which is safe, but your edits are gone.
 | File | What it holds | Who reads it |
 | --- | --- | --- |
 | `/etc/trend-investing/ibkr-login.env` (root only, mode 0600) | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
-| `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
+| `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY`, `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
 | `/etc/trend-investing/accounts/boost.env` (root only, mode 0600, in a root-only folder, mode 0700) | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter only (`ti-adapter-boost.service`) |
 
 What each program actually reads today:
@@ -100,6 +100,13 @@ What each program actually reads today:
   outside heartbeat service; that one is optional for the run, but without
   it nothing outside the server notices the server dying
   ("The outside heartbeat", below).
+- The reporter's `github-issues` channel reads `TI_GITHUB_ISSUES_TOKEN`, a
+  fine-grained token with **Issues read and write on the one repository and
+  no other permission**, and `TI_GITHUB_ISSUES_REPO`, that repository as
+  `owner/name`. Both are optional until `github-issues` is in the reporter's
+  `-channel`; the channel is set aside while either is empty and the others
+  still deliver. How to create and rotate the token:
+  [alerts and dashboard](alerts-and-dashboard.md), "Alerts as GitHub Issues".
 
 Never paste a secret into an issue, a pull request, a chat with an agent or
 a command line. Edit these files with `sudo -e`.

@@ -128,8 +128,10 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 			s, err = ntfyFrom(getenv, client)
 		case "pagerduty":
 			s, err = pagerDutyFrom(getenv, client)
+		case issuesChannel:
+			s, err = githubIssuesFrom(getenv, client)
 		default:
-			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty)", c)
+			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty, github-issues)", c)
 		}
 		if err != nil {
 			faults = append(faults, channelFault{channel: name, err: err})

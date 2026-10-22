@@ -88,7 +88,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	flags.SetOutput(out)
 	journalPath := flags.String("journal", "", "path to the account's journal (read only)")
 	statePath := flags.String("state", "", "path to the reporter's own state file of delivered alerts")
-	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty")
+	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty, github-issues (one issue per alert, closed when it resolves)")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	date := flags.String("date", "", "summary date, YYYY-MM-DD, sent once the log records that day's session closed (default: the latest closed session)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
@@ -156,6 +156,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	for _, f := range setAside {
 		failures = append(failures, f.err)
 	}
+	withRedaction(senders, secretValues(getenv, *secretsFile))
 	// systemd is asked once, at the start of the firing, before anything is
 	// delivered: a unit that fails while the firing runs is paged by its
 	// hook, and its page is newer than this sample, so it is never resolved
@@ -197,6 +198,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		label = account
 	}
 	examined := false
+	withIssueEvidence(senders, *journalPath)
 	if refused == nil {
 		var restored, current string
 		restored, current, examined = restoredLogNewer(*journalPath)
@@ -277,6 +279,13 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 				failures = append(failures, err)
 			}
 		}
+	}
+	// A repeating alert the owner has acknowledged closes its issue.
+	if err := closeAcknowledged(senders, alerts, seen); err != nil {
+		failures = append(failures, err)
+	}
+	if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
+		failures = append(failures, err)
 	}
 	// A failed trading unit is paged by the OnFailure hook at the moment it
 	// fails; this firing pages a failure episode the hook missed and resolves

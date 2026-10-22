@@ -298,16 +298,19 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 		if strings.HasSuffix(k, "_SERVER") || strings.HasSuffix(k, "_URL") {
 			return "https://example.org"
 		}
+		if strings.HasSuffix(k, "_REPO") {
+			return "owner/repo"
+		}
 		return "x"
 	}
-	if _, faults, err := buildSenders("ntfy,pagerduty", recording, http.DefaultClient, io.Discard); err != nil || len(faults) != 0 {
+	if _, faults, err := buildSenders("ntfy,pagerduty,github-issues", recording, http.DefaultClient, io.Discard); err != nil || len(faults) != 0 {
 		t.Fatal(err, faults)
 	}
 	// The outside heartbeat's address, read when a firing ends; a stand-in
 	// transport answers, so nothing leaves this machine.
 	pingHeartbeat(recording, &http.Client{Transport: &relay{sent: map[string][]string{}}}, io.Discard)
 	example := readAssignments(t, secretsExample)
-	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_HEARTBEAT_URL"} {
+	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_GITHUB_ISSUES_TOKEN", "TI_GITHUB_ISSUES_REPO", "TI_HEARTBEAT_URL"} {
 		if _, ok := example[need]; !ok {
 			t.Errorf("secrets.env.example has no %s line", need)
 		}

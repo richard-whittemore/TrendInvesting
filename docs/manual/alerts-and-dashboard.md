@@ -228,6 +228,7 @@ Alerts go to real channels. You choose them with `-channel`, comma-separated.
 | --- | --- | --- |
 | `ntfy` | Push to your phone through ntfy. With `TI_NTFY_SERVER` set to **your own ntfy server** (on the Lightsail box, reachable only over Tailscale; [server](server.md), "Your own ntfy server") it carries every alert **and the daily summary**. With it empty, or naming the public ntfy.sh relay, it carries incident alerts only | `TI_NTFY_TOPIC`, an unguessable topic name; `TI_NTFY_SERVER`, your own server's URL |
 | `pagerduty` | The second channel, chosen by the owner: PagerDuty, through its Events API. **Incidents only**: the daily summary never goes here | `TI_PAGERDUTY_ROUTING_KEY`, the integration key; optionally `TI_PAGERDUTY_URL` |
+| `github-issues` | One GitHub Issue per alert, readable on your phone in the GitHub app. **Incidents only**: the daily summary never goes here ("Alerts as GitHub Issues", below) | `TI_GITHUB_ISSUES_TOKEN`, an issues-only fine-grained token; `TI_GITHUB_ISSUES_REPO`, the repository as `owner/name`; optionally `TI_GITHUB_API_URL` |
 | `stdout` | Prints to the terminal or the system log | none |
 
 Each secret is read from the environment, or, when `-secrets-file` names a
@@ -386,6 +387,90 @@ delivery. A refusal, a throttle or an answer it cannot read is a failure. That
 is the machine acknowledgement. Acknowledging the incident yourself on your
 phone is PagerDuty's job (its escalation rules), not the reporter's, because
 the reporter has no way to listen for it.
+
+## Alerts as GitHub Issues
+
+With `github-issues` in `-channel`, every alert also becomes an issue in the
+repository named by `TI_GITHUB_ISSUES_REPO`, with the label `alert`. It is a
+third place to read the alert, with the context beside it, in the GitHub app
+on your phone. PagerDuty still pages you, and ntfy still pushes; the issue is
+not a replacement for either, and a fault in it never holds them back.
+
+**What an issue holds.** The title is the alert's title. The body is the
+alert's text, then "Last journal records (redacted)": the journal's last ten
+records, one line each, then the output of three `journal-query` reports over
+the journal (`reconcile`, which is the reconciliation detail, `refusals` and
+`orders`), each cut to its last ten rows. A hidden line at the end ties the
+issue to the alert's key; leave it alone.
+
+**One issue per alert.** An alert is one issue however many times it is sent.
+An alert that repeats until you acknowledge it ("Repeated until you
+acknowledge it") adds one comment per repeat to the same open issue, never a
+second issue, so your phone buzzes at each repeat as it does for the other
+channels. An alert that comes back after its issue was closed is a new
+incident and opens a new issue.
+
+**What is kept out.** The repository is public, so anyone can read an issue.
+The reporter therefore writes only the alert's *public* text when it has one,
+the text that names what is in doubt and carries no balance (the same text
+the public ntfy.sh relay gets), and it removes, from every part of the issue,
+each secret in the secrets file, every IBKR account id (the letters U or DU
+and digits), any GitHub token, any Tailscale host name (`...ts.net`) or
+address (`100.64.0.0/10`), this server's own name, and every dollar figure.
+In the journal records it also replaces, wherever it sits, the value of any
+field that holds cash, equity, liquidation value, margin, an amount, a cost
+or an account, and in the query output it leaves out the columns of
+quantities, prices and accounts. Each is shown as `[redacted]`. So an issue
+tells you what happened and where to look, and the figures stay on the
+server: read them with `journal-query` or on the dashboard. The daily summary
+carries your balances and is never sent here.
+
+**How an issue closes.** The reporter closes it, with a closing comment, when
+the alert resolves:
+
+- an alert that repeats until you acknowledge it closes when the journal
+  records your acknowledgement (`operator acknowledge`); it is not opened
+  again;
+- a page the reporter resolves for the other channels, such as a failed unit
+  that recovers or a clock check that passes again, closes its issue in the
+  same firing.
+
+An alert that reports a single event, such as one refused order, has nothing
+that resolves it: its issue stays open until you close it yourself in the app
+once you have read it. A close the reporter could not make, because GitHub
+could not be reached, is tried again at the next firing. If you close an
+issue yourself, the reporter does not reopen it; only a new incident opens a
+new one.
+
+**If issues stop appearing.** PagerDuty and ntfy are unaffected, so first
+read the run's error: a failed firing names `github-issues:` and why. The
+usual causes are in the table "What can go wrong", below: the token expired or
+was revoked ("GitHub answered 401 Unauthorized"), the token cannot write the
+repository's issues ("403 Forbidden" or "404 Not Found"), GitHub was
+unreachable, or the channel is not in `-channel`. The alert is not lost: it
+is sent again at the next firing, and an issue is made then.
+
+**The token.** Create it once, and again when it expires:
+
+1. On GitHub, open Settings, Developer settings, Personal access tokens,
+   Fine-grained tokens, Generate new token.
+2. Name it `ti-alerts`, set an expiry (90 days is a good length), and under
+   "Repository access" choose "Only select repositories" and pick the one
+   repository.
+3. Under "Repository permissions" set **Issues** to "Read and write", and
+   leave every other permission at "No access". (Metadata read-only is added
+   by GitHub and is fine.) An issues-only token cannot read code, change
+   settings or trade; if it leaks, the most it can do is write issues.
+4. On the server, `sudo -e /etc/trend-investing/secrets.env` and fill in
+   `TI_GITHUB_ISSUES_TOKEN=` (the token) and `TI_GITHUB_ISSUES_REPO=`
+   (`owner/name`). The next firing uses them. Add `github-issues` to the
+   reporter's `-channel`.
+5. To rotate it, make a new token the same way, replace the line, and delete
+   the old token on GitHub. Put a reminder in your calendar for its expiry:
+   an expired token is a channel that fails every firing.
+
+Never paste the token into an issue, a chat or the repository. The reporter
+never prints it: it is removed from every message and issue.
 
 ## Running the reporter
 
@@ -1112,6 +1197,8 @@ passes `-clock-check`.
 | "reporter: the ntfy channel needs TI_NTFY_TOPIC ..." or "reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY ..." | That channel is set aside and the other still delivers (the row above). With no channel left that reaches you, the whole run is refused before anything is sent | Fill the line in with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses it |
 | "reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org" or "reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue" | That channel is set aside and the other still delivers; with none left, the run is refused before anything is sent | Correct the line, or leave `TI_PAGERDUTY_URL` empty for PagerDuty's own endpoint; an empty `TI_NTFY_SERVER` is the public ntfy.sh relay, which takes incident alerts but not the daily summary |
 | "reporter: the secrets file cannot be read; check -secrets-file names the credential file", or "reporter: the secrets file's line N is not KEY=VALUE" | Reported in the run's error, which never shows a secret's text. Every line that reads is still used, so only a channel whose secret that leaves unset is set aside; with no channel left, nothing is sent | Correct that line of `secrets.env` (`KEY=VALUE`, no spaces round `=`) with `sudo -e` |
+| "reporter: the github-issues channel needs TI_GITHUB_ISSUES_TOKEN ..." or "... needs TI_GITHUB_ISSUES_REPO as owner/name ...", or "reporter: TI_GITHUB_API_URL must be an absolute URL ..." | That channel is set aside and the others still deliver (the rows above); no issue is opened | Fill in the name it gives in `/etc/trend-investing/secrets.env` ("Alerts as GitHub Issues", the token steps) |
+| "github-issues: GitHub answered 401 Unauthorized" (or 403 Forbidden, 404 Not Found, 5xx, or "rate limited"), or "github-issues: request failed" | That channel failed, so the alert is not delivered to it, and PagerDuty and ntfy are not held back. It is sent again at the next firing and its issue is made then; a rate limit is the same | 401: the token expired or was revoked, make a new one. 403 or 404: the token lacks Issues read and write on that one repository, or `TI_GITHUB_ISSUES_REPO` is misspelt. Otherwise wait for the next firing |
 | "ntfy: server answered 403 Forbidden" (or another status), "pagerduty: server answered 400 Bad Request", "pagerduty: the answer did not acknowledge the event", or "post failed" | That channel failed, so the alert is not delivered, even if the other channel took it. Only the failed channel is retried, at every firing, until it takes the alert | A wrong topic, server or routing key: correct `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` or `TI_PAGERDUTY_ROUTING_KEY` in `secrets.env`. A network fault clears by itself |
 | PagerDuty shows incidents, but your phone shows nothing | Both channels accepted the alert, so the reporter counts it delivered. What your phone does with it is up to the PagerDuty and ntfy apps | Check the PagerDuty app's notification rules, and that the ntfy app is subscribed to exactly the topic (and server) in `secrets.env` |
 | "reporter: the state file is unreadable and is not reset, since a new file forgets which alerts are open: ..." | The run stops before anything is sent, every firing | Move the file aside: `sudo -u ti-trader mv /var/lib/trend-investing/reports/boost.reporter.json /var/lib/trend-investing/reports/boost.reporter.json.bad`. The next firing starts a new state file, which sends none of the log's routine history but pages, once per channel, the state at reporter start and every open alert (see "The delivery rules"); the open alerts then repeat until acknowledged |
