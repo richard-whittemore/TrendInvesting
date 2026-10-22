@@ -13,6 +13,12 @@ OnFailure=ti-unit-failed@%n.service
 ConditionFileIsExecutable=/opt/trend-investing/bin/ti-engine
 ConditionPathExists=/etc/trend-investing/engines/%i.env
 ConditionPathExists=/etc/trend-investing/engines/%i.config
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (owner decision 2026-10-22; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/secrets.env
 
 [Service]
 Type=simple
@@ -29,7 +35,7 @@ Environment=TI_CONFIG=/etc/trend-investing/engines/%i.config
 Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
 Environment=TI_DATA_DIR=/var/lib/trend-investing/data
 Environment=TI_FLEX_DIR=/var/lib/trend-investing/flex/%i
-LoadCredential=secrets:/etc/trend-investing/secrets.env
+LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # The socket lives in a private directory, /run/ti-engine-%i, mode 0700,
 # which transport.Listen requires of a socket's parent (ADR 0014).
 RuntimeDirectory=ti-engine-%i

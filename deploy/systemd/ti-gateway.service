@@ -3,7 +3,12 @@ Description=IB Gateway under IBC (one gateway for all three engines)
 Documentation=https://github.com/IbcAlpha/IBC
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/etc/trend-investing/ibkr-login.env
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (owner decision 2026-10-22; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/ibkr-login.env
 
 [Service]
 Type=simple
@@ -11,8 +16,9 @@ User=ti-gateway
 Group=ti-gateway
 Environment=TZ=America/New_York
 EnvironmentFile=/etc/trend-investing/gateway.env
-# The login file is root-only; systemd hands this service one private copy.
-LoadCredential=ibkr-login:/etc/trend-investing/ibkr-login.env
+# The unlocked login file is root-only, in memory; systemd hands this service
+# one private copy.
+LoadCredential=ibkr-login:/run/trend-investing/secrets/ibkr-login.env
 RuntimeDirectory=ti-gateway
 RuntimeDirectoryMode=0700
 LogsDirectory=ti-gateway

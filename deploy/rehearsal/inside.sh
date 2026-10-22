@@ -17,11 +17,27 @@ cp -a /deploy /root/deploy
 cp -a /dist /root/dist
 p=/root/deploy/provision.sh
 
+# The secret files rest on disk only encrypted (owner decision 2026-10-22).
+# The owner types the passphrase; here it comes on a test-only descriptor,
+# which ti-secrets honours only where TI_REHEARSAL=1, as this container sets.
+test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_REHEARSAL"
+passphrase="rehearsal passphrase $(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+with_pass() { TI_PASSPHRASE_FD=7 "$@" 7< <(yes "$passphrase"); }
+# A server provisioned before the secrets were encrypted: its secrets.env is
+# in plain text, with a marker the first pass must migrate off the disk.
+marker=marker-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+install -d -m 0755 /etc/trend-investing
+install -m 0600 /dev/null /etc/trend-investing/secrets.env
+sed "s/^TI_IBKR_FLEX_TOKEN=\$/TI_IBKR_FLEX_TOKEN=$marker/" /deploy/etc/secrets.env.example >/etc/trend-investing/secrets.env
+grep -qx "TI_IBKR_FLEX_TOKEN=$marker" /etc/trend-investing/secrets.env || fail "could not write the earlier server's secrets file"
+unlocked=/run/trend-investing/secrets
+
 "$p" base
 "$p" clock
 "$p" gateway
-"$p" services
+with_pass "$p" services
 pass "first full pass"
+test ! -e /etc/trend-investing/secrets.env || fail "the first pass left the earlier server's secrets.env on disk in plain text"
 
 # The clock check passed above against this container's host. With a reference
 # clock an hour off (the skew is measured to about a second, so -3598 to -3602
@@ -38,15 +54,19 @@ grep -Eq 'skew of -(359[89]|360[012])s' "$stubs/err" || fail "the clock step fai
 rm -rf "$stubs"
 pass "the clock step passes on this host's clock and refuses a skewed one"
 
-# Idempotence: a second pass changes nothing and must not touch owner-entered stubs.
-printf 'TWS_USERID=sentinel\n' >>/etc/trend-investing/ibkr-login.env
+# Idempotence: a second pass changes nothing, asks for no passphrase (it is
+# given none) and must not touch the owner's encrypted files.
+secret_sums() { sha256sum /etc/trend-investing/*.gpg /etc/trend-investing/accounts/*.gpg; }
+before=$(secret_sums)
 "$p" base
 "$p" clock
 "$p" gateway
-"$p" services
-grep -q sentinel /etc/trend-investing/ibkr-login.env || fail "re-run overwrote the owner's login file"
-pass "second pass idempotent, owner stub preserved"
-sed -i '/sentinel/d' /etc/trend-investing/ibkr-login.env
+"$p" services </dev/null
+test "$(secret_sums)" = "$before" || fail "re-run changed the owner's encrypted secret files"
+pass "second pass idempotent, owner's encrypted files preserved, no passphrase asked"
+
+# The encrypted files, ti-unlock and ti-secrets (deploy/rehearsal/inside-secrets.sh).
+TI_TEST_PASS=$passphrase TI_TEST_MARKER=$marker bash /root/deploy/rehearsal/inside-secrets.sh
 
 # The owner's own ntfy server (provision.sh ntfy): the pinned binary is
 # fetched and verified, installed, and configured to listen on the Tailscale
@@ -85,10 +105,11 @@ for u in ti-gateway ti-trader; do
   test "$(id -u "$u")" -ne 0 || fail "$u is uid 0"
 done
 for f in ibkr-login.env secrets.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
-  test "$(mode_of "/etc/trend-investing/$f")" = 600 || fail "$f is not mode 600"
-  test "$(stat -c %U:%G "/etc/trend-investing/$f")" = root:root || fail "$f is not root-owned"
+  test ! -e "/etc/trend-investing/$f" || fail "$f is on disk in plain text"
+  test "$(mode_of "/etc/trend-investing/$f.gpg")" = 600 || fail "$f.gpg is not mode 600"
+  test "$(stat -c %U:%G "/etc/trend-investing/$f.gpg")" = root:root || fail "$f.gpg is not root-owned"
 done
-pass "users are non-root, nologin; secret stubs are root:root 0600"
+pass "users are non-root, nologin; the secret files are encrypted only, root:root 0600"
 
 # IBKR's execution times name "US/Eastern", which Ubuntu 24.04 ships only in
 # tzdata-legacy; the adapter cannot read an execution without it.
@@ -208,12 +229,12 @@ pass "an empty login stops the gateway with 78, which the unit does not restart 
 test -x /opt/trend-investing/bin/ti-data || fail "the data step was not installed"
 cmp /root/dist/ti-data /opt/trend-investing/bin/ti-data || fail "the installed data step is not the built one"
 /opt/trend-investing/bin/ti-data --help | grep -q -- --backfill-from || fail "the data step does not run"
-grep -qx 'MASSIVE_API_KEY=' /etc/trend-investing/secrets.env || fail "the secrets stub has no MASSIVE_API_KEY line"
+grep -qx 'MASSIVE_API_KEY=' "$unlocked/secrets.env" || fail "the unlocked secrets file has no MASSIVE_API_KEY line"
 scratch=$(mktemp -d)
 cp /root/dist/boost-fixture.log "$scratch/run.log"
 status=0
 /opt/trend-investing/bin/ti-data --data "$scratch/data" --config /etc/trend-investing/engines/boost.config \
-  --engine-log "$scratch/run.log" --secrets-file /etc/trend-investing/secrets.env >/dev/null 2>"$scratch/err" || status=$?
+  --engine-log "$scratch/run.log" --secrets-file "$unlocked/secrets.env" >/dev/null 2>"$scratch/err" || status=$?
 test "$status" = 1 || fail "the data step exited $status with no key, want 1"
 grep -q 'ti-data refused: .*MASSIVE_API_KEY' "$scratch/err" || fail "the data step's refusal does not name the missing key"
 test ! -e "$scratch/data" || fail "the data step wrote something while refusing"
@@ -282,9 +303,17 @@ for _ in $(seq 50); do
   python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8099), 1)' 2>/dev/null && break
   sleep 0.1
 done
-printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\nTI_HEARTBEAT_URL=http://127.0.0.1:8099/hb\n' >"$rep/creds/secrets"
-chown ti-trader:ti-trader "$rep/creds/secrets"
-chmod 0400 "$rep/creds/secrets"
+# The stand-in channels go into the encrypted secrets file as the owner puts
+# them there (ti-secrets edit, its editor given the lines from a tmpfs), and
+# the reporter is handed the unlocked copy its unit names in LoadCredential=,
+# as systemd would hand it: a private copy, the unit's user's, read-only.
+install -d -m 0700 /dev/shm/ti-edit
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\nTI_HEARTBEAT_URL=http://127.0.0.1:8099/hb\nMASSIVE_API_KEY=\n' >/dev/shm/ti-edit/content
+EDITOR=/root/ti-editor.sh with_pass ti-secrets edit secrets.env >/dev/null || fail "ti-secrets edit could not set the reporter's channels"
+rm -rf /dev/shm/ti-edit
+source=$(sed -n 's/^LoadCredential=secrets://p' /etc/systemd/system/ti-reporter@.service)
+test "$source" = "$unlocked/secrets.env" || fail "the reporter's unit loads its secrets from $source, not the unlocked copy"
+install -o ti-trader -g ti-trader -m 0400 "$source" "$rep/creds/secrets"
 line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
 line=${line//%i/boost}
 line=${line//%d/$rep/creds}
@@ -699,4 +728,7 @@ for b in ti-engine ti-reporter ti-dashboard operator journal-query; do
   cmp "/root/dist/$b" "/opt/trend-investing/bin/$b" || fail "rollback did not restore $b byte for byte"
 done
 pass "ti-release refuses without gh, installs a fake release with --unverified, restarts only the dashboard, and --rollback restores the previous build"
+for f in $(find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$marker" 2>/dev/null || true); do
+  fail "the migrated secret is on disk at the end: $f"
+done
 echo "REHEARSAL COMPLETE"

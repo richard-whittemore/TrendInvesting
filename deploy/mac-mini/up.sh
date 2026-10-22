@@ -437,6 +437,10 @@ else
 fi
 
 say "provisioning (TI_TARGET=mac-mini)"
-docker exec --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh all
+# On a terminal the provisioner's ti-secrets can ask for the secrets'
+# passphrase, which it does only when a secret file is still in plain text.
+tty=()
+if test -t 0 && test -t 1; then tty=(-it); fi
+docker exec ${tty[@]+"${tty[@]}"} --env TI_TARGET=mac-mini "$name" /root/deploy/provision.sh all
 
 say "$name is up. Its units: docker exec $name systemctl list-units 'ti-*'"

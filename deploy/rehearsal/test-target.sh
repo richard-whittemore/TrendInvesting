@@ -228,6 +228,8 @@ scenario() {
     sudo() { record sudo "$@"; return 1; }
     docker() { record docker "$@"; return 1; }
     timedatectl() { record timedatectl "$@"; return 1; }
+    # ti-secrets' migration asks for a passphrase and changes /etc: recorded.
+    secrets_migrate() { record secrets-migrate; }
     # Unpacking IBC, or running a vendor installer, is where the Gateway case
     # stops, explicitly.
     unzip() { record unzip "$@"; record "STOPPED at unzip"; exit 75; }
@@ -499,6 +501,9 @@ if called "systemctl mask"; then fail "Lightsail masks a unit"; fi
 called "/systemd/ti-gateway.service" || fail "Lightsail no longer installs the Gateway unit"
 called "systemctl enable --now ti-data.timer ti-reporter@boost.timer" || fail "Lightsail no longer starts the timers"
 grep -q '"host": "127.0.0.1"' "$work/etc/adapters/boost.json" || fail "Lightsail's adapter configuration does not point at 127.0.0.1"
+called "install -m 0755 $work/deploy/secrets.sh /usr/local/sbin/ti-secrets" || fail "Lightsail services does not install ti-secrets: $(grep secrets "$work/calls")"
+called "ln -sfn ti-secrets /usr/local/sbin/ti-unlock" || fail "Lightsail services does not install ti-unlock"
+test "$(grep -n 'secrets-migrate' "$work/calls" | cut -d: -f1)" -gt "$(grep -n 'roth-ira.env' "$work/calls" | tail -1 | cut -d: -f1)" || fail "Lightsail services does not encrypt the secret files after writing their stubs"
 
 scenario "" x86_64 firewall || fail "Lightsail firewall failed: $(cat "$work/out")"
 said "Tailscale is not signed in" || fail "Lightsail's firewall step no longer checks Tailscale: $(cat "$work/out")"

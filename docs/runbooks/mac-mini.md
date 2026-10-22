@@ -85,9 +85,15 @@ re-attaching to it.*
    never a live account's:
 
    ```
-   docker exec -it ti nano /etc/trend-investing/secrets.env
-   docker exec -it ti nano /etc/trend-investing/accounts/boost.env
+   docker exec -it ti ti-secrets edit secrets.env
+   docker exec -it ti ti-secrets edit accounts/boost.env
    ```
+
+   The secret files are kept encrypted, as on the server: the first
+   provisioning asked you to choose a passphrase, and each edit asks for it.
+   After every start of the container, unlock them, or every unit that needs
+   a secret refuses to start: `docker exec -it ti ti-unlock`
+   (`docs/manual/server.md`, "Unlocking the secrets after a boot").
 
 7. **Install the TWS API for the adapter.** Not part of `up.sh`. It fetches
    IBKR's Mac/Unix archive (the Linux installer is x86_64 only), checks its

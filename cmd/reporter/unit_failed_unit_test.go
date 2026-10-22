@@ -62,7 +62,7 @@ func TestTheHookUnitRunsTheReportersPageAsTheReporterUser(t *testing.T) {
 	if one("[Service]", "SupplementaryGroups") != "systemd-journal" {
 		t.Error("the hook cannot read the failed unit's last line without the journal group")
 	}
-	if one("[Service]", "LoadCredential") != "secrets:/etc/trend-investing/secrets.env" {
+	if one("[Service]", "LoadCredential") != "secrets:"+unlockedSecrets {
 		t.Error("the hook reads the same credential file as the reporter")
 	}
 	if one("[Service]", "ReadWritePaths") != "/var/lib/trend-investing/reports" {
@@ -131,5 +131,49 @@ func TestTheSecretsExampleNamesTheHeartbeatURL(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "is not built") {
 		t.Error("the secrets example still says the outside heartbeat is not built")
+	}
+}
+
+// TestEveryUnitThatLoadsASecretRefusesToStartWhileTheSecretsAreLocked: the
+// secret files rest on disk only encrypted, and ti-unlock decrypts them after
+// each boot into a root-only tmpfs (owner decision 2026-10-22). Every unit
+// that loads a secret loads it from that tmpfs, never from /etc, and asserts
+// the decrypted file exists, so until the owner unlocks, systemd refuses to
+// start it ("Assertion failed"; AssertPathExists=; a refused timer
+// firing leaves the timer running, so the next firing after the unlock
+// runs). The reporter therefore cannot run while locked: its heartbeat pings
+// stop and the outside check pages the owner.
+func TestEveryUnitThatLoadsASecretRefusesToStartWhileTheSecretsAreLocked(t *testing.T) {
+	units, err := filepath.Glob("../../deploy/systemd/*.service")
+	if err != nil || len(units) == 0 {
+		t.Fatalf("no units found: %v", err)
+	}
+	loaders := 0
+	for _, path := range units {
+		asserted := map[string]bool{}
+		for _, a := range directive(t, path, "[Unit]", "AssertPathExists") {
+			asserted[a] = true
+		}
+		for _, load := range directive(t, path, "[Service]", "LoadCredential") {
+			loaders++
+			_, source, _ := strings.Cut(load, ":")
+			if !strings.HasPrefix(source, unlockedDir) {
+				t.Errorf("%s: LoadCredential=%s loads from outside %s, where ti-unlock decrypts the secrets", path, load, unlockedDir)
+			}
+			if !asserted[source] {
+				t.Errorf("%s: LoadCredential=%s but no AssertPathExists=%s: the unit would start, or fail at credential setup (Failed to set up credentials), which does not say the secrets are locked", path, load, source)
+			}
+		}
+		for _, d := range unitDirectives(t, path) {
+			if strings.Contains(d.value, "/etc/trend-investing/secrets.env") || strings.Contains(d.value, "/etc/trend-investing/ibkr-login.env") ||
+				strings.Contains(d.value, "/etc/trend-investing/accounts/") {
+				t.Errorf("%s: %s=%s names a secret file on disk; only its encrypted copy rests there", path, d.key, d.value)
+			}
+		}
+	}
+	// The gateway, the engines, the Boost adapter, the data job, the reporter,
+	// the failed-unit page and the Flex reader (secrets and account).
+	if loaders != 8 {
+		t.Errorf("%d LoadCredential= lines across the units, want 8", loaders)
 	}
 }

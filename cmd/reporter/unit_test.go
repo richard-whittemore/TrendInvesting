@@ -23,6 +23,12 @@ const (
 	runEnvExample     = "../../deploy/etc/engines/run.env.example"
 	secretsExample    = "../../deploy/etc/secrets.env.example"
 	provisionPath     = "../../deploy/provision.sh"
+	// unlockedSecrets is where ti-unlock decrypts secrets.env after a boot,
+	// on a root-only tmpfs: the units load it from there and from nowhere
+	// else (owner decision 2026-10-22; docs/manual/server.md, "Unlocking the
+	// secrets after a boot").
+	unlockedSecrets = "/run/trend-investing/secrets/secrets.env"
+	unlockedDir     = "/run/trend-investing/secrets/"
 )
 
 // readAssignments reads KEY=VALUE lines, skipping comments and blanks.
@@ -149,8 +155,8 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 				t.Errorf("EnvironmentFile=%s, want the engine's run.env, which names the current run", d.value)
 			}
 		case "LoadCredential":
-			if d.value != "secrets:/etc/trend-investing/secrets.env" {
-				t.Errorf("LoadCredential=%s, want secrets:/etc/trend-investing/secrets.env", d.value)
+			if d.value != "secrets:"+unlockedSecrets {
+				t.Errorf("LoadCredential=%s, want secrets:%s, the copy ti-unlock decrypts", d.value, unlockedSecrets)
 			}
 		}
 	}

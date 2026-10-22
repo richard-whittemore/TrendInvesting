@@ -23,7 +23,10 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$repo/deploy/rehearsal/platform.sh"
 platform=$(rehearsal_platform)
 goarch=$(rehearsal_goarch "$platform")
-args=(create -e TI_REHEARSAL=1 --platform "$platform")
+# The secrets ti-unlock decrypts go on a tmpfs of their own, as on the
+# server; this container lacks the capability to mount one itself, so it is
+# given one.
+args=(create -e TI_REHEARSAL=1 --tmpfs /run/trend-investing/secrets:mode=0700 --platform "$platform")
 if test -z "${TI_REHEARSAL_PLATFORM:-}"; then
   args+=(-e TI_REHEARSAL_ANY_ARCH=1 -e TI_REHEARSAL_SKIP_INSTALLER=1)
 fi
@@ -63,13 +66,16 @@ docker start -a "$id"
 # the Mac mini container does (deploy/mac-mini/up.sh, which gives the reason
 # for each capability): every capability dropped and the same eleven added
 # back, a cgroup namespace of its own whose tree is remounted writable before
-# systemd starts, and Docker's default seccomp filter kept.
+# systemd starts, and Docker's default seccomp filter kept. / is mounted
+# shared, as up.sh's mount-shared.service does, so that systemd can hand a
+# unit its credentials (LoadCredential=) and the rehearsal reads them as the
+# server does; gnupg is ti-secrets' tool, as provision.sh base installs it.
 caps=(--cap-drop ALL)
 for cap in SYS_ADMIN SYS_CHROOT CHOWN FOWNER DAC_OVERRIDE SETUID SETGID SETPCAP AUDIT_WRITE KILL FSETID; do
   caps+=(--cap-add "$cap")
 done
 sd=$(docker create "${caps[@]}" --cgroupns=private --tmpfs /run --tmpfs /run/lock -e container=docker --platform "$platform" ubuntu:24.04 \
-  bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends systemd dbus python3 >/dev/null && mount -o remount,rw /sys/fs/cgroup && exec /lib/systemd/systemd')
+  bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends systemd dbus python3 gnupg >/dev/null && mount -o remount,rw /sys/fs/cgroup && mount --make-rshared / && exec /lib/systemd/systemd')
 docker cp "$repo/deploy" "$sd:/deploy"
 docker cp "$dist" "$sd:/dist"
 docker start "$sd" >/dev/null

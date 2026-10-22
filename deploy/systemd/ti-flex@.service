@@ -13,11 +13,17 @@ Wants=network-online.target
 # a failed unit, never a silent skip (docs/manual/reconciliation.md,
 # "Deposits and withdrawals, read from IBKR"). provision.sh writes every
 # account's file, named only, so the reader is the one to say which line is
-# empty; an account file deleted after that fails the unit earlier, at
-# systemd's credential setup ("Failed to set up credentials", status
-# 243/CREDENTIALS), which names no line.
+# empty; an account file deleted after that is refused at the start, naming
+# its unlocked copy (the AssertPathExists= lines below).
 ConditionFileIsExecutable=/opt/trend-investing/adapter-venv/bin/python3
 ConditionPathExists=/opt/trend-investing/adapter/adapter/ibkr/flex.py
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (owner decision 2026-10-22; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/secrets.env
+AssertPathExists=/run/trend-investing/secrets/accounts/%i.env
 
 [Service]
 Type=oneshot
@@ -41,8 +47,8 @@ ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/%i/run.env || 
 # account's number from %d/account (IBKR_ACCOUNT_BOOST in accounts/boost.env,
 # IBKR_ACCOUNT_TRAD_IRA in accounts/trad-ira.env, ...): read, never printed.
 # The token is sent to IBKR's Flex Web Service only.
-LoadCredential=secrets:/etc/trend-investing/secrets.env
-LoadCredential=account:/etc/trend-investing/accounts/%i.env
+LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
+LoadCredential=account:/run/trend-investing/secrets/accounts/%i.env
 WorkingDirectory=/opt/trend-investing/adapter
 ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr flex --secrets %d/secrets --account-secrets %d/account --instance %i --engine-log /var/lib/trend-investing/engines/%i/${TI_RUN}.log --ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl
 NoNewPrivileges=true

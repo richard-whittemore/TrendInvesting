@@ -8,6 +8,12 @@ Description=Reporter for account %i: alerts, their repeats and the daily summary
 # manual row to read (ADR 0019, "Alerting"; docs/manual/server.md, "A failed
 # unit").
 OnFailure=ti-unit-failed@%n.service
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (owner decision 2026-10-22; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/secrets.env
 
 [Service]
 Type=oneshot
@@ -34,7 +40,7 @@ ExecStartPre=/bin/sh -c 'test -s /var/lib/trend-investing/engines/%i/run.env || 
 # finishes without a fault pings TI_HEARTBEAT_URL, the outside service that
 # pages the owner when the pings stop (docs/manual/server.md, "The outside
 # heartbeat").
-LoadCredential=secrets:/etc/trend-investing/secrets.env
+LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # The clock check is run at every firing, after the incident alerts: two
 # failing checks in a row page once for the whole host, a passing check
 # resolves it, and the daily summary shows the last check (ADR 0019,
