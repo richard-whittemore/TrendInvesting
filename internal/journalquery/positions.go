@@ -1,6 +1,7 @@
 package journalquery
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -156,13 +157,20 @@ func (e *DisagreementError) Error() string {
 // Reconcile compares, at every account snapshot after the account's first,
 // the positions the fills imply with the positions the snapshot reports. It
 // lists every comparison and, when any disagree, returns a *DisagreementError
-// along with the table.
+// along with the table. A check that compared nothing is not a pass: a
+// journal that is empty or cut short, or a selection that leaves no
+// comparison, is an error in words and no table (ADR 0017, ADR 0027).
 func Reconcile(journals []Journal, f Filter) (Table, error) {
 	if err := distinct(journals); err != nil {
 		return Table{}, err
 	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "fills", "snapshot", "status"}}
 	disagreements := 0
+	for _, j := range journals {
+		if why := j.Incomplete(); why != "" {
+			return Table{}, fmt.Errorf("reconcile refused: %s", why)
+		}
+	}
 	for _, j := range journals {
 		_, checks, err := rebuild(j)
 		if err != nil {
@@ -182,6 +190,9 @@ func Reconcile(journals []Journal, f Filter) (Table, error) {
 				c.instrument, strconv.FormatInt(c.fills, 10), strconv.FormatInt(c.snapshot, 10), status,
 			})
 		}
+	}
+	if len(t.Rows) == 0 {
+		return Table{}, errors.New("reconcile compared nothing: no account snapshot after the first met the selection, so no fills were checked against the broker's positions")
 	}
 	if disagreements > 0 {
 		return t, &DisagreementError{Count: disagreements}

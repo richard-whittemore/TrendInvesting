@@ -422,3 +422,26 @@ func TestTheOperatorReportShowsTheKillSwitch(t *testing.T) {
 		}
 	}
 }
+
+func TestReconcileOfACutShortLogExitsWithAMessageInWords(t *testing.T) {
+	var buf syncBuffer
+	if _, err := journal.CreateLog(&buf, journal.NewLogHeader("sha256:synthetic", "synthetic/1")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "empty.log")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "holds no committed record") || out != "" {
+		t.Fatalf("want a refusal in words and no table, got %q, %v", out, err)
+	}
+}
+
+func TestReconcileThatComparedNothingExitsNonZero(t *testing.T) {
+	path := writeJournal(t, "nosnap.jsonl", fill(event.FillKindEntry, "AAA", 5, 10, 0, day(2026, 1, 5)))
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "compared nothing") || out != "" {
+		t.Fatalf("want a compared-nothing refusal and no table, got %q, %v", out, err)
+	}
+}

@@ -164,10 +164,11 @@ func TestEveryReportOverOneHandBuiltJournal(t *testing.T) {
 		t.Errorf("error: %v", err)
 	}
 
-	// No Reconcile filter match leaves no rows and no error.
+	// A filter that matches no comparison leaves nothing checked, which
+	// reconcile refuses to call a pass.
 	none, _ := journalquery.NewFilter("B", "", "", "")
-	if tab, err := journalquery.Reconcile(js, none); err != nil || len(tab.Rows) != 0 {
-		t.Errorf("filtered reconcile: %v %v", tab.Rows, err)
+	if _, err := journalquery.Reconcile(js, none); err == nil || !strings.Contains(err.Error(), "compared nothing") {
+		t.Errorf("filtered reconcile: %v", err)
 	}
 }
 
@@ -564,10 +565,16 @@ func TestOverlappingRunFilesAreRefusedNotCountedTwice(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "first.log") || !strings.Contains(err.Error(), "resumed.log") || !strings.Contains(err.Error(), "overlap") {
 			t.Errorf("%s: overlapping files were not refused by name: %v", name, err)
 		}
-		if _, err := report([]journalquery.Journal{first, other}, journalquery.Filter{}); err != nil {
+		if _, err := report([]journalquery.Journal{first, other}, journalquery.Filter{}); !ranOrComparedNothing(name, err) {
 			t.Errorf("%s: independent runs were refused: %v", name, err)
 		}
 	}
+}
+
+// ranOrComparedNothing accepts a report that ran and, for reconcile alone,
+// the refusal to call a check with no snapshot to compare a pass.
+func ranOrComparedNothing(report string, err error) bool {
+	return err == nil || (report == "reconcile" && strings.Contains(err.Error(), "compared nothing"))
 }
 
 func configRec() rec {
@@ -593,7 +600,7 @@ func TestIndependentRunsWithTheSameConfigurationCombine(t *testing.T) {
 	for name, pair := range pairs {
 		a, b := load(t, "a.log", build(t, pair[0]...)), load(t, "b.log", build(t, pair[1]...))
 		for report, run := range overlapReports() {
-			if _, err := run([]journalquery.Journal{a, b}, journalquery.Filter{}); err != nil {
+			if _, err := run([]journalquery.Journal{a, b}, journalquery.Filter{}); !ranOrComparedNothing(report, err) {
 				t.Errorf("%s, %s: independent runs were refused: %v", name, report, err)
 			}
 		}
@@ -966,7 +973,7 @@ func TestTheGlidePathRecordVersionsAreRead(t *testing.T) {
 		"fills": journalquery.Fills, "totals": journalquery.Totals, "orders": journalquery.Orders,
 		"refusals": journalquery.Refusals, "positions": journalquery.Positions, "reconcile": journalquery.Reconcile,
 	} {
-		if _, err := query(js, journalquery.Filter{}); err != nil {
+		if _, err := query(js, journalquery.Filter{}); !ranOrComparedNothing(report, err) {
 			t.Errorf("%s: %v", report, err)
 		}
 	}
@@ -1000,7 +1007,7 @@ func TestTheCompactUniverseInputsAreRead(t *testing.T) {
 		"fills": journalquery.Fills, "totals": journalquery.Totals, "orders": journalquery.Orders,
 		"refusals": journalquery.Refusals, "positions": journalquery.Positions, "reconcile": journalquery.Reconcile,
 	} {
-		if _, err := query(js, journalquery.Filter{}); err != nil {
+		if _, err := query(js, journalquery.Filter{}); !ranOrComparedNothing(report, err) {
 			t.Errorf("%s: %v", report, err)
 		}
 	}
@@ -1062,5 +1069,102 @@ func TestSkippedSharesInTheOrdersNoteAreBounded(t *testing.T) {
 	}
 	if got, want := cell(o, 0, "note"), "below-one-share: 0.3 shares wanted"; got != want {
 		t.Errorf("note = %q, want %q", got, want)
+	}
+}
+
+func reconcilable() []rec {
+	d := at(time.March, 2)
+	return []rec{
+		snap(d),
+		fillRec(event.FillKindEntry, "AAA", 5, 0.1, d),
+		snap(at(time.March, 3), event.AccountPosition{InstrumentID: "AAA", Quantity: 5}),
+	}
+}
+
+func TestReconcileOfACompleteLogStillSucceeds(t *testing.T) {
+	js := []journalquery.Journal{load(t, "run.log", buildLog(t, false, reconcilable()...))}
+	tab, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err != nil || len(tab.Rows) != 1 || cell(tab, 0, "status") != "ok" {
+		t.Fatalf("complete log: %v %v", tab.Rows, err)
+	}
+}
+
+func TestReconcileOfALogWithNothingCommittedFailsInWords(t *testing.T) {
+	var buf syncBuffer
+	if _, err := journal.CreateLog(&buf, journal.NewLogHeader("h", "s")); err != nil {
+		t.Fatal(err)
+	}
+	js := []journalquery.Journal{load(t, "empty.log", buf.Bytes())}
+	_, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "empty.log") || !strings.Contains(err.Error(), "holds no committed record") {
+		t.Fatalf("want a refusal naming the empty log, got %v", err)
+	}
+}
+
+func TestReconcileOfACutShortLogNamesWhereItWasCut(t *testing.T) {
+	data := buildLog(t, true, reconcilable()...)
+	js := []journalquery.Journal{load(t, "cut.log", data)}
+	if js[0].Recovery == nil || js[0].Recovery.Torn == nil {
+		t.Fatal("fixture is not cut short")
+	}
+	_, err := journalquery.Reconcile(js, journalquery.Filter{})
+	want := fmt.Sprintf("after record %d (byte %d)", len(js[0].Records), js[0].Recovery.Torn.Offset)
+	if err == nil || !strings.Contains(err.Error(), "cut.log") || !strings.Contains(err.Error(), "cut short") || !strings.Contains(err.Error(), want) {
+		t.Fatalf("want a refusal naming %q, got %v", want, err)
+	}
+}
+
+func TestReconcileOfALogCutMidRecordNamesWhereItWasCut(t *testing.T) {
+	data := buildLog(t, false, reconcilable()...)
+	data = data[:len(data)-7]
+	js := []journalquery.Journal{load(t, "mid.log", data)}
+	_, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "cut short") || !strings.Contains(err.Error(), "mid.log") {
+		t.Fatalf("want a cut-short refusal, got %v", err)
+	}
+}
+
+func TestReconcileThatComparedNothingFails(t *testing.T) {
+	d := at(time.March, 2)
+	js := []journalquery.Journal{load(t, "nosnap.jsonl", build(t, fillRec(event.FillKindEntry, "AAA", 5, 0.1, d)))}
+	_, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "compared nothing") {
+		t.Fatalf("want a compared-nothing refusal, got %v", err)
+	}
+}
+
+func TestLoadKeepsTheVerificationResult(t *testing.T) {
+	j := load(t, "j", build(t, reconcilable()...))
+	if j.Verification == nil || j.Verification.FinalRecordHash == "" || j.Verification.RecordCount != 3 {
+		t.Fatalf("verification not kept: %+v", j.Verification)
+	}
+	if err := j.CheckFinalHash(j.Verification.FinalRecordHash); err != nil {
+		t.Errorf("the recorded final hash was refused: %v", err)
+	}
+	err := j.CheckFinalHash("deadbeef")
+	if err == nil || !strings.Contains(err.Error(), "final record hash") || !strings.Contains(err.Error(), "deadbeef") {
+		t.Errorf("a final-hash mismatch was not reported: %v", err)
+	}
+	if (journalquery.Journal{}).FinalRecordHash() != "" {
+		t.Error("a journal that was never loaded states a final hash")
+	}
+	l := load(t, "l", buildLog(t, false, reconcilable()...))
+	if err := l.CheckFinalHash(l.Recovery.FinalRecordHash); err != nil {
+		t.Errorf("log final hash refused: %v", err)
+	}
+	if err := l.CheckFinalHash("deadbeef"); err == nil {
+		t.Error("a log final-hash mismatch was not reported")
+	}
+}
+
+func TestReconcileRefusesInputRecordedAfterAStop(t *testing.T) {
+	d := at(time.March, 2)
+	stop := rec{journal.KindInput, event.AdapterRunStoppedEventType, 1, d, event.AdapterRunStoppedPayload{Reason: event.AdapterRunStoppedReasonDelisted, InstrumentID: "AAA", Detail: "delisted at the venue"}}
+	base := reconcilable()
+	recs := []rec{base[0], base[1], stop, base[2]}
+	js := []journalquery.Journal{load(t, "stopped.jsonl", build(t, recs...))}
+	_, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "after the run was stopped") {
+		t.Fatalf("want a refusal about input after the stop, got %v", err)
 	}
 }

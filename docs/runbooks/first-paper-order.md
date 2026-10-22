@@ -433,7 +433,9 @@ Check in this order, and compare the three: they must agree.
 
    The order's quantity and limit match IBKR's; the fills add up to the
    quantity IBKR shows executed; the commission on each fill is IBKR's own
-   figure; `refusals` shows nothing for this order.
+   figure; `refusals` shows nothing for this order. A log that is empty or
+   cut short makes `journal-query reconcile` fail with a message saying so;
+   treat that as no evidence, not as a clean result.
 3. **The reporter's alerts** (`docs/manual/alerts-and-dashboard.md`). An
    urgent alert "order … not acknowledged" means IBKR had not answered within
    the allowed time (`docs/manual/order-lifecycle.md`); one "order …
