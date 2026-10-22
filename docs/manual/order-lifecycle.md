@@ -258,6 +258,17 @@ incident reach a person; an order IBKR never acknowledged is one.
   arrives. `TestARefusedRecoveryRestoresNothing`, and `internal/risklimit`,
   `TestARecoveryIsRestoredWholeOrNotAtAll`: a decision refused for any part
   of what it restores restores none of it.
+- `internal/targetweight`,
+  `TestALateFillOfAnEndedSaleIsReadAfterARestartAsInTheFullRun`,
+  `TestARedeliveredFillOfASaleFilledInFullIsReadAfterARestart` and
+  `TestAFillAnEndedSaleCannotHoldIsRefusedAfterARestartAsInTheFullRun`;
+  `internal/risklimit`, `TestARunsOwnEndedSaleIsRestoredAndReadsALateFill`
+  and `TestARestoredOwnSaleThatEndedStatesHowItEnded`: a sale back to 98%
+  that had ended, or filled in full, when the decision was recorded is kept
+  by a run restarted from it, so a late fill after its cancel counts once,
+  a fill IBKR sends again counts nothing, a later status report is read,
+  and a fill the sale cannot hold is refused as in a run that never
+  restarted ([states and the kill switch](states-and-kill-switch.md)).
 - `internal/report`,
   `TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule` and
   `TestARetirementOfAnOrderTheVenueNamedLeavesItsRejectionCounted`.

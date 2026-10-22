@@ -352,3 +352,22 @@ func TestRulesVersionDeclaresTheNamedLiveSale(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheEndedSale pins ADR 0016's same-rules-version
+// replay guarantee for the run's own sale back to 98% once it has ended or
+// filled in full (ADR 0022; ADR 0026, point 5): each Boost decision records
+// it, at decision schema version 9, with its end and executions under its
+// venue order ID, and a run restarted from the decision reads a late fill
+// after its cancel, an execution sent again and a later lifecycle report on
+// it, where 1.24.0 recorded the sale as spent and refused those reports. A
+// journal holding one decides differently, so the build must not claim
+// 1.24.0 or earlier.
+func TestRulesVersionDeclaresTheEndedSale(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0", "1.17.0", "1.18.0", "1.19.0", "1.20.0", "1.21.0", "1.22.0", "1.23.0", "1.24.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.24.0 once a decision records an ended sale", targetweight.RulesVersion)
+		}
+	}
+}
