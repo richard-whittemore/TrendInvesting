@@ -13,7 +13,7 @@ if tests_dir not in sys.path:
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order, execution
 from test_connection import Harness
 from connection import REQUEST_ID_BASE
-from orders import (OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
+from orders import (BrokerOrdersIncomplete, OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
                     CommissionReport, UnrecognisedOrderReport, collect_broker_orders,
                     match_on_reconnect, parse_execution_time)
 
@@ -469,6 +469,82 @@ class ReconnectMatchTests(unittest.TestCase):
         h.fake.open_orders = [(7, contract(), order(order_ref="tag-1"), STATE)]
         match = match_on_reconnect({"tag-1"}, collect_broker_orders(h.conn), 11)
         self.assertTrue(match.clean)
+
+
+class WholeOpenOrderListTests(unittest.TestCase):
+    """IBKR's open-order list and its end carry no request ID; a read ends only on its own request's end."""
+
+    def working(self):
+        # One order of this engine's, one placed by hand (no order ID), one of another client's.
+        return [
+            (7, contract(), order(order_ref="tag-1"), STATE),
+            (0, contract(), order(order_ref="", client_id=0, perm_id=9101), STATE),
+            (5, contract(), order(order_ref="", client_id=12, perm_id=9102), STATE),
+        ]
+
+    def assert_whole(self, broker):
+        self.assertEqual(sorted(o.perm_id for o in broker.open_orders), [9001, 9101, 9102])
+        match = match_on_reconnect({"tag-1"}, broker, 11)
+        self.assertEqual(match.missing_at_broker, ())
+        self.assertEqual(sorted(match.matched), ["tag-1"])
+
+    def test_the_end_gateway_volunteers_as_the_session_starts_does_not_end_the_read(self):
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.open_order_batch = 1
+        h.conn.connect()
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_a_list_in_several_batches_is_read_to_its_end_behind_a_stray_end(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.callbacks.open_order_end()
+        h.fake.open_orders = self.working()
+        h.fake.open_order_batch = 2
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_an_end_nothing_asked_for_between_reads_ends_no_later_read(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = self.working()
+        self.assert_whole(collect_broker_orders(h.conn))
+        h.fake.callbacks.open_order_end()
+        h.fake.open_order_batch = 1
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_the_late_end_of_a_read_that_gave_up_ends_that_read_not_the_next(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = self.working()
+        h.fake.end_open_orders = False
+        with self.assertRaises(BrokerOrdersIncomplete) as caught:
+            collect_broker_orders(h.conn)
+        self.assertEqual(caught.exception.missing, ("open-orders",))
+        # The abandoned list's end arrives late, on the same link.
+        h.fake.callbacks.open_order_end()
+        h.fake.end_open_orders = True
+        h.fake.open_order_batch = 1
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_an_order_reported_before_the_list_was_asked_for_is_not_read_as_part_of_it(self):
+        h = Harness()
+        h.conn.connect()
+        # Shown working earlier, and ended since: IBKR's list no longer has it.
+        h.fake.callbacks.open_order(8, contract(), order(order_ref="tag-0", perm_id=9008), STATE)
+        h.fake.open_orders = self.working()
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_a_list_whose_end_never_comes_is_incomplete(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.callbacks.open_order_end()
+        h.fake.open_orders = self.working()
+        h.fake.end_open_orders = False
+        h.fake.open_order_batch = 1
+        with self.assertRaises(BrokerOrdersIncomplete) as caught:
+            collect_broker_orders(h.conn)
+        self.assertEqual(caught.exception.missing, ("open-orders",))
 
 
 if __name__ == "__main__":

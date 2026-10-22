@@ -95,6 +95,23 @@ class BrokerSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["positions"], [])
         self.assertEqual(payload["open_orders"], [])
 
+    def test_the_end_gateway_volunteers_on_a_reconnect_does_not_cut_the_order_list_short(self):
+        # The list's end carries no request ID: only the end of the list this
+        # read asked for ends it, however late IBKR sends the list.
+        h = scripted()
+        h.fake.volunteer_open_orders = True
+        h.conn.connect()
+        h.fake.open_order_batch = 1
+        record = broker_snapshot_record(read_account(h.conn), market_open=True, marks={"SPY": Decimal("90")}, why=WHY)
+        self.assertEqual(record.payload, fixture("broker_snapshot.json"))
+
+    def test_a_stray_end_before_the_read_does_not_cut_the_order_list_short(self):
+        h = scripted()
+        h.fake.callbacks.open_order_end()
+        h.fake.open_order_batch = 2
+        record = broker_snapshot_record(read_account(h.conn), market_open=True, marks={"SPY": Decimal("90")}, why=WHY)
+        self.assertEqual(record.payload, fixture("broker_snapshot.json"))
+
     def test_a_failed_summary_marks_both_balances_unreadable_and_carries_no_value(self):
         h = connected()
         h.fake.summary_error = 321

@@ -6,6 +6,7 @@ code under test is exactly the code that runs against the real client. Every
 figure here is invented; none is a real price or account.
 """
 import sys
+from collections import deque
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +81,17 @@ class FakeTWS(TWSApi):
         self.drop_during_summary = False
         self.open_orders = []
         self.end_open_orders = True
+        # reqAllOpenOrders answered in batches of this many orders, each
+        # batch and the list's end arriving only as the adapter next waits
+        # for a callback, so the list ends behind the answers to the
+        # requests asked beside it (IBKR answers each request in its own
+        # time); None answers the whole list at once.
+        self.open_order_batch = None
+        # As a session starts, Gateway sends this client's open orders and
+        # an end-of-list marker that nothing asked for.
+        self.volunteer_open_orders = False
+        # Answers still to come, one taken each time the adapter waits.
+        self._later = deque()
         self.executions = []
         # (code, message) IBKR answers reqExecutions with under its request
         # ID, before the end of the list; None for none.
@@ -126,11 +138,24 @@ class FakeTWS(TWSApi):
             raise ConnectFailed("socket connect did not finish within {}s".format(timeout))
         if behaviour == "socket-error":
             raise ConnectionRefusedError("synthetic connection refused")
+        # An abandoned session's answers never reach the new one.
+        self._later.clear()
+        waiting = callbacks.get
+
+        def get(timeout):
+            if self._later:
+                self._later.popleft()()
+            return waiting(timeout)
+        callbacks.get = get
         if behaviour == "ok":
             self.connected = True
             # IBKR names the login's accounts as the session starts.
             callbacks.managed_accounts(",".join(self.managed_accounts))
             callbacks.next_valid_id(self.next_order_id)
+            if self.volunteer_open_orders:
+                self._send_open_orders(callbacks, [o for o in self.open_orders
+                                                   if getattr(o[2], "clientId", None) == client_id])
+                callbacks.open_order_end()
         elif behaviour == "client-id-in-use":
             callbacks.error(-1, 326, "Unable to connect as the client id is already in use. "
                                      "Retry with a unique client id.")
@@ -188,13 +213,24 @@ class FakeTWS(TWSApi):
     # -- orders ----------------------------------------------------------
     def req_all_open_orders(self):
         self.calls.append(("req_all_open_orders",))
-        for order_id, con, ord_, state in self.open_orders:
-            self.callbacks.open_order(order_id, con, ord_, state)
+        callbacks, rows = self.callbacks, list(self.open_orders)
+        if self.open_order_batch is None:
+            self._send_open_orders(callbacks, rows)
+            if self.end_open_orders:
+                callbacks.open_order_end()
+            return
+        for i in range(0, len(rows), self.open_order_batch):
+            batch = rows[i:i + self.open_order_batch]
+            self._later.append(lambda batch=batch: self._send_open_orders(callbacks, batch))
+        if self.end_open_orders:
+            self._later.append(callbacks.open_order_end)
+
+    def _send_open_orders(self, callbacks, rows):
+        for order_id, con, ord_, state in rows:
+            callbacks.open_order(order_id, con, ord_, state)
             # IBKR follows each open order with its status.
             if order_id in self.order_statuses:
-                self.callbacks.order_status(*self.order_statuses[order_id])
-        if self.end_open_orders:
-            self.callbacks.open_order_end()
+                callbacks.order_status(*self.order_statuses[order_id])
 
     def req_executions(self, req_id, account_id):
         self.calls.append(("req_executions", req_id, account_id))

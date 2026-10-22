@@ -375,6 +375,55 @@ class MaintainTests(unittest.TestCase):
                 self.assertTrue(h.conn.connected, "no stale drop cuts the new link")
                 self.assertEqual(len(h.fake.called("disconnect")), 0)
 
+    def test_connectivity_lost_then_a_socket_close_is_reported_and_reconnected_within_restore_timeout(self):
+        # Gateway lost IBKR's servers (1100), then the socket closed: the
+        # close is reported at once, and the link is made again without
+        # waiting out restore_timeout, the most the adapter ever waits.
+        h = Harness(restore_timeout=60.0)
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+        h.conn.pump(0.01)
+        self.assertEqual(h.states()[-1], "connectivity-lost")
+        lost_at = h.clock.now
+        h.fake.drop()
+        h.conn.pump(0.01)
+        self.assertEqual((h.statuses[-1].state, h.statuses[-1].reason), ("disconnected", "connection-closed"))
+        h.conn.maintain()
+        self.assertLess(h.clock.now - lost_at, h.conn.config.restore_timeout)
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertTrue(h.conn.needs_reconciliation, "the new link is matched again before anything is sent")
+
+    def test_connectivity_lost_then_a_socket_close_and_no_gateway_gives_up_in_bounded_attempts(self):
+        h = Harness(restore_timeout=60.0, max_connect_attempts=3)
+        h.conn.connect()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.fake.drop()
+        h.conn.pump(0.01)
+        h.fake.connect_behaviours = ["refused"] * 3
+        with self.assertRaises(ConnectFailed):
+            h.conn.maintain()
+        self.assertEqual(h.states()[-1], "gave-up")
+        self.assertEqual(h.sleeps, [1.0, 2.0], "the backoff is the only wait")
+
+    def test_connectivity_lost_then_restored_on_the_same_socket_still_recovers(self):
+        h = Harness(restore_timeout=60.0)
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.clock.now += 30.0
+        h.conn.maintain()
+        self.assertFalse(h.conn.connected, "Gateway is given restore_timeout to restore IBKR")
+        h.fake.callbacks.error(-1, 1101, "Connectivity restored - data lost.")
+        h.conn.pump(0.01)
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 1)
+        self.assertTrue(h.conn.needs_reconciliation)
+
     def test_a_healthy_link_is_left_alone(self):
         h = Harness()
         h.conn.connect()

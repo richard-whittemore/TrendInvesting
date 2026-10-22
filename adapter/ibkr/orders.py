@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from connection import LIST_ENDED, LIST_READING
 from values import to_decimal
 
 # IBKR's order statuses ("Order Status" in IBKR's TWS API documentation) and
@@ -343,11 +344,17 @@ def collect_broker_orders(conn):
     Uses reqAllOpenOrders, not reqOpenOrders, so orders placed by hand or by
     another client are seen too (ADR 0019 compares both sets). Executions
     reach back only to midnight through Gateway (ADR 0025 point 5).
+
+    The open orders are the answer to this read's own request and end only
+    on its own end (Connection.ask_all_open_orders): an end Gateway sent
+    unasked, or the late end of an earlier list, never cuts the list short,
+    so an order IBKR has is never reported missing from a part-read list
+    (ADR 0025 point 5: matched in full before anything is sent).
     """
     conn.require_connected()
     account = conn.config.account_id
     exec_req = conn.new_req_id()
-    conn.api.req_all_open_orders()
+    ticket = conn.ask_all_open_orders()
     conn.api.req_executions(exec_req, account)
     open_orders = {}
     executions = {}
@@ -356,19 +363,18 @@ def collect_broker_orders(conn):
         if not conn.connected:
             break
         name, args = event.name, event.args
-        if name == "open_order":
+        if name == "open_order" and conn.open_order_list(ticket) == LIST_READING:
             record = open_order_record(*args)
             if record.account_id == account:
                 key = order_key(record.client_id, record.broker_order_id, record.perm_id)
                 open_orders[key] = record
-        elif name == "open_order_end":
-            orders_done = True
         elif name == "exec_details" and args[0] == exec_req:
             report = execution_report(args[1], args[2])
             if report.account_id == account:
                 executions[report.exec_id] = report
         elif name == "exec_details_end" and args[0] == exec_req:
             execs_done = True
+        orders_done = conn.open_order_list(ticket) == LIST_ENDED
         if orders_done and execs_done:
             break
     missing = []

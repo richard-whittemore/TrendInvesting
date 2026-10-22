@@ -286,6 +286,46 @@ class LoopTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in self.engine.inputs()],
                          ["market.session.closed", LIFECYCLE_TYPE, FILL_TYPE, FILL_TYPE])
 
+    def test_a_reconnect_with_an_order_working_reads_ibkrs_whole_list_and_stays_reconciled(self):
+        # Gateway volunteers this client's orders and an end marker as the
+        # new session starts, and sends the list asked for later, in parts.
+        loop = self.loop()
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        self.session_closed(loop)
+        self.settle(loop)
+        self.assertEqual(len(self.fake.placed), 1)
+        manual = (0, contract(), order(order_ref="", client_id=0, perm_id=4242, order_type="LMT", lmt_price=1.0),
+                  SimpleNamespace(status="Submitted"))
+        self.fake.volunteer_open_orders = True
+        self.fake.open_order_batch = 1
+        self.fake.drop()
+        with self.assertLogs("ibkr", "INFO") as logged:
+            self.settle(loop)
+        self.assertTrue(loop.ready(), "matched again: the working order is IBKR's and the engine's")
+        self.assertEqual(len(self.fake.called("connect")), 2)
+        self.assertEqual(len(self.fake.placed), 1, "never sent again")
+        self.assertTrue(any("ibkr reconciled" in line and "open_orders=1 " in line for line in logged.output),
+                        logged.output)
+        # IBKR's whole list is read: an order there that no run released stops the next reconnect.
+        self.fake.open_orders.append(manual)
+        self.fake.drop()
+        with self.assertRaises(ReconcileMismatch):
+            self.settle(loop)
+        self.assertEqual(len(self.fake.placed), 1)
+
+    def test_an_order_only_ibkrs_whole_list_shows_stops_the_start_behind_a_volunteered_end(self):
+        fake = self.gateway()
+        fake.open_orders = [(0, contract(), order(order_ref="", client_id=0, perm_id=4242, order_type="LMT",
+                                                  lmt_price=1.0), SimpleNamespace(status="Submitted"))]
+        fake.volunteer_open_orders = True
+        fake.open_order_batch = 1
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch):
+            loop.start()
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
     def test_a_restart_sends_nothing_twice_and_records_nothing_twice(self):
         first = self.loop()
         self.fake.on_place = self.fake.accept

@@ -28,6 +28,15 @@ CODE_SERVER_LINK_BROKEN = 2110
 # 2100 and above are warnings and notices (market-data farm status and the
 # like); none of them ends a connection attempt.
 FIRST_NOTICE_CODE = 2100
+# The adapter's note, queued in the Inbox, that it has just asked for every
+# open order (see Connection.ask_all_open_orders).
+OPEN_ORDERS_ASKED = "open_orders_asked"
+# Where one open-order list stands (Connection.open_order_list): callbacks
+# still older than the request, the list being answered, or its end taken.
+LIST_BEFORE = "before"
+LIST_READING = "reading"
+LIST_ENDED = "ended"
+
 # The first request ID: IBKR answers a request's error under its request ID
 # and an order's rejection under its order ID, with message codes shared by
 # both, so request IDs start far above any order ID an account reaches
@@ -119,6 +128,12 @@ class Connection:
         # Monotonic time of a restoration that found server-time requests
         # unanswered; see _settle_time_answers.
         self._time_restored_at = None
+        # Open-order lists asked for on this link, their notes taken from
+        # the Inbox, and the end markers counted as their answers; see
+        # ask_all_open_orders.
+        self._lists_requested = 0
+        self._lists_noted = 0
+        self._list_ends = 0
 
     # -- state reporting -------------------------------------------------
     def _report(self, state, reason="", attempt=None, ibkr_code=None, data_lost=None):
@@ -193,6 +208,40 @@ class Connection:
         self._report("disconnected", "time-answers-unmatched")
         return False
 
+    def ask_all_open_orders(self):
+        """Ask IBKR for every open order (reqAllOpenOrders); return the ticket open_order_list reads it by.
+
+        IBKR's open orders and the end of their list carry no request ID,
+        and Gateway also sends open orders and an end that nothing asked
+        for, as a session starts. So the request is noted in the Inbox just
+        before it is sent: every callback queued ahead of the note arrived
+        before the request left and is no part of its answer. IBKR answers
+        each request with one end, in the order asked, so an end taken
+        while a list is outstanding answers the oldest one, and an end taken
+        with none outstanding was not asked for and ends nothing. An
+        abandoned list's late end therefore ends that list, never a later
+        one; a list whose end never comes leaves every later list on the
+        link unended, which reads fail closed on (ADR 0019: a list not read
+        in full is unread). NotConnected while the link is down.
+        """
+        self.require_connected()
+        self._lists_requested += 1
+        self.inbox.note(OPEN_ORDERS_ASKED)
+        self.api.req_all_open_orders()
+        return self._lists_requested
+
+    def open_order_list(self, ticket):
+        """Where the list ask_all_open_orders gave ticket for stands: LIST_BEFORE, LIST_READING or LIST_ENDED.
+
+        Read after each callback pump() takes: an open order taken while
+        the list is LIST_READING is part of its answer.
+        """
+        if self._lists_noted < ticket:
+            return LIST_BEFORE
+        if self._list_ends >= ticket:
+            return LIST_ENDED
+        return LIST_READING
+
     def new_req_id(self):
         req_id = self._next_req_id
         self._next_req_id += 1
@@ -217,6 +266,9 @@ class Connection:
         self.time_requests = 0
         self.time_answers = 0
         self._time_restored_at = None
+        self._lists_requested = 0
+        self._lists_noted = 0
+        self._list_ends = 0
         # One deadline covers the socket connect, IBKR's handshake and the
         # wait for nextValidId: EClient.connect is synchronous, so a deadline
         # started after it returns would not bound a stalled socket.
@@ -333,11 +385,17 @@ class Connection:
 
     # -- consuming callbacks ---------------------------------------------
     def pump(self, timeout):
-        """Take one callback (waiting up to timeout seconds), apply it, and fan it out; None if none."""
+        """Take one callback (waiting up to timeout seconds), apply it, and fan it out; None if none.
+
+        The adapter's own notes (OPEN_ORDERS_ASKED) are applied and returned
+        but never fanned out: they are no callback of IBKR's.
+        """
         event = self._pending.popleft() if self._pending else self.inbox.get(timeout)
         if event is None:
             return None
         self._apply(event)
+        if event.name == OPEN_ORDERS_ASKED:
+            return event  # the adapter's own note, not IBKR's callback
         for handler in self._subscribers:
             handler(event)
         return event
@@ -362,6 +420,13 @@ class Connection:
                 self.connected = False
                 self._lost_at = None
                 self._report("disconnected", "connection-closed")
+        elif event.name == OPEN_ORDERS_ASKED:
+            self._lists_noted += 1
+        elif event.name == "open_order_end":
+            if self._list_ends < self._lists_noted:
+                self._list_ends += 1
+            else:
+                log.info("ibkr open-order list end with no list outstanding ignored")
         elif event.name == "current_time":
             self.time_answers += 1
             self.last_server_time = event.args[0]
