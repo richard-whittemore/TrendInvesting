@@ -10,12 +10,13 @@ tests_dir = str(Path(__file__).resolve().parent)
 if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 
-from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order, execution
+from fake_tws import ACCOUNT, OTHER_ACCOUNT, FakeTWS, contract, order, execution
 from test_connection import Harness
 from connection import REQUEST_ID_BASE, NotConnected
 from orders import (BrokerOrdersIncomplete, OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
                     CommissionReport, OpenOrdersUnsettled, UnrecognisedOrderReport, collect_broker_orders,
                     collect_settled_broker_orders, match_on_reconnect, parse_execution_time)
+from snapshot import read_account
 
 STATE = SimpleNamespace(status="Submitted")
 
@@ -471,6 +472,29 @@ class ReconnectMatchTests(unittest.TestCase):
         self.assertTrue(match.clean)
 
 
+def account_orders(rows):
+    """The open orders an account read of IBKR's list rows shows, read on a link of its own."""
+    h = Harness()
+    h.fake.open_orders = rows
+    h.conn.connect()
+    return read_account(h.conn).open_orders
+
+
+class EndsEachListOnAnotherEnd(FakeTWS):
+    """Each list asked for ends at once on an end that is not its own, and its rows follow that end.
+
+    The first list's is an end nothing asked for; each later list's is the
+    end of the list before it, delayed across this request. A list's own
+    end comes only behind the next request, so every read is cut short in
+    the same way.
+    """
+
+    def req_all_open_orders(self):
+        self.calls.append(("req_all_open_orders",))
+        self.callbacks.open_order_end()
+        self._send_open_orders(self.callbacks, self.open_orders)
+
+
 class OpenOrderLists:
     """The orders IBKR's open-order list shows in these tests, and what a whole read of it holds."""
 
@@ -619,13 +643,13 @@ class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         h.fake.volunteer_open_orders = True
         h.fake.volunteer_after_request = True
         h.conn.connect()
-        self.assert_whole(collect_settled_broker_orders(h.conn))
+        self.assert_whole(collect_settled_broker_orders(h.conn, account_orders(self.working())))
 
     def test_two_reads_that_disagree_are_read_again_until_two_agree(self):
         h = Harness()
         h.conn.connect()
         h.fake.open_order_answers = [[], self.working(), self.working()]
-        self.assert_whole(collect_settled_broker_orders(h.conn))
+        self.assert_whole(collect_settled_broker_orders(h.conn, account_orders(self.working())))
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
 
     def test_an_order_whose_state_changed_between_reads_is_read_again(self):
@@ -633,16 +657,50 @@ class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         h.conn.connect()
         pending = [(7, contract(), order(order_ref="tag-1"), SimpleNamespace(status="PreSubmitted"))]
         h.fake.open_order_answers = [pending, self.working()[:1], self.working()[:1]]
-        broker = collect_settled_broker_orders(h.conn)
+        broker = collect_settled_broker_orders(h.conn, account_orders(self.working()[:1]))
         self.assertEqual([o.ibkr_status for o in broker.open_orders], ["Submitted"])
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
+
+    def test_two_reads_cut_short_the_same_way_never_settle(self):
+        h = Harness()
+        h.fake = EndsEachListOnAnotherEnd()
+        h.conn.api = h.fake
+        h.fake.open_orders = self.working()
+        h.conn.connect()
+        # The account read was cut short the same way: it too shows no order.
+        with self.assertRaises(OpenOrdersUnsettled):
+            collect_settled_broker_orders(h.conn, [])
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
+
+    def test_a_link_one_list_behind_is_resynced_and_the_next_read_is_current(self):
+        # Gateway's unasked end lands inside the first list asked for; that
+        # list's own rows and end then arrive behind the next request. Each
+        # request's answer differs, so a read one list behind shows the
+        # previous request's answer, not its own.
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.volunteer_after_request = True
+        h.fake.open_order_batch = 1
+        h.fake.open_order_answers = [self.working()[:1], self.working(), self.working()]
+        h.conn.connect()
+        self.assert_whole(collect_settled_broker_orders(h.conn, account_orders(self.working())))
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
+
+    def test_two_reads_that_agree_but_not_with_the_account_read_do_not_settle(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = self.working()
+        with self.assertRaises(OpenOrdersUnsettled):
+            collect_settled_broker_orders(h.conn, account_orders(self.working()[:1]))
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
 
     def test_three_disagreements_in_a_row_leave_the_list_unsettled(self):
         h = Harness()
         h.conn.connect()
         h.fake.open_order_answers = [[], self.working(), [], self.working(), []]
         with self.assertRaises(OpenOrdersUnsettled):
-            collect_settled_broker_orders(h.conn)
+            collect_settled_broker_orders(h.conn, account_orders(self.working()))
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
 
 

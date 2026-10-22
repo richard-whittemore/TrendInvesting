@@ -346,14 +346,26 @@ class LoopTests(unittest.TestCase):
 
     def test_the_start_reads_the_open_orders_again_until_two_reads_agree(self):
         # The account read's list, then two reads that disagree, then one
-        # that agrees with the read before it: the agreed list is matched.
+        # that agrees with the read before it and with the account read: the
+        # agreed list is matched.
         fake = self.gateway()
-        fake.open_order_answers = [[], [], [self.manual_order()], [self.manual_order()]]
+        fake.open_order_answers = [[self.manual_order()], [], [self.manual_order()], [self.manual_order()]]
         loop = self.loop(fake)
         with self.assertRaises(ReconcileMismatch):
             loop.start()
         self.assertEqual(len(fake.called("req_all_open_orders")), 4)
         self.assertTrue(loop.conn.needs_reconciliation)
+
+    def test_two_reads_that_agree_but_not_with_the_account_read_leave_the_link_not_reconciled(self):
+        fake = self.gateway()
+        fake.open_order_answers = [[]]
+        fake.open_orders = [self.manual_order()]
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileIncomplete):
+            loop.start()
+        self.assertEqual(len(fake.called("req_all_open_orders")), 5)
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
 
     def test_open_order_reads_that_disagree_three_times_leave_the_link_not_reconciled(self):
         fake = self.gateway()

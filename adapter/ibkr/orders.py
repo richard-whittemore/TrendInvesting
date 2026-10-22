@@ -44,6 +44,9 @@ STATUS_LIFECYCLE = {
     "Filled": None,
 }
 INACTIVE = "Inactive"
+# IBKR's statuses of an order no longer working: an open-order list may
+# still show it, but the account's records list no such order.
+FINISHED = frozenset({"Cancelled", "ApiCancelled", "Filled"})
 # IBKR message code 201: "Order rejected - reason: ...".
 REJECTION_CODES = frozenset({201})
 # IBKR message codes that refuse a newly placed order before it works, but
@@ -125,6 +128,11 @@ order (partial fills) all go to executed. clean is true only when the last three
 empty; anything else is for reconciliation to classify (ADR 0019), never a
 reason to resend.
 """
+
+
+def order_label(key):
+    """An order_key as the account's records name the order (their broker_order_id)."""
+    return "perm:{}".format(key[2]) if key[0] == "perm" else "order:{}:{}".format(key[1], key[2])
 
 
 def order_key(client_id, order_id, perm_id):
@@ -403,31 +411,51 @@ def collect_broker_orders(conn):
         executions=tuple(executions[k] for k in sorted(executions)))
 
 
-def collect_settled_broker_orders(conn, disagreements=OPEN_ORDER_DISAGREEMENTS):
-    """collect_broker_orders until two reads in a row show the same open orders (ids and states); the later read.
+def collect_settled_broker_orders(conn, account_orders, disagreements=OPEN_ORDER_DISAGREEMENTS):
+    """collect_broker_orders until two clean reads in a row agree, with each other and with the account read; the later.
 
-    An end-of-list mark nothing asked for, should one still land inside a
-    list after connect took Gateway's volunteered one, ends that read short;
-    the next read then differs from it, so a short list is never taken as
-    IBKR's whole list (ADR 0025 point 5: matched in full before anything is
-    sent). After disagreements disagreements in a row, OpenOrdersUnsettled:
-    the link is not reconciled (ADR 0019: a list not read in full is unread).
-    BrokerOrdersIncomplete and NotConnected as collect_broker_orders raises
-    them.
+    account_orders is the account read's own open-order list (the rows
+    snapshot.read_account lists). Two reads agree when they show the same
+    open orders (ids and IBKR states) and the same working orders as the
+    account read. After each read the link is pumped quiet
+    (Connection.resync_open_orders); a read during which, or after which,
+    a row or end arrived with no list outstanding (Connection.open_order_strays)
+    may have been ended by an end not its own, so it is no read at all: it
+    pairs with neither neighbour, and the quiet pump has brought the link
+    level for the next. Two reads cut short in the same way therefore never
+    agree (ADR 0025 point 5: matched in full before anything is sent).
+    After disagreements disagreements in a row (a read that is no read
+    counts as one), OpenOrdersUnsettled: the link is not reconciled (ADR
+    0019: a list not read in full is unread). BrokerOrdersIncomplete and
+    NotConnected as collect_broker_orders raises them.
     """
-    previous = collect_broker_orders(conn)
-    for _ in range(disagreements):
+    account = frozenset(row["broker_order_id"] for row in account_orders)
+    previous = None
+    for _ in range(disagreements + 1):
+        strays = conn.open_order_strays
         current = collect_broker_orders(conn)
-        if _order_states(current) == _order_states(previous):
+        conn.resync_open_orders()
+        if conn.open_order_strays != strays:
+            previous = None
+            continue
+        states = _order_states(current)
+        if previous == states and _working(current) == account:
             return current
-        previous = current
+        previous = states
     raise OpenOrdersUnsettled(
-        "IBKR's open orders did not agree in two reads in a row in {} reads".format(disagreements + 1))
+        "IBKR's open orders did not agree in two clean reads in a row, and with the account read, in {} "
+        "reads".format(disagreements + 1))
 
 
 def _order_states(broker):
     """The open orders broker shows, by identity and IBKR status."""
     return frozenset((order_key(r.client_id, r.broker_order_id, r.perm_id), r.ibkr_status) for r in broker.open_orders)
+
+
+def _working(broker):
+    """The orders broker shows still working, named as the account's records name them."""
+    return frozenset(order_label(order_key(r.client_id, r.broker_order_id, r.perm_id))
+                     for r in broker.open_orders if r.ibkr_status not in FINISHED)
 
 
 def match_on_reconnect(expected_client_order_ids, broker, client_id):

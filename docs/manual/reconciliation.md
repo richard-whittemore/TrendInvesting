@@ -21,10 +21,15 @@ reconnect's is read only once every trade IBKR replayed has its commission
 and its fill has reached the engine. Before the engine holds any account
 snapshot there is no book to compare, so the adapter sends none at a start
 or reconnect then. At a start or reconnect the adapter also reads IBKR's
-open-order list, each time to its end, until two reads in a row agree, before
-it compares anything or sends any order: an order still working at IBKR is
-matched to the engine's order, never reported missing because one read was
-cut short. The engine compares them with its own book and decides one of four
+open-order list, each time to its end, until two reads in a row agree with
+each other and with the account read's own list, before it compares anything
+or sends any order: an order still working at IBKR is matched to the engine's
+order, never reported missing because one read was cut short. After each of
+these reads the adapter waits until IBKR has sent no open-order message for
+2 seconds; a read after which an order or an end-of-list mark arrived that
+no list was waiting for may have been cut short, so it counts as no read and
+the list is read again. After three disagreements in a row the link is not
+reconciled and nothing is sent. The engine compares them with its own book and decides one of four
 things:
 
 | Result | What it means | What happens |
@@ -194,14 +199,14 @@ to the private channel for the reasons, which can carry amounts.
 
 The adapter reads positions, the account summary (net liquidation, total cash,
 Excess Liquidity) and every open order in one pass, then asks IBKR the time.
-The open orders are taken as IBKR's whole list only when two reads in a row
-show the same orders in the same states; after three disagreements in a row
-the link is not reconciled and nothing is sent. The adapter asks for one list
-at a time, so an earlier list's late orders are never read as a later one's,
-and takes the list and end-of-list mark IB Gateway sends unasked as a session
-starts before it asks for anything. Whether a live Gateway always sends that
-mark in time is still to be confirmed on the first live Gateway; the two
-agreeing reads are what guard against it until then ([the IBKR adapter](ibkr-adapter.md), "Reports").
+The open orders in the records below are the list taken in that one-pass
+read. The rule of two agreeing reads (and the stop after three disagreements)
+belongs to the start's and reconnect's reconciliation read, described at the
+top of this page, not to this read. The adapter asks for one list at a time,
+so an earlier list's late orders are never read as a later one's, and takes
+the list and end-of-list mark IB Gateway sends unasked as a session starts
+before it asks for anything. Whether a live Gateway always sends that mark in
+time is still to be confirmed on the first live Gateway ([the IBKR adapter](ibkr-adapter.md), "Reports").
 From that one read it builds the records the engine reads:
 
 - the engine's **account snapshot** (`account.snapshot`), positions and net

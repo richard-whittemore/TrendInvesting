@@ -2,6 +2,7 @@
 import logging
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 tests_dir = str(Path(__file__).resolve().parent)
@@ -132,6 +133,42 @@ class ConnectTests(unittest.TestCase):
         self.assertTrue(h.conn.connected)
         self.assertEqual(len(h.fake.called("connect")), 2)
         self.assertEqual(len(h.fake.called("disconnect")), 1)
+
+    def volunteering_then(self, h, interrupt):
+        """Gateway volunteers this client's orders as the session starts, and interrupt() happens once as they arrive."""
+        h.fake.open_orders = [(7, SimpleNamespace(), SimpleNamespace(clientId=11), SimpleNamespace(status="Submitted"))]
+        h.fake.volunteer_open_orders = True
+        fired = []
+
+        def once():
+            if not fired:
+                fired.append(True)
+                interrupt()
+        h.fake.later_hook = once
+
+    def test_a_close_while_connect_takes_the_volunteered_list_fails_the_connect(self):
+        h = Harness()
+        self.volunteering_then(h, h.fake.drop)
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertFalse(h.conn.connected)
+        self.assertNotIn("connected", h.states())
+
+    def test_a_fatal_error_while_connect_takes_the_volunteered_list_fails_the_connect(self):
+        h = Harness()
+        self.volunteering_then(h, lambda: h.fake.callbacks.error(-1, 1100, "Connectivity lost."))
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertFalse(h.conn.connected)
+        self.assertNotIn("connected", h.states())
+
+    def test_a_close_while_connect_takes_the_volunteered_list_is_retried_with_backoff(self):
+        h = Harness()
+        self.volunteering_then(h, h.fake.drop)
+        h.conn.connect_with_backoff()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertEqual(h.states(), ["reconnecting", "connected"])
 
     def test_a_socket_error_is_a_failed_connect(self):
         h = Harness()

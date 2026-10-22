@@ -57,7 +57,7 @@ from types import SimpleNamespace
 from account import EXCESS_LIQUIDITY, NET_LIQUIDATION, SUMMARY_GROUP, SUMMARY_TAGS, TOTAL_CASH
 from account import SnapshotIncomplete, SnapshotInvalid, _add_balance, _add_position, _server_time
 from connection import LIST_ENDED, LIST_READING, NotConnected
-from orders import UnrecognisedOrderReport, open_order_record, order_key
+from orders import FINISHED, UnrecognisedOrderReport, open_order_record, order_key, order_label
 from sender import CURRENCY, EXCHANGE, SEC_TYPE
 from values import to_decimal
 
@@ -101,7 +101,6 @@ OPEN_STATUS = {
     "Inactive": "pending",
     "PendingCancel": "cancel-pending",
 }
-FINISHED = frozenset({"Cancelled", "ApiCancelled", "Filled"})
 
 Record = namedtuple("Record", "event_type schema_version payload")
 """One recorded input: its event type, schema version and JSON-ready payload."""
@@ -254,9 +253,8 @@ def _take_order(orders, account, unread, order_id, contract, order, order_state)
             or record.quantity != record.quantity.to_integral_value()):
         unread.add(OPEN_ORDERS)
         return
-    broker_id = "perm:{}".format(key[2]) if key[0] == "perm" else "order:{}:{}".format(key[1], key[2])
     orders[key] = {
-        "broker_order_id": broker_id,
+        "broker_order_id": order_label(key),
         "client_order_id": record.client_order_id or "",
         "instrument_id": record.symbol,
         "side": side,

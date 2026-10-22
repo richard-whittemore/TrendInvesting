@@ -43,6 +43,10 @@ LIST_ENDED = "ended"
 # request_timeout, if shorter) and VOLUNTEER_MAX seconds in all.
 VOLUNTEER_QUIET = 2.0
 VOLUNTEER_MAX = 10.0
+# The callbacks of an open-order list: the Inbox is quiet for the list once
+# none of them has arrived for VOLUNTEER_QUIET seconds (see
+# Connection.resync_open_orders).
+LIST_MESSAGES = ("open_order", "open_order_end")
 
 # The first request ID: IBKR answers a request's error under its request ID
 # and an order's rejection under its order ID, with message codes shared by
@@ -141,6 +145,18 @@ class Connection:
         self._lists_requested = 0
         self._lists_noted = 0
         self._list_ends = 0
+        self._reset_list_alignment()
+
+    def _reset_list_alignment(self):
+        # Open-order rows taken while the newest noted list was outstanding;
+        # the volunteered rows and end connect kept for pump(), which are
+        # Gateway's own list, not strays; the count of strays (an end with
+        # no list outstanding, a row with none outstanding); and whether the
+        # link must be pumped quiet before the next list is asked.
+        self._rows_in_list = 0
+        self._volunteered = 0
+        self.open_order_strays = 0
+        self._resync_due = False
 
     # -- state reporting -------------------------------------------------
     def _report(self, state, reason="", attempt=None, ibkr_code=None, data_lost=None):
@@ -225,7 +241,11 @@ class Connection:
         if it does not come drops the link and raises NotConnected, since no
         later list on the link could be told from it (ADR 0019: a list not
         read in full is unread). Gateway's volunteered list was taken by
-        connect. The request is noted in the Inbox just before it is sent:
+        connect. After an end with no list outstanding, a list that ended
+        before any row of its own (the shape of a list ended by an end not
+        its own), or a connect that saw no volunteered end, the link is
+        pumped quiet first (resync_open_orders), so a link one list behind
+        is brought level before it is read again. The request is noted in the Inbox just before it is sent:
         every callback queued ahead of the note arrived before the request
         left and is no part of its answer, and an end taken with no list
         outstanding ends nothing. NotConnected while the link is down.
@@ -233,6 +253,8 @@ class Connection:
         self.require_connected()
         if self._list_ends < self._lists_requested:
             self._await_list_end()
+        if self._resync_due:
+            self.resync_open_orders()
         self._lists_requested += 1
         self.inbox.note(OPEN_ORDERS_ASKED)
         self.api.req_all_open_orders()
@@ -248,6 +270,42 @@ class Connection:
         if self._list_ends < self._lists_requested:
             self.drop("open-order-list-unended")
             raise NotConnected("an earlier open-order list never ended, so no later one on this link can be read")
+
+    def resync_open_orders(self):
+        """Take callbacks until no open-order row or end has arrived for VOLUNTEER_QUIET seconds (or request_timeout).
+
+        Waits first for any list still outstanding to end (as
+        ask_all_open_orders does). An end not a list's own that landed
+        inside a list leaves the link one list behind, each list ending on
+        the one before's end; once the Inbox is quiet, every late row and
+        end has been taken with no list outstanding, counted as strays
+        (open_order_strays), and the next list is answered by its own end
+        (ADR 0025 point 5: matched in full before anything is sent). A link
+        never quiet within VOLUNTEER_MAX seconds is dropped (ADR 0019: a
+        list not read in full is unread). NotConnected while the link is
+        down or once dropped.
+        """
+        self.require_connected()
+        if self._list_ends < self._lists_requested:
+            self._await_list_end()
+        quiet = min(VOLUNTEER_QUIET, self.config.request_timeout)
+        now = self._monotonic()
+        until, quiet_until = now + VOLUNTEER_MAX, now + quiet
+        while True:
+            now = self._monotonic()
+            if now >= quiet_until:
+                break
+            if now >= until:
+                self.drop("open-orders-never-quiet")
+                raise NotConnected("IBKR's open orders never stopped arriving, so no list on this link can be read")
+            event = self.pump(min(until, quiet_until) - now)
+            if not self.connected:
+                raise NotConnected("IB Gateway link is down")
+            if event is None:
+                break
+            if event.name in LIST_MESSAGES:
+                quiet_until = self._monotonic() + quiet
+        self._resync_due = False
 
     def open_order_list(self, ticket):
         """Where the list ask_all_open_orders gave ticket for stands: LIST_BEFORE, LIST_READING or LIST_ENDED.
@@ -288,6 +346,7 @@ class Connection:
         self._lists_requested = 0
         self._lists_noted = 0
         self._list_ends = 0
+        self._reset_list_alignment()
         # One deadline covers the socket connect, IBKR's handshake and the
         # wait for nextValidId: EClient.connect is synchronous, so a deadline
         # started after it returns would not bound a stalled socket.
@@ -314,21 +373,31 @@ class Connection:
                 # The session's own state, read here: nothing else needs it.
                 self._apply(event)
                 continue
-            if event.name == "connection_closed":
-                self._abandon()
-                raise ConnectFailed("Gateway closed the connection during the handshake")
-            if event.name == "error":
-                code = event.args[1]
-                if code == CODE_CLIENT_ID_IN_USE:
-                    self._abandon()
-                    self._report("refused", "client-id-in-use", ibkr_code=code)
-                    raise ClientIdInUse("client_id {} is already connected".format(cfg.client_id))
-                if code < FIRST_NOTICE_CODE:
-                    self._abandon()
-                    raise ConnectFailed("IBKR code {} during the handshake".format(code))
+            self._fail_handshake(event)
             # Anything else (notices, the open orders Gateway volunteers on
             # connect) is kept for pump() rather than dropped.
-            self._pending.append(event)
+            self._keep(event)
+
+    def _fail_handshake(self, event):
+        """Abandon the attempt (ConnectFailed, or ClientIdInUse) on a close or a code that ends a connect."""
+        if event.name == "connection_closed":
+            self._abandon()
+            raise ConnectFailed("Gateway closed the connection during the handshake")
+        if event.name == "error":
+            code = event.args[1]
+            if code == CODE_CLIENT_ID_IN_USE:
+                self._abandon()
+                self._report("refused", "client-id-in-use", ibkr_code=code)
+                raise ClientIdInUse("client_id {} is already connected".format(self.config.client_id))
+            if code < FIRST_NOTICE_CODE:
+                self._abandon()
+                raise ConnectFailed("IBKR code {} during the handshake".format(code))
+
+    def _keep(self, event):
+        """Keep a callback connect took for pump(); a row or end of Gateway's volunteered list is no stray."""
+        if event.name in LIST_MESSAGES:
+            self._volunteered += 1
+        self._pending.append(event)
 
     def _take_volunteered_list(self):
         """Keep for pump() the open orders and end Gateway volunteers as the session starts (see VOLUNTEER_QUIET).
@@ -337,7 +406,11 @@ class Connection:
         note in the queue, so the volunteered end ends nothing. When no end
         comes in time the session goes on without it; a start's or
         reconnect's read of the open orders stands only once two reads in a
-        row agree (orders.collect_settled_broker_orders).
+        row agree (orders.collect_settled_broker_orders), and the first list
+        asked is pumped quiet first (resync_open_orders). A close or a code
+        that ends a connect, taken here, fails the attempt as it does
+        during the handshake, so connect_with_backoff retries it: a link
+        already lost is never reported connected.
         """
         quiet = min(VOLUNTEER_QUIET, self.config.request_timeout)
         now = self._monotonic()
@@ -346,9 +419,11 @@ class Connection:
             wait = min(until, quiet_until) - self._monotonic()
             event = self.inbox.get(wait) if wait > 0 else None
             if event is None:
+                self._resync_due = True
                 return
-            self._pending.append(event)
-            if event.name in ("open_order_end", "connection_closed"):
+            self._fail_handshake(event)
+            self._keep(event)
+            if event.name == "open_order_end":
                 return
             if event.name in ("open_order", "order_status"):
                 quiet_until = self._monotonic() + quiet
@@ -465,10 +540,22 @@ class Connection:
                 self._report("disconnected", "connection-closed")
         elif event.name == OPEN_ORDERS_ASKED:
             self._lists_noted += 1
+            self._rows_in_list = 0
+        elif event.name in LIST_MESSAGES and self._list_ends >= self._lists_noted and self._volunteered:
+            self._volunteered -= 1  # Gateway's volunteered list, which connect took
+        elif event.name == "open_order":
+            if self._list_ends < self._lists_noted:
+                self._rows_in_list += 1
+            else:
+                self.open_order_strays += 1
         elif event.name == "open_order_end":
             if self._list_ends < self._lists_noted:
                 self._list_ends += 1
+                if not self._rows_in_list:
+                    self._resync_due = True
             else:
+                self.open_order_strays += 1
+                self._resync_due = True
                 log.info("ibkr open-order list end with no list outstanding ignored")
         elif event.name == "current_time":
             self.time_answers += 1

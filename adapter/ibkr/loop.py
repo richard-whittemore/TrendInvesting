@@ -171,7 +171,7 @@ from decimal import Decimal
 from connection import Connection, NotConnected
 from delivery import (DELIVERED_SUFFIX, Deliverer, PostCloseReading, SnapshotRefused, market_open, nyse_calendar,
                       run_name)
-from orders import (BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker, collect_broker_orders,
+from orders import (OPEN_ORDER_DISAGREEMENTS, BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker, collect_broker_orders,
                     collect_settled_broker_orders, match_on_reconnect, order_key)
 from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
                    read_engine_log, released_client_order_ids, run_identity, run_logs)
@@ -416,14 +416,32 @@ class AdapterLoop:
         return self.conn is not None and self.conn.connected and not self.conn.needs_reconciliation
 
     def reconcile(self):
-        """Read IBKR's account in full, match its open orders and executions to the journal, then mark the link reconciled."""
-        reading = read_account(self.conn)
-        if reading.unread:
-            raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread); nothing is sent until a "
-                                      "read is complete (ADR 0019: an unavailable balance is not zero)".format(
-                                          ", ".join(sorted(reading.unread))))
+        """Read IBKR's account in full, match its open orders and executions to the journal, then mark the link reconciled.
+
+        The account read is followed by a quiet pump of the link
+        (Connection.resync_open_orders), and read again when a row or end of
+        an open-order list arrived with no list outstanding by then: its own
+        list may have been ended by an end not its own (ADR 0025 point 5:
+        matched in full before anything is sent). The open orders matched
+        are two clean reads that agree with each other and with that account
+        read (collect_settled_broker_orders).
+        """
+        for _ in range(OPEN_ORDER_DISAGREEMENTS + 1):
+            strays = self.conn.open_order_strays
+            reading = read_account(self.conn)
+            if reading.unread:
+                raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread); nothing is sent until "
+                                          "a read is complete (ADR 0019: an unavailable balance is not zero)".format(
+                                              ", ".join(sorted(reading.unread))))
+            self.conn.resync_open_orders()
+            if self.conn.open_order_strays == strays:
+                break
+        else:
+            raise ReconcileIncomplete("IBKR's open orders arrived outside the list asked for in {} account reads; the "
+                                      "link is not reconciled and nothing is sent (ADR 0019: a list not read in full "
+                                      "is unread)".format(OPEN_ORDER_DISAGREEMENTS + 1))
         try:
-            broker = collect_settled_broker_orders(self.conn)
+            broker = collect_settled_broker_orders(self.conn, reading.open_orders)
         except OpenOrdersUnsettled as err:
             raise ReconcileIncomplete("{}; the link is not reconciled and nothing is sent (ADR 0019: a list not "
                                       "read in full is unread)".format(err)) from None
