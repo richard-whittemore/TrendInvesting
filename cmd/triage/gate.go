@@ -104,23 +104,65 @@ func (g *gateBox) socketDir(runDir string) string {
 // folder is missing or wrong, or a check could not be started in it.
 var errGateUnavailable = errors.New("gate unavailable")
 
-// gateStepTimeout is the time limit of each gate-side step (the ports in
-// use, the object reads, the copy): well under Claude Code's own limit for a
-// command, so a stalled step ends as the gate's failure before the wrapper
-// gives up on the session's command.
-const gateStepTimeout = 2 * time.Minute
+// gateStepTimeout is the time limit of each gate-side step (the object
+// reads and the copy, the ports in use): safely under Claude Code's default
+// two-minute command timeout, so a stalled step ends as the gate's failure
+// before the wrapper gives up on the session's command. A step inside
+// another (the ports read of the copy) ends no later than the enclosing
+// step. The sudo that starts the session's own command is part of that
+// command's own budget, not a step of its own.
+const gateStepTimeout = time.Minute
 
 // errGateStalled is a gate-side step that ran past its own time limit.
 var errGateStalled = errors.New("a gate step ran past its time limit")
 
+// errGateStep is the failure of a gate-side step: the object reads, the
+// copy, the ports in use, the launcher (sudo, sandbox-exec, env), the end of
+// the gate user's processes. It is the gate's outage whatever the session's
+// context did meanwhile; only a cancel while the session's own command runs
+// is an interruption.
+type errGateStep struct{ err error }
+
+func (e *errGateStep) Error() string { return e.err.Error() }
+func (e *errGateStep) Unwrap() error { return e.err }
+
+// gateStep marks err as a gate-side step's failure (errGateUnavailable).
+func gateStep(err error) error {
+	var step *errGateStep
+	if errors.As(err, &step) {
+		return err
+	}
+	if !errors.Is(err, errGateUnavailable) {
+		err = fmt.Errorf("%w: %w", errGateUnavailable, err)
+	}
+	return &errGateStep{err: err}
+}
+
+// stepFailure is err of the gate-side step whose context is step, marked
+// as a stall when the step ran past its limit.
+func stepFailure(step context.Context, err error) error {
+	if errors.Is(step.Err(), context.DeadlineExceeded) && !errors.Is(err, errGateStalled) {
+		err = fmt.Errorf("%w: %w", err, errGateStalled)
+	}
+	return gateStep(err)
+}
+
+// stepDeadline is the context key of the enclosing gate-side step's end.
+type stepDeadline struct{}
+
 // stepContext is the context of one gate-side step: the session's values,
-// never its cancellation or deadline, with the step's own time limit.
+// never its cancellation or deadline, with the step's own time limit, cut
+// to the end of any enclosing step.
 func (g *gateBox) stepContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	d := g.stepTimeout
 	if d <= 0 {
 		d = gateStepTimeout
 	}
-	return context.WithTimeout(context.WithoutCancel(ctx), d)
+	end := time.Now().Add(d)
+	if outer, ok := ctx.Value(stepDeadline{}).(time.Time); ok && outer.Before(end) {
+		end = outer
+	}
+	return context.WithDeadline(context.WithValue(context.WithoutCancel(ctx), stepDeadline{}, end), end)
 }
 
 // errProcessesLeft is a gate command after which the gate user's processes
@@ -267,12 +309,12 @@ func (g *gateBox) Sweep(ctx context.Context) error {
 // just before the command starts. A command the gate could not start
 // (sudo, sandbox-exec, env or the program missing or refusing: the
 // launcher never ran it) and one after which the gate user's processes
-// could not all be ended are the gate's failure (errGateUnavailable),
-// never the command's.
+// could not all be ended are the gate's failure (errGateStep,
+// errGateUnavailable), never the command's, whatever ctx did meanwhile.
 func (g *gateBox) Run(ctx context.Context, runDir, wd string, argv []string) (string, error) {
 	var id [8]byte
 	if _, err := rand.Read(id[:]); err != nil {
-		return "", fmt.Errorf("%w: no randomness for the command's launch mark", errGateUnavailable)
+		return "", gateStep(errors.New("no randomness for the command's launch mark"))
 	}
 	marker := filepath.Join(runDir, "launched-"+hex.EncodeToString(id[:]))
 	var ports []int
@@ -280,27 +322,29 @@ func (g *gateBox) Run(ctx context.Context, runDir, wd string, argv []string) (st
 		step, cancel := g.stepContext(ctx)
 		var err error
 		ports, err = g.listening(step)
-		stalled := step.Err() != nil
+		if err != nil {
+			err = stepFailure(step, errors.New("the ports in use could not be read"))
+		}
 		cancel()
 		if err != nil {
-			if stalled {
-				return "", fmt.Errorf("%w: %w: the ports in use could not be read", errGateUnavailable, errGateStalled)
-			}
-			return "", fmt.Errorf("%w: the ports in use could not be read", errGateUnavailable)
+			return "", err
 		}
 	}
 	name, args := g.command(runDir, wd, marker, argv, ports)
 	if args == nil {
-		return "", fmt.Errorf("%w: the run folder's name cannot be put in the sandbox's profile", errGateUnavailable)
+		return "", gateStep(errors.New("the run folder's name cannot be put in the sandbox's profile"))
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err // given up on before it started: nothing of the gate's failed
 	}
 	out, err := withStop(g.run, func() { _ = g.stopAll() }).Run(ctx, "/", nil, name, args...)
 	_, unlaunched := os.Stat(marker)
 	_ = os.Remove(marker)
 	if serr := g.stopAll(); serr != nil {
-		return out, fmt.Errorf("%w: %w (%w)", errGateUnavailable, errProcessesLeft, serr)
+		return out, gateStep(fmt.Errorf("%w (%w)", errProcessesLeft, serr))
 	}
-	if unlaunched != nil && ctx.Err() == nil {
-		return out, fmt.Errorf("%w: sudo, sandbox-exec or env could not start %s", errGateUnavailable, filepath.Base(argv[0]))
+	if unlaunched != nil {
+		return out, gateStep(fmt.Errorf("sudo, sandbox-exec or env could not start %s", filepath.Base(argv[0])))
 	}
 	return out, err
 }
@@ -619,14 +663,14 @@ git $safe -c commit.gpgsign=false -c user.name=TrendInvesting-gate -c user.email
 func (w *gitWorkspace) exportTree(ctx context.Context, dir, rev, runDir string) error {
 	stage, err := stageFolder(runDir)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errGateUnavailable, err)
+		return gateStep(err)
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
 	archive := filepath.Join(stage, "commit.tar")
 	//nolint:gosec // G302/G304: a new file in the job's fresh folder; the gate user, in the gate's group, reads it.
 	f, err := os.OpenFile(archive, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o640)
 	if err != nil {
-		return fmt.Errorf("%w: the commit's archive could not be made", errGateUnavailable)
+		return gateStep(errors.New("the commit's archive could not be made"))
 	}
 	werr := w.treeTar(ctx, dir, rev, f)
 	if werr == nil {
@@ -636,13 +680,10 @@ func (w *gitWorkspace) exportTree(ctx context.Context, dir, rev, runDir string) 
 		werr = cerr
 	}
 	if werr != nil {
-		return fmt.Errorf("%w: the commit's archive could not be written", errGateUnavailable)
+		return gateStep(errors.New("the commit's archive could not be written"))
 	}
 	if _, err := w.gate.Run(ctx, runDir, "", []string{"/bin/sh", "-c", copyScript, archive}); err != nil {
-		if errors.Is(err, errProcessesLeft) {
-			return fmt.Errorf("%w: the gate user could not make the copy of the commit: %w", errGateUnavailable, err)
-		}
-		return fmt.Errorf("%w: the gate user could not make the copy of the commit (sudo, sandbox-exec or the archive)", errGateUnavailable)
+		return gateStep(fmt.Errorf("the gate user could not make the copy of the commit: %w", err))
 	}
 	return nil
 }

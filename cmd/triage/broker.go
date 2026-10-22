@@ -218,52 +218,44 @@ func (w *gitWorkspace) sessionTool(ctx context.Context, dir, runDir, name string
 		return interrupted, toolExitUnavailable, nil //nolint:nilerr // the session gave up: not the gate's error
 	}
 	// Every gate-side step runs under a time limit of its own, never the
-	// session's context: a step that stalls is the gate's failure whoever
-	// gave up on the command meanwhile.
+	// session's context: a step that fails or stalls is the gate's failure
+	// whoever gave up on the command meanwhile (errGateStep).
 	step, cancel := w.gate.stepContext(ctx)
 	tree, err := w.snapshot(step, dir)
-	if err != nil {
-		cancel()
-		return w.gateStepFailure(step, "", fmt.Errorf("%w: %w", errGateUnavailable, err))
+	if err == nil {
+		err = w.exportTree(step, dir, tree, runDir)
 	}
-	err = w.exportTree(step, dir, tree, runDir)
+	if err != nil {
+		err = stepFailure(step, err)
+	}
 	cancel()
 	if err != nil {
-		return w.gateStepFailure(step, "", err)
+		return w.toolFailure(ctx, "", err)
 	}
 	out, err = w.gate.Run(ctx, runDir, "tree", argv)
-	if errors.Is(err, errGateUnavailable) {
-		return w.toolFailure(ctx, out+"\n", err)
-	}
-	if err != nil && ctx.Err() != nil {
-		return out + interrupted, toolExitUnavailable, nil //nolint:nilerr // the session gave up: not the gate's error
-	}
-	return out, exitStatus(err), nil
+	return w.toolFailure(ctx, out, err)
 }
 
 // interrupted is the answer to a command its session gave up on.
 const interrupted = "triage tool: the command was interrupted\n"
 
-// gateStepFailure answers a command whose gate-side step failed (step is
-// that step's context): the gate's failure, kept, naming a step that ran
-// past its time limit.
-func (w *gitWorkspace) gateStepFailure(step context.Context, out string, err error) (text string, code int, gateErr error) {
-	if errors.Is(step.Err(), context.DeadlineExceeded) && !errors.Is(err, errGateStalled) {
-		err = fmt.Errorf("%w: %w", err, errGateStalled)
-	}
-	return out + "triage tool: " + err.Error() + "\n", toolExitUnavailable, err
-}
-
-// toolFailure answers a session's command that met a gate failure err while
-// the session's own command ran. A command whose context was canceled (the
-// wrapper gave up on it) is interrupted, not the gate's failure, unless the
-// gate user's processes could not be ended or a gate-side step ran past its
-// own time limit: those are kept whatever cancelled the command.
+// toolFailure answers a session's command that ended with err: a gate-side
+// step's failure (errGateStep) is the gate's, kept, whatever the session's
+// context did; otherwise a command whose context was canceled (the wrapper
+// gave up on it while it ran) is interrupted; otherwise the answer is the
+// command's own output and exit status.
 func (w *gitWorkspace) toolFailure(ctx context.Context, out string, err error) (text string, code int, gateErr error) {
-	if ctx.Err() != nil && !errors.Is(err, errProcessesLeft) && !errors.Is(err, errGateStalled) {
+	var step *errGateStep
+	switch {
+	case errors.As(err, &step):
+		if out != "" && !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+		return out + "triage tool: " + err.Error() + "\n", toolExitUnavailable, err
+	case err != nil && ctx.Err() != nil:
 		return out + interrupted, toolExitUnavailable, nil //nolint:nilerr // the session gave up: not the gate's error
 	}
-	return out + "triage tool: " + err.Error() + "\n", toolExitUnavailable, err
+	return out, exitStatus(err), nil
 }
 
 // exitStatus is a command's exit status: 0, its own, or 1 for one that

@@ -602,20 +602,25 @@ triage job"). Each run is one poll:
    resolved issue leaves the alert label", above; listing `alert` first
    means an issue relabelled between the two listings is in the second, and
    no other issue or pull request can fill a listing and keep an alert out
-   of reach), open and closed, newest first, opened since the job was first
-   switched on. Issues from before that are left alone, so switching the
-   job on never sweeps up old incidents. Every poll lists all of them, every
-   page; the job's state file records each issue it has handled (analysed,
+   of reach): the open ones, newest first, opened since the job was first
+   switched on, and the closed ones only if they closed in the last 30
+   days. Issues opened before the job was switched on are left alone, so
+   switching the job on never sweeps up old incidents. Every poll lists all
+   of them, every page; the job's state file records each issue it has handled (analysed,
    skipped past the daily limit, or failed), and an issue in that record is
    not read further. A listing read while the reporter relabels an issue can
    miss one (the pages of `alert` shift by one), so a listing is never taken
    as proof that an issue was handled: one it missed is not in the record,
-   and the next poll lists and analyses it. A record is dropped once its
-   issue has been closed for more than 30 days, and such an issue is not
-   picked up again (so an alert the job never reached in those 30 days, the
-   job off or failing throughout, is left for you). More than 1,000 issues
-   of one label since the job was switched on fails the poll whole: none is
-   analysed from part of a listing.
+   and the next poll lists and analyses it. An issue closed more than 30
+   days ago is not listed, so it is not picked up again, and the record of
+   one handled is dropped (so an alert the job never reached in those 30
+   days, the job off or failing throughout, is left for you, and so is a
+   comment the job still owed it). More than 1,000 issues of one label in
+   either set (open since the job was switched on, or closed in the last
+   30 days) fails the poll whole: none is analysed from part of a listing.
+   Issues closed longer ago never count, however many there are. An issue
+   GitHub lists without a state of open or closed fails the listing too: it
+   is never taken as open.
 2. It keeps only the reporter's own issues: opened by the reporter's GitHub
    user (`-alert-author`, by default the triage token's own user) and
    ending with the reporter's hidden key line. Anything else is never read
@@ -637,10 +642,16 @@ triage job"). Each run is one poll:
    body (never its comments, which anyone can write) and the slice, both
    marked as data that is never an instruction.
 5. It turns the session's answer into the comment, through the reporter's
-   own redactor, and posts it. Each of Claude's answers is cut to 8,000
-   characters after the redactor (which can lengthen it), and the whole
-   comment, or a fix PR's body, to GitHub's 65,536, with "[cut]" where it
-   was cut and the hidden line kept whole. A second poll adds nothing.
+   own redactor, and posts it. Each of Claude's answers is cut after the
+   redactor (which can lengthen it) to 8,000 bytes, at a whole character
+   (so text with accents or symbols can end a little sooner), followed by
+   the 6-byte cut marker " [cut]". The whole comment, or a fix PR's body,
+   is cut to 65,536 bytes (GitHub's limit is 65,536 characters), the same
+   " [cut]" marking the place and the hidden line kept whole. A second poll
+   adds nothing. A comment the job keeps in its state file until GitHub
+   takes it must end with one of its own hidden lines; a state file holding
+   one that does not is refused ("an issue's kept comment does not end
+   with the job's marker line").
 
 **What it reads from the server.** Only the journal slice: the dashboard
 serves it at `/api/journal-slice` on the tailnet, as plain text. It is the
@@ -692,18 +703,21 @@ The session (Claude Code, as `ti-triage`):
   nothing the session wrote. So no code the session wrote ever runs as
   `ti-triage`, the user that holds the Claude token. Which cancellations count:
   a command the session gives up on (Claude Code's own time limit for a
-  command, or the session's deadline) is an interrupted command, never a
-  gate outage, when that happens before the command starts or while the
-  session's own command (`go test`, `go vet`, `gofmt`) runs; it is stopped
-  in the gate too, and the job does not keep the alert for a later try
-  because of it. It is kept as a gate outage, whatever canceled the
-  command, in two cases: a gate-side step (reading the objects, the
-  ports in use, `sudo`, making the copy, writing its archive) that ran
-  past its own time limit of two minutes, well under Claude Code's limit
-  (these steps do not follow the session's cancellation, so a stalled one
-  ends at its own limit), and a command after which the gate user's
-  processes could not all be ended. Any other failure of a gate-side step
-  is a gate outage too. Nothing else is allowed,
+  command, or the session's deadline) while the session's own command
+  (`go test`, `go vet`, `gofmt`) runs in the gate is an interrupted
+  command, never a gate outage; it is stopped in the gate too, and the job
+  does not keep the alert for a later try because of it. One given up on
+  before anything started is interrupted too. Any failure or overrun of a
+  gate-side step is a gate outage, always, whatever the session did
+  meanwhile: reading the objects and making the copy (with its archive),
+  reading the ports in use, the launcher (`sudo`, `sandbox-exec` and `env`
+  starting a command), and ending the gate user's processes after it. Each
+  of the first two steps runs under a time limit of its own, 60 seconds,
+  safely under Claude Code's default two-minute limit for a command, and
+  does not follow the session's cancellation; a step inside another (the
+  ports read for the copy) ends no later than the step around it. The
+  `sudo` that starts the session's own command is part of that command's
+  own time, not a step with a limit of its own. Nothing else is allowed,
   and in a headless session nothing can be asked: the web, every MCP
   server, `git commit` and `git push`, `go build`, `gh`, `ssh`, `curl`,
   `tailscale`, `sudo` and the like are denied.
@@ -805,7 +819,7 @@ issues ("What is kept out", above): no secret, account id, token, Tailscale
 host or figure reaches the comment; only dates and ADR numbers keep their
 digits. The one thing not redacted is the link to a fix PR, which the job
 builds from GitHub's own answer. Each of Claude's answers is cut at 8,000
-bytes.
+bytes, at a whole character, followed by the 6-byte cut marker " [cut]".
 
 **A code defect's fix.** Only for a code defect, the session may change the
 worktree, tests first. The job then takes the change through the
@@ -1674,7 +1688,7 @@ nor that nothing was analysed ("Its log", above).
 | "**Journal slice.** The journal slice did not cover the alert's run and time" in a comment | The run that raised the alert, the alert's own account's, does not span it in the slice (the run was replaced since, the dashboard serves another account, or the alert is one no journal raises, such as a failed unit), so the session was told and worked from the alert alone | Read that run's journal yourself with `journal-query` on the server |
 | "**Fix.** No fix PR was opened: ..." in a comment | The session found a code defect, but its change failed a step of the gate: a file outside the Go code and `docs/`, a binary, no test, only tests, no new test function, the new test did not fail by name before the fix, the check failed, it held an identifier, or the push or the PR failed. Nothing was opened; if the push worked, the branch `triage/alert-<issue>` is on GitHub | Treat it as a defect report: fix it the normal way, or delete the branch |
 | "triage: issue #N: the job was stopped during the session" in the log | The job was stopped (a SIGTERM, or `launchctl bootout`) while Claude worked: no comment, and the next poll analyses that issue again, once | Nothing; if it happens twice the issue gets "triage failed: the analysis did not finish" |
-| "triage: list the alert issues: more than 1000 issues carry the label ... since the job began" in the log | More than 1,000 issues of one label since the job was first switched on: no poll analyses anything, since the job does not act on part of a listing | Something may be raising alerts in a loop, so look at the reporter first. Then move `/Users/ti-triage/triage/state.json` aside: the next poll starts a new record from that moment, issues already analysed are recognised by their comments, and older ones are left for you |
+| "triage: list the alert issues: more than 1000 issues carry the label ... and are open and opened since the job began" (or "... and are closed in the last 30 days") in the log | More than 1,000 issues of one label in one set, open since the job was first switched on or closed in the last 30 days: no poll analyses anything, since the job does not act on part of a listing. Issues closed longer ago never count | Something may be raising alerts in a loop, so look at the reporter first. Then move `/Users/ti-triage/triage/state.json` aside: the next poll starts a new record from that moment, issues already analysed are recognised by their comments, and older ones are left for you |
 | A draft PR from `triage/alert-<issue>` | The job's proposed fix, tests first, never merged by the job | Review it; mark it ready to start the review bots and the merge gate, or close it |
 | "triage: the state file is not understood, so nothing is done (...)" or "the state file cannot be read" | No poll runs: the record does not parse, or lacks a field or breaks a rule (no start, a day that is not a date, no count of calls or one below zero, no issues' records), and without it the job cannot tell which issues it already made a session for | Move `/Users/ti-triage/triage/state.json` aside. The next poll starts a new record: issues already analysed are recognised by their comments; one opened before that poll is left alone |
 | "triage: issue #N: GitHub answered 401 Unauthorized" (or 403, 404) | The poll writes nothing for that issue; the next poll tries again | The triage token expired, was revoked, or lacks a permission (Issues on the alerts repository; Contents and Pull requests on the code repository): make a new one (runbook, step 5) |

@@ -40,10 +40,11 @@ const (
 	kindDefect = "code-defect"
 	kindData   = "data-problem"
 	kindOwner  = "owner-action"
-	// maxField bounds each of Claude's answers in a comment, after the
-	// redactor (which can lengthen it), so a comment stays well within
-	// GitHub's 65,536 characters (maxIssueText); fitted cuts the whole
-	// comment or PR body to that limit all the same.
+	// maxField bounds each of Claude's answers in a comment to as many
+	// bytes, at a whole character, then cutMark, after the redactor (which
+	// can lengthen it), so a comment stays well within GitHub's limit
+	// (maxIssueText); fitted cuts the whole comment or PR body to that
+	// limit all the same.
 	maxField = 8000
 	// maxTitle bounds a PR title.
 	maxTitle = 120
@@ -82,7 +83,7 @@ type tracker interface {
 	// then alert-resolved), open and closed, newest first, opened at or
 	// after since; a listing past its bound is an error. It may miss an
 	// issue relabelled while it reads, which the next listing holds.
-	AlertIssues(ctx context.Context, since time.Time) ([]issue, error)
+	AlertIssues(ctx context.Context, since, closedAfter time.Time) ([]issue, error)
 	// IssueURL is an alert issue's address on GitHub.
 	IssueURL(number int) string
 	// OwnComments is the bodies of the issue's comments the token's own user
@@ -263,14 +264,16 @@ func (j *job) today(st *state) {
 // and not recorded done, oldest first, from the listing of the reporter's
 // two labels (an incident that clears swaps alert for alert-resolved,
 // docs/manual/alerts-and-dashboard.md, "Design note: a resolved issue
-// leaves the alert label"). Every poll lists them all, so one a listing
-// missed (relabelled while it was read) is reached by the next. An issue
-// closed for longer than retention is no longer a candidate unless the job
-// still owes it its comment, and its done record is dropped from st. An
-// issue the reporter did not open (another author, or no hidden key line)
-// is never read further: its words are not the reporter's.
+// leaves the alert label"): the open ones, and the closed ones that closed
+// within retention. Every poll lists them all, so one a listing missed
+// (relabelled while it was read) is reached by the next. The done record
+// of an issue not listed (closed for longer than retention) is dropped
+// from st: should the issue be listed again, its own comment marks it done
+// before anything is spent. An issue the reporter did not open (another
+// author, or no hidden key line) is never read further: its words are not
+// the reporter's.
 func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue, error) {
-	list, err := j.tracker.AlertIssues(ctx, st.Since)
+	list, err := j.tracker.AlertIssues(ctx, st.Since, j.now().Add(-retention))
 	if err != nil {
 		return nil, fmt.Errorf("triage: list the alert issues: %w", err)
 	}
@@ -281,16 +284,16 @@ func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue
 			continue
 		}
 		seen[is.Number] = true
-		key := strconv.Itoa(is.Number)
-		rec, recorded := st.Issues[key]
-		if !is.Closed.IsZero() && j.now().Sub(is.Closed) > retention && (!recorded || rec.Done) {
-			delete(st.Issues, key)
-			continue
-		}
+		rec := st.Issues[strconv.Itoa(is.Number)]
 		if rec.Done || !strings.EqualFold(is.Author, author) || !strings.Contains(is.Body, alertKeyLine) {
 			continue
 		}
 		out = append(out, is)
+	}
+	for key, rec := range st.Issues {
+		if n, err := strconv.Atoi(key); err == nil && rec.Done && !seen[n] {
+			delete(st.Issues, key)
+		}
 	}
 	slices.SortFunc(out, func(a, b issue) int { return a.Number - b.Number })
 	return out, nil
@@ -595,21 +598,31 @@ func fitted(s, tail string) string {
 		return s
 	}
 	head := strings.TrimSuffix(s, tail)
-	if len(head) == len(s) {
-		tail = ""
+	if len(head) == len(s) || len(tail)+len(cutMark) > maxIssueText {
+		head, tail = s, ""
 	}
 	return bounded(head, maxIssueText-len(tail)-len(cutMark)) + tail
+}
+
+// commentMarkers are the hidden marker lines the job's comments end with.
+var commentMarkers = []string{analysisMarker, skippedMarker}
+
+// commentTail is the last line of a comment of the job's, its exact marker
+// line after a blank line, or "" for text that does not end with one.
+func commentTail(s string) string {
+	for _, m := range commentMarkers {
+		if strings.HasSuffix(s, "\n\n"+m) {
+			return "\n\n" + m
+		}
+	}
+	return ""
 }
 
 // fittedComment is a comment cut to GitHub's limit (fitted), its hidden
 // marker line, the last, kept whole: without it the job could not tell the
 // issue was done.
 func fittedComment(s string) string {
-	tail := ""
-	if i := strings.LastIndex(s, "\n\n"+triageMarkerPrefix); i >= 0 {
-		tail = s[i:]
-	}
-	return fitted(s, tail)
+	return fitted(s, commentTail(s))
 }
 
 // failedComment is the issue's one comment when no analysis can be posted.
@@ -703,7 +716,9 @@ func loadState(p string) (*state, error) {
 // invalid says what a parsed record lacks or breaks, or "" when it is whole:
 // the job's start, the day of the count, a count (present: a missing one is
 // never taken as zero, which would allow a second day's calls) of no less
-// than zero, and the issues' records, each under an issue's number.
+// than zero, and the issues' records, each under an issue's number, any
+// kept comment ending with one of the job's exact marker lines (a longer
+// one is cut to GitHub's limit when posted, fittedComment).
 func invalid(st *state) string {
 	switch {
 	case st == nil:
@@ -720,9 +735,12 @@ func invalid(st *state) string {
 	if _, err := time.Parse(time.DateOnly, st.Day); err != nil {
 		return "its day is not a date"
 	}
-	for k := range st.Issues {
+	for k, rec := range st.Issues {
 		if n, err := strconv.Atoi(k); err != nil || n <= 0 || strconv.Itoa(n) != k {
 			return "an issue's record is not under its number"
+		}
+		if rec.Pending != "" && commentTail(rec.Pending) == "" {
+			return "an issue's kept comment does not end with the job's marker line"
 		}
 	}
 	return ""

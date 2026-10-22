@@ -209,33 +209,48 @@ func (g *githubTracker) Self(ctx context.Context) (string, error) {
 var reporterLabels = []string{"alert", "alert-resolved"}
 
 // AlertIssues lists the alerts repository's issues that carry one of
-// reporterLabels, open and closed, newest first, label by label, each to
-// the first one opened before since; no other issue or pull request counts
-// against a listing's bound. A label with more than maxPages pages of them
-// is an error, never a listing cut short.
+// reporterLabels, label by label: the open ones, newest first, each to the
+// first one opened before since, and the closed ones that closed at or
+// after closedAfter (closed issues are read most recently updated first,
+// and their reading stops at the first one last updated before
+// closedAfter: an issue's last update is never before its closing). Only
+// those count against a listing's bound: no other issue, no pull request
+// and no issue closed before closedAfter. A label with more than
+// maxPages*pageSize of them is an error, never a listing cut short.
 //
 // A listing read while labels change can miss an issue (one that moves to
 // alert-resolved shifts the later pages of alert by one), so the job never
 // takes a listing as proof an issue was handled: it keeps the issues it
 // handled in its own record, and one missed now is listed by the next poll.
-func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time) ([]issue, error) {
+func (g *githubTracker) AlertIssues(ctx context.Context, since, closedAfter time.Time) ([]issue, error) {
 	var out []issue
 	for _, label := range reporterLabels {
-		listed, err := g.labelIssues(ctx, label, since)
-		if err != nil {
-			return nil, err
+		for _, state := range []string{"open", "closed"} {
+			listed, err := g.labelIssues(ctx, label, state, since, closedAfter)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, listed...)
 		}
-		out = append(out, listed...)
 	}
 	return out, nil
 }
 
-// labelIssues is one label's listing of AlertIssues.
-func (g *githubTracker) labelIssues(ctx context.Context, label string, since time.Time) ([]issue, error) {
+// maxListPages bounds the pages of one listing, whatever they hold: a
+// GitHub whose listing never ends is an error, never a poll that never
+// ends.
+const maxListPages = 10 * maxPages
+
+// labelIssues is one label's and one state's listing of AlertIssues.
+func (g *githubTracker) labelIssues(ctx context.Context, label, state string, since, closedAfter time.Time) ([]issue, error) {
+	query := fmt.Sprintf("labels=%s&state=open&sort=created", url.QueryEscape(label))
+	if state == "closed" {
+		query = fmt.Sprintf("labels=%s&state=closed&sort=updated&since=%s", url.QueryEscape(label), url.QueryEscape(closedAfter.UTC().Format(time.RFC3339)))
+	}
 	var out []issue
 	for page := 1; ; page++ {
-		if page > maxPages {
-			return nil, fmt.Errorf("more than %d issues carry the label %s since the job began, so none is analysed until the job's record is moved aside", maxPages*pageSize, label)
+		if page > maxListPages {
+			return nil, fmt.Errorf("GitHub's listing of the %s issues labelled %s did not end within %d pages", state, label, maxListPages)
 		}
 		var items []struct {
 			Number      int             `json:"number"`
@@ -244,10 +259,11 @@ func (g *githubTracker) labelIssues(ctx context.Context, label string, since tim
 			User        *ghUser         `json:"user"`
 			State       string          `json:"state"`
 			CreatedAt   time.Time       `json:"created_at"`
+			UpdatedAt   time.Time       `json:"updated_at"`
 			ClosedAt    *time.Time      `json:"closed_at"`
 			PullRequest json.RawMessage `json:"pull_request"`
 		}
-		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?labels=%s&state=all&sort=created&direction=desc&per_page=%d&page=%d", g.alerts, url.QueryEscape(label), pageSize, page), maxPageAnswer, nil, &items)
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?%s&direction=desc&per_page=%d&page=%d", g.alerts, query, pageSize, page), maxPageAnswer, nil, &items)
 		if err != nil {
 			return nil, err
 		}
@@ -256,20 +272,35 @@ func (g *githubTracker) labelIssues(ctx context.Context, label string, since tim
 				continue
 			}
 			// Every item is checked before it is used as the stopping point:
-			// a missing creation time is a malformed answer, never the end.
+			// a missing time or state is a malformed answer, never the end.
 			switch {
 			case it.CreatedAt.IsZero():
 				return nil, errors.New("GitHub's listing named an issue without its creation time")
 			case it.Number <= 0 || it.User == nil:
 				return nil, errors.New("GitHub's listing named an issue without its number or its author")
-			case it.State == "closed" && (it.ClosedAt == nil || it.ClosedAt.IsZero()):
-				return nil, errors.New("GitHub's listing named a closed issue without its closing time")
+			case it.State != state:
+				return nil, fmt.Errorf("GitHub's listing of %s issues named one whose state is %q", state, it.State)
+			case state == "closed" && (it.ClosedAt == nil || it.ClosedAt.IsZero() || it.UpdatedAt.IsZero()):
+				return nil, errors.New("GitHub's listing named a closed issue without its closing time or its last update")
 			}
-			if it.CreatedAt.Before(since) {
+			if state == "open" && it.CreatedAt.Before(since) {
 				return out, nil
 			}
+			if state == "closed" && it.UpdatedAt.Before(closedAfter) {
+				return out, nil
+			}
+			if it.CreatedAt.Before(since) || (state == "closed" && it.ClosedAt.Before(closedAfter)) {
+				continue
+			}
+			if len(out) >= maxPages*pageSize {
+				scope := "open and opened since the job began"
+				if state == "closed" {
+					scope = "closed in the last 30 days"
+				}
+				return nil, fmt.Errorf("more than %d issues carry the label %s and are %s, so none is analysed until the job's record is moved aside", maxPages*pageSize, label, scope)
+			}
 			is := issue{Number: it.Number, Title: it.Title, Body: it.Body, Author: it.User.Login, Created: it.CreatedAt}
-			if it.State == "closed" {
+			if state == "closed" {
 				is.Closed = *it.ClosedAt
 			}
 			out = append(out, is)

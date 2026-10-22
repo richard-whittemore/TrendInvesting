@@ -48,7 +48,8 @@ func (f *fakeGitHub) addIssue(number int, label, author string, created time.Tim
 	f.issues = append(f.issues, map[string]any{
 		"number": number, "title": fmt.Sprintf("alert %d", number), "body": body, "state": "open",
 		"user": map[string]any{"login": author, "id": 99}, "created_at": created.Format(time.RFC3339),
-		"labels": []map[string]any{{"name": label}},
+		"updated_at": created.Format(time.RFC3339),
+		"labels":     []map[string]any{{"name": label}},
 	})
 }
 
@@ -73,15 +74,27 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"login": "owner", "id": f.selfID})
 	case r.Method == http.MethodGet && repo != "" && rest == "/issues":
 		f.listQueries = append(f.listQueries, r.URL.RawQuery)
-		label := r.URL.Query().Get("labels")
+		label, state := r.URL.Query().Get("labels"), r.URL.Query().Get("state")
 		var matching []map[string]any
 		for _, is := range f.issues {
+			if st, _ := is["state"].(string); state != "all" && state != "" && st != "" && st != state && (st == "open" || st == "closed") {
+				continue
+			}
 			for _, l := range is["labels"].([]map[string]any) {
 				if label == "" || l["name"] == label {
 					matching = append(matching, is)
 					break
 				}
 			}
+		}
+		if r.URL.Query().Get("sort") == "updated" {
+			// Most recently updated first; the since filter is left to the
+			// client, as a GitHub that ignored it would.
+			slices.SortStableFunc(matching, func(a, b map[string]any) int {
+				au, _ := a["updated_at"].(string)
+				bu, _ := b["updated_at"].(string)
+				return strings.Compare(bu, au)
+			})
 		}
 		f.page(w, r, matching, page)
 		if f.afterList != nil {
@@ -176,7 +189,7 @@ func TestTheAPIAddressMustBeGitHubOverHTTPSOrTheNamedHost(t *testing.T) {
 }
 
 // TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls: the
-// listing is of the reporter's two labels, alert and then alert-resolved
+// listing is of the reporter's two labels, open and closed, alert and then alert-resolved
 // (so an alert that cleared, and swapped one for the other, before the job
 // read it is still listed), newest first; each stops at the first issue
 // older than since, and never takes a pull request for an issue.
@@ -192,7 +205,7 @@ func TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls(t *testing
 	f.issues = append(f.issues, map[string]any{"number": 4, "pull_request": map[string]any{"url": "x"}, "labels": []map[string]any{{"name": alertLabel}}, "created_at": since.Add(time.Hour).Format(time.RFC3339), "user": map[string]any{"login": "owner"}})
 	f.addIssue(2, alertLabel, "owner", since.Add(-time.Hour), alertBody)
 	f.addIssue(1, alertLabel, "owner", since.Add(-2*time.Hour), alertBody)
-	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since, since)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,16 +215,17 @@ func TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls(t *testing
 	if !got[0].Closed.IsZero() || !got[2].Closed.Equal(since.Add(100*time.Minute)) {
 		t.Errorf("closing times %v and %v; want none for the open issue and the closed one's own", got[0].Closed, got[2].Closed)
 	}
-	if n := len(f.sent()); n != 3 {
+	if n := len(f.sent()); n != 5 {
 		t.Errorf("%d requests; want each listing stopping at the page holding an issue older than the start", n)
 	}
 	var labels []string
 	for _, q := range f.listQueries {
 		v, _ := url.ParseQuery(q)
-		labels = append(labels, v.Get("labels"))
+		labels = append(labels, v.Get("labels")+" "+v.Get("state"))
 	}
-	if len(labels) != 3 || labels[0] != alertLabel || labels[1] != alertLabel || labels[2] != resolvedLabel {
-		t.Errorf("listings by label %q, want alert's pages, then alert-resolved's", labels)
+	want := []string{alertLabel + " open", alertLabel + " open", alertLabel + " closed", resolvedLabel + " open", resolvedLabel + " closed"}
+	if !slices.Equal(labels, want) {
+		t.Errorf("listings by label and state %q, want %q: alert's open and closed, then alert-resolved's", labels, want)
 	}
 }
 
@@ -234,11 +248,11 @@ func TestAnAlertOpenedBetweenTheTwoListingsIsInTheNext(t *testing.T) {
 		f.addIssue(101, alertLabel, "owner", since.Add(2*time.Hour), alertBody)
 		f.issues = append(f.issues, older...)
 	}
-	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since, since)
 	if err != nil || !slices.ContainsFunc(got, func(is issue) bool { return is.Number == 100 }) {
 		t.Fatalf("listed %+v, %v; want the alert open before either listing", got, err)
 	}
-	got, err = trackerFor(t, srv).AlertIssues(context.Background(), since)
+	got, err = trackerFor(t, srv).AlertIssues(context.Background(), since, since)
 	listed := map[int]bool{}
 	for _, is := range got {
 		listed[is.Number] = true
@@ -264,7 +278,7 @@ func TestUnrelatedIssuesAndPullsNeverHideAnOlderAlert(t *testing.T) {
 		f.issues = append(f.issues, item)
 	}
 	f.addIssue(1, alertLabel, "owner", since.Add(time.Minute), alertBody)
-	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since, since)
 	if err != nil || len(got) != 1 || got[0].Number != 1 {
 		t.Fatalf("listed %+v, err %v; want the alert, reached", got, err)
 	}
@@ -275,12 +289,11 @@ func TestUnrelatedIssuesAndPullsNeverHideAnOlderAlert(t *testing.T) {
 // the whole list.
 func TestAListingLongerThanItsBoundIsAnError(t *testing.T) {
 	f, srv := newFakeGitHub(t)
-	f.pageSize = 1
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
-	for n := maxPages + 2; n > 0; n-- {
+	for n := maxPages*pageSize + 1; n > 0; n-- {
 		f.addIssue(n, alertLabel, "owner", since.Add(time.Duration(n)*time.Minute), alertBody)
 	}
-	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since, since)
 	if err == nil || got != nil || !strings.Contains(err.Error(), fmt.Sprintf("more than %d issues", maxPages*pageSize)) {
 		t.Fatalf("listed %d, err %v; want the bound named and nothing listed", len(got), err)
 	}
@@ -448,7 +461,7 @@ func TestAnIssueWithoutItsCreationTimeIsAnError(t *testing.T) {
 			}
 			f.issues = append(f.issues, bad)
 			f.addIssue(5, alertLabel, "owner", since.Add(time.Hour), alertBody)
-			if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since); err == nil || !strings.Contains(err.Error(), "creation time") {
+			if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since, since); err == nil || !strings.Contains(err.Error(), "creation time") {
 				t.Fatalf("err = %v, want the missing creation time named", err)
 			}
 		})
@@ -501,7 +514,68 @@ func TestAClosedIssueWithoutItsClosingTimeIsAnError(t *testing.T) {
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
 	f.addIssue(5, alertLabel, "owner", since.Add(time.Hour), alertBody)
 	f.issues[0]["state"] = "closed"
-	if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since); err == nil || !strings.Contains(err.Error(), "closing time") {
+	if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since, since); err == nil || !strings.Contains(err.Error(), "closing time") {
 		t.Fatalf("err = %v, want the missing closing time named", err)
+	}
+}
+
+// closeIssue closes the fake's issue number at closed (its last update).
+func (f *fakeGitHub) closeIssue(number int, closed time.Time) {
+	for _, is := range f.issues {
+		if is["number"] == number {
+			is["state"], is["closed_at"], is["updated_at"] = "closed", closed.Format(time.RFC3339), closed.Format(time.RFC3339)
+		}
+	}
+}
+
+// TestOldClosedIssuesNeverCountAgainstTheBound: open alert issues are
+// listed whole, closed ones only if they closed within the last 30 days;
+// the listing's bound counts only those, so any number of issues closed
+// longer ago neither fails the listing nor hides a new alert.
+func TestOldClosedIssuesNeverCountAgainstTheBound(t *testing.T) {
+	f, srv := newFakeGitHub(t)
+	f.pageSize = 1
+	since := time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)
+	window := time.Date(2026, time.September, 22, 0, 0, 0, 0, time.UTC)
+	f.addIssue(5000, alertLabel, "owner", window.Add(48*time.Hour), alertBody)
+	f.addIssue(4999, resolvedLabel, "owner", window.Add(24*time.Hour), alertBody)
+	f.closeIssue(4999, window.Add(30*time.Hour))
+	for n := 4998; n > 4998-(maxPages*pageSize+20); n-- {
+		f.addIssue(n, resolvedLabel, "owner", since.Add(time.Duration(n)*time.Second), alertBody)
+		f.closeIssue(n, since.Add(time.Duration(n)*time.Second+time.Hour))
+	}
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since, window)
+	if err != nil {
+		t.Fatalf("err = %v: issues closed before the window counted against the bound", err)
+	}
+	if len(got) != 2 || got[0].Number != 5000 || got[1].Number != 4999 {
+		t.Fatalf("listed %d issues, %+v; want the open alert and the one closed in the window", len(got), got)
+	}
+	if n := len(f.sent()); n > 10 {
+		t.Errorf("%d requests: the closed listing read past the window", n)
+	}
+}
+
+// TestAnIssueWithoutAKnownStateIsAnError: an issue's state decides whether
+// its closing time is read, so a missing or unknown one is a malformed
+// answer, never taken as open: the listing fails whole.
+func TestAnIssueWithoutAKnownStateIsAnError(t *testing.T) {
+	for name, state := range map[string]any{"absent": nil, "null": "null", "unknown": "merged"} {
+		t.Run(name, func(t *testing.T) {
+			f, srv := newFakeGitHub(t)
+			since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
+			f.addIssue(5, alertLabel, "owner", since.Add(time.Hour), alertBody)
+			switch state {
+			case nil:
+				delete(f.issues[0], "state")
+			case "null":
+				f.issues[0]["state"] = nil
+			default:
+				f.issues[0]["state"] = state
+			}
+			if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since, since); err == nil || !strings.Contains(err.Error(), "state") {
+				t.Fatalf("err = %v, want the issue's state named", err)
+			}
+		})
 	}
 }

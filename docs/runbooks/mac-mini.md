@@ -128,11 +128,11 @@ If no such process exists any more, run up.sh again: it takes the lock over.
 ## 2. The alert triage job
 
 Not part of the container: it runs on the Mac itself, under launchd, as a
-macOS user of its own. The code its sessions write runs in two places: in
-the session's own commands (`go test` and the like), as that user, inside
-Claude Code's sandbox, through the job's own program, which hands each
-command a new environment without the Claude token; and in the gate, as a
-second user, in a sandbox of its own. What it does, what the session and the gate can
+macOS user of its own. The code its sessions write runs only in the gate,
+as a second user, in a sandbox of its own: the session's own commands
+(`go test`, `go vet`, `gofmt`) are named to the job by its wrapper, which
+runs nothing itself, and the job runs them in the gate over a copy of the
+worktree. What it does, what the session and the gate can
 and cannot do, its cost cap and its off switch: the manual chapter
 [alerts and dashboard](../manual/alerts-and-dashboard.md), "Alerts analysed
 by Claude". **Owner steps** are marked **[OWNER]**; agents never create

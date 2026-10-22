@@ -56,7 +56,7 @@ type fakePull struct{ head, title, body string }
 
 func (f *fakeTracker) Self(context.Context) (string, error) { return f.self, nil }
 
-func (f *fakeTracker) AlertIssues(_ context.Context, since time.Time) ([]issue, error) {
+func (f *fakeTracker) AlertIssues(_ context.Context, since, closedAfter time.Time) ([]issue, error) {
 	f.listings++
 	if f.afterListing != nil {
 		defer f.afterListing(f.listings)
@@ -79,6 +79,9 @@ func (f *fakeTracker) AlertIssues(_ context.Context, since time.Time) ([]issue, 
 	for _, is := range all {
 		if is.Created.Before(since) {
 			break
+		}
+		if !is.Closed.IsZero() && is.Closed.Before(closedAfter) {
+			continue
 		}
 		out = append(out, is)
 	}
@@ -656,15 +659,17 @@ func (f analystFunc) Analyse(ctx context.Context, req analysisRequest) (analysis
 // tell which issues it called the model for.
 func TestAnIncompleteOrInvalidStateFileStopsTheJob(t *testing.T) {
 	for name, raw := range map[string]string{
-		"null":           `null`,
-		"empty":          `{}`,
-		"no since":       `{"day":"2026-10-22","calls":0,"issues":{}}`,
-		"bad day":        `{"since":"2026-10-22T15:00:00Z","day":"Thursday","calls":0,"issues":{}}`,
-		"negative calls": `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":-1,"issues":{}}`,
-		"no issues":      `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0}`,
-		"no calls":       `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","issues":{}}`,
-		"null calls":     `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":null,"issues":{}}`,
-		"bad key":        `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0,"issues":{"x":{"done":true}}}`,
+		"null":             `null`,
+		"empty":            `{}`,
+		"no since":         `{"day":"2026-10-22","calls":0,"issues":{}}`,
+		"bad day":          `{"since":"2026-10-22T15:00:00Z","day":"Thursday","calls":0,"issues":{}}`,
+		"negative calls":   `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":-1,"issues":{}}`,
+		"no issues":        `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0}`,
+		"no calls":         `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","issues":{}}`,
+		"null calls":       `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":null,"issues":{}}`,
+		"bad key":          `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0,"issues":{"x":{"done":true}}}`,
+		"oversized marker": `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0,"issues":{"5":{"invoked":true,"pending":"x\n\n<!-- ti-triage:` + strings.Repeat("a", maxIssueText) + `"}}}`,
+		"no marker":        `{"since":"2026-10-22T15:00:00Z","day":"2026-10-22","calls":0,"issues":{"5":{"invoked":true,"pending":"x"}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := newWorld(t)
@@ -828,10 +833,11 @@ func TestHandledIssuesAreNeverReadAgain(t *testing.T) {
 	}
 }
 
-// TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed: the record of an
-// issue handled is dropped once the issue has been closed for more than 30
-// days, and such an issue is never read again; one closed more recently is
-// kept, and one still owed its comment is finished whatever its age.
+// TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed: an issue closed
+// for more than 30 days is no longer listed or read, and the record of one
+// handled is dropped; one closed more recently is kept. A record still owed
+// its comment is kept as it is, but its issue is not read once it is that
+// old.
 func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
 	w := newWorld(t)
 	day := 24 * time.Hour
@@ -851,10 +857,10 @@ func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, kept := st.Issues["30"]; kept || !st.Issues["31"].Done || !st.Issues["32"].Done || !st.Issues["41"].Done {
-		t.Fatalf("records %+v; want #30's dropped, #31 finished, #32 and #41 kept", st.Issues)
+	if _, kept := st.Issues["30"]; kept || st.Issues["31"].Pending == "" || st.Issues["31"].Done || !st.Issues["32"].Done || !st.Issues["41"].Done {
+		t.Fatalf("records %+v; want #30's dropped, #31's kept as it was, #32 and #41 kept", st.Issues)
 	}
-	if len(w.tracker.ownComments(30)) != 0 || len(w.tracker.ownComments(32)) != 0 || len(w.tracker.ownComments(31)) != 1 {
+	if len(w.tracker.ownComments(30)) != 0 || len(w.tracker.ownComments(32)) != 0 || len(w.tracker.ownComments(31)) != 0 {
 		t.Fatalf("comments #30 %v, #31 %v, #32 %v", w.tracker.ownComments(30), w.tracker.ownComments(31), w.tracker.ownComments(32))
 	}
 	w.tracker.ownReads = 0
@@ -1114,5 +1120,20 @@ func TestFieldsThatGrowUnderRedactionStillFitOneComment(t *testing.T) {
 	w.poll(t)
 	if own := w.tracker.ownComments(41); len(own) != 1 || len(own[0]) > maxIssueText || !strings.HasSuffix(own[0], "[cut]\n\n"+analysisMarker) {
 		t.Fatalf("a kept comment was posted at %d bytes; want it cut to GitHub's limit, marker kept", len(own[0]))
+	}
+}
+
+// TestAnOversizedMarkerSuffixNeverPanics: a comment whose last marker-like
+// line is longer than GitHub's limit is cut to the limit, never a panic:
+// only the job's own exact marker lines are kept whole.
+func TestAnOversizedMarkerSuffixNeverPanics(t *testing.T) {
+	s := "x\n\n" + triageMarkerPrefix + strings.Repeat("a", maxIssueText)
+	got := fittedComment(s)
+	if len(got) > maxIssueText {
+		t.Fatalf("fitted to %d bytes, over GitHub's %d", len(got), maxIssueText)
+	}
+	long := strings.Repeat("b", 2*maxIssueText) + "\n\n" + analysisMarker
+	if got := fittedComment(long); len(got) > maxIssueText || !strings.HasSuffix(got, "\n\n"+analysisMarker) {
+		t.Fatalf("a long comment fitted to %d bytes, marker kept %v", len(got), strings.HasSuffix(got, analysisMarker))
 	}
 }

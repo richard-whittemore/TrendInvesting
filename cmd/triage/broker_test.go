@@ -389,11 +389,15 @@ func TestACanceledSessionCommandIsNotAGateOutage(t *testing.T) {
 }
 
 // stallingCommandRunner runs every gate command for real but the session's
-// gofmt, which it holds until its context ends.
+// gofmt, which it marks launched (the launcher ran it) and holds until its
+// context ends.
 type stallingCommandRunner struct{}
 
 func (stallingCommandRunner) Run(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
 	if slices.Contains(args, "gofmt") {
+		if err := os.WriteFile(launchedMark(args), nil, 0o600); err != nil {
+			return "", err
+		}
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
@@ -401,7 +405,7 @@ func (stallingCommandRunner) Run(ctx context.Context, dir string, env []string, 
 }
 
 // TestAStalledGateStepIsAGateOutageUnderASessionDeadline: a gate-side step
-// (the object read, the ports in use) that stalls is the gate's failure even
+// (the object read, the ports read of the export's copy) that stalls is the gate's failure even
 // when the session's own deadline ends first: each such step has a time
 // limit of its own, well under the wrapper's, and does not follow the
 // session's context.
@@ -435,5 +439,147 @@ func TestAStalledGateStepIsAGateOutageUnderASessionDeadline(t *testing.T) {
 				t.Fatalf("done = %v: a stalled gate step was taken for an interrupted command", err)
 			}
 		})
+	}
+}
+
+// launchedMark is the launch mark of a gate command line (the launcher's
+// $0), or "" for a line that is not one.
+func launchedMark(args []string) string {
+	if i := slices.Index(args, launcher); i >= 0 && i+1 < len(args) {
+		return args[i+1]
+	}
+	return ""
+}
+
+// stallingLauncherRunner runs every gate command for real but the
+// session's gofmt, whose launcher it holds, never making its launch mark,
+// until its context ends (the session gives up meanwhile: cancel): sudo or
+// sandbox-exec stalled before the command started.
+type stallingLauncherRunner struct{ cancel context.CancelFunc }
+
+func (r stallingLauncherRunner) Run(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
+	if slices.Contains(args, "gofmt") {
+		r.cancel()
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return execRunner{}.Run(ctx, dir, env, name, args...)
+}
+
+// TestAGateSideFailureIsAGateOutageWhateverTheSessionDid: a gate-side step
+// (the launcher of the session's own command, the ports read before it)
+// that fails or stalls is the gate's failure even when the session's
+// context ends in the same moment; only a cancel while the session's own
+// command runs is an interruption.
+func TestAGateSideFailureIsAGateOutageWhateverTheSessionDid(t *testing.T) {
+	cases := map[string]func(w *gitWorkspace, cancel context.CancelFunc){
+		"stalled launcher": func(w *gitWorkspace, cancel context.CancelFunc) {
+			w.gate.run = stallingLauncherRunner{cancel: cancel}
+		},
+		"ports read failing as the session gives up": func(w *gitWorkspace, cancel context.CancelFunc) {
+			var calls int
+			w.gate.listening = func(context.Context) ([]int, error) {
+				calls++
+				if calls == 1 { // the copy's
+					return nil, nil
+				}
+				cancel()
+				return nil, errors.New("netstat failed")
+			}
+		},
+	}
+	for name, setUp := range cases {
+		t.Run(name, func(t *testing.T) {
+			w, _, _ := gitWorld(t)
+			ctx := context.Background()
+			dir, err := w.Prepare(ctx, "triage/alert-58")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Remove(ctx, dir)
+			run, done, err := w.OpenTools(ctx, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, cancel := context.WithCancel(ctx)
+			defer cancel()
+			setUp(w, cancel)
+			if out, code := run(session, "gofmt"); code != toolExitUnavailable {
+				t.Errorf("exit %d, %q; want %d", code, out, toolExitUnavailable)
+			}
+			err = done()
+			var step *errGateStep
+			if !errors.Is(err, errGateUnavailable) || !errors.As(err, &step) {
+				t.Fatalf("done = %v: a gate-side failure was taken for an interrupted command", err)
+			}
+		})
+	}
+}
+
+// TestAStalledPortsReadBeforeTheSessionsCommandIsAGateOutage: the ports
+// read just before the session's own command (not the copy's) stalls past
+// its limit while the session's deadline ends first: the gate's failure,
+// named as a stall.
+func TestAStalledPortsReadBeforeTheSessionsCommandIsAGateOutage(t *testing.T) {
+	w, _, _ := gitWorld(t)
+	ctx := context.Background()
+	dir, err := w.Prepare(ctx, "triage/alert-59")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove(ctx, dir)
+	w.gate.stepTimeout = 600 * time.Millisecond
+	var calls int
+	w.gate.listening = func(ctx context.Context) ([]int, error) {
+		calls++
+		if calls == 1 { // the copy's
+			return nil, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	run, done, err := w.OpenTools(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	if out, code := run(session, "gofmt"); code != toolExitUnavailable {
+		t.Errorf("exit %d, %q; want %d", code, out, toolExitUnavailable)
+	}
+	if calls != 2 {
+		t.Fatalf("the ports were read %d times, want the copy's and the command's", calls)
+	}
+	if err := done(); !errors.Is(err, errGateStalled) {
+		t.Fatalf("done = %v, want the stalled ports read kept as the gate's failure", err)
+	}
+}
+
+// TestAStepInsideAStepEndsWithIt: a gate-side step started inside another
+// (the ports read of the export's copy) ends no later than the enclosing
+// step, never a fresh limit of its own; a step started from the session's
+// context keeps its own limit whatever the session's deadline; and the
+// limit is safely under Claude Code's default two-minute command timeout.
+func TestAStepInsideAStepEndsWithIt(t *testing.T) {
+	if gateStepTimeout > time.Minute {
+		t.Errorf("gateStepTimeout = %s, want at most a minute", gateStepTimeout)
+	}
+	g := &gateBox{stepTimeout: 500 * time.Millisecond}
+	outer, cancel := g.stepContext(context.Background())
+	defer cancel()
+	time.Sleep(300 * time.Millisecond)
+	inner, cancelInner := g.stepContext(outer)
+	defer cancelInner()
+	od, _ := outer.Deadline()
+	id, _ := inner.Deadline()
+	if id.After(od) {
+		t.Errorf("the inner step ends %s after its enclosing step", id.Sub(od))
+	}
+	session, cancelSession := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancelSession()
+	step, cancelStep := g.stepContext(session)
+	defer cancelStep()
+	if sd, _ := step.Deadline(); time.Until(sd) < 400*time.Millisecond {
+		t.Errorf("a step from the session's context has %s left, want its own limit", time.Until(sd))
 	}
 }
