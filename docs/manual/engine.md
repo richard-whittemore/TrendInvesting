@@ -100,8 +100,9 @@ close, and next month is decided normally.
 
 A synthetic report is never an execution. Nothing fills, so no proceeds,
 commission or position change is counted, and the buys are budgeted from
-the account's cash alone. The holdings never move, so each month's dry-run
-decides from the same positions. `journal-query orders` shows the record as
+the account's cash alone. The run's own orders never move the holdings, so
+unless something else changes the account (a split, a deposit), each
+month's dry-run decides from the same positions. `journal-query orders` shows the record as
 `synthetic-lifecycle-canceled`. Paper and live never record one: there the
 venue's own reports end each order. A synthetic report arriving as an input
 is refused.
@@ -114,9 +115,13 @@ release, so nothing of the run's own is ever counted as being sold. Each
 exit is then sized from the account as the snapshot shows it, exactly as the
 paper account would size it from the same holding once its earlier orders
 had ended: the holding less the target, nothing netted. The same goes for
-the broker-holding check and the sale back to 98%. Because nothing fills in
-dry-run, the holding never moves, so every exit in a dry-run is sized from
-the holding the run started with. A dry-run Boost order is never watched for
+the broker-holding check, and the sale back to 98% nets nothing either,
+though it is sized from the latest broker snapshot by its own rule. Nothing
+of the run's own fills, so its orders never move the holding; each exit is
+sized from the latest snapshot, which, with no split, deposit or other
+change to the account, still shows the holding the run started with. A
+fill or venue report on a dry-run order is refused, since no venue received
+it. A dry-run Boost order is never watched for
 a re-plan either: nothing can fill it, so its synthetic cancel is not an
 order "ended unfilled" and plans nothing again. A run resumed in the middle
 of a dry-run exit decides exactly as the run that was never stopped. (Before

@@ -111,14 +111,19 @@ type account struct {
 	all     []event.OrderReleasedPayload // every order released, in release order
 }
 
-// take queues every order released among out to fill at the next close.
+// take queues every order released among out to fill at the next close,
+// except one released with send false: no venue receives it, so none
+// acknowledges, fills or ends it (ADR 0026, point 3, "Mode"). Every order
+// released is kept in all.
 func (a *account) take(t *testing.T, out []event.Envelope) {
 	t.Helper()
 	for _, d := range out {
 		if d.Type == event.OrderReleasedEventType {
 			var p event.OrderReleasedPayload
 			decode(t, d, &p)
-			a.pending = append(a.pending, p)
+			if p.Send {
+				a.pending = append(a.pending, p)
+			}
 			a.all = append(a.all, p)
 		}
 	}

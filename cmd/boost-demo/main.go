@@ -6,7 +6,7 @@
 // it started with, 14 SPY bought on margin at the first close (net
 // liquidation $4,000), and every order is sized from that holding. Each
 // released order is followed by the engine's synthetic cancel of it, since
-// it was never sent (ADR 0026, point 3, "Mode", amended 2026-10-17).
+// it was never sent (ADR 0026, point 3, "Mode", amended 2026-10-17 and 2026-10-22).
 // The series is synthetic, never market data. It composes no strategy: every
 // decision is the engine's, so there is one composition root, cmd/engine.
 //

@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -68,7 +71,7 @@ func startEngine(t *testing.T) (socket, log string, stop func()) {
 // series enters a boost (0.98 x 1.5 = 1.47) and exits it, each exit sized
 // from the 14 held, never net of an earlier sell that was never sent. Every
 // release is followed by the engine's synthetic cancel of it (ADR 0026,
-// point 3, "Mode", amended 2026-10-17).
+// point 3, "Mode", amended 2026-10-17 and 2026-10-22).
 func TestTheDemoDrivesTheRealEngineInDryRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the engine binary")
@@ -93,17 +96,37 @@ func TestTheDemoDrivesTheRealEngineInDryRun(t *testing.T) {
 	if got, want := strings.Count(text, "canceled (synthetic, never sent)"), strings.Count(text, "released (send false)"); got != want || want == 0 {
 		t.Errorf("%d synthetic cancels for %d releases; every unsent release must end canceled", got, want)
 	}
+	// Nothing fills, so every sale down to 98% is sized from the 14 held:
+	// 14 less 0.98 x (14 x close - $1,600 borrowed) / close, toward zero. A
+	// fill reaching the simulated account would change the holding, and so
+	// the size of every later sale.
+	sale := regexp.MustCompile(`close ([0-9.]+) .* target 0\.98 \| sell (\d+) @`)
 	exits := 0
-	for _, line := range lines[1:] {
-		if strings.Contains(line, "target 0.98") && strings.Contains(line, "| sell ") {
+	for i, line := range lines {
+		m := sale.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		closed, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sold, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := int64(math.Trunc(14 - 0.98*(float64(14*closed)-1600)/closed)); sold != want {
+			t.Errorf("line %d sells %d, want %d from the 14 held: %q", i, sold, want, line)
+		}
+		if i > 0 {
 			exits++
 		}
 	}
 	if exits < 2 {
 		t.Errorf("%d boost exits sell, want every exit after the first to sell too, sized from the holding", exits)
 	}
-	if strings.Contains(text, "send true") || strings.Contains(text, "filled") {
-		t.Error("a dry-run released an order to send, or the simulated account filled one")
+	if strings.Contains(text, "send true") {
+		t.Error("a dry-run released an order to send")
 	}
 }
 

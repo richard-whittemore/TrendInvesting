@@ -228,11 +228,12 @@ import (
 //     gate at its release, so a later exit, the broker-holding check and the
 //     sale back to 98% are sized from the account with no unsent sell
 //     netted, as paper sizes them (ADR 0026, point 3, "Mode", amended
-//     2026-10-17). No dry-run order is watched, since none can execute, so
-//     its end re-plans nothing. Where 1.21.0 counted every unsent sell as
-//     still being sold, a dry-run Boost journal decides differently, so one
-//     written under 1.21.0 does not replay. Paper and live decisions are
-//     unchanged.
+//     2026-10-22). No dry-run order is watched, since none can execute, so
+//     its end re-plans nothing, and a venue's fill or lifecycle report on
+//     one is refused, since no venue received it. Where 1.21.0 counted every
+//     unsent sell as still being sold and read such reports, a dry-run Boost
+//     journal decides differently, so one written under 1.21.0 does not
+//     replay. Paper and live decisions are unchanged.
 const RulesVersion = "1.22.0"
 
 // source names this handler on every envelope it emits.
@@ -364,7 +365,8 @@ type Handler struct {
 	// after its end; nil when there is none. Only a later decided session's
 	// released order replaces it, since that order was sized from the
 	// account as it stood (settleWatch). A dry-run's orders, which nothing
-	// can execute, are never watched (endUnsent).
+	// can execute, are never watched (applySession's mode guard); their
+	// synthetic report is endUnsent's.
 	watch *watched
 	// rejections counts the orders decided sessions released that the venue
 	// rejected in a row, whatever their targets, since the last one it
@@ -1066,6 +1068,9 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	if err != nil {
 		return err
 	}
+	if err := h.refuseDryRunReport(in, p.ClientOrderID); err != nil {
+		return err
+	}
 	if slices.Contains(h.cleared, p.ClientOrderID) {
 		return h.contradictsClearance(in, p.ClientOrderID)
 	}
@@ -1286,6 +1291,9 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err != nil {
 		return err
 	}
+	if err := h.refuseDryRunReport(in, p.ClientOrderID); err != nil {
+		return err
+	}
 	o, ok := h.released[p.ClientOrderID]
 	if !ok {
 		return fmt.Errorf("targetweight: lifecycle %s reports order %s, which this run did not release", in.ID, p.ClientOrderID)
@@ -1323,6 +1331,22 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 		h.working = slices.DeleteFunc(h.working, func(o undecidedOrder) bool { return o.id == p.ClientOrderID })
 	}
 	return nil
+}
+
+// refuseDryRunReport refuses, in a dry-run, a venue's fill or lifecycle
+// report on order id, before anything is read from it. A dry-run sends no
+// order and ends each it releases with its own synthetic cancel
+// (endUnsent), so no venue can report on one: the report is a defect, and
+// reading it would count an execution no account holds (ADR 0026, point 3,
+// "Mode", amended 2026-10-22; fail closed, AGENTS.md).
+func (h *Handler) refuseDryRunReport(in event.Envelope, id string) error {
+	if h.cfg.Mode != event.TradingModeDryRun {
+		return nil
+	}
+	if _, ok := h.released[id]; ok {
+		return fmt.Errorf("targetweight: %s %s reports order %s, which this dry-run released with send false and ended with its synthetic cancel; no venue received it, so a venue report on it is a defect: find what fed it before going on", in.Type, in.ID, id)
+	}
+	return fmt.Errorf("targetweight: %s %s reports order %s in a dry-run, which sends no order, so no venue can report on one: find what fed it before going on", in.Type, in.ID, id)
 }
 
 // contradictsClearance refuses a venue report on an order the owner
@@ -1766,7 +1790,7 @@ func (b *emissions) order(o risklimit.Order, book risklimit.Book) risklimit.Outc
 // so a later exit, the broker-holding check and the sale back to 98% are
 // sized from the account with no sell of the run's working, as paper sizes
 // them once its earlier orders have ended (ADR 0026, point 3, "Mode",
-// amended 2026-10-17; ADR 0019, amended 2026-10-15, "net of every working
+// amended 2026-10-22; ADR 0019, amended 2026-10-15, "net of every working
 // sell"). The report is marked synthetic and names no venue order, so no
 // reader can take it for a venue's report or an execution
 // (LimitOrderLifecyclePayload.Synthetic); it fills nothing.

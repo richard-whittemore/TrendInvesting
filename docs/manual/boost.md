@@ -381,12 +381,33 @@ synthetic, saying it was never sent. That cancel is the engine's own note,
 not IBKR's, and nothing fills. It means the order is over: the engine no
 longer counts a dry-run sell as shares still being sold.
 
-So a dry-run exit (147% back to 98%), and the sale back to 98%, is sized
-exactly as the paper account would size it for the same holding: the shares
-the account snapshot shows, less the 98% target, with nothing netted for an
-earlier sell. Nothing fills in dry-run, so the holding stays what it was at
-the start, and every exit in the run is sized from it, the first and the fifth
-alike. A dry-run order is never re-planned because of its
+So a dry-run exit (147% back to 98%) is sized exactly as the paper account
+would size it for the same holding: the shares the latest account snapshot
+shows, less the 98% target, with nothing netted for an earlier sell. The
+sale back to 98% keeps its own rule: it is sized from the latest broker
+snapshot (its holding, net liquidation, mark and open orders, keeping just
+enough shares for 98%), as
+[the one sale back to 98%](states-and-kill-switch.md#the-one-sale-back-to-98)
+describes, and in dry-run it too nets no earlier unsent sell. The sale is
+also cancelled by the engine straight after its release, and it still uses
+up that alarm's one attempt, so it is not released again at the next broker
+snapshot (`TestADryRunBoostSaleBackTo98IsCanceledAndSizedWithNothingNetted`).
+
+A dry-run does not freeze the account. Its own orders never change the
+holding, since none is sent, but each decision reads the latest account and
+broker snapshots, so anything else that changes the account (a stock split,
+a deposit) is still sized from. With no such change the holding stays what
+it was at the start, and every exit is sized from it, the first and the
+fifth alike, as in the simulated demo (`make demo-boost-dry-run`), whose
+account never changes.
+
+If IBKR, or anything else, ever reports a fill or an order update on a
+dry-run order, the engine refuses it: no venue received the order, so the
+report can only be a fault upstream. The refusal is recorded with the
+report and names the order, and nothing in the run changes because of it
+(`TestADryRunBoostRefusesAVenueReportOnAnOrderItCanceled`).
+
+A dry-run order is never re-planned because of its
 synthetic cancel, and a dry-run resumed in the middle of an exit decides
 exactly as one that was never stopped
 (`TestADryRunBoostExitIsSizedAsPaperWouldSizeIt`,

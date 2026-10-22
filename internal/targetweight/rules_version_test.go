@@ -302,7 +302,7 @@ func TestRulesVersionDeclaresTheCloseSnapshotCheck(t *testing.T) {
 
 // TestRulesVersionDeclaresTheDryRunBoostSyntheticReports pins ADR 0016's
 // same-rules-version replay guarantee for a dry-run Boost run's synthetic
-// terminal reports (ADR 0026, point 3, "Mode", amended 2026-10-17): each
+// terminal reports (ADR 0026, point 3, "Mode", amended 2026-10-22): each
 // order it releases is ended at its release, so a later exit is sized with
 // no sell of its own working, where 1.21.0 counted every unsent sell as
 // still being sold. A dry-run Boost journal decides differently, so the

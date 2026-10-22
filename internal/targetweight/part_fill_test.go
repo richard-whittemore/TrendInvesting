@@ -1317,14 +1317,18 @@ func TestALaterOrdersAcceptanceStillEndsTheRunOfRejections(t *testing.T) {
 // undecided and records why on every decision (`no_venue`, dry-run), so
 // nothing grows with the orders it releases (ADR 0026, point 3, "Mode",
 // and point 2, "Boost", amended 2026-10-18). The same run in live lists
-// them and records no such mark.
+// them and records no such mark. The dry-run's account starts holding 58
+// SPY on margin, so its exits have shares to sell: no venue receives its
+// orders, so none executes and it holds 58 throughout, and each order ends
+// with the run's own synthetic cancel, never a venue's report (amended
+// 2026-10-22).
 func TestADryRunListsNoUndecidedOrder(t *testing.T) {
 	opts := options{closes: flippingCloses(), hold: heldFrom(2)}
 	live := targets(t, simulate(t, opts).decisions)
 	if d := live[45].Boost; len(d.UndecidedOrders) < 8 || d.NoVenue != "" {
 		t.Fatalf("setup: the live run's session 45 lists %d undecided, no venue %q; want the orders the venue said nothing of", len(d.UndecidedOrders), d.NoVenue)
 	}
-	opts.mutate = boostDryRun
+	opts.mutate, opts.startHeld = boostDryRun, 58
 	r := simulate(t, opts)
 	if len(released(t, r.decisions)) < 10 {
 		t.Fatalf("setup: the dry-run releases %d orders", len(released(t, r.decisions)))
@@ -1434,7 +1438,8 @@ func TestAClearedOlderOrderCountsOneFewerBeforeTheRejection(t *testing.T) {
 // released, under the decision it names, and that the venue has not ruled
 // on; anything else is refused, so a clearance never means more than the
 // owner said (fail closed, AGENTS.md). A dry-run lists no order undecided,
-// so it refuses every clearance.
+// so it refuses every clearance; its account starts holding 58 SPY on
+// margin, so its session-16 entry is released, and is never sent.
 func TestAClearanceOfNoUndecidedBoostOrderIsRefused(t *testing.T) {
 	closes := flippingCloses()[:20]
 	opts := options{closes: closes, hold: heldFrom(2), unsent: []int{16}}
@@ -1449,6 +1454,7 @@ func TestAClearanceOfNoUndecidedBoostOrderIsRefused(t *testing.T) {
 	}
 	for name, c := range map[string]struct {
 		mode   func(*event.TargetWeightConfigurationPayload)
+		held   int64
 		change func(r run, p *event.RebalanceClearedPayload)
 	}{
 		"naming no order":       {change: func(_ run, p *event.RebalanceClearedPayload) { p.ClientOrderIDs = nil }},
@@ -1465,11 +1471,11 @@ func TestAClearanceOfNoUndecidedBoostOrderIsRefused(t *testing.T) {
 			o := first(r, 17)
 			p.DecisionID, p.ClientOrderIDs = o.Tag, []string{o.ClientOrderID}
 		}},
-		"a dry-run's order": {mode: boostDryRun},
+		"a dry-run's order": {mode: boostDryRun, held: 58},
 	} {
 		t.Run(name, func(t *testing.T) {
 			o := opts
-			o.mutate = c.mode
+			o.mutate, o.startHeld = c.mode, c.held
 			r := simulate(t, o)
 			p := event.RebalanceClearedPayload{AccountID: "joint", AsOf: at, DecisionID: decisionTag(16),
 				ClientOrderIDs: []string{first(r, 16).ClientOrderID}, Operator: "owner", Detail: "never sent"}
