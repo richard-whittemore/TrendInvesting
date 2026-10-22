@@ -45,12 +45,15 @@ rehearsal=${TI_REHEARSAL:-0}
 target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
 unit_dir=/etc/systemd/system
-dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
+# Absolute, because the vendor installers run from "/" (cd / && runuser ...).
+dl_cache=${TI_DOWNLOAD_CACHE-/var/cache/trend-investing}
 # The Mac mini's volumes that hold files owned by the service users.
 volume_roots=(/etc/trend-investing /var/lib/trend-investing /opt/trend-investing)
 
 log() { printf 'provision: %s\n' "$*"; }
 die() { printf 'provision: %s\n' "$*" >&2; exit 1; }
+test -n "$dl_cache" || die "TI_DOWNLOAD_CACHE is set but empty"
+case $dl_cache in /*) ;; *) dl_cache=$PWD/$dl_cache ;; esac
 
 need_root() { test "$(id -u)" -eq 0 || die "run as root (sudo)"; }
 

@@ -534,8 +534,17 @@ TEST_LEAK='unzip() { record unzip "$@"; }; rm() { record rm "$@"; }; cp() { reco
 # The stand-in's exit ends only the installer's own subshell, so the step goes on
 # to its missing-binary refusal.
 test "$status" != 0 || fail "Lightsail's gateway step finished although the installer stand-in made nothing: $(cat "$work/out")"
+said "ibgateway is missing" || fail "Lightsail's gateway step did not end with its missing-binary refusal: $(cat "$work/out")"
 called "STOPPED at runuser" || fail "Lightsail's gateway step never ran the installer: $(cat "$work/calls")"
 if grep -q "can't cd" "$work/out"; then fail "Lightsail's gateway installer starts in a folder its user cannot enter: $(cat "$work/out")"; fi
+
+# The download folder is made absolute where it is read, because the installers
+# start from "/": a relative TI_DOWNLOAD_CACHE would point somewhere else
+# there. An empty one is refused.
+rel_cache=$(cd "$work/cwd" && TI_DOWNLOAD_CACHE=rel/cache bash -c '. "$1/deploy/provision.sh"; printf %s "$dl_cache"' _ "$work") || fail "a relative TI_DOWNLOAD_CACHE was refused"
+test "$rel_cache" = "$work/cwd/rel/cache" || fail "a relative TI_DOWNLOAD_CACHE is not made absolute (got '$rel_cache')"
+if (cd "$work/cwd" && TI_DOWNLOAD_CACHE='' bash -c '. "$1/deploy/provision.sh"' _ "$work") >"$work/out" 2>&1; then fail "an empty TI_DOWNLOAD_CACHE was accepted"; fi
+said "TI_DOWNLOAD_CACHE" || fail "the empty TI_DOWNLOAD_CACHE refusal does not name it: $(cat "$work/out")"
 
 # The owner's own ntfy server: fetched against its pin on Lightsail; with no
 # Tailscale address it is installed and not configured; an address outside the
