@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost")
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0))
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -189,7 +189,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Broker holding (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is no more than the latest broker snapshot's holding, when that snapshot is readable and fresh; with no readable latest snapshot, a Normal account releases the sell against the journal's account book, only an account Degraded on another instrument reaches this refusal, and every other state has already refused the sell under ADR 0019 reading 7 (checked first) and the exit has fired; an older readable snapshot is never used | refuse (`risk.order.refused`, reason `broker-holding`); alert; **Degraded** on the instrument when the sell is above a fresh snapshot's holding |
 | Broker snapshot freshness (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is checked against the latest broker snapshot, which is stale: older than `MaxSnapshotAge`, or stamped later than the sell's journalled time (point 6) | refuse (`risk.order.refused`, reason `stale-broker-snapshot`); one urgent alert per stale episode, carried by the episode's first `stale-broker-snapshot` refusal or withhold and cleared by whichever comes first: the first journalled `account.broker.snapshot` fresh by its own journalled time, or the first gate check whose latest snapshot is fresh as measured from that check's triggering event (ADR 0019 reading 10); a stale check opens an episode when no episode is open for the account and either no episode has yet closed or the check's triggering event comes after (by journal sequence) the event that closed the most recent episode; a stale check whose triggering event precedes that close belongs to the closed episode and opens none; state unchanged; the sell is re-planned at the next decision |
 | Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
-| Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent. Amended 2026-10-17 (owner): since no venue ever reports on an unsent order, a dry-run momentum run records, at the release, its own **synthetic** terminal report for each order it releases: `execution.order.lifecycle` version 3, `synthetic: true`, status `canceled`, no venue order ID, a message saying it was never sent (target-weight rules version 1.11.0, ADR 0016). It is a decision, never an input (a version-3 report arriving as an input is refused), and it counts no execution: no fill, proceeds, commission or position change follows from it. It ends the order as a venue's cancellation would, so the buy phase (point 2, "IRA execution") is planned at the same close and the next rebalance is not withheld as `rebalance-in-progress`. Paper and live never record one. Boost records none: a dry-run Boost sell stays pending in the gate, so a later exit in the same dry-run is sized net of it, and so are the broker-holding check and ADR 0019's sale back to 98%. Rules version 1.11.0 leaves Boost as it was. Rules version 1.18.0: no dry-run Boost order is listed as awaiting the venue's word (`boost.undecided_orders`), since none will come; each dry-run Boost decision records `boost.no_venue: "dry-run"` instead (point 2, "Boost", amended 2026-10-18) | not a breach |
+| Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent. Amended 2026-10-17 (owner): since no venue ever reports on an unsent order, a dry-run momentum run records, at the release, its own **synthetic** terminal report for each order it releases: `execution.order.lifecycle` version 3, `synthetic: true`, status `canceled`, no venue order ID, a message saying it was never sent (target-weight rules version 1.11.0, ADR 0016). It is a decision, never an input (a version-3 report arriving as an input is refused), and it counts no execution: no fill, proceeds, commission or position change follows from it. It ends the order as a venue's cancellation would, so the buy phase (point 2, "IRA execution") is planned at the same close and the next rebalance is not withheld as `rebalance-in-progress`. Paper and live never record one. Boost records none: a dry-run Boost sell stays pending in the gate, so a later exit in the same dry-run is sized net of it, and so are the broker-holding check and ADR 0019's sale back to 98%. Rules version 1.11.0 leaves Boost as it was. Rules version 1.18.0: no dry-run Boost order is listed as awaiting the venue's word (`boost.undecided_orders`), since none will come; each dry-run Boost decision records `boost.no_venue: "dry-run"` instead (point 2, "Boost", amended 2026-10-18). Amended 2026-10-22 (owner-approved Boost-to-paper plan): under every rules version from 1.11.0 through 1.21.0 Boost recorded none, as this row says; from rules version 1.22.0 a dry-run Boost run records a synthetic cancel for each unsent release and refuses a venue report on one: see "Amendment (2026-10-22, owner-approved Boost-to-paper plan)" | not a breach |
 
 Degraded and Halted are emitted through the existing `strategy.engine.state`.
 A new reason, `risk-limit-breached`, joins its closed set, as
@@ -1346,3 +1346,45 @@ No unit that reads data from outside runs as `ti-operator`. The adapter, the
 data job, the reporter and the dashboard run as `ti-trader` but cannot reach
 the inbox (each unit's `InaccessiblePaths=`) and can write nothing under the
 engines' state directory, so none can write an instruction.
+
+## Amendment (2026-10-22, owner-approved Boost-to-paper plan): a dry-run Boost run records a synthetic cancel for each unsent release
+
+Approved by the owner as part of the Boost-to-paper plan, which keeps one
+dry-run rule for both strategies. It amends point 3, "Mode" (the limits
+table), and is target-weight rules version 1.22.0 (ADR 0016).
+
+- **Before.** Under every rules version from 1.11.0 through 1.21.0, a
+  dry-run momentum run recorded a synthetic terminal report for each order
+  it released and Boost recorded none: a dry-run Boost sell stayed pending
+  in the gate, so a later exit in the same dry-run, the broker-holding check
+  and ADR 0019's sale back to 98% were all sized net of a sell no venue
+  ever received.
+- **The rule.** A dry-run Boost run records, at the release, the same
+  synthetic report a dry-run momentum run records for each order it
+  releases, the sale back to 98% included: `execution.order.lifecycle`
+  version 3, `synthetic: true`, status `canceled`, no venue order ID, a
+  message saying it was never sent. It is a decision, never an input, and
+  counts no execution. The gate ends the order at its release, so a later
+  exit and the broker-holding check are sized from the account snapshot,
+  and the sale back to 98% from the broker snapshot by its own rule (point
+  4; ADR 0019, amended 2026-10-15), each with no unsent sell netted, as
+  paper sizes them. A released sale still consumes its trigger's one
+  attempt (point 5), so a cancelled, unsent sale is not sent again at the
+  next broker snapshot.
+- **No dry-run order is watched.** `boost.watched` stays empty in a dry-run,
+  since no order of it can execute, so its synthetic end re-plans nothing
+  (point 2, "Boost", amended 2026-10-18), and none is listed as awaiting the
+  venue's word (`boost.no_venue: "dry-run"`, rules version 1.18.0).
+- **A venue report on a dry-run order is refused.** No venue received the
+  order, so a fill or a venue lifecycle report naming one can only be a
+  defect upstream: the run refuses it, the refusal journalled with the input
+  and naming the order, and nothing is read from it, so no decision changes
+  (fail closed, AGENTS.md).
+- **What does not change.** Paper and live never record a synthetic report
+  and read the venue's reports as before. A dry-run's account is not frozen:
+  each decision still reads the latest validated account and broker
+  snapshots, so a recorded corporate action or deposit still changes what
+  it sizes from; only the run's own unsent orders change nothing.
+- **Replay.** A dry-run Boost journal decides differently from one written
+  under 1.21.0, so a journal written under 1.21.0 does not replay under
+  1.22.0; paper and live journals are unaffected.

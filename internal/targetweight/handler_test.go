@@ -13,7 +13,7 @@ import (
 )
 
 func TestBoostRunDecidesEnterAndExit(t *testing.T) {
-	r := simulate(t, options{mutate: boostDryRun})
+	r := simulate(t, boostDryRunOptions())
 	decided := targets(t, r.decisions)
 	if len(decided) != len(syntheticCloses()) {
 		t.Fatalf("%d decisions for %d sessions", len(decided), len(syntheticCloses()))
@@ -36,10 +36,10 @@ func TestBoostRunDecidesEnterAndExit(t *testing.T) {
 	}
 	orders := planned(t, r.decisions)
 	if len(orders) != 3 {
-		t.Fatalf("want three orders (first purchase, entry, exit), got %d: %+v", len(orders), orders)
+		t.Fatalf("want three orders (first sale to 98%%, entry, exit), got %d: %+v", len(orders), orders)
 	}
-	// 0.98 x 4000 / 100 = 39.2: 39 shares.
-	if orders[0].Side != event.OrderSideBuy || orders[0].Quantity != 39 {
+	// The account holds 58; 0.98 x 4000 / 100 = 39.2, so it sells 18.
+	if orders[0].Side != event.OrderSideSell || orders[0].Quantity != 18 {
 		t.Errorf("first order: %+v", orders[0])
 	}
 	if orders[1].Side != event.OrderSideBuy || orders[2].Side != event.OrderSideSell {

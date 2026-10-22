@@ -88,35 +88,46 @@ Dry-run rehearses the decisions, not the trading. Nothing reaches a venue, so
 no venue ever reports on an order. A momentum IRA plans its buys only once
 every sell of the rebalance has ended (ADR 0026, point 2, "IRA execution"),
 and would wait on an unsent sell for ever, withholding every later month as
-`rebalance-in-progress`. So in dry-run, and only in dry-run, the engine
-records its own **synthetic** terminal report for each order it releases:
+`rebalance-in-progress`; Boost would count an unsent sell as still being
+sold, and size every later sell smaller. So in dry-run, and only in dry-run,
+the engine, momentum or Boost, records its own **synthetic** terminal report
+for each order it releases:
 an `execution.order.lifecycle` record at version 3, marked
 `"synthetic": true`, status `canceled`, with no venue order id and a message
-saying it was never sent. The rebalance then plans its buys at the same
+saying it was never sent. The record comes straight after the release, in
+the same decision. A momentum rebalance then plans its buys at the same
 close, and next month is decided normally.
 
 A synthetic report is never an execution. Nothing fills, so no proceeds,
 commission or position change is counted, and the buys are budgeted from
-the account's cash alone. The holdings never move, so each month's dry-run
-decides from the same positions. `journal-query orders` shows the record as
+the account's cash alone. The run's own orders never move the holdings, so
+unless something else changes the account (a split, a deposit), each
+month's dry-run decides from the same positions. `journal-query orders` shows the record as
 `synthetic-lifecycle-canceled`. Paper and live never record one: there the
 venue's own reports end each order. A synthetic report arriving as an input
 is refused.
 
-Boost records none, and that has a consequence. It has no buy phase to wait
-for, but the gate still counts each released Boost sell as pending until a
-venue reports a fill or a cancellation on it, and every later Boost sell is
-sized net of the shares still pending (ADR 0026, point 2, step 5). In a
-dry-run against an adapter that sends nothing, no report ever comes, so after
-Boost's first exit sell (147% back to 98%) that sell's shares stay pending
-for the rest of the run: the next exit's sell is smaller than paper would
-make it, and none at all once the pending shares reach the holding. The
-broker-holding check and the sale back to 98% net the same phantom sell. So
-a dry-run rehearses one Boost exit faithfully; read any later exit in the
-same run as under-sized (a resumed run replays the same pending sell). (`make
-demo-boost-dry-run` does not show this: its simulated account reports a fill
-for every released order a minute before the next close, which ends each
-sell.)
+For Boost, the synthetic report is what keeps a dry-run's sizing honest.
+The risk gate counts a released sell as still being sold until it ends, and
+sizes every later Boost sell net of the shares still being sold (ADR 0026,
+point 2, step 5). The synthetic report ends each dry-run order at its
+release, so nothing of the run's own is ever counted as being sold. Each
+exit is then sized from the account as the snapshot shows it, exactly as the
+paper account would size it from the same holding once its earlier orders
+had ended: the holding less the target, nothing netted. The same goes for
+the broker-holding check, and the sale back to 98% nets nothing either,
+though it is sized from the latest broker snapshot by its own rule. Nothing
+of the run's own fills, so its orders never move the holding; each exit is
+sized from the latest snapshot, which, with no split, deposit or other
+change to the account, still shows the holding the run started with. A
+fill or venue report on a dry-run order is refused, since no venue received
+it. A dry-run Boost order is never watched for
+a re-plan either: nothing can fill it, so its synthetic cancel is not an
+order "ended unfilled" and plans nothing again. A run resumed in the middle
+of a dry-run exit decides exactly as the run that was never stopped. (Before
+target-weight rules version 1.22.0 Boost recorded no synthetic report, so a
+dry-run's first exit sell stayed pending for the rest of the run and every
+later exit was smaller than paper's, or nothing.)
 
 Nor does a dry-run Boost run wait for a venue's verdict on its orders: it
 lists none as awaiting one (`undecided_orders`), and each decision records
@@ -255,8 +266,13 @@ The reporter's own alerts about a silent engine are in
 
 `make demo-boost-dry-run` builds a stamped engine, plays the adapter with an
 invented SPY series (never market data), prints one line per session (the
-target, any order, "released (send false)"), then restarts a second engine
-from the first one's log and checks the two logs are identical byte for byte.
+target, any order, "released (send false)" and the engine's "canceled
+(synthetic, never sent)" after it), then restarts a second engine from the
+first one's log and checks the two logs are identical byte for byte. Its
+simulated account starts holding 14 SPY bought on margin ($4,000 of net
+liquidation, 140% invested) and, since a dry-run sends nothing, nothing
+ever fills: the first session sells down to 98%, and every Boost exit after
+it sells again, sized from the 14 shares held.
 
 ## What backs this
 
@@ -264,9 +280,9 @@ from the first one's log and checks the two logs are identical byte for byte.
   0019 (Degraded and Halted), 0025 (IBKR adapter), 0026 (target-weight
   strategies and the risk gate), 0027 (durable log, restart).
 - The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
-  introduced in target-weight rules version 1.11.0 (ADR 0016; the rules are
-  at 1.18.0 now), so a dry-run journal written under an earlier rules
-  version does not replay.
+  introduced for momentum in target-weight rules version 1.11.0 and for
+  Boost in 1.22.0 (ADR 0016; the rules are at 1.22.0 now), so a dry-run
+  journal written under an earlier rules version does not replay.
 - Tests of the withheld sessions, in `internal/targetweight`:
   `TestAMissingBarIsSkippedAndBoostDecidesAcrossTheGap`,
   `TestAGapWhileBoostedNeverBlocksTheExit`,
@@ -280,7 +296,11 @@ from the first one's log and checks the two logs are identical byte for byte.
   `TestADryRunJournalReplays`; in `internal/journalquery`:
   `TestASyntheticReportIsShownAndCountsNoFill`; in `internal/report`:
   `TestASyntheticReportAcknowledgesNothing`; in `internal/event`:
-  `TestLimitOrderLifecycleIsReadAtBothItsVersions`.
+  `TestLimitOrderLifecycleIsReadAtBothItsVersions`. For Boost, in
+  `internal/targetweight`: `TestADryRunBoostExitIsSizedAsPaperWouldSizeIt`,
+  `TestADryRunBoostRecordsEachUnsentReleaseCanceled`,
+  `TestADryRunBoostRestartedMidExitDecidesAsTheFullRun`,
+  `TestRulesVersionDeclaresTheDryRunBoostSyntheticReports`.
 - Tests in `cmd/engine`: `TestADryRunEngineRunsBoostAndSendsNothing`,
   `TestTheDeclaredModeMustBeTheConfiguredMode`,
   `TestTheAccountMustMatchTheMode`,

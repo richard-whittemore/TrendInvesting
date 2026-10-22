@@ -1,9 +1,12 @@
 // Command boost-demo plays the broker adapter for a dry-run Boost engine: it
 // connects to cmd/engine's socket and sends an invented SPY series, session
 // by session (the bar, the account snapshot, the mark, the session close),
-// with a simulated account in which every released order fills a minute
-// before the next session's close, and prints the decision log from the
-// engine's replies.
+// with a simulated account, and prints the decision log from the engine's
+// replies. A dry-run sends nothing, so nothing fills: the account holds what
+// it started with, 14 SPY bought on margin at the first close (net
+// liquidation $4,000), and every order is sized from that holding. Each
+// released order is followed by the engine's synthetic cancel of it, since
+// it was never sent (ADR 0026, point 3, "Mode", amended 2026-10-17 and 2026-10-22).
 // The series is synthetic, never market data. It composes no strategy: every
 // decision is the engine's, so there is one composition root, cmd/engine.
 //
@@ -100,7 +103,7 @@ func run(args []string, out io.Writer) error {
 	defer func() { _ = client.Close() }()
 	feed := &feeder{
 		client: client, hash: header.ConfigurationHash, version: header.StrategyVersion, sequence: *first,
-		accountID: cfg.AccountID, instrument: cfg.Boost.InstrumentID, account: account{cash: 4000},
+		accountID: cfg.AccountID, instrument: cfg.Boost.InstrumentID, account: startingAccount(),
 	}
 	days := sessions(*count)
 	for i, price := range syntheticCloses(*count) {
@@ -146,12 +149,19 @@ func readConfiguration(path string) (event.TargetWeightConfigurationPayload, err
 	return cfg, cfg.Validate()
 }
 
-// account is the simulated joint account: a released order fills a minute
-// before the next session's close, and the venue reports the execution.
+// account is the simulated joint account. No order a dry-run releases is
+// sent, so none fills and the account never changes.
 type account struct {
-	cash    float64
-	held    int64
-	pending []event.OrderReleasedPayload
+	cash float64
+	held int64
+}
+
+// startingAccount holds 14 SPY bought on margin at the first close, $400:
+// net liquidation $4,000, 140% invested, so the first decision, at 98%,
+// sells, and every Boost exit has shares to sell.
+func startingAccount() account {
+	const held, price = 14, 400.0
+	return account{cash: float64(4000 - float64(held*price)), held: held}
 }
 
 type feeder struct {
@@ -197,28 +207,6 @@ func (f *feeder) send(eventType string, version uint32, id string, at time.Time,
 
 func (f *feeder) session(i int, at time.Time, price float64) error {
 	a := &f.account
-	for _, o := range a.pending {
-		quantity := o.Quantity
-		if o.Side == event.OrderSideSell {
-			quantity = -quantity
-		}
-		a.held += quantity
-		a.cash -= float64(float64(quantity) * price)
-		// The venue reports each execution, which ends a sell's pending
-		// shares. It is stamped a minute before the close, inside the
-		// session: a fill stamped in the close snapshot's second post-dates
-		// that snapshot, so the snapshot holding it would state holdings no
-		// fill explains (ADR 0019, amended 2026-10-21).
-		filledAt := at.Add(-time.Minute)
-		fill := event.TargetWeightFillPayload{
-			AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
-			Side: o.Side, Quantity: o.Quantity, Price: price, FilledAt: filledAt,
-		}
-		if err := f.send(event.FillEventType, event.FillTargetWeightVersion, fill.FillID, filledAt, fill); err != nil {
-			return err
-		}
-	}
-	a.pending = nil
 	view := func(label string) event.PriceView {
 		return event.PriceView{View: label, Open: price, High: price, Low: price, Close: price, Volume: 1e6}
 	}
@@ -280,7 +268,14 @@ func (f *feeder) describe(at time.Time) error {
 				return err
 			}
 			line += fmt.Sprintf(" released (send %v)", p.Send)
-			f.account.pending = append(f.account.pending, p)
+		case event.OrderLifecycleEventType:
+			var p event.LimitOrderLifecyclePayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				return err
+			}
+			if p.Synthetic {
+				line += fmt.Sprintf(" %s (synthetic, never sent)", p.Status)
+			}
 		case event.OrderRefusedEventType:
 			var p event.OrderRefusedPayload
 			if err := json.Unmarshal(e.Payload, &p); err != nil {
