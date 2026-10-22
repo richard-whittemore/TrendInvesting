@@ -110,7 +110,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	flags := flag.NewFlagSet("reporter notify-unit-failed", flag.ContinueOnError)
 	flags.SetOutput(out)
 	statePath := flags.String("state", "", "the host's record of failed-unit pages (unit-failures.json beside the reporters' state files)")
-	channels := flags.String("channel", "ntfy,pagerduty", "comma-separated channels: ntfy, pagerduty")
+	channels := flags.String("channel", "ntfy,pagerduty", "comma-separated channels: ntfy, pagerduty, github-issues (one issue per page, with every secret removed)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets (under systemd: %d/secrets, the credential file)")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that names the failed run when systemd did not (MONITOR_INVOCATION_ID)")
@@ -143,6 +143,9 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	for _, f := range setAside {
 		failures = append(failures, f.err)
 	}
+	// An issue is public: it is given every secret the hook holds to remove,
+	// as the reporter's firing gives its own.
+	withRedaction(senders, secrets)
 	at := now()
 	run := failedInvocation(getenv, *systemctl, unit, at)
 	err = withUnitState(*statePath, func(u *unitState) error {
@@ -296,8 +299,21 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 		for _, s := range echoes {
 			_ = s.send(a, 0)
 		}
-		for _, s := range due {
-			if err := s.send(a, 0); err != nil {
+		// The paging channels are reminded before an issue tracker, so a
+		// slow tracker never holds back a page (ADR 0019, "Alerting"); a
+		// tracker is given the reminder's own ordinal, so it comments on the
+		// open issue rather than taking the reminder for the first page.
+		for _, s := range trackersLast(due) {
+			var err error
+			if is, ok := s.(*issuesSender); ok {
+				ordinal := u.repeats[remindedKey(s.name(), key)] + 1
+				if err = is.remind(a, ordinal); err == nil {
+					u.repeats[remindedKey(s.name(), key)] = ordinal
+				}
+			} else {
+				err = s.send(a, 0)
+			}
+			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", s.name(), err))
 				continue
 			}
@@ -375,7 +391,7 @@ func journalLines(out string) []string {
 // and every line of the secrets file.
 func secretValues(getenv func(string) string, secretsFile string) []string {
 	var values []string
-	for _, k := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_PAGERDUTY_URL", "TI_HEARTBEAT_URL"} {
+	for _, k := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_PAGERDUTY_URL", "TI_HEARTBEAT_URL", "TI_GITHUB_ISSUES_TOKEN"} {
 		if v := getenv(k); v != "" {
 			values = append(values, v)
 		}
