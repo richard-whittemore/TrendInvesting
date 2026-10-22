@@ -127,3 +127,47 @@ func TestTheDailySummaryTakesOnlyTheAccountsOwnLedgerAndSaysHowFarItReaches(t *t
 		}
 	}
 }
+
+// The daily summary's costs line totals the month's commissions, fees and
+// interest from the costs ledger beside the cash ledger, and says when that
+// ledger is not there yet.
+func TestTheDailySummaryGivesThisMonthsCostsFromTheLedgerBesideTheCashLedger(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	dir := t.TempDir()
+	journalPath := pairedJournal(t, dir)
+	stamp := t0.AddDate(0, 0, 1).Add(-2 * time.Hour).Format(time.RFC3339)
+	var lines strings.Builder
+	for _, c := range []struct {
+		id, kind string
+		amount   float64
+	}{{"c1", event.CostCommission, -1}, {"c2", event.CostFee, -10}, {"c3", event.CostInterestPaid, -3.21}, {"c4", event.CostInterestReceived, 0.42}} {
+		line, err := json.Marshal(map[string]any{"id": "ibkr-flex:" + c.id, "type": event.CostEventType, "schema_version": event.CostSchemaVersion,
+			"event_time": stamp, "source": "ibkr-flex",
+			"payload": map[string]any{"kind": c.kind, "amount": c.amount, "currency": "USD", "as_of": stamp, "transaction_id": c.id}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines.Write(line)
+		lines.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, "costs.jsonl"), []byte(lines.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := func() time.Time { return t0.AddDate(0, 0, 1).Add(time.Hour) }
+	var out bytes.Buffer
+	args := []string{"-journal", journalPath, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-summary", "-cash-ledger", filepath.Join(dir, "cash-movements.jsonl")}
+	if err := run(args, fakeEnv, now, &out, fakeClient); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Costs this month: commissions 1.00, fees 10.00, interest 2.79\n") {
+		t.Errorf("summary lacks the costs line:\n%s", out.String())
+	}
+	out.Reset()
+	args = []string{"-journal", journalPath, "-state", filepath.Join(dir, "s2.json"), "-channel", "stdout,ntfy", "-summary"}
+	if err := run(args, fakeEnv, now, &out, fakeClient); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Costs this month: commissions 0.00, fees 0.00, interest 0.00 (fees and interest not yet recorded by the Flex reader)") {
+		t.Errorf("summary without a ledger:\n%s", out.String())
+	}
+}

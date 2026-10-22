@@ -348,7 +348,9 @@ query*, to a program holding a *Flex token*. The reader asks for yours, reads
 its **Cash Transactions** section, and sorts each row by IBKR's type:
 deposits and withdrawals, dividends, broker interest paid and received,
 commission adjustments, and other fees, each with IBKR's own transaction ID,
-its date, amount and currency. Which times are a session's close comes from
+its date, amount and currency. The deposits and withdrawals go to the cash
+ledger; the commissions, fees and broker interest go to a second ledger, the
+costs ledger (below). Which times are a session's close comes from
 the NYSE calendar the adapter and the data job share
 (`adapter/marketdata/nyse_calendar.py`), which holds 2022 to 2030; past its
 last year the reader refuses rather than guess (below, "What can go wrong").
@@ -358,10 +360,36 @@ one cash movement (`account.cash-movement`, version 2) in the account's
 **ledger**, `/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl`
 (`boost`, `trad-ira` or `roth-ira`): the amount (positive in, negative out),
 the date, the currency, IBKR's transaction ID, and the account's equity
-before it. The other postings are read but not written yet; they are for the
-running totals of costs. A posting whose type the reader does not know is
-counted in the status file (`unknown_types`) and named in its log, never
-dropped without a word.
+before it. A posting whose type the reader does not know is counted in the
+status file (`unknown_types`) and named in its log, never dropped without a
+word. Dividends and withholding tax are read but not written.
+
+**The costs ledger.** Each commission, fee and broker-interest posting not
+already recorded becomes one cost (`account.cost`, version 1) in
+`/var/lib/trend-investing/flex/<instance>/costs.jsonl`, in the same folder as
+the cash ledger, under the same lock: its kind (`commission`, `fee`,
+`interest-paid` or `interest-received`), the amount as IBKR states it
+(negative is money out of the account), the date, the currency and IBKR's
+transaction ID. It follows the cash ledger's rules: a posting whose
+transaction ID is already in it is never written again, a posting IBKR later
+states with another amount, kind, date or currency stops the reader (below),
+and a ledger line that is not as the reader writes it, or a file that does not
+end with a whole line, is never appended to. A reading's status file is copied
+beside it (`costs.jsonl.status.json`) so the reporter and the dashboard can say
+how far the costs are recorded. A cost IBKR dates before the New York day you
+approved the first run is not written, as it belongs to the account before the
+book you stated; a posting of nothing is not written. Nothing reads the costs
+ledger to trade: only the reporter and the dashboard total it (alerts and
+dashboard chapter, "Costs: commissions, fees and interest").
+
+**The reader writes every commission, and the reporter counts each once.**
+The reader cannot see the engine's log, in which each fill already carries
+its commission, so it writes all commission postings. The reporter and the
+dashboard leave out a commission posting whose transaction ID is a logged
+fill's execution ID, or a correction of that execution (the same ID but its
+last dot-separated part), and count the fill's. So a trade's commission is
+in the totals exactly once, whether or not IBKR's statement repeats it.
+Interest and fees have no fill, so they are always the ledger's.
 
 **The equity before a transfer** comes from the engine's close snapshots
 (the reading after each close), found back through the chain of runs:
@@ -653,6 +681,11 @@ reading has checked everything, so a stopped reading leaves it as it was.
   read the ledger's deposits and withdrawals (see the sections above).
   Not built: a page from the reporter when the Flex reader itself is set aside
   (today you see a failed unit only, and after two sessions a pending cash read
-  becomes Degraded); and the dividends, interest and fees the reader parses are
-  not yet recorded (a follow-up issue). An IRA's reader runs only once
+  becomes Degraded). Built since: the reader records the commissions, fees and
+  broker interest it parses in the costs ledger, and the reporter and the
+  dashboard total them (alerts and dashboard chapter, "Costs"). That narrows
+  what the cash-drift bound has to allow for, since a fee or an interest
+  posting is now a recorded posting rather than an unknown one; the bound
+  itself is unchanged. Still not recorded: the dividends and withholding tax
+  the reader parses. An IRA's reader runs only once
   that IRA's engine runs (its `run.env`) and you fill in its account file.

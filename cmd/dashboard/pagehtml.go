@@ -137,6 +137,14 @@ tr.urgent td:first-child{border-left:3px solid var(--neg)}
 <p class="assume">The {{.Benchmark}} shadow account is the starting balance held in {{.Benchmark}} at the first paired day&rsquo;s close, buying or selling {{.Benchmark}} at the close for each recorded deposit or withdrawal{{if not .Equity.DollarsWithheld}}; on {{.Equity.EndDate}} it is worth {{money .Equity.ShadowValue}}{{end}}.</p>{{end}}
 {{else}}<p>Not enough paired snapshots and bars yet.</p>{{template "equity" chart .}}{{end}}
 </div>
+<div class="card"><h3>Costs</h3><table><tr><th></th><th>Month to date</th><th>Year to date</th><th>Since start</th></tr>
+<tr><td>Commissions</td><td>{{money .Costs.Month.Commissions}}</td><td>{{money .Costs.Year.Commissions}}</td><td>{{money .Costs.Since.Commissions}}</td></tr>
+<tr><td>Fees</td><td>{{money .Costs.Month.Fees}}</td><td>{{money .Costs.Year.Fees}}</td><td>{{money .Costs.Since.Fees}}</td></tr>
+<tr><td>Interest paid</td><td>{{money .Costs.Month.InterestPaid}}</td><td>{{money .Costs.Year.InterestPaid}}</td><td>{{money .Costs.Since.InterestPaid}}</td></tr>
+<tr><td>Interest received</td><td>{{money .Costs.Month.InterestReceived}}</td><td>{{money .Costs.Year.InterestReceived}}</td><td>{{money .Costs.Since.InterestReceived}}</td></tr>
+<tr><td><strong>Net cost</strong></td><td><strong>{{money .Costs.Month.Net}}</strong></td><td><strong>{{money .Costs.Year.Net}}</strong></td><td><strong>{{money .Costs.Since.Net}}</strong></td></tr></table>
+{{if .Costs.ShareAvailable}}<p>Since start the net cost is {{share .Costs.Share}} of average net liquidation ({{money .Costs.AverageNetLiquidation}}).</p>{{end}}
+<p class="assume">{{.Costs.Note}}</p></div>
 <div class="card"><h3>Change between paired points</h3>{{template "strip" strip .}}</div>
 </div><div>
 <div class="card"><h3>Holdings</h3>{{if .Holdings}}<table>{{range .Holdings}}<tr><td>{{.InstrumentID}}</td><td>{{.Quantity}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}</div>

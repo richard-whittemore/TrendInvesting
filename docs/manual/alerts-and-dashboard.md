@@ -559,8 +559,9 @@ around the page, to the two data pages, or switch the colours. From the top:
 - **The row of figures** gives each account's net liquidation (what the
   broker says the account is worth) and its engine state. Click one to jump to
   that account.
-- **One section per account.** Its first card is the equity comparison.
-  Below it come the day's holdings, the targets the strategy decided, the
+- **One section per account.** Its first card is the equity comparison,
+  followed by the costs card ("Costs: commissions, fees and interest",
+  below) and the change-between-paired-points card. Then come the day's holdings, the targets the strategy decided, the
   orders, the refusals, the fills, and, only on a day that has them, the sales
   back to 98% that were withheld and the trades skipped. "Inputs not read"
   appears when the program left out an input that failed its checks. The
@@ -738,6 +739,89 @@ move. Counted as price only, SPY would show +9.00% and the card would say you
 were beating SPY by 1.0 point; with the dividend reinvested SPY's holder is
 level too, and the verdict says so.
 
+### Costs: commissions, fees and interest
+
+**In short: nothing to do.** The costs card, under the equity comparison,
+adds up what the account has paid IBKR, so you can see what trading and
+borrowing cost. Its table has one column for the **month to date**, one for
+the **year to date** and one **since the start** (the account's first
+recorded day), and one row each for:
+
+- **Commissions**, what IBKR charged for each trade;
+- **Fees**, such as market-data or other fees IBKR posts to the account;
+- **Interest paid**, the interest on money borrowed on margin;
+- **Interest received**, the interest IBKR pays on cash, which is money *in*;
+- **Net cost**, the first three less the fourth: what the account paid in all.
+
+Under the table, one sentence says what the net cost since the start is as a
+share of your **average net liquidation** (the mean of the account's recorded
+net liquidations from its first day to the summary's day), and a second says
+exactly what is counted and what may be missing. The reporter's daily summary
+carries one line, "Costs this month: commissions X, fees Y, interest Z", where
+Z is the interest paid less the interest received. The dashboard's
+`/api/summary.json` carries the same block under `Costs` for each account
+(`Month`, `Year` and `Since`, each with `Commissions`, `Fees`, `InterestPaid`
+and `InterestReceived`, and `Share` of `AverageNetLiquidation`).
+
+**Where the figures come from.** Commissions on trades come from the
+account's own record: IBKR reports each execution's commission, and the
+engine's log keeps it with the fill, so every fill from the account's first run
+on counts. Fees and interest, and any commission IBKR posts to the account
+without a fill (an adjustment), come from the **costs ledger**, which the Flex
+reader writes beside the cash ledger every evening
+(`/var/lib/trend-investing/flex/<instance>/costs.jsonl`; the reconciliation
+chapter, "Deposits and withdrawals, read from IBKR", says how). The reader
+cannot see the engine's log, so it writes every commission IBKR posts, and
+the reporter and the dashboard do the matching:
+
+- **A commission is counted once.** A commission posting whose IBKR ID is a
+  logged fill's execution ID, or a correction of that execution (IBKR keeps
+  the first part of the ID and changes the last), is that fill's commission
+  and is left out of the ledger's total. The text under the table says how
+  many were left out.
+- **Only this account's folder is read.** As for the cash ledger, a costs
+  ledger in another account's folder is not read ("not accepted"), and
+  nothing from it is counted.
+- **A day after the summary's is never counted**, so an earlier day's summary
+  does not change when the ledger grows. A cost is dated by IBKR's date,
+  read as a UTC day for the month and year.
+- **Costs before the account's start are not counted.** The reader writes
+  none dated before the New York day you approved the first run: they belong
+  to the account before the book you stated.
+- **Only US dollars are added.** A posting in another currency is not added;
+  the text says how many.
+
+**What may be missing, and how it is said.** IBKR's report lags: a posting of
+day D is in the statement read on the evening of the next session, so the
+last two sessions' costs may not be there yet (the text says so, and says
+"costs recorded through <day>"). Until the Flex reader has written a costs
+ledger, the card shows the commissions on fills only and says "fees and
+interest not yet recorded by the Flex reader"; the daily summary's costs line
+ends with the same words in brackets. A ledger that cannot be read, or that
+belongs to another account, is named the same way; the commissions on fills
+are still counted. A fill that did not read is counted as an input not read, not
+here, and the text says how many commissions are therefore left out.
+
+**A worked example** (made-up numbers). In March 2027 the account is worth
+about 10,000.00 all month. On the 3rd it buys, and IBKR charges 1.25 for the
+trade: the fill in the log carries 1.25, and the next evening the Flex reader
+writes IBKR's own commission posting of -1.25 for the same execution; the
+reporter counts 1.25 once. On the 10th IBKR posts a market-data fee of
+-10.00, on the 12th interest paid of -3.21 (a short margin loan) and on the
+12th interest received of 0.42. The month's column reads commissions 1.25,
+fees 10.00, interest paid 3.21, interest received 0.42, net cost 14.04, and
+the daily summary's line reads "Costs this month: commissions 1.25, fees
+10.00, interest 2.79". If this is the account's first month, the net cost
+since the start is 14.04, 0.14% of an average net liquidation of 10,000.00.
+The same IBKR commission read twice, by the fill and by the ledger, would have
+shown 2.50 and 15.29; that is what the matching prevents.
+
+This card changes no order and no limit; it reports. It is also why the cash
+checks have less to allow for: a fee or an interest posting is now recorded
+(next to the deposits and withdrawals), though the daily bound on cash drift
+is unchanged (reconciliation chapter, "Deposits and withdrawals, read from
+IBKR").
+
 ## What the summary shows, and its limits
 
 - Holdings come from the broker's account snapshot.
@@ -763,6 +847,11 @@ level too, and the verdict says so.
 - Fills are read in both forms the engines record: the Turtle engine's and
   the Boost and momentum engines' (which name the side and the client order
   ID). Neither is counted in "Inputs not read".
+- The line "Costs this month: commissions X, fees Y, interest Z" gives the
+  month's commissions, fees and interest paid less interest received (the
+  dashboard's costs card, above, has the year, the start and the share of
+  net liquidation). When the Flex reader's costs are not available yet it says
+  so in brackets, and the commissions on fills are still counted.
 - Every sale back to 98% withheld that day is listed under "Sales back to 98%
   withheld", with its reason, what fired it and the engine's detail. A lapse
   (`lapsed`: what fired the sale ended before a good snapshot came) appears
@@ -960,7 +1049,8 @@ passes `-clock-check`.
   `TestOneChannelsBadSecretNeverSilencesTheOther`,
   `TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset`,
   `TestTheServiceFileRunsTheReporterOnTheEnginesLog`,
-  `TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored` and
+  `TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored`,
+  `TestTheDailySummaryGivesThisMonthsCostsFromTheLedgerBesideTheCashLedger` and
   `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`.
 - Tests in `cmd/dashboard`, among them `TestEveryRouteRefusesEveryWritingMethod`,
   `TestDashboardShowsTheDaysSkippedTrades`,
@@ -969,7 +1059,14 @@ passes `-clock-check`.
   `TestTheEquityCardOpensWithTheVerdictInWordsAndColour`,
   `TestTheChartDrawsGrowthSoADepositDoesNotBendIt`,
   `TestTheDashboardReadsTheFlexLedgerForEachEngineDirectory`,
-  `TestTheCashLedgerFlagNamesTheAccountItBelongsTo` and
+  `TestTheCashLedgerFlagNamesTheAccountItBelongsTo`,
+  `TestTheCostsCardSitsUnderTheEquityComparisonWithEveryPeriodAndKind`,
+  `TestTheDashboardTotalsTheCostsLedgerBesideEachAccountsCashLedger` and
   `TestTheServiceFileServesTheBoostLogOnTheOnePort`.
+- Tests in `internal/report` for the costs block:
+  `TestTotalsPerKindForTheMonthTheYearAndSinceTheStart`,
+  `TestACommissionAlreadyOnAFillIsNotCountedTwice`,
+  `TestEarlierRunsFillsCountSinceTheStart` and
+  `TestCostsAsAShareOfAverageNetLiquidation`.
 - `deploy/rehearse.sh`, which installs the programs in a clean Ubuntu
   container and runs the reporter with its unit's own command line.
