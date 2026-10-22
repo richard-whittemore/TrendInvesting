@@ -978,3 +978,38 @@ func TestBoostVenueOrderIDsNameOneOrderEach(t *testing.T) {
 		p.Boost.WorkingOrders[0].VenueOrderID = "ib-3"
 	}, "venue order")
 }
+
+// TestBoostRetiredSaleAndNamedOrdersValidate: a retired sale back to 98%
+// records its tag and the attempt retired, the first being 1, both or
+// neither; the orders a venue named are named once, strictly ascending,
+// each the watched, an undecided or a working order, so a run restarted
+// from the decision refuses their retirement as the full run does (ADR 0026,
+// point 2, "Boost", and point 5, amended 2026-10-22).
+func TestBoostRetiredSaleAndNamedOrdersValidate(t *testing.T) {
+	v := validTargetsDecidedWatching()
+	v.Boost.RetiredOrders[0].SaleTag, v.Boost.RetiredOrders[0].SaleAttempt = "engine-state:joint:1", 2
+	v.Boost.NamedOrders = []string{"tw-0", "tw-1"}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a retired sale with its attempt and the watched and working orders named are valid: %v", err)
+	}
+	if (event.BoostFigures{NamedOrders: []string{"tw-0"}}).IsZero() {
+		t.Error("figures naming an order are not empty")
+	}
+	type P = event.TargetsDecidedPayload
+	expectInvalid(t, "a sale's tag with no attempt", v, func(p *P) {
+		p.Boost.RetiredOrders = slices.Clone(p.Boost.RetiredOrders)
+		p.Boost.RetiredOrders[0].SaleAttempt = 0
+	}, "attempt")
+	expectInvalid(t, "an attempt with no tag", v, func(p *P) {
+		p.Boost.RetiredOrders = slices.Clone(p.Boost.RetiredOrders)
+		p.Boost.RetiredOrders[0].SaleTag = ""
+	}, "attempt")
+	expectInvalid(t, "a negative attempt", v, func(p *P) {
+		p.Boost.RetiredOrders = slices.Clone(p.Boost.RetiredOrders)
+		p.Boost.RetiredOrders[0].SaleAttempt = -1
+	}, "attempt")
+	expectInvalid(t, "named out of order", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-1", "tw-0"} }, "named")
+	expectInvalid(t, "named twice", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-0", "tw-0"} }, "named")
+	expectInvalid(t, "an order not listed", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-9"} }, "named")
+	expectInvalid(t, "a retired order", v, func(p *P) { p.Boost.NamedOrders = []string{"tw-r"} }, "named")
+}

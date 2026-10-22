@@ -1094,7 +1094,7 @@ class Relay:
                 continue
             if broker is None:
                 broker = _tags(self._broker_orders())
-            if mark is None and _finish_retirement(self._pending, cid, self._today()):
+            if mark is None and _finish_retirement(self._pending, cid, envelope.get("id"), self._today()):
                 # A retirement a stop left unmarked is finished before the
                 # order could be judged sendable again: the engine is told it
                 # was never sent, so it never is.
@@ -1129,7 +1129,7 @@ class Relay:
                 with self._step:
                     self._require_held()
                     retire_order(self._pending, order, RETIRED_SESSION_OVER, str(err), RETIRED_BY_ADAPTER,
-                                 self._now(), self._today())
+                                 self._now(), self._today(), envelope.get("id"))
                 continue
             except Exception as err:
                 # Recorded so the owner can settle this order, and only this
@@ -1360,7 +1360,7 @@ def _utc_now():
     return datetime.now(timezone.utc)
 
 
-def retire_order(pending, order, reason, detail, by, at, today):
+def retire_order(pending, order, reason, detail, by, at, today, input_id):
     """Retire a released order that never left the adapter: journal the refusal, record it, and mark it never sent.
 
     The owner's decision of 2026-10-22. In that order: the refusal is
@@ -1373,7 +1373,9 @@ def retire_order(pending, order, reason, detail, by, at, today):
     nothing under its tag. order is the release's payload; reason is
     RETIRED_SESSION_OVER (by the adapter) or RETIRED_BY_OWNER (by the owner,
     named); detail what refused it or why the owner retired it; at when;
-    today the session it was judged in.
+    today the session it was judged in; input_id the input awaiting its
+    reply that released it, recorded with the retirement so that only that
+    input's settlement reads it as begun (_finish_retirement).
     """
     order = _plain(order)
     cid = order["client_order_id"]
@@ -1386,11 +1388,12 @@ def retire_order(pending, order, reason, detail, by, at, today):
         "id": RETIRED_ID + cid, "event_type": RETIRED_TYPE, "schema_version": RETIRED_VERSION,
         "event_time": stamp, "payload": payload})
     pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": detail,
-                             "retired": reason, "retired_by": by, "at": stamp, "session_date": today.isoformat()})
+                             "retired": reason, "retired_by": by, "at": stamp, "session_date": today.isoformat(),
+                             "input_id": input_id})
     pending.mark(cid, NEVER_SENT)
 
 
-def _finish_retirement(pending, cid, today):
+def _finish_retirement(pending, cid, input_id, today):
     """Finish a retirement of cid that a stop left unmarked, and say whether one was begun.
 
     retire_order records the retirement for the engine first (the outbox),
@@ -1399,10 +1402,13 @@ def _finish_retirement(pending, cid, today):
     that the record does not mark, so it is finished here, before the order
     is judged sendable again: the decision recorded from the outbox entry if
     the stop came before it, and the order marked never sent (the owner's
-    decision of 2026-10-22; fail closed, AGENTS.md).
+    decision of 2026-10-22; fail closed, AGENTS.md). Only a retirement
+    recorded for input_id, the input awaiting its reply, was begun for this
+    order: one recorded for another input, an earlier run's under a reused
+    client order ID, is not this order's, which is judged as any other.
     """
     begun = any(d.get("client_order_id") == cid and d.get("decision") == DECIDE_RETIRED
-                for d in pending.decisions())
+                and d.get("input_id") == input_id for d in pending.decisions())
     entry = next((e for e in Outbox(pending.path + OUTBOX_SUFFIX).load() if e["id"] == RETIRED_ID + cid), None)
     if not begun and entry is None:
         return False
@@ -1410,7 +1416,7 @@ def _finish_retirement(pending, cid, today):
         p = entry["payload"]
         pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": p.get("detail"),
                                  "retired": p.get("reason"), "retired_by": p.get("retired_by"),
-                                 "at": p.get("retired_at"), "session_date": today.isoformat()})
+                                 "at": p.get("retired_at"), "session_date": today.isoformat(), "input_id": input_id})
     pending.mark(cid, NEVER_SENT)
     return True
 
@@ -1477,7 +1483,7 @@ def retire(pending, client_order_id, by, reason, now=None, today=None):
                                  "with resolve --never-sent (docs/manual/redelivery.md)".format(
                                      client_order_id, refusal["reason"]))
         retire_order(pending, refusal["order"], RETIRED_BY_OWNER, reason, by, (now or _utc_now)(),
-                     today or _session_today())
+                     today or _session_today(), waiting.get("id"))
     finally:
         os.close(held)
 

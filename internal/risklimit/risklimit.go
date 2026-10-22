@@ -210,9 +210,13 @@ type Gate struct {
 // whether the owner's approval of a fresh run records the incident's sale as
 // attempted in an earlier run (RestoreSaleAttempt), which spends it for
 // every instrument; instruments holds those whose sale this run planned or
-// withheld for a person (Sale).
+// withheld for a person (Sale). retired is how many of the incident's
+// sales the approval records as retired as never sent in earlier runs, each
+// under a client order ID of its own, so this run's next attempt follows
+// them (orderplan.SaleAttemptClientOrderID).
 type saleAttempt struct {
 	earlier     bool
+	retired     int
 	instruments map[string]bool
 }
 
@@ -292,18 +296,48 @@ func (g *Gate) Incident() string { return g.incident }
 // earlier run attempted incidentID's one sale back to 98%: ADR 0019 (amended
 // 2026-10-15) allows one attempt per incident, never retried automatically,
 // and a fresh run learns of an earlier attempt only from the owner's
-// approval, since it does not replay the earlier run's log. It writes the
-// incident's one attempt record, the record Sale consults and adds to, so an
-// incident is restored once, and never after this run attempted its sale.
-func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool) error {
-	if incidentID == "" {
+// approval, since it does not replay the earlier run's log. retired is how
+// many of the incident's sales earlier runs retired as never sent, each
+// under a client order ID of its own, so the next attempt has the next one
+// and never a retired order's (ADR 0026, point 2, "Order identity"). It
+// writes the incident's one attempt record, the record Sale consults and
+// adds to, so an incident is restored once, and never after this run
+// attempted its sale.
+func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool, retired int) error {
+	switch {
+	case incidentID == "":
 		return errors.New("risklimit: a restored sale attempt must name its incident")
+	case retired < 0:
+		return fmt.Errorf("risklimit: incident %q's restored retired sale attempts %d are fewer than none", incidentID, retired)
 	}
 	if _, ok := g.attempts[incidentID]; ok {
 		return fmt.Errorf("risklimit: incident %q's sale attempt is restored once, before its sale is attempted", incidentID)
 	}
-	g.attempts[incidentID] = &saleAttempt{earlier: attempted, instruments: make(map[string]bool)}
+	g.attempts[incidentID] = &saleAttempt{earlier: attempted, retired: retired, instruments: make(map[string]bool)}
 	return nil
+}
+
+// RestoreRetiredSale records, from a recovered decision, that the attempt
+// numbered attempt (the first is 1) of the sale back to 98% for tag and
+// instrumentID was retired as never sent, so the next attempt has a client
+// order ID of its own and never a retired order's (ADR 0026, point 2,
+// "Order identity", and point 5: recovered, never recomputed).
+func (g *Gate) RestoreRetiredSale(tag, instrumentID string, attempt int) error {
+	if tag == "" || instrumentID == "" || attempt < 1 {
+		return fmt.Errorf("risklimit: a restored retired sale names its tag, its instrument and its attempt, the first being 1; got %q, %q, %d", tag, instrumentID, attempt)
+	}
+	key := saleKey(tag, instrumentID)
+	g.retiredSales[key] = max(g.retiredSales[key], attempt-g.restoredRetired(tag))
+	return nil
+}
+
+// restoredRetired is how many of tag's sales the owner's approval records
+// as retired in earlier runs (RestoreSaleAttempt).
+func (g *Gate) restoredRetired(tag string) int {
+	if a := g.attempts[tag]; a != nil {
+		return a.retired
+	}
+	return 0
 }
 
 // RestoreState applies one strategy.engine.state record an earlier run of

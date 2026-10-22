@@ -104,6 +104,10 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			}
 		case event.OrderRetiredEventType:
 			rej.retire(e)
+		case event.BrokerSnapshotEventType:
+			// A listing names the order, so the engine refuses its
+			// retirement as it would after any venue report.
+			rej.listed(e)
 		case event.OrderLifecycleEventType, event.FillEventType, event.RebalanceClearedEventType:
 			if rej.venue(e) == targetweight.VerdictRejected && lastBoost.ID != "" && rej.verdicts.Stopped() {
 				// The decision that records the stop comes with the next
@@ -351,7 +355,9 @@ func (r *boostRejections) retire(e event.Envelope) bool {
 
 // listed reads a broker snapshot e as the Boost engine does for the orders
 // it lists: one listed under the client order ID of an order this run
-// released reached IBKR, so it is named (targetweight's learnListings).
+// released reached IBKR, so it is named, and its venue order ID is learnt
+// for the count, whose rule then refuses its retirement (targetweight's
+// learnListings).
 func (r *boostRejections) listed(e event.Envelope) {
 	var p event.BrokerSnapshotPayload
 	if read(e, brokerSnapshotVersions, &p) != nil || p.AccountID != r.account {
@@ -359,6 +365,7 @@ func (r *boostRejections) listed(e event.Envelope) {
 	}
 	for _, l := range p.OpenOrders {
 		if o, ok := r.released[l.ClientOrderID]; ok && l.ClientOrderID != "" && o.InstrumentID == l.InstrumentID {
+			r.verdicts.LearnVenueID(l.ClientOrderID, l.BrokerOrderID)
 			r.named[l.ClientOrderID] = true
 		}
 	}

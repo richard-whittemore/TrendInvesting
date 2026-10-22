@@ -580,8 +580,8 @@ order. Still to come, and not needed for it:
     after a restart, and nothing is recorded twice;
   - `test_a_corrected_execution_stops_for_a_person_and_is_never_a_second_fill`;
   - `test_an_execution_whose_commission_never_arrives_stops_for_a_person`;
-  - `test_a_release_left_waiting_past_its_session_is_never_sent` and
-    `test_a_stale_release_settled_as_never_sent_lets_the_adapter_go_on_and_reports_nothing`;
+  - `test_a_release_left_waiting_past_its_session_is_retired_and_never_sent` and
+    `test_an_order_ibkr_can_never_accept_stops_until_the_owner_retires_it`;
   - `test_the_relay_checks_with_the_sender_before_the_mark_whatever_the_mapper`;
   - `test_an_acknowledged_correction_lets_the_adapter_start_again_and_is_never_a_fill`
     and `test_a_correction_of_an_execution_never_recorded_as_a_fill_is_not_acknowledged`;

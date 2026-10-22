@@ -624,3 +624,26 @@ func TestARetirementOfAnOrderTheVenueNamedLeavesItsRejectionCounted(t *testing.T
 		t.Errorf("the retirement of an order IBKR named was applied, and its rejection not counted: %+v", a)
 	}
 }
+
+// TestARetirementOfAnOrderIBKRListedLeavesItsRejectionCounted: a broker
+// snapshot listing an order the count holds shows it reached IBKR, so the
+// engine refuses its retirement and its later rejection still counts, as on
+// the page (ADR 0026, point 2, "Boost", amended 2026-10-22; fail closed).
+func TestARetirementOfAnOrderIBKRListedLeavesItsRejectionCounted(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0, "tw-6")
+	l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+	l.inARow, l.undecided = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, nil
+	l.decide(1, "tw-7")
+	l.add(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:1", day(2), event.BrokerSnapshotPayload{
+		AccountID: "joint", AsOf: day(2), NetLiquidation: 10000, ExcessLiquidity: 10000, Positions: []event.BrokerPosition{},
+		OpenOrders: []event.BrokerOrder{{BrokerOrderID: "ib-tw-7", ClientOrderID: "tw-7", InstrumentID: "SPY", Side: event.OrderSideBuy,
+			Status: event.BrokerOrderWorking, RemainingQuantity: 10}}})
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:1", day(2), event.OrderRetiredPayload{
+		AccountID: "joint", ClientOrderID: "tw-7", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101,
+		Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(2)})
+	l.report(3, "tw-7", event.OrderLifecycleStatusInvalid)
+	if a, ok := stateAtStart(t, l.stream); !ok || !strings.Contains(a.Body, "tw-7") {
+		t.Errorf("the retirement of an order IBKR listed was applied, and its rejection not counted: %+v", a)
+	}
+}

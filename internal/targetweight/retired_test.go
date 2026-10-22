@@ -378,3 +378,122 @@ func TestARecoveredRetiredOrderTheGateKnowsIsRefused(t *testing.T) {
 		t.Errorf("a recovered retired order the gate already knows: %v, want the recovery refused naming it", err)
 	}
 }
+
+// TestARetiredSaleIsRecordedWithItsAttempt: a decision records a retired
+// sale back to 98% with its tag and the number of the attempt retired, so a
+// run restarted from it gives the next attempt a client order ID of its own
+// (ADR 0026, point 2, "Order identity", and point 5: recovered, never
+// recomputed).
+func TestARetiredSaleIsRecordedWithItsAttempt(t *testing.T) {
+	first := orderplan.SaleClientOrderID("kill:19", "SPY")
+	r := simulate(t, options{brokers: true, kill: map[int]bool{19: true}, retireIDs: map[int][]string{21: {first}}})
+	d := targets(t, r.decisions)[21]
+	i := slices.IndexFunc(d.Boost.RetiredOrders, func(o event.BoostRetiredOrder) bool { return o.ClientOrderID == first })
+	if i < 0 {
+		t.Fatalf("session 21 records retired orders %+v, want the sale", d.Boost.RetiredOrders)
+	}
+	if got := d.Boost.RetiredOrders[i]; got.SaleTag != "kill:19" || got.SaleAttempt != 1 {
+		t.Errorf("the retired sale is recorded as %+v, want tag kill:19 and attempt 1", got)
+	}
+}
+
+// TestASaleAfterARecoveredRetiredSaleHasAnIDOfItsOwn: a run restarted from
+// a decision that records the incident's sale retired as its first attempt
+// plans the next attempt under the second attempt's client order ID, never
+// the retired order's, as the full run does (ADR 0026, point 2, "Order
+// identity", and point 5: recovered, never recomputed).
+func TestASaleAfterARecoveredRetiredSaleHasAnIDOfItsOwn(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	state := haltedState(t)
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[17]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	retired := orderplan.SaleClientOrderID(state.ID, "SPY")
+	p.Boost.RetiredOrders = append(p.Boost.RetiredOrders, event.BoostRetiredOrder{ClientOrderID: retired, Side: event.OrderSideSell,
+		Released: 5, LimitPrice: 99, RetiredAt: sessionEnd(17), SaleTag: state.ID, SaleAttempt: 1})
+	s := &stream{hash: event.TargetWeightConfigurationHash(testConfiguration())}
+	edited := s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, recovery.EventTime, p)
+	edited.Source = recovery.Source
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	r := simulate(t, options{recovery: &edited, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state}, brokerMutate: urgent})
+	sold := sales(t, r.decisions)
+	if want := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 1); len(sold) != 1 || sold[0].ClientOrderID != want {
+		t.Fatalf("sales %+v, want one under %s, the second attempt's ID, not the retired %s", sold, want, retired)
+	}
+}
+
+// TestAFreshRunApprovedAfterARetiredSaleSellsUnderAnIDOfItsOwn: the owner's
+// approval carries how many of the incident's sales were retired as never
+// sent, so the fresh run's first attempt has the next attempt's client
+// order ID, never a retired order's (ADR 0019, amended 2026-10-17, reading
+// 4; ADR 0026, point 2, "Order identity").
+func TestAFreshRunApprovedAfterARetiredSaleSellsUnderAnIDOfItsOwn(t *testing.T) {
+	h, s := configured(t)
+	p := approval(false)
+	p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(false), SaleRetiredAttempts: 1}
+	mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", sessionEnd(0), p))
+	held := &account{cash: -2000, held: 60}
+	at := sessionEnd(0)
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b0", at, bar(100, at)))
+	b := held.broker(at, 100)
+	b.ExcessLiquidity = 0.1 * b.NetLiquidation
+	out := mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k0", at, b))
+	sold := sales(t, out)
+	if want := orderplan.SaleAttemptClientOrderID("engine-state:joint:1", "SPY", 1); len(sold) != 1 || sold[0].ClientOrderID != want {
+		t.Fatalf("sales %+v, want one under %s, the second attempt's ID", sold, want)
+	}
+}
+
+// TestARecoveredRunRefusesTheRetirementOfAnOrderAVenueNamed: a venue named
+// the watched order and the working one beside it before the decision, so
+// the full run refuses their retirement, and a run restarted from the
+// decision refuses it as the full run does (ADR 0026, point 2, "Boost",
+// amended 2026-10-22, and point 5: recovered, never recomputed).
+func TestARecoveredRunRefusesTheRetirementOfAnOrderAVenueNamed(t *testing.T) {
+	closes := flippingCloses()[:20]
+	opts := options{closes: closes, hold: heldFrom(18), partFill: map[int]int64{17: 5}, cancelAt: map[int]int{17: 30}}
+	full := simulate(t, opts)
+	decisions := ofType(full.decisions, event.TargetsDecidedEventType)
+	n := len(decisions) - 1
+	last := targets(t, full.decisions)[n].Boost
+	if len(last.WorkingOrders) != 1 || last.Watched.ClientOrderID == "" {
+		t.Fatalf("setup: the last decision records %+v, want a working order beside the watched one", last)
+	}
+	recovery := decisions[n]
+	recovered := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reports: venueReports(full.inputs, n), closes: closes})
+	at := sessionEnd(len(closes) - 1).Add(time.Hour)
+	for _, id := range []string{last.WorkingOrders[0].ClientOrderID, last.Watched.ClientOrderID} {
+		var o event.OrderReleasedPayload
+		for _, rel := range released(t, full.decisions) {
+			if rel.ClientOrderID == id {
+				o = rel
+			}
+		}
+		p := event.OrderRetiredPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side,
+			Quantity: o.Quantity, LimitPrice: o.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "session over",
+			RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+		for name, r := range map[string]run{"the full run": full, "the recovered run": recovered} {
+			if err := applyAfter(t, r, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:"+id, at, p); err == nil || !strings.Contains(err.Error(), "venue") {
+				t.Errorf("%s: the retirement of %s, which a venue named: %v, want it refused", name, id, err)
+			}
+		}
+	}
+}
+
+// TestARecoveredRetiredSaleUnderAnotherAttemptsIDIsRefused: a recovered
+// decision recording a retired sale whose client order ID is not the one
+// its tag and attempt give is refused, rather than count a retired attempt
+// the run never released (fail closed, AGENTS.md).
+func TestARecoveredRetiredSaleUnderAnotherAttemptsIDIsRefused(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[17]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	p.Boost.RetiredOrders = append(p.Boost.RetiredOrders, event.BoostRetiredOrder{ClientOrderID: orderplan.SaleClientOrderID("kill:1", "SPY"),
+		Side: event.OrderSideSell, Released: 5, LimitPrice: 99, RetiredAt: sessionEnd(17), SaleTag: "kill:1", SaleAttempt: 2})
+	h, s := configured(t)
+	_, err := h.Apply(context.Background(), s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, recovery.EventTime, p))
+	if err == nil || !strings.Contains(err.Error(), "attempt 2") {
+		t.Errorf("a retired sale recorded under another attempt's ID: %v, want the recovery refused", err)
+	}
+}

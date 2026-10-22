@@ -1443,6 +1443,26 @@ class RetireTests(unittest.TestCase):
                 self.assertIsNone(self.pending.load())
                 self.assertEqual(self.sent, [])
 
+    def test_an_earlier_inputs_retirement_never_stops_a_later_order_under_the_same_id(self):
+        # A retirement recorded among the decisions for another input, an
+        # earlier run's under a reused client order ID, is not this input's:
+        # the order released now is judged and sent as any other, never
+        # marked never sent with nothing told to the engine (fail closed,
+        # AGENTS.md).
+        for earlier in ({"input_id": "session:old"}, {}):
+            with self.subTest(earlier=earlier):
+                self.pending.clear()
+                Path(self.pending.decisions_path).unlink(missing_ok=True)
+                del self.sent[:]
+                self.pending.record_decision(dict({"client_order_id": "tw-1", "decision": "retired", "reason": "session over",
+                                                   "retired": "session over", "retired_by": "adapter",
+                                                   "at": "2026-10-16T13:30:00Z", "session_date": "2026-10-16"}, **earlier))
+                relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}))
+                relay.exchange(envelope(0))
+                relay.close()
+                self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"])
+                self.assertEqual(self.retired_entries(), [])
+
     def test_an_order_whose_session_is_over_that_ibkr_shows_is_never_retired(self):
         # Checked at IBKR first, as every order is: one IBKR shows under its
         # tag was sent, so it is taken as sent, never retired.

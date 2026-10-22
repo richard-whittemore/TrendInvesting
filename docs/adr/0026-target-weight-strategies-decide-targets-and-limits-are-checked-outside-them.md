@@ -1449,15 +1449,27 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   rebalance's orders are all terminal the next decision decides afresh. A
   venue report on a retired order proves the retirement wrong and is
   refused. Each Boost decision records the orders retired
-  (`retired_orders`, `strategy.targets.decided` version 7), so a run
-  restarted from it refuses such a report as the full run does (point 5:
-  recovered, never recomputed). A dry-run sends nothing, so it refuses every
-  retirement.
+  (`retired_orders`, `strategy.targets.decided` version 7), a retired sale
+  back to 98% with its tag and the number of the attempt retired
+  (`sale_tag`, `sale_attempt`), and the watched, undecided and working
+  orders a venue has named (`named_orders`), so a run restarted from it
+  refuses such a report, and the retirement of an order a venue named, as
+  the full run does, and gives the next attempt of a retired sale a client
+  order ID of its own (point 5: recovered, never recomputed). A fresh run's
+  approval carries how many of the incident's sales were retired
+  (`operator.run.approved` version 4, ADR 0027), counted only from
+  retirements the engine applied, so its next attempt follows them too. A
+  retired urgent sale is attempted again while the alarm stays urgent
+  whatever its tag: one fired while Halted, Degraded on the instrument or
+  under the kill switch carries the incident's or the engagement's tag. A
+  dry-run sends nothing, so it refuses every retirement.
 - **The adapter.** The owner's `retire` command is the only settlement of
   an order IBKR can never accept: `resolve --never-sent`, which tells the
   engine nothing, is refused for it. A retirement the adapter or the command
   began and a stop left unfinished is finished when the adapter starts
   again, before the order is judged sendable, so an order the engine is
-  told was never sent is never sent.
+  told was never sent is never sent. Only a retirement recorded for the
+  input awaiting its reply counts as begun: one recorded for another input
+  under the same client order ID is not this order's.
 - **Replay.** Rules version 1.22.0 refused the input, so a journal holding
   a retirement decides differently and does not replay across the two.

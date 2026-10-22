@@ -317,7 +317,13 @@ retired it because IBKR could never accept it) used nothing up: nothing was
 sent, so it is tried again at the next IBKR reading while the exit is still
 refused or the alarm still urgent, as a new order with a client order ID of
 its own ([order lifecycle](order-lifecycle.md), "An order IBKR can never
-accept").
+accept"). That holds for an urgent-alarm sale made while Halted, Degraded or
+under the kill switch too, though it carries the incident's or the
+engagement's tag. The new order's ID survives a restart: each decision
+records the retired sale and its attempt number, and `operator approve`
+writes how many of the incident's sales were retired into the fresh run's
+approval (`sale_retired_attempts`), so no attempt ever reuses a retired
+order's ID.
 
 **When it does not go.** It is *withheld*, and recorded as
 `risk.sale.withheld`, when:

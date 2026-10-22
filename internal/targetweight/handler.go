@@ -725,7 +725,25 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 			}
 			h.release(o)
 		}
+		// A retired sale back to 98% counts among its tag's retired
+		// attempts, so the next has an ID of its own; one whose ID is not
+		// the attempt's it records is refused (ADR 0026, point 2, "Order
+		// identity"; fail closed, AGENTS.md).
+		if r.SaleTag != "" {
+			if want := orderplan.SaleAttemptClientOrderID(r.SaleTag, h.cfg.Boost.InstrumentID, r.SaleAttempt-1); want != r.ClientOrderID {
+				return fmt.Errorf("targetweight: recovered decision %s: retired order %s is recorded as attempt %d of %s's sale, whose client order ID is %s", in.ID, r.ClientOrderID, r.SaleAttempt, r.SaleTag, want)
+			}
+			if err := h.gate.RestoreRetiredSale(r.SaleTag, h.cfg.Boost.InstrumentID, r.SaleAttempt); err != nil {
+				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+			}
+		}
 		h.retired = append(h.retired, r)
+	}
+	// An order a venue named before the decision reached IBKR, so the
+	// restarted run refuses its retirement as the full run does (ADR 0026,
+	// point 2, "Boost", and point 5, amended 2026-10-22).
+	for _, id := range p.Boost.NamedOrders {
+		h.name(id)
 	}
 	// An accepted order still working beside the watched one is restored
 	// with its executions, latest first so the gate keeps release order,
@@ -778,8 +796,9 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 		return errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
 	}
 	// Version 3 adds the starting book, which the IBKR adapter reads (ADR
-	// 0027, amended 2026-10-18); a version 2 approval still replays.
-	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, event.OperatorRunApprovedSchemaVersion})
+	// 0027, amended 2026-10-18), and version 4 the incident's retired sale
+	// attempts; a version 2 or 3 approval still replays.
+	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, 3, event.OperatorRunApprovedSchemaVersion})
 	if err != nil {
 		return err
 	}
@@ -790,7 +809,7 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 		return fmt.Errorf("targetweight: approval %s is for another account, %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
 	}
 	if incident := p.IncidentInForce; incident != nil {
-		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted); err != nil {
+		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted, incident.SaleRetiredAttempts); err != nil {
 			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
 		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs, incident.ScopeCashComponents); err != nil {
@@ -1523,10 +1542,17 @@ func (h *Handler) applyRetired(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(end); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	r := event.BoostRetiredOrder{ClientOrderID: id, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice, RetiredAt: p.RetiredAt.UTC()}
 	if !held {
-		h.gate.RetireSale(id)
+		// A retired sale back to 98% is recorded with its tag and the
+		// attempt retired, so a run restarted from the decision gives the
+		// next attempt an ID of its own (ADR 0026, point 2, "Order
+		// identity", and point 5).
+		if tag, attempt, sale := h.gate.RetireSale(id); sale {
+			r.SaleTag, r.SaleAttempt = tag, attempt
+		}
 	}
-	h.retired = append(h.retired, event.BoostRetiredOrder{ClientOrderID: id, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice, RetiredAt: p.RetiredAt.UTC()})
+	h.retired = append(h.retired, r)
 	if w := h.watch; w != nil && w.order.ClientOrderID == id && w.status == "" {
 		w.status, w.endedAt = event.OrderLifecycleStatusCanceled, p.RetiredAt.UTC()
 	}
@@ -1652,7 +1678,7 @@ func holdings(positions []event.AccountPosition) map[string]int64 {
 // figures are the Boost figures for this session, with latchedBefore and the
 // latch and target in force as they stand.
 func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigures {
-	return event.BoostFigures{
+	b := event.BoostFigures{
 		InstrumentID: h.cfg.Boost.InstrumentID, Close: r.Close,
 		RSI: r.RSI, RSIReady: r.RSIReady, TrendMean: r.TrendMean, TrendMeanReady: r.TrendMeanReady,
 		ExitMean: r.ExitMean, ExitMeanReady: r.ExitMeanReady,
@@ -1662,6 +1688,30 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		VenueRejections: h.verdicts.rejections, RejectedInARow: slices.Clone(h.verdicts.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(), RetiredOrders: slices.Clone(h.retired),
 		UndecidedBeforeRejection: h.verdicts.olderThanRejection, RejectionsWhileStopped: h.verdicts.whileStopped, NoVenue: h.noVenue(),
 	}
+	b.NamedOrders = h.namedFigures(b)
+	return b
+}
+
+// namedFigures are the orders b restores as released, the watched, the
+// undecided and the working ones, that a venue has named, ascending
+// (BoostFigures.NamedOrders), so a run restarted from the decision refuses
+// their retirement as the full run does (ADR 0026, point 5).
+func (h *Handler) namedFigures(b event.BoostFigures) []string {
+	var ids []string
+	add := func(id string) {
+		if id != "" && h.named[id] && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	add(b.Watched.ClientOrderID)
+	for _, o := range b.UndecidedOrders {
+		add(o.ClientOrderID)
+	}
+	for _, o := range b.WorkingOrders {
+		add(o.ClientOrderID)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // noVenue is the run's mode when no venue receives its orders, dry-run, so
@@ -1766,6 +1816,7 @@ func (b *emissions) settleReplan(i int, decided event.TargetsDecidedPayload) {
 	}
 	decided.Boost.ReplanPending, decided.Boost.Watched, decided.Boost.UndecidedOrders = b.h.replan, watched, undecided
 	decided.Boost.WorkingOrders = working
+	decided.Boost.NamedOrders = b.h.namedFigures(decided.Boost)
 	e, err := b.h.stamp(b.out[i].ID, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, b.at, b.in, decided)
 	b.fail(err)
 	b.out[i] = e

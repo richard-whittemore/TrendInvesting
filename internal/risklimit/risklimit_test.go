@@ -526,7 +526,7 @@ func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
 	if s, ok := requestSale(t, g, event.SaleTriggerExit); !ok || s.Order == nil {
 		t.Fatalf("the incident's first sale = %+v, %v; want an order", s, ok)
 	}
-	if err := g.RestoreSaleAttempt(halted.StateID, false); err == nil {
+	if err := g.RestoreSaleAttempt(halted.StateID, false, 0); err == nil {
 		t.Error("an incident whose sale this run attempted was restored as not attempted")
 	}
 	if s, ok := requestSale(t, g, event.SaleTriggerExit); ok {
@@ -534,13 +534,13 @@ func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
 	}
 
 	twice := gate(t, limits(), event.TradingModeDryRun)
-	if err := twice.RestoreSaleAttempt("incident-1", false); err != nil {
+	if err := twice.RestoreSaleAttempt("incident-1", false, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := twice.RestoreSaleAttempt("incident-1", false); err == nil {
+	if err := twice.RestoreSaleAttempt("incident-1", false, 0); err == nil {
 		t.Error("an incident's attempt was restored twice")
 	}
-	if err := twice.RestoreSaleAttempt("", false); err == nil {
+	if err := twice.RestoreSaleAttempt("", false, 0); err == nil {
 		t.Error("an attempt was restored for no incident")
 	}
 }

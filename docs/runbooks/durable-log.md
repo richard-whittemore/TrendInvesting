@@ -147,7 +147,8 @@ The engine reads its settings from
    `{"incident_id": "<id>", "state": "degraded"|"halted",
    "scope_instrument_ids": ["SPY"], "scope_cash_components": ["total-cash"],
    "sale_attempted": true|false,
-   "sale_client_order_id": "<id, only if the sale was sent>"}`: the state
+   "sale_client_order_id": "<id, only if the sale was sent>",
+   "sale_retired_attempts": <n, left out when none>}`: the state
    and scope the incident holds the account in (degraded names its
    instruments and its cash components, each in ascending order, at least
    one of either: `["total-cash"]` when a reconciliation found unexplained
@@ -158,7 +159,12 @@ The engine reads its settings from
    (a continued incident records no new state); the new run starts
    in them (ADR 0019, amended 2026-09-24). And whether that incident's one
    sale back to 98% was attempted (ADR 0019, amended 2026-10-15). A run
-   approved with `true` never attempts it again. If the previous log ended
+   approved with `true` never attempts it again. `sale_retired_attempts`
+   is how many of that incident's sales the log (and the approvals before
+   it) records as retired as never sent; each had a client order ID of its
+   own, so the new run's next attempt takes the next one. `operator
+   approve` fills it in, and the engine refuses fewer than the log records.
+   If the previous log ended
    degraded or halted, the approval must either clear that incident
    (`incident_id`) or carry it in force, under that incident's ID, at least
    as tight; the engine refuses one that would loosen it or names another

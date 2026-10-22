@@ -398,7 +398,7 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	default:
 		return orderplan.Sale{}, false, nil
 	}
-	retired := g.retiredSales[saleKey(tag, instrumentID)]
+	retired := g.restoredRetired(tag) + g.retiredSales[saleKey(tag, instrumentID)]
 	if g.saleAttemptedFor(tag, instrumentID) {
 		g.disarm(orderplan.SaleAttemptClientOrderID(tag, instrumentID, retired))
 		return orderplan.Sale{}, false, nil
@@ -453,7 +453,9 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 
 // RetireSale reads the retirement of order clientOrderID as never sent, when
 // it is a sale back to 98% this gate released, and reports whether it was
-// one. Nothing was sent, so the attempt is not spent (ADR 0019, amended
+// one, with the tag it was planned under and the number of the attempt
+// retired, the first being 1, which a decision records so a run restarted
+// from it gives the next attempt an ID of its own (RestoreRetiredSale). Nothing was sent, so the attempt is not spent (ADR 0019, amended
 // 2026-10-17, reading 4, as the owner's decision of 2026-10-22 reads it;
 // ADR 0026, point 2, "Boost", amended 2026-10-22): the sale is attempted
 // again under its own rule at the next opportunity, its tag and trigger
@@ -464,19 +466,25 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 // client order ID of its own (orderplan.SaleAttemptClientOrderID). The
 // caller ends the order in the ledger, as a cancellation with nothing
 // filled would, so its shares are no longer counted as being sold.
-func (g *Gate) RetireSale(clientOrderID string) bool {
+func (g *Gate) RetireSale(clientOrderID string) (tag string, attempt int, ok bool) {
 	o := g.orders[clientOrderID]
 	if o == nil || o.planned.Sale == (event.SaleFigures{}) {
-		return false
+		return "", 0, false
 	}
 	tag, instrumentID := o.planned.Tag, o.planned.InstrumentID
 	if a := g.attempts[tag]; a != nil {
 		delete(a.instruments, instrumentID)
 	}
 	g.retiredSales[saleKey(tag, instrumentID)]++
+	attempt = g.restoredRetired(tag) + g.retiredSales[saleKey(tag, instrumentID)]
 	switch o.planned.Sale.Trigger {
 	case event.SaleTriggerMarginUrgent:
-		if g.alarmLevel == event.MarginAlarmUrgent && g.alarmID == tag {
+		// Armed by what fired it, whatever its tag: an urgent sale fired
+		// while Halted, Degraded on the instrument or under the kill switch
+		// carries the incident's or the engagement's tag, and is in force
+		// while the alarm stays urgent all the same; Sale picks the tag
+		// afresh (ADR 0019, amended 2026-10-17, reading 1).
+		if g.alarmLevel == event.MarginAlarmUrgent {
 			g.urgentRetry, g.urgentInstrument, g.urgentWithheld = true, instrumentID, nil
 		}
 	case event.SaleTriggerExit:
@@ -484,7 +492,7 @@ func (g *Gate) RetireSale(clientOrderID string) bool {
 			g.exitRetry, g.exitWithheld = instrumentID, nil
 		}
 	}
-	return true
+	return tag, attempt, true
 }
 
 // saleKey keys a sale back to 98% by its tag and instrument.

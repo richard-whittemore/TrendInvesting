@@ -413,6 +413,14 @@ stated by the owner instead:
   IBKR's total cash and its currency, as the owner checked them in IBKR. The
   key is required, `null` when the approval states none. Versions 1 and 2
   stay readable and state none.
+- **`operator.run.approved` schema version 4** (amendment of 2026-10-22)
+  adds `incident_in_force.sale_retired_attempts`: how many of the
+  incident's sales back to 98% the approved log, and the approvals before
+  it, record as retired as never sent by a retirement the engine applied.
+  Each had a client order ID of its own, so the fresh run's next attempt
+  takes the next one (ADR 0026, point 2, "Order identity"). It is left out
+  when none; the engine refuses an approval stating fewer than the log
+  records. Versions 1 to 3 stay readable and state none.
 - **A first run's approval.** It names no previous log and no final hash,
   states the starting book, and states the boost not latched and no
   incident, since no earlier run had either. Its input ID is
