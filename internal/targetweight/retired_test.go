@@ -996,3 +996,99 @@ func TestAVenueReportOnARestoredOwnSaleEndsItAsInTheFullRun(t *testing.T) {
 		})
 	}
 }
+
+// TestAVenueReportOnASaleReleasedBeforeTheRecoveredDecisionEndsItAsInTheFullRun:
+// the incident's sale fired by an urgent reading at session 18, outside any
+// decided session, is still unsent when session 19 decides; session 19's
+// decision records it live, with the trigger that fired it, and a run
+// restarted from that decision holds it as its own: the venue's fill of it,
+// its cancel after a part fill and its expiry unfilled are each read as in
+// the run that never restarted, so each later decision is the full run's,
+// the sale ends, and no decision records it live after (ADR 0019, amended
+// 2026-10-15: one attempt; ADR 0026, point 5: recovered, never recomputed).
+func TestAVenueReportOnASaleReleasedBeforeTheRecoveredDecisionEndsItAsInTheFullRun(t *testing.T) {
+	cases := []struct {
+		name          string
+		part          map[int]int64
+		filled, ended bool
+	}{
+		{"filled", nil, true, false},
+		{"canceled after a part fill", map[int]int64{21: 5}, true, true},
+		{"expired unfilled", map[int]int64{21: 0}, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state := haltedState(t)
+			first := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0)
+			urgent := func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }
+			mutate := map[int]func(*event.BrokerSnapshotPayload){18: urgent, 23: urgent}
+			base := simulate(t, options{brokers: true})
+			// The sale is released at session 18 and the adapter holds it back
+			// until session 21, so session 19's decision finds it unsent.
+			probe := restartAt17(t, base, options{prelude: []event.Envelope{state}, brokerMutate: mutate, unsentIDs: []string{first}})
+			rel := released(t, probe.decisions)
+			if len(rel) != 1 || rel[0].ClientOrderID != first {
+				t.Fatalf("setup: released %+v, want the incident's first sale", rel)
+			}
+			sale := rel[0]
+			full := restartAt17(t, base, options{prelude: []event.Envelope{state}, brokerMutate: mutate, unsentIDs: []string{first},
+				working: map[int][]event.OrderReleasedPayload{21: {sale}}, partFill: c.part})
+			for _, e := range ofType(full.decisions, event.OrderReleasedEventType) {
+				if !e.EventTime.Equal(sessionEnd(18)) {
+					t.Fatalf("setup: the sale was released at %s, want session 18's broker snapshot", e.EventTime)
+				}
+			}
+			var decision event.Envelope
+			for _, e := range ofType(full.decisions, event.TargetsDecidedEventType) {
+				if e.EventTime.Equal(sessionEnd(19)) {
+					decision = e
+				}
+			}
+			var d event.TargetsDecidedPayload
+			decode(t, decision, &d)
+			if s := d.Boost.RestoredSale; s == nil || s.Order == nil || s.Order.ClientOrderID != first || s.Order.Trigger != event.SaleTriggerMarginUrgent {
+				t.Fatalf("session 19's decision records the restored sale %+v, want %s live under margin-urgent", s, first)
+			}
+			r := simulate(t, options{recovery: &decision, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state},
+				working: map[int][]event.OrderReleasedPayload{21: {sale}}, partFill: c.part, brokerMutate: mutate})
+			var filled, ended bool
+			for _, in := range r.inputs {
+				filled = filled || in.Type == event.FillEventType && strings.Contains(string(in.Payload), sale.ClientOrderID)
+				ended = ended || in.ID == "cancel:"+sale.ClientOrderID
+			}
+			if filled != c.filled || ended != c.ended {
+				t.Fatalf("setup: the venue reported the restored sale filled %t and canceled %t, want %t and %t", filled, ended, c.filled, c.ended)
+			}
+			after := func(run run) []event.TargetsDecidedPayload {
+				var out []event.TargetsDecidedPayload
+				for _, e := range ofType(run.decisions, event.TargetsDecidedEventType) {
+					if e.EventTime.After(sessionEnd(19)) {
+						var p event.TargetsDecidedPayload
+						decode(t, e, &p)
+						out = append(out, p)
+					}
+				}
+				return out
+			}
+			want, got := after(full), after(r)
+			if len(want) == 0 {
+				t.Fatal("setup: the full run decides nothing after session 19")
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("the restarted run's decisions after the venue's report are %+v, want the full run's %+v", got, want)
+			}
+			// Session 20's decision still finds the sale unsent; the venue's
+			// report reaches the run at session 21.
+			for i, p := range got {
+				s := p.Boost.RestoredSale
+				if live := i == 0; s == nil || !s.Attempted || (s.Order != nil) != live {
+					t.Errorf("decision %d after session 19 records the restored sale as %+v, want it attempted and live %t", i, s, live)
+				}
+			}
+			late := slices.DeleteFunc(slices.Clone(full.decisions), func(e event.Envelope) bool { return !e.EventTime.After(sessionEnd(19)) })
+			if w, g := sales(t, late), sales(t, r.decisions); !reflect.DeepEqual(g, w) {
+				t.Errorf("the restarted run's sales %+v, want the full run's %+v", g, w)
+			}
+		})
+	}
+}
