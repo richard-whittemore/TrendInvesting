@@ -234,7 +234,20 @@ import (
 //     unsent sell as still being sold and read such reports, a dry-run Boost
 //     journal decides differently, so one written under 1.21.0 does not
 //     replay. Paper and live decisions are unchanged.
-const RulesVersion = "1.22.0"
+//   - 1.23.0 reads execution.order.retired, the IBKR adapter's retirement
+//     of a released order it never sent because its session was over, or
+//     the owner's retirement of one the adapter can never send (the owner's
+//     decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
+//     2026-10-22). The order must be one the run released, as released,
+//     that no venue has reported on; it ends with nothing filled. In Boost
+//     it leaves the orders awaiting the venue's word, a retired sell is no
+//     longer counted as being sold, and the watched order so retired is
+//     re-planned at the next decided session as unfilled; a momentum
+//     rebalance whose orders are all terminal then completes. A venue
+//     report on a retired order is refused. A dry-run refuses every
+//     retirement. 1.22.0 refused the input, so a journal holding one
+//     decides differently.
+const RulesVersion = "1.23.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -298,6 +311,10 @@ type Options struct {
 //     naming the decision that released it and that order, which settles an
 //     order the adapter never sent: no venue will rule on it, so it is no
 //     longer awaited (applyClearance);
+//   - after an order's release: the adapter's execution.order.retired, for
+//     an order it never sent because its session was over, or the owner's,
+//     for one it can never send, which ends the order with nothing filled,
+//     so the watched order is re-planned as unfilled (applyRetired);
 //   - at any time after the configuration: account.cash-movement version 2
 //     and account.flex-status, the Flex reader's journalled transfers and its
 //     status, which a reconciliation's cash is bridged by and judged against
@@ -389,6 +406,10 @@ type Handler struct {
 	// cleared (BoostFigures.ClearedOrders): off undecided, but released in
 	// the gate still, so a decision records them for a restart to restore.
 	cleared []string
+	// retired are the orders the adapter or the owner retired as never sent
+	// (applyRetired), in the order retired: ended with nothing filled, so a
+	// venue report on one is refused.
+	retired []string
 	// working are the orders the venue accepted that were not fully filled
 	// or ended when last read, in the order the venue accepted them, whichever order is watched
 	// now (BoostFigures.WorkingOrders): a later order replaces them as the
@@ -531,6 +552,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyAcknowledgement(in)
 	case event.RebalanceClearedEventType:
 		return nil, h.applyClearance(in)
+	case event.OrderRetiredEventType:
+		return nil, h.applyRetired(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -1074,6 +1097,9 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	if slices.Contains(h.cleared, p.ClientOrderID) {
 		return h.contradictsClearance(in, p.ClientOrderID)
 	}
+	if slices.Contains(h.retired, p.ClientOrderID) {
+		return h.contradictsRetirement(in, p.ClientOrderID)
+	}
 	if err := h.gate.ObserveFill(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
@@ -1301,6 +1327,9 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if slices.Contains(h.cleared, p.ClientOrderID) {
 		return h.contradictsClearance(in, p.ClientOrderID)
 	}
+	if slices.Contains(h.retired, p.ClientOrderID) {
+		return h.contradictsRetirement(in, p.ClientOrderID)
+	}
 	if !p.Describes(o) {
 		return fmt.Errorf("targetweight: lifecycle %s reports %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
 			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
@@ -1356,6 +1385,15 @@ func (h *Handler) refuseDryRunReport(in event.Envelope, id string) error {
 // AGENTS.md).
 func (h *Handler) contradictsClearance(in event.Envelope, id string) error {
 	return fmt.Errorf("targetweight: %s %s reports order %s, which the owner cleared as never sent; the report shows it reached IBKR, so the clearance was wrong: reconcile the account with IBKR and start a fresh run", in.Type, in.ID, id)
+}
+
+// contradictsRetirement refuses a venue report on an order retired as never
+// sent: a report proves the order reached IBKR, so the retirement was wrong,
+// and the run stops for a person to reconcile before it goes on (the owner's
+// decision of 2026-10-22; ADR 0026, point 2, "Boost", amended 2026-10-22;
+// fail closed, AGENTS.md).
+func (h *Handler) contradictsRetirement(in event.Envelope, id string) error {
+	return fmt.Errorf("targetweight: %s %s reports order %s, which was retired as never sent; the report shows it reached IBKR, so the retirement was wrong: reconcile the account with IBKR and start a fresh run", in.Type, in.ID, id)
 }
 
 // undecidedOrder is an order a decided session released that the venue has
@@ -1464,6 +1502,73 @@ func (h *Handler) applyClearance(in event.Envelope) error {
 	for _, id := range p.ClientOrderIDs {
 		h.leaveUndecided(slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id }))
 		h.cleared = append(h.cleared, id)
+	}
+	return nil
+}
+
+// applyRetired reads the retirement of a Boost order the adapter never sent
+// (execution.order.retired): its session ended before the adapter could
+// send it, or the owner retired an order the adapter can never send (the
+// owner's decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
+// 2026-10-22). No venue received it, so none will ever rule on it: it
+// leaves the orders awaiting the venue's word, counted neither accepted nor
+// rejected, and ends with nothing filled, so the gate no longer counts a
+// retired sell as being sold (ADR 0019, amended 2026-10-15, "net of every
+// working sell"). The watched order so retired ends as canceled at its
+// retirement, so the session's close re-plans it as unfilled (settleWatch),
+// as an order that expired unfilled is. It must name an order of this
+// account that this run released, as released (event's Describes), still
+// undecided and never named by the venue, and neither cleared nor retired
+// before; anything else is refused, so a retirement never ends an order
+// that may be working (fail closed). A dry-run sends nothing, so it refuses
+// every retirement.
+func (h *Handler) applyRetired(in event.Envelope) error {
+	p, err := decodeInput[event.OrderRetiredPayload](in, event.OrderRetiredSchemaVersion)
+	if err != nil {
+		return err
+	}
+	id := p.ClientOrderID
+	if h.cfg.Mode == event.TradingModeDryRun {
+		return fmt.Errorf("targetweight: retirement %s names order %s in a dry-run, which sends no order and ends each it releases with its own synthetic cancel, so it has nothing to retire: find what fed it before going on", in.ID, id)
+	}
+	if p.AccountID != h.cfg.AccountID {
+		return fmt.Errorf("targetweight: retirement %s is for account %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
+	}
+	o, ok := h.released[id]
+	switch {
+	case !ok:
+		return fmt.Errorf("targetweight: retirement %s names order %s, which this run did not release", in.ID, id)
+	case slices.Contains(h.cleared, id):
+		return fmt.Errorf("targetweight: retirement %s names order %s, which the owner cleared as never sent already", in.ID, id)
+	case slices.Contains(h.retired, id):
+		return fmt.Errorf("targetweight: retirement %s names order %s, which is retired already", in.ID, id)
+	case !p.Describes(o):
+		return fmt.Errorf("targetweight: retirement %s retires %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
+			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, id, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
+	}
+	i := slices.IndexFunc(h.undecided, func(u undecidedOrder) bool { return u.id == id })
+	switch {
+	case i < 0:
+		return fmt.Errorf("targetweight: retirement %s names order %s, which the venue has already ruled on; it was sent, and only an order no venue received is retired", in.ID, id)
+	case h.undecided[i].venueID != "":
+		return fmt.Errorf("targetweight: retirement %s names order %s, which the venue has already named as order %s; it was sent, and only an order no venue received is retired", in.ID, id, h.undecided[i].venueID)
+	}
+	// The gate ends the order as a cancellation with nothing filled would.
+	// The report is the engine's own and is never journalled: it is marked
+	// synthetic and names no venue order, so the gate cannot take it for a
+	// venue's (LimitOrderLifecyclePayload.Synthetic).
+	end := event.LimitOrderLifecyclePayload{
+		AccountID: o.AccountID, ClientOrderID: id, InstrumentID: o.InstrumentID, Side: o.Side,
+		Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+		OccurredAt: p.RetiredAt, Synthetic: true, Message: "retired unsent: " + p.Reason,
+	}
+	if err := h.gate.ObserveLifecycle(end); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	h.leaveUndecided(i)
+	h.retired = append(h.retired, id)
+	if w := h.watch; w != nil && w.order.ClientOrderID == id && w.status == "" {
+		w.status, w.endedAt = event.OrderLifecycleStatusCanceled, p.RetiredAt.UTC()
 	}
 	return nil
 }

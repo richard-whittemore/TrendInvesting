@@ -1,0 +1,18 @@
+[
+  {
+    "event_type": "execution.order.retired",
+    "schema_version": 1,
+    "payload": {
+      "account_id": "DU0000001",
+      "client_order_id": "tw-paper-1",
+      "instrument_id": "SPY",
+      "side": "buy",
+      "quantity": 9,
+      "limit_price": 401.5,
+      "reason": "session over",
+      "detail": "order tw-paper-1 was released for the session of 2026-10-16, not today's (2026-10-17); its session is over, so it is never sent (docs/manual/paper-trading.md)",
+      "retired_by": "adapter",
+      "retired_at": "2026-10-17T13:30:00Z"
+    }
+  }
+]

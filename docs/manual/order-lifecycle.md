@@ -1,4 +1,4 @@
-# An order's lifecycle: committed, released, acknowledged
+# An order's lifecycle: committed, released, acknowledged, retired
 
 *For the owner. How to tell from the log where an order stands, and when the
 reporter pages you about one.*
@@ -13,6 +13,7 @@ is read from the durable log alone:
 | **committed** | The order's `risk.order.released` record is on disk. | The engine decided it and forced it to disk. It may or may not have reached the adapter yet. |
 | **released** | A later input is on disk after it. | The adapter has it. The adapter sends its next input only after it holds the reply to its last one, so a later input proves the reply arrived. |
 | **acknowledged** | IBKR's report about it is on disk and the engine read it: an `execution.order.lifecycle` (version 2) naming its client order ID that matches the order as released, or, for a momentum run, an `execution.fill` (version 5) of it. | IBKR has seen the order: accepted it, refused it, cancelled it, or filled it. |
+| **retired** | An `execution.order.retired` (version 1) naming it is on disk and the engine read it, and IBKR had said nothing of the order before. | The order never left the adapter, and never will. See "An order IBKR can never accept", below. |
 
 The log keeps every input, including one the engine refused, and does not
 mark which were refused. So the reporter reads IBKR's report the way the
@@ -98,6 +99,51 @@ reporter reading the rest of it.
 Dry-run orders are recorded with `send` false and are never sent, so they are
 never acknowledged and never alert.
 
+## An order IBKR can never accept
+
+Sometimes the adapter refuses an order before it writes "about to send", so
+the order never leaves the adapter. Since the owner's decision of
+2026-10-22 such an order no longer wedges the run. There are two cases.
+
+**Its session is over.** An order is a limit order for the day it was
+released in. If the adapter could not send it that day (most often because
+the link to IBKR was down until the next day), it is never sent: its limit
+and the engine's checks were for a day that has gone. The adapter now
+**retires it by itself**. It checks IBKR first, as for every order: if IBKR
+shows anything under the order's client order ID, the order was sent and is
+not retired. Otherwise the adapter records an `execution.order.retired`
+input for the engine, reason `session over`, retired by `adapter`, with the
+adapter's own words for why. That is a refusal of an order that never left
+the adapter, never a cancel of an order at IBKR. Then the adapter goes on to
+its next order and its next input. You get one **routine** message, "order …
+retired (session over)". You are not paged for it.
+
+**IBKR can never accept it as it stands.** The order is not a limit order,
+is for a fraction of a share, or the stock has no IBKR contract number in
+the adapter's configuration. That will not cure itself, so the adapter
+**stops at that order**, every time it is started, and sends nothing more.
+Because the order never reaches IBKR, the reporter's **urgent** "order … not
+acknowledged" page fires for it within the usual 10 minutes, and the
+adapter's stop names the order and the command to run. Find the cause, then
+retire the order yourself with `relay.py retire` (see
+[operator](operator.md), "Retiring an order the adapter can never send").
+That records the same `execution.order.retired` input, reason `owner
+retired`, with your name and your reason, and when you start the adapter
+again it goes on. You then get the same routine "order … retired (owner
+retired)" message.
+
+Either way the engine reads the retirement as an order that ended with
+nothing filled. Boost no longer waits for IBKR's word on it, no longer counts
+a retired sell as shares being sold, and plans the difference to its target
+again at its next decision (recorded as a re-plan for an `unfilled` order,
+[boost](boost.md)). A momentum rebalance whose orders are all finished
+completes, so the next decision decides afresh. A report from IBKR on a
+retired order afterwards proves the retirement wrong: the engine refuses it
+and the reporter raises the "venue report … not read" alert for it. A
+dry-run never sends an order, so the engine refuses any retirement there.
+Engines before target-weight rules version 1.23.0 did not read a
+retirement at all, so a journal holding one does not replay under them.
+
 ## Why
 
 Journal-before-send (ADR 0027) means an order on disk is only *possibly*
@@ -112,6 +158,10 @@ incident reach a person; an order IBKR never acknowledged is one.
 - ADR 0026, Consequences: a target-weight order is a limit order, reported at
   lifecycle version 2 and fill version 5.
 - ADR 0019, "Alerting": every incident reaches the owner, once.
+- The owner's decision of 2026-10-22 (ADR 0026, point 2, "Boost", amended
+  2026-10-22): an order whose session is over is retired by the adapter and
+  reported as a routine notice; one IBKR can never accept stops the adapter
+  and is retired by the owner.
 
 ## The tests
 
@@ -139,6 +189,20 @@ incident reach a person; an order IBKR never acknowledged is one.
 - `cmd/reporter`, `TestAnUnreadVenueReportDoesNotSilenceTheOtherAlerts`: an
   unreadable report raises its own alert once and the unacknowledged-order
   alert still reaches you.
+- `internal/report`, `TestARetiredOrderIsARoutineNoticeNeverAPage`: a
+  retired order gets one routine notice and is never paged as
+  unacknowledged; a retirement the engine refuses retires nothing; a report
+  on a retired order afterwards is "not read".
+- `internal/event`, `TestOrderReportsRetiresOnlyAnOrderNoVenueReceived` and
+  `TestTheIBKRAdaptersRetirementIsReadByOrderReports`: the shared rule, and
+  the adapter's own retirement read by it.
+- `internal/targetweight`, `TestARetiredOrderIsReplannedAtTheNextDecision`,
+  `TestARetiredSellIsNoLongerCountedAsBeingSold`,
+  `TestARetirementOfAnOrderAVenueMayHaveIsRefused`,
+  `TestAVenueReportOnARetiredOrderIsRefused`,
+  `TestARunWithARetirementIsByteIdenticalAndReplays`,
+  `TestARetiredOrderIsRecoveredAsTheFullRun` and
+  `TestRetiredOrdersEndARebalanceInProgress`.
 - `cmd/engine`, `TestABoostEngineRecordsTheAcknowledgementOfAnOrderItReleased`
   and `TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged`: a real
   paper engine, fed over its socket, records the order and its states.
@@ -154,6 +218,7 @@ Alerts come from the reporter, whose urgent alerts do not repeat; see
 | --- | --- | --- |
 | Urgent alert `<account>: order <client order ID> not acknowledged`; its text says either that no input followed the order or that the adapter has it | The reporter alerts once, when the order has gone unacknowledged for 10 minutes (the default) from its commit. No input followed: the order is committed and no later input is on disk, so the adapter may never have received it (a crash right after the engine wrote it). The adapter has it: the order is released, so it was sent and lost, or is still waiting at the adapter. | In both cases, look in IBKR for an order whose `orderRef` is the client order ID **before** placing anything by hand: a second order with the same tag is one reconciliation cannot explain. No input followed: make sure the adapter is running; on reconnect it asks the engine for that reply again and sends the order once ([re-delivery](redelivery.md)). The adapter has it: if IBKR shows nothing and the adapter is stopped on the order, follow the adapter's stop in [re-delivery](redelivery.md), "What can go wrong". |
 | Routine message `<account>: order <client order ID> acknowledged` | IBKR's report on the order is now in the log and was read by the engine. The earlier "not acknowledged" alert is cleared. It is sent once, and only if you were paged. | Nothing. |
+| Routine message `<account>: order <client order ID> retired (<reason>)`, where the reason is `session over` or `owner retired` | The order never left the adapter and was retired: by the adapter, because its day ended before it could be sent, or by you, with `relay.py retire`. The text names the order, who retired it, when, and why. The engine has read the retirement, so it re-plans at its next decision. The message is sent once, whether or not the order was paged as "not acknowledged" first, and it answers that page. | Nothing for `session over`, beyond finding out why the order could not go out on its day (usually the link to IBKR was down; see [paper trading](paper-trading.md)). For `owner retired`, nothing more. If IBKR ever shows an order under that client order ID, the retirement was wrong: the adapter stops ("was settled as never sent, but IBKR shows"), so follow [re-delivery](redelivery.md) and reconcile. |
 | Urgent alert `<account>: venue report <input> not read` | The log holds a report from IBKR that the engine refused: it is at a version the run does not read, does not validate, does not describe the order it names as it was released, takes it past its quantity, reuses a fill id, or arrives after the order finished. It acknowledges nothing. The reporter alerts once per report and goes on with its other alerts. The client order ID in the text may be empty. | Look in IBKR at the order the alert names, or at every order around the time it was recorded when the ID is empty. If that order's "not acknowledged" alert is also open, treat the order as unconfirmed and follow that alert first. |
 | The engine refuses a lifecycle report naming an order "which this run did not release" | IBKR reported an order this run never released, for example one left working by the previous run. The engine applies nothing from it, and the reporter raises no alert for it. It is reconciliation's to explain. | Follow [reconciliation](reconciliation.md) and `docs/runbooks/reconciliation.md`. |
 | No alert ever fires in dry-run | Expected: dry-run orders are recorded with `send` false and never sent, so none is ever waiting for IBKR, and the engine's own synthetic report acknowledges nothing. | Nothing. |

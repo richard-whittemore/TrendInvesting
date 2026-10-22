@@ -33,10 +33,19 @@ false) is never sent (ADR 0026 point 3, "Mode").
 The relay asks the sender's own check (a sender is an object with check and
 send) before it marks an order, whatever to_request does, so an order the
 sender would refuse is refused before any mark. One the sender refuses for
-good (released for an earlier session, or one that can never be shaped)
-is never marked and stops every exchange; the relay records which order it
-is refusing, for which input, beside the pending file, and the owner settles
-that order, and only that one, as never sent (`resolve ... --never-sent`), a
+good is never marked. The owner's decision of 2026-10-22 splits it in two.
+One released for a session that is over (sender.SessionOver) is retired by
+the relay itself (retire_order): journalled for the engine as a refusal for
+"session over" by the adapter (execution.order.retired), never a cancel of
+an order at IBKR, recorded as a retirement, marked never sent, and the
+relay goes on. One IBKR can never accept as it stands
+(sender.UnsendableOrder: not a limit order, a fraction of a share, no
+contract ID) stops every exchange (OrderUnsendable), and the owner retires
+it with `relay.py retire` once the cause is found, which journals the same
+refusal with the owner's reason. Any other refusal for good stops every
+exchange too. Each stop records which order the relay is refusing, for
+which input, beside the pending file, and the owner settles any refused
+order, and only that one, as never sent (`resolve ... --never-sent`), a
 refusal kept with its reason, never a cancel of an order at IBKR. The relay
 passes over a never-sent order only after the same check at IBKR as any
 other: if IBKR shows an order or execution carrying its tag, the owner's
@@ -141,6 +150,8 @@ import importlib.util
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from sender import SessionOver, UnsendableOrder
+
 _LOADED = {}
 
 
@@ -211,6 +222,24 @@ DECIDE_NEVER_SENT = "never-sent"
 # as never sent, on any day, after the owner checks IBKR's order history.
 DECIDE_NOT_HANDED_OVER = "not-handed-over"
 DECISIONS = (DECIDE_SENT, DECIDE_RESEND, DECIDE_NEVER_SENT, DECIDE_NOT_HANDED_OVER)
+# A retirement of an order the sender can never send (retire_order), which
+# the decisions file records beside the person's decisions above: the
+# relay's own for an order whose session is over, the owner's (retire) for
+# one IBKR can never accept as it stands. The owner's decision of 2026-10-22.
+DECIDE_RETIRED = "retired"
+RECORDED_DECISIONS = DECISIONS + (DECIDE_RETIRED,)
+# The input a retirement is journalled as (internal/event OrderRetiredPayload):
+# a refusal of an order that never left the adapter, never a cancel of an
+# order at IBKR. Its reason is one of two, and who retired it fits the reason.
+RETIRED_TYPE = "execution.order.retired"
+RETIRED_VERSION = 1
+RETIRED_SESSION_OVER = "session over"
+RETIRED_BY_OWNER = "owner retired"
+RETIRED_BY_ADAPTER = "adapter"
+# A retirement's outbox entry is named after its order, so a stop between
+# recording it and marking the order retires the order again without a
+# second record (Outbox.append_once).
+RETIRED_ID = "order-retired:"
 # The input an earlier engine run left awaiting its reply (resolve_run_ended),
 # settled apart from the order decisions above.
 DECIDE_RUN_ENDED = "run-ended"
@@ -240,8 +269,12 @@ OUTBOX_RUN_FIELDS = tuple(sorted(OUTBOX_FIELDS + ("run",)))
 # its committed reply released that the record does not mark sent, as
 # (client order ID, mark), and the run the adapter recorded sending it to.
 EarlierRun = namedtuple("EarlierRun", ("input_id", "log", "committed", "unsent", "run"))
-# The fields of the relay's record of the order it is refusing.
+# The fields of the relay's record of the order it is refusing: as the relay
+# first wrote it, and with whether the order is of a shape IBKR can never
+# accept (unsendable) and, for one that is, the release itself (order), which
+# the owner's retire command journals.
 REFUSAL_FIELDS = ("client_order_id", "input_id", "reason")
+REFUSAL_SHAPE_FIELDS = ("client_order_id", "input_id", "order", "reason", "unsendable")
 # The engine's durable log (internal/journal durable_log.go; ADR 0027;
 # docs/runbooks/durable-log.md), which the engine streams as it runs: a
 # header line, then for each input one group (the input's record, the
@@ -354,6 +387,24 @@ class ResendExpired(HandoverUnconfirmed):
         self.client_order_id = client_order_id
 
 
+class OrderUnsendable(ValueError):
+    """An order IBKR can never accept as it stands was refused before any mark; the adapter stops at it for the owner.
+
+    Not a limit order, a fraction of a share, or no IBKR contract ID
+    (sender.UnsendableOrder): the owner's decision of 2026-10-22 stops the
+    adapter at that order, and the owner, once the cause is found, retires
+    it with `relay.py retire` (retire), which journals the refusal with the
+    owner's reason so the adapter goes on.
+    """
+
+    def __init__(self, client_order_id, pending_path, why):
+        super().__init__(
+            "order {0} can never be sent as it stands ({1}); it is never sent and the adapter stops here. Find "
+            "the cause, then, with the adapter stopped, retire it: python3 adapter/ibkr/relay.py retire {2} {0} "
+            "--by NAME --reason \"why\" (docs/manual/paper-trading.md)".format(client_order_id, why, pending_path))
+        self.client_order_id = client_order_id
+
+
 class PendingInUse(Exception):
     """Another relay, or the resolve command, holds the pending file; or this relay was closed and holds it no more."""
 
@@ -460,6 +511,22 @@ class Outbox:
                                     "nothing was recorded".format(self.path))
             self._write(merged)
 
+    def append_once(self, entry):
+        """Add entry behind every entry recorded, unless one under its ID is already there; True when added.
+
+        Checked and written under the lock, as extend is, so a retirement
+        recorded before a stop is never recorded twice when it is made again.
+        """
+        with self._locked():
+            entries = self.load()
+            if any(e["id"] == entry["id"] for e in entries):
+                return False
+            if not _is_outbox_entry(entry):
+                raise OutboxInvalid("an input for {} is not as the adapter records one; nothing was recorded".format(
+                    self.path))
+            self._write(entries + [entry])
+            return True
+
     def strike(self, input_id):
         """Remove the entry for input_id; one not there is already struck off."""
         with self._locked():
@@ -561,7 +628,8 @@ class PendingInput:
 
         The mark is HANDING_OVER (about to be handed over), SENT (the sender
         returned, or a person found it at IBKR), NEVER_SENT (a person settled
-        an order the sender refused for good) or "resend:YYYY-MM-DD" (a
+        an order the sender refused for good, or the order was retired:
+        retire_order) or "resend:YYYY-MM-DD" (a
         person allowed it to be sent again in that session).
         """
         marks = self.handovers()
@@ -585,12 +653,32 @@ class PendingInput:
         self._sync_dir()
 
     def refusal(self):
-        """The order the relay is refusing, as {client_order_id, input_id, reason}, or None.
+        """The order the relay is refusing, as {client_order_id, input_id, reason, unsendable, order}, or None.
 
-        Read strictly (fail closed, AGENTS.md): anything but what
-        record_refusal writes raises HandoverRecordInvalid.
+        unsendable says whether IBKR can never accept the order as it
+        stands, and order is then its release, for the owner's retire
+        command. A refusal as the relay wrote one before it recorded either
+        reads as not unsendable, with no order. Read strictly (fail closed,
+        AGENTS.md): anything but what record_refusal writes raises
+        HandoverRecordInvalid.
         """
-        return self._read_entry(self.refused_path, "a refusal")
+        try:
+            with open(self.refused_path, encoding="utf-8") as f:
+                entry = json.load(f)
+        except FileNotFoundError:
+            return None
+        except ValueError as err:
+            raise HandoverRecordInvalid("{} is not JSON: {}".format(self.refused_path, err)) from None
+        if isinstance(entry, dict) and tuple(sorted(entry)) == REFUSAL_FIELDS:
+            entry = dict(entry, unsendable=False, order=None)
+        if (not isinstance(entry, dict) or tuple(sorted(entry)) != REFUSAL_SHAPE_FIELDS
+                or not all(isinstance(entry[k], str) for k in REFUSAL_FIELDS)
+                or not entry["client_order_id"] or not entry["input_id"]
+                or not isinstance(entry["unsendable"], bool)
+                or entry["unsendable"] != isinstance(entry["order"], dict)
+                or entry["order"] is not None and entry["order"].get("client_order_id") != entry["client_order_id"]):
+            raise HandoverRecordInvalid("{} is not a refusal as the relay writes one".format(self.refused_path))
+        return entry
 
     def _read_entry(self, path, what):
         try:
@@ -606,10 +694,14 @@ class PendingInput:
             raise HandoverRecordInvalid("{} is not {} as the relay writes one".format(path, what))
         return entry
 
-    def record_refusal(self, input_id, client_order_id, reason):
-        """Record durably which order of which input the relay is refusing, replacing any earlier refusal."""
+    def record_refusal(self, input_id, client_order_id, reason, order=None):
+        """Record durably which order of which input the relay is refusing, replacing any earlier refusal.
+
+        order, given only for an order IBKR can never accept as it stands, is
+        its release, which the owner's retire command journals.
+        """
         self._write(self.refused_path, {"client_order_id": client_order_id, "input_id": input_id,
-                                        "reason": reason})
+                                        "reason": reason, "unsendable": order is not None, "order": order})
 
     def not_handed_over(self):
         """The marked order whose last hand-over the sender said reached nothing, as {client_order_id, input_id, reason}, or None.
@@ -710,7 +802,8 @@ class PendingInput:
         """The orders the adapter's own durable records settle, as a SettledOrders (run_logs reads it).
 
         ended holds each client order ID whose last recorded decision
-        settles it as never sent (--never-sent or --not-handed-over), that
+        settles it as never sent (--never-sent, --not-handed-over or a
+        retirement), that
         the hand-over record marks never sent, that a run-ended settlement
         left unsent, or that a cancellation or refusal settled at such a
         settlement ends (the input it settled, or an outbox entry struck off
@@ -741,11 +834,12 @@ class PendingInput:
             except ValueError as err:
                 raise HandoverRecordInvalid("{} line {} is not JSON: {}".format(self.decisions_path, n, err)) from None
             if (not isinstance(decision, dict) or not _is_text(decision.get("client_order_id"))
-                    or decision.get("decision") not in DECISIONS):
+                    or decision.get("decision") not in RECORDED_DECISIONS):
                 raise HandoverRecordInvalid("{} line {} is not a decision as relay.py resolve writes one".format(
                     self.decisions_path, n))
             last[decision["client_order_id"]] = decision["decision"]
-        ended = {cid for cid, decision in last.items() if decision in (DECIDE_NEVER_SENT, DECIDE_NOT_HANDED_OVER)}
+        ended = {cid for cid, decision in last.items()
+                 if decision in (DECIDE_NEVER_SENT, DECIDE_NOT_HANDED_OVER, DECIDE_RETIRED)}
         ended |= {cid for cid, mark in self.handovers().items() if mark == NEVER_SENT}
         fills = {}
         for entry in self.run_ended():
@@ -902,7 +996,7 @@ class Relay:
     """
 
     def __init__(self, connect, sender, pending, broker_orders, to_request, reconnects=1, today=None,
-                 close_timeout=CLOSE_TIMEOUT, settled=None):
+                 close_timeout=CLOSE_TIMEOUT, settled=None, now=None):
         _positive_seconds("close_timeout", close_timeout)
         if not callable(getattr(sender, "check", None)) or not callable(getattr(sender, "send", None)):
             raise TypeError("the relay's sender must have check and send: it asks check before every mark")
@@ -910,6 +1004,7 @@ class Relay:
         if self._held is None:
             raise PendingInUse("{} is held by another adapter or by relay.py resolve".format(pending.path))
         self._today = today or _session_today
+        self._now = now or _utc_now
         self._connect = connect
         self._sender = sender
         self._pending = pending
@@ -1019,12 +1114,24 @@ class Relay:
             try:
                 request = self._to_request(order, _session_date(envelope))
                 self._sender.check(request)
-            except Exception as err:
-                # Recorded so the owner can settle this order, and only this
-                # one, as never sent.
+            except SessionOver as err:
+                # Its session is over, so it is never sent: retired here,
+                # without the owner (the owner's decision of 2026-10-22).
                 with self._step:
                     self._require_held()
-                    self._pending.record_refusal(envelope.get("id"), cid, str(err))
+                    retire_order(self._pending, order, RETIRED_SESSION_OVER, str(err), RETIRED_BY_ADAPTER,
+                                 self._now(), self._today())
+                continue
+            except Exception as err:
+                # Recorded so the owner can settle this order, and only this
+                # one: one IBKR can never accept is the owner's to retire.
+                unsendable = isinstance(err, UnsendableOrder)
+                with self._step:
+                    self._require_held()
+                    self._pending.record_refusal(envelope.get("id"), cid, str(err),
+                                                 order=_plain(order) if unsendable else None)
+                if unsendable:
+                    raise OrderUnsendable(cid, self._pending.path, err) from err
                 raise
             with self._step:
                 self._require_held()
@@ -1225,6 +1332,116 @@ def _resolve(pending, client_order_id, decision, reason, today):
     else:
         pending.record_decision(recorded)
         pending.mark(client_order_id, SENT)
+
+
+def _plain(order):
+    """A released order's payload with every number a JSON number, as the outbox and the refusal record hold it."""
+    return json.loads(json.dumps(order, default=float, allow_nan=False))
+
+
+def _stamp(at):
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def retire_order(pending, order, reason, detail, by, at, today):
+    """Retire a released order that never left the adapter: journal the refusal, record it, and mark it never sent.
+
+    The owner's decision of 2026-10-22. In that order: the refusal is
+    recorded first in the adapter's outbox as the engine's next
+    execution.order.retired input (internal/event OrderRetiredPayload),
+    named after the order (Outbox.append_once), then the retirement among
+    the decisions, then the order marked never sent, so a stop before the
+    mark retires the order again with no second record, and the relay passes
+    over an order marked never sent, as any other, only while IBKR shows
+    nothing under its tag. order is the release's payload; reason is
+    RETIRED_SESSION_OVER (by the adapter) or RETIRED_BY_OWNER (by the owner,
+    named); detail what refused it or why the owner retired it; at when;
+    today the session it was judged in.
+    """
+    order = _plain(order)
+    cid = order["client_order_id"]
+    stamp = _stamp(at)
+    payload = {"account_id": order.get("account_id"), "client_order_id": cid,
+               "instrument_id": order.get("instrument_id"), "side": order.get("side"),
+               "quantity": order.get("quantity"), "limit_price": order.get("limit_price"), "reason": reason,
+               "detail": detail, "retired_by": by, "retired_at": stamp}
+    Outbox(pending.path + OUTBOX_SUFFIX).append_once({
+        "id": RETIRED_ID + cid, "event_type": RETIRED_TYPE, "schema_version": RETIRED_VERSION,
+        "event_time": stamp, "payload": payload})
+    pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": detail,
+                             "retired": reason, "retired_by": by, "at": stamp, "session_date": today.isoformat()})
+    pending.mark(cid, NEVER_SENT)
+
+
+def _effective_user():
+    return os.geteuid()
+
+
+def retire(pending, client_order_id, by, reason, now=None, today=None):
+    """The owner's retirement of the order the adapter stopped at because IBKR can never accept it as it stands.
+
+    The owner's decision of 2026-10-22: the adapter stopped at an order that
+    is not a limit order, is for a fraction of a share, or has no IBKR
+    contract ID (OrderUnsendable); once the owner has found the cause, this
+    journals the refusal with the owner's reason (retire_order, reason
+    RETIRED_BY_OWNER, by the owner named), so the adapter, started again,
+    goes on to its next input and the engine re-plans at its next decision.
+    Refuses (ResolveRefused, nothing changed) an empty reason, no name or the
+    adapter's own, a run as any user but the one that owns the adapter's
+    files (the owner's account for them, `sudo -u ti-trader` on the server)
+    or as root, while an adapter holds the pending file, no input awaiting
+    its reply, any order but the one the relay recorded it is refusing for
+    that input, a refusal that is not of a shape IBKR can never accept, and
+    an order the record marks. now defaults to the time now, today to today
+    in New York.
+    """
+    if not reason or not reason.strip():
+        raise ResolveRefused("a reason is required: it is journalled with the retirement")
+    if not by or not by.strip() or by == RETIRED_BY_ADAPTER:
+        raise ResolveRefused("--by must name the owner retiring the order; {!r} is not a person".format(by))
+    user = _effective_user()
+    try:
+        owner = os.stat(pending.path).st_uid
+    except FileNotFoundError:
+        raise ResolveRefused("no input awaits its reply in {}, so no order is stopped; check the pending "
+                             "file".format(pending.path)) from None
+    if user == 0 or user != owner:
+        raise ResolveRefused("only the owner retires an order, as the user that owns the adapter's files (user "
+                             "{}, `sudo -u ti-trader` on the server), never as root or another user; this runs as "
+                             "user {}".format(owner, user))
+    held = _lock(pending.lock_path)
+    if held is None:
+        raise ResolveRefused("the adapter holds the pending file {}; stop it first".format(pending.path))
+    try:
+        waiting = pending.load()
+        if waiting is None:
+            raise ResolveRefused("no input awaits its reply in {}, so no order is stopped; check the pending "
+                                 "file".format(pending.path))
+        marks = pending.handovers()
+        if client_order_id in marks:
+            raise ResolveRefused("order {} is marked {!r}: it was handed over or settled already, so it is not "
+                                 "an order the adapter stopped at before sending".format(
+                                     client_order_id, marks[client_order_id]))
+        refusal = pending.refusal()
+        if refusal is None or refusal["input_id"] != waiting.get("id"):
+            raise ResolveRefused("the adapter has recorded no refused order for the input awaiting its reply ({}); "
+                                 "check the adapter's stop message".format(waiting.get("id")))
+        if refusal["client_order_id"] != client_order_id:
+            raise ResolveRefused("the adapter is refusing order {} ({}), not {}; check the client order ID".format(
+                refusal["client_order_id"], refusal["reason"], client_order_id))
+        if not refusal["unsendable"]:
+            raise ResolveRefused("the adapter refused order {} for a reason that is not a shape IBKR can never "
+                                 "accept ({}): fix that cause and start the adapter again, or settle the order "
+                                 "with resolve --never-sent (docs/manual/redelivery.md)".format(
+                                     client_order_id, refusal["reason"]))
+        retire_order(pending, refusal["order"], RETIRED_BY_OWNER, reason, by, (now or _utc_now)(),
+                     today or _session_today())
+    finally:
+        os.close(held)
 
 
 def run_identity(path):
@@ -1432,7 +1649,7 @@ def journalled_reports(path):
 
     A JournalledReports: the fill ID of every committed fill input, and the
     client order ID of every order a committed lifecycle input ended
-    (cancelled or invalid). A lifecycle input not as the IBKR adapter
+    (cancelled or invalid) or a committed retirement input retired. A lifecycle input not as the IBKR adapter
     journals one (version 2, a client order ID and a status) is refused
     like a fill.
 
@@ -1458,6 +1675,8 @@ def journalled_reports(path):
                 client_order_id, status = _lifecycle(path, at, kind, envelope)
                 if status in LIFECYCLE_TERMINAL:
                     ended.add(client_order_id)
+            elif envelope["type"] == RETIRED_TYPE and kind == LOG_INPUT:
+                ended.add(_retired(path, at, envelope))
     return JournalledReports(fills, ended)
 
 
@@ -1645,6 +1864,8 @@ def _order_ends(path, groups, ended, fills):
                 client_order_id, status = _lifecycle(path, at, kind, envelope)
                 if status in LIFECYCLE_TERMINAL:
                     ended.add(client_order_id)
+            elif envelope["type"] == RETIRED_TYPE:
+                ended.add(_retired(path, at, envelope))
     return ended, fills
 
 
@@ -1770,6 +1991,16 @@ def _lifecycle(path, n, kind, envelope):
         raise _unreadable(path, n, "it is a lifecycle report but not an input {} version {} as the adapter "
                                    "journals one".format(LIFECYCLE_TYPE, LIFECYCLE_VERSION))
     return payload["client_order_id"], payload["status"]
+
+
+def _retired(path, n, envelope):
+    """The client order ID a committed retirement input names, else ResolveRefused."""
+    payload = envelope["payload"]
+    if (envelope["schema_version"] != RETIRED_VERSION or not isinstance(payload, dict)
+            or not _is_text(payload.get("client_order_id"))):
+        raise _unreadable(path, n, "it is a retirement but not an input {} version {} as the adapter journals "
+                                   "one".format(RETIRED_TYPE, RETIRED_VERSION))
+    return payload["client_order_id"]
 
 
 _is_text = engine_log.is_text
@@ -1973,9 +2204,21 @@ def main(argv=None, today=None):
     late.add_argument("--after", required=True, metavar="CLIENT_ORDER_ID",
                       help="the client order ID of the order the trade was reported after")
     late.add_argument("--reason", required=True, help="what IBKR's trades show; kept with the acknowledgement")
+    ret = commands.add_parser("retire", help="retire the order the adapter stopped at because IBKR can never "
+                                             "accept it as it stands, once its cause is found, so the adapter "
+                                             "goes on; journalled as a refusal with your reason")
+    ret.add_argument("pending_file", help="the adapter's pending-input file")
+    ret.add_argument("client_order_id", metavar="ID", help="the client order ID the adapter's stop names")
+    ret.add_argument("--by", required=True, help="your name, the owner retiring it; journalled with it")
+    ret.add_argument("--reason", required=True, help="why it is retired and what was fixed; journalled with it")
     args = parser.parse_args(argv)
     pending = PendingInput(args.pending_file)
     try:
+        if args.command == "retire":
+            retire(pending, args.client_order_id, args.by, args.reason, today=today)
+            print("order {} retired: journalled for the engine as a refusal ({}), never sent; start the adapter "
+                  "and it goes on".format(args.client_order_id, RETIRED_BY_OWNER))
+            return 0
         if args.command == "acknowledge-late-fill":
             reports = journalled_reports(args.journal)
             acknowledge_late_fill(pending, args.exec_id, args.after, args.reason, reports.fills, reports.ended)

@@ -272,6 +272,14 @@ type options struct {
 	// the owner's operator.rebalance.cleared for the order released at each
 	// session listed: an order the adapter never sent, settled as such.
 	clear map[int][]int
+	// retire records, at the start of session i after the venue's reports
+	// and the owner's clearances, the adapter's execution.order.retired for
+	// the order released at each session listed: an order the adapter never
+	// sent, its session over (event.OrderRetiredSessionOver).
+	retire map[int][]int
+	// retireBy, when set, names the owner, and each retirement is the
+	// owner's (event.OrderRetiredByOwnerReason) instead of the adapter's.
+	retireBy string
 	// unsent lists the sessions whose released orders the adapter never
 	// sends: the venue is told of none, so none is acknowledged and none
 	// executes. Every session in clear is one.
@@ -288,12 +296,28 @@ func (o options) neverReaches(tag string) bool {
 	if slices.ContainsFunc(o.unsent, func(n int) bool { return decisionTag(n) == tag }) {
 		return true
 	}
-	for _, sessions := range o.clear {
-		if slices.ContainsFunc(sessions, func(n int) bool { return decisionTag(n) == tag }) {
-			return true
+	for _, settled := range []map[int][]int{o.clear, o.retire} {
+		for _, sessions := range settled {
+			if slices.ContainsFunc(sessions, func(n int) bool { return decisionTag(n) == tag }) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// retired is the adapter's execution.order.retired, at at, retiring o as an
+// order its session ended before the adapter could send.
+// by, when set, names the owner, and the retirement is the owner's.
+func retired(t *testing.T, s *stream, o event.OrderReleasedPayload, at time.Time, by string) event.Envelope {
+	t.Helper()
+	p := event.OrderRetiredPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side,
+		Quantity: o.Quantity, LimitPrice: o.LimitPrice, Reason: event.OrderRetiredSessionOver,
+		Detail: "released for an earlier session; never sent", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+	if by != "" {
+		p.Reason, p.Detail, p.RetiredBy = event.OrderRetiredByOwnerReason, "no IBKR contract ID configured; never sent", by
+	}
+	return s.envelope(t, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:"+o.ClientOrderID, at, p)
 }
 
 // neverSent is the owner's operator.rebalance.cleared, at at, settling o as
@@ -315,7 +339,7 @@ func venueReports(inputs []event.Envelope, n int) map[int][]event.Envelope {
 		switch in.Type {
 		case event.SessionClosedEventType:
 			session++
-		case event.FillEventType, event.OrderLifecycleEventType, event.RebalanceClearedEventType:
+		case event.FillEventType, event.OrderLifecycleEventType, event.RebalanceClearedEventType, event.OrderRetiredEventType:
 			if session > n {
 				out[session] = append(out[session], in)
 			}
@@ -540,6 +564,13 @@ func simulate(t *testing.T, opts options) run {
 			for _, o := range acct.all {
 				if o.Tag == decisionTag(j) {
 					apply(neverSent(t, s, o, at.Add(-70*time.Minute)))
+				}
+			}
+		}
+		for _, j := range opts.retire[i] {
+			for _, o := range acct.all {
+				if o.Tag == decisionTag(j) {
+					apply(retired(t, s, o, at.Add(-6*time.Hour), opts.retireBy))
 				}
 			}
 		}

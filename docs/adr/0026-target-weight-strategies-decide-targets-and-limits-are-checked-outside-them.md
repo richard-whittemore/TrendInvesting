@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0))
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0))
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -1388,3 +1388,49 @@ table), and is target-weight rules version 1.22.0 (ADR 0016).
 - **Replay.** A dry-run Boost journal decides differently from one written
   under 1.21.0, so a journal written under 1.21.0 does not replay under
   1.22.0; paper and live journals are unaffected.
+
+## Amendment (2026-10-22, owner): an order the adapter can never send is retired
+
+The owner's decision of 2026-10-22, part of the Boost-to-paper plan. It
+amends point 2, "Boost" (the re-plan of the watched order), and point 5
+(a rebalance in progress), and is target-weight rules version 1.23.0 (ADR
+0016).
+
+- **Before.** A released order the IBKR adapter's paper sender refused
+  before any write-ahead mark, for good, stopped the adapter at that order
+  until the owner settled it as never sent. The engine was never told: the
+  order stayed released and awaiting the venue's word, so a never-sent Boost
+  sell kept counting as being sold, a never-sent buy was never planned
+  again, and a momentum rebalance stayed in progress until the owner's
+  clearance.
+- **The input.** `execution.order.retired` version 1
+  (`OrderRetiredPayload`): the order as released, a reason from a closed
+  set, what refused it or why, who retired it and when. It is a refusal of
+  an order that never left the adapter, never a cancel of an order at the
+  venue, so it is a type of its own, not a lifecycle status.
+- **Its session is over.** An order released for a session that has ended
+  before the adapter could send it is never sent (point 2, "Order type and
+  price": a DAY limit order for its own session). The adapter retires it
+  itself, reason `session over`, retired by `adapter`, after the same check
+  at IBKR as any order (an order IBKR shows under its tag was sent, and is
+  never retired), and goes on. The owner is told by a routine notice, never
+  a page.
+- **IBKR can never accept it as it stands.** Not a limit order, a fraction
+  of a share, or no IBKR contract ID: the adapter stops at that order, the
+  owner is paged urgently (the order goes unacknowledged), and the owner,
+  once the cause is found, retires it with the relay's retire command,
+  reason `owner retired`, retired by the owner named, owner only. Any other
+  refusal is not retired.
+- **The rule.** The engine reads a retirement only for an order of its
+  account it released, as released, that no venue has reported on (and, in
+  Boost, that the venue has not named and the owner has not cleared). The
+  order ends with nothing filled: in Boost it leaves the orders awaiting the
+  venue's word, counted neither accepted nor rejected, the gate no longer
+  counts a retired sell as being sold, and the watched order so retired is
+  re-planned at the next decided session as `unfilled`; in a momentum run
+  it is terminal by the shared report rule, so a rebalance whose orders are
+  all terminal completes and the next decision decides afresh. A venue
+  report on a retired order proves the retirement wrong and is refused. A
+  dry-run sends nothing, so it refuses every retirement.
+- **Replay.** Rules version 1.22.0 refused the input, so a journal holding
+  a retirement decides differently and does not replay across the two.

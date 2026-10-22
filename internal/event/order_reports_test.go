@@ -288,3 +288,99 @@ func TestAPaperOrderTheAdapterNeverSentIsWorkingUntilTheOwnersClearance(t *testi
 		t.Errorf("order %+v, working %v after the clearance; want it ended unfilled and nothing working", o, r.Working())
 	}
 }
+
+// TestOrderReportsRetiresOnlyAnOrderNoVenueReceived: the adapter's or the
+// owner's retirement of a released order ends it as terminal, but only for
+// an order no venue has said anything of: one a lifecycle report or a fill
+// named reached the venue, so it is not an order the adapter never sent
+// (the owner's decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
+// 2026-10-22). A retirement naming no released order is ErrNotReleased, and
+// one that does not describe the order, or arrives once it is terminal, is
+// refused. A venue's later report on a retired order is refused as on any
+// terminal order.
+func TestOrderReportsRetiresOnlyAnOrderNoVenueReceived(t *testing.T) {
+	at := time.Date(2025, 2, 3, 21, 0, 0, 0, time.UTC)
+	release := func(id string) event.OrderReleasedPayload {
+		return event.OrderReleasedPayload{AccountID: "ira", ClientOrderID: id, InstrumentID: "AAA", Side: event.OrderSideBuy, Quantity: 9, LimitPrice: 10}
+	}
+	retire := func(id string) event.OrderRetiredPayload {
+		return event.OrderRetiredPayload{AccountID: "ira", ClientOrderID: id, InstrumentID: "AAA", Side: event.OrderSideBuy, Quantity: 9, LimitPrice: 10,
+			Reason: event.OrderRetiredSessionOver, Detail: "released for an earlier session", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+	}
+	r := event.NewOrderReports()
+	for _, id := range []string{"tw-1", "tw-2", "tw-3", "tw-4"} {
+		r.Release(release(id))
+	}
+	o, err := r.Retire(retire("tw-1"))
+	if err != nil || !o.Terminal || o.Filled != 0 {
+		t.Fatalf("the retirement of an order no venue named: %+v %v, want it terminal with nothing filled", o, err)
+	}
+	if got := r.Working(); !slices.Equal(got, []string{"tw-2", "tw-3", "tw-4"}) {
+		t.Errorf("working %v, want the retired order gone", got)
+	}
+	lifecycle := event.LimitOrderLifecyclePayload{AccountID: "ira", ClientOrderID: "tw-1", OrderID: "7", InstrumentID: "AAA", Side: event.OrderSideBuy,
+		Status: event.OrderLifecycleStatusSubmitted, Quantity: 9, LimitPrice: 10, OccurredAt: at}
+	if _, err := r.Lifecycle(lifecycle); err == nil || !strings.Contains(err.Error(), "already terminal") {
+		t.Errorf("a venue report on the retired order: %v, want it refused as on a terminal order", err)
+	}
+	if _, err := r.Retire(retire("tw-1")); err == nil || !strings.Contains(err.Error(), "already terminal") {
+		t.Errorf("a second retirement: %v, want it refused", err)
+	}
+
+	lifecycle.ClientOrderID = "tw-2"
+	if _, err := r.Lifecycle(lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Retire(retire("tw-2")); err == nil || !strings.Contains(err.Error(), "venue") {
+		t.Errorf("the retirement of an order the venue acknowledged: %v, want it refused", err)
+	}
+	if _, _, err := r.Fill(event.TargetWeightFillPayload{AccountID: "ira", ClientOrderID: "tw-3", FillID: "f1", InstrumentID: "AAA",
+		Side: event.OrderSideBuy, Quantity: 2, Price: 10, FilledAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Retire(retire("tw-3")); err == nil || !strings.Contains(err.Error(), "venue") {
+		t.Errorf("the retirement of an order the venue filled: %v, want it refused", err)
+	}
+	moved := retire("tw-4")
+	moved.Quantity = 8
+	if _, err := r.Retire(moved); err == nil || !strings.Contains(err.Error(), "as released") {
+		t.Errorf("a retirement that does not describe the order: %v, want it refused", err)
+	}
+	if _, err := r.Retire(retire("tw-9")); !errors.Is(err, event.ErrNotReleased) {
+		t.Errorf("a retirement naming no released order: %v, want ErrNotReleased", err)
+	}
+	if got := r.Working(); !slices.Equal(got, []string{"tw-2", "tw-3", "tw-4"}) {
+		t.Errorf("working %v, want every refused retirement to change nothing", got)
+	}
+}
+
+// TestTheIBKRAdaptersRetirementIsReadByOrderReports is the contract with
+// the IBKR adapter's relay: its test asks again, a session later, for the
+// input that released the order in paper_released.json, and the relay
+// retires the order, its session over, recording exactly the input in
+// paper_retired.json. The engine reads it at the version it reads one at,
+// by the shared report rule, and the order ends with nothing filled (the
+// owner's decision of 2026-10-22).
+func TestTheIBKRAdaptersRetirementIsReadByOrderReports(t *testing.T) {
+	var released event.OrderReleasedPayload
+	readAdapterFile(t, "paper_released.json", &released)
+	var records []adapterRecord
+	readAdapterFile(t, "paper_retired.json", &records)
+	if len(records) != 1 || records[0].EventType != event.OrderRetiredEventType || records[0].SchemaVersion != event.OrderRetiredSchemaVersion {
+		t.Fatalf("records %+v, want one %s at version %d", records, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion)
+	}
+	var p event.OrderRetiredPayload
+	strict(t, "paper_retired.json", records[0].Payload, &p)
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if p.Reason != event.OrderRetiredSessionOver || p.RetiredBy != event.OrderRetiredByAdapter {
+		t.Errorf("retired for %q by %q, want the session over, by the adapter", p.Reason, p.RetiredBy)
+	}
+	r := event.NewOrderReports()
+	r.Release(released)
+	o, err := r.Retire(p)
+	if err != nil || !o.Terminal || o.Filled != 0 {
+		t.Fatalf("the retirement: %+v %v, want the order terminal with nothing filled", o, err)
+	}
+}

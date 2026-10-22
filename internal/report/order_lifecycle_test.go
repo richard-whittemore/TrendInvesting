@@ -502,3 +502,97 @@ func TestASyntheticReportAcknowledgesNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestARetiredOrderIsARoutineNoticeNeverAPage: the adapter retired an order
+// it never sent because its session was over (execution.order.retired), so
+// no venue will ever acknowledge it. It is retired, not awaiting the venue:
+// the reporter tells the owner once, as a routine notice naming the order
+// and why, and never pages it as unacknowledged; an unacknowledged-order
+// page already delivered for it is answered by the same notice. A
+// retirement the engine refuses (one naming no released order, or one that
+// does not describe it) retires nothing. The retirement ends the order as
+// the engine reads it, so a venue's report on it after is unread (the
+// owner's decision of 2026-10-22; ADR 0019, "Alerting").
+func TestARetiredOrderIsARoutineNoticeNeverAPage(t *testing.T) {
+	const within = 10 * time.Minute
+	order := releasedOrder("tw-1", event.TradingModePaper)
+	at := day(1).Add(time.Minute)
+	retire := func(r *logRun, id string, p event.OrderRetiredPayload) {
+		r.add(journal.KindInput, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, id, at, p)
+	}
+	payload := event.OrderRetiredPayload{AccountID: order.AccountID, ClientOrderID: order.ClientOrderID, InstrumentID: order.InstrumentID,
+		Side: order.Side, Quantity: order.Quantity, LimitPrice: order.LimitPrice, Reason: event.OrderRetiredSessionOver,
+		Detail: "released for the session of 2026-10-16, not today's", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+	none := func(string) bool { return false }
+	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
+		t.Run(strategy, func(t *testing.T) {
+			r := &logRun{t: t}
+			r.session(0)
+			r.release(0, order)
+			r.session(1)
+			moved := payload
+			moved.Quantity++
+			retire(r, "retired:moved", moved)
+			unknown := payload
+			unknown.ClientOrderID = "tw-9"
+			retire(r, "retired:unknown", unknown)
+			r.add(journal.KindInput, event.OrderRetiredEventType, 2, "retired:other-version", at, payload)
+			orders, _, err := report.OrderLifecycles(r.out, strategy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := report.UnacknowledgedAlerts(orders, day(2), within, none); len(got) != 1 || got[0].Kind != report.KindUnacknowledged {
+				t.Fatalf("after retirements the engine refuses: %+v, want the order still paged as unacknowledged", got)
+			}
+
+			retire(r, "retired:tw-1", payload)
+			r.acknowledge(order, at.Add(time.Minute))
+			orders, unread, err := report.OrderLifecycles(r.out, strategy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := stateOf(t, orders, "tw-1")
+			if o.State != report.LifecycleRetired || o.Retirement != event.OrderRetiredSessionOver || !o.RetiredAt.Equal(at) {
+				t.Fatalf("order %+v, want it retired for %q at %s", o, event.OrderRetiredSessionOver, at)
+			}
+			for _, delivered := range []func(string) bool{none, func(key string) bool { return key == "order-unacknowledged:tw-1@joint" }} {
+				got := report.UnacknowledgedAlerts(orders, day(2), within, delivered)
+				if len(got) != 1 || got[0].Kind != report.KindRetired || got[0].Severity != report.Routine {
+					t.Fatalf("a retired order: %+v, want one routine retirement notice and no page", got)
+				}
+				if got[0].Title != "joint: order tw-1 retired (session over)" || !strings.Contains(got[0].Body, payload.Detail) ||
+					got[0].Key != "order-retired:tw-1@joint" {
+					t.Errorf("notice %+v, want it to name the order, the reason and the adapter's detail", got[0])
+				}
+			}
+			if len(unread) != 1 || unread[0].InputID != "ack:tw-1" || !strings.Contains(unread[0].Reason, "terminal") {
+				t.Errorf("unread %+v, want the venue's report after the retirement unread, as the engine refuses it", unread)
+			}
+		})
+	}
+}
+
+// TestARetirementAfterTheOwnersClearanceRetiresNothing: in a momentum run
+// the owner's clearance ends the orders it names as the engine reads it,
+// so a retirement of one of them afterwards is one the engine refuses, and
+// the reporter does not count the order retired.
+func TestARetirementAfterTheOwnersClearanceRetiresNothing(t *testing.T) {
+	order := releasedOrder("tw-1", event.TradingModePaper)
+	at := day(1).Add(time.Minute)
+	r := &logRun{t: t}
+	r.session(0)
+	r.release(0, order)
+	r.add(journal.KindInput, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared", at,
+		event.RebalanceClearedPayload{AccountID: order.AccountID, AsOf: at, DecisionID: order.Tag, ClientOrderIDs: []string{"tw-1"}, Operator: "owner", Detail: "cancelled at IBKR"})
+	r.add(journal.KindInput, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired", at,
+		event.OrderRetiredPayload{AccountID: order.AccountID, ClientOrderID: "tw-1", InstrumentID: order.InstrumentID, Side: order.Side,
+			Quantity: order.Quantity, LimitPrice: order.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "over",
+			RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at})
+	orders, _, err := report.OrderLifecycles(r.out, event.TargetWeightStrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := stateOf(t, orders, "tw-1"); o.State == report.LifecycleRetired {
+		t.Errorf("order %+v retired after the clearance ended it", o)
+	}
+}

@@ -986,6 +986,20 @@
       "statement": "panic(fmt.Sprintf(\"nysecalendar: load %s: %v\", name, err))",
       "category": "unreachable-by-construction",
       "reason": "The package imports time/tzdata, so America/New_York loads from the embedded zone database whatever the host has."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRetired",
+      "statement": "return fmt.Errorf(\"targetweight: %s %s: %w\", in.Type, in.ID, err)",
+      "category": "unreachable-by-invariant",
+      "reason": "The gate's end of a retired order, by a synthetic report the engine never journals, built from the very release the gate holds (its account, client order ID, instrument, side, quantity and limit) with a validated whole-second time, a message and no venue order ID: Validate, reportedOrder and the quantity and limit match all pass by construction, and an empty venue order ID is never held by another sell (venueHolder)."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "(*momentumRun).applyRetired",
+      "statement": "return nil, fmt.Errorf(\"targetweight: retirement %s: %w\", in.ID, err)",
+      "category": "unreachable-by-invariant",
+      "reason": "The gate's end of a retired order, by a synthetic report the engine never journals, built from the very release the gate holds (its account, client order ID, instrument, side, quantity and limit) with a validated whole-second time, a message and no venue order ID: Validate, reportedOrder and the quantity and limit match all pass by construction, and an empty venue order ID is never held by another sell (venueHolder)."
     }
   ]
 }

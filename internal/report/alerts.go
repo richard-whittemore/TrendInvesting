@@ -47,6 +47,11 @@ const (
 	// notice that one already alerted has since been acknowledged.
 	KindUnacknowledged Kind = "order-unacknowledged"
 	KindAcknowledged   Kind = "order-acknowledged"
+	// KindRetired is the routine notice that an order the adapter never sent
+	// was retired (execution.order.retired): its session was over, or the
+	// owner retired it. No venue will acknowledge it, so it is never paged
+	// as unacknowledged (the owner's decision of 2026-10-22).
+	KindRetired Kind = "order-retired"
 	// KindVenueReportUnread is a venue's report the log holds that the
 	// engine did not read: it does not validate, or does not describe the
 	// order it names as released. It acknowledges nothing.

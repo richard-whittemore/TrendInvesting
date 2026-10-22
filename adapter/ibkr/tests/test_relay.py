@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -23,11 +24,12 @@ if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 
 from orders import BrokerOrders
-from relay import (MAX_CLOSE_TIMEOUT, log_chain_next, log_chain_seed, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
-                   NeverSentAtBroker, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
+from relay import (MAX_CLOSE_TIMEOUT, OUTBOX_SUFFIX, log_chain_next, log_chain_seed, EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged,
+                   NeverSentAtBroker, OrderUnsendable, Outbox, PendingInput, PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused,
                    acknowledge_correction, acknowledge_late_fill, earlier_run, journalled_fills, journalled_reports,
-                   main, resolve, resolve_run_ended, run_chain, run_identity, run_logs)
-from sender import OrderRequest
+                   main, resolve, resolve_run_ended, retire, run_chain, run_identity, run_logs)
+import relay as relay_module
+from sender import OrderRequest, SendRefused, SessionOver, UnsendableOrder
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 
@@ -1341,6 +1343,263 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(main(["resolve", path, "tw-1", "--sent", "--reason", "IBKR shows it filled"],
                               today=date(2026, 10, 16)), 0)
         self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+
+
+# When the relay retires an order itself, and when the owner does.
+RETIRED_AT = datetime(2026, 10, 17, 13, 30, 0, tzinfo=timezone.utc)
+
+
+def session_over(request):
+    raise SessionOver("order {} was released for the session of 2026-10-16, not today's (2026-10-17); its "
+                      "session is over, so it is never sent".format(request.client_order_id))
+
+
+def no_contract(order, session):
+    raise UnsendableOrder("no IBKR contract ID is configured for {!r}".format(order["instrument_id"]))
+
+
+class RetireTests(unittest.TestCase):
+    """The owner's decision of 2026-10-22: an order IBKR can never accept is retired, never left to wedge the run."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.pending = PendingInput(str(Path(self.dir.name) / "pending.json"))
+        self.outbox = Outbox(self.pending.path + OUTBOX_SUFFIX)
+        self.sent = []
+
+    def relay(self, connect, broker=holding(), check=None, mapper=to_request, **options):
+        relay = Relay(connect=connect, sender=Sending(self.sent.append, check=check), pending=self.pending,
+                      broker_orders=broker, to_request=mapper, today=lambda: date(2026, 10, 17),
+                      now=lambda: RETIRED_AT, **options)
+        self.addCleanup(relay.close)
+        return relay
+
+    def retired_entries(self):
+        return [e for e in self.outbox.load() if e["event_type"] == "execution.order.retired"]
+
+    def test_an_order_whose_session_is_over_is_retired_by_the_relay_which_goes_on(self):
+        # Refused before any mark for its session being over, the order is
+        # retired without the owner: journalled for the engine as a refusal
+        # for "session over" by the adapter, never a cancel of an order at
+        # IBKR, settled as never sent, and the relay goes on to its next
+        # order and its next input.
+        log = {}
+        decisions = {"session:0": [released("tw-1"), released("tw-2")]}
+
+        def tw1_over(request):
+            if request.client_order_id == "tw-1":
+                session_over(request)
+
+        relay = self.relay(Restarts(log, decisions), check=tw1_over)
+        relay.exchange(envelope(0))
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-2"], "the next order still goes out")
+        self.assertIsNone(self.pending.load(), "the relay went on past the input")
+        [entry] = self.retired_entries()
+        self.assertEqual(entry, {
+            "id": "order-retired:tw-1", "event_type": "execution.order.retired", "schema_version": 1,
+            "event_time": "2026-10-17T13:30:00Z",
+            "payload": {"account_id": "DU1234567", "client_order_id": "tw-1", "instrument_id": "SPY", "side": "buy",
+                        "quantity": 9, "limit_price": 401.5, "reason": "session over",
+                        "detail": "order tw-1 was released for the session of 2026-10-16, not today's (2026-10-17); "
+                                  "its session is over, so it is never sent",
+                        "retired_by": "adapter", "retired_at": "2026-10-17T13:30:00Z"}})
+        [decision] = self.pending.decisions()
+        self.assertEqual((decision["client_order_id"], decision["decision"], decision["retired_by"]),
+                         ("tw-1", "retired", "adapter"))
+        self.assertIn("tw-1", self.pending.settled_orders().ended)
+
+    def test_a_retired_order_is_never_sent_when_its_input_is_asked_for_again(self):
+        # The retirement is recorded for the engine first and the order
+        # marked never sent last. A stop before the mark retires it again on
+        # restart without a second record; a stop after it, before the input
+        # is cleared, asks for the input's reply again and passes over the
+        # order marked never sent. Either way it is never sent.
+        for stop in ("mark", "clear"):
+            with self.subTest(stop=stop):
+                self.pending.clear()
+                Path(self.outbox.path).unlink(missing_ok=True)
+                Path(self.pending.decisions_path).unlink(missing_ok=True)
+                log = {}
+                decisions = {"session:0": [released("tw-1")]}
+                first = self.relay(Restarts(log, decisions), check=session_over)
+                real = getattr(self.pending, stop)
+
+                def die(*args, real=real, stop=stop):
+                    if stop == "clear" or args[1:] == ("never-sent",):
+                        raise OSError("stopped at the " + stop)
+                    return real(*args)
+
+                setattr(self.pending, stop, die)
+                with self.assertRaises(OSError):
+                    first.exchange(envelope(0))
+                first.close()
+                setattr(self.pending, stop, real)
+                self.assertEqual(self.pending.handovers(), {} if stop == "mark" else {"tw-1": "never-sent"})
+                again = self.relay(Restarts(log, decisions), check=session_over)
+                again.exchange(envelope(1))
+                again.close()
+                self.assertEqual(len(self.retired_entries()), 1, "the retirement is journalled once")
+                self.assertIsNone(self.pending.load())
+                self.assertEqual(self.sent, [])
+
+    def test_an_order_whose_session_is_over_that_ibkr_shows_is_never_retired(self):
+        # Checked at IBKR first, as every order is: one IBKR shows under its
+        # tag was sent, so it is taken as sent, never retired.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        relay = self.relay(Restarts(log, decisions), broker=holding(executions=["tw-1"]), check=session_over)
+        relay.exchange(envelope(0))
+        self.assertEqual(self.retired_entries(), [])
+        self.assertEqual(self.sent, [])
+
+    def stuck_on_unsendable(self, log, decisions, mapper=no_contract):
+        relay = self.relay(Restarts(log, decisions), mapper=mapper)
+        with self.assertRaises(OrderUnsendable) as stopped:
+            relay.exchange(envelope(0))
+        relay.close()
+        return stopped.exception
+
+    def test_an_order_ibkr_can_never_accept_stops_the_relay_for_the_owner(self):
+        # Not a limit order, a fraction of a share, or no contract ID: never
+        # marked, never sent, and the relay stops at that order every time,
+        # naming the retire command; it records the order it is refusing,
+        # with the release, for that command.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        for shape in ("a market order", "a fraction of a share", "no contract ID"):
+            with self.subTest(shape=shape):
+                def unsendable(order, session, shape=shape):
+                    raise UnsendableOrder("order {} is {}".format(order["client_order_id"], shape))
+
+                stopped = self.stuck_on_unsendable(log, decisions, mapper=unsendable)
+                self.assertIsInstance(stopped, ValueError)
+                self.assertIn("relay.py retire", str(stopped))
+                self.assertIn("tw-1", str(stopped))
+                refusal = self.pending.refusal()
+                self.assertEqual((refusal["client_order_id"], refusal["input_id"], refusal["unsendable"]),
+                                 ("tw-1", "session:0", True))
+                self.assertEqual(refusal["order"]["client_order_id"], "tw-1")
+        self.assertEqual(self.pending.handovers(), {})
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.retired_entries(), [])
+
+    def test_the_owners_retire_clears_the_stopped_order_and_the_relay_goes_on(self):
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        self.stuck_on_unsendable(log, decisions)
+        retire(self.pending, "tw-1", "richard", "no IBKR contract for SPY configured; added for the next run",
+               now=lambda: RETIRED_AT, today=date(2026, 10, 17))
+        [entry] = self.retired_entries()
+        self.assertEqual(entry["payload"]["reason"], "owner retired")
+        self.assertEqual(entry["payload"]["retired_by"], "richard")
+        self.assertEqual(entry["payload"]["detail"], "no IBKR contract for SPY configured; added for the next run")
+        self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"}, "marked while its input awaits its reply")
+        [decision] = self.pending.decisions()
+        self.assertEqual((decision["decision"], decision["retired_by"], decision["session_date"]),
+                         ("retired", "richard", "2026-10-17"))
+        goes_on = self.relay(Restarts(log, decisions), mapper=no_contract)
+        goes_on.exchange(envelope(1))
+        self.assertEqual(self.sent, [])
+        self.assertIsNone(self.pending.load(), "the relay went on to the next input")
+
+    def test_the_retire_command_refuses_an_order_that_is_not_stopped_as_unsendable(self):
+        today = date(2026, 10, 17)
+        with self.assertRaises(ResolveRefused):
+            retire(self.pending, "tw-1", "richard", "nothing is pending", today=today)
+        log = {}
+        decisions = {"session:0": [released("tw-1"), released("tw-2")]}
+
+        def tw2_unsendable(order, session):
+            if order["client_order_id"] == "tw-2":
+                no_contract(order, session)
+            return to_request(order, session)
+
+        self.stuck_on_unsendable(log, decisions, mapper=tw2_unsendable)
+        for cid, why in (("tw-1", "sent"), ("tw-3", "tw-2")):
+            with self.subTest(cid=cid), self.assertRaises(ResolveRefused) as refused:
+                retire(self.pending, cid, "richard", "a typo", today=today)
+            self.assertIn(why, str(refused.exception))
+        for by, reason in (("richard", " "), ("", "no contract"), ("adapter", "no contract")):
+            with self.subTest(by=by, reason=reason), self.assertRaises(ResolveRefused):
+                retire(self.pending, "tw-2", by, reason, today=today)
+        holder = self.relay(Restarts(log, decisions), mapper=tw2_unsendable)
+        with self.assertRaises(ResolveRefused) as held:
+            retire(self.pending, "tw-2", "richard", "no contract", today=today)
+        self.assertIn("stop it first", str(held.exception))
+        holder.close()
+        self.assertEqual(self.retired_entries(), [])
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+        self.assertEqual([d["decision"] for d in self.pending.decisions()], [])
+
+    def test_the_retire_command_refuses_a_refusal_that_is_not_a_shape_ibkr_can_never_accept(self):
+        # A login that does not manage the account, or no order ID yet, is
+        # the link's to fix, not the order's: it is not retired.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+
+        def unmanaged(request):
+            raise SendRefused("account 'DU1234567' is not among the accounts this IBKR login manages")
+
+        relay = self.relay(Restarts(log, decisions), check=unmanaged)
+        with self.assertRaises(SendRefused):
+            relay.exchange(envelope(0))
+        relay.close()
+        self.assertFalse(self.pending.refusal()["unsendable"])
+        with self.assertRaises(ResolveRefused) as refused:
+            retire(self.pending, "tw-1", "richard", "guessing", today=date(2026, 10, 17))
+        self.assertIn("can never accept", str(refused.exception))
+        # A refusal as the relay wrote one before retirement existed holds no
+        # shape, so it is not retired either.
+        with open(self.pending.refused_path, "w", encoding="utf-8") as f:
+            json.dump({"input_id": "session:0", "client_order_id": "tw-1", "reason": "no contract"}, f)
+        with self.assertRaises(ResolveRefused):
+            retire(self.pending, "tw-1", "richard", "guessing", today=date(2026, 10, 17))
+        self.assertEqual(self.retired_entries(), [])
+
+    def test_the_retire_command_refuses_anyone_but_the_owner(self):
+        # The owner runs the adapter's commands as the user that owns its
+        # files (sudo -u ti-trader on the server); run as any other user, or
+        # as root, the command records nothing.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        self.stuck_on_unsendable(log, decisions)
+        owner = os.stat(self.pending.path).st_uid
+        for user in (owner + 1, 0):
+            with self.subTest(user=user), mock.patch.object(relay_module, "_effective_user", return_value=user):
+                with self.assertRaises(ResolveRefused) as refused:
+                    retire(self.pending, "tw-1", "richard", "no contract", today=date(2026, 10, 17))
+                self.assertIn("owner", str(refused.exception))
+        self.assertEqual(self.retired_entries(), [])
+        self.assertEqual(self.pending.handovers(), {})
+
+    def test_the_retire_command_line(self):
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+        self.stuck_on_unsendable(log, decisions)
+        path = self.pending.path
+        self.assertEqual(main(["retire", path, "tw-9", "--by", "richard", "--reason", "typo"],
+                              today=date(2026, 10, 17)), 1)
+        self.assertEqual(main(["retire", path, "tw-1", "--by", "richard", "--reason", "no contract for SPY"],
+                              today=date(2026, 10, 17)), 0)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "never-sent"})
+        self.assertEqual(len(self.retired_entries()), 1)
+
+    def test_a_committed_retirement_ends_its_order_in_the_run_chain(self):
+        # A run whose only released order was retired has no order open, so
+        # the walk of earlier runs reads past it like a run whose orders
+        # ended at IBKR.
+        path = Path(self.dir.name) / "engine.log"
+        retired = {"account_id": "DU1234567", "client_order_id": "tw-1", "instrument_id": "SPY", "side": "buy",
+                   "quantity": 9, "limit_price": 401.5, "reason": "session over", "detail": "over",
+                   "retired_by": "adapter", "retired_at": "2026-10-17T13:30:00Z"}
+        lines = [log_header()]
+        lines += log_group(1, [("input", "market.session.closed", 1, {"session": "2026-10-14"}),
+                               ("decision", "risk.order.released", 3, released("tw-1")["payload"] | {"limit_price": 401.5})],
+                           at="2026-10-14T20:00:00Z")
+        lines += log_group(3, [("input", "execution.order.retired", 1, retired)], at="2026-10-14T21:00:00Z")
+        path.write_text("".join(lines))
+        self.assertIn("tw-1", journalled_reports(str(path)).ended)
 
 
 class RunLogsTests(unittest.TestCase):
