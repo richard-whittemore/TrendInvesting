@@ -509,3 +509,32 @@ func TestReconcileWithFillsAfterTheLastSnapshotFailsUnlessAllowed(t *testing.T) 
 		t.Fatalf("the trailing fill was allowed: %v", err)
 	}
 }
+
+func TestReconcileWithTheRegistryAnchorChecksTheFinalRecordHash(t *testing.T) {
+	path := writeJournal(t, "anchored.jsonl",
+		snapshot("A1", day(2026, 1, 2)),
+		fill(event.FillKindEntry, "AAA", 5, 10, 0, day(2026, 1, 5)),
+		snapshot("A1", day(2026, 1, 6), pos("AAA", 5)),
+	)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := journalquery.Load(path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := query(t, "reconcile", "-final-hash", j.FinalRecordHash(), path); err != nil {
+		t.Fatalf("the recorded anchor matches: %v", err)
+	}
+	out, err := query(t, "reconcile", "-final-hash", "sha256:deadbeef", path)
+	if err == nil || !strings.Contains(err.Error(), "not the run's complete history") || out != "" {
+		t.Fatalf("want a mismatch refusal and no table, got %q, %v", out, err)
+	}
+	if _, err := query(t, "reconcile", "-final-hash", "", path); err == nil {
+		t.Fatal("an empty anchor is not agreement")
+	}
+	if _, err := query(t, "reconcile", "-final-hash", j.FinalRecordHash(), path, path); err == nil {
+		t.Fatal("one anchor names one journal: several journals with it are refused")
+	}
+}

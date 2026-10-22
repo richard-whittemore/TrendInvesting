@@ -429,7 +429,7 @@ Check in this order, and compare the three: they must agree.
    go run ./cmd/journal-query fills   <durable log>   # each fill: quantity, price, commission
    go run ./cmd/journal-query refusals <durable log>  # nothing expected
    go run ./cmd/journal-query positions <durable log> # holding rebuilt from the fills
-   go run ./cmd/journal-query reconcile <durable log> # fills against the account snapshots
+   go run ./cmd/journal-query reconcile -final-hash <hash from the run registry> <durable log> # fills against the account snapshots; the anchor also catches a log cut short at its end
    ```
 
    The order's quantity and limit match IBKR's; the fills add up to the
