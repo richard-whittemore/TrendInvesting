@@ -469,6 +469,58 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(len(fake.called("connect")), 1 + RECONCILE_CUTOFFS, "the cut-offs are bounded")
         self.assertEqual(fake.placed, [])
 
+    def test_a_completed_reconcile_resets_the_count_of_cut_off_reconciles(self):
+        # Two cut-offs, a completed reconcile, then two more: never three in
+        # a row, so the adapter is never stopped (ADR 0025 point 5).
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        loop.start()
+        self.assertTrue(loop.ready())
+        for episode in range(2):
+            reads = len(fake.called("req_all_open_orders"))
+            self.never_quiet(fake, reads + 1, reads + 2)
+            fake.drop()
+            self.settle(loop)
+            self.assertTrue(loop.ready(), "episode {}: the link was not reconciled again".format(episode + 1))
+            self.assertEqual(loop._reconcile_cutoffs, 0, "a completed reconcile left the cut-offs counted")
+        self.assertEqual(len(fake.called("connect")), 1 + 2 * 3, "each episode: the drop and two cut-offs")
+        self.assertEqual(fake.placed, [])
+
+    def test_the_engines_own_fill_during_the_starts_reads_is_read_again_and_the_start_proceeds(self):
+        # An order an earlier run released is working at IBKR and fills
+        # during the restart's first account read: the reads are taken
+        # again, the fill is among the executions re-read, the engine's
+        # release explains it, and the start goes on with nothing sent.
+        first = self.loop()
+        self.fake.on_place = self.fake.accept
+        first.start()
+        self.session_closed(first)
+        self.settle(first)
+        first.close()
+        self.fake.drop()
+        self.fake.on_place = None
+        positions = self.fake.req_positions
+        filled = []
+
+        def fill_during_the_first_account_read():
+            if not filled:
+                filled.append(True)
+                self.fake.fill(7, shares="9", price=401.25, exec_id="0001f4e8.paper.01.01", cum_qty="9",
+                               commission="1.00", time="20261017 09:30:01 US/Eastern")
+            positions()
+        self.fake.req_positions = fill_during_the_first_account_read
+        executions_asked = len(self.fake.called("req_executions"))
+        second = self.loop()
+        second.start()
+        self.assertTrue(filled, "the fill never came during the account read")
+        self.assertTrue(second.ready(), "the engine's own fill stopped the start")
+        self.assertGreaterEqual(len(self.fake.called("req_executions")) - executions_asked, 4,
+                                "the settled pair was not read again after the fill")
+        self.settle(second)
+        self.assertEqual(len(self.fake.placed), 1, "nothing is sent again")
+        self.assertEqual([e["type"] for e in self.engine.inputs()].count(FILL_TYPE), 1, "the fill is recorded once")
+
     def test_a_hand_placed_fill_during_the_account_read_is_read_again_and_stops_the_start(self):
         # An order placed by hand fills after the settled pair's executions
         # were read and before the account read ends: it is in neither

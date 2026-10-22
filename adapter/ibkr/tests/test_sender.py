@@ -9,6 +9,7 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 tests_dir = str(Path(__file__).resolve().parent)
 if tests_dir not in sys.path:
@@ -17,6 +18,7 @@ if tests_dir not in sys.path:
 from fake_tws import ACCOUNT
 from test_connection import Harness, config
 from connection import NotConnected
+from orders import collect_broker_orders
 from sender import (OrderRequest, DryRunSender, LiveSendingDisabled, NotReconciled, PaperSender, SendRefused,
                     make_sender, release_to_request)
 
@@ -105,6 +107,31 @@ class PaperSenderTests(unittest.TestCase):
         self.assertTrue(record.send)
         self.assertEqual((record.client_id, record.broker_order_id), (11, 7))
         self.assertEqual(journal, [record])
+
+    def test_ibkrs_echo_of_an_order_just_placed_is_no_stray_and_the_next_read_does_not_wait_for_quiet(self):
+        # IBKR echoes every order placed with an openOrder and orderStatus
+        # outside any list: expected traffic, matched to the placement by
+        # its order ID, so the next read is asked at once. A row of any
+        # other order with no list outstanding is still a stray.
+        h = paper_harness()
+        collect_broker_orders(h.conn)  # the link is level before the placement
+        h.fake.on_place = h.fake.accept
+        sender = make_sender(h.conn.config, [].append, h.conn, today=lambda: SESSION)
+        sender.send(limit_request())
+        while h.conn.pump(0) is not None:
+            pass
+        self.assertEqual(h.conn.open_order_strays, 0, "the echo of the adapter's own placement counted as a stray")
+        quiet_pumps = []
+        resync = h.conn.resync_open_orders
+        h.conn.resync_open_orders = lambda: (quiet_pumps.append(True), resync())[1]
+        collect_broker_orders(h.conn)
+        self.assertEqual(quiet_pumps, [], "the read after the adapter's own placement waited for quiet")
+        _, contract, order = h.fake.placed[0]
+        h.fake.callbacks.open_order(5, contract, h.fake.echoed(5, order), SimpleNamespace(status="Submitted"))
+        h.conn.pump(0)
+        self.assertEqual(h.conn.open_order_strays, 1)
+        collect_broker_orders(h.conn)
+        self.assertEqual(quiet_pumps, [True], "a row of an order not placed on this session was not a stray")
 
     def test_paper_is_refused_unless_the_connection_is_the_paper_configuration(self):
         # The sender reads the mode and account from the connection it sends

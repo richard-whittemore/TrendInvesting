@@ -32,10 +32,11 @@ read during or after which an order or an end-of-list mark arrived that no
 list was waiting for may have been cut short, so it counts as no read and
 the list is read again. Messages that never pause for 2 seconds within 10
 drop the link, which is made again and matched again; a link dropped during
-three of these reads in a row, with none completed between them, stops the
-adapter (`ReconcileIncomplete`). An execution that arrives while the account
-is read and is not among the executions just read (an order placed by hand
-that filled at once) has everything read again. After three
+three reconciles (these reads and the account read) in a row, with none
+completed between them, stops the adapter (`ReconcileIncomplete`). An
+execution that arrives during these reads and is not among the executions
+just read (an order placed by hand that filled at once) has everything read
+again. After three
 disagreements in a row, or four account reads that never agree, the adapter
 stops (`ReconcileIncomplete`) and nothing is sent; start it again once
 nothing is being placed, filled or cancelled at IBKR. The engine compares them with its own book and decides one of four

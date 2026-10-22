@@ -246,6 +246,26 @@ class DisconnectDetectionTests(unittest.TestCase):
         self.assertTrue(h.statuses[-1].data_lost)
         self.assertTrue(h.conn.needs_reconciliation)
 
+    def test_gateway_losing_ibkr_is_the_last_drop_reason_a_stop_names(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.drop()
+        h.conn.pump(0.01)
+        self.assertEqual(h.conn.last_drop_reason, "connection-closed")
+        h.conn.connect()
+        h.fake.callbacks.error(-1, 2110, "Connectivity between TWS and server is broken.")
+        h.conn.pump(0.01)
+        self.assertEqual(h.conn.last_drop_reason, "gateway-lost-ibkr")
+
+    def test_a_successful_connect_clears_the_last_drop_reason(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.drop()
+        h.conn.pump(0.01)
+        self.assertEqual(h.conn.last_drop_reason, "connection-closed")
+        h.conn.connect()
+        self.assertIsNone(h.conn.last_drop_reason, "a reason from an earlier link outlived the connect")
+
     def test_restoration_with_data_maintained_still_requires_reconciliation(self):
         h = Harness()
         h.conn.connect()

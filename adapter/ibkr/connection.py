@@ -122,8 +122,9 @@ class Connection:
         self.inbox = Inbox()
         self.connected = False
         self.needs_reconciliation = True
-        # The reason the link was last reported disconnected, for a stop
-        # that names why the link kept going.
+        # The reason the link was last reported down (disconnected, or
+        # Gateway losing IBKR's servers), for a stop that names why the
+        # link kept going; None again once a connect succeeds.
         self.last_drop_reason = None
         self.next_order_id = None
         self.managed_accounts = frozenset()
@@ -148,6 +149,9 @@ class Connection:
         self._lists_requested = 0
         self._lists_noted = 0
         self._list_ends = 0
+        # Order IDs placed on this session, whose openOrder echo is expected
+        # traffic, not a stray (see placing).
+        self._placed = set()
         self._reset_list_alignment()
 
     def _reset_list_alignment(self):
@@ -163,7 +167,7 @@ class Connection:
     def _report(self, state, reason="", attempt=None, ibkr_code=None, data_lost=None):
         status = ConnectionStatus(state, reason, self.config.client_id, self._wall_clock(),
                                   attempt, ibkr_code, data_lost)
-        if state == "disconnected":
+        if state in ("disconnected", "connectivity-lost"):
             self.last_drop_reason = reason
         log.info("ibkr link state=%s reason=%s client_id=%d attempt=%s code=%s", state, reason,
                  self.config.client_id, attempt, ibkr_code)
@@ -332,6 +336,17 @@ class Connection:
             return LIST_ENDED
         return LIST_READING
 
+    def placing(self, order_id):
+        """Note that the adapter is placing order_id on this session, just before placeOrder is sent.
+
+        IBKR echoes every order placed with an openOrder outside any list:
+        that row is matched to the placement by its order ID and is no
+        stray, so the next read is not pumped quiet for it. A row of any
+        other order with no list outstanding is still a stray (ADR 0019: a
+        list not read in full is unread).
+        """
+        self._placed.add(order_id)
+
     def new_req_id(self):
         req_id = self._next_req_id
         self._next_req_id += 1
@@ -359,6 +374,7 @@ class Connection:
         self._lists_requested = 0
         self._lists_noted = 0
         self._list_ends = 0
+        self._placed = set()
         self._reset_list_alignment()
         # One deadline covers the socket connect, IBKR's handshake and the
         # wait for nextValidId: EClient.connect is synchronous, so a deadline
@@ -380,6 +396,7 @@ class Connection:
                 self._take_volunteered_list()
                 self.connected = True
                 self.needs_reconciliation = True
+                self.last_drop_reason = None
                 self._report("connected")
                 return
             if event.name == "managed_accounts":
@@ -559,10 +576,11 @@ class Connection:
         elif event.name in LIST_MESSAGES and self._list_ends >= self._lists_noted and self._volunteered:
             self._volunteered -= 1  # Gateway's volunteered list, which connect took
         elif event.name == "open_order":
-            if self._list_ends >= self._lists_noted:
-                # A row with no list outstanding is a stray as an end is:
-                # the next list is asked only once the link is pumped quiet
-                # (ADR 0019: a list not read in full is unread).
+            if self._list_ends >= self._lists_noted and not self._is_echo(event):
+                # A row with no list outstanding, other than IBKR's echo of
+                # an order placed on this session (see placing), is a stray
+                # as an end is: the next list is asked only once the link is
+                # pumped quiet (ADR 0019: a list not read in full is unread).
                 self.open_order_strays += 1
                 self._resync_due = True
         elif event.name == "open_order_end":
@@ -582,6 +600,11 @@ class Connection:
             self._probe_sent_at = None
         elif event.name == "error":
             self._apply_error(event.args[1])
+
+    def _is_echo(self, event):
+        """Whether an openOrder row is IBKR's echo of an order this client placed on this session (see placing)."""
+        order_id, order = event.args[0], event.args[2]
+        return order_id in self._placed and getattr(order, "clientId", None) == self.config.client_id
 
     def _apply_error(self, code):
         if code in (CODE_CONNECTIVITY_LOST, CODE_SERVER_LINK_BROKEN):

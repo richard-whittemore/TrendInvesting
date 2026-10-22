@@ -456,7 +456,7 @@ class AdapterLoop:
             if self.conn.connected:
                 raise
             self._reconcile_cutoffs += 1
-            reason = self.conn.last_drop_reason or "connection-closed"
+            reason = self.conn.last_drop_reason or "link lost, no drop reported"
             if self._reconcile_cutoffs >= RECONCILE_CUTOFFS:
                 raise ReconcileIncomplete(
                     "the link to IB Gateway was dropped during {} reconciles in a row (last: {}), so it is not "
