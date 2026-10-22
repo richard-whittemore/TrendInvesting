@@ -1529,11 +1529,14 @@ class RetireTests(unittest.TestCase):
         # wins over it on every path (ADR 0026, amended 2026-10-22, "The
         # adapter"): every queued retirement of the order, in either ID form,
         # is struck off before the relay stops, so resolve --sent never
-        # delivers a retirement of an order working at IBKR.
-        def entry(entry_id):
+        # delivers a retirement of an order working at IBKR. Only that
+        # order's entries are struck: one for an order whose client order ID
+        # extends its own (tw-10), and one for a second order of the same
+        # input that IBKR does not show (tw-2), stay queued.
+        def entry(entry_id, cid="tw-1"):
             return {"id": entry_id, "event_type": "execution.order.retired", "schema_version": 1,
                     "event_time": "2026-10-16T13:30:00Z",
-                    "payload": {"account_id": "joint", "client_order_id": "tw-1", "instrument_id": "SPY", "side": "buy",
+                    "payload": {"account_id": "joint", "client_order_id": cid, "instrument_id": "SPY", "side": "buy",
                                 "quantity": 9, "limit_price": 100.0, "reason": "session over", "detail": "session over",
                                 "retired_by": "adapter", "retired_at": "2026-10-16T13:30:00Z"}}
         cases = {
@@ -1552,15 +1555,20 @@ class RetireTests(unittest.TestCase):
                         self.record_inputless_retirement(**record)
                     for i in ids:
                         self.outbox.append_once(entry(i))
-                    relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}), broker=broker)
+                    others = ["order-retired:tw-10", "order-retired:tw-10:session:0", "order-retired:tw-2"]
+                    for i in others:
+                        self.outbox.append_once(entry(i, i.split(":")[1]))
+                    relay = self.relay(Restarts({}, {"session:0": [released("tw-1"), released("tw-2")]}), broker=broker)
                     with self.assertRaises(NeverSentAtBroker):
                         relay.exchange(envelope(0))
                     relay.close()
-                    self.assertEqual(self.retired_entries(), [], "no retirement stays queued for an order IBKR shows")
+                    self.assertEqual([e["id"] for e in self.retired_entries()], others,
+                                     "only the retirements of the order IBKR shows are struck off")
                     self.assertEqual([d for d in self.pending.decisions() if d.get("input_id") == "session:0"
                                       and record != {"input_id": "session:0"}], [])
+                    self.assertEqual(self.pending.handovers().get("tw-1"), "never-sent")
                     resolve(PendingInput(self.pending.path), "tw-1", "sent", "IBKR shows it", today=date(2026, 10, 17))
-                    self.assertEqual(self.retired_entries(), [])
+                    self.assertEqual([e["id"] for e in self.retired_entries()], others)
 
     def test_a_retirement_recorded_with_no_input_is_finished_only_while_the_relay_holds_the_lock(self):
         # Closed while it asks IBKR, the relay edits nothing more (Relay.close):

@@ -2,6 +2,7 @@ package targetweight_test
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -842,5 +843,156 @@ func TestARecoveredOwnSaleUnderAnotherAttemptsIDIsRefused(t *testing.T) {
 	_, err := h.Apply(context.Background(), s.envelope(t, decision.Type, decision.SchemaVersion, decision.ID, decision.EventTime, p))
 	if err == nil || !strings.Contains(err.Error(), "next attempt") {
 		t.Errorf("an own sale recorded under another attempt's ID: %v, want the recovery refused", err)
+	}
+}
+
+// retireSaleAt retires, at session i, the sale o as never sent, its session
+// over, as the adapter does.
+func retireSaleAt(t *testing.T, i int, o event.OrderReleasedPayload) map[int]func(apply func(typ string, version uint32, id string, at time.Time, payload any) error) {
+	t.Helper()
+	return map[int]func(apply func(typ string, version uint32, id string, at time.Time, payload any) error){
+		i: func(apply func(typ string, version uint32, id string, at time.Time, payload any) error) {
+			at := sessionEnd(i).Add(-6 * time.Hour)
+			p := event.OrderRetiredPayload{AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side,
+				Quantity: o.Quantity, LimitPrice: o.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "session over",
+				RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+			if err := apply(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:"+o.ClientOrderID, at, p); err != nil {
+				t.Errorf("the retirement of %s at session %d: %v, want it read", o.ClientOrderID, i, err)
+			}
+		},
+	}
+}
+
+// TestARecoveryRestoresTheRunsRetiredSaleBeforeItsLiveOne: a decision
+// records the run's retired first attempt of the incident's sale and its
+// live second attempt; the recovery restores the retired attempt before the
+// live one, so the live one is held as the second attempt, an urgent
+// reading fires no sale while it is held, and after its retirement the sale
+// is attempted under the third attempt's client order ID (ADR 0019, amended
+// 2026-10-15: one attempt; ADR 0026, point 2, "Order identity", and point 5:
+// recovered, never recomputed).
+func TestARecoveryRestoresTheRunsRetiredSaleBeforeItsLiveOne(t *testing.T) {
+	first, state, sale, decision := haltedExitSale(t)
+	attempt := func(n int) string { return orderplan.SaleAttemptClientOrderID(state.ID, "SPY", n) }
+	// IBKR still holds the shares the unsent sales would have sold.
+	urgent := func(sessions ...int) map[int]func(*event.BrokerSnapshotPayload) {
+		m := map[int]func(*event.BrokerSnapshotPayload){}
+		for _, i := range sessions {
+			m[i] = func(b *event.BrokerSnapshotPayload) {
+				b.ExcessLiquidity = 0.1 * b.NetLiquidation
+				b.Positions[0].Quantity += sale.Quantity
+			}
+		}
+		return m
+	}
+	second := simulate(t, options{recovery: &decision, snapshots: first.inputs, brokers: true, prelude: []event.Envelope{state},
+		intrude: retireSaleAt(t, 21, sale), brokerMutate: urgent(22), unsentIDs: []string{attempt(1)}})
+	rel := released(t, second.decisions)
+	if len(rel) != 1 || rel[0].ClientOrderID != attempt(1) {
+		t.Fatalf("setup: the second run released %+v, want the sale's second attempt %s", rel, attempt(1))
+	}
+	var recovery event.Envelope
+	for _, e := range ofType(second.decisions, event.TargetsDecidedEventType) {
+		if e.EventTime.Equal(sessionEnd(23)) {
+			recovery = e
+		}
+	}
+	var d event.TargetsDecidedPayload
+	decode(t, recovery, &d)
+	if d.Boost.RestoredSale == nil || d.Boost.RestoredSale.Order == nil || d.Boost.RestoredSale.Order.ClientOrderID != attempt(1) {
+		t.Fatalf("setup: session 23's decision records the restored sale %+v, want the live second attempt %s", d.Boost.RestoredSale, attempt(1))
+	}
+	if r := d.Boost.RetiredOrders; len(r) != 1 || r[0].ClientOrderID != attempt(0) || r[0].SaleTag != state.ID || r[0].SaleAttempt != 1 {
+		t.Fatalf("setup: session 23's decision records retired orders %+v, want the sale's first attempt %s", r, attempt(0))
+	}
+	held := simulate(t, options{recovery: &recovery, snapshots: second.inputs, brokers: true, prelude: []event.Envelope{state},
+		brokerMutate: urgent(24)})
+	if sold := sales(t, held.decisions); len(sold) != 0 {
+		t.Fatalf("the run restarted from that decision sold %+v while it holds %s, want nothing", sold, attempt(1))
+	}
+	again := simulate(t, options{recovery: &recovery, snapshots: second.inputs, brokers: true, prelude: []event.Envelope{state},
+		intrude: retireSaleAt(t, 24, rel[0]), brokerMutate: urgent(25)})
+	if sold := sales(t, again.decisions); len(sold) != 1 || sold[0].ClientOrderID != attempt(2) || sold[0].Tag != state.ID {
+		t.Fatalf("sales after the second attempt's retirement %+v, want the sale attempted under the third attempt's %s", sold, attempt(2))
+	}
+}
+
+// TestAVenueReportOnARestoredOwnSaleEndsItAsInTheFullRun: the incident's
+// sale the run released is restored as the run's own after a restart from
+// the decision that records it live; the venue's fill of it, its cancel
+// after a part fill, and its expiry unfilled are each read as in the run
+// that never restarted, so each later decision, and each sale, is the full
+// run's: the sale ends, its attempt stays spent, and no decision records it
+// live (ADR 0019, amended 2026-10-15: one attempt; ADR 0026, point 5:
+// recovered, never recomputed).
+func TestAVenueReportOnARestoredOwnSaleEndsItAsInTheFullRun(t *testing.T) {
+	cases := []struct {
+		name          string
+		part          map[int]int64
+		filled, ended bool
+	}{
+		{"filled", nil, true, false},
+		{"canceled after a part fill", map[int]int64{21: 5}, true, true},
+		{"expired unfilled", map[int]int64{21: 0}, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state := haltedState(t)
+			urgent := map[int]func(*event.BrokerSnapshotPayload){23: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+			full := restartAt17(t, simulate(t, options{brokers: true}), options{prelude: []event.Envelope{state}, partFill: c.part, brokerMutate: urgent})
+			rel := released(t, full.decisions)
+			if len(rel) != 1 || rel[0].ClientOrderID != orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0) {
+				t.Fatalf("setup: released %+v, want the incident's first sale", rel)
+			}
+			sale := rel[0]
+			var decision event.Envelope
+			for _, e := range ofType(full.decisions, event.TargetsDecidedEventType) {
+				if e.EventTime.Equal(sessionEnd(20)) {
+					decision = e
+				}
+			}
+			var d event.TargetsDecidedPayload
+			decode(t, decision, &d)
+			if d.Boost.RestoredSale == nil || d.Boost.RestoredSale.Order == nil || d.Boost.RestoredSale.Order.ClientOrderID != sale.ClientOrderID {
+				t.Fatalf("setup: session 20's decision records the restored sale %+v, want %s live", d.Boost.RestoredSale, sale.ClientOrderID)
+			}
+			r := simulate(t, options{recovery: &decision, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state},
+				working: map[int][]event.OrderReleasedPayload{21: {sale}}, partFill: c.part, brokerMutate: urgent})
+			var filled, ended bool
+			for _, in := range r.inputs {
+				filled = filled || in.Type == event.FillEventType && strings.Contains(string(in.Payload), sale.ClientOrderID)
+				ended = ended || in.ID == "cancel:"+sale.ClientOrderID
+			}
+			if filled != c.filled || ended != c.ended {
+				t.Fatalf("setup: the venue reported the restored sale filled %t and canceled %t, want %t and %t", filled, ended, c.filled, c.ended)
+			}
+			after := func(run run) []event.TargetsDecidedPayload {
+				var out []event.TargetsDecidedPayload
+				for _, e := range ofType(run.decisions, event.TargetsDecidedEventType) {
+					if e.EventTime.After(sessionEnd(20)) {
+						var p event.TargetsDecidedPayload
+						decode(t, e, &p)
+						out = append(out, p)
+					}
+				}
+				return out
+			}
+			want, got := after(full), after(r)
+			if len(want) == 0 {
+				t.Fatal("setup: the full run decides nothing after session 20")
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("the restarted run's decisions after the venue's report are %+v, want the full run's %+v", got, want)
+			}
+			for _, p := range got {
+				if s := p.Boost.RestoredSale; s == nil || !s.Attempted || s.Order != nil {
+					t.Errorf("a decision after the venue ended the sale records the restored sale as %+v, want it attempted and not live", s)
+				}
+			}
+			late := slices.DeleteFunc(slices.Clone(full.decisions), func(e event.Envelope) bool { return !e.EventTime.After(sessionEnd(20)) })
+			if w, g := sales(t, late), sales(t, r.decisions); !reflect.DeepEqual(g, w) {
+				t.Errorf("the restarted run's sales %+v, want the full run's %+v", g, w)
+			}
+		})
 	}
 }

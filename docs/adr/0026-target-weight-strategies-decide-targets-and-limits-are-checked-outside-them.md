@@ -1479,14 +1479,17 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   A retirement frees only an attempt this run, or the run whose decision
   it was restarted from, made: never one the approval restored as an
   earlier run's. Stated limit: a recovered decision states only the
-  attempts made by the time it was recorded, so one made before the
-  incident began, or before the run's later attempt of its sale, cannot
-  state that later attempt; the restarted run refuses a snapshot that
-  would fire the recorded incident's sale until its first bar or session,
-  as below, and holds the sale as not attempted after it. The owner checks
-  IBKR for an order under the incident's tag before letting such a run go
-  on and, if one is there, starts a fresh run from `operator approve`,
-  whose approval states the attempt (ADR 0027). A recovered
+  attempts made by the time it was recorded. One made before the incident
+  began restores no attempt of it, so the restarted run refuses a snapshot
+  that would fire the recorded incident's sale until its first bar or
+  session, as below, and holds the sale as not attempted after it. One
+  made during the incident records its sale, attempted or not
+  (`restored_sale`), which states the incident's attempts, so such a
+  snapshot is accepted. A restart from a decision recorded before the
+  run's later attempt does not know that attempt; such a restart is not
+  used by the production start, which always begins a fresh run from an
+  owner approval that carries the attempt count (ADR 0027; "Which start
+  reads a recorded decision", above). A recovered
   decision comes before any broker snapshot that would fire the sale of an
   incident an earlier run's recorded engine state restored: such a
   snapshot read before the approval, before a recovered decision that
