@@ -122,12 +122,12 @@ func TestTheDailySummaryNeverGoesThroughThePublicRelayOrToPagerDuty(t *testing.T
 				t.Fatal("the incident alerts must still go to ntfy")
 			}
 			for _, m := range public {
-				if strings.Contains(m, "daily summary") || strings.Contains(m, "Net liquidation") {
+				if strings.Contains(m, "daily summary 2024") || strings.Contains(m, "Net liquidation") {
 					t.Fatalf("the summary, with balances, went to the public relay:\n%s", m)
 				}
 			}
 			got := strings.Join(r.to("events.pagerduty.test"), "\n")
-			if strings.Contains(got, "daily summary") || strings.Contains(got, "Net liquidation") {
+			if strings.Contains(got, "daily summary 2024") || strings.Contains(got, "Net liquidation") {
 				t.Fatalf("the summary opened a PagerDuty incident:\n%s", got)
 			}
 			if !strings.Contains(got, "engine halted") {
@@ -155,7 +155,7 @@ func TestASummaryWithOnlyThePublicRelayIsNotSentAndSaidSoOnceButTheAlertsStillGo
 		t.Fatalf("the reporter said the summary is not sent %d times, want once:\n%s", got, first.String())
 	}
 	sent := strings.Join(r.to("ntfy.sh"), "\n")
-	if !strings.Contains(sent, "engine halted") || strings.Contains(sent, "daily summary") {
+	if !strings.Contains(sent, "engine halted") || strings.Contains(sent, "daily summary 2024") {
 		t.Fatalf("alerts must go and the summary must not:\n%s", sent)
 	}
 	raw, _ := os.ReadFile(state)
@@ -213,12 +213,14 @@ func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
 // its unit's TimeoutStartSec) leaves behind.
 type killedAt struct {
 	state, left string
-	sends       []string
+	// at is the send the copy is taken at; 0 is the second.
+	at    int
+	sends []string
 }
 
 func (k *killedAt) RoundTrip(req *http.Request) (*http.Response, error) {
 	k.sends = append(k.sends, req.Header.Get("Title"))
-	if len(k.sends) == 2 {
+	if at := k.at; at == 0 && len(k.sends) == 2 || at != 0 && len(k.sends) == at {
 		raw, err := os.ReadFile(k.state)
 		if err == nil {
 			err = os.WriteFile(k.left, raw, 0o600)

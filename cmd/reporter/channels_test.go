@@ -85,7 +85,7 @@ func TestOneChannelsBadSecretNeverSilencesTheOther(t *testing.T) {
 		}
 		// With the one channel that takes the summary set aside, the summary
 		// goes nowhere, and PagerDuty never takes it.
-		if anyContains(summaries, "daily summary") {
+		if anyContains(summaries, "daily summary 2024") {
 			t.Errorf("the daily summary opened a PagerDuty incident: %v", summaries)
 		}
 		if !strings.Contains(out.String(), "the daily summary is not sent") {

@@ -34,13 +34,18 @@ type echoOnly interface{ echo() }
 // carries the account's balances. Only the owner's own ntfy server is one: a
 // public relay can be read by anyone who learns the topic (owner decision
 // 2026-10-17, docs/live-trading/plan.md section 7), and the summary is a
-// routine message that never opens a PagerDuty incident (owner decision
-// 2026-10-22; ADR 0019, "Alerting": a page means an incident).
+// routine message that never opens a PagerDuty incident (ADR 0019,
+// "Alerting"; docs/manual/alerts-and-dashboard.md, "The delivery rules": a
+// page always means an incident).
 type summaryTaker interface{ takesSummary() bool }
 
 // kindSummary is the daily summary's kind: a routine message, not an
 // incident, and the one message that carries balances.
 const kindSummary report.Kind = "daily-summary"
+
+// kindSummaryNoChannel is the routine notice that the daily summary has no
+// channel that takes it.
+const kindSummaryNoChannel report.Kind = "daily-summary-no-channel"
 
 // publicNtfy reports whether an ntfy server is the public ntfy.sh relay.
 func publicNtfy(server string) (bool, error) {
@@ -270,21 +275,65 @@ func (ntfySender) name() string { return "ntfy" }
 // balances never go to a public relay.
 func (n ntfySender) takesSummary() bool { return !n.public }
 
+// ntfyMessageLimit is the most bytes one ntfy message may carry, the
+// server's default message-size-limit (https://docs.ntfy.sh/config/): a
+// longer one is refused or turned into an attachment the phone does not
+// show.
+const ntfyMessageLimit = 4096
+
 // send posts the alert's text; through a public relay it posts the alert's
 // public text when it has one, which carries no balance (owner decision
-// 2026-10-17).
+// 2026-10-17). A text longer than ntfy's message limit is posted as numbered
+// parts, each whole UTF-8 and within the limit, the title ending "(i/n)",
+// rather than failing the channel and never reaching the owner (ADR 0019,
+// "Alerting"). A part that fails fails the send, and the whole alert is
+// posted again at the next firing.
 func (n ntfySender) send(a report.Alert, _ int) error {
 	body := a.Body
 	if n.public && a.PublicBody != "" {
 		body = a.PublicBody
 	}
+	parts := splitMessage(body, ntfyMessageLimit)
+	for i, part := range parts {
+		title := a.Title
+		if len(parts) > 1 {
+			title = fmt.Sprintf("%s (%d/%d)", a.Title, i+1, len(parts))
+		}
+		if err := n.post(title, part, a.Severity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitMessage cuts text into parts of at most limit bytes, each ending at a
+// line's end where one falls in its second half, and never inside a UTF-8
+// character; joined, the parts are text.
+func splitMessage(text string, limit int) []string {
+	var parts []string
+	for len(text) > limit {
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		if nl := strings.LastIndexByte(text[:cut], '\n'); nl >= limit/2 {
+			cut = nl + 1
+		}
+		parts = append(parts, text[:cut])
+		text = text[cut:]
+	}
+	return append(parts, text)
+}
+
+// post sends one message to the topic.
+func (n ntfySender) post(title, body string, severity report.Severity) error {
 	req, err := http.NewRequest(http.MethodPost, n.server+"/"+url.PathEscape(n.topic), bytes.NewBufferString(body))
 	if err != nil {
 		return errors.New("build request")
 	}
-	req.Header.Set("Title", a.Title)
+	req.Header.Set("Title", title)
 	req.Header.Set("Priority", "3")
-	if a.Severity == report.Urgent {
+	if severity == report.Urgent {
 		req.Header.Set("Priority", "5")
 	}
 	resp, err := n.client.Do(req)

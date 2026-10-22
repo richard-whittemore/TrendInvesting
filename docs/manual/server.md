@@ -123,21 +123,47 @@ when `ntfy` is in the reporter's channels.
    unguessable `TI_NTFY_TOPIC=` beside it. The topic is the only secret the
    server uses: the server asks for no sign-in, because nothing but your own
    tailnet reaches it.
-3. On your phone, which must be signed in to Tailscale: in the ntfy app,
-   subscribe to that topic on that server (the app's "use another server"
-   option, with the same URL). Then ntfy delivers to you exactly when the
-   phone is on the tailnet.
-4. The next reporter firing (within 5 minutes) sends the day's summary once
-   the log records that day's session closed. If the phone is off the
-   tailnet the summary waits on the server, not on a public service.
+3. On your phone: install Tailscale, sign in to the same tailnet, and keep it
+   **on all the time**: on an iPhone, turn on "VPN On Demand" in the
+   Tailscale app's settings; on Android, turn on "Always-on VPN" for Tailscale
+   in the system's VPN settings. The phone fetches every message from your
+   server over Tailscale, so with Tailscale off it shows nothing new from
+   this server, the daily summary included.
+4. In the ntfy app, subscribe to that topic on that server (the app's "use
+   another server" option, with the same URL).
+5. **Test a delivery end to end** before you rely on it. In the ntfy app,
+   also subscribe to a throwaway topic on the same server, say `check-1234`
+   (not your secret topic). On the server run
+   `curl -d "test from the server" http://100.x.y.z:2586/check-1234` with your
+   server's address. The phone must show the notification within a few
+   seconds, with the phone locked and on mobile data. Then unsubscribe from
+   the throwaway topic. If nothing arrives, see "What can go wrong" below.
+
+How the phone is woken. The iOS ntfy app cannot keep a connection open to
+your server in the background, so `provision.sh ntfy` sets the server's
+`upstream-base-url` to `https://ntfy.sh`: for each message your server asks
+ntfy.sh to wake the app. That request carries only the message's ID and a
+scrambled (SHA-256) form of the topic's address: **never the message, its
+title or the topic's name**. The woken app then fetches the message itself
+from your server over Tailscale. The server still listens on the tailnet
+only; nothing reaches it from the internet. (Android's app keeps its own
+connection and does not need the upstream.)
+
+The next reporter firing (within 5 minutes) sends the day's summary once the
+log records that day's session closed. A message the server has taken counts
+as delivered to the reporter: whether the phone then shows it depends on the
+phone keeping Tailscale on (step 3).
 
 Checking it: `systemctl status ti-ntfy`, and `journalctl -u ti-ntfy`. The
 server keeps messages for 12 hours, so a phone that was off the tailnet for a
-night still receives what it missed when it returns. It keeps nothing else
-and holds no account.
+few hours fetches what it missed when it returns; one off for longer misses
+the messages older than 12 hours. Incident alerts go to PagerDuty as well, so
+they do not depend on this server. It keeps nothing else and holds no
+account.
 
-**Without it** the daily summary is not sent, and the reporter says so once in
-its output; incident alerts are unaffected. Read the summary on the dashboard
+**Without it** the daily summary is not sent, and the reporter says so once,
+as a routine message on the incident channels and in its output; incident
+alerts are unaffected. Read the summary on the dashboard
 meanwhile ([alerts and dashboard](alerts-and-dashboard.md), "Where alerts
 go").
 
@@ -326,6 +352,7 @@ already at IBKR in IBKR's own app.
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
 | `ti-engine@<instance>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the IRA engines have no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
 | The data job fails | The unit shows failed; `journalctl -u ti-data` says why; no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)) |
+| The end-to-end test (step 5 of "Your own ntfy server") shows nothing on the phone | The phone is not on the tailnet (Tailscale off, or not set to stay on), the app is subscribed on another server, or the server cannot reach ntfy.sh to wake an iPhone (`journalctl -u ti-ntfy` names the upstream) | Turn Tailscale on and set it to stay on (step 3); check the subscription's server URL is exactly `TI_NTFY_SERVER`; check the server reaches the internet (`curl -sI https://ntfy.sh`) |
 | `ti-ntfy` fails, or the summary stops reaching your phone while PagerDuty pages still do; `journalctl -u ti-ntfy` names it | Your own ntfy server is down or has no Tailscale address yet. The unit tries again every 10 seconds; the reporter retries the summary at every firing and the run ends with an error naming `ntfy:`. Incident pages go to PagerDuty as well and are not held back | `sudo systemctl status ti-ntfy`; if Tailscale was signed out, `sudo tailscale up --ssh` and `sudo systemctl restart ti-ntfy`; if the configuration is missing, `sudo deploy/provision.sh ntfy` |
 | `provision.sh ntfy` printed "SKIPPED the ntfy server's configuration: Tailscale is not signed in yet" | The program is installed; the server is not configured or started | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh ntfy` again |
 | `provision.sh ntfy` stopped with "is not a Tailscale address" | The address it was given is outside `100.64.0.0/10`; it configures nothing, so the server cannot be exposed | Do not set `TI_NTFY_ADDRESS` by hand on the server; sign in to Tailscale and run it again |

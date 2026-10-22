@@ -60,7 +60,7 @@ grep -q '^NTFY_SHA256=0\{64\}$' /root/deploy-badntfy/versions.env || fail "could
 rm -f "$cache"/ntfy_*.tar.gz
 if TI_NTFY_ADDRESS=100.64.0.7 /root/deploy-badntfy/provision.sh ntfy >/dev/null 2>&1; then fail "an ntfy download that does not match its pin was accepted"; fi
 test ! -e /usr/local/bin/ntfy || fail "a mismatched ntfy download was installed"
-for bad in 0.0.0.0 127.0.0.1 203.0.113.5 100.128.0.1 100.63.255.255 "100.64.0.1; x"; do
+for bad in 0.0.0.0 127.0.0.1 203.0.113.5 100.128.0.1 100.63.255.255 "100.64.0.1; x" 100.64.999.1 100.64.0.256; do
   if TI_NTFY_ADDRESS=$bad "$p" ntfy >/dev/null 2>&1; then fail "the ntfy step accepted the address '$bad'"; fi
 done
 test ! -e /etc/ntfy/server.yml || fail "an address that is not Tailscale's left a configuration"
@@ -69,6 +69,9 @@ test -x /usr/local/bin/ntfy || fail "ntfy not installed"
 grep -qx 'listen-http: "100.64.0.7:2586"' /etc/ntfy/server.yml || fail "the ntfy server does not listen on the Tailscale address: $(cat /etc/ntfy/server.yml)"
 grep -qx 'base-url: "http://100.64.0.7:2586"' /etc/ntfy/server.yml || fail "the ntfy server's base URL is not the Tailscale address"
 test "$(grep -c '^listen-http:' /etc/ntfy/server.yml)" = 1 || fail "more than one listen address"
+# The iOS app gets instant notifications from a self-hosted server only
+# through the upstream relay, which carries the message ID alone.
+grep -qx 'upstream-base-url: "https://ntfy.sh"' /etc/ntfy/server.yml || fail "the ntfy server names no upstream relay for the iOS app: $(cat /etc/ntfy/server.yml)"
 id ti-ntfy >/dev/null || fail "no ti-ntfy user"
 test "$(getent passwd ti-ntfy | cut -d: -f7)" = /usr/sbin/nologin || fail "ti-ntfy has a login shell"
 test -f /etc/systemd/system/ti-ntfy.service || fail "the ntfy unit is not installed"

@@ -86,12 +86,15 @@ type Order struct {
 // A dry-run momentum run's synthetic report on an order it never sent, a
 // decision, ends the order by the same rule and acknowledges nothing
 // (endSynthetic). A fill in a Boost run is read as the Boost engine reads it,
-// by the risk gate's check (risklimit.Gate.ObserveFill), not by
-// event.OrderReports: the gate accepts a fill its order's release describes
-// whatever the lifecycle reports before it said, a late fill after a
-// cancellation included, so such a fill acknowledges the order (ADR 0022).
-// A fill the gate refuses, or one that cannot be read, changes nothing and
-// raises no alert: the order then alerts as unacknowledged.
+// by the risk gate's fill rule (risklimit.CheckFill, which
+// risklimit.Gate.ObserveFill applies), not by event.OrderReports: the rule
+// accepts a fill its order's release describes whatever the lifecycle
+// reports before it said, a late fill after a cancellation included, so such
+// a fill acknowledges the order (ADR 0022). A fill the rule refuses, or one
+// that cannot be read, acknowledges nothing: on an order not yet
+// acknowledged the order alerts as unacknowledged, and on one already
+// acknowledged, where nothing else would alert, it is a report the engine
+// did not read, as in a momentum run.
 func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
 	var unread []UnreadReport
@@ -227,8 +230,16 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		_, _, refused = reports.Fill(p)
 	case e.Type == event.FillEventType:
 		var p event.TargetWeightFillPayload
-		if read(e, targetWeightFillVersions, &p) != nil || !fills.accept(p) {
-			return nil // a fill the Boost engine's gate does not accept acknowledges nothing
+		err := read(e, targetWeightFillVersions, &p)
+		if err == nil {
+			err = fills.accept(p)
+		}
+		if err != nil {
+			// A fill the Boost engine's rule refuses acknowledges nothing.
+			if o, ok := byID[p.ClientOrderID]; ok && o.State == LifecycleAcknowledged {
+				return unread(p.ClientOrderID, err.Error())
+			}
+			return nil
 		}
 		client, status, at = p.ClientOrderID, "fill", p.FilledAt
 	default:
@@ -247,35 +258,46 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 	return nil
 }
 
-// boostFills reads a Boost run's fills by the rule the Boost engine applies,
-// the risk gate's own (risklimit.Gate.ObserveFill), so the reporter and the
-// engine cannot disagree about which fill counts. One gate stands for each
-// account whose orders the log released; it is used only for that rule, so
-// its limits (which no fill is checked against) are placeholders.
-type boostFills struct{ gates map[string]*risklimit.Gate }
-
-func newBoostFills() *boostFills { return &boostFills{gates: map[string]*risklimit.Gate{}} }
-
-// release tells the account's gate of a released order, as the engine's gate
-// learns of one. A gate that cannot be made accepts no fill, so the order
-// alerts rather than going unwatched.
-func (b *boostFills) release(p event.OrderReleasedPayload) {
-	g, ok := b.gates[p.AccountID]
-	if !ok {
-		limits := event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05}
-		g, _ = risklimit.NewIRAGate(p.AccountID, limits, event.TradingModeDryRun, 0, time.Minute)
-		b.gates[p.AccountID] = g
-	}
-	if g != nil {
-		_ = g.RestoreReleased(p, nil, time.Time{}, "")
-	}
+// boostFills reads a Boost run's fills by the rule the Boost engine's gate
+// applies (risklimit.CheckFill), so the reporter and the engine cannot
+// disagree about which fill counts. The rule needs no limits, so no gate is
+// built: it holds each released order as the rule reads it and the fills
+// applied, by account and fill ID, as the gate does.
+type boostFills struct {
+	orders  map[string]*risklimit.FillOrder
+	applied map[string]map[string]event.TargetWeightFillPayload
 }
 
-// accept reports whether the gate accepts fill p: it is applied, or it is a
-// redelivery of an execution already applied.
-func (b *boostFills) accept(p event.TargetWeightFillPayload) bool {
-	g := b.gates[p.AccountID]
-	return g != nil && g.ObserveFill(p) == nil
+func newBoostFills() *boostFills {
+	return &boostFills{orders: map[string]*risklimit.FillOrder{}, applied: map[string]map[string]event.TargetWeightFillPayload{}}
+}
+
+// release records a released order, as the engine's gate does. OrderLifecycles
+// passes each client order ID's first release only, read and validated (a
+// named order of positive shares), so every release is one the rule holds.
+func (b *boostFills) release(p event.OrderReleasedPayload) {
+	b.orders[p.ClientOrderID] = &risklimit.FillOrder{AccountID: p.AccountID, ClientOrderID: p.ClientOrderID,
+		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity}
+}
+
+// accept applies fill p when the rule accepts it, or is a redelivery of an
+// execution already applied, and returns the rule's refusal otherwise.
+func (b *boostFills) accept(p event.TargetWeightFillPayload) error {
+	o := b.orders[p.ClientOrderID]
+	account := p.AccountID
+	if o != nil {
+		account = o.AccountID
+	}
+	redelivery, err := risklimit.CheckFill(p, account, o, b.applied[account])
+	if err != nil || redelivery {
+		return err
+	}
+	o.Reported += p.Quantity
+	if b.applied[account] == nil {
+		b.applied[account] = map[string]event.TargetWeightFillPayload{}
+	}
+	b.applied[account][p.FillID] = p
+	return nil
 }
 
 // applyClearance applies the owner's clearance as the momentum engine

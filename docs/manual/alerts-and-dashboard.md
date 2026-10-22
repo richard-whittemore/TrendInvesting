@@ -90,13 +90,15 @@ account.
 | A momentum decision was withheld because no stock with a target was affordable (`all-unaffordable`; the net liquidation or prices may be wrong) | urgent | run of the same reason |
 | A momentum decision was withheld because more than the configured share (20%) of the ranked stocks had no sector label (`labels-missing`; a sector-label source or its mapping may have failed, see [momentum universe](momentum-universe.md)) | urgent | run of the same reason |
 | A decision was withheld for another reason | routine | run of the same reason |
-| An order to be sent was not acknowledged by IBKR within `-ack-within` of its commit ([order lifecycle](order-lifecycle.md)). A report that the engine reads counts as the acknowledgement. In a Boost run a fill is read by the risk gate's own rule, so a fill that names the order and fits it (part or whole, even one that arrives after IBKR canceled the order) acknowledges it, and a fill the gate refuses (past the order's size, for another account or side, or a fill number reused for a different execution) does not | urgent | order (its client order ID) |
+| An order to be sent was not acknowledged by IBKR within `-ack-within` of its commit ([order lifecycle](order-lifecycle.md)). A report that the engine reads counts as the acknowledgement. In a Boost run a fill is read by the risk gate's own rule, so a fill that names the order and fits it (part or whole, even one that arrives after IBKR canceled the order) acknowledges it, and a fill the gate refuses (past the order's size, for another account or side, or a fill number reused for a different execution) does not. A refused fill on an order already acknowledged is paged as a report the engine did not read (two rows down) | urgent | order (its client order ID) |
 | An order already alerted as unacknowledged has since been acknowledged | routine | order |
-| A report from IBKR in the log that the engine did not read: it does not validate, or does not match the order it names ([order lifecycle](order-lifecycle.md)) | urgent | that report (its input ID) |
+| A report from IBKR in the log that the engine did not read: it does not validate, or does not match the order it names ([order lifecycle](order-lifecycle.md)); in a Boost run, also a fill the risk gate's rule refuses on an order already acknowledged | urgent | that report (its input ID) |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
 | The reporter set one delivery channel aside (its secret is empty or malformed, or its name is unknown); sent on the channels that still work | urgent | account, channel and problem |
+| "state at reporter start": a channel began with this reporter after the log's earlier events (a new or lost state file, or a channel just named), and something is in force. The page names the engine state when Degraded or Halted, with its scope (an incident a fresh run's approval carried in force included), the kill switch when engaged, a pending cash read, the margin-cushion alarm when not clear, and each open alert that follows it; each open alert is then sent marked "state at reporter start" and repeats as usual until acknowledged (see "The delivery rules") | urgent | channel: once, when the channel begins |
+| "the daily summary has no channel: name your own ntfy server": `-summary` is set but no ntfy server of your own takes the summary (see "The delivery rules") | routine | account: once, until your own server takes the summary; again if it is later left out or set aside |
 | The server's clock failed its check (the reporter runs `clock-check.sh` with `-clock-check`, after the other alerts of each firing). The page gives the measured skew, or says none was measured, and the remedy ([server](server.md), "The clock"). Sent after two failing checks in a row; not repeated | urgent | the host: one page for the whole server, whichever account's reporter saw it; a passing check resolves it, and the next failure after that is another alert |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
 
@@ -262,12 +264,20 @@ The delivery rules:
   else: never to PagerDuty, and never to the public ntfy.sh relay, which
   anyone who learns the topic can read. A summary never opens an incident and
   is never resolved.
-- With no ntfy server of your own named (ntfy absent, or only the public
-  ntfy.sh relay), the summary is not sent. The reporter says so once, in the
-  unit's output (`journalctl -u ti-reporter@boost`): "reporter: the daily
-  summary is not sent ...". Incident alerts are unaffected and the run is not
-  an error. It says so again only if you name your server and later leave it
-  out.
+- With no ntfy server of your own taking the summary (ntfy absent, only the
+  public ntfy.sh relay, or your server's channel set aside for a bad secret),
+  the summary is not sent. The reporter tells you once, as a routine message
+  on the incident channels, "<account>: the daily summary has no channel:
+  name your own ntfy server" (on PagerDuty it is a low-urgency `info` event),
+  and in the unit's output (`journalctl -u ti-reporter@boost`). Incident
+  alerts are unaffected and the run is not an error. It tells you again only
+  if your server takes the summary and is later left out or set aside.
+- ntfy takes a message of at most 4096 bytes. A longer one (an alert naming
+  many instruments, or a long summary) is sent as numbered parts, each titled
+  with the alert's title and "(1/3)", "(2/3)" and so on; read them in order.
+  The parts together are the whole message. If one part fails, the whole
+  message is sent again at the next firing, so you may see the earlier parts
+  twice.
 - The summary's channel failing (your server unreachable, say) fails the run
   with the channel named, and retries the summary at the next firing. It never
   holds back an incident page: the incidents are sent first, to every channel
@@ -279,22 +289,32 @@ The delivery rules:
 - If the summary cannot be built (a decision record the program cannot read),
   the incident alerts still go out and are remembered, and the run ends with
   an error naming the record.
-- A **new or lost state file replays no history.** The first time the reporter
-  sees a channel with no record in the state file (the file is new, was lost,
-  or you have just named the channel in `-channel`), it records that moment
-  for that channel in the file ("baselines"), and sends that channel none of
-  the alerts the log holds from events before it. Only events after it are
-  sent. This is per channel: adding PagerDuty to an account that has run for
-  weeks starts PagerDuty at that moment, and ntfy, which already has its
-  record, is not sent anything again. A channel set aside for a bad secret is
-  recorded too, so what it missed while set aside reaches it once it works. A
-  channel that already has alerts recorded in a state file written by an
-  earlier reporter is not new. The cost is the other side of the same rule: if
-  you lose the state file while an alert is open and unacknowledged, that
-  alert is not paged again, so after losing the file look at the account
-  yourself (the dashboard, or `journal-query`), and do not trust silence.
-  The daily summary is keyed by its day, not an event, so a new state file
-  sends the latest closed day's summary once.
+- A **new or lost state file replays no history, but pages what is in
+  force.** The first time the reporter sees a channel with no record in the
+  state file (the file is new, was lost, or you have just named the channel
+  in `-channel`), it records that moment for that channel in the file
+  ("baselines"), and writes the file before it sends anything, so a run
+  stopped midway cannot lose it. That channel is sent none of the routine
+  history the log holds from events before it (old refusals, fills, withheld
+  decisions); only events after it are sent. What is still in force is not
+  history: the channel is sent, once, an urgent page "<account>: state at
+  reporter start: Halted" (or Degraded, or Normal) naming the engine state and
+  its scope, the kill switch if it is engaged, a pending cash read, the
+  margin-cushion alarm if it is not clear, and every open alert. Each open
+  alert (a Degraded, Halted or reconciliation alert you have not
+  acknowledged) is then sent to it, its title beginning "state at reporter
+  start:", and repeats every `-repeat-interval` until you acknowledge it, as
+  on any channel. This is per channel: adding PagerDuty to an account that has
+  run for weeks starts PagerDuty at that moment with the state in force, and
+  ntfy, which already has its record, is not sent anything again. A channel
+  set aside for a bad secret is recorded too, so what it missed while set
+  aside, and the state in force, reach it once it works. A channel that
+  already has alerts recorded in a state file written by an earlier reporter
+  is not new. If the reporter cannot write the file at that moment, it sends
+  that channel the whole log instead, which is noisy but never silent, and
+  the run ends with an error naming the write. The daily summary is keyed by
+  its day, not an event, so a new state file sends the latest closed day's
+  summary once.
 - The reporter remembers what each channel has taken in its own state file
   (`-state`). That file is the only thing it writes, and it is flushed to disk
   before the run ends, so a power cut cannot leave it empty. If it is
@@ -916,15 +936,16 @@ passes `-clock-check`.
 | --- | --- | --- |
 | Nothing at all for a long time | Possible causes: the timer is not running, the binary is not installed, or every run stops before it sends (the rows below). Nothing outside the server notices: the outside heartbeat (a dead-man's switch) is not built, and nothing reads a `HEALTHCHECK_URL` line | `systemctl list-timers ti-reporter@boost.timer` shows the next firing; `systemctl status ti-reporter@boost` and `journalctl -u ti-reporter@boost` show the last run and its error |
 | The unit failed: "ti-reporter: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the boost engine once first ..." | The reporter does not run, so it sends nothing | Start the engine by `docs/runbooks/durable-log.md`, "Restarting an engine"; the next firing follows its log |
+| `<account>: state at reporter start: <state>`, urgent, then each open alert with its title beginning "state at reporter start:" | This channel began with the reporter after the log's earlier events: the state file is new or was lost (moved aside, say), or you just named the channel in `-channel`. It is sent no routine history, only what is in force: the page names the engine state and scope, an engaged kill switch, a pending cash read, the margin-cushion alarm and every open alert, and those alerts repeat until acknowledged. Once per channel | Read the page and act on each open alert as you would on its first page; acknowledge each with `operator acknowledge` and the key it gives ([operator](operator.md), "Acknowledging an alert"). Check the account on the dashboard or with `journal-query` |
 | `<account>: the reporter cannot deliver to <channel>`, urgent, on the channels that still work | One channel's secret is empty or malformed, or its name in `-channel` is unknown, so that channel is set aside; every alert still goes to the others, the daily summary ends with "Channels not delivering:" naming it, and the run ends with an error naming it (the rows below). Once per channel and problem; nothing reaches the channel set aside until it is fixed | Fix that channel's line in `secrets.env` (the rows below say which), or the unit's `-channel`; the next firing delivers to it everything it missed |
 | "reporter: the ntfy channel needs TI_NTFY_TOPIC ..." or "reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY ..." | That channel is set aside and the other still delivers (the row above). With no channel left that reaches you, the whole run is refused before anything is sent | Fill the line in with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses it |
 | "reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org" or "reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue" | That channel is set aside and the other still delivers; with none left, the run is refused before anything is sent | Correct the line, or leave `TI_PAGERDUTY_URL` empty for PagerDuty's own endpoint; an empty `TI_NTFY_SERVER` is the public ntfy.sh relay, which takes incident alerts but not the daily summary |
 | "reporter: the secrets file cannot be read; check -secrets-file names the credential file", or "reporter: the secrets file's line N is not KEY=VALUE" | Reported in the run's error, which never shows a secret's text. Every line that reads is still used, so only a channel whose secret that leaves unset is set aside; with no channel left, nothing is sent | Correct that line of `secrets.env` (`KEY=VALUE`, no spaces round `=`) with `sudo -e` |
 | "ntfy: server answered 403 Forbidden" (or another status), "pagerduty: server answered 400 Bad Request", "pagerduty: the answer did not acknowledge the event", or "post failed" | That channel failed, so the alert is not delivered, even if the other channel took it. Only the failed channel is retried, at every firing, until it takes the alert | A wrong topic, server or routing key: correct `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` or `TI_PAGERDUTY_ROUTING_KEY` in `secrets.env`. A network fault clears by itself |
 | PagerDuty shows incidents, but your phone shows nothing | Both channels accepted the alert, so the reporter counts it delivered. What your phone does with it is up to the PagerDuty and ntfy apps | Check the PagerDuty app's notification rules, and that the ntfy app is subscribed to exactly the topic (and server) in `secrets.env` |
-| "reporter: the state file is unreadable and is not reset, since a new file forgets which alerts are open: ..." | The run stops before anything is sent, every firing | Move the file aside: `sudo -u ti-trader mv /var/lib/trend-investing/reports/boost.reporter.json /var/lib/trend-investing/reports/boost.reporter.json.bad`. The next firing starts a new state file, which sends **none** of the log's earlier alerts (see "The delivery rules"), so before moving it aside look at the account yourself (the dashboard, `journal-query`) for anything open and unacknowledged: it will not be paged again |
+| "reporter: the state file is unreadable and is not reset, since a new file forgets which alerts are open: ..." | The run stops before anything is sent, every firing | Move the file aside: `sudo -u ti-trader mv /var/lib/trend-investing/reports/boost.reporter.json /var/lib/trend-investing/reports/boost.reporter.json.bad`. The next firing starts a new state file, which sends none of the log's routine history but pages, once per channel, the state at reporter start and every open alert (see "The delivery rules"); the open alerts then repeat until acknowledged |
 | "reporter: write state: ..." | Alerts may have gone, but were not recorded, so the next firing sends them again | Free disk space, or fix the folder's owner (`ti-trader`) |
-| "reporter: the daily summary is not sent. It carries your balances, which go only to your own ntfy server (TI_NTFY_SERVER) ..." | Every alert still goes, and the run does not fail. The summary does not: no ntfy server of your own is named (ntfy is not in `-channel`, or `TI_NTFY_SERVER` is empty or the public ntfy.sh relay, or the ntfy channel was set aside). Said once; PagerDuty never takes the summary | Set up your own ntfy server ([server](server.md), "Your own ntfy server"), put its URL in `TI_NTFY_SERVER` and keep `ntfy` in the unit's `-channel`. Until then read the summary on the dashboard |
+| "<account>: the daily summary has no channel: name your own ntfy server" on your channels, and "reporter: Incident alerts are unaffected, but the daily summary is not sent ..." in the unit's output | Every alert still goes, and the run does not fail. The summary does not: no ntfy server of your own takes it (ntfy is not in `-channel`, or `TI_NTFY_SERVER` is empty or the public ntfy.sh relay, or the ntfy channel was set aside). Said once; PagerDuty never takes the summary | Set up your own ntfy server ([server](server.md), "Your own ntfy server"), put its URL in `TI_NTFY_SERVER` and keep `ntfy` in the unit's `-channel`. Until then read the summary on the dashboard |
 | The daily summary stops arriving on your phone while incident pages still do | The ntfy channel failed for the summary (your server stopped, the phone left the tailnet, or Tailscale is down on the server) and the run ended with an error naming `ntfy:`. The summary is tried again at every firing | `systemctl status ti-ntfy` on the server; the phone must be signed in to Tailscale. Incident pages are not affected: they go to PagerDuty as well |
 | "reporter: the daily summary was not sent: ..." | Every alert still goes and is remembered; the summary is tried again at the next firing | Read the record it names with `journal-query`; if the record fails its checks, the log is damaged (row above on reading the journal) |
 | The repeats keep coming after you ran `operator acknowledge` | The engine records an acknowledgement only from its operator inbox, at its next input from the adapter, so with the engine stopped the repeats continue until it runs. One the engine refused leaves a `.refused` note in its notes folder (`operator-notes`, beside the inbox); one for another account, or for a key with a typing slip, is recorded and does nothing | Check the engine is running and read any `.refused` note; record the acknowledgement again with the right account, the current time and the key copied from the alert ([operator](operator.md), "Acknowledging an alert") |

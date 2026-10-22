@@ -249,6 +249,12 @@ func TestABoostEngineRecordsTheAcknowledgementOfAnOrderItReleased(t *testing.T) 
 // log at path.
 func lifecycleIn(t *testing.T, path, clientID string) report.OrderState {
 	t.Helper()
+	return orderIn(t, path, clientID).State
+}
+
+// orderIn reads the released order's lifecycle from the durable log at path.
+func orderIn(t *testing.T, path, clientID string) report.Order {
+	t.Helper()
 	_, entries, err := report.LoadEntries(readFile(t, path))
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
@@ -259,20 +265,20 @@ func lifecycleIn(t *testing.T, path, clientID string) report.OrderState {
 	}
 	for _, o := range orders {
 		if o.ClientOrderID == clientID {
-			return o.State
+			return o
 		}
 	}
 	t.Fatalf("%s holds no order %s", path, clientID)
-	return ""
+	return report.Order{}
 }
 
 // TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged: the order
 // a paper engine releases is committed in the log once its group is
 // flushed, released once the adapter's next input shows it holds the reply,
 // and acknowledged once the venue's report is recorded (ADR 0027, section
-// 4; ADR 0022). The stand-in venue's fill is itself a report the gate
-// accepts, so the order is released only until the first session after it
-// begins, and the fill, not a lifecycle report, acknowledges it.
+// 4; ADR 0022). Here the venue's lifecycle report is the adapter's next
+// input, before the stand-in venue's fill, so the report alone acknowledges
+// the order, and the fill after it changes nothing.
 func TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged(t *testing.T) {
 	dir := t.TempDir()
 	opts, cfg := paperBoostOptions(t, dir)
@@ -284,14 +290,14 @@ func TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged(t *testing.T)
 	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleCommitted {
 		t.Fatalf("after its release: %s, want %s", got, report.LifecycleCommitted)
 	}
-	feed.sessions(session+1, session+2)
-	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleAcknowledged {
-		t.Fatalf("after the venue's fill, which the gate accepts: %s, want %s", got, report.LifecycleAcknowledged)
-	}
-	at := boostSession(session + 1).Add(time.Minute)
+	at := boostSession(session).Add(time.Minute)
 	feed.send(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+order.ClientOrderID, at, lifecycle(order, event.OrderLifecycleStatusSubmitted, at))
-	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleAcknowledged {
-		t.Fatalf("after the venue's report: %s, want %s", got, report.LifecycleAcknowledged)
+	if got := orderIn(t, opts.logPath, order.ClientOrderID); got.State != report.LifecycleAcknowledged || got.Acknowledgement != event.OrderLifecycleStatusSubmitted {
+		t.Fatalf("after the venue's lifecycle report: %s by %q, want %s by its status %q", got.State, got.Acknowledgement, report.LifecycleAcknowledged, event.OrderLifecycleStatusSubmitted)
+	}
+	feed.sessions(session+1, session+2)
+	if got := orderIn(t, opts.logPath, order.ClientOrderID); got.State != report.LifecycleAcknowledged || got.Acknowledgement != event.OrderLifecycleStatusSubmitted {
+		t.Fatalf("after the venue's fill: %s by %q, want it still acknowledged by the report", got.State, got.Acknowledgement)
 	}
 	_ = feed.client.Close()
 	if err := stop(); err != nil {

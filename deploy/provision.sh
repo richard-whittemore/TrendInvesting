@@ -732,6 +732,8 @@ step_firewall() {
 
 # The owner's own ntfy server, which takes the daily summary (it carries
 # balances, so it never goes to the public ntfy.sh relay or to PagerDuty). It
+# names ntfy.sh as its upstream, the relay the iOS app is woken through,
+# which is told only a message's ID and a hash of its topic. It
 # listens on this machine's Tailscale address and nowhere else: the address
 # is read from Tailscale, or given as TI_NTFY_ADDRESS (the rehearsal), and
 # must be a Tailscale one (100.64.0.0/10), so the server cannot be made to
@@ -760,8 +762,10 @@ step_ntfy() {
     log "SKIPPED the ntfy server's configuration: Tailscale is not signed in yet (owner step: sudo tailscale up --ssh). Re-run 'provision.sh ntfy' after."
     return 0
   fi
-  # 100.64.0.0/10: 100.64.x.x to 100.127.x.x.
-  if ! [[ $addr =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+  # 100.64.0.0/10: 100.64.x.x to 100.127.x.x, each of the last two octets
+  # 0 to 255.
+  local octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  if ! [[ $addr =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.${octet}\.${octet}$ ]]; then
     die "'$addr' is not a Tailscale address (100.64.0.0/10); the ntfy server listens on the tailnet only, so it is not configured"
   fi
   ensure_user ti-ntfy /var/lib/ntfy
@@ -775,6 +779,11 @@ listen-http: "${addr}:2586"
 cache-file: "/var/lib/ntfy/cache.db"
 cache-duration: "12h"
 auth-default-access: "read-write"
+# The iOS app shows a self-hosted server's messages at once only when the
+# server asks ntfy.sh to wake it: the request carries the message's ID and a
+# hash of the topic, never the message or the topic itself, and the phone
+# then fetches the message from this server over Tailscale.
+upstream-base-url: "https://ntfy.sh"
 CONF
   install -m 0644 "$here/systemd/ti-ntfy.service" "$unit_dir/"
   if test "$rehearsal" != 1; then
@@ -782,7 +791,7 @@ CONF
     systemctl enable ti-ntfy.service
     systemctl restart ti-ntfy.service
   fi
-  log "ntfy listens on http://${addr}:2586 (the tailnet only). Owner step: in /etc/trend-investing/secrets.env set TI_NTFY_SERVER=http://${addr}:2586 and an unguessable TI_NTFY_TOPIC, and subscribe to that topic on that server in the ntfy app on a phone that is on the tailnet."
+  log "ntfy listens on http://${addr}:2586 (the tailnet only). Owner step: in /etc/trend-investing/secrets.env set TI_NTFY_SERVER=http://${addr}:2586 and an unguessable TI_NTFY_TOPIC, and subscribe to that topic on that server in the ntfy app on a phone that keeps Tailscale on (always-on VPN); then send a test message to check delivery end to end (docs/manual/server.md, \"Your own ntfy server\")."
 }
 
 # reown NAME OLD_UID [OLD_GID] [--force-id] (the Mac mini only): after a container

@@ -141,7 +141,19 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		return errors.Join(append(failures, err)...)
 	}
 	start := now()
-	baseline(baselines, seen, senders, setAside, channelBaseline(start))
+	// A new baseline is on disk before any delivery starts, so a run stopped
+	// midway (systemd stops one at its TimeoutStartSec) cannot leave the next
+	// run to take a later one and drop what the log recorded between the two.
+	// One that cannot be saved is dropped: the channel is then sent the whole
+	// log, which fails noisy, never silent (ADR 0019, "Alerting").
+	if added := baseline(baselines, seen, senders, setAside, channelBaseline(start)); len(added) > 0 {
+		if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
+			failures = append(failures, err)
+			for _, name := range added {
+				delete(baselines, name)
+			}
+		}
+	}
 	label := *accountName
 	if label == "" {
 		label = filepath.Base(*journalPath)
@@ -211,9 +223,22 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// file exists after a run that delivered nothing.
 	at := now()
 	record := func() error { return saveState(*statePath, seen, sent, repeats, baselines) }
-	for _, a := range report.Fresh(alerts, nil) {
-		if err := deliver(sendersFor(senders, a, baselines), a, seen, sent, repeats, at, *repeat, record); err != nil {
+	if refused == nil {
+		if err := tellStateAtStart(senders, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
+		}
+	}
+	for _, a := range report.Fresh(alerts, nil) {
+		current, starting := sendersFor(senders, a, baselines, seen)
+		if err := deliver(current, a, seen, sent, repeats, at, *repeat, record); err != nil {
+			failures = append(failures, err)
+		}
+		if len(starting) > 0 {
+			marked := a
+			marked.Title = report.StateAtStartTitle + a.Title
+			if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record); err != nil {
+				failures = append(failures, err)
+			}
 		}
 	}
 	// The clock check comes after every incident alert is sent, so a slow or
@@ -235,7 +260,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
 	if *summary {
-		saySummaryRoute(senders, seen, out)
+		if err := saySummaryRoute(senders, label, out, seen, sent, repeats, at, *repeat, record); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	if *summary && refused == nil {
 		// The ledger is taken only from the account's own flex/<instance>
@@ -263,8 +290,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 // baseline time: a channel that has no baseline yet and has taken nothing,
 // whether the state file is new or the channel was just named. A channel set
 // aside is baselined too, so what it missed while set aside reaches it once
-// it works. A channel already in the state file keeps what it has.
-func baseline(baselines map[string]time.Time, seen map[string]bool, senders []sender, setAside []channelFault, at time.Time) {
+// it works. A channel already in the state file keeps what it has. It
+// returns the channels it baselined.
+func baseline(baselines map[string]time.Time, seen map[string]bool, senders []sender, setAside []channelFault, at time.Time) (added []string) {
 	names := make([]string, 0, len(senders)+len(setAside))
 	for _, s := range senders {
 		if _, echo := s.(echoOnly); !echo {
@@ -279,7 +307,9 @@ func baseline(baselines map[string]time.Time, seen map[string]bool, senders []se
 			continue
 		}
 		baselines[name] = at
+		added = append(added, name)
 	}
+	return added
 }
 
 // hasKeys reports whether the channel has taken any alert.
@@ -292,42 +322,104 @@ func hasKeys(seen map[string]bool, channel string) bool {
 	return false
 }
 
-// sendersFor returns the senders alert a may go to now: not a channel whose
-// baseline is after the event the alert reports, which is history to it. An
-// alert with no event time is current.
-func sendersFor(senders []sender, a report.Alert, baselines map[string]time.Time) []sender {
-	out := make([]sender, 0, len(senders))
+// sendersFor returns the senders alert a may go to now. To a channel whose
+// baseline is after the event the alert reports, the alert is history and is
+// not sent, unless it is still open (repeating and not acknowledged): then it
+// is in force, not history, and is in starting, to be sent marked as the
+// state at reporter start until the channel has taken it, and in current
+// after that, so it repeats as usual (ADR 0019, "Alerting"). An alert with no
+// event time is current.
+func sendersFor(senders []sender, a report.Alert, baselines map[string]time.Time, seen map[string]bool) (current, starting []sender) {
 	for _, s := range senders {
 		if _, echo := s.(echoOnly); !echo {
 			if b, ok := baselines[s.name()]; ok && !a.At.IsZero() && a.At.Before(b) {
+				switch {
+				case !a.Repeat || a.Acknowledged:
+				case seen[channelKey(s.name(), a.Key)]:
+					current = append(current, s)
+				default:
+					starting = append(starting, s)
+				}
 				continue
 			}
 		}
-		out = append(out, s)
+		current = append(current, s)
 	}
-	return out
+	return current, starting
 }
 
-// summaryNotSentKey is the state-file key recording that the reporter has
-// said the daily summary has nowhere to go.
-var summaryNotSentKey = channelKey("reporter", "summary-not-sent")
-
-// saySummaryRoute tells the owner, once, that the daily summary is not sent
-// because no channel takes it: it carries balances, which go only to the
-// owner's own ntfy server. Naming such a server clears the record, so the
-// notice returns if the server is later left out.
-func saySummaryRoute(senders []sender, seen map[string]bool, out io.Writer) {
-	for _, s := range senders {
-		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
-			delete(seen, summaryNotSentKey)
-			return
+// tellStateAtStart sends the account's standing (report.StateAtStartAlert)
+// once to every channel that has a baseline after the log's first event,
+// that is, one the log's earlier events are held back from as history, and
+// has not been told it: what is in force must reach the owner all the same
+// (ADR 0019, "Alerting"). A channel such an account has nothing in force for
+// is recorded as told, so an incident that begins later reaches it as itself
+// alone.
+func tellStateAtStart(senders []sender, envelopes []event.Envelope, alerts []report.Alert, baselines map[string]time.Time, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, record func() error) error {
+	var first time.Time
+	for _, e := range envelopes {
+		if first.IsZero() || e.EventTime.Before(first) {
+			first = e.EventTime
 		}
 	}
-	if seen[summaryNotSentKey] {
-		return
+	a, inForce, err := report.StateAtStartAlert(envelopes, alerts)
+	if err != nil {
+		return err
 	}
-	seen[summaryNotSentKey] = true
-	_, _ = fmt.Fprintln(out, "reporter: the daily summary is not sent. It carries your balances, which go only to your own ntfy server (TI_NTFY_SERVER), never to PagerDuty or the public ntfy.sh relay, and no such server is named. Incident alerts are unaffected. This is said once.")
+	var due []sender
+	for _, s := range senders {
+		if _, echo := s.(echoOnly); echo {
+			continue
+		}
+		b, ok := baselines[s.name()]
+		if !ok || b.IsZero() || !first.Before(b) || seen[channelKey(s.name(), a.Key)] {
+			continue
+		}
+		due = append(due, s)
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	if !inForce {
+		for _, s := range due {
+			seen[channelKey(s.name(), a.Key)] = true
+		}
+		return record()
+	}
+	return deliver(due, a, seen, sent, repeats, at, every, record)
+}
+
+// summaryNoChannelPrefix begins the key of the notice that the daily summary
+// has no channel.
+const summaryNoChannelPrefix = "summary-no-channel:"
+
+// saySummaryRoute tells the owner, once, on the incident channels, that the
+// daily summary is not sent because no channel takes it: it carries
+// balances, which go only to the owner's own ntfy server. The owner's only
+// eyes are the channels, so the notice is a routine message on them, not a
+// line in the unit's output alone (ADR 0019, "Alerting"); it carries no
+// balance, and is shown in the unit's output (out, or the stdout echo when
+// named) while no channel has it yet. A server of the owner's own that takes the summary clears the
+// notice, so it returns if the server is later left out or set aside.
+func saySummaryRoute(senders []sender, account string, out io.Writer, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, record func() error) error {
+	for _, s := range senders {
+		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
+			forget(summaryNoChannelPrefix, seen, sent, repeats)
+			return nil
+		}
+	}
+	a := report.Alert{
+		Key: summaryNoChannelPrefix + account, Kind: kindSummaryNoChannel, Severity: report.Routine, AccountID: account,
+		Title: account + ": the daily summary has no channel: name your own ntfy server",
+		Body: "Incident alerts are unaffected, but the daily summary is not sent. It carries your balances, which go only to your own ntfy server (TI_NTFY_SERVER), " +
+			"never to PagerDuty or the public ntfy.sh relay, and no such server is named, or the one named is set aside (the channel alert says why). " +
+			"Set one up: docs/manual/server.md, \"Your own ntfy server\"; until then read the summary on the dashboard. This is said once.",
+	}
+	echoed := slices.ContainsFunc(senders, func(s sender) bool { _, echo := s.(echoOnly); return echo })
+	if !echoed && !deliveredAnywhere(seen, a.Key) {
+		_, _ = fmt.Fprintln(out, "reporter: "+a.Body)
+	}
+	return deliver(senders, a, seen, sent, repeats, at, every, record)
 }
 
 // readJournal reads and verifies the journal and returns the history of the

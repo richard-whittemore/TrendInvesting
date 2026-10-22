@@ -520,7 +520,7 @@ scenario "" x86_64 ntfy || fail "Lightsail ntfy failed: $(cat "$work/out")"
 called "fetch https://github.com/binwiederhier/ntfy" || fail "Lightsail's ntfy step no longer fetches the pinned server: $(cat "$work/calls")"
 said "SKIPPED the ntfy server's configuration" || fail "the ntfy step does not say it waits for Tailscale: $(cat "$work/out")"
 if called "ti-ntfy.service"; then fail "the ntfy step installed its unit with no Tailscale address"; fi
-for bad in 0.0.0.0 127.0.0.1 203.0.113.5 100.128.0.1 "100.64.0.1:2586"; do
+for bad in 0.0.0.0 127.0.0.1 203.0.113.5 100.128.0.1 "100.64.0.1:2586" 100.64.999.1 100.64.0.256 100.64.256.0; do
   if TI_NTFY_ADDRESS=$bad scenario "" x86_64 ntfy; then fail "the ntfy step accepted the address '$bad'"; fi
   said "not a Tailscale address" || fail "the ntfy step's refusal of '$bad' does not say why: $(cat "$work/out")"
   if called "ti-ntfy.service" || called "systemctl enable ti-ntfy"; then fail "the ntfy step set the server up for '$bad'"; fi

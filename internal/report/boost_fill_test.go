@@ -14,7 +14,9 @@ import (
 // a fill the order's release describes whatever the lifecycle reports said
 // before it, so the reporter counts a Boost order whose only report is such
 // a fill as acknowledged and does not page it as unacknowledged. A fill the
-// gate refuses acknowledges nothing (ADR 0022; ADR 0019, "Alerting").
+// gate refuses acknowledges nothing, and on an order already acknowledged,
+// where no unacknowledged page would follow, it is a venue report the engine
+// did not read, as in a momentum run (ADR 0022; ADR 0019, "Alerting").
 func TestABoostFillAcknowledgesAnOrderByTheGatesRule(t *testing.T) {
 	order := releasedOrder("tw-1", event.TradingModePaper)
 	at := day(0).Add(time.Minute)
@@ -27,41 +29,52 @@ func TestABoostFillAcknowledgesAnOrderByTheGatesRule(t *testing.T) {
 	}
 	cancel := event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: "tw-1", OrderID: "7", InstrumentID: "SPY", Side: event.OrderSideBuy,
 		Status: event.OrderLifecycleStatusCanceled, Quantity: order.Quantity, LimitPrice: order.LimitPrice, OccurredAt: at}
+	submitted := cancel
+	submitted.Status = event.OrderLifecycleStatusSubmitted
 	cases := map[string]struct {
 		add          func(*logRun)
 		acknowledged bool
 		by           string
+		unread       int
 	}{
 		"a fill of the whole order": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at, fill("f1", 9, nil))
-		}, true, "fill"},
+		}, true, "fill", 0},
 		"a part fill": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at, fill("f1", 4, nil))
-		}, true, "fill"},
+		}, true, "fill", 0},
 		"a fill after a cancellation, which the gate accepts": {func(r *logRun) {
 			r.add(journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "cancel", at, cancel)
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:late", at.Add(time.Minute), fill("f1", 4, nil))
-		}, true, "canceled"},
+		}, true, "canceled", 0},
 		"the same execution twice": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at, fill("f1", 4, nil))
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:again", at.Add(time.Minute), fill("f1", 4, nil))
-		}, true, "fill"},
+		}, true, "fill", 0},
 		"a fill past the order's quantity": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:big", at, fill("f1", 10, nil))
-		}, false, ""},
+		}, false, "", 0},
 		"a fill of the wrong side": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:side", at, fill("f1", 4, func(p *event.TargetWeightFillPayload) { p.Side = event.OrderSideSell }))
-		}, false, ""},
+		}, false, "", 0},
 		"a fill for another account": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:account", at, fill("f1", 4, func(p *event.TargetWeightFillPayload) { p.AccountID = "ira" }))
-		}, false, ""},
+		}, false, "", 0},
 		"a fill that does not validate": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:zero", at, fill("f1", 0, nil))
-		}, false, ""},
+		}, false, "", 0},
 		"a fill id reused for another execution": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at, fill("f1", 9, nil))
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:reused", at, fill("f1", 1, nil))
-		}, true, "fill"},
+		}, true, "fill", 1},
+		"a fill past the order's quantity after a lifecycle report acknowledged it": {func(r *logRun) {
+			r.add(journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "submitted", at, submitted)
+			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:big", at.Add(time.Minute), fill("f1", 10, nil))
+		}, true, "submitted", 1},
+		"a fill of the wrong side after a fill acknowledged the order": {func(r *logRun) {
+			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at, fill("f1", 4, nil))
+			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:side", at.Add(time.Minute), fill("f2", 1, func(p *event.TargetWeightFillPayload) { p.Side = event.OrderSideSell }))
+		}, true, "fill", 1},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -73,8 +86,8 @@ func TestABoostFillAcknowledgesAnOrderByTheGatesRule(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(unread) != 0 {
-				t.Errorf("unread %+v: a Boost fill raises no unread-report alert", unread)
+			if len(unread) != c.unread {
+				t.Errorf("unread %+v, want %d: only a fill the gate refuses on an order already acknowledged is a report the engine did not read", unread, c.unread)
 			}
 			got := stateOf(t, orders, "tw-1")
 			if (got.State == report.LifecycleAcknowledged) != c.acknowledged || got.Acknowledgement != c.by {
