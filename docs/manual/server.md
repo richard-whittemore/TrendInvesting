@@ -20,7 +20,8 @@ Everything that sets it up is in `deploy/`, run by `deploy/provision.sh`.
 
 One machine keeps the cost at about $170 a year (plan section 8). The price
 is that a reporter on the same machine cannot notice the machine itself
-dying: that needs an outside watcher, which is not built (below).
+dying: that needs an outside watcher, a Healthchecks check that pages you
+when the reporter's pings stop ("The outside heartbeat", below).
 
 ## Users
 
@@ -43,6 +44,7 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 | `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 17:05, retried at 18:05 and 20:05. A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. It fails, with a message, until the Boost engine has been started once |
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. The IRA instances are skipped: they have no configuration file |
 | `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; only Boost's timer is enabled, since the IRA engines have no configuration yet | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, and fails, with a message, until the engine has been started once and the `secrets.env` entries below are filled in |
+| `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter and the reporter each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit (for the engine, `ti-unit-failed@ti-engine@boost.service.service`), the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, the failed run's last journal line and the manual row to read ("A failed unit", below) | Only when one of those three units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
 | `ti-dashboard.service` | The read-only dashboard, on loopback port 8088 | Starts at boot (enabled) | Built and installed by `provision.sh services`; it finds the Boost engine's current run, the newest link of its chain of runs, on every request and follows the chain of runs back to the first, so a restart or an upgrade of the engine needs no dashboard restart. It shows a message, not a figure, until the engine has run once |
 | `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
@@ -78,7 +80,7 @@ then refuses to start in paper, which is safe, but your edits are gone.
 | File | What it holds | Who reads it |
 | --- | --- | --- |
 | `/etc/trend-investing/ibkr-login.env` (root only, mode 0600) | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
-| `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
+| `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
 | `/etc/trend-investing/accounts/boost.env` (root only, mode 0600, in a root-only folder, mode 0700) | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter only (`ti-adapter-boost.service`) |
 
 What each program actually reads today:
@@ -94,7 +96,10 @@ What each program actually reads today:
   (`-secrets-file`), through its unit's credential. It refuses to run, and
   its unit fails, while the topic or the routing key is empty: fill them in
   with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses
-  them. There is no line for the outside heartbeat, which is not built.
+  them. It also reads `TI_HEARTBEAT_URL`, the address of your check at the
+  outside heartbeat service; that one is optional for the run, but without
+  it nothing outside the server notices the server dying
+  ("The outside heartbeat", below).
 
 Never paste a secret into an issue, a pull request, a chat with an agent or
 a command line. Edit these files with `sudo -e`.
@@ -168,6 +173,58 @@ as a routine message on the incident channels and in its output; incident
 alerts are unaffected. Read the summary on the dashboard
 meanwhile ([alerts and dashboard](alerts-and-dashboard.md), "Where alerts
 go").
+
+## The outside heartbeat
+
+A reporter on the server cannot page you that the server died, so the
+reporter also pings an outside service, Healthchecks, at the end of every
+firing that finishes without a fault (every 5 minutes, around the clock). The
+service pages you through PagerDuty when the pings stop. You decided this is
+required before paper trading.
+
+What is sent: an empty request to your check's address, with nothing in it:
+no balance, account number, alert text or secret. The address is the check's
+key, so it lives only in `secrets.env` as `TI_HEARTBEAT_URL` and is never
+printed or logged. A ping that fails never fails the reporter's run: the
+reporter logs one line ("the heartbeat ping was not sent: ...", without the
+address) and pings again at the next firing. No ping is sent for a firing that
+failed, so a reporter that cannot deliver, or cannot read the log, also goes
+quiet and is noticed from outside; nor for a firing that found the engine or
+the adapter failed, even when its page was delivered, so a trading unit left
+failed for 20 minutes also takes the check down.
+
+**Set it up (once) [OWNER]:**
+
+1. Sign up at healthchecks.io. The free plan is enough for one check.
+2. Add a check named `trend-investing-reporter` with a **period of 5
+   minutes** (the reporter's timer) and a **grace time of 15 minutes**, so
+   the check is down 20 minutes after the last ping, on the fourth missed
+   firing, and one slow firing does not page you.
+3. Copy the check's ping address (`https://hc-ping.com/<uuid>`) and put it on the
+   server: `sudo -e /etc/trend-investing/secrets.env`, as the line
+   `TI_HEARTBEAT_URL=<the address>`. The next firing uses it.
+4. In Healthchecks, under Integrations, add **PagerDuty** (it asks you to
+   sign in to PagerDuty and pick the same service your reporter pages) and
+   tick it on the check.
+5. Test it: `sudo systemctl stop ti-reporter@boost.timer`. After about
+   20 minutes (the 5-minute period plus the 15 minutes' grace) PagerDuty
+   pages you that the check is down. Then `sudo systemctl start
+   ti-reporter@boost.timer`: the next firing pings and the check recovers.
+
+How to tell it from an engine alert: a heartbeat page comes from
+Healthchecks, names your check, and says nothing about an account or an
+engine. It means the reporter has not finished a clean firing for 20 minutes,
+for one of four reasons: the server is down or unreachable, the timer is
+stopped, every firing is failing, or the engine or the adapter has been failed
+for 20 minutes (a firing that finds a trading unit failed sends no ping, even
+when it delivered everything). The last is the likeliest: one stopped engine
+gives you two pages for one fault, first `<host>: <unit> failed` from the
+reporter, then, 20 minutes later, this one from Healthchecks. Act on the unit
+page ("A failed unit" below); the Healthchecks page clears by itself at the
+first clean firing after the unit is running again. If you have no unit page,
+check the server, the timer and the reporter's firings (`journalctl -u
+ti-reporter@boost`). Every page the reporter itself sends names an account or a
+unit.
 
 ## Where the records live
 
@@ -342,6 +399,54 @@ already at IBKR in IBKR's own app.
   adapter and goes out once the Gateway is back the same day, and an order already at IBKR keeps
   working until you cancel it in IBKR's app.
 
+## A failed unit
+
+The engine, the adapter and the reporter each name `ti-unit-failed@%n.service`
+in `OnFailure=`. When one fails, systemd starts that unit under the failed
+unit's name (for the engine, `ti-unit-failed@ti-engine@boost.service.service`;
+the rehearsal starts it under a real systemd), which runs `ti-reporter
+notify-unit-failed <unit>`: one urgent page on PagerDuty and your own ntfy
+server naming the unit, the reason (cleaned of addresses, account numbers and
+secrets) and the manual row to read. You are paged within a minute of the
+stop, not after two sessions of silence.
+
+- One page per failure, not per failed run. Every start of a unit is a new
+  run with its own invocation ID (`systemctl show -p InvocationID --value
+  <unit>`), which systemd hands the hook, and the page is keyed by the run
+  that began the failure. A failure lasts until the unit is seen well: a
+  reporter firing finds the engine or the adapter not failed, or, for the
+  reporter itself, a firing finishes without a fault. Every run that fails
+  before that (a unit you restart that fails again, a reporter that fails on
+  each 5-minute firing) is the same failure: it is not paged again and its
+  PagerDuty incident is neither resolved nor triggered anew. While it goes
+  on, at most once an hour, a reminder `<host>: <unit> still failing` is sent
+  (by a later failed run, or by a reporter firing that finds the unit still
+  failed), saying since when and, once two or more runs have failed, how
+  many, under the same incident. A failure after the unit was seen well pages
+  again. The record is `unit-failures.json` in
+  `/var/lib/trend-investing/reports/`.
+- The reason is the failed run's own last journal line. A run that wrote
+  nothing (a start systemd refused, such as a missing `run.env`) is explained
+  by systemd's own line about that run, such as "Failed to load environment
+  files: No such file or directory"; it is never a line from an earlier run.
+- The reporter's every firing asks systemd once, at its start, for the engine's
+  and the adapter's state and run (`systemctl show`). A failed run that the hook
+  did not page (the hook could not reach a channel, the unit failed before the
+  hook was installed, or you started a unit that was already failed and
+  systemd refused the start, which systemd does not hand to the hook) is paged
+  at that firing (unless its failure was already paged), and the
+  state-at-start page names every failed trading unit, so a reporter
+  restarted after the failure still tells you. The page of a unit that was not
+  failed at the firing's start is resolved; a page sent, or a failed run of
+  the same failure recorded, after the firing started is left for the next
+  firing, so a unit that fails again while a firing runs keeps its incident
+  open.
+- A failure of the reporter itself is paged by the hook too, once, however
+  many firings fail after it (with the hourly reminder), and resolved by the
+  next firing that finishes without a fault.
+- If the hook itself fails (`systemctl status ti-unit-failed@<unit>.service`),
+  no channel took the page; the reporter's next firing tries again.
+
 ## What can go wrong, and what happens then
 
 | What you see | What the program does | What you do |
@@ -359,7 +464,10 @@ already at IBKR in IBKR's own app.
 | `provision.sh ntfy` printed "SKIPPED the ntfy server's configuration: Tailscale is not signed in yet" | The program is installed; the server is not configured or started | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh ntfy` again |
 | `provision.sh ntfy` stopped with "is not a Tailscale address" | The address it was given is outside `100.64.0.0/10`; it configures nothing, so the server cannot be exposed | Do not set `TI_NTFY_ADDRESS` by hand on the server; sign in to Tailscale and run it again |
 | The reporter fails every firing | Nothing reaches your phone; the error is in `journalctl -u ti-reporter@boost` | [alerts and dashboard](alerts-and-dashboard.md), "What can go wrong" |
-| The machine dies, or the reporter never runs | **Nothing outside the server tells you.** The outside heartbeat (Healthchecks.io in plan section 7) is not built, and nothing reads a `HEALTHCHECK_URL` line. A reporter on the machine cannot notice the machine dying | Check the dashboard or the server yourself until it exists (tracked in the issue "External heartbeat and a recorded clock input for the margin alarm's 30-minute rule") |
+| A page from Healthchecks (through PagerDuty) that your check `trend-investing-reporter` is down | The reporter has not finished a clean firing for 20 minutes (period 5 minutes plus 15 minutes' grace). Nothing on the server sent this page; it works even when the server is dead | Check the server is up and reachable over Tailscale (the dashboard, or `ssh`). If it is: `systemctl list-timers ti-reporter@boost.timer`, then `journalctl -u ti-reporter@boost -n 50` for the run's error. If the server is dead, start it from the Lightsail console, then read "After a reboot" |
+| The reporter's journal says "the heartbeat ping was not sent: ..." | The reporter's run is unaffected; it will ping again at the next firing. The reason is the kind of failure only (an address that is not an absolute URL, the service not reached or not answering in time, or the status it answered), never the address | If the pages from Healthchecks come anyway, check `TI_HEARTBEAT_URL` in `secrets.env` is the check's full ping address and that the server can reach the internet. A single line during a Healthchecks outage needs nothing |
+| No page from Healthchecks when you stop the timer (the test above) | The check is not wired: the address is missing or wrong, the period or grace is wrong, or the PagerDuty integration is not ticked on the check | Healthchecks' page for the check shows the last ping; fix the address, the 5-minute period, the 15-minute grace, or the integration |
+| A page from the server, titled with the unit's name and ending "failed", that a trading unit failed | The engine, the adapter or the reporter stopped and systemd does not restart them. See "A failed unit" below | Read the manual row the page names, then `journalctl -u <unit>` |
 | `provision.sh firewall` printed "SKIPPED firewall: Tailscale is not signed in yet" | The firewall is not changed, so the public door is still open | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh firewall` again |
 | The disk fills | An engine that cannot write its log stops deciding and releases nothing more (ADR 0027); the data job writes nothing; the reporter cannot save its state | Free space, then resume or start as `docs/runbooks/durable-log.md` says |
 | The server's clock drifts behind IBKR's | The engine counts the account reading as stale and blocks every sell (`stale-broker-snapshot`); the sale back to 98% is withheld and you are alerted to that. The reporter's own clock check pages you first, within 10 minutes of the drift ("The server's clock failed its check") | Run the clock check ("The clock", above); fix the time syncing (or, on the Mac mini, the Mac's automatic date and time), then wait for the next close |

@@ -131,8 +131,18 @@ cannot check the heartbeat" alert, once per distinct problem, so a timer run
 never fails silently. The minimum is 2 because a session's close is counted
 before the engine writes that session's records, so 1 would page every
 trading day. A reporter running on the engine's
-own machine cannot catch that machine dying; the outside dead-man's switch
-ADR 0019 asks for is a separate service and is not built.
+own machine cannot catch that machine dying, so every firing that finishes
+without a fault also pings an outside service (Healthchecks), which pages you
+through PagerDuty when the pings stop: that page comes from Healthchecks, not
+from the reporter, names your check and no account, and means no clean firing
+for 20 minutes: the server, the timer or the reporter's firings, or, most
+likely, an engine or adapter left failed for 20 minutes, which first paged you
+`<host>: <unit> failed`; act on that page, and this one clears at the first
+clean firing after the unit runs again ([server](server.md), "The outside
+heartbeat"). A trading unit
+that stops (the engine, the adapter, the reporter) pages you at once through
+the reporter's own channels ("The reporter itself", below, the row
+`<host>: <unit> failed`).
 
 If the log cannot be read, the alert is named by the account the log names,
 or by `-account`, or by the log file's name.
@@ -1024,6 +1034,7 @@ name; the other words in angle brackets are filled in by the reporter.
 | `<account>: order <id> not acknowledged` | urgent | [order lifecycle](order-lifecycle.md) |
 | `<account>: order <id> acknowledged` | routine | [order lifecycle](order-lifecycle.md) |
 | `<host>: the server's clock failed its check` (the server's name, not an account's) | urgent | this chapter, below, and [server](server.md), "The clock" |
+| `<host>: <unit> failed` (the server's name and the failed unit's, such as `ti-adapter-boost.service`) | urgent | this chapter, below, and [server](server.md), "A failed unit"; the engine's and adapter's chapters have a row for their own unit |
 | `<account>: daily summary <date>` | routine | this chapter, "What the summary shows, and its limits" |
 
 **Why an order was refused.** The reason in `order refused (<reason>)`:
@@ -1092,9 +1103,12 @@ passes `-clock-check`.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| Nothing at all for a long time | Possible causes: the timer is not running, the binary is not installed, or every run stops before it sends (the rows below). Nothing outside the server notices: the outside heartbeat (a dead-man's switch) is not built, and nothing reads a `HEALTHCHECK_URL` line | `systemctl list-timers ti-reporter@boost.timer` shows the next firing; `systemctl status ti-reporter@boost` and `journalctl -u ti-reporter@boost` show the last run and its error |
-| The unit failed: "ti-reporter: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the boost engine once first ..." | The reporter does not run, so it sends nothing | Start the engine by `docs/runbooks/durable-log.md`, "Restarting an engine"; the next firing follows its log |
-| `<account>: state at reporter start: <state>`, urgent, then each open alert with its title beginning "state at reporter start:" | This channel began with the reporter after the log's earlier events: the state file is new or was lost (moved aside, say), or you just named the channel in `-channel`. It is sent no routine history, only what is in force: the page names the engine state and scope, an engaged kill switch, a pending cash read, the margin-cushion alarm and every open alert, and those alerts repeat until acknowledged. Once per channel | Read the page and act on each open alert as you would on its first page; acknowledge each with `operator acknowledge` and the key it gives ([operator](operator.md), "Acknowledging an alert"). Check the account on the dashboard or with `journal-query` |
+| Nothing at all for a long time | Possible causes: the timer is not running, the binary is not installed, or every run stops before it sends (the rows below). If the whole server is down, the page comes from Healthchecks instead ([server](server.md), "The outside heartbeat"): your check `trend-investing-reporter` is down, and it names no account | `systemctl list-timers ti-reporter@boost.timer` shows the next firing; `systemctl status ti-reporter@boost` and `journalctl -u ti-reporter@boost` show the last run and its error |
+| The unit failed: "ti-reporter: /var/lib/trend-investing/engines/boost/run.env is missing or empty: start the boost engine once first ..." | The reporter does not run, so it sends nothing from the log. Its unit's failure is paged once by the hook (`<host>: ti-reporter@boost.service failed`, below), not at every firing, with a reminder at most once an hour while every firing fails | Start the engine by `docs/runbooks/durable-log.md`, "Restarting an engine"; the next firing follows its log |
+| `<account>: state at reporter start: <state>`, urgent, then each open alert with its title beginning "state at reporter start:" | This channel began with the reporter after the log's earlier events: the state file is new or was lost (moved aside, say), or you just named the channel in `-channel`. It is sent no routine history, only what is in force: the page names the engine state and scope, an engaged kill switch, a pending cash read, the margin-cushion alarm and every open alert, and any failed trading unit (named with its manual row), and those alerts repeat until acknowledged. Once per channel | Read the page and act on each open alert as you would on its first page; acknowledge each with `operator acknowledge` and the key it gives ([operator](operator.md), "Acknowledging an alert"). Check the account on the dashboard or with `journal-query` |
+| `<host>: <unit> failed`, urgent, once per failure: the unit is `ti-engine@boost.service`, `ti-adapter-boost.service` or `ti-reporter@boost.service`. The text names the unit, the failed run's own last journal line as the reason (or, for a run that wrote nothing, systemd's line about that run) and the manual row to read | A trading unit failed and systemd does not restart it. The `ti-unit-failed@<unit>.service` unit started by the unit's `OnFailure=` sent this page to PagerDuty and your own ntfy server within a minute; it carries no balance, account number or secret. The page is keyed by the run that began the failure (systemd's invocation ID). Every run that fails before the unit is seen well again (a unit restarted that fails again, a reporter failing at each firing) is the same failure: no second page and no resolve-and-trigger of its incident, only `<host>: <unit> still failing`, at most once an hour for as long as the unit stays failed, saying since when and, once two or more runs are known to have failed, how many. The reporter's every firing asks systemd for the engine's and the adapter's state and run at its start too: it pages a failure the hook missed, and resolves the PagerDuty incident of a unit no longer failed; a failure after that pages again. A reporter's own failure is resolved by its next clean firing. While the engine or the adapter is failed the reporter sends no outside heartbeat ping ([server](server.md), "A failed unit") | Read the manual row the page names (the engine's or the adapter's chapter), `journalctl -u <unit>` for the whole reason, then start the engine or the adapter as that row says. Nothing restarts them for you |
+| `<host>: <unit> still failing`, urgent, at most once an hour: "still failing since <time>", plus ", N failed runs" only when two or more runs are known | The unit paged as `<host>: <unit> failed` is still failed and was never seen well between: a unit that failed once and stays failed (nothing restarts it) gets this reminder every hour with no count, and one that has failed again, run after run, gets it with the count of its failed runs. This is a reminder under the same PagerDuty incident, not a new page. It carries no journal line. It stops when the unit is seen well (a firing finds the engine or the adapter not failed, or the reporter finishes a clean firing), which resolves the incident | Act on the first page's manual row; for the reporter, the row of its error (`journalctl -u ti-reporter@boost`), such as starting the engine once or fixing a channel |
+| A trading unit failed and no page about it came | The hook could not reach a channel (`systemctl status ti-unit-failed@<unit>` shows it failed), or the unit failed before the hook was installed. The next reporter firing pages it (within 5 minutes), and the state-at-start page names every failed trading unit | Wait for the next firing; if nothing comes, `systemctl --failed` on the server shows the unit, and the reporter's own error (`journalctl -u ti-reporter@boost`) says why it could not page |
 | `<account>: the reporter cannot deliver to <channel>`, urgent, on the channels that still work | One channel's secret is empty or malformed, or its name in `-channel` is unknown, so that channel is set aside; every alert still goes to the others, the daily summary ends with "Channels not delivering:" naming it, and the run ends with an error naming it (the rows below). Once per channel and problem; nothing reaches the channel set aside until it is fixed | Fix that channel's line in `secrets.env` (the rows below say which), or the unit's `-channel`; the next firing delivers to it everything it missed |
 | "reporter: the ntfy channel needs TI_NTFY_TOPIC ..." or "reporter: the pagerduty channel needs TI_PAGERDUTY_ROUTING_KEY ..." | That channel is set aside and the other still delivers (the row above). With no channel left that reaches you, the whole run is refused before anything is sent | Fill the line in with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses it |
 | "reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org" or "reporter: TI_PAGERDUTY_URL must be an absolute URL such as https://events.pagerduty.com/v2/enqueue" | That channel is set aside and the other still delivers; with none left, the run is refused before anything is sent | Correct the line, or leave `TI_PAGERDUTY_URL` empty for PagerDuty's own endpoint; an empty `TI_NTFY_SERVER` is the public ntfy.sh relay, which takes incident alerts but not the daily summary |
@@ -1173,7 +1187,10 @@ passes `-clock-check`.
   `TestAMultipartNtfyMessageHasOneDeadlineForAllItsParts`,
   `TestRestoringTheSummaryRouteResolvesTheNoticesIncident`,
   `TestTheNoChannelNoticeIsKeyedByTheAccountAlone`,
-  `TestTheDailySummaryGivesThisMonthsCostsFromTheLedgerBesideTheCashLedger` and
+  `TestTheDailySummaryGivesThisMonthsCostsFromTheLedgerBesideTheCashLedger`,
+  `TestAReporterThatFailsEveryFiringPagesOnceAndRemindsHourly`,
+  `TestAFailureAfterTheUnitWasSeenWellPagesAgain`,
+  `TestAFiringThatFindsATradingUnitFailedSendsNoPing` and
   `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`; in
   `internal/report`, `TestTheStateAtReporterStartNamesBoostsStoppedBuys`,
   `TestTheSecondRejectionStopsBuysAtOnceInTheStanding` and

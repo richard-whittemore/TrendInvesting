@@ -247,7 +247,9 @@ import (
 //     unfilled, and a retired sale back to 98% spent no attempt, so it is
 //     attempted again under its own rule, under a client order ID of its
 //     own. Each Boost decision records the retired orders (decision schema
-//     7), so a restart refuses a venue report on one as the full run does.
+//     7), so a restart refuses a venue report on one as the full run does,
+//     and the sale attempt the owner's approval restored, so a restart
+//     restores it.
 //     A momentum rebalance with a retired sell never starts its buy phase,
 //     and once its orders are all terminal it completes. A venue report on
 //     a retired order is refused. A dry-run refuses every retirement.
