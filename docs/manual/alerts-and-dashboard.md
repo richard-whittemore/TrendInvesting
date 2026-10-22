@@ -612,11 +612,15 @@ triage job"). Each run is one poll:
    miss one (the pages of `alert` shift by one), so a listing is never taken
    as proof that an issue was handled: one it missed is not in the record,
    and the next poll lists and analyses it. An issue closed more than 30
-   days ago is not listed, so it is not picked up again, and the record of
-   one handled is dropped only when the record itself shows the issue
-   closed more than 30 days ago (the job writes the closing time into the
-   record whenever it sees the issue closed; a listing that merely omits an
-   issue, or a record with no closing time, never drops it) (so an alert the job never reached in those 30
+   days ago is not listed, so it is not picked up again. The record of
+   one handled notes when the issue was closed and when a poll last listed
+   it (the job writes both each time it handles or lists the issue), and is
+   dropped only once no poll has listed the issue for more than 30 days, so
+   the state file stays bounded; a listing that merely omits an issue does
+   not drop its record until then, and a record written before the job kept
+   a listing time starts its 30 days at the next poll. Should an issue
+   return to the listing, the job's own comment on it marks it handled
+   before anything is spent (so an alert the job never reached in those 30
    days, the job off or failing throughout, is left for you, and so is a
    comment the job still owed it). More than 1,000 issues of one label in
    either set (open since the job was switched on, or closed in the last
@@ -1779,6 +1783,8 @@ nor that nothing was analysed ("Its log", above).
   `TestAnIncompleteOrInvalidStateFileStopsTheJob`,
   `TestHandledIssuesAreNeverReadAgain`,
   `TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed`,
+  `TestARecordWhoseIssueDisappearsFromListingsIsBounded`,
+  `TestAClosedIssueHandledJustBeforeDay30IsNotAnalysedAgain`,
   `TestAnAlertShiftedPastAPageByARelabelIsAnalysedAtTheNextPoll`,
   `TestFieldsThatGrowUnderRedactionStillFitOneComment`,
   `TestADefectGoesThroughTheGateToADraftPullRequestOnGitHub`,

@@ -306,11 +306,13 @@ func (g *gateBox) Sweep(ctx context.Context) error {
 // still runs. The job starts sudo in /, never in a folder of the gate
 // user's (its copy is the gate user's alone, mode 700): env, as the gate
 // user inside the sandbox, enters the folder. The ports in use are read
-// just before the command starts. A command the gate could not start
-// (sudo, sandbox-exec, env or the program missing or refusing: the
-// launcher never ran it) and one after which the gate user's processes
-// could not all be ended are the gate's failure (errGateStep,
-// errGateUnavailable), never the command's, whatever ctx did meanwhile.
+// just before the command starts. A command that never launched (sudo,
+// sandbox-exec, env or the program missing or refusing: the launcher left
+// no mark) and one after which the gate user's processes could not all be
+// ended are the gate's failure (errGateStep, errGateUnavailable), never the
+// command's. The exceptions are a ctx already done before the command
+// started, and a launcher process that was never started once ctx is done:
+// both are the job's own stop, and return ctx's error.
 func (g *gateBox) Run(ctx context.Context, runDir, wd string, argv []string) (string, error) {
 	var id [8]byte
 	if _, err := rand.Read(id[:]); err != nil {

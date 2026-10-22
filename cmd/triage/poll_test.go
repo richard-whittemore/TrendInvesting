@@ -848,7 +848,7 @@ func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
 		{Number: 32, Body: alertBody, Author: "owner", Created: start.Add(3 * day), Closed: pollTime.Add(-29 * day)},
 	}
 	if err := saveState(w.job.statePath, &state{Since: start, Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{
-		"30": {Done: true, Closed: pollTime.Add(-31 * day)}, "31": {Invoked: true, Pending: "kept\n\n" + analysisMarker}, "32": {Done: true, Closed: pollTime.Add(-29 * day)},
+		"30": {Done: true, Closed: pollTime.Add(-31 * day), LastListed: pollTime.Add(-31 * day)}, "31": {Invoked: true, Pending: "kept\n\n" + analysisMarker}, "32": {Done: true, Closed: pollTime.Add(-29 * day), LastListed: pollTime.Add(-day)},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -872,16 +872,17 @@ func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
 
 // TestADoneRecordSurvivesAListingThatOmitsItsIssue: a listing GitHub
 // answers without an issue (relabelled while it was read) never deletes the
-// issue's done record; only the record's own closing time, older than
-// retention, does. A record with no closing time (never seen closed) stays.
+// issue's done record at once; only 30 days without being listed does. A
+// record with no listing time (written before the job kept one) starts its
+// 30 days at this poll.
 func TestADoneRecordSurvivesAListingThatOmitsItsIssue(t *testing.T) {
 	w := newWorld(t)
 	day := 24 * time.Hour
 	start := pollTime.Add(-90 * day)
 	if err := saveState(w.job.statePath, &state{Since: start, Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{
 		"60": {Done: true},
-		"61": {Done: true, Closed: pollTime.Add(-5 * day)},
-		"62": {Done: true, Closed: pollTime.Add(-31 * day)},
+		"61": {Done: true, LastListed: pollTime.Add(-5 * day)},
+		"62": {Done: true, LastListed: pollTime.Add(-31 * day)},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -890,11 +891,73 @@ func TestADoneRecordSurvivesAListingThatOmitsItsIssue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, k60 := st.Issues["60"]
 	_, k61 := st.Issues["61"]
 	_, k62 := st.Issues["62"]
-	if !k60 || !k61 || k62 {
-		t.Fatalf("records %+v; want #60 (no closing time) and #61 (closed 5 days ago) kept, #62 (closed 31 days ago) dropped", st.Issues)
+	if !st.Issues["60"].Done || !st.Issues["60"].LastListed.Equal(pollTime) || !k61 || k62 {
+		t.Fatalf("records %+v; want #60 kept with its clock started now, #61 (listed 5 days ago) kept, #62 (not listed for 31 days) dropped", st.Issues)
+	}
+}
+
+// TestARecordWhoseIssueDisappearsFromListingsIsBounded: a done record of
+// an issue that is never listed again (deleted, or relabelled away) is
+// dropped 30 days after it was last listed, not kept for ever.
+func TestARecordWhoseIssueDisappearsFromListingsIsBounded(t *testing.T) {
+	w := newWorld(t)
+	day := 24 * time.Hour
+	w.tracker.issues[alertLabel] = []issue{{Number: 90, Body: alertBody, Author: "owner", Created: pollTime.Add(-10 * day)}}
+	if err := saveState(w.job.statePath, &state{Since: pollTime.Add(-90 * day), Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{"90": {Done: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(t)
+	st, err := loadState(w.job.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Issues["90"].Done || !st.Issues["90"].LastListed.Equal(pollTime) {
+		t.Fatalf("record %+v; want done, listed at %v", st.Issues["90"], pollTime)
+	}
+	w.tracker.issues[alertLabel] = w.tracker.issues[alertLabel][:0]
+	w.job.now = func() time.Time { return pollTime.Add(29 * day) }
+	w.poll(t)
+	if st, _ = loadState(w.job.statePath); !st.Issues["90"].Done {
+		t.Fatalf("records %+v; want #90 kept 29 days after it was last listed", st.Issues)
+	}
+	w.job.now = func() time.Time { return pollTime.Add(31 * day) }
+	w.poll(t)
+	if st, _ = loadState(w.job.statePath); st.Issues["90"] != (issueRecord{}) {
+		t.Fatalf("records %+v; want #90 dropped 31 days after it was last listed", st.Issues)
+	}
+}
+
+// TestAClosedIssueHandledJustBeforeDay30IsNotAnalysedAgain: an issue
+// closed 29.5 days ago and handled in this poll has its closing time and
+// listing time recorded, so the record outlives the issue's leaving the
+// listing the next day and is dropped only 30 days after its last listing.
+func TestAClosedIssueHandledJustBeforeDay30IsNotAnalysedAgain(t *testing.T) {
+	w := newWorld(t)
+	day := 24 * time.Hour
+	closed := pollTime.Add(-29*day - 12*time.Hour)
+	w.tracker.issues[resolvedLabel] = []issue{{Number: 80, Body: alertBody, Author: "owner", Created: pollTime.Add(-40 * day), Closed: closed}}
+	if err := saveState(w.job.statePath, &state{Since: pollTime.Add(-90 * day), Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{}}); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(t)
+	st, err := loadState(w.job.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := st.Issues["80"]; !r.Done || !r.Closed.Equal(closed) || !r.LastListed.Equal(pollTime) {
+		t.Fatalf("record %+v; want done, closed at %v, listed at %v", r, closed, pollTime)
+	}
+	w.job.now = func() time.Time { return pollTime.Add(day) }
+	w.poll(t)
+	if st, _ = loadState(w.job.statePath); !st.Issues["80"].Done {
+		t.Fatalf("records %+v; want #80 kept the day after it left the listing", st.Issues)
+	}
+	w.job.now = func() time.Time { return pollTime.Add(31 * day) }
+	w.poll(t)
+	if st, _ = loadState(w.job.statePath); st.Issues["80"] != (issueRecord{}) {
+		t.Fatalf("records %+v; want #80 dropped 31 days after it was last listed", st.Issues)
 	}
 }
 

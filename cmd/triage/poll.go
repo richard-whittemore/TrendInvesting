@@ -185,8 +185,11 @@ type state struct {
 	Calls *int   `json:"calls"`
 	// Issues is each issue's record, by number: one Done is handled
 	// (analysed, skipped past the cap, or failed), and is never read again.
-	// A Done record is dropped once its issue has been closed for longer
-	// than retention, and such an issue is not listed as new again.
+	// A Done record carries when its issue was last listed (LastListed) and
+	// is dropped once no poll has listed the issue for longer than retention
+	// (an issue closed that long ago is not listed, and a re-listed one is
+	// marked done by the job's own comment before anything is spent), so the
+	// file stays bounded.
 	Issues map[string]issueRecord `json:"issues"`
 }
 
@@ -202,9 +205,11 @@ type issueRecord struct {
 	GateFailed  bool   `json:"gate_failed,omitempty"`
 	Pending     string `json:"pending,omitempty"`
 	Done        bool   `json:"done,omitempty"`
-	// Closed is when the issue was last seen closed; a done record is
-	// dropped only once this is older than retention.
+	// Closed is when the issue was closed, as of the last poll that handled
+	// or listed it; zero while open.
 	Closed time.Time `json:"closed,omitempty"`
+	// LastListed is when a poll last found the issue in its listing.
+	LastListed time.Time `json:"last_listed,omitempty"`
 }
 
 // poll is one run of the job: every alert issue with no triage comment yet
@@ -270,10 +275,10 @@ func (j *job) today(st *state) {
 // leaves the alert label"): the open ones, and the closed ones that closed
 // within retention. Every poll lists them all, so one a listing missed
 // (relabelled while it was read) is reached by the next. The done record
-// of an issue not listed is dropped from st only when the record itself
-// shows it closed for longer than retention (a listing that merely missed
-// the issue keeps it): should the issue be listed again, its own comment marks it done
-// before anything is spent. An issue the reporter did not open (another
+// of an issue not listed is dropped from st only once it has gone unlisted
+// for longer than retention (a listing that merely missed the issue keeps
+// it for that time): should the issue be listed again, its own comment
+// marks it done before anything is spent. An issue the reporter did not open (another
 // author, or no hidden key line) is never read further: its words are not
 // the reporter's.
 func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue, error) {
@@ -289,8 +294,8 @@ func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue
 		}
 		seen[is.Number] = true
 		rec := st.Issues[strconv.Itoa(is.Number)]
-		if rec.Done && !rec.Closed.Equal(is.Closed) {
-			rec.Closed = is.Closed
+		if rec.Done {
+			rec.Closed, rec.LastListed = is.Closed, j.now()
 			st.Issues[strconv.Itoa(is.Number)] = rec
 		}
 		if rec.Done || !strings.EqualFold(is.Author, author) || !strings.Contains(is.Body, alertKeyLine) {
@@ -299,7 +304,16 @@ func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue
 		out = append(out, is)
 	}
 	for key, rec := range st.Issues {
-		if n, err := strconv.Atoi(key); err == nil && rec.Done && !seen[n] && !rec.Closed.IsZero() && rec.Closed.Before(j.now().Add(-retention)) {
+		n, err := strconv.Atoi(key)
+		if err != nil || !rec.Done || seen[n] {
+			continue
+		}
+		switch {
+		case rec.LastListed.IsZero():
+			// Written before the job kept a listing time: its 30 days begin now.
+			rec.LastListed = j.now()
+			st.Issues[key] = rec
+		case rec.LastListed.Before(j.now().Add(-retention)):
 			delete(st.Issues, key)
 		}
 	}
@@ -321,23 +335,23 @@ func (j *job) triage(ctx context.Context, st *state, is issue) error {
 		return err
 	}
 	if slices.ContainsFunc(own, func(c string) bool { return strings.Contains(c, triageMarkerPrefix) }) {
-		st.Issues[key] = issueRecord{Done: true}
+		st.Issues[key] = j.doneRecord(is)
 		return saveState(j.statePath, st)
 	}
 	rec := st.Issues[key]
 	switch {
 	case rec.Pending != "":
-		return j.post(ctx, st, is.Number, rec)
+		return j.post(ctx, st, is, rec)
 	case rec.Invoked:
 		// The call was made and its answer lost (the run died during it):
 		// it is not made again.
 		rec.Pending = failedComment("the analysis did not finish, and is not tried again")
-		return j.post(ctx, st, is.Number, rec)
+		return j.post(ctx, st, is, rec)
 	}
 	j.today(st)
 	if *st.Calls >= j.dailyCap {
 		rec.Pending = skippedComment
-		return j.post(ctx, st, is.Number, rec)
+		return j.post(ctx, st, is, rec)
 	}
 	prep, err := j.prepare(ctx, is)
 	if err != nil {
@@ -349,7 +363,7 @@ func (j *job) triage(ctx context.Context, st *state, is issue) error {
 	j.today(st)
 	if *st.Calls >= j.dailyCap {
 		rec.Pending = skippedComment
-		return j.post(ctx, st, is.Number, rec)
+		return j.post(ctx, st, is, rec)
 	}
 	*st.Calls++
 	rec.Invoked = true
@@ -379,7 +393,7 @@ func (j *job) triage(ctx context.Context, st *state, is issue) error {
 	// A gate unavailable a second time: the analysis stands, its fix said
 	// not opened.
 	rec.Pending = comment
-	return j.post(ctx, st, is.Number, rec)
+	return j.post(ctx, st, is, rec)
 }
 
 // skippedComment is the comment of an issue past the day's cap.
@@ -387,18 +401,24 @@ const skippedComment = "triage skipped: daily limit. The day's limit of analyses
 
 // post keeps rec's comment, cut to GitHub's limit (fittedComment), in the
 // state file, posts it, and records the issue done.
-func (j *job) post(ctx context.Context, st *state, number int, rec issueRecord) error {
-	key := strconv.Itoa(number)
+func (j *job) post(ctx context.Context, st *state, is issue, rec issueRecord) error {
+	key := strconv.Itoa(is.Number)
 	rec.Pending = fittedComment(rec.Pending)
 	st.Issues[key] = rec
 	if err := saveState(j.statePath, st); err != nil {
 		return err
 	}
-	if err := j.tracker.Comment(ctx, number, rec.Pending); err != nil {
+	if err := j.tracker.Comment(ctx, is.Number, rec.Pending); err != nil {
 		return err
 	}
-	st.Issues[key] = issueRecord{Done: true}
+	st.Issues[key] = j.doneRecord(is)
 	return saveState(j.statePath, st)
+}
+
+// doneRecord is the record of an issue handled: when it was closed (zero
+// while open) and when it was listed, which the next listings keep current.
+func (j *job) doneRecord(is issue) issueRecord {
+	return issueRecord{Done: true, Closed: is.Closed, LastListed: j.now()}
 }
 
 // prepared is what a session is started with: its worktree and branch, and
