@@ -132,11 +132,11 @@ func TestAMissingJournalPathIsAlertedOnceWithoutAHeartbeatCheck(t *testing.T) {
 	if !strings.Contains(all, "missing.journal: the reporter cannot read the journal") || strings.Contains(all, "no engine heartbeat") || strings.Contains(all, "The heartbeat is still checked") || !strings.Contains(all, "The heartbeat is NOT checked: the journal file has no modification time") {
 		t.Fatalf("want the refusal alert and no heartbeat alert:\n%s", all)
 	}
-	sent := len(r.to("events.pagerduty.test"))
+	sent := count(r.to("events.pagerduty.test"), "cannot read the journal")
 	if err := run(args, environment, now, &bytes.Buffer{}, client); err == nil {
 		t.Fatal("the failure must be returned on every run")
 	}
-	if again := len(r.to("events.pagerduty.test")); again != sent || sent != 1 {
+	if again := count(r.to("events.pagerduty.test"), "cannot read the journal"); again != sent || sent != 1 {
 		t.Fatalf("the refusal must be delivered once: %d then %d", sent, again)
 	}
 }

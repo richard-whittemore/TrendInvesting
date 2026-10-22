@@ -513,6 +513,25 @@ scenario "" x86_64 gateway || status=$?
 test "$status" = 75 || fail "Lightsail's gateway step did not stop at its stand-in (status $status): $(cat "$work/out")"
 called "fetch https://github.com/IbcAlpha" || fail "Lightsail's gateway step no longer fetches IBC: $(cat "$work/calls")"
 
+# The owner's own ntfy server: fetched against its pin on Lightsail; with no
+# Tailscale address it is installed and not configured; an address outside the
+# tailnet's range is refused; the Mac mini has none.
+scenario "" x86_64 ntfy || fail "Lightsail ntfy failed: $(cat "$work/out")"
+called "fetch https://github.com/binwiederhier/ntfy" || fail "Lightsail's ntfy step no longer fetches the pinned server: $(cat "$work/calls")"
+said "SKIPPED the ntfy server's configuration" || fail "the ntfy step does not say it waits for Tailscale: $(cat "$work/out")"
+if called "ti-ntfy.service"; then fail "the ntfy step installed its unit with no Tailscale address"; fi
+for bad in 0.0.0.0 127.0.0.1 203.0.113.5 100.128.0.1 "100.64.0.1:2586" 100.64.999.1 100.64.0.256 100.64.256.0; do
+  if TI_NTFY_ADDRESS=$bad scenario "" x86_64 ntfy; then fail "the ntfy step accepted the address '$bad'"; fi
+  said "not a Tailscale address" || fail "the ntfy step's refusal of '$bad' does not say why: $(cat "$work/out")"
+  if called "ti-ntfy.service" || called "systemctl enable ti-ntfy"; then fail "the ntfy step set the server up for '$bad'"; fi
+done
+TI_NTFY_ADDRESS=100.100.1.2 scenario "" x86_64 ntfy || fail "the ntfy step refused a Tailscale address: $(cat "$work/out")"
+called "/systemd/ti-ntfy.service" || fail "the ntfy step did not install its unit: $(cat "$work/calls")"
+called "systemctl enable ti-ntfy.service" || fail "the ntfy step did not enable its unit"
+said "http://100.100.1.2:2586" || fail "the ntfy step does not print the server URL for secrets.env: $(cat "$work/out")"
+scenario mac-mini aarch64 ntfy || fail "Mac mini ntfy failed: $(cat "$work/out")"
+test ! -s "$work/calls" || fail "the Mac mini's ntfy step changed something: $(cat "$work/calls")"
+
 # --- The Mac mini.
 if scenario mac-mini x86_64 services; then fail "the Mac mini target accepted x86_64"; fi
 said "arm64" || fail "the Mac mini's x86_64 refusal does not say arm64: $(cat "$work/out")"

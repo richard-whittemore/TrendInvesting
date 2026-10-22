@@ -538,40 +538,91 @@ func (g *Gate) recordBroker(next event.BrokerSnapshotPayload) {
 }
 
 // reportedOrder returns the released order a venue report names, checking
-// that the report describes it.
+// that the report describes it (checkReport).
 func (g *Gate) reportedOrder(account, client, instrument, side string) (*releasedOrder, error) {
-	o, ok := g.orders[client]
-	switch {
-	case account != g.accountID:
-		return nil, fmt.Errorf("risklimit: report for account %q; this gate is %q", account, g.accountID)
-	case !ok:
-		return nil, fmt.Errorf("risklimit: report names order %s, which the gate never released", client)
-	case o.planned.InstrumentID != instrument || o.planned.Side != side:
-		return nil, fmt.Errorf("risklimit: report describes %s %s, but order %s is %s %s", side, instrument, client, o.planned.Side, o.planned.InstrumentID)
+	o := g.orders[client]
+	if err := checkReport(account, client, instrument, side, g.accountID, o.fillOrder()); err != nil {
+		return nil, err
 	}
 	return o, nil
 }
 
-// ObserveFill applies a recorded execution of a released order, which is
-// also a change a reconciliation's book is bridged by. A redelivery of an
-// execution already applied changes nothing: a fill already applied can
-// never be added again to erase a difference (ADR 0019, "Explained means").
-func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
+// checkReport checks that a venue report for account names a released order
+// of the gate's account, order (nil when none was released), and describes
+// its instrument and side.
+func checkReport(account, client, instrument, side, gateAccount string, order *FillOrder) error {
+	switch {
+	case account != gateAccount:
+		return fmt.Errorf("risklimit: report for account %q; this gate is %q", account, gateAccount)
+	case order == nil:
+		return fmt.Errorf("risklimit: report names order %s, which the gate never released", client)
+	case order.InstrumentID != instrument || order.Side != side:
+		return fmt.Errorf("risklimit: report describes %s %s, but order %s is %s %s", side, instrument, client, order.Side, order.InstrumentID)
+	}
+	return nil
+}
+
+// FillOrder is a released order as the fill rule reads it: its account,
+// client order ID, instrument and side, the shares released, and the shares
+// the fills applied to it so far executed.
+type FillOrder struct {
+	AccountID, ClientOrderID, InstrumentID, Side string
+	Quantity, Reported                           int64
+}
+
+// fillOrder is the order as the fill rule reads it; nil for none.
+func (o *releasedOrder) fillOrder() *FillOrder {
+	if o == nil {
+		return nil
+	}
+	return &FillOrder{AccountID: o.planned.AccountID, ClientOrderID: o.planned.ClientOrderID, InstrumentID: o.planned.InstrumentID,
+		Side: o.planned.Side, Quantity: o.planned.Quantity, Reported: o.reported}
+}
+
+// CheckFill is the rule a recorded execution of a released order is applied
+// by: the one ObserveFill applies, and the one the reporter reads a Boost
+// run's fills by, so the two cannot disagree about which fill counts. It
+// needs no limits: a fill is checked against the order it names, nothing
+// else. p must validate; a fill whose ID was already applied (applied, by
+// fill ID) is a redelivery, which changes nothing, when it is the same
+// execution, and refused when it is another (ADR 0019, "Explained means": a
+// fill already applied can never be added again to erase a difference);
+// otherwise it must be for the gate's account (account), name a released
+// order (order, nil when none was), describe its instrument and side, and
+// not take it past the shares released. A whole or part fill counts
+// whatever the lifecycle reports before it said, a late fill after a
+// cancellation included (ADR 0022).
+func CheckFill(p event.TargetWeightFillPayload, account string, order *FillOrder, applied map[string]event.TargetWeightFillPayload) (redelivery bool, err error) {
 	if err := p.Validate(); err != nil {
-		return fmt.Errorf("risklimit: %w", err)
+		return false, fmt.Errorf("risklimit: %w", err)
 	}
-	if seen, ok := g.fills[p.FillID]; ok {
+	if seen, ok := applied[p.FillID]; ok {
 		if seen.SameExecution(p) {
-			return nil
+			return true, nil
 		}
-		return fmt.Errorf("risklimit: fill id %s is reused for a different execution", p.FillID)
+		return false, fmt.Errorf("risklimit: fill id %s is reused for a different execution", p.FillID)
 	}
-	o, err := g.reportedOrder(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side)
-	if err != nil {
+	if err := checkReport(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, account, order); err != nil {
+		return false, err
+	}
+	if order.Reported+p.Quantity > order.Quantity {
+		return false, fmt.Errorf("risklimit: fill %s takes order %s past its %d shares", p.FillID, p.ClientOrderID, order.Quantity)
+	}
+	return false, nil
+}
+
+// ObserveFill applies a recorded execution of a released order, which is
+// also a change a reconciliation's book is bridged by, when the fill rule
+// (CheckFill) accepts it. A redelivery of an execution already applied
+// changes nothing: a fill already applied can never be added again to erase
+// a difference (ADR 0019, "Explained means").
+func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
+	o := g.orders[p.ClientOrderID]
+	switch redelivery, err := CheckFill(p, g.accountID, o.fillOrder(), g.fills); {
+	case err != nil:
 		return err
-	}
-	if o.reported+p.Quantity > o.planned.Quantity {
-		return fmt.Errorf("risklimit: fill %s takes order %s past its %d shares", p.FillID, p.ClientOrderID, o.planned.Quantity)
+	case redelivery:
+		return nil
 	}
 	o.reported += p.Quantity
 	o.fills = append(o.fills, p)

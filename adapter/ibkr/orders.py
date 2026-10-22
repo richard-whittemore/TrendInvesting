@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from connection import LIST_ENDED, LIST_READING
 from values import to_decimal
 
 # IBKR's order statuses ("Order Status" in IBKR's TWS API documentation) and
@@ -43,6 +44,9 @@ STATUS_LIFECYCLE = {
     "Filled": None,
 }
 INACTIVE = "Inactive"
+# IBKR's statuses of an order no longer working: an open-order list may
+# still show it, but the account's records list no such order.
+FINISHED = frozenset({"Cancelled", "ApiCancelled", "Filled"})
 # IBKR message code 201: "Order rejected - reason: ...".
 REJECTION_CODES = frozenset({201})
 # IBKR message codes that refuse a newly placed order before it works, but
@@ -61,6 +65,16 @@ _UNSET_PRICE = 1.7e308
 
 class UnrecognisedOrderReport(Exception):
     """IBKR reported an order state this adapter cannot classify; the run must stop (ADR 0022)."""
+
+
+# How many times in a row two consecutive reads of IBKR's open orders may
+# disagree at a start or reconnect before the read is given up as unsettled
+# (collect_settled_broker_orders).
+OPEN_ORDER_DISAGREEMENTS = 3
+
+
+class OpenOrdersUnsettled(Exception):
+    """IBKR's open orders read differently each time, so no read of them can be taken as whole."""
 
 
 class BrokerOrdersIncomplete(Exception):
@@ -114,6 +128,11 @@ order (partial fills) all go to executed. clean is true only when the last three
 empty; anything else is for reconciliation to classify (ADR 0019), never a
 reason to resend.
 """
+
+
+def order_label(key):
+    """An order_key as the account's records name the order (their broker_order_id)."""
+    return "perm:{}".format(key[2]) if key[0] == "perm" else "order:{}:{}".format(key[1], key[2])
 
 
 def order_key(client_id, order_id, perm_id):
@@ -343,11 +362,19 @@ def collect_broker_orders(conn):
     Uses reqAllOpenOrders, not reqOpenOrders, so orders placed by hand or by
     another client are seen too (ADR 0019 compares both sets). Executions
     reach back only to midnight through Gateway (ADR 0025 point 5).
+
+    The open orders are the answer to this read's own request, the one list
+    outstanding on the link, and end on the first end taken after it was
+    asked (Connection.ask_all_open_orders): an end Gateway volunteers as a
+    session starts is taken before the first request, and an earlier
+    list's late rows and end before this one is asked. A start or reconnect
+    reads through collect_settled_broker_orders, which takes a list as
+    whole only once two reads agree.
     """
     conn.require_connected()
     account = conn.config.account_id
     exec_req = conn.new_req_id()
-    conn.api.req_all_open_orders()
+    ticket = conn.ask_all_open_orders()
     conn.api.req_executions(exec_req, account)
     open_orders = {}
     executions = {}
@@ -356,19 +383,18 @@ def collect_broker_orders(conn):
         if not conn.connected:
             break
         name, args = event.name, event.args
-        if name == "open_order":
+        if name == "open_order" and conn.open_order_list(ticket) == LIST_READING:
             record = open_order_record(*args)
             if record.account_id == account:
                 key = order_key(record.client_id, record.broker_order_id, record.perm_id)
                 open_orders[key] = record
-        elif name == "open_order_end":
-            orders_done = True
         elif name == "exec_details" and args[0] == exec_req:
             report = execution_report(args[1], args[2])
             if report.account_id == account:
                 executions[report.exec_id] = report
         elif name == "exec_details_end" and args[0] == exec_req:
             execs_done = True
+        orders_done = conn.open_order_list(ticket) == LIST_ENDED
         if orders_done and execs_done:
             break
     missing = []
@@ -383,6 +409,57 @@ def collect_broker_orders(conn):
     return BrokerOrders(
         open_orders=tuple(open_orders[k] for k in sorted(open_orders)),
         executions=tuple(executions[k] for k in sorted(executions)))
+
+
+def collect_settled_broker_orders(conn, disagreements=OPEN_ORDER_DISAGREEMENTS):
+    """collect_broker_orders until two clean reads in a row agree; the later.
+
+    Two reads agree when they show the same open orders (ids and IBKR
+    states). After each read the link is pumped quiet
+    (Connection.resync_open_orders); a read during which, or after which,
+    a row or end arrived with no list outstanding (Connection.open_order_strays)
+    may have been ended by an end not its own, so it is no read at all: it
+    pairs with neither neighbour, and the quiet pump has brought the link
+    level for the next. Two reads cut short in the same way therefore never
+    agree (ADR 0025 point 5: matched in full before anything is sent).
+    After disagreements disagreements in a row (a read that is no read
+    counts as one), OpenOrdersUnsettled: the link is not reconciled (ADR
+    0019: a list not read in full is unread). The account read is compared
+    with the settled pair after it (agrees_with_account), so a book that
+    changes between the reads is read again, not taken as unsettled.
+    BrokerOrdersIncomplete and NotConnected as collect_broker_orders raises
+    them.
+    """
+    previous = None
+    for _ in range(disagreements + 1):
+        strays = conn.open_order_strays
+        current = collect_broker_orders(conn)
+        conn.resync_open_orders()
+        if conn.open_order_strays != strays:
+            previous = None
+            continue
+        states = _order_states(current)
+        if previous == states:
+            return current
+        previous = states
+    raise OpenOrdersUnsettled(
+        "IBKR's open orders did not agree in two clean reads in a row in {} reads".format(disagreements + 1))
+
+
+def agrees_with_account(broker, account_orders):
+    """Whether broker's working orders are the ones an account read lists (the rows snapshot.read_account gives)."""
+    return _working(broker) == frozenset(row["broker_order_id"] for row in account_orders)
+
+
+def _order_states(broker):
+    """The open orders broker shows, by identity and IBKR status."""
+    return frozenset((order_key(r.client_id, r.broker_order_id, r.perm_id), r.ibkr_status) for r in broker.open_orders)
+
+
+def _working(broker):
+    """The orders broker shows still working, named as the account's records name them."""
+    return frozenset(order_label(order_key(r.client_id, r.broker_order_id, r.perm_id))
+                     for r in broker.open_orders if r.ibkr_status not in FINISHED)
 
 
 def match_on_reconnect(expected_client_order_ids, broker, client_id):

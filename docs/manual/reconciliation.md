@@ -20,7 +20,26 @@ first account snapshot, which is the engine's first book. A start's or a
 reconnect's is read only once every trade IBKR replayed has its commission
 and its fill has reached the engine. Before the engine holds any account
 snapshot there is no book to compare, so the adapter sends none at a start
-or reconnect then. The engine compares them with its own book and decides one of four
+or reconnect then. At a start or reconnect the adapter also reads IBKR's
+open-order list, each time to its end, until two reads in a row agree, and
+then the account, whose own list must show the same working orders (if an
+order filled, was cancelled or was placed meanwhile, both are read again, up
+to four account reads), before it compares anything or sends any order: an
+order still working at IBKR is matched to the engine's order, never reported
+missing because one read was cut short. After each of these reads the
+adapter waits until IBKR has sent no open-order message for 2 seconds; a
+read during or after which an order or an end-of-list mark arrived that no
+list was waiting for may have been cut short, so it counts as no read and
+the list is read again. Messages that never pause for 2 seconds within 10
+drop the link, which is made again and matched again; a link dropped during
+three reconciles (these reads and the account read) in a row, with none
+completed between them, stops the adapter (`ReconcileIncomplete`). An
+execution that arrives during these reads and is not among the executions
+just read (an order placed by hand that filled at once) has everything read
+again. After three
+disagreements in a row, or four account reads that never agree, the adapter
+stops (`ReconcileIncomplete`) and nothing is sent; start it again once
+nothing is being placed, filled or cancelled at IBKR. The engine compares them with its own book and decides one of four
 things:
 
 | Result | What it means | What happens |
@@ -190,6 +209,14 @@ to the private channel for the reasons, which can carry amounts.
 
 The adapter reads positions, the account summary (net liquidation, total cash,
 Excess Liquidity) and every open order in one pass, then asks IBKR the time.
+The open orders in the records below are the list taken in that one-pass
+read. The rule of two agreeing reads (and the stop after three disagreements)
+belongs to the start's and reconnect's reconciliation read, described at the
+top of this page, not to this read. The adapter asks for one list at a time,
+so an earlier list's late orders are never read as a later one's, and takes
+the list and end-of-list mark IB Gateway sends unasked as a session starts
+before it asks for anything. Whether a live Gateway always sends that mark in
+time is still to be confirmed on the first live Gateway ([the IBKR adapter](ibkr-adapter.md), "Reports").
 From that one read it builds the records the engine reads:
 
 - the engine's **account snapshot** (`account.snapshot`), positions and net
@@ -699,6 +726,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | The engine will not start: `the Flex ledger's folder: ... no such file or directory` | The account's Flex folder is missing (the provisioner creates it) | Run the provisioner's services step again (`docs/manual/server.md`) |
 | A dividend, interest charge, fee or fill the journal has not recorded | Cash (or that instrument) differs, so the account goes Degraded: on cash, buys stop. **No command records the missing event**: `operator` has four commands (the kill switch, an approval, a rebalance clearance and an acknowledgement), and none records a market or account event. | Check the item on IBKR's activity, write down what you found, and either approve a fresh run that clears the incident (`operator approve -clear-incident <id>`) or one that carries it in force (leave `-clear-incident` out; for cash its scope is `"scope_cash_components": ["total-cash"]`, so buys stay refused) (`docs/runbooks/reconciliation.md`, "Recover"). |
 | Private text names `corporate action ... (... of ...) is not one a target-weight book can apply` | A delisting, merger or symbol change: the book can apply only fills, dividends and splits, so the reconciliation is unverifiable and the account goes Halted. | Check at IBKR what the account now holds for that stock. There is no way to record the action for the program: clear the incident in a fresh run once the holding is understood. For an IRA, the next rebalance sells what the rule no longer targets. |
+| The adapter's link to IB Gateway is lost (IBKR's message 1100, the connection closing, or both) while orders are working | Nothing is sent while the link is down. When it is back the adapter reads the positions, the cash and IBKR's whole open-order list again, matches the working orders to the engine's, and, once the engine holds a book, records a reconciliation for the engine to compare. A working order is matched, not reported missing: the reconnect itself changes nothing in the account's state. The adapter waits on a closed connection not at all, and for Gateway to restore IBKR's servers at most `restore_timeout` ([the IBKR adapter](ibkr-adapter.md), "What can go wrong") | Nothing, unless the adapter stops: then the stop's own row in [the IBKR adapter](ibkr-adapter.md) |
 | An account has no account snapshot yet (a start or reconnect before the run's first delivery) | The adapter sends no reconciliation: with no book to compare, it would be unverifiable and halt the account. The run's first delivery carries the first, right behind its account snapshot. | Nothing. |
 | A run's first reading is not the book it was compared with (the previous run's last close, or your starting book) | The adapter sends its reconciliation alone and withholds its snapshots, so the engine, holding no book, finds it unverifiable and **Halted**; nothing of that reading is taken as the book, by this run or the next. | Clear it with a fresh run whose approval states the book you check in IBKR (`operator approve -log <the halted run's log> -account <account> -by owner -clear-incident <id> -positions SYM=<shares> -cash <total cash> -currency USD -out <approval file>`, typed right after reading the book in IBKR; [restart](restart.md)). Without a stated book, the fresh run is compared with the same book again and halts again. |
 | The daily summary shows `cash drift` and `unexplained cash` | Information only: the drift since the previous close and that drift added up since the cash was last explained (an explained reconciliation, else the starting book). The program does not act on it, and the post-close reading is stamped at its read time instead of the close when the drift exceeds 1% of net liquidation (the session is then withheld). | A small posting day (interest, a dividend) is expected; a figure that keeps growing is a cash movement to find at IBKR before approving anything. |

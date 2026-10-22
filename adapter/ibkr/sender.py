@@ -223,6 +223,7 @@ class PaperSender:
         config = self._check_shape(request)
         order_id = self._conn.next_order_id
         self._conn.next_order_id = order_id + 1
+        self._conn.placing(order_id)
         self._conn.api.place_order(order_id, *request_shape(request))
         record = SentRecord(request=request, send=True, client_id=config.client_id, broker_order_id=order_id)
         self._journal(record)

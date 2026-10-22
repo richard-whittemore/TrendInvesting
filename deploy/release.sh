@@ -150,10 +150,11 @@ if test "$mode" = status; then
       # The release runs as root, so a plain user cannot signal it (kill -0
       # would fail): look at the process table instead, and at what the pid
       # runs, since a dead release's pid may have been given to another program.
-      # argv[0] names the release, or, when it is a shell, any later word
-      # does: shell options (bash -x) and options that take an argument
-      # (bash -o pipefail) come before the script, so no option is skipped.
-      # A program that merely names the script in an argument is not the release.
+      # argv[0] names the release, or, when it is a shell, the first word after
+      # the shell's options does: -o, -O, --rcfile and --init-file take the
+      # next word as their argument, -c runs a command string (no script), and
+      # a later word never counts, so a script that merely names ti-release
+      # in its arguments is not the release.
       a0=""
       rel=0
       {
@@ -162,8 +163,19 @@ if test "$mode" = status; then
           ti-release | release.sh) rel=1 ;;
           bash | sh | dash)
             w=""
+            skip=0
             while IFS= read -r -d '' w || [ -n "$w" ]; do
-              case ${w##*/} in ti-release | release.sh) rel=1; break ;; esac
+              if test "$skip" = 1; then skip=0; w=""; continue; fi
+              case $w in
+                -o | -O | --rcfile | --init-file) skip=1 ;;
+                -c | -[a-zA-Z]*c) break ;;
+                -*) ;;
+                *)
+                  case ${w##*/} in ti-release | release.sh) rel=1 ;; esac
+                  break
+                  ;;
+              esac
+              w=""
             done
             ;;
         esac

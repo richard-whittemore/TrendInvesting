@@ -535,6 +535,14 @@ grep -q "pid reused; the lock is stale" "$work/out" || fail "--status takes a sh
 printf '/bin/bash\0/usr/local/sbin/ti-release' >"$TI_PROC/999999/cmdline"
 expect "--status with a final word that has no trailing NUL" 0 "$(run --status)"
 grep -q "pid 999999 is running" "$work/out" || fail "--status drops a final cmdline word with no trailing NUL: $(cat "$work/out")"
+# Only the first word after the shell's options is the script; a later word
+# that names the release does not make another script the release, and -c
+# runs a command string, not a script.
+for words in '/bin/bash\0/tmp/check.sh\0/usr/local/sbin/ti-release\0' '/bin/bash\0-c\0ti-release\0' '/bin/bash\0-o\0pipefail\0/tmp/check.sh\0ti-release\0'; do
+  printf '%b' "$words" >"$TI_PROC/999999/cmdline"
+  expect "--status with a shell whose later argument names the script" 0 "$(run --status)"
+  grep -q "pid reused; the lock is stale" "$work/out" || fail "--status takes a later argument for the release ($words): $(cat "$work/out")"
+done
 # An empty command line (not readable under hidepid) is a running lock.
 : >"$TI_PROC/999999/cmdline"
 expect "--status with an unreadable command line" 0 "$(run --status)"

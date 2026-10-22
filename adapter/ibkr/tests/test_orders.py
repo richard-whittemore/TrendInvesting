@@ -10,12 +10,12 @@ tests_dir = str(Path(__file__).resolve().parent)
 if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 
-from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order, execution
+from fake_tws import ACCOUNT, OTHER_ACCOUNT, FakeTWS, contract, order, execution
 from test_connection import Harness
-from connection import REQUEST_ID_BASE
-from orders import (OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
-                    CommissionReport, UnrecognisedOrderReport, collect_broker_orders,
-                    match_on_reconnect, parse_execution_time)
+from connection import REQUEST_ID_BASE, NotConnected
+from orders import (BrokerOrdersIncomplete, OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
+                    CommissionReport, OpenOrdersUnsettled, UnrecognisedOrderReport, collect_broker_orders,
+                    collect_settled_broker_orders, match_on_reconnect, parse_execution_time)
 
 STATE = SimpleNamespace(status="Submitted")
 
@@ -469,6 +469,282 @@ class ReconnectMatchTests(unittest.TestCase):
         h.fake.open_orders = [(7, contract(), order(order_ref="tag-1"), STATE)]
         match = match_on_reconnect({"tag-1"}, collect_broker_orders(h.conn), 11)
         self.assertTrue(match.clean)
+
+
+class EndsEachListOnAnotherEnd(FakeTWS):
+    """Each list asked for ends at once on an end that is not its own, and its rows follow that end.
+
+    The first list's is an end nothing asked for; each later list's is the
+    end of the list before it, delayed across this request. A list's own
+    end comes only behind the next request, so every read is cut short in
+    the same way.
+    """
+
+    def req_all_open_orders(self):
+        self.calls.append(("req_all_open_orders",))
+        self.callbacks.open_order_end()
+        self._send_open_orders(self.callbacks, self.open_orders)
+
+
+class OpenOrderLists:
+    """The orders IBKR's open-order list shows in these tests, and what a whole read of it holds."""
+
+    def working(self):
+        # One order of this engine's, one placed by hand (no order ID), one of another client's.
+        return [
+            (7, contract(), order(order_ref="tag-1"), STATE),
+            (0, contract(), order(order_ref="", client_id=0, perm_id=9101), STATE),
+            (5, contract(), order(order_ref="", client_id=12, perm_id=9102), STATE),
+        ]
+
+    def assert_whole(self, broker):
+        self.assertEqual(sorted(o.perm_id for o in broker.open_orders), [9001, 9101, 9102])
+        match = match_on_reconnect({"tag-1"}, broker, 11)
+        self.assertEqual(match.missing_at_broker, ())
+        self.assertEqual(sorted(match.matched), ["tag-1"])
+
+
+class WholeOpenOrderListTests(OpenOrderLists, unittest.TestCase):
+    """IBKR's open-order list and its end carry no request ID; a read ends only on its own request's end."""
+
+    def test_the_end_gateway_volunteers_as_the_session_starts_does_not_end_the_read(self):
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.open_order_batch = 1
+        h.conn.connect()
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_a_list_in_several_batches_is_read_to_its_end_behind_a_stray_end(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.callbacks.open_order_end()
+        h.fake.open_orders = self.working()
+        h.fake.open_order_batch = 2
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_an_end_nothing_asked_for_between_reads_ends_no_later_read(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = self.working()
+        self.assert_whole(collect_broker_orders(h.conn))
+        h.fake.callbacks.open_order_end()
+        h.fake.open_order_batch = 1
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_the_late_end_of_a_read_that_gave_up_ends_that_read_not_the_next(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = self.working()
+        h.fake.end_open_orders = False
+        with self.assertRaises(BrokerOrdersIncomplete) as caught:
+            collect_broker_orders(h.conn)
+        self.assertEqual(caught.exception.missing, ("open-orders",))
+        # The abandoned list's end arrives late, on the same link.
+        h.fake.callbacks.open_order_end()
+        h.fake.end_open_orders = True
+        h.fake.open_order_batch = 1
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_an_order_reported_before_the_list_was_asked_for_is_not_read_as_part_of_it(self):
+        h = Harness()
+        h.conn.connect()
+        # Shown working earlier, and ended since: IBKR's list no longer has it.
+        h.fake.callbacks.open_order(8, contract(), order(order_ref="tag-0", perm_id=9008), STATE)
+        h.fake.open_orders = self.working()
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_a_list_whose_end_never_comes_is_incomplete(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.callbacks.open_order_end()
+        h.fake.open_orders = self.working()
+        h.fake.end_open_orders = False
+        h.fake.open_order_batch = 1
+        with self.assertRaises(BrokerOrdersIncomplete) as caught:
+            collect_broker_orders(h.conn)
+        self.assertEqual(caught.exception.missing, ("open-orders",))
+
+
+    def test_connect_takes_the_volunteered_rows_until_gateway_stops_sending_them(self):
+        # No end comes after the volunteered rows: connect waits only until
+        # Gateway has sent none for a while, and the first list is asked
+        # behind every row it volunteered.
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.volunteer_end = False
+        h.conn.connect()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake._later), 0, "every volunteered row was taken before connect returned")
+        h.fake.open_order_batch = 1
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_connect_stops_waiting_for_the_volunteered_end_after_ten_seconds(self):
+        h = Harness()
+        h.fake.open_orders = [(n, contract(), order(order_ref="tag-{}".format(n), perm_id=9000 + n), STATE)
+                              for n in range(1, 11)]
+        h.fake.volunteer_open_orders = True
+
+        def three_seconds():
+            h.clock.now += 3.0
+        h.fake.later_hook = three_seconds
+        started = h.clock.now
+        h.conn.connect()
+        self.assertTrue(h.conn.connected)
+        self.assertGreaterEqual(h.clock.now - started, 10.0)
+        self.assertLess(h.clock.now - started, 13.0)
+        self.assertTrue(h.fake._later, "connect stopped waiting with volunteered rows still to come")
+
+    def test_delayed_rows_of_an_abandoned_list_are_not_read_as_the_next_lists(self):
+        # The first list's answer arrives only after its read gave up: an
+        # order it shows (cancelled since) is no part of the second list.
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = [(8, contract(), order(order_ref="tag-0", perm_id=9008), STATE)]
+        h.fake.hold_open_orders = True
+        with self.assertRaises(BrokerOrdersIncomplete):
+            collect_broker_orders(h.conn)
+        h.fake.hold_open_orders = False
+        h.fake.release_held()
+        h.fake.open_orders = []
+        self.assertEqual(collect_broker_orders(h.conn).open_orders, ())
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 2)
+
+    def test_open_orders_still_arriving_at_ten_seconds_drop_the_link_however_short_the_last_gap(self):
+        # A stray end every 1.5 seconds for 9 seconds: at 10 seconds the
+        # link has been silent for 1 second, not the 2 a quiet link needs.
+        h = Harness(request_timeout=5.0)
+        h.fake.volunteer_open_orders = True
+        h.conn.connect()
+        start = h.clock.now
+        strays = [start + 1.5 * n for n in range(1, 7)]
+        inbox = h.conn.inbox
+        waiting = inbox.get
+
+        def get(timeout):
+            if not inbox._queue.empty():
+                return waiting(0)
+            if strays and strays[0] <= h.clock.now + timeout:
+                h.clock.now = max(h.clock.now, strays.pop(0))
+                inbox.open_order_end()
+                return waiting(0)
+            h.clock.now += timeout
+            return None
+        inbox.get = get
+        with self.assertRaises(NotConnected):
+            h.conn.resync_open_orders()
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(h.statuses[-1].reason, "open-orders-never-quiet")
+        self.assertLessEqual(h.clock.now - start, 10.0 + 1e-9)
+
+    def test_the_relays_read_after_an_empty_list_that_ended_cleanly_does_not_wait_for_quiet(self):
+        # No open order at IBKR: every list ends before any row. With no
+        # stray since, the link is level and the next read is asked at once.
+        h = Harness()
+        h.fake.volunteer_open_orders = True
+        h.conn.connect()
+        self.assertEqual(collect_broker_orders(h.conn).open_orders, ())
+        quiet_pumps = []
+        resync = h.conn.resync_open_orders
+        h.conn.resync_open_orders = lambda: (quiet_pumps.append(True), resync())[1]
+        self.assertEqual(collect_broker_orders(h.conn).open_orders, ())
+        self.assertEqual(quiet_pumps, [], "the read waited for a quiet link it already had")
+        # A stray since the last list still makes the next read wait.
+        h.fake.callbacks.open_order_end()
+        h.conn.pump(0)
+        collect_broker_orders(h.conn)
+        self.assertEqual(quiet_pumps, [True])
+
+    def test_a_stray_row_with_no_list_outstanding_makes_the_relays_next_read_wait_for_quiet(self):
+        # A row taken with no list outstanding is a stray as an end is: the
+        # next single read pumps the link quiet before it asks.
+        h = Harness()
+        h.fake.volunteer_open_orders = True
+        h.conn.connect()
+        collect_broker_orders(h.conn)
+        quiet_pumps = []
+        resync = h.conn.resync_open_orders
+        h.conn.resync_open_orders = lambda: (quiet_pumps.append(True), resync())[1]
+        row = self.working()[0]
+        h.fake.callbacks.open_order(*row)
+        h.conn.pump(0)
+        collect_broker_orders(h.conn)
+        self.assertEqual(quiet_pumps, [True], "the read after a stray row was asked without the quiet pump")
+
+    def test_a_list_whose_end_never_comes_drops_the_link_before_another_is_asked(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = self.working()
+        h.fake.hold_open_orders = True
+        with self.assertRaises(BrokerOrdersIncomplete):
+            collect_broker_orders(h.conn)
+        with self.assertRaises(NotConnected):
+            collect_broker_orders(h.conn)
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 1, "never two lists outstanding")
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(h.statuses[-1].reason, "open-order-list-unended")
+
+
+class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
+    """A start's or reconnect's read of IBKR's open orders stands only once two reads in a row agree."""
+
+    def test_a_volunteered_end_after_the_first_request_never_passes_a_short_list_as_whole(self):
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.volunteer_after_request = True
+        h.conn.connect()
+        self.assert_whole(collect_settled_broker_orders(h.conn))
+
+    def test_two_reads_that_disagree_are_read_again_until_two_agree(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_order_answers = [[], self.working(), self.working()]
+        self.assert_whole(collect_settled_broker_orders(h.conn))
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
+
+    def test_an_order_whose_state_changed_between_reads_is_read_again(self):
+        h = Harness()
+        h.conn.connect()
+        pending = [(7, contract(), order(order_ref="tag-1"), SimpleNamespace(status="PreSubmitted"))]
+        h.fake.open_order_answers = [pending, self.working()[:1], self.working()[:1]]
+        broker = collect_settled_broker_orders(h.conn)
+        self.assertEqual([o.ibkr_status for o in broker.open_orders], ["Submitted"])
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
+
+    def test_two_reads_cut_short_the_same_way_never_settle(self):
+        h = Harness()
+        h.fake = EndsEachListOnAnotherEnd()
+        h.conn.api = h.fake
+        h.fake.open_orders = self.working()
+        h.conn.connect()
+        with self.assertRaises(OpenOrdersUnsettled):
+            collect_settled_broker_orders(h.conn)
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
+
+    def test_a_link_one_list_behind_is_resynced_and_the_next_read_is_current(self):
+        # Gateway's unasked end lands inside the first list asked for; that
+        # list's own rows and end then arrive behind the next request. Each
+        # request's answer differs, so a read one list behind shows the
+        # previous request's answer, not its own.
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.volunteer_after_request = True
+        h.fake.open_order_batch = 1
+        h.fake.open_order_answers = [self.working()[:1], self.working(), self.working()]
+        h.conn.connect()
+        self.assert_whole(collect_settled_broker_orders(h.conn))
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
+
+    def test_three_disagreements_in_a_row_leave_the_list_unsettled(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_order_answers = [[], self.working(), [], self.working(), []]
+        with self.assertRaises(OpenOrdersUnsettled):
+            collect_settled_broker_orders(h.conn)
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
 
 
 if __name__ == "__main__":

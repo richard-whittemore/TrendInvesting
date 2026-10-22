@@ -2,6 +2,7 @@
 import logging
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 tests_dir = str(Path(__file__).resolve().parent)
@@ -133,6 +134,56 @@ class ConnectTests(unittest.TestCase):
         self.assertEqual(len(h.fake.called("connect")), 2)
         self.assertEqual(len(h.fake.called("disconnect")), 1)
 
+    def volunteering_then(self, h, interrupt):
+        """Gateway volunteers this client's orders as the session starts, and interrupt() happens once as they arrive."""
+        h.fake.open_orders = [(7, SimpleNamespace(), SimpleNamespace(clientId=11), SimpleNamespace(status="Submitted"))]
+        h.fake.volunteer_open_orders = True
+        fired = []
+
+        def once():
+            if not fired:
+                fired.append(True)
+                interrupt()
+        h.fake.later_hook = once
+
+    def test_a_close_while_connect_takes_the_volunteered_list_fails_the_connect(self):
+        h = Harness()
+        self.volunteering_then(h, h.fake.drop)
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertFalse(h.conn.connected)
+        self.assertNotIn("connected", h.states())
+
+    def test_a_fatal_error_while_connect_takes_the_volunteered_list_fails_the_connect(self):
+        h = Harness()
+        self.volunteering_then(h, lambda: h.fake.callbacks.error(-1, 1100, "Connectivity lost."))
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertFalse(h.conn.connected)
+        self.assertNotIn("connected", h.states())
+
+    def test_an_order_level_code_while_connect_takes_the_volunteered_list_is_kept_and_the_connect_stands(self):
+        # IBKR answers an order's message under its order ID (0 for an order
+        # placed by hand); only a code under no order (-1) ends a connect.
+        h = Harness()
+        seen = []
+        h.conn.subscribe(lambda event: seen.append(event))
+        self.volunteering_then(h, lambda: h.fake.callbacks.error(0, 202, "Order Canceled - reason:"))
+        h.conn.connect()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(h.states(), ["connected"])
+        while h.conn.pump(0) is not None:
+            pass
+        self.assertIn(("error", 202), [(e.name, e.args[1]) for e in seen if e.name == "error"])
+
+    def test_a_close_while_connect_takes_the_volunteered_list_is_retried_with_backoff(self):
+        h = Harness()
+        self.volunteering_then(h, h.fake.drop)
+        h.conn.connect_with_backoff()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertEqual(h.states(), ["reconnecting", "connected"])
+
     def test_a_socket_error_is_a_failed_connect(self):
         h = Harness()
         h.fake.connect_behaviours = ["socket-error"]
@@ -194,6 +245,26 @@ class DisconnectDetectionTests(unittest.TestCase):
         self.assertEqual(h.statuses[-1].state, "connected")
         self.assertTrue(h.statuses[-1].data_lost)
         self.assertTrue(h.conn.needs_reconciliation)
+
+    def test_gateway_losing_ibkr_is_the_last_drop_reason_a_stop_names(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.drop()
+        h.conn.pump(0.01)
+        self.assertEqual(h.conn.last_drop_reason, "connection-closed")
+        h.conn.connect()
+        h.fake.callbacks.error(-1, 2110, "Connectivity between TWS and server is broken.")
+        h.conn.pump(0.01)
+        self.assertEqual(h.conn.last_drop_reason, "gateway-lost-ibkr")
+
+    def test_a_successful_connect_clears_the_last_drop_reason(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.drop()
+        h.conn.pump(0.01)
+        self.assertEqual(h.conn.last_drop_reason, "connection-closed")
+        h.conn.connect()
+        self.assertIsNone(h.conn.last_drop_reason, "a reason from an earlier link outlived the connect")
 
     def test_restoration_with_data_maintained_still_requires_reconciliation(self):
         h = Harness()
@@ -374,6 +445,55 @@ class MaintainTests(unittest.TestCase):
                 h.conn.pump(0.01)
                 self.assertTrue(h.conn.connected, "no stale drop cuts the new link")
                 self.assertEqual(len(h.fake.called("disconnect")), 0)
+
+    def test_connectivity_lost_then_a_socket_close_is_reported_and_reconnected_within_restore_timeout(self):
+        # Gateway lost IBKR's servers (1100), then the socket closed: the
+        # close is reported at once, and the link is made again without
+        # waiting out restore_timeout, the most the adapter ever waits.
+        h = Harness(restore_timeout=60.0)
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
+        h.conn.pump(0.01)
+        self.assertEqual(h.states()[-1], "connectivity-lost")
+        lost_at = h.clock.now
+        h.fake.drop()
+        h.conn.pump(0.01)
+        self.assertEqual((h.statuses[-1].state, h.statuses[-1].reason), ("disconnected", "connection-closed"))
+        h.conn.maintain()
+        self.assertLess(h.clock.now - lost_at, h.conn.config.restore_timeout)
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertTrue(h.conn.needs_reconciliation, "the new link is matched again before anything is sent")
+
+    def test_connectivity_lost_then_a_socket_close_and_no_gateway_gives_up_in_bounded_attempts(self):
+        h = Harness(restore_timeout=60.0, max_connect_attempts=3)
+        h.conn.connect()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.fake.drop()
+        h.conn.pump(0.01)
+        h.fake.connect_behaviours = ["refused"] * 3
+        with self.assertRaises(ConnectFailed):
+            h.conn.maintain()
+        self.assertEqual(h.states()[-1], "gave-up")
+        self.assertEqual(h.sleeps, [1.0, 2.0], "the backoff is the only wait")
+
+    def test_connectivity_lost_then_restored_on_the_same_socket_still_recovers(self):
+        h = Harness(restore_timeout=60.0)
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.clock.now += 30.0
+        h.conn.maintain()
+        self.assertFalse(h.conn.connected, "Gateway is given restore_timeout to restore IBKR")
+        h.fake.callbacks.error(-1, 1101, "Connectivity restored - data lost.")
+        h.conn.pump(0.01)
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 1)
+        self.assertTrue(h.conn.needs_reconciliation)
 
     def test_a_healthy_link_is_left_alone(self):
         h = Harness()
