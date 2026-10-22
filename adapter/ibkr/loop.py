@@ -210,6 +210,12 @@ ENGINE_WAIT_POLL = 0.05
 # How many times one delivery reads the account and the marks for a broker
 # snapshot that is complete and not overtaken by an order report.
 SNAPSHOT_ATTEMPTS = 3
+# How many reconciles in a row the link may be dropped during (the open
+# orders never quiet, a close) before the adapter stops for a person: a
+# Gateway that keeps the socket up while its stream never pauses would
+# otherwise drop, reconnect and reconcile without end, sending nothing and
+# telling no one (fail closed and tell a person, AGENTS.md; ADR 0025 point 5).
+RECONCILE_CUTOFFS = 3
 # The source a mark names: the data job, whose delivered bar's official close
 # it is (adapter/marketdata/kinds.py SOURCE).
 MARK_SOURCE = "marketdata"
@@ -369,6 +375,9 @@ class AdapterLoop:
         # How many reads in a row of that reconciliation left positions or
         # cash unread (_send_reconciliation).
         self._reconciliation_unread = 0
+        # How many reconciles in a row the link was dropped during, since it
+        # was last reconciled (reconcile, RECONCILE_CUTOFFS).
+        self._reconcile_cutoffs = 0
         self.delivery = None if streams is None else Deliverer(
             streams, pending_path + DELIVERED_SUFFIX, self.outbox, engine_log_path, self._post_close_reading, new_id)
 
@@ -435,15 +444,29 @@ class AdapterLoop:
         quiet, a socket close) leaves the link not reconciled and the
         adapter running: maintain() connects again and the new link is
         reconciled (Connection.drop), so nothing is sent meanwhile (ADR
-        0025 point 5).
+        0025 point 5). RECONCILE_CUTOFFS such cut-offs in a row, with no
+        reconcile completed between them, stop the adapter for a person
+        (ReconcileIncomplete, naming the last drop's reason): a link that
+        drops in every reconcile would otherwise cycle with nothing sent
+        and no one told (fail closed and tell a person, AGENTS.md).
         """
         try:
             self._reconcile()
         except (NotConnected, BrokerOrdersIncomplete, ReconcileIncomplete) as err:
             if self.conn.connected:
                 raise
-            log.info("ibkr reconcile cut off: the link went during its reads (%s); it is connected again and "
-                     "reconciled before anything is sent", type(err).__name__)
+            self._reconcile_cutoffs += 1
+            reason = self.conn.last_drop_reason or "connection-closed"
+            if self._reconcile_cutoffs >= RECONCILE_CUTOFFS:
+                raise ReconcileIncomplete(
+                    "the link to IB Gateway was dropped during {} reconciles in a row (last: {}), so it is not "
+                    "reconciled and nothing is sent (ADR 0025 point 5: matched in full before anything is sent). "
+                    "Check IB Gateway and whether another client or IBKR's own app is working the account's "
+                    "orders, then start the adapter again (docs/manual/ibkr-adapter.md)".format(
+                        self._reconcile_cutoffs, reason)) from None
+            log.info("ibkr reconcile cut off (%d of %d): the link went during its reads (%s, %s); it is connected "
+                     "again and reconciled before anything is sent", self._reconcile_cutoffs, RECONCILE_CUTOFFS,
+                     type(err).__name__, reason)
 
     def _reconcile(self):
         """reconcile's reads and match, on a link that stays up.
@@ -453,13 +476,17 @@ class AdapterLoop:
         them and must agree with them (orders.agrees_with_account). An
         account read that differs, or during or after which a row or end of
         an open-order list arrived with no list outstanding (it is pumped
-        quiet, Connection.resync_open_orders), is a fresh read of a book
-        that changed: the orders are settled and the account read again, up
+        quiet, Connection.resync_open_orders), or during or after which IBKR
+        reported an execution in the account that the settled pair's
+        executions do not hold (an order placed by hand that filled at
+        once shows in no open-order list), is a fresh read of a book that
+        changed: the orders are settled and the account read again, up
         to OPEN_ORDER_DISAGREEMENTS + 1 account reads, and only then
         ReconcileIncomplete (ADR 0025 point 5: matched in full before
         anything is sent; ADR 0019: a list not read in full is unread).
         """
         for _ in range(OPEN_ORDER_DISAGREEMENTS + 1):
+            seen = set(self._account_executions)
             try:
                 broker = collect_settled_broker_orders(self.conn)
             except OpenOrdersUnsettled as err:
@@ -472,10 +499,12 @@ class AdapterLoop:
                                           "a read is complete (ADR 0019: an unavailable balance is not zero)".format(
                                               ", ".join(sorted(reading.unread))))
             self.conn.resync_open_orders()
-            if self.conn.open_order_strays == strays and agrees_with_account(broker, reading.open_orders):
+            new_executions = self._account_executions - seen - {r.exec_id for r in broker.executions}
+            if (self.conn.open_order_strays == strays and not new_executions
+                    and agrees_with_account(broker, reading.open_orders)):
                 break
-            log.info("ibkr reconcile reads IBKR's open orders again: the account read differed from them or a stray "
-                     "order message arrived during or after it")
+            log.info("ibkr reconcile reads IBKR's open orders again: the account read differed from them, or a stray "
+                     "order message or a new execution arrived during or after it")
         else:
             raise ReconcileIncomplete("IBKR's open orders and the account read did not agree in {} account reads; the "
                                       "link is not reconciled and nothing is sent (ADR 0019: a list not read in full "
@@ -498,6 +527,7 @@ class AdapterLoop:
                 "client, or one no run of this engine released) and reconcile the account before starting again "
                 "(docs/manual/paper-trading.md)".format(len(unexplained), "; ".join(unexplained)))
         self.conn.mark_reconciled()
+        self._reconcile_cutoffs = 0
         log.info("ibkr reconciled client_id=%d positions=%d open_orders=%d executions=%d", self.config.client_id,
                  len(reading.positions), len(broker.open_orders), len(broker.executions))
         # The start-of-run and reconnect reconciliation (ADR 0025 point 5,

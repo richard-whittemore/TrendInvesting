@@ -122,6 +122,9 @@ class Connection:
         self.inbox = Inbox()
         self.connected = False
         self.needs_reconciliation = True
+        # The reason the link was last reported disconnected, for a stop
+        # that names why the link kept going.
+        self.last_drop_reason = None
         self.next_order_id = None
         self.managed_accounts = frozenset()
         self.last_server_time = None
@@ -148,12 +151,10 @@ class Connection:
         self._reset_list_alignment()
 
     def _reset_list_alignment(self):
-        # Open-order rows taken while the newest noted list was outstanding;
-        # the volunteered rows and end connect kept for pump(), which are
+        # The volunteered rows and end connect kept for pump(), which are
         # Gateway's own list, not strays; the count of strays (an end with
         # no list outstanding, a row with none outstanding); and whether the
         # link must be pumped quiet before the next list is asked.
-        self._rows_in_list = 0
         self._volunteered = 0
         self.open_order_strays = 0
         self._resync_due = False
@@ -162,6 +163,8 @@ class Connection:
     def _report(self, state, reason="", attempt=None, ibkr_code=None, data_lost=None):
         status = ConnectionStatus(state, reason, self.config.client_id, self._wall_clock(),
                                   attempt, ibkr_code, data_lost)
+        if state == "disconnected":
+            self.last_drop_reason = reason
         log.info("ibkr link state=%s reason=%s client_id=%d attempt=%s code=%s", state, reason,
                  self.config.client_id, attempt, ibkr_code)
         self._status_sink(status)
@@ -553,14 +556,15 @@ class Connection:
                 self._report("disconnected", "connection-closed")
         elif event.name == OPEN_ORDERS_ASKED:
             self._lists_noted += 1
-            self._rows_in_list = 0
         elif event.name in LIST_MESSAGES and self._list_ends >= self._lists_noted and self._volunteered:
             self._volunteered -= 1  # Gateway's volunteered list, which connect took
         elif event.name == "open_order":
-            if self._list_ends < self._lists_noted:
-                self._rows_in_list += 1
-            else:
+            if self._list_ends >= self._lists_noted:
+                # A row with no list outstanding is a stray as an end is:
+                # the next list is asked only once the link is pumped quiet
+                # (ADR 0019: a list not read in full is unread).
                 self.open_order_strays += 1
+                self._resync_due = True
         elif event.name == "open_order_end":
             if self._list_ends < self._lists_noted:
                 # A list that ends before any row of its own is no signal on

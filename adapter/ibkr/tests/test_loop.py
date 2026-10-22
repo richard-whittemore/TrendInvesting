@@ -30,7 +30,7 @@ from test_connection import Clock, config
 from connection import AccountNotManaged
 from engine_client import EngineRejected
 from relay import EngineUnavailable
-from loop import (OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch,
+from loop import (OUTBOX_SUFFIX, RECONCILE_CUTOFFS, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch,
                   ReportRecordInvalid, SOURCE)
 from relay import (RELEASED, EarlierRunInput, HandoverRecordInvalid, PendingInput, ResolveRefused, main as relay_main,
                    read_engine_log, run_identity)
@@ -123,6 +123,10 @@ class NeverQuietAfterARead(FakeTWS):
         super().__init__()
         self.never_quiet_after = set()
         self.tick = None
+        # While set, the stream goes on across reconnects: every new
+        # session's messages never pause either (an account another client
+        # is working, behind a Gateway that keeps the socket up).
+        self.never_pauses = False
 
     def req_all_open_orders(self):
         super().req_all_open_orders()
@@ -133,6 +137,9 @@ class NeverQuietAfterARead(FakeTWS):
     def connect(self, *args):
         self.later_hook = None
         super().connect(*args)
+        if self.never_pauses and self.connected:
+            self.later_hook = self.tick
+            self._later.extend([self.callbacks.open_order_end] * 20)
 
 
 class Interposed:
@@ -433,6 +440,56 @@ class LoopTests(unittest.TestCase):
         self.settle(loop)
         self.assertTrue(loop.ready())
         self.assertEqual(len(fake.called("connect")), 3, "the dropped link was made again")
+
+    def test_open_orders_that_never_pause_across_reconnects_stop_the_start_for_a_person(self):
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        self.never_quiet(fake, 1)
+        fake.never_pauses = True
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            loop.start()
+        self.assertIn("open-orders-never-quiet", str(caught.exception))
+        self.assertEqual(len(fake.called("connect")), RECONCILE_CUTOFFS, "the cut-offs are bounded")
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def test_open_orders_that_never_pause_after_a_drop_stop_the_adapter_for_a_person(self):
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.never_quiet(fake, len(fake.called("req_all_open_orders")) + 1)
+        fake.never_pauses = True
+        fake.drop()
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            self.settle(loop)
+        self.assertIn("open-orders-never-quiet", str(caught.exception))
+        self.assertEqual(len(fake.called("connect")), 1 + RECONCILE_CUTOFFS, "the cut-offs are bounded")
+        self.assertEqual(fake.placed, [])
+
+    def test_a_hand_placed_fill_during_the_account_read_is_read_again_and_stops_the_start(self):
+        # An order placed by hand fills after the settled pair's executions
+        # were read and before the account read ends: it is in neither
+        # open-order list, so only the execution shows it. The reads are
+        # taken again and the unexplained execution stops the start.
+        fake = self.gateway()
+        manual = execution(exec_id="0001f4e8.manual.01.01", order_id=0, perm_id=4242, order_ref="", client_id=0)
+        positions = fake.req_positions
+
+        def fill_during_the_account_read():
+            if not fake.executions:
+                fake.executions.append((contract(), manual))
+                fake.callbacks.exec_details(-1, contract(), manual)
+            positions()
+        fake.req_positions = fill_during_the_account_read
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch) as caught:
+            loop.start()
+        self.assertIn("0001f4e8.manual.01.01", str(caught.exception))
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
 
     def test_open_order_reads_that_disagree_three_times_leave_the_link_not_reconciled(self):
         fake = self.gateway()

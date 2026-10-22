@@ -656,6 +656,22 @@ class WholeOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         collect_broker_orders(h.conn)
         self.assertEqual(quiet_pumps, [True])
 
+    def test_a_stray_row_with_no_list_outstanding_makes_the_relays_next_read_wait_for_quiet(self):
+        # A row taken with no list outstanding is a stray as an end is: the
+        # next single read pumps the link quiet before it asks.
+        h = Harness()
+        h.fake.volunteer_open_orders = True
+        h.conn.connect()
+        collect_broker_orders(h.conn)
+        quiet_pumps = []
+        resync = h.conn.resync_open_orders
+        h.conn.resync_open_orders = lambda: (quiet_pumps.append(True), resync())[1]
+        row = self.working()[0]
+        h.fake.callbacks.open_order(*row)
+        h.conn.pump(0)
+        collect_broker_orders(h.conn)
+        self.assertEqual(quiet_pumps, [True], "the read after a stray row was asked without the quiet pump")
+
     def test_a_list_whose_end_never_comes_drops_the_link_before_another_is_asked(self):
         h = Harness()
         h.conn.connect()
