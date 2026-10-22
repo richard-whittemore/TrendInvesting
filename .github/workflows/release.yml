@@ -1,0 +1,94 @@
+name: Release
+
+# Runs only when a version tag is pushed; a merge to main deploys nothing.
+# The server pulls a release by tag with deploy/release.sh (`ti-release`).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      # Create the release and attach the programs.
+      contents: write
+      # Sign the build attestation with this workflow's identity.
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # git describe needs the tag and its history to stamp the build.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Refuse a tag that is not an annotated tag on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The stamp is `git describe --always --dirty` (ADR 0016), which
+          # names only annotated tags, so a lightweight tag would be stamped
+          # with a commit hash and could not be told apart from the tag.
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag || {
+            echo "$TAG is a lightweight tag: create release tags with git tag -a" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD || {
+            echo "$TAG is not on main: only a commit that passed review is released" >&2
+            exit 1
+          }
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          # Built from source: no shared module or build cache feeds an attested
+          # program.
+          cache: false
+
+      - name: Build the five stamped programs
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Never from a dirty tree, and never under a stamp other than the
+          # tag: build-engine.sh refuses a dirty tree, and the stamp must be
+          # exactly the tag.
+          test "$(scripts/build-stamp.sh)" = "$TAG"
+          # Outside the checkout so the build output cannot dirty the tree.
+          deploy/build-engine.sh --out "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release"
+          sha256sum ti-engine ti-reporter ti-dashboard operator journal-query > checksums.txt
+
+      - name: Attest the build
+        id: attest
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/ti-engine
+            ${{ runner.temp }}/release/ti-reporter
+            ${{ runner.temp }}/release/ti-dashboard
+            ${{ runner.temp }}/release/operator
+            ${{ runner.temp }}/release/journal-query
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE" "$RUNNER_TEMP/release/attestation.sigstore.json"
+          cd "$RUNNER_TEMP/release"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+            --notes "Install on the server with: sudo ti-release $TAG" \
+            ti-engine ti-reporter ti-dashboard operator journal-query checksums.txt attestation.sigstore.json
