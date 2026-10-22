@@ -479,6 +479,7 @@ grep -q "lock: held at $TI_PREFIX/releases/.lock" "$work/out" || fail "--status 
 grep -q "pid 999999" "$work/out" || fail "--status does not name the lock's pid: $(cat "$work/out")"
 grep -q "not running" "$work/out" || fail "--status does not say the lock is stale: $(cat "$work/out")"
 if grep -q "belongs to the running release" "$work/out"; then fail "--status calls .replaced a running release's when the lock is stale: $(cat "$work/out")"; fi
+grep -q "left by a run that died" "$work/out" || fail "--status does not say .replaced was left by a dead run when the pid is absent: $(cat "$work/out")"
 # A live release owned by another user (a pid we cannot signal) is running.
 mkdir -p "$TI_PROC/999999"
 printf '/bin/bash\0/usr/local/sbin/ti-release\0v1.2.3\0' >"$TI_PROC/999999/cmdline"
@@ -493,6 +494,22 @@ expect "--status with a reused pid" 0 "$(run --status)"
 grep -q "pid reused; the lock is stale" "$work/out" || fail "--status does not report a reused pid: $(cat "$work/out")"
 expect "--status with a stale lock and .replaced" 0 "$(run --status)"
 grep -q "left by a run that died" "$work/out" || fail "--status does not say .replaced was left by a dead run: $(cat "$work/out")"
+# A reused pid whose command line merely contains the script's name in an
+# argument (an editor opened on it) is not the release.
+for words in 'vim\0/usr/local/sbin/ti-release\0' 'less\0deploy/release.sh\0' 'journalctl\0-t\0ti-release\0'; do
+  printf '%b' "$words" >"$TI_PROC/999999/cmdline"
+  expect "--status with a pid reused by a program naming the script" 0 "$(run --status)"
+  grep -q "pid reused; the lock is stale" "$work/out" || fail "--status takes a program that only names the script for the release ($words): $(cat "$work/out")"
+done
+# bash running the script, with the script as argv[1], is the release.
+printf '/bin/bash\0deploy/release.sh\0v1.2.3\0' >"$TI_PROC/999999/cmdline"
+expect "--status with the script as argv[1]" 0 "$(run --status)"
+grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash release.sh: $(cat "$work/out")"
+# An empty command line (not readable under hidepid) is a running lock.
+: >"$TI_PROC/999999/cmdline"
+expect "--status with an unreadable command line" 0 "$(run --status)"
+grep -q "its command line cannot be read" "$work/out" || fail "--status does not say the command line cannot be read: $(cat "$work/out")"
+grep -q "belongs to the running release" "$work/out" || fail "--status calls a lock with an unreadable command line stale: $(cat "$work/out")"
 unset TI_PROC
 rm -rf "$TI_PREFIX/releases/.lock"
 expect "--status with no lock" 0 "$(run --status)"

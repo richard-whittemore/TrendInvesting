@@ -13,7 +13,10 @@
 #   sudo ti-release --rollback put the previous build back the same way
 #   ti-release --status        print the current and previous tags and whether a
 #                              kept build (.replaced or .rescue-*) is waiting;
-#                              read-only, takes no lock, needs no root
+#                              read-only, takes no lock, needs no root; run it
+#                              with sudo when deciding whether to clear a lock
+#                              (under hidepid=2 a plain user cannot see a live
+#                              root release and would call its lock stale)
 #   sudo deploy/release.sh --install
 #                              copy this script to /usr/local/sbin/ti-release
 #   ti-release --unverified v1.2.3
@@ -59,7 +62,7 @@
 #
 # Settings for tests and rehearsals (the server needs none): TI_RELEASE_URL,
 # TI_RELEASE_API, TI_PREFIX, TI_LINK_DIR, TI_SYSTEMCTL, TI_GH,
-# TI_RELEASE_NO_ROOT, TI_RELEASE_ANY_ARCH, TI_RELEASE_WAIT (seconds to wait
+# TI_PROC (the process table --status reads; default /proc), TI_RELEASE_NO_ROOT, TI_RELEASE_ANY_ARCH, TI_RELEASE_WAIT (seconds to wait
 # for the dashboard), TI_RELEASE_SETTLE (seconds between the settle checks),
 # TI_RELEASE_MAX_BYTES (the size cap of each download).
 set -euo pipefail
@@ -147,12 +150,25 @@ if test "$mode" = status; then
       # The release runs as root, so a plain user cannot signal it (kill -0
       # would fail): look at the process table instead, and at what the pid
       # runs, since a dead release's pid may have been given to another program.
-      lcmd=$(tr '\0' ' ' <"$proc/$lpid/cmdline" 2>/dev/null || true)
-      case $lcmd in
-        *ti-release* | *release.sh*) lstate="pid $lpid is running" ;;
-        "") lstate="pid $lpid is running (its command line cannot be read)" ;;
-        *) lstate="pid $lpid is another program (pid reused; the lock is stale); see the runbook before removing it" ;;
-      esac
+      # Only argv[0], or argv[1] when a shell is argv[0], can be the
+      # release: a program that merely names the script is not.
+      a0=""
+      a1=""
+      { IFS= read -r -d '' a0 && IFS= read -r -d '' a1; } <"$proc/$lpid/cmdline" 2>/dev/null || true
+      if test -z "$a0"; then
+        lstate="pid $lpid is running (its command line cannot be read)"
+      else
+        case ${a0##*/} in
+          ti-release | release.sh) lstate="pid $lpid is running" ;;
+          bash | sh | dash)
+            case ${a1##*/} in
+              ti-release | release.sh) lstate="pid $lpid is running" ;;
+              *) lstate="pid $lpid is another program (pid reused; the lock is stale); see the runbook before removing it" ;;
+            esac
+            ;;
+          *) lstate="pid $lpid is another program (pid reused; the lock is stale); see the runbook before removing it" ;;
+        esac
+      fi
     fi
     case $lstate in *stale*) lock_stale=1 ;; esac
     echo "lock: held at $releases/.lock (age $lage, $lstate)"
