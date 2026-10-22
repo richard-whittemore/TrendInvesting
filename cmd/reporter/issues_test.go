@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -36,19 +38,19 @@ type fakeIssue struct {
 	open     bool
 }
 
-func (f *fakeTracker) FindOpen(marker string) (number int, found bool, err error) {
+func (f *fakeTracker) Latest(_ context.Context, marker string) (trackedIssue, bool, error) {
 	if f.failing != nil {
-		return 0, false, f.failing
+		return trackedIssue{}, false, f.failing
 	}
-	for _, i := range f.issues {
-		if i.open && strings.Contains(i.body, marker) {
-			return i.number, true, nil
+	for n := len(f.issues) - 1; n >= 0; n-- {
+		if i := f.issues[n]; strings.Contains(i.body, marker) {
+			return trackedIssue{Number: i.number, Open: i.open, Comments: len(i.comments)}, true, nil
 		}
 	}
-	return 0, false, nil
+	return trackedIssue{}, false, nil
 }
 
-func (f *fakeTracker) Create(title, body string, labels []string) (int, error) {
+func (f *fakeTracker) Create(_ context.Context, title, body string, labels []string) (int, error) {
 	if f.failing != nil {
 		return 0, f.failing
 	}
@@ -57,7 +59,14 @@ func (f *fakeTracker) Create(title, body string, labels []string) (int, error) {
 	return len(f.issues), nil
 }
 
-func (f *fakeTracker) Comment(number int, body string) error {
+func (f *fakeTracker) LastComments(_ context.Context, number int) ([]string, error) {
+	if f.failing != nil {
+		return nil, f.failing
+	}
+	return f.issues[number-1].comments, nil
+}
+
+func (f *fakeTracker) Comment(_ context.Context, number int, body string) error {
 	if f.failing != nil {
 		return f.failing
 	}
@@ -66,12 +75,11 @@ func (f *fakeTracker) Comment(number int, body string) error {
 	return nil
 }
 
-func (f *fakeTracker) Close(number int, body string) error {
+func (f *fakeTracker) CloseIssue(_ context.Context, number int) error {
 	if f.failing != nil {
 		return f.failing
 	}
 	f.writes++
-	f.issues[number-1].comments = append(f.issues[number-1].comments, body)
 	f.issues[number-1].open = false
 	return nil
 }
@@ -212,8 +220,8 @@ func TestAnAcknowledgedAlertClosesItsIssueOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if tr.issues[0].open || tr.writes != 2 {
-		t.Fatalf("open=%v writes=%d, want closed with one create and one close", tr.issues[0].open, tr.writes)
+	if tr.issues[0].open || tr.writes != 3 || len(tr.issues[0].comments) != 1 {
+		t.Fatalf("open=%v writes=%d comments=%d, want closed with one create, one closing comment and one close", tr.issues[0].open, tr.writes, len(tr.issues[0].comments))
 	}
 	// The record stops the alert being delivered again: it would reopen.
 	if err := deliver([]sender{s}, a, seen, map[string]time.Time{}, map[string]int{}, t0.Add(time.Hour), time.Minute, func() error { return nil }); err != nil || len(tr.issues) != 1 {
@@ -221,18 +229,47 @@ func TestAnAcknowledgedAlertClosesItsIssueOnce(t *testing.T) {
 	}
 }
 
-// fakeGitHub is the GitHub REST API's issues endpoints, in memory.
+// fakeGitHub is the GitHub REST API's issues endpoints, in memory, as far as
+// the channel uses them: issues listed newest first, filtered by label and
+// state, and comments, each paged with a Link header; a body or comment over
+// GitHub's 65,536-character limit is refused with 422.
 type fakeGitHub struct {
 	mu      sync.Mutex
 	issues  []*fakeIssue
 	status  int // when not zero, every request is answered with it
 	tokens  []string
 	methods []string
+	// hang makes every request wait until its client gives up.
+	hang bool
+	// delay is how long each request takes.
+	delay time.Duration
+	// patchFailures is how many closes to refuse before taking one.
+	patchFailures int
+	// createAnswer, when set, is the answer to an issue's creation.
+	createAnswer string
+	// times are when each request arrived.
+	times []time.Time
 }
 
 func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
+	if g.hang {
+		g.mu.Lock()
+		g.times = append(g.times, time.Now())
+		g.methods = append(g.methods, r.Method+" "+r.URL.Path)
+		g.mu.Unlock()
+		<-r.Context().Done()
+		return
+	}
+	if g.delay > 0 {
+		select {
+		case <-time.After(g.delay):
+		case <-r.Context().Done():
+			return
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.times = append(g.times, time.Now())
 	g.tokens = append(g.tokens, r.Header.Get("Authorization"))
 	g.methods = append(g.methods, r.Method+" "+r.URL.Path)
 	if g.status != 0 {
@@ -246,26 +283,45 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		State  string   `json:"state"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
+	if utf8.RuneCountInString(in.Body) > 65536 {
+		http.Error(w, `{"message":"Validation Failed"}`, http.StatusUnprocessableEntity)
+		return
+	}
 	const base = "/repos/owner/repo/issues"
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == base:
-		if r.URL.Query().Get("labels") != "alert" || r.URL.Query().Get("state") != "open" {
+		q := r.URL.Query()
+		state := q.Get("state")
+		if q.Get("labels") != "alert" || (state != "open" && state != "all") {
 			http.Error(w, "unfiltered", http.StatusBadRequest)
 			return
 		}
-		var out []map[string]any
-		for _, i := range g.issues {
-			if i.open {
-				out = append(out, map[string]any{"number": i.number, "body": i.body})
+		var out []any
+		for n := len(g.issues) - 1; n >= 0; n-- {
+			i := g.issues[n]
+			if state == "open" && !i.open {
+				continue
 			}
+			s := "closed"
+			if i.open {
+				s = "open"
+			}
+			out = append(out, map[string]any{"number": i.number, "body": i.body, "state": s, "comments": len(i.comments)})
 		}
-		if r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1" {
-			out = nil
+		page(w, r, out)
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments"):
+		var out []any
+		for _, c := range g.issues[issueNumber(r.URL.Path)-1].comments {
+			out = append(out, map[string]any{"body": c})
 		}
-		_ = json.NewEncoder(w).Encode(out)
+		page(w, r, out)
 	case r.Method == http.MethodPost && r.URL.Path == base:
 		g.issues = append(g.issues, &fakeIssue{number: len(g.issues) + 1, title: in.Title, body: in.Body, labels: in.Labels, open: true})
 		w.WriteHeader(http.StatusCreated)
+		if g.createAnswer != "" {
+			_, _ = w.Write([]byte(g.createAnswer))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": len(g.issues)})
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
 		n := issueNumber(r.URL.Path)
@@ -273,12 +329,50 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("{}"))
 	case r.Method == http.MethodPatch:
+		if g.patchFailures > 0 {
+			g.patchFailures--
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		n := issueNumber(r.URL.Path)
 		g.issues[n-1].open = in.State != "closed"
 		_, _ = w.Write([]byte("{}"))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// page answers one page of all, as per_page and page ask, with GitHub's Link
+// header naming the next and the last page.
+func page(w http.ResponseWriter, r *http.Request, all []any) {
+	per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	if per <= 0 {
+		per = 30
+	}
+	p, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if p <= 0 {
+		p = 1
+	}
+	last := max(1, (len(all)+per-1)/per)
+	link := func(n int, rel string) string {
+		u := *r.URL
+		q := u.Query()
+		q.Set("page", strconv.Itoa(n))
+		u.RawQuery = q.Encode()
+		return fmt.Sprintf("<http://%s%s>; rel=%q", r.Host, u.String(), rel)
+	}
+	var links []string
+	if p < last {
+		links = append(links, link(p+1, "next"))
+	}
+	links = append(links, link(last, "last"))
+	w.Header().Set("Link", strings.Join(links, ", "))
+	lo, hi := min(len(all), (p-1)*per), min(len(all), p*per)
+	out := all[lo:hi]
+	if out == nil {
+		out = []any{}
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func issueNumber(path string) int {

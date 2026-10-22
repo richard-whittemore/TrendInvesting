@@ -110,7 +110,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	flags := flag.NewFlagSet("reporter notify-unit-failed", flag.ContinueOnError)
 	flags.SetOutput(out)
 	statePath := flags.String("state", "", "the host's record of failed-unit pages (unit-failures.json beside the reporters' state files)")
-	channels := flags.String("channel", "ntfy,pagerduty", "comma-separated channels: ntfy, pagerduty")
+	channels := flags.String("channel", "ntfy,pagerduty", "comma-separated channels: ntfy, pagerduty, github-issues (one issue per page, with every secret removed)")
 	secretsFile := flags.String("secrets-file", "", "KEY=VALUE file of channel secrets (under systemd: %d/secrets, the credential file)")
 	journalctl := flags.String("journalctl", "journalctl", "the journal reader")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that names the failed run when systemd did not (MONITOR_INVOCATION_ID)")
@@ -143,6 +143,9 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	for _, f := range setAside {
 		failures = append(failures, f.err)
 	}
+	// An issue is public: it is given every secret the hook holds to remove,
+	// as the reporter's firing gives its own.
+	withRedaction(senders, secrets)
 	at := now()
 	run := failedInvocation(getenv, *systemctl, unit, at)
 	err = withUnitState(*statePath, func(u *unitState) error {

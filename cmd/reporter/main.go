@@ -262,21 +262,30 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if unitStatePath == "" {
 		unitStatePath = filepath.Join(filepath.Dir(*statePath), "unit-failures.json")
 	}
-	if refused == nil {
-		if err := tellStateAtStart(senders, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
-			failures = append(failures, err)
+	// Every alert reaches the channels that page before any reaches an issue
+	// tracker, so a slow or failing tracker never holds back a page (ADR
+	// 0019, "Alerting": one channel's fault must not silence another).
+	paging, trackers := splitTrackers(senders)
+	for _, group := range [][]sender{paging, trackers} {
+		if len(group) == 0 {
+			continue
 		}
-	}
-	for _, a := range report.Fresh(alerts, nil) {
-		current, starting := sendersFor(senders, a, baselines, seen)
-		if err := deliver(current, a, seen, sent, repeats, at, *repeat, record); err != nil {
-			failures = append(failures, err)
-		}
-		if len(starting) > 0 {
-			marked := a
-			marked.Title = report.StateAtStartTitle + a.Title
-			if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record); err != nil {
+		if refused == nil {
+			if err := tellStateAtStart(group, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
 				failures = append(failures, err)
+			}
+		}
+		for _, a := range report.Fresh(alerts, nil) {
+			current, starting := sendersFor(group, a, baselines, seen)
+			if err := deliver(current, a, seen, sent, repeats, at, *repeat, record); err != nil {
+				failures = append(failures, err)
+			}
+			if len(starting) > 0 {
+				marked := a
+				marked.Title = report.StateAtStartTitle + a.Title
+				if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record); err != nil {
+					failures = append(failures, err)
+				}
 			}
 		}
 	}

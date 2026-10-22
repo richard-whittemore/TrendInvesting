@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,8 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
@@ -26,56 +31,110 @@ import (
 
 const (
 	issuesChannel = "github-issues"
-	// alertLabel is the label every alert issue carries, and the one the open
-	// issues are looked up by.
+	// alertLabel is the label every alert issue carries, and the one the
+	// alert issues are listed by.
 	alertLabel          = "alert"
 	defaultGitHubAPIURL = "https://api.github.com"
 	// issueEvidenceRows is how many of the journal's last records, and of each
 	// query's last rows, an issue shows.
 	issueEvidenceRows = 10
 	maxIssueTitle     = 200
-	// maxIssuePages bounds the look-up of open alert issues: 100 an issue
-	// page, so 1,000 open alerts are matched.
+	// maxIssueText is GitHub's limit on an issue's body and on a comment
+	// (65,536 characters); counted in bytes, which is never fewer.
+	maxIssueText = 65536
+	// maxIssuePages bounds the listing of alert issues, 100 an issue page, so
+	// 1,000 are matched; a longer listing is an error, never taken as whole.
 	maxIssuePages = 10
+	// maxDeliveryRequests bounds the requests of one delivery: the listing,
+	// then at most two pages of the issue's comments, a comment and a close.
+	maxDeliveryRequests = maxIssuePages + 4
 )
 
+// trackedIssue is the newest issue of an alert key, as the listing shows it.
+type trackedIssue struct {
+	Number   int
+	Open     bool
+	Comments int
+}
+
 // issueTracker is the issues of one repository, as the channel needs them.
-// The reporter's tracker is GitHub's; tests use an in-memory one.
+// The reporter's tracker is GitHub's; tests use an in-memory one. Every call
+// runs within ctx, the one deadline of the delivery it is part of.
 type issueTracker interface {
-	// FindOpen returns the number of the open issue whose body holds marker.
-	FindOpen(marker string) (number int, found bool, err error)
+	// Latest returns the newest issue, open or closed, whose body holds
+	// marker.
+	Latest(ctx context.Context, marker string) (issue trackedIssue, found bool, err error)
 	// Create opens an issue and returns its number.
-	Create(title, body string, labels []string) (int, error)
+	Create(ctx context.Context, title, body string, labels []string) (int, error)
+	// LastComments returns the bodies of the issue's latest comments, its
+	// last one among them.
+	LastComments(ctx context.Context, number int) ([]string, error)
 	// Comment adds a comment to an issue.
-	Comment(number int, body string) error
-	// Close adds a closing comment to an issue and closes it.
-	Close(number int, body string) error
+	Comment(ctx context.Context, number int, body string) error
+	// CloseIssue closes an issue.
+	CloseIssue(ctx context.Context, number int) error
 }
 
 // issuesSender delivers an alert as an issue: the first delivery opens it, a
-// repeat adds one comment to the open issue, and resolve closes it. A firing
-// delivers an alert once per channel, so an issue gets one write per key per
-// firing, inside GitHub's rate limits.
+// repeat adds one comment to the open issue, and resolve closes it. Each
+// write carries its delivery's identity (deliveryMarker), so a delivery sent
+// again, after its answer was lost, writes nothing more. An issue the owner
+// closed by hand is left closed: a repeat of the same incident neither
+// reopens nor replaces it, and only an alert that resolved and came back, a
+// new incident, opens a new issue (docs/manual/alerts-and-dashboard.md, "How
+// an issue closes").
+//
+// One delivery runs under one deadline, the send timeout (-send-timeout, the
+// longest one send to one channel may take), for all of its requests
+// together, and a tracker that failed its listing or ran out of time is not
+// asked again in the firing: the later alerts fail at once, so a GitHub that
+// hangs costs the firing one timeout (ADR 0019, "Alerting": one channel's
+// fault must not silence another).
 type issuesSender struct {
 	tracker  issueTracker
 	redactor report.Redactor
 	// evidence, when set, is the journal's redacted records and query output
 	// for the issue's body; the run sets it once the journal is read.
 	evidence func() string
+	// timeout is the deadline of one delivery; zero is none.
+	timeout time.Duration
+	// down is the tracker's failure earlier in the firing.
+	down error
 }
 
 func (*issuesSender) name() string { return issuesChannel }
 
+// tracksIssues marks the channel that writes to an issue tracker: it is sent
+// each alert after every other channel, so a slow or failing tracker never
+// holds back a page.
+func (*issuesSender) tracksIssues() {}
+
 // issueMarker is the hidden line in an issue's body that ties it to its alert
 // key. It carries the key's hash, never the key.
 func issueMarker(key string) string {
+	return "<!-- ti-alert-key:" + keyHash(key) + " -->"
+}
+
+func keyHash(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return "<!-- ti-alert-key:" + hex.EncodeToString(sum[:]) + " -->"
+	return hex.EncodeToString(sum[:])
+}
+
+// deliveryMarker is the hidden line of the comment of one delivery of an
+// alert: its key's hash and its repeat ordinal.
+func deliveryMarker(key string, repeat int) string {
+	return fmt.Sprintf("<!-- ti-alert-delivery:%s#%d -->", keyHash(key), repeat)
+}
+
+// resolvedMarker is the hidden line of the comment that closes an alert's
+// issue.
+func resolvedMarker(key string) string {
+	return "<!-- ti-alert-resolved:" + keyHash(key) + " -->"
 }
 
 // text is the alert's words for a public place: its public text when it has
 // one, which carries no figure (owner decision 2026-10-17,
-// docs/live-trading/plan.md section 7), redacted.
+// docs/live-trading/plan.md section 7), redacted all the same.
 func (s *issuesSender) text(a report.Alert) string {
 	body := a.Body
 	if a.PublicBody != "" {
@@ -84,35 +143,123 @@ func (s *issuesSender) text(a report.Alert) string {
 	return s.redactor.Text(body)
 }
 
+// begin starts one delivery: its deadline and its request budget, or the
+// tracker's failure earlier in the firing.
+func (s *issuesSender) begin() (context.Context, context.CancelFunc, error) {
+	if s.down != nil {
+		return nil, nil, fmt.Errorf("not tried: GitHub failed earlier in this firing (%w)", s.down)
+	}
+	ctx, cancel := context.Background(), context.CancelFunc(func() {})
+	if s.timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+	}
+	return withRequestBudget(ctx, maxDeliveryRequests), cancel, nil
+}
+
+// note remembers, for the rest of the firing, a failed listing and a
+// delivery that ran out of time, and returns err.
+func (s *issuesSender) note(err error, listing bool) error {
+	if err != nil && (listing || errors.Is(err, context.DeadlineExceeded)) {
+		s.down = err
+	}
+	return err
+}
+
 func (s *issuesSender) send(a report.Alert, repeat int) error {
-	marker := issueMarker(a.Key)
-	number, found, err := s.tracker.FindOpen(marker)
+	ctx, cancel, err := s.begin()
 	if err != nil {
 		return err
 	}
-	if found {
-		return s.tracker.Comment(number, fmt.Sprintf("Still open (repeat %d).\n\n%s", repeat, s.text(a)))
+	defer cancel()
+	marker := issueMarker(a.Key)
+	issue, found, err := s.tracker.Latest(ctx, marker)
+	if err != nil {
+		return s.note(err, true)
+	}
+	switch {
+	case found && issue.Open && repeat == 0:
+		// The open issue is this delivery's, made by a send whose answer was
+		// lost.
+		return nil
+	case found && issue.Open:
+		id := deliveryMarker(a.Key, repeat)
+		last, err := s.tracker.LastComments(ctx, issue.Number)
+		if err != nil {
+			return s.note(err, false)
+		}
+		if slices.ContainsFunc(last, func(c string) bool { return strings.Contains(c, id) }) {
+			return nil
+		}
+		return s.note(s.tracker.Comment(ctx, issue.Number, fitIssueText(fmt.Sprintf("Still open (repeat %d).\n\n%s", repeat, s.text(a)), "", "\n\n"+id)), false)
+	case found && repeat > 0:
+		// Closed by hand while the incident goes on: left closed.
+		return nil
 	}
 	title := s.redactor.Text(a.Title)
 	if r := []rune(title); len(r) > maxIssueTitle {
 		title = string(r[:maxIssueTitle])
 	}
-	body := s.text(a)
+	evidence := ""
 	if s.evidence != nil {
-		body += "\n\n" + s.redactor.Text(s.evidence())
+		evidence = s.redactor.Text(s.evidence())
 	}
-	_, err = s.tracker.Create(title, body+"\n\n"+marker, []string{alertLabel})
-	return err
+	_, err = s.tracker.Create(ctx, title, fitIssueText(s.text(a), evidence, "\n\n"+marker), []string{alertLabel})
+	return s.note(err, false)
 }
 
-// resolve closes the open issue of the alert keyed key. An alert with no open
-// issue, one the owner closed already, is resolved.
+// resolve closes the open issue of the alert keyed key, with one closing
+// comment: a close whose comment was posted but whose state change failed
+// only closes when tried again. An alert with no open issue, one the owner
+// closed already, is resolved.
 func (s *issuesSender) resolve(key string) error {
-	number, found, err := s.tracker.FindOpen(issueMarker(key))
-	if err != nil || !found {
+	ctx, cancel, err := s.begin()
+	if err != nil {
 		return err
 	}
-	return s.tracker.Close(number, "Resolved: this alert has cleared.")
+	defer cancel()
+	issue, found, err := s.tracker.Latest(ctx, issueMarker(key))
+	if err != nil {
+		return s.note(err, true)
+	}
+	if !found || !issue.Open {
+		return nil
+	}
+	id := resolvedMarker(key)
+	last, err := s.tracker.LastComments(ctx, issue.Number)
+	if err != nil {
+		return s.note(err, false)
+	}
+	if !slices.ContainsFunc(last, func(c string) bool { return strings.Contains(c, id) }) {
+		if err := s.tracker.Comment(ctx, issue.Number, "Resolved: this alert has cleared.\n\n"+id); err != nil {
+			return s.note(err, false)
+		}
+	}
+	return s.note(s.tracker.CloseIssue(ctx, issue.Number), false)
+}
+
+// issueCutNote ends a text cut to fit GitHub's limit.
+const issueCutNote = "\n\n[cut to fit GitHub's limit; the rest is in the journal on the server]"
+
+// fitIssueText is text, then evidence, then tail, within GitHub's limit
+// (maxIssueText): the evidence is cut first, then the text, each at a whole
+// character and said so, and tail, the hidden marker, is always kept whole.
+func fitIssueText(text, evidence, tail string) string {
+	whole := text
+	if evidence != "" {
+		whole += "\n\n" + evidence
+	}
+	if len(whole)+len(tail) <= maxIssueText {
+		return whole + tail
+	}
+	room := maxIssueText - len(tail) - len(issueCutNote) - len("\n```")
+	cut := whole[:room]
+	for !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	if strings.Count(cut, "```")%2 == 1 {
+		cut += "\n```"
+	}
+	return cut + issueCutNote + tail
 }
 
 // resolvedKey is the state-file key recording that a channel has closed the
@@ -148,7 +295,8 @@ func closeAcknowledged(senders []sender, alerts []report.Alert, seen map[string]
 // githubIssuesFrom builds the channel from its secrets: the issues-only
 // fine-grained token, the repository as owner/name, and GitHub's API address,
 // api.github.com when unset. Neither the token nor the address's text appears
-// in an error.
+// in an error. One delivery's deadline is the client's timeout, the send
+// timeout.
 func githubIssuesFrom(getenv func(string) string, client *http.Client) (sender, error) {
 	token := getenv("TI_GITHUB_ISSUES_TOKEN")
 	if token == "" {
@@ -166,41 +314,60 @@ func githubIssuesFrom(getenv func(string) string, client *http.Client) (sender, 
 	if u, err := url.Parse(api); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, errors.New("reporter: TI_GITHUB_API_URL must be an absolute URL such as https://api.github.com")
 	}
-	return &issuesSender{tracker: &githubTracker{base: strings.TrimRight(api, "/") + "/repos/" + owner + "/" + name, token: token, client: client}, redactor: report.NewRedactor(append([]string{token}, hostLiterals()...))}, nil
+	return &issuesSender{
+		tracker:  &githubTracker{base: strings.TrimRight(api, "/") + "/repos/" + owner + "/" + name, token: token, client: client},
+		redactor: report.NewRedactor(append([]string{token}, hostLiterals()...)),
+		timeout:  client.Timeout,
+	}, nil
 }
 
 // githubTracker is one repository's issues over GitHub's REST API
-// (https://docs.github.com/en/rest/issues). The open alert issues are listed
-// once per firing and kept, so a firing's lookups cost one request, not one
-// per alert.
+// (https://docs.github.com/en/rest/issues). The alert issues, open and
+// closed, are listed once per firing, newest first, and kept, so a firing's
+// lookups cost one listing, not one per alert.
 type githubTracker struct {
 	base, token string
 	client      *http.Client
 
 	mu     sync.Mutex
 	loaded bool
-	open   map[string]int // marker -> issue number
+	latest map[string]trackedIssue // marker -> the newest issue holding it
 }
 
 // ghIssue is the part of an issue the channel reads.
 type ghIssue struct {
 	Number      int             `json:"number"`
 	Body        string          `json:"body"`
+	State       string          `json:"state"`
+	Comments    int             `json:"comments"`
 	PullRequest json.RawMessage `json:"pull_request"`
 }
 
-func (g *githubTracker) call(method, path string, in, out any) error {
+// requestBudget is the count of requests one delivery may still make.
+type requestBudget struct{}
+
+func withRequestBudget(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, requestBudget{}, &n)
+}
+
+func (g *githubTracker) call(ctx context.Context, method, path string, in, out any) (http.Header, error) {
+	if left, ok := ctx.Value(requestBudget{}).(*int); ok {
+		if *left <= 0 {
+			return nil, errors.New("this delivery used every request it may make")
+		}
+		*left--
+	}
 	var body io.Reader
 	if in != nil {
 		raw, err := json.Marshal(in)
 		if err != nil {
-			return errors.New("build request")
+			return nil, errors.New("build request")
 		}
 		body = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequest(method, g.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, g.base+path, body)
 	if err != nil {
-		return errors.New("build request")
+		return nil, errors.New("build request")
 	}
 	req.Header.Set("Authorization", "Bearer "+g.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -212,39 +379,54 @@ func (g *githubTracker) call(method, path string, in, out any) error {
 	if err != nil {
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			return fmt.Errorf("request failed: %w", urlErr.Err)
+			return nil, fmt.Errorf("request failed: %w", urlErr.Err)
 		}
-		return errors.New("request failed")
+		return nil, errors.New("request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	answer, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<22))
 	if resp.StatusCode/100 != 2 {
 		// A limit GitHub applies is the channel's failure like any other: the
-		// alert is sent again at the next firing, which is later than the
-		// Retry-After GitHub names.
+		// alert is sent again at a later firing, and a firing that comes
+		// before the limit lifts fails the same way.
 		if resp.StatusCode == http.StatusTooManyRequests || resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != "" {
-			return fmt.Errorf("GitHub answered %s: rate limited, tried again at the next firing", resp.Status)
+			return nil, fmt.Errorf("GitHub answered %s: rate limited, tried again at a later firing", resp.Status)
 		}
-		return fmt.Errorf("GitHub answered %s", resp.Status)
+		return nil, fmt.Errorf("GitHub answered %s", resp.Status)
 	}
 	if out != nil {
 		if err := json.Unmarshal(answer, out); err != nil {
-			return errors.New("GitHub's answer was not understood")
+			return nil, errors.New("GitHub's answer was not understood")
 		}
 	}
-	return nil
+	return resp.Header, nil
 }
 
-// load lists the open alert issues once.
-func (g *githubTracker) load() error {
+// nextPage reports whether GitHub's Link header names a next page.
+func nextPage(h http.Header) bool {
+	for _, link := range strings.Split(h.Get("Link"), ",") {
+		if strings.Contains(link, `rel="next"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// load lists the alert issues, open and closed, newest first, once. A
+// listing longer than maxIssuePages is an error: an issue beyond it would be
+// taken for absent and opened again.
+func (g *githubTracker) load(ctx context.Context) error {
 	if g.loaded {
 		return nil
 	}
-	open := map[string]int{}
-	for page := 1; page <= maxIssuePages; page++ {
+	latest := map[string]trackedIssue{}
+	for page := 1; ; page++ {
+		if page > maxIssuePages {
+			return fmt.Errorf("more than %d issues carry the %s label, so the list of alert issues is incomplete and none is written; remove the label from old closed ones", maxIssuePages*100, alertLabel)
+		}
 		var issues []ghIssue
-		path := fmt.Sprintf("/issues?labels=%s&state=open&per_page=100&page=%d", alertLabel, page)
-		if err := g.call(http.MethodGet, path, nil, &issues); err != nil {
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues?labels=%s&state=all&sort=created&direction=desc&per_page=100&page=%d", alertLabel, page), nil, &issues)
+		if err != nil {
 			return err
 		}
 		for _, i := range issues {
@@ -252,14 +434,16 @@ func (g *githubTracker) load() error {
 				continue
 			}
 			if m := markerIn(i.Body); m != "" {
-				open[m] = i.Number
+				if _, newer := latest[m]; !newer {
+					latest[m] = trackedIssue{Number: i.Number, Open: i.State == "open", Comments: i.Comments}
+				}
 			}
 		}
-		if len(issues) < 100 {
+		if !nextPage(h) {
 			break
 		}
 	}
-	g.open, g.loaded = open, true
+	g.latest, g.loaded = latest, true
 	return nil
 }
 
@@ -277,47 +461,89 @@ func markerIn(body string) string {
 	return body[i : i+end+3]
 }
 
-func (g *githubTracker) FindOpen(marker string) (number int, found bool, err error) {
+func (g *githubTracker) Latest(ctx context.Context, marker string) (trackedIssue, bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if err := g.load(); err != nil {
-		return 0, false, err
+	if err := g.load(ctx); err != nil {
+		return trackedIssue{}, false, err
 	}
-	n, ok := g.open[marker]
-	return n, ok, nil
+	i, ok := g.latest[marker]
+	return i, ok, nil
 }
 
-func (g *githubTracker) Create(title, body string, labels []string) (int, error) {
+// Create opens an issue. Only an answer that names the new issue is a
+// delivery.
+func (g *githubTracker) Create(ctx context.Context, title, body string, labels []string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var out ghIssue
-	if err := g.call(http.MethodPost, "/issues", map[string]any{"title": title, "body": body, "labels": labels}, &out); err != nil {
+	if _, err := g.call(ctx, http.MethodPost, "/issues", map[string]any{"title": title, "body": body, "labels": labels}, &out); err != nil {
 		return 0, err
 	}
+	if out.Number <= 0 {
+		return 0, errors.New("GitHub's answer named no issue")
+	}
 	if g.loaded {
-		g.open[markerIn(body)] = out.Number
+		g.latest[markerIn(body)] = trackedIssue{Number: out.Number, Open: true}
 	}
 	return out.Number, nil
 }
 
-func (g *githubTracker) Comment(number int, body string) error {
+// LastComments reads the issue's last page of comments, found from the
+// listing's count and followed to the end.
+func (g *githubTracker) LastComments(ctx context.Context, number int) ([]string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.call(http.MethodPost, fmt.Sprintf("/issues/%d/comments", number), map[string]string{"body": body}, nil)
+	page := 1
+	for _, i := range g.latest {
+		if i.Number == number && i.Comments > 0 {
+			page = (i.Comments + 99) / 100
+		}
+	}
+	var bodies []string
+	for {
+		var comments []struct {
+			Body string `json:"body"`
+		}
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues/%d/comments?per_page=100&page=%d", number, page), nil, &comments)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range comments {
+			bodies = append(bodies, c.Body)
+		}
+		if !nextPage(h) {
+			return bodies, nil
+		}
+		page++
+	}
 }
 
-func (g *githubTracker) Close(number int, body string) error {
+func (g *githubTracker) Comment(ctx context.Context, number int, body string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if err := g.call(http.MethodPost, fmt.Sprintf("/issues/%d/comments", number), map[string]string{"body": body}, nil); err != nil {
+	if _, err := g.call(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/comments", number), map[string]string{"body": body}, nil); err != nil {
 		return err
 	}
-	if err := g.call(http.MethodPatch, fmt.Sprintf("/issues/%d", number), map[string]string{"state": "closed", "state_reason": "completed"}, nil); err != nil {
+	for m, i := range g.latest {
+		if i.Number == number {
+			i.Comments++
+			g.latest[m] = i
+		}
+	}
+	return nil
+}
+
+func (g *githubTracker) CloseIssue(ctx context.Context, number int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, err := g.call(ctx, http.MethodPatch, fmt.Sprintf("/issues/%d", number), map[string]string{"state": "closed", "state_reason": "completed"}, nil); err != nil {
 		return err
 	}
-	for m, n := range g.open {
-		if n == number {
-			delete(g.open, m)
+	for m, i := range g.latest {
+		if i.Number == number {
+			i.Open = false
+			g.latest[m] = i
 		}
 	}
 	return nil
@@ -339,17 +565,11 @@ func withIssueEvidence(senders []sender, journalPath string) {
 	}
 }
 
-// droppedColumns are the query columns that hold a quantity, a price or an
-// account: with a price they give a position's size, and the issue is public.
-var droppedColumns = map[string]bool{
-	"account": true, "quantity": true, "price": true, "commission": true,
-	"fills": true, "snapshot": true, "change": true, "position": true, "journal": true,
-}
-
-// issueEvidence is the body's journal section: the last records as redacted
-// text, then the output of journal-query's reconcile, refusals and orders,
-// each without its quantities and prices and cut to its last rows. A journal
-// that cannot be read is said so; the alert still opens its issue.
+// issueEvidence is the body's journal section: the last records, then the
+// output of journal-query's reconcile, refusals and orders cut to their last
+// rows, all through one filter (report.Withheld names the fields and columns
+// left out, and every figure left is removed), since the issue is public. A
+// journal that cannot be read is said so; the alert still opens its issue.
 func issueEvidence(path string, r report.Redactor) string {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -388,8 +608,8 @@ func issueEvidence(path string, r report.Redactor) string {
 			continue
 		}
 		var text bytes.Buffer
-		_ = trimmed(table).WriteText(&text)
-		b.WriteString(r.Text(text.String()))
+		_ = redactedTable(table, r).WriteText(&text)
+		b.WriteString(text.String())
 		if qerr != nil {
 			b.WriteString(r.Text(qerr.Error()) + "\n")
 		}
@@ -398,12 +618,13 @@ func issueEvidence(path string, r report.Redactor) string {
 	return b.String()
 }
 
-// trimmed is t without its dropped columns and cut to its last rows.
-func trimmed(t journalquery.Table) journalquery.Table {
+// redactedTable is t without its withheld columns, cut to its last rows, and
+// with every cell redacted; a record's sequence number is kept, as #n.
+func redactedTable(t journalquery.Table, r report.Redactor) journalquery.Table {
 	var keep []int
 	var out journalquery.Table
 	for i, c := range t.Columns {
-		if !droppedColumns[c] {
+		if !report.Withheld(c) {
 			keep = append(keep, i)
 			out.Columns = append(out.Columns, c)
 		}
@@ -412,7 +633,12 @@ func trimmed(t journalquery.Table) journalquery.Table {
 	for _, row := range rows {
 		cells := make([]string, 0, len(keep))
 		for _, i := range keep {
-			cells = append(cells, row[i])
+			cell := row[i]
+			if _, err := strconv.ParseUint(cell, 10, 64); err == nil && t.Columns[i] == "seq" {
+				// A record number reads #n, as in the records above, and is kept.
+				cell = "#" + cell
+			}
+			cells = append(cells, r.Text(cell))
 		}
 		out.Rows = append(out.Rows, cells)
 	}
@@ -420,10 +646,11 @@ func trimmed(t journalquery.Table) journalquery.Table {
 }
 
 // hostLiterals are this host's names, which never reach an issue: a Tailscale
-// host is named by the machine's own name.
+// host is named by the machine's own name. A short name is kept too; the
+// redactor removes it where it stands as a word.
 func hostLiterals() []string {
 	h, err := os.Hostname()
-	if err != nil || len(h) < 4 {
+	if err != nil || h == "" {
 		return nil
 	}
 	short, _, _ := strings.Cut(h, ".")
@@ -435,7 +662,7 @@ func hostLiterals() []string {
 func withRedaction(senders []sender, secrets []string) {
 	for _, s := range senders {
 		if is, ok := s.(*issuesSender); ok {
-			is.redactor = report.NewRedactor(append(secrets, append([]string{}, hostLiterals()...)...))
+			is.redactor = report.NewRedactor(append(slices.Clone(secrets), hostLiterals()...))
 		}
 	}
 }
