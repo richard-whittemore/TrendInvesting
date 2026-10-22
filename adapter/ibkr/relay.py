@@ -105,7 +105,12 @@ sent is never sent: the adapter stops for a person (EarlierRunInput), who
 settles it with `python3 adapter/ibkr/relay.py resolve --run-ended
 PENDING_FILE INPUT_ID --journal ENGINE_LOG --reason TEXT`
 (resolve_run_ended), refused for an input of the run whose durable log is
-ENGINE_LOG.
+ENGINE_LOG. Before the fresh run is approved, an order the ended run's
+last reply released that the adapter never sent is settled for the
+approval with `python3 adapter/ibkr/relay.py settle-ended-run PENDING_FILE
+--journal ENDED_LOG --by NAME --reason TEXT` (settle_ended_run), so a sale
+back to 98% the ended run's engine could not be told was never sent is
+tried again by the fresh run (the owner's decision of 2026-10-22).
 
 An input ID names one input (ADR 0027 section 4): a retry under the ID of
 the input awaiting its reply, with other content, is refused (InputChanged)
@@ -257,6 +262,18 @@ RUN_ENDED = "run ended"
 # (PendingInput.record_run), and of one settled input (record_run_ended).
 RUN_FIELDS = ("input_id", "log", "run")
 RUN_ENDED_FIELDS = ("at", "input", "outbox", "reason", "refused", "run", "session_date", "unsent")
+# The adapter's settlement of an order an ended run released and it never
+# sent (settle_ended_run), one line of PendingInput.never_sent_path, as
+# internal/event NeverSentSettlement reads it: its fields, its retirement's,
+# and the evidence it carries (NEVER_SENT_UNMARKED: the record holds no mark
+# for it; NEVER_SENT_REFUSED: the relay recorded refusing it before any mark;
+# NEVER_SENT for the mark itself).
+NEVER_SENT_SUFFIX = ".never-sent"
+NEVER_SENT_FIELDS = ("evidence", "input_id", "log", "retirement", "run")
+NEVER_SENT_RETIREMENT_FIELDS = ("account_id", "client_order_id", "detail", "instrument_id", "limit_price", "quantity",
+                                "reason", "retired_at", "retired_by", "side")
+NEVER_SENT_UNMARKED = "unmarked"
+NEVER_SENT_REFUSED = "refused"
 # The adapter's outbox (Outbox), beside the pending file, and the fields of
 # one of its entries.
 OUTBOX_SUFFIX = ".outbox"
@@ -589,6 +606,7 @@ class PendingInput:
         self.not_handed_over_path = path + ".not-handed-over"
         self.run_path = path + ".run"
         self.run_ended_path = path + ".run-ended"
+        self.never_sent_path = path + NEVER_SENT_SUFFIX
         # Never removed: a lock lives on the file's inode, so deleting it
         # under a live holder would let a second writer lock a new file.
         self.lock_path = path + ".lock"
@@ -797,6 +815,45 @@ class PendingInput:
     def record_run_ended(self, entry):
         """Append one settled input durably; never removed, so it is never sent or journalled again."""
         with open(self.run_ended_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self._sync_dir()
+
+    def never_sent(self):
+        """The settlements of orders an ended run released and the adapter never sent (settle_ended_run), oldest first.
+
+        Read strictly (fail closed, AGENTS.md): a line that is not exactly
+        what record_never_sent writes raises HandoverRecordInvalid. The
+        file is never cleared: it is the evidence `operator approve
+        -never-sent` reads.
+        """
+        try:
+            with open(self.never_sent_path, encoding="utf-8") as f:
+                # Numbered as the file's own lines, blank ones included, so
+                # a stop names the line the owner finds.
+                lines = [(n, line) for n, line in enumerate(f, 1) if line.strip()]
+        except FileNotFoundError:
+            return []
+        entries = []
+        for n, line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError as err:
+                raise HandoverRecordInvalid("{} line {} is not JSON: {}".format(self.never_sent_path, n, err)) from None
+            if (not isinstance(entry, dict) or tuple(sorted(entry)) != NEVER_SENT_FIELDS
+                    or not all(_is_text(entry[k]) for k in ("evidence", "input_id", "log", "run"))
+                    or not isinstance(entry["retirement"], dict)
+                    or tuple(sorted(entry["retirement"])) != NEVER_SENT_RETIREMENT_FIELDS
+                    or not _is_text(entry["retirement"]["client_order_id"])):
+                raise HandoverRecordInvalid("{} line {} is not a settlement as settle-ended-run writes one".format(
+                    self.never_sent_path, n))
+            entries.append(entry)
+        return entries
+
+    def record_never_sent(self, entry):
+        """Append one settlement of a never-sent order durably; never removed (never_sent)."""
+        with open(self.never_sent_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
@@ -1754,6 +1811,107 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
         os.close(held)
 
 
+def settle_ended_run(pending, engine_log_path, by, reason, now=None):
+    """Settle, for the fresh run's approval, each order the ended run left unsent: one line each, and marked never sent.
+
+    The owner's decision of 2026-10-22, and ADR 0019's amendment of
+    2026-10-17, reading 4: a sale back to 98% the adapter never sent spent
+    nothing, so the fresh run may try it again; but the ended run's engine
+    can no longer be told, so its log still records the attempt. With the
+    adapter stopped and the run whose durable log is engine_log_path ended,
+    this reads the input awaiting its reply, which must have been sent to
+    that run (PendingInput.run_of, run_identity) and committed in its log,
+    and for each order its committed reply released to be sent, records a
+    settlement in PendingInput.never_sent_path (the file `operator approve
+    -never-sent` reads, internal/restart ReadSettlements): the log's file
+    name, the run, the input, the evidence, and the retirement it amounts
+    to, retired by the owner named by with reason (internal/event
+    OrderRetiredPayload, "owner retired"). Then it marks the order never
+    sent, so no relay sends it, whichever run is started next. Only an
+    order the write-ahead record leaves unmarked (never handed over:
+    NEVER_SENT_UNMARKED, or NEVER_SENT_REFUSED when the relay recorded
+    refusing it) or marks never sent (NEVER_SENT) is settled; one marked
+    handed over, sent or allowed to be sent again may have reached IBKR,
+    and is never settled (fail closed, AGENTS.md). Nor is one the log
+    already ends: retired, or named by a venue's report or execution, which
+    shows it was sent. An order settled already for that log is not settled
+    again, so the command may be run again after a stop. The approval tool
+    checks each line against the log by the engine's own rule, so a line
+    here never retires an order the log shows was sent. Refuses
+    (ResolveRefused, nothing changed) an empty reason, no name or the
+    adapter's own, while an adapter holds the pending file, no input
+    awaiting its reply, an input sent to another run, and one the log does
+    not commit (that run released nothing for it). now, the clock the
+    settlement is stamped from, defaults to the time now.
+    """
+    if not reason or not reason.strip():
+        raise ResolveRefused("a reason is required: it is kept with each settlement and carried into the approval")
+    if not by or not by.strip() or by == RETIRED_BY_ADAPTER:
+        raise ResolveRefused("--by must name the owner settling the ended run's orders; {!r} is not a person".format(by))
+    held = _lock(pending.lock_path)
+    if held is None:
+        raise ResolveRefused("the adapter holds the pending file {}; stop it first".format(pending.path))
+    try:
+        waiting = pending.load()
+        if waiting is None:
+            raise ResolveRefused("no input awaits its reply in {}, so the ended run left no order unsent: approve "
+                                 "the fresh run without -never-sent".format(pending.path))
+        input_id = waiting.get("id")
+        log = os.path.basename(engine_log_path)
+        sent_to = pending.run_of()
+        run = run_identity(engine_log_path)
+        if sent_to is None or sent_to["input_id"] != input_id or sent_to["run"] != run:
+            raise ResolveRefused(
+                "input {} awaiting its reply was not sent to the run whose durable log is {} ({} records {}): give "
+                "--journal the log of the run that ended, the one the adapter sent it to".format(
+                    input_id, engine_log_path, pending.run_path, "nothing for it" if sent_to is None or
+                    sent_to["input_id"] != input_id else "run {}".format(sent_to["run"])))
+        groups = _committed_groups(engine_log_path).groups
+        group = next((g for g in groups if g[0][2]["id"] == input_id), None)
+        if group is None:
+            raise ResolveRefused("{} does not commit input {}, so that run released nothing for it: there is nothing "
+                                 "to settle; approve the fresh run without -never-sent".format(engine_log_path, input_id))
+        ended = set()
+        for g in groups:
+            for _, kind, envelope in g:
+                payload = envelope["payload"]
+                if (kind == LOG_INPUT and envelope["type"] in (RETIRED_TYPE, LIFECYCLE_TYPE, FILL_TYPE)
+                        and isinstance(payload, dict) and _is_text(payload.get("client_order_id"))):
+                    ended.add(payload["client_order_id"])
+        marks = pending.handovers()
+        refusal = pending.refusal()
+        settled = {(e["log"], e["retirement"]["client_order_id"]) for e in pending.never_sent()}
+        stamp = _stamp((now or _utc_now)())
+        for _, kind, envelope in group[1:]:
+            order = envelope["payload"]
+            if (kind != LOG_DECISION or envelope["type"] != RELEASED or not isinstance(order, dict)
+                    or order.get("send") is not True or not _is_text(order.get("client_order_id"))):
+                continue
+            order = _plain(order)
+            cid = order["client_order_id"]
+            mark = marks.get(cid)
+            if mark not in (None, NEVER_SENT) or cid in ended:
+                continue
+            if (log, cid) not in settled:
+                evidence = NEVER_SENT if mark == NEVER_SENT else (
+                    NEVER_SENT_REFUSED if refusal is not None and refusal["input_id"] == input_id
+                    and refusal["client_order_id"] == cid else NEVER_SENT_UNMARKED)
+                pending.record_never_sent({
+                    "log": log, "run": run, "input_id": input_id, "evidence": evidence,
+                    "retirement": {"account_id": order.get("account_id"), "client_order_id": cid,
+                                   "instrument_id": order.get("instrument_id"), "side": order.get("side"),
+                                   "quantity": order.get("quantity"), "limit_price": order.get("limit_price"),
+                                   "reason": RETIRED_BY_OWNER, "detail": reason, "retired_by": by,
+                                   "retired_at": stamp}})
+                settled.add((log, cid))
+            # Recorded first, so a stop before the mark finds the order
+            # unmarked and settled already, and marks it on the next run.
+            if mark is None:
+                pending.mark(cid, NEVER_SENT)
+    finally:
+        os.close(held)
+
+
 def journalled_fills(path):
     """The fill IDs of every committed fill input in the engine's durable log at path (journalled_reports)."""
     return journalled_reports(path).fills
@@ -2326,9 +2484,27 @@ def main(argv=None, today=None):
     ret.add_argument("client_order_id", metavar="ID", help="the client order ID the adapter's stop names")
     ret.add_argument("--by", required=True, help="your name, the owner retiring it; journalled with it")
     ret.add_argument("--reason", required=True, help="why it is retired and what was fixed; journalled with it")
+    ended = commands.add_parser("settle-ended-run",
+                                help="once the engine run the adapter's waiting input was sent to has ended, settle "
+                                     "each order it released that the adapter never sent, for the fresh run's "
+                                     "approval (operator approve -never-sent), and never send it")
+    ended.add_argument("pending_file", help="the adapter's pending-input file")
+    ended.add_argument("--journal", required=True, metavar="ENGINE_LOG",
+                       help="the durable log of the engine run that ended (its -log file), the one the waiting "
+                            "input was sent to")
+    ended.add_argument("--by", required=True, help="your name, the owner settling them; kept with each settlement")
+    ended.add_argument("--reason", required=True, help="why the run ended before they were sent; kept with each")
     args = parser.parse_args(argv)
     pending = PendingInput(args.pending_file)
     try:
+        if args.command == "settle-ended-run":
+            before = len(pending.never_sent())
+            settle_ended_run(pending, args.journal, args.by, args.reason)
+            lines = pending.never_sent()
+            print("{} order(s) settled as never sent in {} ({} already settled); approve the fresh run with "
+                  "operator approve -never-sent {}".format(len(lines) - before, pending.never_sent_path, before,
+                                                           pending.never_sent_path))
+            return 0
         if args.command == "retire":
             retire(pending, args.client_order_id, args.by, args.reason, today=today)
             print("order {} retired: journalled for the engine as a refusal ({}), never sent; start the adapter "

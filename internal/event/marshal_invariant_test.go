@@ -49,7 +49,7 @@ func marshalPayloads() []validatedPayload {
 		validTargetsDecidedWatching(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validKillSwitch(), validBrokerSnapshot(), postCloseSnapshot(), readTimeSnapshot(), evidencedMark(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
-		validOperatorRunApproved(), validOperatorRunApprovedInIncident(), validRebalanceCleared(), validRetired(),
+		validOperatorRunApprovedSettled(), validOperatorRunApproved(), validOperatorRunApprovedInIncident(), validRebalanceCleared(), validRetired(),
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
 		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
@@ -234,6 +234,17 @@ func leafByPath(t *testing.T, v reflect.Value, path string) reflect.Value {
 	t.Helper()
 	for _, part := range strings.Split(path, ".")[1:] {
 		name, index, indexed := strings.Cut(part, "[")
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				t.Fatalf("%s: %s is nil in the fixture", path, part)
+			}
+			// The copy shares the fixture's pointee: copy it, so setting
+			// the leaf changes the copy alone.
+			clone := reflect.New(v.Type().Elem())
+			clone.Elem().Set(v.Elem())
+			v.Set(clone)
+			v = clone.Elem()
+		}
 		v = v.FieldByName(name)
 		if indexed {
 			i, err := strconv.Atoi(strings.TrimSuffix(index, "]"))

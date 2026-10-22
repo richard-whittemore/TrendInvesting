@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352); amended 2026-10-21: the engine checks every close snapshot's holdings against its fills (#490); amended 2026-10-21, accepted by the owner 2026-10-22: a journalled deposit or withdrawal explains the cash difference; refined 2026-10-22 by the owner, with ADR 0026's amendment of that date: a sale back to 98% retired as never sent is no attempt, reading 4, and an ended run's never-sent sale is settled for the fresh run's approval)
 - Date: 2026-09-17
 
 ## In plain English
@@ -445,7 +445,11 @@ here so that all eleven are in one place.
    it is retired as never sent *(the owner's decision of 2026-10-22, ADR
    0026's amendment of that date: nothing was sent, so it is no attempt, and
    the sale is attempted again under its own rule at the next opportunity,
-   as a new order with a client identifier of its own)*. No
+   as a new order with a client identifier of its own; a sale an ended run
+   released and the adapter never sent counts so too, once the adapter's
+   settlement of it, which the fresh run's approval carries, is applied to
+   that run's log by the same rule, below, "A sale an ended run never
+   sent")*. No
    other withhold does: not "nothing to sell" (below), and not reading 1's
    `stale-broker-snapshot` or `non-positive-broker-values` withholds, which
    leave the attempt unspent and are re-evaluated as reading 1 states. In
@@ -542,6 +546,31 @@ here so that all eleven are in one place.
     `account.broker.snapshot` carries the observed side that
     `account.reconciliation` also needs; #227 folds one into the other or
     references it.
+
+### A sale an ended run never sent (2026-10-22, the owner's decision that retirement be automatic)
+
+Reading 4's retirement needs the engine to read it, and an engine run that
+has ended reads nothing more: when a run ends while the IBKR adapter still
+holds a sale it released and never sent, that run's log records the sale as
+attempted, and the fresh run would never try it again. So, before the
+owner approves the fresh run, the adapter settles each order the ended
+run's last reply released that its write-ahead record leaves unmarked or
+marks never sent (`relay.py settle-ended-run`): one line each, naming the
+ended log, the run, the releasing input, its evidence and the owner's
+retirement it amounts to, and the order is marked never sent so no adapter
+sends it. An order marked handed over, sent, or allowed to be sent again,
+or one the ended log shows retired, reported on or executed, is never
+settled. The approval tool (`operator approve -never-sent`) applies each
+line to the ended log after its last record, by the engine's own
+retirement rule (the restart reading never re-implements it), and checks
+that the named input released the order; a sale back to 98% it settles is
+then no attempt: the approval states it not attempted, counts it among the
+incident's retired sales, and carries the line as evidence
+(`operator.run.approved` version 5, ADR 0027). The engine applies the same
+lines to the same log before the fresh run starts and refuses the approval
+for any the log does not bear out. Nothing the engine decides changes: the
+fresh run reads the count as it did, so the target-weight `RulesVersion` is
+unchanged; only the approval's schema grows.
 
 ## Amendment (2026-10-17, accepted by the owner 2026-10-18): operator instructions count in the order of the times they state
 

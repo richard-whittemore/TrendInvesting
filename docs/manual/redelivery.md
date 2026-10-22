@@ -62,6 +62,45 @@ Re-delivery closes that gap:
   order: an order IBKR shows under its tag is never retired. See [paper
   trading](paper-trading.md), "What can go wrong", and
   [operator](operator.md), "Retiring an order the adapter can never send".
+- **An order an ended run left unsent is settled for the fresh run, so a
+  sale back to 98% is tried again.** When an engine run ends (you stop it
+  to leave Halted, to upgrade, after a reboot) while the adapter is still
+  waiting on an input whose reply released orders it never sent, that
+  run's engine can no longer be told they were never sent, so its log
+  still counts the incident's one sale back to 98% as attempted. Before you
+  approve the fresh run, with the adapter and the engine stopped, settle
+  them (the owner's decision of 2026-10-22):
+
+  ```
+  python3 adapter/ibkr/relay.py settle-ended-run PENDING_FILE --journal ENDED_LOG --by "your name" --reason "why the run ended"
+  ```
+
+  `ENDED_LOG` is the durable log of the run that ended (its `-log` file),
+  the run the adapter sent the waiting input to. For each order that
+  input's committed reply released to be sent that the adapter's record
+  leaves unmarked (never handed over) or marks never sent, it writes one
+  settlement line to `PENDING_FILE.never-sent`: the log, the run, the
+  input, the adapter's evidence (`unmarked`, `refused` or `never-sent`)
+  and the retirement it amounts to, retired by you with your reason. It
+  then marks the order never sent, so no adapter ever sends it. An order
+  marked about to be sent, sent, or allowed to be sent again may have
+  reached IBKR and is never settled; nor is one the ended log already
+  shows retired, reported on or executed. Running it again settles nothing
+  twice. It refuses while the adapter runs, with no input waiting, for an
+  input the log does not commit or that was sent to another run, and
+  without your name and a reason. Check IBKR for an order under each
+  client order ID it names (open, cancelled and today's trades): if IBKR
+  shows one, it was sent, and you approve without the file. Then approve
+  with `operator approve ... -never-sent PENDING_FILE.never-sent`: the
+  tool checks each line against the log by the engine's own retirement
+  rule and the input that released the order, refuses the approval
+  naming any line it does not bear out, and states each settled sale back
+  to 98% not attempted, with one more of the incident's sales retired and
+  the line carried as its evidence (`sale_settlements`). The engine checks
+  the same lines against the log again before it starts, and the fresh run
+  tries the sale again under the next attempt's client order ID. At the
+  fresh run's start, settle the waiting input with `resolve --run-ended`
+  as before; nothing of it is sent.
 - **A changed input never replaces the one waiting for its reply.** If the
   adapter is asked to send an input under the ID of the one it is still
   waiting on, but with different content, it first finishes the original
@@ -196,6 +235,30 @@ and after a crash.
     resume"), so what the crashed run committed is never sent again and the
     rest goes once; `test_a_fresh_run_drops_the_earlier_runs_batch_and_needs_its_own_warm_up_folder`:
     a fresh run never takes the earlier run's batch or folder.
+  - `adapter/ibkr/tests/test_loop.py`,
+    `test_settle_ended_run_records_each_order_the_ended_run_released_and_the_adapter_never_sent`:
+    the ended run's unsent order is settled once, with its evidence, in the
+    line `operator approve -never-sent` reads (`cmd/operator`,
+    `TestTheAdaptersSettlementLineIsOneTheApprovalReads`), marked never
+    sent, and never sent by the fresh run;
+    `test_settle_ended_run_never_settles_an_order_the_adapter_may_have_sent`,
+    `test_settle_ended_run_names_the_order_the_adapter_recorded_it_refused`,
+    `test_settle_ended_run_never_settles_an_order_the_ended_log_shows_retired_or_reported`,
+    `test_settle_ended_run_is_refused_for_a_log_that_is_not_the_run_the_input_was_sent_to`
+    and `test_settle_ended_run_is_refused_without_a_person_and_a_reason_and_while_the_adapter_runs`:
+    an order that may have reached IBKR, or that the log already ends, is
+    never settled, and the command changes nothing when refused.
+    `cmd/operator`, `TestTheApprovalReadsTheAdaptersSettlementOfANeverSentSale`,
+    and `internal/restart`,
+    `TestASaleTheAdapterNeverSentIsNotAttemptedOnceSettled`,
+    `TestASaleTheAdapterSentStaysAttempted`,
+    `TestASettlementThatDoesNotMatchTheLogIsRefused` and
+    `TestTheEngineChecksTheApprovalsSettlements`: the approval states a
+    settled sale not attempted, a sale that was sent stays attempted, and a
+    settlement the log does not bear out is refused, by the operator tool
+    and the engine alike; `cmd/engine`,
+    `TestAFreshRunApprovedAfterASettledNeverSentSaleSellsUnderTheNextAttemptsID`:
+    the fresh run sells under the next attempt's client order ID.
   - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
     a changed copy under the waiting input's ID is refused; the original's
     reply is asked for and its order sent once.

@@ -33,7 +33,7 @@ from relay import EngineUnavailable
 from loop import (OUTBOX_SUFFIX, RECONCILE_CUTOFFS, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch,
                   ReportRecordInvalid, SOURCE)
 from relay import (RELEASED, EarlierRunInput, HandoverRecordInvalid, PendingInput, ResolveRefused, main as relay_main,
-                   read_engine_log, run_identity)
+                   read_engine_log, run_identity, settle_ended_run)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 
 TESTDATA = tests_dir / "testdata"
@@ -878,6 +878,123 @@ class LoopTests(unittest.TestCase):
         recorded = PendingInput(self.pending).run_ended()
         self.assertEqual([(r["input"]["id"], r["refused"], r["unsent"]) for r in recorded],
                          [("session:1", "run ended", ["tw-paper-1"])])
+
+    def settle_ended_run(self, *extra):
+        return relay_main(["settle-ended-run", self.pending, "--journal", self.engine_log, "--by", "owner",
+                           "--reason", "the run ended before the adapter sent it"] + list(extra))
+
+    def test_settle_ended_run_records_each_order_the_ended_run_released_and_the_adapter_never_sent(self):
+        # The owner's decision of 2026-10-22: an order the ended run released
+        # and the adapter never sent is settled for the fresh run's approval,
+        # with the adapter's evidence, and marked never sent so no relay ever
+        # sends it; settling again writes nothing more (ADR 0019, amended
+        # 2026-10-17, reading 4).
+        second = self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        settle_ended_run(pending, self.engine_log, "owner", "the run ended before the adapter sent it",
+                         now=lambda: datetime(2026, 10, 16, 21, 0, tzinfo=timezone.utc))
+        # The line internal/restart ReadSettlements reads (cmd/operator's
+        # test reads the same file).
+        self.assertEqual(Path(pending.never_sent_path).read_text(encoding="utf-8"),
+                         (TESTDATA / "never_sent.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(self.settle_ended_run(), 0, "settling again is not refused")
+        lines = pending.never_sent()
+        self.assertEqual(len(lines), 1, "settled once, however often the command runs")
+        line = lines[0]
+        self.assertEqual((line["log"], line["run"], line["input_id"], line["evidence"]),
+                         ("engine.log", run_identity(self.engine_log), "session:1", "unmarked"))
+        self.assertEqual(line["retirement"], {
+            "account_id": "DU0000001", "client_order_id": "tw-paper-1", "instrument_id": "SPY", "side": "buy",
+            "quantity": 9, "limit_price": 401.5, "reason": "owner retired",
+            "detail": "the run ended before the adapter sent it", "retired_by": "owner",
+            "retired_at": line["retirement"]["retired_at"]})
+        self.assertRegex(line["retirement"]["retired_at"], r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+        self.assertEqual(pending.handovers(), {"tw-paper-1": "never-sent"})
+        # The fresh run's start still settles the input as run ended, and
+        # nothing of it is ever sent.
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        settled = self.loop(engine=second, engine_log=second.path)
+        settled.start()
+        self.settle(settled)
+        self.assertEqual(self.fake.placed, [])
+        self.assertEqual(len(PendingInput(self.pending).never_sent()), 1, "the settlement is kept as evidence")
+        self.assertEqual(self.settle_ended_run(), 1, "with nothing awaiting its reply there is nothing to settle")
+
+    def test_settle_ended_run_never_settles_an_order_the_adapter_may_have_sent(self):
+        # Only an order the record leaves unmarked, or marks never sent, is
+        # settled: one marked handed over, sent, or allowed to be sent again
+        # may have reached IBKR (fail closed, AGENTS.md).
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        for mark in ("sent", "handing-over", "resend:2026-10-16"):
+            with self.subTest(mark=mark):
+                pending.mark("tw-paper-1", mark)
+                self.assertEqual(self.settle_ended_run(), 0)
+                self.assertEqual(pending.never_sent(), [])
+                self.assertEqual(pending.handovers(), {"tw-paper-1": mark})
+        pending.mark("tw-paper-1", "never-sent")
+        self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual([(l["evidence"], l["retirement"]["client_order_id"]) for l in pending.never_sent()],
+                         [("never-sent", "tw-paper-1")])
+
+    def test_settle_ended_run_names_the_order_the_adapter_recorded_it_refused(self):
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        pending.record_refusal("session:1", "tw-paper-1", "no contract ID")
+        self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual([l["evidence"] for l in pending.never_sent()], ["refused"])
+
+    def test_settle_ended_run_never_settles_an_order_the_ended_log_shows_retired_or_reported(self):
+        # The ended run's engine already read the order's retirement, or a
+        # venue's report on it (so it was sent): neither is settled again.
+        for event_type, version, payload in (
+                ("execution.order.retired", 1, {"account_id": "DU0000001", "client_order_id": "tw-paper-1",
+                                                "instrument_id": "SPY", "side": "buy", "quantity": 9,
+                                                "limit_price": 401.5, "reason": "session over",
+                                                "detail": "session over", "retired_by": "adapter",
+                                                "retired_at": "2026-10-16T20:30:00Z"}),
+                (LIFECYCLE_TYPE, 2, {"account_id": "DU0000001", "client_order_id": "tw-paper-1",
+                                     "order_id": "order:11:7", "instrument_id": "SPY", "side": "buy",
+                                     "status": "submitted", "quantity": 9, "limit_price": 401.5,
+                                     "occurred_at": "2026-10-16T20:30:00Z", "message": ""})):
+            with self.subTest(event_type=event_type):
+                self.setUp()
+                self.left_waiting_by_the_first_run("session:1", commits=True)
+                raw = json.dumps(payload, separators=(",", ":"))
+                self.engine.decide({"id": "later:" + event_type, "type": event_type, "envelope_version": 1,
+                                    "schema_version": version, "event_time": SESSION_CLOSED,
+                                    "recorded_at": SESSION_CLOSED, "sequence": self.engine.next_sequence,
+                                    "source": SOURCE, "configuration_hash": CONFIGURATION_HASH,
+                                    "strategy_version": STRATEGY_VERSION, "payload": payload,
+                                    "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+                self.assertEqual(self.settle_ended_run(), 0)
+                self.assertEqual(PendingInput(self.pending).never_sent(), [])
+
+    def test_settle_ended_run_is_refused_for_a_log_that_is_not_the_run_the_input_was_sent_to(self):
+        second = self.left_waiting_by_the_first_run("session:2", commits=False)
+        # engine.log never committed session:2, so it released nothing for it.
+        self.assertEqual(self.settle_ended_run(), 1)
+        self.assertEqual(relay_main(["settle-ended-run", self.pending, "--journal", str(second.path), "--by", "owner",
+                                     "--reason", "the wrong log"]), 1)
+        self.assertEqual(PendingInput(self.pending).never_sent(), [])
+        self.assertEqual(PendingInput(self.pending).load()["id"], "session:2")
+
+    def test_settle_ended_run_is_refused_without_a_person_and_a_reason_and_while_the_adapter_runs(self):
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        for by, reason in (("", "a reason"), ("adapter", "a reason"), ("owner", " ")):
+            with self.subTest(by=by, reason=reason):
+                self.assertEqual(relay_main(["settle-ended-run", self.pending, "--journal", self.engine_log,
+                                             "--by", by, "--reason", reason]), 1)
+        # An adapter holds the pending file's lock while it runs.
+        held = os.open(PendingInput(self.pending).lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            self.assertEqual(self.settle_ended_run(), 1)
+        finally:
+            os.close(held)
+        self.assertEqual(PendingInput(self.pending).never_sent(), [])
+        self.assertEqual(PendingInput(self.pending).handovers(), {})
 
     def test_run_ended_is_refused_for_an_input_of_the_current_run(self):
         loop = self.loop(engine=Unanswered(self.engine, commits=False))
