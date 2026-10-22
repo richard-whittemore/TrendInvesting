@@ -299,8 +299,21 @@ func remindRun(u *unitState, unit, episode, run string, senders []sender, at tim
 		for _, s := range echoes {
 			_ = s.send(a, 0)
 		}
-		for _, s := range due {
-			if err := s.send(a, 0); err != nil {
+		// The paging channels are reminded before an issue tracker, so a
+		// slow tracker never holds back a page (ADR 0019, "Alerting"); a
+		// tracker is given the reminder's own ordinal, so it comments on the
+		// open issue rather than taking the reminder for the first page.
+		for _, s := range trackersLast(due) {
+			var err error
+			if is, ok := s.(*issuesSender); ok {
+				ordinal := u.repeats[remindedKey(s.name(), key)] + 1
+				if err = is.remind(a, ordinal); err == nil {
+					u.repeats[remindedKey(s.name(), key)] = ordinal
+				}
+			} else {
+				err = s.send(a, 0)
+			}
+			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", s.name(), err))
 				continue
 			}

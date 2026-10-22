@@ -198,6 +198,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		label = account
 	}
 	examined := false
+	var forgotten []string
 	withIssueEvidence(senders, *journalPath)
 	if refused == nil {
 		var restored, current string
@@ -211,12 +212,14 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		// break after a repair is a new incident (ADR 0019, "Alerting":
 		// once per incident).
 		forget(report.HistoryUnavailableKeyPrefix(account), seen, sent, repeats)
+		forgotten = append(forgotten, report.HistoryUnavailableKeyPrefix(account))
 	}
 	if refused == nil && examined && !slices.ContainsFunc(alerts, func(a report.Alert) bool { return a.Kind == report.KindRestoredLogNewer }) {
 		// A folder examined with no log newer than the current run clears
 		// the restored-log alerts delivered for the account, so the same log restored wrongly again
 		// is a new incident (ADR 0019, "Alerting": once per incident).
 		forget(report.RestoredLogNewerKeyPrefix(account), seen, sent, repeats)
+		forgotten = append(forgotten, report.RestoredLogNewerKeyPrefix(account))
 	}
 	// The heartbeat is checked first so a refused journal's alert can say
 	// whether liveness is monitored.
@@ -291,6 +294,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	// A repeating alert the owner has acknowledged closes its issue.
 	if err := closeAcknowledged(senders, alerts, seen); err != nil {
+		failures = append(failures, err)
+	}
+	// A forgotten alert closes its issue, so its next incident is a new one.
+	if err := closeForgotten(senders, forgotten, seen, sent, repeats); err != nil {
 		failures = append(failures, err)
 	}
 	if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
@@ -636,10 +643,11 @@ func restoredLogNewer(path string) (restored, current string, examined bool) {
 }
 
 // forget removes from the delivery state every channel's record of the
-// alerts whose keys begin with prefix.
+// alerts whose keys begin with prefix, except an issue tracker's: its record
+// is dropped once closeForgotten has closed the alert's issue.
 func forget(prefix string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) {
 	for k := range seen {
-		if _, key, ok := strings.Cut(k, "|"); ok && strings.HasPrefix(key, prefix) {
+		if ch, key, ok := strings.Cut(k, "|"); ok && ch != issuesChannel && strings.HasPrefix(key, prefix) {
 			delete(seen, k)
 			delete(sent, k)
 			delete(repeats, k)

@@ -27,6 +27,25 @@ type fakeTracker struct {
 	issues  []*fakeIssue
 	failing error
 	writes  int
+	// delay is how long each call takes, unless its deadline comes first.
+	delay time.Duration
+	// onCall, when set, is told of each call.
+	onCall func()
+}
+
+// call is the start of every call: it waits out delay within ctx.
+func (f *fakeTracker) call(ctx context.Context) error {
+	if f.onCall != nil {
+		f.onCall()
+	}
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return f.failing
 }
 
 type fakeIssue struct {
@@ -36,11 +55,14 @@ type fakeIssue struct {
 	labels   []string
 	comments []string
 	open     bool
+	// strangers are the indexes of the comments someone other than the
+	// channel's own identity wrote.
+	strangers map[int]bool
 }
 
-func (f *fakeTracker) Latest(_ context.Context, marker string) (trackedIssue, bool, error) {
-	if f.failing != nil {
-		return trackedIssue{}, false, f.failing
+func (f *fakeTracker) Latest(ctx context.Context, marker string) (trackedIssue, bool, error) {
+	if err := f.call(ctx); err != nil {
+		return trackedIssue{}, false, err
 	}
 	for n := len(f.issues) - 1; n >= 0; n-- {
 		if i := f.issues[n]; strings.Contains(i.body, marker) {
@@ -50,34 +72,40 @@ func (f *fakeTracker) Latest(_ context.Context, marker string) (trackedIssue, bo
 	return trackedIssue{}, false, nil
 }
 
-func (f *fakeTracker) Create(_ context.Context, title, body string, labels []string) (int, error) {
-	if f.failing != nil {
-		return 0, f.failing
+func (f *fakeTracker) Create(ctx context.Context, title, body string, labels []string) (int, error) {
+	if err := f.call(ctx); err != nil {
+		return 0, err
 	}
 	f.writes++
 	f.issues = append(f.issues, &fakeIssue{number: len(f.issues) + 1, title: title, body: body, labels: labels, open: true})
 	return len(f.issues), nil
 }
 
-func (f *fakeTracker) LastComments(_ context.Context, number int) ([]string, error) {
-	if f.failing != nil {
-		return nil, f.failing
+func (f *fakeTracker) OwnComments(ctx context.Context, number int) ([]string, error) {
+	if err := f.call(ctx); err != nil {
+		return nil, err
 	}
-	return f.issues[number-1].comments, nil
+	var own []string
+	for n, c := range f.issues[number-1].comments {
+		if !f.issues[number-1].strangers[n] {
+			own = append(own, c)
+		}
+	}
+	return own, nil
 }
 
-func (f *fakeTracker) Comment(_ context.Context, number int, body string) error {
-	if f.failing != nil {
-		return f.failing
+func (f *fakeTracker) Comment(ctx context.Context, number int, body string) error {
+	if err := f.call(ctx); err != nil {
+		return err
 	}
 	f.writes++
 	f.issues[number-1].comments = append(f.issues[number-1].comments, body)
 	return nil
 }
 
-func (f *fakeTracker) CloseIssue(_ context.Context, number int) error {
-	if f.failing != nil {
-		return f.failing
+func (f *fakeTracker) CloseIssue(ctx context.Context, number int) error {
+	if err := f.call(ctx); err != nil {
+		return err
 	}
 	f.writes++
 	f.issues[number-1].open = false
@@ -249,7 +277,20 @@ type fakeGitHub struct {
 	createAnswer string
 	// times are when each request arrived.
 	times []time.Time
+	// writeStatus, when not zero, answers every write (a POST or a PATCH)
+	// with it; retryAfter adds GitHub's Retry-After header to that answer.
+	writeStatus int
+	retryAfter  bool
+	// omitState lists the issues without their state.
+	omitState bool
+	// stallWrites answers each write's headers, then stops sending its body
+	// until the client gives up.
+	stallWrites bool
 }
+
+// fakeSelf and fakeStranger are the ids of the channel's own identity and of
+// another commenter.
+const fakeSelf, fakeStranger = 41, 42
 
 func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 	if g.hang {
@@ -274,6 +315,26 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 	g.methods = append(g.methods, r.Method+" "+r.URL.Path)
 	if g.status != 0 {
 		w.WriteHeader(g.status)
+		return
+	}
+	if g.stallWrites && (r.Method == http.MethodPost || r.Method == http.MethodPatch) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("["))
+		w.(http.Flusher).Flush()
+		g.mu.Unlock()
+		<-r.Context().Done()
+		g.mu.Lock()
+		return
+	}
+	if g.writeStatus != 0 && (r.Method == http.MethodPost || r.Method == http.MethodPatch) {
+		if g.retryAfter {
+			w.Header().Set("Retry-After", "60")
+		}
+		w.WriteHeader(g.writeStatus)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/user" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": fakeSelf, "login": "reporter"})
 		return
 	}
 	var in struct {
@@ -306,13 +367,22 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 			if i.open {
 				s = "open"
 			}
-			out = append(out, map[string]any{"number": i.number, "body": i.body, "state": s, "comments": len(i.comments)})
+			issue := map[string]any{"number": i.number, "body": i.body, "state": s, "comments": len(i.comments)}
+			if g.omitState {
+				delete(issue, "state")
+			}
+			out = append(out, issue)
 		}
 		page(w, r, out)
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments"):
 		var out []any
-		for _, c := range g.issues[issueNumber(r.URL.Path)-1].comments {
-			out = append(out, map[string]any{"body": c})
+		i := g.issues[issueNumber(r.URL.Path)-1]
+		for n, c := range i.comments {
+			by := fakeSelf
+			if i.strangers[n] {
+				by = fakeStranger
+			}
+			out = append(out, map[string]any{"body": c, "user": map[string]any{"id": by}})
 		}
 		page(w, r, out)
 	case r.Method == http.MethodPost && r.URL.Path == base:

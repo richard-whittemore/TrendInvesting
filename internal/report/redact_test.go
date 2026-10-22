@@ -2,6 +2,10 @@ package report_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +64,7 @@ func TestRecordRedactionDropsBalanceBearingFields(t *testing.T) {
 			t.Errorf("record still holds %q:\n%s", leak, got)
 		}
 	}
-	for _, want := range []string{"7", event.AccountSnapshotEventType, "2024-01-02T21:00:00Z", "USD"} {
+	for _, want := range []string{event.AccountSnapshotEventType, "2024-01-02T21:00:00Z", "USD"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("record lacks %q:\n%s", want, got)
 		}
@@ -88,7 +92,7 @@ func TestRecordRedactionHandlesNoPayloadAndAnUnreadableOne(t *testing.T) {
 	for name, payload := range map[string]string{"none": "", "unreadable": "{not json DU1234567"} {
 		e := event.Envelope{Type: "x.y", Sequence: 1, Payload: json.RawMessage(payload)}
 		got := r.Record(e)
-		if !strings.Contains(got, "#1 x.y") || strings.Contains(got, "DU1234567") {
+		if !strings.HasPrefix(got, "x.y ") || strings.Contains(got, "DU1234567") {
 			t.Errorf("%s: %q", name, got)
 		}
 	}
@@ -108,7 +112,7 @@ func TestRecordWithholdsQuantitiesPricesAndPositionsAtAnyDepth(t *testing.T) {
 			t.Errorf("record still holds %q:\n%s", leak, got)
 		}
 	}
-	for _, want := range []string{"#9", event.FillEventType, "SPY", "bought", `"final":true`, `"none":null`} {
+	for _, want := range []string{event.FillEventType, "SPY", "bought", `"final":true`, `"none":null`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("record lacks %q:\n%s", want, got)
 		}
@@ -121,12 +125,12 @@ func TestRecordWithholdsQuantitiesPricesAndPositionsAtAnyDepth(t *testing.T) {
 func TestTextRemovesEveryBareFigure(t *testing.T) {
 	in := "buy 7391 SPY at 8264.17 (-0.48, +12%) of 1,234,567 at 2024-01-02T21:00:00Z, record #4, qty:39 and 39/100 (ADR 0019), order tw-17, every 30m."
 	got := report.NewRedactor(nil).Text(in)
-	for _, leak := range []string{"7391", "8264", "0.48", "12%", "1,234", "567", "qty:39", " 39/", "100"} {
+	for _, leak := range []string{"7391", "8264", "0.48", "12%", "1,234", "567", "qty:39", " 39/", "100", "#4"} {
 		if strings.Contains(got, leak) {
 			t.Errorf("text still holds %q:\n%s", leak, got)
 		}
 	}
-	for _, want := range []string{"buy", "SPY", "2024-01-02T21:00:00Z", "#4", "ADR 0019", "tw-17", "30m"} {
+	for _, want := range []string{"buy", "SPY", "2024-01-02T21:00:00Z", "ADR 0019", "tw-17", "30m"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("text lacks %q:\n%s", want, got)
 		}
@@ -159,7 +163,7 @@ func TestShortSecretsAndHostNamesAreRedactedAsWords(t *testing.T) {
 			t.Errorf("text still holds %q:\n%s", leak, got)
 		}
 	}
-	for _, want := range []string{"trader", "zq7x", "said"} {
+	for _, want := range []string{"trader", "saw zq", "said"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("text lacks %q:\n%s", want, got)
 		}
@@ -177,6 +181,97 @@ func TestWithheldNamesTheFigureFieldsAndColumns(t *testing.T) {
 	for _, name := range []string{"seq", "time", "instrument", "instrument_id", "event", "side", "note", "reason", "detail", "kind", "status", "input", "action", "by"} {
 		if report.Withheld(name) {
 			t.Errorf("%s is withheld", name)
+		}
+	}
+}
+
+// TestTextRedactsAFigureWhateverItsNeighbours: a number is a figure whatever
+// stands beside it, a letter, a currency sign, a non-ASCII character, an
+// exponent, a dash, a colon or a '#' (docs/live-trading/plan.md section 7:
+// the public text carries no figure); no digit of any of these survives.
+func TestTextRedactsAFigureWhateverItsNeighbours(t *testing.T) {
+	r := report.NewRedactor(nil)
+	for _, in := range []string{
+		"412.35€", "412.35USD", "USD412.35", "£400", "400×", "\u2212400", "100-200", "100\u2014200", "100\u2013200",
+		"412.35-415.00", "5:412.35", "123-45-67", "sell-400", "qty-412.35", "limit-412.35", "#400", "#4", "1.234567e+06",
+		"1.234567E-06", "100\u00a0shares", "x400", "400x", "tw-1234", "2024-13-45", "25:99", "ADR 26", "ADR-0026",
+		"ADR 00261", "999m", "1.5s", "30mm", "30m5", "2024-01-02T25:00:00Z", "v2", "sha256",
+	} {
+		got := r.Text("saw " + in + " here")
+		if strings.ContainsAny(got, "0123456789") {
+			t.Errorf("Text(%q) = %q: a digit survived", in, got)
+		}
+		if !strings.Contains(got, report.Redacted) {
+			t.Errorf("Text(%q) = %q: nothing was redacted", in, got)
+		}
+	}
+}
+
+// TestTextKeepsOnlyTheAllowedShapes: the only numbers kept are ISO dates and
+// times, ADR numbers written "ADR 0026", short durations and identifiers of
+// letters, a dash and at most two digits, each matched as a whole token.
+func TestTextKeepsOnlyTheAllowedShapes(t *testing.T) {
+	r := report.NewRedactor(nil)
+	for _, in := range []string{
+		"2024-01-02", "2024-01-02T21:00:00Z", "2024-01-02T21:00:00.123456789+02:00", "2024-01-02T21:00Z", "21:00", "21:00:00",
+		"(ADR 0026)", "ADR 0019,", "30m", "5s", "1h30m", "250ms", "2m0s.", "tw-17", "fill-3", "(tw-9);",
+	} {
+		if got := r.Text("at " + in + " now"); got != "at "+in+" now" {
+			t.Errorf("Text(%q) = %q, want it kept", in, got)
+		}
+	}
+}
+
+// TestNoRandomFigureSurvivesBesideAnything: a random figure, whole, decimal,
+// grouped, signed or in exponent form, placed beside letters, signs, dashes,
+// colons, '#' and non-ASCII characters, never survives.
+func TestNoRandomFigureSurvivesBesideAnything(t *testing.T) {
+	rng := rand.New(rand.NewSource(20261022))
+	r := report.NewRedactor(nil)
+	sides := []string{"", " ", "x", "USD", "qty", "sell-", "-", "\u2014", "\u2013", "\u2212", "\u20ac", "\u00a3", "\u00d7",
+		"\u00a0", ":", "#", "+", "e", "_", "/", ".", ",", "(", "\"", "%", "$", "\u00e9", "\u4e2d", "ADR "}
+	for n := 0; n < 2000; n++ {
+		whole := 100000 + rng.Int63n(9000000)
+		var figure string
+		switch rng.Intn(5) {
+		case 0:
+			figure = strconv.FormatInt(whole, 10)
+		case 1:
+			figure = strconv.FormatFloat(float64(whole)+float64(rng.Intn(99)+1)/100, 'f', 2, 64)
+		case 2:
+			figure = strconv.FormatFloat(float64(whole)*1.5, 'g', -1, 64)
+		case 3:
+			figure = fmt.Sprintf("%v", float64(whole)*1000)
+		default:
+			figure = fmt.Sprintf("%d,%03d", whole/1000, whole%1000)
+		}
+		in := sides[rng.Intn(len(sides))] + figure + sides[rng.Intn(len(sides))]
+		got := r.Text("saw " + in + " here")
+		for _, part := range digitRuns.FindAllString(figure, -1) {
+			if len(part) >= 3 && strings.Contains(got, part) {
+				t.Fatalf("Text(%q) = %q holds %q", in, got, part)
+			}
+		}
+	}
+}
+
+var digitRuns = regexp.MustCompile(`\d+`)
+
+// TestFieldNamesThatRedactAlikeAreAllKept: two field names that redact to
+// the same text both keep their values, in an order that never depends on
+// map iteration (.greptile/rules.md: map iteration never affects output).
+func TestFieldNamesThatRedactAlikeAreAllKept(t *testing.T) {
+	r := report.NewRedactor([]string{"alpha1x", "alpha2x", "alpha3x"})
+	e := event.Envelope{Type: "x.y", Payload: json.RawMessage(`{"alpha1x":"accepted","alpha2x":"refused","alpha3x":"held"}`)}
+	first := r.Record(e)
+	for _, want := range []string{"accepted", "refused", "held"} {
+		if !strings.Contains(first, want) {
+			t.Errorf("record lost %q:\n%s", want, first)
+		}
+	}
+	for range 50 {
+		if got := r.Record(e); got != first {
+			t.Fatalf("record changed between renderings:\n%s\n%s", first, got)
 		}
 	}
 }

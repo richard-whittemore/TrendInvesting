@@ -148,75 +148,114 @@ func isLetter(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c >= 0x80
 }
 
-// removeFigures replaces every number in s that is not part of a date, a
-// time, a word, a record number (#4) or an ADR's number: a quantity, a price, a share count
-// or any other figure, signed, grouped, decimal or a percentage, is removed
-// rather than judged, since a public text carries no figure
-// (docs/live-trading/plan.md section 7).
+// keptShapes are the only tokens of free text whose digits are kept, each
+// matched as a whole token: an ISO date, a date and time or a time of day; a
+// short duration such as 30m, 5s or 250ms; and an identifier of letters, a
+// dash and at most two digits, such as tw-17. Every other number is a figure
+// and is removed, whatever stands beside it (docs/live-trading/plan.md
+// section 7: the public text carries no figure).
+var keptShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?)?$`),
+	regexp.MustCompile(`^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?Z?$`),
+	regexp.MustCompile(`^(?:\d{1,2}[dhms]|\d{1,3}ms)+$`),
+	regexp.MustCompile(`^[A-Za-z]+(?:-[A-Za-z]+)*-\d{1,2}$`),
+}
+
+// adrNumber is a decision record's number as it follows "ADR ".
+var adrNumber = regexp.MustCompile(`^\d{4}$`)
+
+// isTokenEdge reports whether c ends a token of free text: ASCII space or
+// a bracket, quote or other mark that never joins a number to its
+// neighbours. A dash, a colon, a dot, a '#', a sign, a letter and every
+// non-ASCII byte join the token, so a figure beside them is judged with them.
+func isTokenEdge(c byte) bool {
+	return strings.IndexByte(" \t\n\r\f\v()[]{}<>\"'`;=|*", c) >= 0
+}
+
+// removeFigures replaces every number in s that is not part of a token of a
+// kept shape (keptShapes) or the number of "ADR nnnn": a quantity, a price, a
+// share count or any other figure, signed, grouped, decimal, in exponent form
+// or a percentage, is removed rather than judged, since a public text carries
+// no figure (docs/live-trading/plan.md section 7).
 func removeFigures(s string) string {
-	var b []byte
+	var b strings.Builder
 	for i := 0; i < len(s); {
-		if !isDigit(s[i]) {
-			b = append(b, s[i])
+		if isTokenEdge(s[i]) {
+			b.WriteByte(s[i])
 			i++
 			continue
 		}
 		j := i
-		for j < len(s) && (isDigit(s[j]) || (s[j] == ',' || s[j] == '.') && j+1 < len(s) && isDigit(s[j+1])) {
+		for j < len(s) && !isTokenEdge(s[j]) {
 			j++
 		}
-		if keptNumber(s, i, j) {
-			b = append(b, s[i:j]...)
-		} else {
-			// A sign that stands before the figure goes with it.
-			if n := len(b); n > 0 && (b[n-1] == '-' || b[n-1] == '+') && (n == 1 || !isAlnum(b[n-2])) {
-				b = b[:n-1]
+		b.WriteString(tokenWithoutFigures(s, i, j))
+		i = j
+	}
+	return b.String()
+}
+
+// tokenWithoutFigures is the token s[i:j] kept whole when it is of a kept
+// shape, less any closing punctuation, and otherwise with each of its numbers
+// replaced.
+func tokenWithoutFigures(s string, i, j int) string {
+	tok := s[i:j]
+	if strings.IndexFunc(tok, func(r rune) bool { return r >= '0' && r <= '9' }) < 0 {
+		return tok
+	}
+	core := strings.TrimRight(tok, ".,:!?")
+	if strings.HasSuffix(s[:i], "ADR ") && adrNumber.MatchString(core) {
+		return tok
+	}
+	for _, shape := range keptShapes {
+		if shape.MatchString(core) {
+			return tok
+		}
+	}
+	var b []byte
+	for k := 0; k < len(tok); {
+		if !isDigit(tok[k]) {
+			b = append(b, tok[k])
+			k++
+			continue
+		}
+		e := k
+		for e < len(tok) && (isDigit(tok[e]) || (tok[e] == ',' || tok[e] == '.') && e+1 < len(tok) && isDigit(tok[e+1])) {
+			e++
+		}
+		// An exponent goes with its mantissa.
+		if e+1 < len(tok) && (tok[e] == 'e' || tok[e] == 'E') {
+			x := e + 1
+			if tok[x] == '+' || tok[x] == '-' {
+				x++
 			}
-			b = append(b, Redacted...)
-			if j < len(s) && s[j] == '%' {
-				j++
+			if x < len(tok) && isDigit(tok[x]) {
+				for x < len(tok) && isDigit(tok[x]) {
+					x++
+				}
+				e = x
 			}
 		}
-		i = j
+		// A sign that stands before the figure goes with it.
+		if n := len(b); n > 0 && (b[n-1] == '-' || b[n-1] == '+') && (n == 1 || !isAlnum(b[n-2])) {
+			b = b[:n-1]
+		}
+		b = append(b, Redacted...)
+		if e < len(tok) && tok[e] == '%' {
+			e++
+		}
+		k = e
 	}
 	return string(b)
 }
 
-// keptNumber reports whether the number s[i:j] is part of a date, a time, a
-// word, a record number or an ADR's number rather than a figure.
-func keptNumber(s string, i, j int) bool {
-	if i > 0 {
-		before := s[i-1]
-		switch {
-		case isLetter(before), before == '#':
-			return true
-		case strings.HasSuffix(s[:i], "ADR "):
-			return true // a decision record's number, such as ADR 0019
-		case before == '-' && i > 1 && isLetter(s[i-2]):
-			return true // an identifier such as tw-17
-		case (before == '-' || before == ':' || before == '+' || before == '.') && i > 1 && isDigit(s[i-2]):
-			return true // a date's, a time's or a zone's later part
-		}
-	}
-	if j < len(s) {
-		after := s[j]
-		switch {
-		case isLetter(after):
-			return true // a word such as 30m, or a date's T
-		case (after == '-' || after == ':') && j+1 < len(s) && isDigit(s[j+1]):
-			return true // a date's or a time's first part
-		}
-	}
-	return false
-}
-
-// Record renders one journal record on one line: its sequence, type and
-// event time, then its payload with the value of every withheld field and
+// Record renders one journal record on one line: its type and event time,
+// then its payload with the value of every withheld field and
 // every number replaced, wherever it sits, and every string and field name
 // redacted as text in its decoded form; the line is redacted once more as
 // written, so a secret is removed escaped or not.
 func (r Redactor) Record(e event.Envelope) string {
-	line := fmt.Sprintf("#%d %s %s", e.Sequence, e.Type, e.EventTime.UTC().Format("2006-01-02T15:04:05Z07:00"))
+	line := fmt.Sprintf("%s %s", e.Type, e.EventTime.UTC().Format("2006-01-02T15:04:05Z07:00"))
 	if len(e.Payload) == 0 {
 		return r.Text(line)
 	}
@@ -238,13 +277,29 @@ func (r Redactor) Record(e event.Envelope) string {
 func (r Redactor) scrub(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
+		// Names that redact alike are each kept, told apart by a run of
+		// "+" (a count would be redacted as a figure), in
+		// the names' sorted order, so no value is lost and map iteration never
+		// decides the output (.greptile/rules.md).
+		names := make([]string, 0, len(t))
+		for k := range t {
+			names = append(names, k)
+		}
+		sort.Strings(names)
 		out := make(map[string]any, len(t))
-		for k, child := range t {
+		for _, k := range names {
+			name := r.Text(k)
+			for {
+				if _, taken := out[name]; !taken {
+					break
+				}
+				name += "+"
+			}
 			if Withheld(k) {
-				out[r.Text(k)] = Redacted
+				out[name] = Redacted
 				continue
 			}
-			out[r.Text(k)] = r.scrub(child)
+			out[name] = r.scrub(t[k])
 		}
 		return out
 	case []any:

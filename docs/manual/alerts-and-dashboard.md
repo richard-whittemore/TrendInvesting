@@ -395,11 +395,14 @@ repository named by `TI_GITHUB_ISSUES_REPO`, with the label `alert`. It is a
 third place to read the alert, with the context beside it, in the GitHub app
 on your phone. PagerDuty still pages you, and ntfy still pushes; the issue is
 not a replacement for either, and a fault in it never holds them back: every
-alert of a firing goes to PagerDuty and ntfy before any goes to GitHub. One
-delivery to GitHub, every request of it together, is bounded by
-`-send-timeout`, and when GitHub cannot list the alert issues, or runs out of
-that time, it is not asked again in that firing: the firing's other alerts
-fail on it at once and are all sent again at the next firing.
+alert of a firing goes to PagerDuty and ntfy before any goes to GitHub, and
+so does every reminder of a failed unit. A firing's work on GitHub, every
+request of every alert together, is bounded by one `-send-timeout` from its
+first request, and when GitHub cannot list the alert issues, runs out of
+that time, limits the rate, answers with a server error (5xx), or cannot be
+reached or stops answering half-way, it is not asked again in that firing:
+the firing's other alerts fail on it at once and are all sent again at the
+next firing.
 
 **What an issue holds.** The title is the alert's title. The body is the
 alert's text, then "Last journal records (redacted)": the journal's last ten
@@ -416,10 +419,13 @@ limit; the rest is in the journal on the server]".
 An alert that repeats until you acknowledge it ("Repeated until you
 acknowledge it") adds one comment per repeat to the same open issue, never a
 second issue, so your phone buzzes at each repeat as it does for the other
-channels. A delivery the reporter sends again, because GitHub's answer was
-lost, writes nothing more: each comment carries a hidden line naming its
-repeat, and one already there is not posted twice. An alert that comes back
-after it resolved is a new incident and opens a new issue.
+channels. A failed unit's hourly reminder is a comment on its issue too. A
+delivery the reporter sends again, because GitHub's answer was lost, writes
+nothing more: each comment carries a hidden line naming its repeat or its
+reminder, and one already there is not posted twice. Only the reporter's own
+comments (those of the token's user) count: a hidden line someone else
+pasted into a comment does not stop a repeat. An alert that comes back after
+it resolved is a new incident and opens a new issue.
 
 **What is kept out.** The repository is public, so anyone can read an issue.
 The reporter therefore writes only the alert's *public* text when it has one,
@@ -438,8 +444,12 @@ position, size or P&L, in any part of it:
   replaced wherever it sits, and so is every other number;
 - in the query output, the same rule leaves out those columns;
 - in the alert's text and in every other piece of text, each number is
-  replaced unless it is part of a date or a time, a record number such as
-  `#4`, an ADR's number, or a word.
+  replaced, whatever stands beside it (a letter, a currency sign, a dash, a
+  colon, `#`), unless the whole word it sits in is one of a short list: a
+  date or a time such as `2024-01-02T21:00:00Z`, an ADR's number written
+  `ADR 0019`, a short duration such as `30m` or `5s`, or a name such as
+  `tw-17` (letters, a dash and at most two digits). Record numbers are
+  replaced too.
 
 Each is shown as `[redacted]`. A secret is removed also in the escaped form
 a journal record writes it in. So an issue tells you what happened and where
@@ -455,7 +465,11 @@ the alert resolves:
   again;
 - a page the reporter resolves for the other channels, such as a failed unit
   that recovers or a clock check that passes again, closes its issue in the
-  same firing.
+  same firing;
+- a broken history that is whole again, or a restored-log alert whose folder
+  no longer holds a newer log, closes its issue at the end of the firing that
+  finds it so, so the same fault arising again opens a new issue that
+  notifies you.
 
 An alert that reports a single event, such as one refused order, has nothing
 that resolves it: its issue stays open until you close it yourself in the app
@@ -465,10 +479,13 @@ is posted once, however many tries the close takes.
 
 If you close an issue yourself, the reporter leaves it closed. An alert that
 goes on repeating after that, because it is not yet acknowledged in the
-journal, neither reopens that issue nor opens another: its repeats still
-reach PagerDuty and ntfy. Only once the alert has resolved (acknowledged,
-cleared or recovered, as above) and then happens again is it a new incident
-with a new issue.
+journal, neither reopens that issue nor opens another, and nor does a
+first delivery the reporter tries again: its repeats still reach PagerDuty
+and ntfy. Only once the alert has resolved (acknowledged, cleared or
+recovered, as above; the reporter then adds its closing comment to your
+closed issue) and then happens again is it a new incident with a new issue.
+An issue whose `alert` label you remove, or that you delete, is out of the
+reporter's sight: a repeat or reminder of it opens no new issue.
 
 **If issues stop appearing.** PagerDuty and ntfy are unaffected, so first
 read the run's error: a failed firing names `github-issues:` and why. The
@@ -1227,8 +1244,10 @@ passes `-clock-check`.
 | "reporter: the secrets file cannot be read; check -secrets-file names the credential file", or "reporter: the secrets file's line N is not KEY=VALUE" | Reported in the run's error, which never shows a secret's text. Every line that reads is still used, so only a channel whose secret that leaves unset is set aside; with no channel left, nothing is sent | Correct that line of `secrets.env` (`KEY=VALUE`, no spaces round `=`) with `sudo -e` |
 | "reporter: the github-issues channel needs TI_GITHUB_ISSUES_TOKEN ..." or "... needs TI_GITHUB_ISSUES_REPO as owner/name ...", or "reporter: TI_GITHUB_API_URL must be an absolute URL ..." | That channel is set aside and the others still deliver (the rows above); no issue is opened | Fill in the name it gives in `/etc/trend-investing/secrets.env` ("Alerts as GitHub Issues", the token steps) |
 | "github-issues: GitHub answered 401 Unauthorized" (or 403 Forbidden, 404 Not Found, 5xx, or "rate limited"), or "github-issues: request failed" | That channel failed, so the alert is not delivered to it, and PagerDuty and ntfy are not held back. It is sent again at the next firing and its issue is made then; a rate limit is the same, and a firing that comes before GitHub lifts the limit fails the same way | 401: the token expired or was revoked, make a new one. 403 or 404: the token lacks Issues read and write on that one repository, or `TI_GITHUB_ISSUES_REPO` is misspelt. Otherwise wait for the next firing |
-| "github-issues: not tried: GitHub failed earlier in this firing (...)" | GitHub could not list the alert issues, or ran out of `-send-timeout`, earlier in the same firing, so the firing's later alerts were not sent to it. PagerDuty and ntfy had them first. All are sent again at the next firing | The reason in the brackets is the first failure; act on it as in the row above |
-| "github-issues: more than 1000 issues carry the alert label, so the list of alert issues is incomplete and none is written ..." | The channel fails every firing and writes nothing, since an issue it could not see would be opened twice. PagerDuty and ntfy are unaffected | Remove the `alert` label from old closed alert issues on GitHub (filter `label:alert is:closed`, select, Label) until fewer than 1,000 carry it |
+| "github-issues: not tried: GitHub failed earlier in this firing (...)" or "github-issues: not tried: this firing's time for GitHub (the send timeout) has run out" | GitHub could not list the alert issues, ran out of `-send-timeout`, limited the rate, answered 5xx or could not be reached, earlier in the same firing, so the firing's later alerts were not sent to it. PagerDuty and ntfy had them first. All are sent again at the next firing | The reason in the brackets is the first failure; act on it as in the row above |
+| "github-issues: more than 1000 issues carry the alert label, so the list of alert issues is incomplete and none is written ..." | The channel fails every firing and writes nothing, since an issue it could not see would be opened twice. PagerDuty and ntfy are unaffected | Remove the `alert` label only from closed alert issues whose incident is over: one the reporter closed with "Resolved: this alert has cleared", or a single-event alert you have read (filter `label:alert is:closed`, select, Label), until fewer than 1,000 carry it. Leave the label on an issue you closed by hand while its alert still repeats (not yet acknowledged): without it the reporter cannot see that issue |
+| "github-issues: issue has more than 1000 comments, so whether this delivery was made cannot be told and nothing is written" | That issue takes no more comments, so its repeats and reminders fail on GitHub every firing; PagerDuty and ntfy are unaffected | Acknowledge the alert (`operator acknowledge`) so it stops repeating; its issue then closes (its closing comment may then appear twice) |
+| "github-issues: GitHub's listing named an issue without its number or its state" or "github-issues: GitHub did not name the token's user" | GitHub's answer was not one the reporter can trust, so nothing is written to GitHub that firing | Usually clears at the next firing; if it persists, check `TI_GITHUB_API_URL` points at GitHub's API |
 | "ntfy: server answered 403 Forbidden" (or another status), "pagerduty: server answered 400 Bad Request", "pagerduty: the answer did not acknowledge the event", or "post failed" | That channel failed, so the alert is not delivered, even if the other channel took it. Only the failed channel is retried, at every firing, until it takes the alert | A wrong topic, server or routing key: correct `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` or `TI_PAGERDUTY_ROUTING_KEY` in `secrets.env`. A network fault clears by itself |
 | PagerDuty shows incidents, but your phone shows nothing | Both channels accepted the alert, so the reporter counts it delivered. What your phone does with it is up to the PagerDuty and ntfy apps | Check the PagerDuty app's notification rules, and that the ntfy app is subscribed to exactly the topic (and server) in `secrets.env` |
 | "reporter: the state file is unreadable and is not reset, since a new file forgets which alerts are open: ..." | The run stops before anything is sent, every firing | Move the file aside: `sudo -u ti-trader mv /var/lib/trend-investing/reports/boost.reporter.json /var/lib/trend-investing/reports/boost.reporter.json.bad`. The next firing starts a new state file, which sends none of the log's routine history but pages, once per channel, the state at reporter start and every open alert (see "The delivery rules"); the open alerts then repeat until acknowledged |

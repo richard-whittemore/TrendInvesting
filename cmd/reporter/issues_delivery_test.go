@@ -17,7 +17,6 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
-	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // The github-issues channel against GitHub's REST API, in memory: what one
@@ -271,13 +270,16 @@ func figureJournal(t *testing.T, dir string, rng *rand.Rand) (path string, figur
 	figures = []string{
 		strconv.FormatFloat(netLiq, 'f', -1, 64), strconv.FormatInt(held, 10), strconv.FormatInt(qty, 10),
 		strconv.FormatFloat(limit, 'f', -1, 64), strconv.FormatFloat(ref, 'f', -1, 64), strconv.FormatInt(short, 10),
+		fmt.Sprintf("%v", netLiq*10), fmt.Sprintf("%g", ref*1000),
 	}
 	entries := haltedEntries(t)
 	snap := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: t0, Currency: "USD", NetLiquidation: netLiq,
 		Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: held}}}
 	refused := event.OrderRefusedPayload{AccountID: "joint", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",
 		Side: event.OrderSideBuy, Quantity: qty, LimitPrice: limit, Reason: event.RefusedOrderSize,
-		Detail:  fmt.Sprintf("short %d shares at %s (qty:%d)", short, strconv.FormatFloat(limit, 'f', -1, 64), qty),
+		Detail: fmt.Sprintf("short %d shares at %s (qty:%d); %sUSD %s\u20ac \u00a3%d %d-%d sell-%d #%d %v %g x%d %d\u00a0shares \u2212%d %d\u2014%d limit-%s",
+			short, strconv.FormatFloat(limit, 'f', -1, 64), qty, strconv.FormatFloat(limit, 'f', -1, 64), strconv.FormatFloat(ref, 'f', -1, 64),
+			held, short, qty, qty, held, netLiq*10, ref*1000, held, short, qty, held, short, strconv.FormatFloat(netLiq, 'f', -1, 64)),
 		Figures: event.RiskFigures{NetLiquidation: netLiq, ReferencePrice: ref, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}}
 	entries[1] = journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 2, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "snap", t0, snap)}
 	entries[3] = journal.Entry{Kind: journal.KindDecision, Envelope: envelope(t, 4, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, "refuse", t0, refused)}
@@ -292,7 +294,7 @@ func figureJournal(t *testing.T, dir string, rng *rand.Rand) (path string, figur
 	return path, figures
 }
 
-var digitToken = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?`)
+var digitRun = regexp.MustCompile(`\d+`)
 
 // No figure of the journal reaches a public issue, wherever it sits: in the
 // alert's text, in a journal record at any depth, in a record's free text,
@@ -313,19 +315,14 @@ func TestNoFigureOfTheJournalReachesAnIssue(t *testing.T) {
 		if len(issues) == 0 {
 			t.Fatal("no issue was opened")
 		}
-		withheld := map[string]bool{}
-		for _, f := range figures {
-			withheld[strings.ReplaceAll(f, ",", "")] = true
-			if whole, _, ok := strings.Cut(f, "."); ok {
-				withheld[whole] = true
-			}
-		}
 		hidden := regexp.MustCompile(`<!--.*?-->`)
 		for _, i := range issues {
 			all := hidden.ReplaceAllString(i.title+"\n"+i.body+"\n"+strings.Join(i.comments, "\n"), "")
-			for _, tok := range digitToken.FindAllString(all, -1) {
-				if withheld[strings.ReplaceAll(tok, ",", "")] {
-					t.Errorf("round %d: issue %q holds the figure %s:\n%s", round, i.title, tok, all)
+			for _, f := range figures {
+				for _, part := range digitRun.FindAllString(f, -1) {
+					if len(part) >= 4 && strings.Contains(all, part) {
+						t.Errorf("round %d: issue %q holds %s of the figure %s:\n%s", round, i.title, part, f, all)
+					}
 				}
 			}
 		}
@@ -378,5 +375,4 @@ func TestAnEscapedSecretNeverReachesAnIssue(t *testing.T) {
 			t.Errorf("the issue holds %q:\n%s", leak, body)
 		}
 	}
-	_ = report.Redacted
 }
