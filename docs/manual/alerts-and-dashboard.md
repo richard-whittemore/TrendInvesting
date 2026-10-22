@@ -97,7 +97,7 @@ account.
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
 | The reporter set one delivery channel aside (its secret is empty or malformed, or its name is unknown); sent on the channels that still work | urgent | account, channel and problem |
-| "state at reporter start": a channel began with this reporter after the log's earlier events (a new or lost state file, or a channel just named), and something is in force. The page names the engine state when Degraded or Halted, with its scope (an incident a fresh run's approval carried in force included), the kill switch when engaged, a pending cash read, the margin-cushion alarm when not clear, and each open alert that follows it; each open alert is then sent marked "state at reporter start" and repeats as usual until acknowledged (see "The delivery rules") | urgent | channel: once, when the channel begins |
+| "state at reporter start": a channel began with this reporter after the log's earlier events (a new or lost state file, or a channel just named), and something is in force. The page names the engine state when Degraded or Halted, with its scope (an incident a fresh run's approval carried in force included), Boost's stopped buys (with the orders, and whether the boost is on, as soon as the second rejection is reported), the kill switch when engaged, a pending cash read, the margin-cushion alarm when not clear, and each open alert that follows it; each open alert is then sent marked "state at reporter start" and repeats as usual until acknowledged (see "The delivery rules") | urgent | channel: once, when the channel begins |
 | "the daily summary has no channel: name your own ntfy server": `-summary` is set but no ntfy server of your own takes the summary (see "The delivery rules") | routine | account: once, until your own server takes the summary; again if it is later left out or set aside |
 | The server's clock failed its check (the reporter runs `clock-check.sh` with `-clock-check`, after the other alerts of each firing). The page gives the measured skew, or says none was measured, and the remedy ([server](server.md), "The clock"). Sent after two failing checks in a row; not repeated | urgent | the host: one page for the whole server, whichever account's reporter saw it; a passing check resolves it, and the next failure after that is another alert |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
@@ -310,7 +310,11 @@ The delivery rules:
   history: the channel is sent, once, an urgent page "<account>: state at
   reporter start: Halted" (or Degraded, or Normal) naming the engine state and
   its scope, Boost's buys if two orders the venue rejected in a row have
-  stopped them (with the orders, and whether the boost is on), the kill
+  stopped them (with the orders, and whether the boost is on; read from the
+  venue's rejections themselves, so named from the report of the second
+  rejection, before the next decision records it; a decision record the
+  reporter cannot read is named "cannot be read: treat the buy stop as
+  possibly in force"), the kill
   switch if it is engaged, a pending cash read, the margin-cushion alarm if it
   is not clear, and every open alert. Each open
   alert (a Degraded, Halted or reconciliation alert you have not
@@ -1034,7 +1038,9 @@ passes `-clock-check`.
   `TestRestoringTheSummaryRouteResolvesTheNoticesIncident`,
   `TestTheNoChannelNoticeIsKeyedByTheAccountAlone` and
   `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`; in
-  `internal/report`, `TestTheStateAtReporterStartNamesBoostsStoppedBuys`.
+  `internal/report`, `TestTheStateAtReporterStartNamesBoostsStoppedBuys`,
+  `TestTheSecondRejectionStopsBuysAtOnceInTheStanding` and
+  `TestAnUnreadableDecisionDoesNotSilenceTheStandingAndIsNamedAsPossiblyStopping`.
 - Tests in `cmd/dashboard`, among them `TestEveryRouteRefusesEveryWritingMethod`,
   `TestDashboardShowsTheDaysSkippedTrades`,
   `TestDashboardRefusesAJournalThatDoesNotVerify`,

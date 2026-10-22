@@ -19,7 +19,7 @@ import (
 // without waiting for the rest of the parts (ADR 0019, "Alerting": one
 // channel's fault must not silence another).
 func TestAMultipartNtfyMessageHasOneDeadlineForAllItsParts(t *testing.T) {
-	const perPart, timeout = 150 * time.Millisecond, 400 * time.Millisecond
+	const perPart, timeout = 300 * time.Millisecond, time.Second
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		select {
@@ -40,7 +40,9 @@ func TestAMultipartNtfyMessageHasOneDeadlineForAllItsParts(t *testing.T) {
 		ntfySender{server: slow.URL, topic: "t", client: client},
 		pagerDutySender{url: pd.URL, routingKey: "rk", client: client},
 	}
-	// Eight parts at 150ms each take 1.2s, each part within the timeout.
+	// Eight parts at 300ms each take 2.4s, each part within the timeout; the
+	// bound below sits 700ms over the deadline and 700ms under the serial
+	// time, so a slow machine does not fail it and one deadline per part would.
 	a := report.Alert{Key: "k", Title: "joint: engine degraded", Body: strings.Repeat("x", 8*4096), Severity: report.Urgent}
 	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
 	begun := time.Now()
@@ -55,7 +57,7 @@ func TestAMultipartNtfyMessageHasOneDeadlineForAllItsParts(t *testing.T) {
 	if paged.Load() != 1 || !seen[channelKey("pagerduty", "k")] {
 		t.Errorf("PagerDuty took the alert %d time(s); the ntfy deadline must not hold it back", paged.Load())
 	}
-	if took > timeout+300*time.Millisecond {
+	if took > timeout+700*time.Millisecond {
 		t.Errorf("the delivery took %s: the multipart ntfy send overran its %s deadline", took, timeout)
 	}
 }

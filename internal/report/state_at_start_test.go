@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -123,7 +124,7 @@ func TestTheStateAtReporterStartRefusesWhatItCannotRead(t *testing.T) {
 	if _, _, err := report.StateAtStartAlert(nil, nil); err == nil {
 		t.Error("a log with no configuration names no account, and must be an error")
 	}
-	for _, eventType := range []string{event.OperatorRunApprovedEventType, event.EngineStateEventType, event.TargetsDecidedEventType, event.ReconciliationResultEventType, event.MarginAlarmEventType} {
+	for _, eventType := range []string{event.OperatorRunApprovedEventType, event.EngineStateEventType, event.ReconciliationResultEventType, event.MarginAlarmEventType} {
 		s := newStream(t)
 		s.add(eventType, 99, "unreadable", day(1), map[string]string{})
 		if _, _, err := report.StateAtStartAlert(s.out, nil); err == nil {
@@ -147,7 +148,7 @@ func TestTheStateAtReporterStartRefusesWhatItCannotRead(t *testing.T) {
 // rejected in a row stop Boost's buys until the owner starts a fresh run
 // (ADR 0026, point 2, "Boost", amended 2026-10-18). The page that announced
 // it is sent once, not repeated, so a channel that begins after it is told
-// the stop in the standing, with the latch it holds, or the owner sees no
+// the stop in the standing, with whether the boost is on, or the owner sees no
 // reason the account buys nothing (ADR 0019, "Alerting").
 func TestTheStateAtReporterStartNamesBoostsStoppedBuys(t *testing.T) {
 	stoppedAt := func(n int, rejections int, latched bool) event.TargetsDecidedPayload {
@@ -172,9 +173,104 @@ func TestTheStateAtReporterStartNamesBoostsStoppedBuys(t *testing.T) {
 		}
 	}
 
+	if strings.Contains(strings.ToLower(a.Body+a.PublicBody), "latch") {
+		t.Errorf("the owner-facing page must say the boost is on or off, not latch:\n%s", a.Body)
+	}
+
 	counting := newStream(t)
 	counting.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0), stoppedAt(0, 1, false))
 	if a, ok := stateAtStart(t, counting); ok {
 		t.Errorf("one rejection does not stop buys: %+v", a)
+	}
+}
+
+// TestAnUnreadableDecisionDoesNotSilenceTheStandingAndIsNamedAsPossiblyStopping:
+// a targets-decided record this build cannot read may be the one that stopped
+// Boost's buys, so the page still goes out, with everything else in force,
+// and says to treat the buy stop as in force (fail closed, AGENTS.md).
+func TestAnUnreadableDecisionDoesNotSilenceTheStandingAndIsNamedAsPossiblyStopping(t *testing.T) {
+	s := newStream(t)
+	s.engineState(1, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
+	s.add(event.TargetsDecidedEventType, 99, "targets:2", day(2), map[string]string{})
+	a, ok, err := report.StateAtStartAlert(s.out, nil)
+	if err != nil || !ok {
+		t.Fatalf("an unreadable decision must not fail the page: %+v, %v, %v", a, ok, err)
+	}
+	for _, want := range []string{"targets:2", "cannot be read: treat the buy stop as possibly in force", "Halted"} {
+		if !strings.Contains(a.Body, want) || !strings.Contains(a.PublicBody, want) {
+			t.Errorf("the standing does not say %q:\n%s", want, a.Body)
+		}
+	}
+}
+
+// TestTheSecondRejectionStopsBuysAtOnceInTheStanding: the decision that
+// records the stop comes at the next session, but the second rejection is
+// journalled as the venue's report, and a channel that begins in between is
+// told the stop from the rejections themselves (ADR 0026, point 2, "Boost").
+func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
+	decision := func(s *stream, n, rejections int) {
+		p := event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
+			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, LatchedBefore: true, LatchedAfter: true, VenueRejections: rejections}}
+		p.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-6"}}[:rejections]
+		s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, fmt.Sprintf("targets:%d", n), day(n), p)
+	}
+	sent := func(s *stream, n int, clientID string) {
+		s.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:"+clientID, day(n),
+			event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
+				InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101, Mode: event.TradingModePaper, Send: true, Figures: figures})
+	}
+	one := func() *stream {
+		s := newStream(t)
+		decision(s, 0, 0)
+		sent(s, 0, "tw-6")
+		sent(s, 0, "tw-7")
+		s.lifecycle(1, "life:6", "tw-6", event.OrderLifecycleStatusInvalid)
+		decision(s, 1, 1)
+		return s
+	}
+	second := one()
+	// None of these is a rejection the engine counts: a dry-run release, a
+	// release made twice, a sale back to 98% (no Boost decision's order), a
+	// report on an order no decision released, an acknowledgement, a report
+	// the build cannot read and another account's.
+	second.released(1, "tw-dry", 10)
+	sent(second, 1, "tw-7")
+	second.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm", day(1),
+		event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:alarm", Tag: "alarm:u", ClientOrderID: "alarm-1",
+			InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures})
+	second.lifecycle(2, "life:alarm", "alarm-1", event.OrderLifecycleStatusInvalid)
+	second.lifecycle(2, "life:unknown", "tw-unknown", event.OrderLifecycleStatusInvalid)
+	second.lifecycle(2, "life:sub", "tw-7", event.OrderLifecycleStatusSubmitted)
+	second.add(event.OrderLifecycleEventType, 99, "life:unread", day(2), map[string]string{})
+	second.add(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "life:other", day(2),
+		event.LimitOrderLifecyclePayload{AccountID: "ira", ClientOrderID: "tw-7", OrderID: "ib-9", InstrumentID: "SPY",
+			Side: event.OrderSideBuy, Status: event.OrderLifecycleStatusInvalid, Quantity: 10, LimitPrice: 101, OccurredAt: day(2)})
+	if a, ok := stateAtStart(t, second); ok {
+		t.Fatalf("what is not a counted rejection stops buys: %+v", a)
+	}
+	second.lifecycle(2, "life:7", "tw-7", event.OrderLifecycleStatusInvalid)
+	sent(second, 1, "tw-9")
+	second.lifecycle(3, "life:9", "tw-9", event.OrderLifecycleStatusInvalid) // read once stopped: counts nothing more
+	a, ok := stateAtStart(t, second)
+	if !ok {
+		t.Fatal("the second rejection, journalled and not yet decided, does not stop buys in the standing")
+	}
+	for _, want := range []string{"buys are stopped", "tw-6", "tw-7", "boost is on"} {
+		if !strings.Contains(a.Body, want) {
+			t.Errorf("the standing does not say %q:\n%s", want, a.Body)
+		}
+	}
+
+	if a, ok := stateAtStart(t, one()); ok {
+		t.Errorf("one rejection does not stop buys: %+v", a)
+	}
+
+	accepted := one()
+	sent(accepted, 1, "tw-8")
+	accepted.lifecycle(2, "life:8", "tw-8", event.OrderLifecycleStatusCanceled)
+	accepted.lifecycle(3, "life:7", "tw-7", event.OrderLifecycleStatusInvalid)
+	if a, ok := stateAtStart(t, accepted); ok {
+		t.Errorf("an order accepted after the first rejection sets the count back, and a rejection of an older order does not stop buys: %+v", a)
 	}
 }
