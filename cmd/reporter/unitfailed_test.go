@@ -954,3 +954,42 @@ func TestAnEpisodesBookkeepingIsBoundedAndGoneWhenItEnds(t *testing.T) {
 		t.Errorf("the ended episode left %d entries in the record", n)
 	}
 }
+
+// TestAStaleSampleOfAFailedRunIsNotCountedTwice: a firing samples a unit failed
+// as run R2, whose own hook counted it; a later run R3 is recorded (the hook
+// keeps only the latest later run) before the firing's unit step, so the
+// firing's sample of R2 is older than R3 and must not count R2 again (ADR
+// 0019, "Alerting": each incident once).
+func TestAStaleSampleOfAFailedRunIsNotCountedTwice(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	const unit = "ti-engine@boost.service"
+	path := filepath.Join(dir, "unit-failures.json")
+	base := t0.Add(time.Hour)
+	thirdRun := fmt.Sprintf("%032x", 3)
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), base, unit); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, secondRun), base.Add(10*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, thirdRun), base.Add(61*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	senders, setAside, err := buildSenders("ntfy,pagerduty", twoChannels(), &http.Client{Transport: r}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampled := map[string]unitSample{unit: {failed: true, invocation: secondRun}}
+	if err := unitStep(path, []string{unit}, sampled, base.Add(60*time.Minute), systemd.journalctl(), nil, senders, setAside, base.Add(60*time.Minute), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	_, _, repeats, _, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := repeats[runsKey(report.UnitFailedKey(unit, firstRun))], 2; got != want {
+		t.Errorf("the episode counted %d later failed runs, want %d (R2 and R3 once each)", got, want)
+	}
+}

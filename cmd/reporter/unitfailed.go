@@ -146,7 +146,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	at := now()
 	run := failedInvocation(getenv, *systemctl, unit, at)
 	err = withUnitState(*statePath, func(u *unitState) error {
-		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, *repeat)
+		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, time.Time{}, *repeat)
 	})
 	return errors.Join(append(failures, err)...)
 }
@@ -179,8 +179,10 @@ func failedInvocation(getenv func(string) string, systemctl, unit string, at tim
 // resolved again and the run pages afresh. A run systemd named no invocation
 // for (unnamedRun) joins the open episode uncounted, since it may be the same
 // run, or else begins one under a name of its own, so no two episodes share a
-// key.
-func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
+// key. sampledAt is when the firing sampled systemd (zero for a hook, which
+// names its run itself): a run the sample named joins uncounted when a later
+// run was recorded at or after it, since that run is newer than the sample.
+func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at, sampledAt time.Time, every time.Duration) error {
 	var errs []error
 	episode, opened := "", time.Time{}
 	for invocation, recorded := range unitRecords(u, unit) {
@@ -199,6 +201,9 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 		} else {
 			run = ""
 		}
+	}
+	if episode != "" && run != "" && run != episode && !sampledAt.IsZero() && !latestRun(u, report.UnitFailedKey(unit, episode)).Before(sampledAt) {
+		run = ""
 	}
 	if episode == "" || episode == run {
 		return errors.Join(append(errs, pageRun(u, unit, run, journalctl, secrets, senders, at, every))...)
@@ -442,7 +447,7 @@ func unitStep(path string, units []string, samples map[string]unitSample, sample
 				if sample.invocation == "" {
 					sample.invocation = unnamedRun
 				}
-				if err := failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, every); err != nil {
+				if err := failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, sampledAt, every); err != nil {
 					failures = append(failures, err)
 				}
 				continue

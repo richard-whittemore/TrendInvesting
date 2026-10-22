@@ -126,3 +126,25 @@ func TestAFailedUnitJoinsTheStandingWhetherOrNotAnythingElseIsInForce(t *testing
 		t.Errorf("with the engine Halted: %+v", b)
 	}
 }
+
+// TestAReminderWithoutAKnownCountSaysNoCount: a reminder for an episode no
+// later run was named for (one run, or unknown) says the unit is still failing
+// without a count, and a count of two or more is said as runs (ADR 0019,
+// "Alerting").
+func TestAReminderWithoutAKnownCountSaysNoCount(t *testing.T) {
+	since := time.Date(2026, 10, 22, 15, 4, 0, 0, time.UTC)
+	const run = "0123456789abcdef0123456789abcdef"
+	const unit = "ti-engine@boost.service"
+	for _, runs := range []int{0, 1} {
+		a := report.UnitStillFailedAlert("lightsail", unit, run, since, runs, since.Add(time.Hour))
+		for _, body := range []string{a.Body, a.PublicBody} {
+			if !strings.Contains(body, "still failing since 2026-10-22T15:04:00Z") || strings.Contains(body, "failed run") {
+				t.Errorf("runs %d: the reminder must say still failing since the start, with no count:\n%s", runs, body)
+			}
+		}
+	}
+	a := report.UnitStillFailedAlert("lightsail", unit, run, since, 2, since.Add(time.Hour))
+	if !strings.Contains(a.Body, "2 failed runs") {
+		t.Errorf("runs 2: the reminder lacks %q:\n%s", "2 failed runs", a.Body)
+	}
+}

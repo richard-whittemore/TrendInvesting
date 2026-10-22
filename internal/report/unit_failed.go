@@ -58,14 +58,20 @@ func UnitFailedAlert(host, unit, invocation, reason string, at time.Time) Alert 
 	}
 }
 
-// UnitStillFailedAlert is the reminder for a failure episode that goes on:
-// the unit has failed runs runs since the page of since, the episode's first.
+// UnitStillFailedAlert is the reminder for a failure episode that goes on: the
+// unit is still failing since the page of since, the episode's first. runs is
+// the count of later failed runs the episode has; a count below two (none was
+// named for a later run, so it is unknown) is left out rather than said wrong.
 // It is sent under the episode's key, at most once an hour (the caller's
 // interval), and carries no journal line.
 func UnitStillFailedAlert(host, unit, invocation string, since time.Time, runs int, at time.Time) Alert {
-	body := fmt.Sprintf("The unit %s is still failing since %s, %d failed runs, as of %s. Read %s, then `journalctl -u %s` on the server. "+
+	count := ""
+	if runs >= 2 {
+		count = fmt.Sprintf(", %d failed runs", runs)
+	}
+	body := fmt.Sprintf("The unit %s is still failing since %s%s, as of %s. Read %s, then `journalctl -u %s` on the server. "+
 		"This reminder comes at most once an hour while the unit keeps failing; the incident is resolved when the unit is seen well.",
-		unit, since.UTC().Format(time.RFC3339), runs, at.UTC().Format(time.RFC3339), UnitManualRow(unit), unit)
+		unit, since.UTC().Format(time.RFC3339), count, at.UTC().Format(time.RFC3339), UnitManualRow(unit), unit)
 	return Alert{
 		Key: UnitFailedKey(unit, invocation), Kind: KindUnitFailed, Severity: Urgent, AccountID: host, At: at,
 		Title: fmt.Sprintf("%s: %s still failing", host, unit),
