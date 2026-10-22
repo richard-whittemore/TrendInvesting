@@ -4,7 +4,8 @@ ADR 0025 points 2 and 5, ADR 0027 section 4. At start the loop connects
 with the engine's own client ID and, before any order can be sent, reads
 the account (snapshot.read_account: positions, balances and open orders)
 and IBKR's open orders and the session's executions
-(orders.collect_broker_orders), refusing to go on if any of it could not be
+(orders.collect_settled_broker_orders: read again until two reads in a row
+show the same open orders), refusing to go on if any of it could not be
 read (ReconcileIncomplete; an unavailable balance is not zero, ADR 0019).
 It then matches IBKR's open orders and executions against the orders the
 engine's durable log released to be sent, and the logs of the earlier runs
@@ -170,7 +171,8 @@ from decimal import Decimal
 from connection import Connection, NotConnected
 from delivery import (DELIVERED_SUFFIX, Deliverer, PostCloseReading, SnapshotRefused, market_open, nyse_calendar,
                       run_name)
-from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect, order_key
+from orders import (BrokerOrdersIncomplete, OpenOrdersUnsettled, OrderTracker, collect_broker_orders,
+                    collect_settled_broker_orders, match_on_reconnect, order_key)
 from relay import (OUTBOX_SUFFIX, EarlierRunInput, Outbox, OutboxInvalid, PendingInput, Relay, earlier_run,
                    read_engine_log, released_client_order_ids, run_identity, run_logs)
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
@@ -420,7 +422,11 @@ class AdapterLoop:
             raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread); nothing is sent until a "
                                       "read is complete (ADR 0019: an unavailable balance is not zero)".format(
                                           ", ".join(sorted(reading.unread))))
-        broker = collect_broker_orders(self.conn)
+        try:
+            broker = collect_settled_broker_orders(self.conn)
+        except OpenOrdersUnsettled as err:
+            raise ReconcileIncomplete("{}; the link is not reconciled and nothing is sent (ADR 0019: a list not "
+                                      "read in full is unread)".format(err)) from None
         # An order an earlier run of this engine released (the runs its Run
         # approvals chain back to) is this engine's too: IBKR's day lists
         # still show it after a fresh run starts.

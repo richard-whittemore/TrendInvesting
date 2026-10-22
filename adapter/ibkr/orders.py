@@ -64,6 +64,16 @@ class UnrecognisedOrderReport(Exception):
     """IBKR reported an order state this adapter cannot classify; the run must stop (ADR 0022)."""
 
 
+# How many times in a row two consecutive reads of IBKR's open orders may
+# disagree at a start or reconnect before the read is given up as unsettled
+# (collect_settled_broker_orders).
+OPEN_ORDER_DISAGREEMENTS = 3
+
+
+class OpenOrdersUnsettled(Exception):
+    """IBKR's open orders read differently each time, so no read of them can be taken as whole."""
+
+
 class BrokerOrdersIncomplete(Exception):
     """IBKR's open orders or executions did not arrive in full; missing names which."""
 
@@ -345,11 +355,13 @@ def collect_broker_orders(conn):
     another client are seen too (ADR 0019 compares both sets). Executions
     reach back only to midnight through Gateway (ADR 0025 point 5).
 
-    The open orders are the answer to this read's own request and end only
-    on its own end (Connection.ask_all_open_orders): an end Gateway sent
-    unasked, or the late end of an earlier list, never cuts the list short,
-    so an order IBKR has is never reported missing from a part-read list
-    (ADR 0025 point 5: matched in full before anything is sent).
+    The open orders are the answer to this read's own request, the one list
+    outstanding on the link, and end on the first end taken after it was
+    asked (Connection.ask_all_open_orders): an end Gateway volunteers as a
+    session starts is taken before the first request, and an earlier
+    list's late rows and end before this one is asked. A start or reconnect
+    reads through collect_settled_broker_orders, which takes a list as
+    whole only once two reads agree.
     """
     conn.require_connected()
     account = conn.config.account_id
@@ -389,6 +401,33 @@ def collect_broker_orders(conn):
     return BrokerOrders(
         open_orders=tuple(open_orders[k] for k in sorted(open_orders)),
         executions=tuple(executions[k] for k in sorted(executions)))
+
+
+def collect_settled_broker_orders(conn, disagreements=OPEN_ORDER_DISAGREEMENTS):
+    """collect_broker_orders until two reads in a row show the same open orders (ids and states); the later read.
+
+    An end-of-list mark nothing asked for, should one still land inside a
+    list after connect took Gateway's volunteered one, ends that read short;
+    the next read then differs from it, so a short list is never taken as
+    IBKR's whole list (ADR 0025 point 5: matched in full before anything is
+    sent). After disagreements disagreements in a row, OpenOrdersUnsettled:
+    the link is not reconciled (ADR 0019: a list not read in full is unread).
+    BrokerOrdersIncomplete and NotConnected as collect_broker_orders raises
+    them.
+    """
+    previous = collect_broker_orders(conn)
+    for _ in range(disagreements):
+        current = collect_broker_orders(conn)
+        if _order_states(current) == _order_states(previous):
+            return current
+        previous = current
+    raise OpenOrdersUnsettled(
+        "IBKR's open orders did not agree in two reads in a row in {} reads".format(disagreements + 1))
+
+
+def _order_states(broker):
+    """The open orders broker shows, by identity and IBKR status."""
+    return frozenset((order_key(r.client_id, r.broker_order_id, r.perm_id), r.ibkr_status) for r in broker.open_orders)
 
 
 def match_on_reconnect(expected_client_order_ids, broker, client_id):

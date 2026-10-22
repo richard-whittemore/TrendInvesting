@@ -36,6 +36,13 @@ OPEN_ORDERS_ASKED = "open_orders_asked"
 LIST_BEFORE = "before"
 LIST_READING = "reading"
 LIST_ENDED = "ended"
+# As a session starts, Gateway sends this client's open orders and an end of
+# list that nothing asked for. connect takes them before it returns, so that
+# end can never land inside the first list asked for: it waits for that end,
+# but no longer than VOLUNTEER_QUIET seconds with no volunteered row (or
+# request_timeout, if shorter) and VOLUNTEER_MAX seconds in all.
+VOLUNTEER_QUIET = 2.0
+VOLUNTEER_MAX = 10.0
 
 # The first request ID: IBKR answers a request's error under its request ID
 # and an order's rejection under its order ID, with message codes shared by
@@ -212,23 +219,35 @@ class Connection:
         """Ask IBKR for every open order (reqAllOpenOrders); return the ticket open_order_list reads it by.
 
         IBKR's open orders and the end of their list carry no request ID,
-        and Gateway also sends open orders and an end that nothing asked
-        for, as a session starts. So the request is noted in the Inbox just
-        before it is sent: every callback queued ahead of the note arrived
-        before the request left and is no part of its answer. IBKR answers
-        each request with one end, in the order asked, so an end taken
-        while a list is outstanding answers the oldest one, and an end taken
-        with none outstanding was not asked for and ends nothing. An
-        abandoned list's late end therefore ends that list, never a later
-        one; a list whose end never comes leaves every later list on the
-        link unended, which reads fail closed on (ADR 0019: a list not read
-        in full is unread). NotConnected while the link is down.
+        so at most one list is outstanding on the link at a time: while an
+        earlier list has not ended, this waits for its end (taking its late
+        rows as that list's, never this one's) up to request_timeout, and
+        if it does not come drops the link and raises NotConnected, since no
+        later list on the link could be told from it (ADR 0019: a list not
+        read in full is unread). Gateway's volunteered list was taken by
+        connect. The request is noted in the Inbox just before it is sent:
+        every callback queued ahead of the note arrived before the request
+        left and is no part of its answer, and an end taken with no list
+        outstanding ends nothing. NotConnected while the link is down.
         """
         self.require_connected()
+        if self._list_ends < self._lists_requested:
+            self._await_list_end()
         self._lists_requested += 1
         self.inbox.note(OPEN_ORDERS_ASKED)
         self.api.req_all_open_orders()
         return self._lists_requested
+
+    def _await_list_end(self):
+        """Take callbacks until the outstanding open-order list ends; drop the link if it does not in request_timeout."""
+        for _ in self.events(self.config.request_timeout):
+            if not self.connected or self._list_ends >= self._lists_requested:
+                break
+        if not self.connected:
+            raise NotConnected("IB Gateway link is down")
+        if self._list_ends < self._lists_requested:
+            self.drop("open-order-list-unended")
+            raise NotConnected("an earlier open-order list never ended, so no later one on this link can be read")
 
     def open_order_list(self, ticket):
         """Where the list ask_all_open_orders gave ticket for stands: LIST_BEFORE, LIST_READING or LIST_ENDED.
@@ -286,6 +305,7 @@ class Connection:
                 raise ConnectFailed("no handshake within connect_timeout")
             if event.name == "next_valid_id":
                 self.next_order_id = event.args[0]
+                self._take_volunteered_list()
                 self.connected = True
                 self.needs_reconciliation = True
                 self._report("connected")
@@ -309,6 +329,29 @@ class Connection:
             # Anything else (notices, the open orders Gateway volunteers on
             # connect) is kept for pump() rather than dropped.
             self._pending.append(event)
+
+    def _take_volunteered_list(self):
+        """Keep for pump() the open orders and end Gateway volunteers as the session starts (see VOLUNTEER_QUIET).
+
+        Taken before the first list is asked for, they stand ahead of its
+        note in the queue, so the volunteered end ends nothing. When no end
+        comes in time the session goes on without it; a start's or
+        reconnect's read of the open orders stands only once two reads in a
+        row agree (orders.collect_settled_broker_orders).
+        """
+        quiet = min(VOLUNTEER_QUIET, self.config.request_timeout)
+        now = self._monotonic()
+        until, quiet_until = now + VOLUNTEER_MAX, now + quiet
+        while True:
+            wait = min(until, quiet_until) - self._monotonic()
+            event = self.inbox.get(wait) if wait > 0 else None
+            if event is None:
+                return
+            self._pending.append(event)
+            if event.name in ("open_order_end", "connection_closed"):
+                return
+            if event.name in ("open_order", "order_status"):
+                quiet_until = self._monotonic() + quiet
 
     def connect_with_backoff(self):
         """Connect, retrying a failed attempt after an exponentially growing, capped delay."""

@@ -68,8 +68,9 @@ class SwitchFollowsLink(FakeTWS):
 class DropsOnTheRelaysOrderRead(FakeTWS):
     """IB Gateway closes the connection as the relay reads IBKR's orders for an order about to be sent.
 
-    The start's reconciliation reads them twice (the account read and the
-    order match); the third read is the relay's.
+    The start's reconciliation reads them three times (the account read and
+    the two agreeing reads of the order match); the fourth read is the
+    relay's.
     """
 
     def __init__(self):
@@ -78,7 +79,7 @@ class DropsOnTheRelaysOrderRead(FakeTWS):
 
     def req_all_open_orders(self):
         self.reads += 1
-        if self.reads == 3:
+        if self.reads == 4:
             self.calls.append(("req_all_open_orders",))
             self.drop()
             return
@@ -90,7 +91,7 @@ class LosesIbkrOnTheRelaysOrderRead(DropsOnTheRelaysOrderRead):
 
     def req_all_open_orders(self):
         self.reads += 1
-        if self.reads == 3:
+        if self.reads == 4:
             self.calls.append(("req_all_open_orders",))
             self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
             self.callbacks.error(-1, 1102, "Connectivity between IB and Trader Workstation has been restored - "
@@ -104,7 +105,7 @@ class LosesIbkrAndRestoresLater(DropsOnTheRelaysOrderRead):
 
     def req_all_open_orders(self):
         self.reads += 1
-        if self.reads == 3:
+        if self.reads == 4:
             self.calls.append(("req_all_open_orders",))
             self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
             return
@@ -279,7 +280,8 @@ class LoopTests(unittest.TestCase):
         self.assertTrue(loop.conn.connected)
         self.assertFalse(loop.conn.needs_reconciliation)
         self.assertEqual(len(self.fake.called("connect")), 2)
-        self.assertEqual(len(self.fake.called("req_executions")), matched + 1, "matched again after the reconnect")
+        self.assertEqual(len(self.fake.called("req_executions")), matched + 2,
+                         "matched again after the reconnect, by two reads that agree")
         self.fills(self.fake)
         self.settle(loop)
         self.assertEqual(len(self.fake.placed), 1)
@@ -323,6 +325,44 @@ class LoopTests(unittest.TestCase):
         loop = self.loop(fake)
         with self.assertRaises(ReconcileMismatch):
             loop.start()
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def manual_order(self):
+        return (0, contract(), order(order_ref="", client_id=0, perm_id=4242, order_type="LMT", lmt_price=1.0),
+                SimpleNamespace(status="Submitted"))
+
+    def test_an_order_only_ibkrs_whole_list_shows_stops_the_start_when_the_volunteered_end_follows_the_request(self):
+        fake = self.gateway()
+        fake.open_orders = [self.manual_order()]
+        fake.volunteer_open_orders = True
+        fake.volunteer_after_request = True
+        fake.open_order_batch = 1
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch):
+            loop.start()
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def test_the_start_reads_the_open_orders_again_until_two_reads_agree(self):
+        # The account read's list, then two reads that disagree, then one
+        # that agrees with the read before it: the agreed list is matched.
+        fake = self.gateway()
+        fake.open_order_answers = [[], [], [self.manual_order()], [self.manual_order()]]
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch):
+            loop.start()
+        self.assertEqual(len(fake.called("req_all_open_orders")), 4)
+        self.assertTrue(loop.conn.needs_reconciliation)
+
+    def test_open_order_reads_that_disagree_three_times_leave_the_link_not_reconciled(self):
+        fake = self.gateway()
+        fake.open_order_answers = [[], [], [self.manual_order()], [], [self.manual_order()]]
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            loop.start()
+        self.assertIn("did not agree", str(caught.exception))
+        self.assertEqual(len(fake.called("req_all_open_orders")), 5)
         self.assertTrue(loop.conn.needs_reconciliation)
         self.assertEqual(fake.placed, [])
 

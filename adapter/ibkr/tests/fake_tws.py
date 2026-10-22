@@ -88,10 +88,30 @@ class FakeTWS(TWSApi):
         # time); None answers the whole list at once.
         self.open_order_batch = None
         # As a session starts, Gateway sends this client's open orders and
-        # an end-of-list marker that nothing asked for.
+        # an end-of-list marker that nothing asked for, after nextValidId,
+        # one row (and then the end) each time the adapter next waits, so
+        # they can still be arriving after connect has returned.
         self.volunteer_open_orders = False
-        # Answers still to come, one taken each time the adapter waits.
+        # Whether the volunteered list ends with its end-of-list marker.
+        self.volunteer_end = True
+        # The volunteered rows and end arrive only behind the adapter's
+        # first reqAllOpenOrders, ahead of its answer: the ordering in which
+        # an end nothing asked for lands inside an asked-for list.
+        self.volunteer_after_request = False
+        # Each reqAllOpenOrders answered with the next of these lists of
+        # rows, then with open_orders once they are used up: IBKR's list
+        # changing between reads.
+        self.open_order_answers = []
+        # While set, reqAllOpenOrders' answers are held back, to arrive only
+        # once release_held() is called (an answer delayed past its read).
+        self.hold_open_orders = False
+        self._held = []
+        # Answers still to come, one arriving each time the adapter waits
+        # with nothing else left to take.
         self._later = deque()
+        # Called before each answer still to come is delivered, so a test
+        # can let the clock move between them.
+        self.later_hook = None
         self.executions = []
         # (code, message) IBKR answers reqExecutions with under its request
         # ID, before the end of the list; None for none.
@@ -140,10 +160,15 @@ class FakeTWS(TWSApi):
             raise ConnectionRefusedError("synthetic connection refused")
         # An abandoned session's answers never reach the new one.
         self._later.clear()
+        self._held = []
         waiting = callbacks.get
 
+        # One answer still to come arrives each time the adapter waits on
+        # an empty Inbox: what has already arrived is taken first.
         def get(timeout):
-            if self._later:
+            if self._later and callbacks._queue.empty():
+                if self.later_hook is not None:
+                    self.later_hook()
                 self._later.popleft()()
             return waiting(timeout)
         callbacks.get = get
@@ -152,10 +177,8 @@ class FakeTWS(TWSApi):
             # IBKR names the login's accounts as the session starts.
             callbacks.managed_accounts(",".join(self.managed_accounts))
             callbacks.next_valid_id(self.next_order_id)
-            if self.volunteer_open_orders:
-                self._send_open_orders(callbacks, [o for o in self.open_orders
-                                                   if getattr(o[2], "clientId", None) == client_id])
-                callbacks.open_order_end()
+            if self.volunteer_open_orders and not self.volunteer_after_request:
+                self._volunteer(callbacks, self._later.append)
         elif behaviour == "client-id-in-use":
             callbacks.error(-1, 326, "Unable to connect as the client id is already in use. "
                                      "Retry with a unique client id.")
@@ -213,17 +236,40 @@ class FakeTWS(TWSApi):
     # -- orders ----------------------------------------------------------
     def req_all_open_orders(self):
         self.calls.append(("req_all_open_orders",))
-        callbacks, rows = self.callbacks, list(self.open_orders)
+        callbacks = self.callbacks
+        rows = list(self.open_order_answers.pop(0) if self.open_order_answers else self.open_orders)
+        if self.volunteer_open_orders and self.volunteer_after_request:
+            self.volunteer_after_request = False
+            self._volunteer(callbacks, lambda send: send())
+        answer = []
         if self.open_order_batch is None:
-            self._send_open_orders(callbacks, rows)
-            if self.end_open_orders:
-                callbacks.open_order_end()
-            return
-        for i in range(0, len(rows), self.open_order_batch):
-            batch = rows[i:i + self.open_order_batch]
-            self._later.append(lambda batch=batch: self._send_open_orders(callbacks, batch))
+            answer.append(lambda: self._send_open_orders(callbacks, rows))
+        else:
+            for i in range(0, len(rows), self.open_order_batch):
+                batch = rows[i:i + self.open_order_batch]
+                answer.append(lambda batch=batch: self._send_open_orders(callbacks, batch))
         if self.end_open_orders:
-            self._later.append(callbacks.open_order_end)
+            answer.append(callbacks.open_order_end)
+        if self.hold_open_orders:
+            self._held.extend(answer)
+        elif self.open_order_batch is None:
+            for send in answer:
+                send()
+        else:
+            self._later.extend(answer)
+
+    def release_held(self):
+        """The held answers arrive late, one each time the adapter next waits."""
+        self._later.extend(self._held)
+        self._held = []
+
+    def _volunteer(self, callbacks, deliver):
+        """Gateway's unasked list: this client's open orders, one at a time, then (if volunteer_end) its end."""
+        for row in self.open_orders:
+            if getattr(row[2], "clientId", None) == self.client_id:
+                deliver(lambda row=row: self._send_open_orders(callbacks, [row]))
+        if self.volunteer_end:
+            deliver(callbacks.open_order_end)
 
     def _send_open_orders(self, callbacks, rows):
         for order_id, con, ord_, state in rows:

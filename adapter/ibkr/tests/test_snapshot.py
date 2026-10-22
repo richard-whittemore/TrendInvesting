@@ -193,7 +193,8 @@ class BrokerSnapshotTests(unittest.TestCase):
         h.fake.req_all_open_orders = lost
         reading = read_account(h.conn)
         self.assertFalse(h.conn.connected)
-        self.assertEqual(reading.unended, frozenset({"open-orders"}))
+        # The positions, asked behind the list, were cut off with it.
+        self.assertEqual(reading.unended, frozenset({"open-orders", "positions"}))
 
     def test_no_server_time_after_the_read_leaves_it_unbounded_and_unreadable(self):
         h = scripted()

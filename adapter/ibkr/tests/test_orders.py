@@ -12,10 +12,10 @@ if tests_dir not in sys.path:
 
 from fake_tws import ACCOUNT, OTHER_ACCOUNT, contract, order, execution
 from test_connection import Harness
-from connection import REQUEST_ID_BASE
+from connection import REQUEST_ID_BASE, NotConnected
 from orders import (BrokerOrdersIncomplete, OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
-                    CommissionReport, UnrecognisedOrderReport, collect_broker_orders,
-                    match_on_reconnect, parse_execution_time)
+                    CommissionReport, OpenOrdersUnsettled, UnrecognisedOrderReport, collect_broker_orders,
+                    collect_settled_broker_orders, match_on_reconnect, parse_execution_time)
 
 STATE = SimpleNamespace(status="Submitted")
 
@@ -471,8 +471,8 @@ class ReconnectMatchTests(unittest.TestCase):
         self.assertTrue(match.clean)
 
 
-class WholeOpenOrderListTests(unittest.TestCase):
-    """IBKR's open-order list and its end carry no request ID; a read ends only on its own request's end."""
+class OpenOrderLists:
+    """The orders IBKR's open-order list shows in these tests, and what a whole read of it holds."""
 
     def working(self):
         # One order of this engine's, one placed by hand (no order ID), one of another client's.
@@ -487,6 +487,10 @@ class WholeOpenOrderListTests(unittest.TestCase):
         match = match_on_reconnect({"tag-1"}, broker, 11)
         self.assertEqual(match.missing_at_broker, ())
         self.assertEqual(sorted(match.matched), ["tag-1"])
+
+
+class WholeOpenOrderListTests(OpenOrderLists, unittest.TestCase):
+    """IBKR's open-order list and its end carry no request ID; a read ends only on its own request's end."""
 
     def test_the_end_gateway_volunteers_as_the_session_starts_does_not_end_the_read(self):
         h = Harness()
@@ -545,6 +549,101 @@ class WholeOpenOrderListTests(unittest.TestCase):
         with self.assertRaises(BrokerOrdersIncomplete) as caught:
             collect_broker_orders(h.conn)
         self.assertEqual(caught.exception.missing, ("open-orders",))
+
+
+    def test_connect_takes_the_volunteered_rows_until_gateway_stops_sending_them(self):
+        # No end comes after the volunteered rows: connect waits only until
+        # Gateway has sent none for a while, and the first list is asked
+        # behind every row it volunteered.
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.volunteer_end = False
+        h.conn.connect()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake._later), 0, "every volunteered row was taken before connect returned")
+        h.fake.open_order_batch = 1
+        self.assert_whole(collect_broker_orders(h.conn))
+
+    def test_connect_stops_waiting_for_the_volunteered_end_after_ten_seconds(self):
+        h = Harness()
+        h.fake.open_orders = [(n, contract(), order(order_ref="tag-{}".format(n), perm_id=9000 + n), STATE)
+                              for n in range(1, 11)]
+        h.fake.volunteer_open_orders = True
+
+        def three_seconds():
+            h.clock.now += 3.0
+        h.fake.later_hook = three_seconds
+        started = h.clock.now
+        h.conn.connect()
+        self.assertTrue(h.conn.connected)
+        self.assertGreaterEqual(h.clock.now - started, 10.0)
+        self.assertLess(h.clock.now - started, 13.0)
+        self.assertTrue(h.fake._later, "connect stopped waiting with volunteered rows still to come")
+
+    def test_delayed_rows_of_an_abandoned_list_are_not_read_as_the_next_lists(self):
+        # The first list's answer arrives only after its read gave up: an
+        # order it shows (cancelled since) is no part of the second list.
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = [(8, contract(), order(order_ref="tag-0", perm_id=9008), STATE)]
+        h.fake.hold_open_orders = True
+        with self.assertRaises(BrokerOrdersIncomplete):
+            collect_broker_orders(h.conn)
+        h.fake.hold_open_orders = False
+        h.fake.release_held()
+        h.fake.open_orders = []
+        self.assertEqual(collect_broker_orders(h.conn).open_orders, ())
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 2)
+
+    def test_a_list_whose_end_never_comes_drops_the_link_before_another_is_asked(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = self.working()
+        h.fake.hold_open_orders = True
+        with self.assertRaises(BrokerOrdersIncomplete):
+            collect_broker_orders(h.conn)
+        with self.assertRaises(NotConnected):
+            collect_broker_orders(h.conn)
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 1, "never two lists outstanding")
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(h.statuses[-1].reason, "open-order-list-unended")
+
+
+class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
+    """A start's or reconnect's read of IBKR's open orders stands only once two reads in a row agree."""
+
+    def test_a_volunteered_end_after_the_first_request_never_passes_a_short_list_as_whole(self):
+        h = Harness()
+        h.fake.open_orders = self.working()
+        h.fake.volunteer_open_orders = True
+        h.fake.volunteer_after_request = True
+        h.conn.connect()
+        self.assert_whole(collect_settled_broker_orders(h.conn))
+
+    def test_two_reads_that_disagree_are_read_again_until_two_agree(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_order_answers = [[], self.working(), self.working()]
+        self.assert_whole(collect_settled_broker_orders(h.conn))
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
+
+    def test_an_order_whose_state_changed_between_reads_is_read_again(self):
+        h = Harness()
+        h.conn.connect()
+        pending = [(7, contract(), order(order_ref="tag-1"), SimpleNamespace(status="PreSubmitted"))]
+        h.fake.open_order_answers = [pending, self.working()[:1], self.working()[:1]]
+        broker = collect_settled_broker_orders(h.conn)
+        self.assertEqual([o.ibkr_status for o in broker.open_orders], ["Submitted"])
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
+
+    def test_three_disagreements_in_a_row_leave_the_list_unsettled(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_order_answers = [[], self.working(), [], self.working(), []]
+        with self.assertRaises(OpenOrdersUnsettled):
+            collect_settled_broker_orders(h.conn)
+        self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
 
 
 if __name__ == "__main__":

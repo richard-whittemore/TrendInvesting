@@ -20,10 +20,11 @@ first account snapshot, which is the engine's first book. A start's or a
 reconnect's is read only once every trade IBKR replayed has its commission
 and its fill has reached the engine. Before the engine holds any account
 snapshot there is no book to compare, so the adapter sends none at a start
-or reconnect then. At a start or reconnect the adapter also reads IBKR's whole
-open-order list, to its end, before it compares anything or sends any
-order: an order still working at IBKR is matched to the engine's order, never
-reported missing because the list was read only in part. The engine compares them with its own book and decides one of four
+or reconnect then. At a start or reconnect the adapter also reads IBKR's
+open-order list, each time to its end, until two reads in a row agree, before
+it compares anything or sends any order: an order still working at IBKR is
+matched to the engine's order, never reported missing because one read was
+cut short. The engine compares them with its own book and decides one of four
 things:
 
 | Result | What it means | What happens |
@@ -193,9 +194,14 @@ to the private channel for the reasons, which can carry amounts.
 
 The adapter reads positions, the account summary (net liquidation, total cash,
 Excess Liquidity) and every open order in one pass, then asks IBKR the time.
-The open orders are IBKR's whole list: only the end of the list the adapter
-asked for ends it, never an end-of-list mark IB Gateway sends unasked or one
-left over from an earlier list.
+The open orders are taken as IBKR's whole list only when two reads in a row
+show the same orders in the same states; after three disagreements in a row
+the link is not reconciled and nothing is sent. The adapter asks for one list
+at a time, so an earlier list's late orders are never read as a later one's,
+and takes the list and end-of-list mark IB Gateway sends unasked as a session
+starts before it asks for anything. Whether a live Gateway always sends that
+mark in time is still to be confirmed on the first live Gateway; the two
+agreeing reads are what guard against it until then ([the IBKR adapter](ibkr-adapter.md), "Reports").
 From that one read it builds the records the engine reads:
 
 - the engine's **account snapshot** (`account.snapshot`), positions and net
