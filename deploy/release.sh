@@ -139,6 +139,11 @@ refuse_if_engine_busy() {
 }
 refuse_if_engine_busy
 
+# A build kept at .replaced by an earlier failed save is the only copy: refuse
+# before the exit trap (which clears .replaced) exists, until it is moved aside.
+if test -e "$releases/.replaced"; then
+  die "ALERT: a kept build was left at $releases/.replaced by an earlier failed save; move it to $releases/<tag> (or aside) by hand first; nothing installed"
+fi
 install -d -m 0755 "$releases"
 lock=$releases/.lock
 mkdir "$lock" 2>/dev/null || die "another ti-release is running (or died: remove $lock)"
@@ -389,7 +394,6 @@ if test "$mode" = release; then
   # Keep the new build; a folder of the same tag (the previous build, when its
   # tag is released again) is replaced only now that the release succeeded.
   # If keeping it fails, the old build is put back and nothing is recorded.
-  rm -rf "$releases/.replaced"
   kept=1
   if test -d "$releases/$tag" && ! mv "$releases/$tag" "$releases/.replaced"; then kept=0; fi
   if test "$kept" = 1 && ! mv "$stage" "$releases/$tag"; then
@@ -399,7 +403,10 @@ if test "$mode" = release; then
       # exit trap must not delete it.
       keep_replaced=1
       kept_at=$releases/.replaced
-      if mv "$releases/.replaced" "$releases/.rescue-$tag"; then kept_at=$releases/.rescue-$tag; keep_replaced=0; fi
+      rescue=$releases/.rescue-$tag
+      n=0
+      while test -e "$rescue"; do n=$((n + 1)); rescue=$releases/.rescue-$tag.$n; done
+      if mv "$releases/.replaced" "$rescue"; then kept_at=$rescue; keep_replaced=0; fi
       log "ALERT: the kept build $tag could not be moved back; its only copy is $kept_at (state still names it as previous); move it to $releases/$tag by hand"
     fi
   fi

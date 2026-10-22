@@ -134,7 +134,8 @@ echo "verify $(basename "$file")" >>"$FAKE_GH_LOG.verified"
 STUB
 # The stand-in curl and mv: each records its arguments and runs the real one;
 # mv fails the first FAKE_MV_FAIL_N (default 1) times it would rename onto the
-# path in FAKE_MV_FAIL.
+# path in FAKE_MV_FAIL; every rename onto a path starting with FAKE_MV_FAIL2
+# fails.
 real_curl=$(command -v curl)
 real_mv=$(command -v mv)
 mkdir -p "$work/path"
@@ -146,6 +147,10 @@ STUB
 cat >"$work/path/mv" <<STUB
 #!/bin/bash
 last=\${*: -1}
+if test -n "\${FAKE_MV_FAIL2:-}" && [[ "\$last" == "\$FAKE_MV_FAIL2"* ]]; then
+  echo "mv: No space left on device" >&2
+  exit 1
+fi
 if test -n "\${FAKE_MV_FAIL:-}" && test "\$last" = "\$FAKE_MV_FAIL" && test "\$(cat "\$FAKE_MV_FAIL.failed-once" 2>/dev/null || echo 0)" -lt "\${FAKE_MV_FAIL_N:-1}"; then
   echo \$((\$(cat "\$FAKE_MV_FAIL.failed-once" 2>/dev/null || echo 0) + 1)) >"\$FAKE_MV_FAIL.failed-once"
   echo "mv: No space left on device" >&2
@@ -288,6 +293,17 @@ for body in 'not json' '[]' '{}' '{"status":["behind"]}' '{"status":"behindish"}
   expect "a compare answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.6)")"
   expect "bin untouched after the compare answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
 done
+# The branch lookup is checked as strictly: a tag object, a short or non-hex
+# sha, missing fields and a non-JSON answer are all refused as unreadable.
+good_main=$(cat "$work/api/repos/$slug/git/ref/heads/main")
+set_compare v0.9.6 '{"status":"identical"}'
+for body in 'not json' '{}' '[]' '' '{"object":{"sha":"'"$main_sha"'","type":"tag"}}' '{"object":{"sha":"abc123","type":"commit"}}' '{"object":{"sha":"'"$(echo "$main_sha" | tr a-f A-F)"'","type":"commit"}}' '{"object":{"type":"commit"}}' '{"object":{"sha":"'"$main_sha"'"}}' '{"object":"x"}'; do
+  printf '%s\n' "$body" >"$work/api/repos/$slug/git/ref/heads/main"
+  expect "a main lookup answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.6)")"
+  grep -q "try again later" "$work/out" || fail "the main lookup answer '$body' does not say to try again later: $(cat "$work/out")"
+  expect "bin untouched after the main lookup answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
+done
+printf '%s\n' "$good_main" >"$work/api/repos/$slug/git/ref/heads/main"
 rm -f "$work/api/repos/$slug/compare/$main_sha...$(str_sha commit-v0.9.6)"
 expect "no compare answer is refused" nonzero "$(nonzero "$(run v0.9.6)")"
 not_current "no release recorded without a compare answer" v0.9.6
@@ -376,6 +392,39 @@ grep -q "ALERT" "$work/out" || fail "no ALERT for the lost build: $(cat "$work/o
 grep -q "$TI_PREFIX/releases/.rescue-v1.0.0" "$work/out" || fail "the ALERT does not name the rescued build: $(cat "$work/out")"
 test -f "$TI_PREFIX/releases/.rescue-v1.0.0/checksums.txt" || fail "the kept build was deleted"
 rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
+
+# An earlier incident left a .rescue folder for the tag: the rescue goes to a
+# new name, never inside the old folder.
+fresh_server
+expect "v1.0.0 installs again" 0 "$(run v1.0.0)"
+expect "v1.1.0 installs again" 0 "$(run v1.1.0)"
+mkdir -p "$TI_PREFIX/releases/.rescue-v1.0.0"
+echo old >"$TI_PREFIX/releases/.rescue-v1.0.0/marker"
+expect "a failed save beside an old rescue is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run v1.0.0)")"
+test -f "$TI_PREFIX/releases/.rescue-v1.0.0/marker" || fail "the old rescue folder was disturbed"
+test ! -e "$TI_PREFIX/releases/.rescue-v1.0.0/.replaced" || fail "the kept build was moved inside the old rescue folder"
+rescued=$(find "$TI_PREFIX/releases" -maxdepth 1 -name ".rescue-v1.0.0.*" | head -1)
+test -n "$rescued" && test -f "$rescued/checksums.txt" || fail "the kept build is not under a new rescue name"
+grep -q "$rescued" "$work/out" || fail "the ALERT does not name $rescued: $(cat "$work/out")"
+rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
+rm -rf "$TI_PREFIX"/releases/.rescue-v1.0.0*
+
+# The rescue rename fails too: the kept build stays at .replaced, the ALERT
+# names it, and the next release refuses to start until it is moved aside.
+fresh_server
+expect "v1.0.0 installs a third time" 0 "$(run v1.0.0)"
+expect "v1.1.0 installs a third time" 0 "$(run v1.1.0)"
+expect "a failed save with no rescue is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 FAKE_MV_FAIL2=$TI_PREFIX/releases/.rescue run v1.0.0)")"
+grep -q "ALERT" "$work/out" || fail "no ALERT when the rescue also failed: $(cat "$work/out")"
+grep -q "$TI_PREFIX/releases/.replaced" "$work/out" || fail "the ALERT does not name .replaced: $(cat "$work/out")"
+test -f "$TI_PREFIX/releases/.replaced/checksums.txt" || fail "the kept build did not survive the exit trap"
+rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
+expect "a later release refuses while .replaced exists" nonzero "$(nonzero "$(run v1.3.0)")"
+if ! grep -q "ALERT" "$work/out" || ! grep -q "$TI_PREFIX/releases/.replaced" "$work/out"; then fail "the refusal does not name .replaced: $(cat "$work/out")"; fi
+test -f "$TI_PREFIX/releases/.replaced/checksums.txt" || fail "a later release deleted the kept build"
+expect "bin untouched by the refused release" "echo ti-engine v1.1.0" "$(installed ti-engine)"
+mv "$TI_PREFIX/releases/.replaced" "$TI_PREFIX/releases/aside"
+expect "the release goes ahead once .replaced is moved aside" 0 "$(run v1.3.0)"
 
 # The first release.
 fresh_server
