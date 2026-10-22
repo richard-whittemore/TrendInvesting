@@ -144,9 +144,12 @@ const (
 // reads the cash ledger's: every line must be an account.cost at version 1
 // from the Flex reader that validates (event.CostPayload.ValidateSchema),
 // whose ID is its transaction ID and is not repeated, and the file must end
-// with a whole line. A cost IBKR restated is recorded again under its next
-// restatement's ID (costRestated) with a note, and the latest value counts.
-// One line that is not refuses the whole ledger.
+// with a whole line. The one exception is a restatement line (its transaction
+// already seen) with amount 0, a reversal: ValidateSchema refuses a zero
+// amount, so readCostLine checks that line with 1 in its place and every
+// other field as ValidateSchema requires. A cost IBKR restated is recorded
+// again under its next restatement's ID (costRestated) with a note, and the
+// latest value counts. One line that is not refuses the whole ledger.
 func ParseCostLedger(raw []byte) CostLedger {
 	if len(raw) == 0 {
 		return CostLedger{Read: true}

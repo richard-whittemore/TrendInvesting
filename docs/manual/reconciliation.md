@@ -408,13 +408,17 @@ written with the reading's other costs and the reading goes on, so the period
 still advances; the costs status says how many were restated ("restated") and
 the unit's log names each, once. A cost IBKR restates to zero is a reversal: it
 is written as a restatement line with an amount of 0 (a zero amount is accepted
-on a restatement line only, never on a new cost) and counts as reversing the
-earlier amount, so the total falls by it. A cost IBKR restates to an amount that
-is not a finite number is not written at all: the costs are set aside with the
-transaction named. The reporter and the dashboard count each cost once, at its
+on a restatement line only, never on a new cost) and from then on counts at
+zero, so the earlier amount no longer counts. For a fee or interest paid, or an
+unmatched commission, the total falls by that amount; for interest received, the
+net cost rises by it; a commission already counted on a fill still counts once,
+from the fill. A cost IBKR restates to an amount that is not a finite number
+is not written at all: the costs are set aside with the transaction named. The reporter and the dashboard count each cost once, at its
 latest value. The costs text counts every restatement line, so a cost restated
 a second time raises the count ("N restatement(s) by IBKR (latest <day>)",
-the day being the New York date of the latest restated posting), says how many
+where the day is the New York posting date (IBKR's as-of date) of the restatement
+line last in the file, not the day IBKR restated it, so it can be older than the
+reading and can move back when an older cost is restated), says how many
 reversed a cost to zero, and says how many the last reading recorded ("N
 restated in the last reading", from the costs status).
 
