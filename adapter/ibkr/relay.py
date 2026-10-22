@@ -260,6 +260,15 @@ RETIRED_BY_ADAPTER = "adapter"
 # recording it and marking the order retires the order again without a
 # second record (Outbox.append_once).
 RETIRED_ID = "order-retired:"
+# The shape of a client order ID a queued retirement may name: the engine's
+# prefix (internal/orderplan ClientOrderID; ADR 0026, point 2, "Order
+# identity": "tw-" and hex digits) then lowercase letters, digits and
+# hyphens, never a colon, so the retirement's entry ID, the order's ID and
+# then an input's, reads one way only.
+CLIENT_ORDER_ID_SHAPE = re.compile(r"tw-[0-9a-z]+(?:-[0-9a-z]+)*")
+# The shape of the input ID a retirement's entry ID may end with
+# (_finish_retirement): non-empty, with no space.
+INPUT_ID_SHAPE = re.compile(r"\S+")
 # The input an earlier engine run left awaiting its reply (resolve_run_ended),
 # settled apart from the order decisions above.
 DECIDE_RUN_ENDED = "run-ended"
@@ -273,6 +282,9 @@ RUN_ENDED = "run ended"
 # (PendingInput.record_run), and of one settled input (record_run_ended).
 RUN_FIELDS = ("input_id", "log", "run")
 RUN_ENDED_FIELDS = ("at", "input", "outbox", "reason", "refused", "run", "session_date", "unsent")
+# A settlement that also set aside malformed queued retirements
+# (resolve_run_ended, set_aside_malformed) names them.
+RUN_ENDED_SET_ASIDE_FIELDS = tuple(sorted(RUN_ENDED_FIELDS + ("set_aside",)))
 # What settle_ended_run did: the client order IDs it settled and those it
 # found settled already, each order whose earlier settlement it withdrew and
 # each it refused to settle, as (client order ID, why), and the torn last
@@ -297,6 +309,9 @@ NEVER_SENT_REFUSED = "refused"
 # The adapter's outbox (Outbox), beside the pending file, and the fields of
 # one of its entries.
 OUTBOX_SUFFIX = ".outbox"
+# Beside the outbox, the entries resolve --run-ended --set-aside-malformed
+# moved out of it (Outbox.set_aside): kept whole, never sent, never deleted.
+SET_ASIDE_SUFFIX = ".set-aside"
 OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
 # An entry from a market-data stream (delivery.py) also carries the
 # envelope as the data job wrote it, which is sent as written but for its
@@ -518,6 +533,7 @@ class Outbox:
     def __init__(self, path):
         self.path = path
         self.lock_path = path + ".lock"
+        self.set_aside_path = path + SET_ASIDE_SUFFIX
 
     def load(self):
         try:
@@ -586,6 +602,33 @@ class Outbox:
             if len(kept) != len(entries):
                 self._write(kept)
 
+    def set_aside_entries(self):
+        """The entries set aside (set_aside), oldest first; a file that is not a list of entries raises OutboxInvalid."""
+        try:
+            with open(self.set_aside_path, encoding="utf-8") as f:
+                entries = json.load(f)
+        except FileNotFoundError:
+            return []
+        except ValueError as err:
+            raise OutboxInvalid("{} is not JSON: {}".format(self.set_aside_path, err)) from None
+        if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+            raise OutboxInvalid("{} is not a list of entries set aside".format(self.set_aside_path))
+        return entries
+
+    def set_aside(self, entries):
+        """Copy entries, whole, into the set-aside file behind those already there, each once; nothing is struck.
+
+        Written under the outbox's lock, as a temporary file renamed over
+        the file, so a stop leaves it as it was or with every entry; an
+        entry set aside is never removed from it (fail closed, AGENTS.md).
+        The caller strikes each entry off the outbox only after this.
+        """
+        with self._locked():
+            kept = self.set_aside_entries()
+            added = [e for e in entries if e not in kept]
+            if added:
+                self._write(kept + added, self.set_aside_path)
+
     @contextlib.contextmanager
     def _locked(self):
         # Never removed: the lock lives on the file's inode.
@@ -596,13 +639,14 @@ class Outbox:
         finally:
             os.close(fd)
 
-    def _write(self, entries):
-        tmp = self.path + ".tmp"
+    def _write(self, entries, path=None):
+        path = path or self.path
+        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(entries, f, separators=(",", ":"), allow_nan=False)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, self.path)
+        os.replace(tmp, path)
         fd = os.open(os.path.dirname(os.path.abspath(self.path)), os.O_RDONLY)
         try:
             os.fsync(fd)
@@ -870,7 +914,9 @@ class PendingInput:
                 entry = json.loads(line)
             except ValueError as err:
                 raise HandoverRecordInvalid("{} line {} is not JSON: {}".format(self.run_ended_path, n, err)) from None
-            if (not isinstance(entry, dict) or tuple(sorted(entry)) != RUN_ENDED_FIELDS
+            if (not isinstance(entry, dict) or tuple(sorted(entry)) not in (RUN_ENDED_FIELDS, RUN_ENDED_SET_ASIDE_FIELDS)
+                    or "set_aside" in entry and not (isinstance(entry["set_aside"], list) and entry["set_aside"]
+                                                     and all(_is_outbox_entry(e) for e in entry["set_aside"]))
                     or not isinstance(entry["input"], dict) or not _is_text(entry["input"].get("id"))
                     or entry["refused"] != RUN_ENDED
                     or not all(_is_text(entry[k]) for k in ("at", "reason", "session_date"))
@@ -1753,53 +1799,71 @@ def _is_retirement(reason, detail, by):
 def _is_queued_retirement(entry):
     """Whether outbox entry entry is a retirement as retire_order queues one.
 
-    The input's type and version (internal/event OrderRetiredPayload,
-    schema version RETIRED_VERSION), the payload's fields and no others, a
-    client order ID, a retirement as the relay records one (_is_retirement),
-    the whole-second time the adapter stamps it with, and an entry ID named
-    after that order (RETIRED_ID and the client order ID) or after the order
-    and a non-empty input ID (_finish_retirement).
+    The input's type and version, an integer (internal/event
+    OrderRetiredPayload, schema version RETIRED_VERSION), the entry's
+    fields and the payload's and no others, each value of its JSON type: the
+    order's identity as the engine's retirement input requires it (an
+    account, an instrument, buy or sell, a whole quantity above zero and a
+    finite limit above zero: OrderRetiredPayload.Validate), a client order
+    ID of the engine's shape (CLIENT_ORDER_ID_SHAPE), a retirement as the
+    relay records one (_is_retirement), the real whole-second time the
+    adapter stamps it with, an event time as real, never before the
+    retirement's session (retire_order stamps both alike), and an entry ID
+    named after that order (RETIRED_ID and the client order ID) or after the
+    order and an input ID (_finish_retirement; INPUT_ID_SHAPE).
     """
     if tuple(sorted(entry)) != OUTBOX_FIELDS or entry["event_type"] != RETIRED_TYPE:
         return False
-    if isinstance(entry["schema_version"], bool) or entry["schema_version"] != RETIRED_VERSION:
+    if type(entry["schema_version"]) is not int or entry["schema_version"] != RETIRED_VERSION:
         return False
     p = entry["payload"]
-    if tuple(sorted(p)) != NEVER_SENT_RETIREMENT_FIELDS or not _is_text(p["client_order_id"]):
+    if tuple(sorted(p)) != NEVER_SENT_RETIREMENT_FIELDS:
+        return False
+    cid = p["client_order_id"]
+    if not isinstance(cid, str) or CLIENT_ORDER_ID_SHAPE.fullmatch(cid) is None:
+        return False
+    if (not _is_text(p["account_id"]) or not _is_text(p["instrument_id"]) or p["side"] not in ("buy", "sell")
+            or not _is_count(p["quantity"]) or not _is_number(p["limit_price"]) or p["limit_price"] <= 0):
         return False
     if not _is_retirement(p["reason"], p["detail"], p["retired_by"]):
         return False
-    if not isinstance(p["retired_at"], str) or WHOLE_SECOND.fullmatch(p["retired_at"]) is None:
+    if not _is_time(p["retired_at"], WHOLE_SECOND) or not _is_time(entry["event_time"], WHOLE_SECOND):
         return False
-    named = RETIRED_ID + p["client_order_id"]
-    return entry["id"] == named or (entry["id"].startswith(named + ":") and len(entry["id"]) > len(named) + 1)
+    if _session_date(entry) < _session_date({"event_time": p["retired_at"]}):
+        return False
+    named = RETIRED_ID + cid
+    return entry["id"] == named or (entry["id"].startswith(named + ":")
+                                    and INPUT_ID_SHAPE.fullmatch(entry["id"][len(named) + 1:]) is not None)
 
 
-def _queued_retirements(path, entries):
-    """The retirements among entries, the outbox at path, each as retire_order queues one, else HandoverRecordInvalid.
+def _queued_retirements(entries):
+    """The retirements among outbox entries entries, as (those as retire_order queues one, those that are not).
 
     An entry of the retirement's type, or named as a retirement (RETIRED_ID),
     is a queued retirement; one that is not as retire_order queues it
-    (_is_queued_retirement) is not a record the relay wrote, so it raises
-    HandoverRecordInvalid naming it, and no retirement is struck or recorded
-    on a record that cannot say whose it is (fail closed, AGENTS.md).
+    (_is_queued_retirement) is not a record the relay wrote, so it can say
+    whose it is no more than its own word, and no retirement is struck or
+    recorded on it unread (fail closed, AGENTS.md).
     """
-    queued = []
+    queued, malformed = [], []
     for e in entries:
         if e["event_type"] != RETIRED_TYPE and not e["id"].startswith(RETIRED_ID):
             continue
-        if not _is_queued_retirement(e):
-            raise HandoverRecordInvalid(
-                "{} holds entry {} as a retirement of order {!r}, {!r} by {!r} because {!r} (type {!r} version {!r}): "
-                "not a retirement as the relay queues one ({!r} by {!r}, or {!r} by the owner named, with its reason, "
-                "under {!r} and the order's client order ID, or that and an input ID), so nothing is settled, struck "
-                "or recorded; restore the outbox from your backup, never edit it by hand, then settle again "
-                "(docs/manual/redelivery.md)".format(
-                    path, e["id"], e["payload"].get("client_order_id"), e["payload"].get("reason"),
-                    e["payload"].get("retired_by"), e["payload"].get("detail"), e["event_type"], e["schema_version"],
-                    RETIRED_SESSION_OVER, RETIRED_BY_ADAPTER, RETIRED_BY_OWNER, RETIRED_ID))
-        queued.append(e)
-    return queued
+        (queued if _is_queued_retirement(e) else malformed).append(e)
+    return queued, malformed
+
+
+def _not_a_queued_retirement(path, e):
+    """HandoverRecordInvalid naming outbox entry e, at path, which is not a retirement as the relay queues one."""
+    return HandoverRecordInvalid(
+        "{} holds entry {} as a retirement of order {!r}, {!r} by {!r} because {!r} (type {!r} version {!r}): "
+        "not a retirement as the relay queues one ({!r} by {!r}, or {!r} by the owner named, with its reason, "
+        "under {!r} and the order's client order ID, or that and an input ID), so nothing is settled, struck "
+        "or recorded; never edit or delete it by hand: check the order at IBKR, then settle again with "
+        "--set-aside-malformed, which moves it into {} and settles the input (docs/manual/redelivery.md)".format(
+            path, e["id"], e["payload"].get("client_order_id"), e["payload"].get("reason"),
+            e["payload"].get("retired_by"), e["payload"].get("detail"), e["event_type"], e["schema_version"],
+            RETIRED_SESSION_OVER, RETIRED_BY_ADAPTER, RETIRED_BY_OWNER, RETIRED_ID, path + SET_ASIDE_SUFFIX))
 
 
 def _effective_user():
@@ -1995,7 +2059,7 @@ def _earlier_logs(pending, engine_log_path, waiting):
     return run_logs(engine_log_path, since, settled=pending.settled_orders())[1:]
 
 
-def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
+def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None, set_aside_malformed=False):
     """Settle the input an earlier run left awaiting its reply: refused, with what it released, for "run ended".
 
     The input, and every order its committed reply released that the
@@ -2030,8 +2094,15 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
     is not as retire_order queues one (_queued_retirements) raises
     HandoverRecordInvalid naming its outbox entry, with nothing struck or
     recorded, so no retirement is struck on a record the relay did not write
-    (fail closed, AGENTS.md).
-    today defaults to today in New York.
+    (fail closed, AGENTS.md), unless set_aside_malformed, the owner's
+    remedy: each such entry is then copied whole into the outbox's
+    set-aside file (Outbox.set_aside, never deleted), named in the
+    settlement (its set_aside), and struck off the outbox with the
+    settlement's other entries. Nothing is lost to the fresh run: its
+    engine refuses an earlier run's retirement (internal/targetweight
+    RetirementVerdict), and the order's sale stays attempted, for the owner
+    to sell by hand if needed (ADR 0019, amended 2026-10-17, reading 4).
+    Returns the entries set aside. today defaults to today in New York.
     """
     if not reason or not reason.strip():
         raise ResolveRefused("a reason is required: it is kept with the settlement")
@@ -2089,24 +2160,39 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
         # nothing struck or recorded (_queued_retirements; fail closed,
         # AGENTS.md).
         queued = outbox.load()
-        retiring = {e["id"] for e in _queued_retirements(outbox.path, queued)}
+        retirements, malformed = _queued_retirements(queued)
+        if malformed and not set_aside_malformed:
+            raise _not_a_queued_retirement(outbox.path, malformed[0])
+        retiring = {e["id"] for e in retirements}
+        aside = {e["id"] for e in malformed}
         own = released_client_order_ids(engine_log_path) - at_broker
-        behind = [e for e in queued if e["id"] != input_id and e["id"] not in recorded
+        behind = [e for e in queued if e["id"] != input_id and e["id"] not in recorded and e["id"] not in aside
                   and ((e["event_type"] in (LIFECYCLE_TYPE, FILL_TYPE)
                         and e["payload"].get("client_order_id") in earlier)
                        or (e["id"] in retiring and e["payload"]["client_order_id"] not in own))]
-        if input_id not in recorded or behind:
-            pending.record_run_ended({
+        # Set aside first, then recorded, then struck: a stop after any step
+        # leaves each entry in the outbox or the set-aside file, never in
+        # neither, and the rerun copies none twice (fail closed, AGENTS.md).
+        if malformed:
+            outbox.set_aside(malformed)
+        named = {o["id"] for e in settled for o in e.get("set_aside", ())}
+        unnamed = [e for e in malformed if e["id"] not in named]
+        if input_id not in recorded or behind or unnamed:
+            settlement = {
                 "input": waiting, "refused": RUN_ENDED, "reason": reason, "run": ended.run,
                 "unsent": [cid for cid, _ in ended.unsent], "outbox": behind,
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "session_date": (today or _session_today()).isoformat()})
+                "session_date": (today or _session_today()).isoformat()}
+            if unnamed:
+                settlement["set_aside"] = unnamed
+            pending.record_run_ended(settlement)
         # Recorded first, so a stop before the strike still keeps every
         # entry it names from the fresh run (the loop strikes what a
         # settlement names).
-        for entry in [{"id": input_id}] + behind:
+        for entry in [{"id": input_id}] + behind + malformed:
             outbox.strike(entry["id"])
         pending.clear()
+        return malformed
     finally:
         os.close(held)
 
@@ -2979,6 +3065,9 @@ def main(argv=None, today=None):
                             "a fresh run's start: refuse it and the orders it released unsent, never send them")
     cmd.add_argument("--journal", metavar="ENGINE_LOG",
                      help="with --run-ended: the durable log of the engine run now running (its -log file)")
+    cmd.add_argument("--set-aside-malformed", action="store_true",
+                     help="with --run-ended: move each queued retirement the adapter could not have written into "
+                          "the outbox's .set-aside file (kept, never sent), print it, and settle the input")
     cmd.add_argument("--reason", required=True, help="what IBKR showed, or why it was refused; kept with the decision")
     ack = commands.add_parser("acknowledge-correction",
                               help="acknowledge IBKR's correction of an execution, so the adapter can start again")
@@ -3062,11 +3151,20 @@ def main(argv=None, today=None):
             if not args.journal:
                 raise ResolveRefused("--run-ended needs --journal, the durable log of the engine run now running, to "
                                      "tell an earlier run's input from that run's")
-            resolve_run_ended(pending, args.client_order_id, args.reason, args.journal, today=today)
+            aside = resolve_run_ended(pending, args.client_order_id, args.reason, args.journal, today=today,
+                                      set_aside_malformed=args.set_aside_malformed)
+            for e in aside:
+                print("set aside outbox entry {} into {}, never sent: not a retirement as the relay queues one: {}. "
+                      "If it retires order {!r}, that order's sale stays attempted: check the order at IBKR and "
+                      "sell by hand if needed (docs/manual/redelivery.md)".format(
+                          e["id"], pending.path + OUTBOX_SUFFIX + SET_ASIDE_SUFFIX,
+                          json.dumps(e, sort_keys=True, separators=(",", ":")), e["payload"].get("client_order_id")))
             print("input {} settled: refused for {}; nothing of it is sent".format(args.client_order_id, RUN_ENDED))
             return 0
         if args.journal:
             raise ResolveRefused("--journal is only for --run-ended")
+        if args.set_aside_malformed:
+            raise ResolveRefused("--set-aside-malformed is only for --run-ended")
         resolve(pending, args.client_order_id, args.decision, args.reason, today=today)
     except (ResolveRefused, HandoverRecordInvalid, OutboxInvalid) as err:
         print("refused: {}".format(err), file=sys.stderr)
