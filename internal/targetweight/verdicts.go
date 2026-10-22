@@ -182,10 +182,14 @@ func (v *BoostVerdicts) leave(i int) bool {
 // be an order decision p.DecisionID released, of instrument instrumentID on
 // the side sideOf names, still awaiting the venue's word and never named by
 // the venue, else the whole settlement is refused and nothing is cleared, so
-// a clearance never means more than the owner said (fail closed): an order
+// a clearance never means more than the owner said (fail closed), and an
+// order named twice is refused too: an order
 // the venue has named, even only as submitted, was sent.
 func (v *BoostVerdicts) ClearNeverSent(inputID string, p event.RebalanceClearedPayload, instrumentID string, sideOf func(id string) string) error {
-	for _, id := range p.ClientOrderIDs {
+	for n, id := range p.ClientOrderIDs {
+		if slices.Contains(p.ClientOrderIDs[:n], id) {
+			return fmt.Errorf("targetweight: clearance %s names order %s twice; a settlement names each order once", inputID, id)
+		}
 		i := slices.IndexFunc(v.undecided, func(o undecidedOrder) bool { return o.id == id })
 		switch {
 		case i < 0:

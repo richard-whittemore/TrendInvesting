@@ -151,3 +151,21 @@ func TestBoostVerdictsClearAnOrderNeverSent(t *testing.T) {
 		t.Errorf("a refused clearance cleared order %s: %v; want it still awaiting the venue's word", sell, got)
 	}
 }
+
+// TestBoostVerdictsRefuseAClearanceNamingAnOrderTwice: a settlement naming
+// one order twice is refused whole, never a panic, and clears nothing (ADR
+// 0026, point 2, "Boost", amended 2026-10-18; fail closed).
+func TestBoostVerdictsRefuseAClearanceNamingAnOrderTwice(t *testing.T) {
+	decision := "targets-decided:joint:x"
+	id := orderplan.ClientOrderID(decision, "SPY", event.OrderSideBuy)
+	var v targetweight.BoostVerdicts
+	v.Release(id)
+	p := event.RebalanceClearedPayload{AccountID: "joint", DecisionID: decision, ClientOrderIDs: []string{id, id}}
+	err := v.ClearNeverSent("clear:3", p, "SPY", func(string) string { return event.OrderSideBuy })
+	if err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Fatalf("a clearance naming %s twice: %v; want a refusal", id, err)
+	}
+	if got := v.Observe(id, true); got != targetweight.VerdictRejected {
+		t.Errorf("a refused clearance cleared the order: %v; want it still awaiting the venue's word", got)
+	}
+}

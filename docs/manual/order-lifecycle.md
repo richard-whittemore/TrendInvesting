@@ -56,7 +56,9 @@ reporter does not yet count a fill in a Boost run as an acknowledgement:
 there, only a lifecycle report acknowledges an order.
 
 IBKR's report on an order carries one of four statuses: submitted (IBKR
-accepted it and it is working), cancel-pending (a cancel was asked for and
+reports it working, which is not yet a promise: IBKR's PreSubmitted maps to it and
+can still be followed by a rejection, so Boost's count does not take it as the
+venue accepting the order), cancel-pending (a cancel was asked for and
 the order may still fill), canceled (it no longer works) or invalid (IBKR
 refused it). A fill is a separate report. The word "reported" below means
 one of these, or a fill.

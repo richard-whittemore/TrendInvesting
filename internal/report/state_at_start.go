@@ -42,7 +42,7 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 	if err != nil {
 		return Alert{}, false, err
 	}
-	var state, stopped, unreadable, killed, pending, alarm []string // each the private line, then the public one
+	var state, stopped, unreadable, refused, killed, pending, alarm []string // each the private line, then the public one
 	headline := "Normal"
 	rej := newBoostRejections(account)
 	var lastBoost event.Envelope
@@ -161,7 +161,11 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			headline = "Normal, Boost's buys possibly stopped"
 		}
 	}
-	for _, l := range [][]string{state, stopped, unreadable, killed, pending, alarm} {
+	if len(rej.refused) > 0 {
+		line := fmt.Sprintf("The clearance record(s) %s cannot be applied (the engine refuses them): check which Boost orders were never sent.", strings.Join(rej.refused, ", "))
+		refused = []string{line, line}
+	}
+	for _, l := range [][]string{state, stopped, unreadable, refused, killed, pending, alarm} {
 		if l != nil {
 			body, public = append(body, l[0]), append(public, l[1])
 		}
@@ -198,6 +202,7 @@ type boostRejections struct {
 	boostTags  map[string]bool                       // IDs of the Boost decisions seen
 	released   map[string]event.OrderReleasedPayload // each order's first release
 	fills      *boostFills
+	refused    []string // clearances the engine refuses, named on the page
 }
 
 func newBoostRejections(account string) *boostRejections {
@@ -207,7 +212,7 @@ func newBoostRejections(account string) *boostRejections {
 // freshRun starts the count a fresh run starts with: none (ADR 0026, point
 // 2, "Boost", amended 2026-10-18; ADR 0027).
 func (r *boostRejections) freshRun() {
-	r.verdicts, r.boostTags = targetweight.BoostVerdicts{}, map[string]bool{}
+	r.verdicts, r.boostTags, r.refused = targetweight.BoostVerdicts{}, map[string]bool{}, nil
 }
 
 // decided takes a Boost decision's recorded count as the count in force.
@@ -257,7 +262,11 @@ func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
 		var p event.RebalanceClearedPayload
 		if read(e, clearedVersions, &p) == nil && p.AccountID == r.account {
 			sideOf := func(id string) string { return r.released[id].Side }
-			_ = r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf)
+			if err := r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf); err != nil {
+				// The engine refuses it as a whole; the reporter names the
+				// record and goes on.
+				r.refused = append(r.refused, e.ID)
+			}
 		}
 	}
 	return targetweight.VerdictNone

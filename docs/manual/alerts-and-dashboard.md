@@ -313,10 +313,14 @@ The delivery rules:
   stopped them (with the count and the orders, and whether the boost is on;
   counted by the engine's own rule, from the latest decision's recorded
   count and the venue's reports and fills since it, so named from the
-  report of the second rejection, before the next decision records it; a
-  fill or any report but "submitted" is the venue accepting the order, and
-  a report that does not describe the order as released counts for
-  nothing, as the engine refuses it; a decision record the reporter cannot
+  report of the second rejection, before the next decision records it; an
+  invalid report is a rejection; a fill the engine's fill rule accepts, or
+  any report but "submitted", is the venue accepting the order ("submitted"
+  is not enough: IBKR's PreSubmitted maps to it and can still be followed
+  by a rejection); a fill the rule refuses, a report that does not describe
+  the order as released, and a report on an order cleared as never sent
+  count for nothing, as the engine refuses them; a clearance record the
+  engine refuses is named on the page; a decision record the reporter cannot
   read is named "cannot be read: treat the buy stop as possibly in force"
   beside any stop already known, and on a momentum account, which has no
   Boost stop, only as a record that cannot be read), the kill

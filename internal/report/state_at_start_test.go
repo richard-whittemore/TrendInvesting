@@ -307,6 +307,17 @@ func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
 		}
 	}
 
+	// A third rejection, read once buys are stopped, counts nothing more:
+	// the page still names the two orders and the count of 2.
+	second.inARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}, {ClientOrderID: "tw-7", VenueOrderID: "ib-tw-7"}}
+	second.undecided, second.before = nil, 0
+	second.decide(3, "tw-9")
+	second.report(4, "tw-9", event.OrderLifecycleStatusInvalid)
+	a, ok = stateAtStart(t, second.stream)
+	if !ok || !strings.Contains(a.Body, "rejected 2 orders") || !strings.Contains(a.Body, "tw-6") || !strings.Contains(a.Body, "tw-7") || strings.Contains(a.Body, "tw-9") {
+		t.Errorf("a rejection read once stopped must leave the count of 2 and the two orders named:\n%s", a.Body)
+	}
+
 	if a, ok := stateAtStart(t, one().stream); ok {
 		t.Errorf("one rejection does not stop buys: %+v", a)
 	}
@@ -473,5 +484,23 @@ func TestAnUnreadableBoostDecisionAloneIsAPossibleStop(t *testing.T) {
 	a, ok, err := report.StateAtStartAlert(s.out, nil)
 	if err != nil || !ok || !strings.HasSuffix(a.Title, "Normal, Boost's buys possibly stopped") {
 		t.Errorf("an unreadable Boost decision alone: %+v, %v, %v; want a possible stop", a, ok, err)
+	}
+}
+
+// TestARefusedClearanceIsNamedNotFatalInTheStanding: the reporter
+// never crashes on a journalled record; a clearance the engine refuses (here
+// one naming an order no decision released) is
+// named on the page and the rest of the standing still goes out (ADR 0026,
+// point 2, "Boost", amended 2026-10-18).
+func TestARefusedClearanceIsNamedNotFatalInTheStanding(t *testing.T) {
+	never := orderplan.ClientOrderID("targets:1", "SPY", event.OrderSideBuy)
+	l := newBoostLog(t)
+	l.decide(0)
+	l.decide(1, never)
+	l.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:twice", day(2), event.RebalanceClearedPayload{
+		AccountID: "joint", AsOf: day(2), DecisionID: "targets:1", ClientOrderIDs: []string{never, "zz-unreleased"}, Operator: "owner", Detail: "never sent"})
+	a, ok := stateAtStart(t, l.stream)
+	if !ok || !strings.Contains(a.Body, "cleared:twice") {
+		t.Errorf("a refused clearance must be named on the page: %+v, %v", a, ok)
 	}
 }
