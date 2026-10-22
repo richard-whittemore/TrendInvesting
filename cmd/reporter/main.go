@@ -81,6 +81,9 @@ type delivered struct {
 var channelBaseline = func(start time.Time) time.Time { return start }
 
 func run(args []string, getenv func(string) string, now func() time.Time, out io.Writer, client *http.Client) error {
+	if len(args) > 0 && args[0] == "notify-unit-failed" {
+		return notifyUnitFailed(args[1:], getenv, now, out, client)
+	}
 	flags := flag.NewFlagSet("reporter", flag.ContinueOnError)
 	flags.SetOutput(out)
 	journalPath := flags.String("journal", "", "path to the account's journal (read only)")
@@ -98,6 +101,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
+	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
+	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
+	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
+	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
+	journalctl := flags.String("journalctl", "journalctl", "the journal reader that gives a failed unit's last line")
 	err := flags.Parse(args)
 	if err != nil {
 		return err
@@ -116,6 +124,15 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	if *repeat <= 0 {
 		return errors.New("reporter: -repeat-interval must be positive: an alert repeated on every run would page without pause")
+	}
+	tradingUnits := splitUnits(*units)
+	if err := checkTradingUnits("-units", tradingUnits); err != nil {
+		return err
+	}
+	if *selfUnit != "" {
+		if err := checkTradingUnits("-self-unit", []string{*selfUnit}); err != nil {
+			return err
+		}
 	}
 	// Every send is bounded, so a stalled channel fails as that channel's
 	// failure, is retried next run, and never holds back the other alerts or
@@ -138,6 +155,19 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	for _, f := range setAside {
 		failures = append(failures, f.err)
+	}
+	// systemd is asked once, at the start of the firing, before anything is
+	// delivered: a unit that fails while the firing runs is paged by its
+	// hook, and its page is newer than this sample, so it is never resolved
+	// on the sample's word (ADR 0019, "Alerting").
+	sampledAt := now()
+	unitSamples, unitsErr := sampleUnits(*systemctl, tradingUnits)
+	if unitsErr != nil {
+		failures = append(failures, unitsErr)
+	}
+	failedNow := map[string]bool{}
+	for unit, sample := range unitSamples {
+		failedNow[unit] = sample.failed
 	}
 	seen, sent, repeats, baselines, err := loadState(*statePath)
 	if err != nil {
@@ -226,8 +256,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// file exists after a run that delivered nothing.
 	at := now()
 	record := func() error { return saveState(*statePath, seen, sent, repeats, baselines) }
+	unitStatePath := *unitState
+	if unitStatePath == "" {
+		unitStatePath = filepath.Join(filepath.Dir(*statePath), "unit-failures.json")
+	}
 	if refused == nil {
-		if err := tellStateAtStart(senders, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, record); err != nil {
+		if err := tellStateAtStart(senders, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -242,6 +276,15 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record); err != nil {
 				failures = append(failures, err)
 			}
+		}
+	}
+	// A failed trading unit is paged by the OnFailure hook at the moment it
+	// fails; this firing pages a failure episode the hook missed and resolves
+	// the page of a unit not failed at the sample. A systemctl that could not
+	// be run checked nothing, so no page is resolved on its word.
+	if unitsErr == nil && len(tradingUnits) > 0 {
+		if err := unitStep(unitStatePath, tradingUnits, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {
+			failures = append(failures, err)
 		}
 	}
 	// The clock check comes after every incident alert is sent, so a slow or
@@ -290,7 +333,28 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
 		failures = append(failures, err)
 	}
-	return errors.Join(failures...)
+	// A firing that finished without a fault resolves this reporter's own
+	// failure page (the OnFailure hook sent it when an earlier firing failed).
+	if *selfUnit != "" && len(failures) == 0 {
+		if err := clearUnit(unitStatePath, *selfUnit, getenv("INVOCATION_ID"), senders, setAside); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	// The outside heartbeat is last, and only for a firing that finished
+	// without a fault and found no trading unit failed: a ping means every
+	// step ran and the engine and the reporter are healthy (ADR 0019,
+	// "Alerting": the outside heartbeat). A ping that fails is logged by
+	// pingHeartbeat and never fails the run.
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	for _, failed := range failedNow {
+		if failed {
+			return nil
+		}
+	}
+	pingHeartbeat(getenv, &bounded, out)
+	return nil
 }
 
 // baseline gives every delivery channel with no record in the state file the
@@ -362,7 +426,7 @@ func sendersFor(senders []sender, a report.Alert, baselines map[string]time.Time
 // (ADR 0019, "Alerting"). A channel such an account has nothing in force for
 // is recorded as told, so an incident that begins later reaches it as itself
 // alone.
-func tellStateAtStart(senders []sender, envelopes []event.Envelope, alerts []report.Alert, baselines map[string]time.Time, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, record func() error) error {
+func tellStateAtStart(senders []sender, envelopes []event.Envelope, alerts []report.Alert, baselines map[string]time.Time, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, failedUnits []string, record func() error) error {
 	var first time.Time
 	for _, e := range envelopes {
 		if first.IsZero() || e.EventTime.Before(first) {
@@ -373,6 +437,8 @@ func tellStateAtStart(senders []sender, envelopes []event.Envelope, alerts []rep
 	if err != nil {
 		return err
 	}
+	// A trading unit that systemd shows failed is part of what is in force.
+	a, inForce = report.WithFailedUnits(a, inForce, failedUnits)
 	var due []sender
 	for _, s := range senders {
 		if _, echo := s.(echoOnly); echo {
@@ -394,6 +460,17 @@ func tellStateAtStart(senders []sender, envelopes []event.Envelope, alerts []rep
 		return record()
 	}
 	return deliver(due, a, seen, sent, repeats, at, every, record)
+}
+
+// sortedUnits are the units of list that failed, in list order.
+func sortedUnits(list []string, failed map[string]bool) []string {
+	var out []string
+	for _, u := range list {
+		if failed[u] {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // summaryNoChannelPrefix begins the key of the notice that the daily summary

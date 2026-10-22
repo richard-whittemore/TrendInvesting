@@ -529,8 +529,10 @@ Lightsail VM (Ubuntu, $12/month, US East)
 - Daily: data refresh after the close, decisions, a summary to the phone
   (the owner's own ntfy server over Tailscale; never PagerDuty, never the
   public relay; owner decision 2026-10-22), heartbeat
-  to Healthchecks.io; an alert if the heartbeat is missed (*the outside
-  heartbeat is not built yet; nothing reads `HEALTHCHECK_URL`*).
+  to Healthchecks.io; an alert if the heartbeat is missed (*the reporter
+  pings `TI_HEARTBEAT_URL` at the end of every clean firing; the owner's
+  check pages through PagerDuty; docs/manual/server.md, "The outside
+  heartbeat"*).
 - Alert channels (owner decision, 2026-10-17): ntfy plus PagerDuty as the
   second channel (the owner signs up; the reporter uses the Events API and
   reads the acknowledgement back). An alert is delivered only when every real

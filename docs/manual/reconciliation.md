@@ -770,8 +770,8 @@ reading has checked everything, so a stopped reading leaves it as it was.
   that arises during a session (a lost fill report among them) is found only
   at that session's close. Also
   the comparison of open orders; the joint account's cash; matching each cash
-  activity to IBKR's activity rows rather than comparing one net total; and
-  the outside heartbeat monitor. These are tracked as follow-up issues.
+  activity to IBKR's activity rows rather than comparing one net total. These
+  are tracked as follow-up issues.
 - Built: the engine's reconciliation, the daily summary and the dashboard all
   read the ledger's deposits and withdrawals (see the sections above).
   Not built: a page from the reporter when the Flex reader itself is set aside
