@@ -85,9 +85,20 @@ re-attaching to it; and, outside the container, the alert triage job.*
    never a live account's:
 
    ```
-   docker exec -it ti nano /etc/trend-investing/secrets.env
-   docker exec -it ti nano /etc/trend-investing/accounts/boost.env
+   docker exec -it ti ti-secrets edit secrets.env
+   docker exec -it ti ti-secrets edit accounts/boost.env
    ```
+
+   The secret files are kept encrypted, as on the server: the first
+   provisioning asked you to choose a passphrase, and each edit asks for it.
+   After every start of the container, unlock them, or every unit that needs
+   a secret refuses to start: `docker exec -it ti ti-unlock`
+   (`docs/manual/server.md`, "Unlocking the secrets after a boot").
+   Every command that asks for the passphrase refuses while any swap is on,
+   and Docker Desktop's virtual machine has swap on unless you turn it off:
+   `docker exec ti cat /proc/swaps` must list only its heading line. Turn it
+   off in Docker Desktop's settings (Resources) before provisioning
+   (`docs/manual/server.md`, "Swap must stay off").
 
 7. **Install the TWS API for the adapter.** Not part of `up.sh`. It fetches
    IBKR's Mac/Unix archive (the Linux installer is x86_64 only), checks its

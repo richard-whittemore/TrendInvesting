@@ -1,14 +1,22 @@
 #!/bin/bash
 # Runs inside the second rehearsal container, in which systemd is PID 1 (root,
-# Ubuntu 24.04, systemd 255): the failed-unit page as systemd itself starts
-# it. The installed ti-unit-failed@.service runs the built reporter against
-# stand-in channels on loopback, unchanged but for a drop-in that writes down
-# the instance and invocation it was given and points -secrets-file at a copy
-# of the secrets, since systemd's credential directory (%d) is not mounted in
-# a Docker container: LoadCredential= itself is rehearsed in inside.sh's
-# verify and on the server. The engine is a stand-in unit with the real
-# engine unit's OnFailure= line, so systemd expands %n into the hook's name:
-# ti-unit-failed@ti-engine@boost.service.service, whose %i is
+# Ubuntu 24.04, systemd 255), with / mounted shared so that systemd can hand a
+# unit its credentials (LoadCredential=) as on the server.
+#
+# First the locked secrets (ADR 0028; docs/manual/server.md,
+# "Unlocking the secrets after a boot"): the secret files are encrypted and
+# nothing is decrypted, so systemd refuses to start every installed unit that
+# loads a secret, naming the decrypted file it asserts, and a timer whose
+# firing is refused keeps firing; then ti-unlock decrypts them into a
+# root-only tmpfs under /run and the units read them from there.
+#
+# Then the failed-unit page as systemd itself starts it. The installed
+# ti-unit-failed@.service runs the built reporter against stand-in channels
+# on loopback, reading the channels from the credential systemd hands it from
+# the unlocked secrets, unchanged but for a drop-in that writes down the
+# instance and invocation it was given. The engine is a stand-in unit with
+# the real engine unit's OnFailure= line, so systemd expands %n into the
+# hook's name: ti-unit-failed@ti-engine@boost.service.service, whose %i is
 # ti-engine@boost.service (docs/manual/server.md, "A failed unit"; ADR 0019,
 # "Alerting").
 set -euo pipefail
@@ -32,10 +40,111 @@ useradd --system --no-create-home --shell /usr/sbin/nologin ti-trader
 install -d -o ti-trader -g ti-trader -m 0750 /var/lib/trend-investing "$reports"
 install -D -m 0755 /dist/ti-reporter /opt/trend-investing/bin/ti-reporter
 install -d -m 0755 /etc/trend-investing
-printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\n' >/etc/trend-investing/secrets.env
+install -d -m 0700 /etc/trend-investing/accounts
+
+# --- The locked secrets. ti-secrets and ti-unlock as provision.sh installs
+# them; the passphrase on the rehearsal's test-only descriptor, which
+# ti-secrets honours only with TI_REHEARSAL=1.
+install -m 0755 /deploy/secrets.sh /usr/local/sbin/ti-secrets
+ln -sfn ti-secrets /usr/local/sbin/ti-unlock
+passphrase="rehearsal passphrase $(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# ti-secrets refuses to run while any swap is on, and Docker's virtual
+# machine has some: the swap list it reads is a stand-in with none.
+printf 'Filename\tType\tSize\tUsed\tPriority\n' >/root/ti-no-swaps
+with_pass() { TI_REHEARSAL=1 TI_PROC_SWAPS=/root/ti-no-swaps TI_PASSPHRASE_FD=7 "$@" 7< <(yes "$passphrase"); }
+marker=marker-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+on_disk() { find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$1" 2>/dev/null || true; }
+unlocked=/run/trend-investing/secrets
+# The secrets in plain text, as on a server provisioned before they were
+# encrypted, with a marker; migrated as provision.sh services migrates them.
+printf 'TI_NTFY_TOPIC=rehearsal\nTI_NTFY_SERVER=http://127.0.0.1:8099\nTI_PAGERDUTY_ROUTING_KEY=fake\nTI_PAGERDUTY_URL=http://127.0.0.1:8099/v2/enqueue\nTI_GITHUB_ISSUES_TOKEN=%s\n' "$marker" >/etc/trend-investing/secrets.env
 chmod 0600 /etc/trend-investing/secrets.env
-install -d -o ti-trader -g ti-trader -m 0700 "$probe/creds"
-install -o ti-trader -g ti-trader -m 0400 /etc/trend-investing/secrets.env "$probe/creds/secrets"
+for f in ibkr-login.env accounts/boost.env accounts/trad-ira.env accounts/roth-ira.env; do
+  install -m 0600 "/deploy/etc/$f.example" "/etc/trend-investing/$f"
+done
+with_pass ti-secrets migrate >/dev/null || fail "ti-secrets migrate failed"
+test ! -e /etc/trend-investing/secrets.env || fail "the migration left secrets.env in plain text"
+test -z "$(on_disk "$marker")" || fail "the migrated secret is on disk: $(on_disk "$marker")"
+
+# Every unit that loads a secret, installed as provision.sh installs it, with
+# what its Condition= lines want in place (stand-ins), so that only the
+# locked secrets stand in its way.
+for u in ti-gateway.service ti-engine@.service ti-adapter-boost.service ti-data.service ti-reporter@.service ti-flex@.service ti-unit-failed@.service; do
+  cp "/deploy/systemd/$u" /etc/systemd/system/
+done
+install -D -m 0755 /dist/ti-engine /opt/trend-investing/bin/ti-engine
+install -D -m 0644 /deploy/etc/engines/boost.env /etc/trend-investing/engines/boost.env
+install -D -m 0644 /deploy/etc/engines/boost.config /etc/trend-investing/engines/boost.config
+install -D -m 0755 /dev/null /opt/trend-investing/adapter-venv/bin/python3
+install -D -m 0644 /dev/null /opt/trend-investing/twsapi/INSTALLED
+install -D -m 0644 /dev/null /opt/trend-investing/adapter/adapter/ibkr/cli.py
+install -D -m 0644 /dev/null /opt/trend-investing/adapter/adapter/ibkr/flex.py
+install -D -m 0644 /deploy/etc/adapters/boost.json.example /etc/trend-investing/adapters/boost.json
+systemctl daemon-reload
+# refused UNIT FILE: systemctl start UNIT fails on its assertion of the
+# decrypted FILE ("Assertion failed on job for UNIT", and in its journal
+# "Starting requested but asserts failed"); the unit never ran, so it is not
+# failed either.
+refused() {
+  if systemctl start "$1" 2>/dev/null; then fail "$1 started with the secrets locked"; fi
+  test "$(systemctl show -p AssertResult --value "$1")" = no || fail "$1 was not refused by its assertion: $(systemctl status "$1" --no-pager 2>&1 | head -n 8)"
+  # Read whole before matching: grep -q stopping early would fail the
+  # writer on a closed pipe, and pipefail would count that.
+  local said
+  said=$(journalctl -u "$1" --no-pager -o cat)
+  grep -q 'Starting requested but asserts failed' <<<"$said" || fail "$1's refusal is not in its journal"
+  said=$(systemctl cat "$1")
+  grep -qxF "AssertPathExists=$unlocked/$2" <<<"$said" || fail "$1 does not assert $unlocked/$2"
+  test "$(systemctl show -p ActiveState --value "$1")" != failed || fail "$1 is failed, not refused"
+}
+refused ti-gateway.service ibkr-login.env
+refused ti-engine@boost.service secrets.env
+refused ti-adapter-boost.service accounts/boost.env
+refused ti-data.service secrets.env
+refused ti-reporter@boost.service secrets.env
+refused ti-flex@trad-ira.service secrets.env
+refused ti-unit-failed@ti-engine@boost.service.service secrets.env
+pass "with the secrets locked, systemd refuses to start the Gateway, the engine, the adapter, the data job, the reporter, the Flex reader and the failed-unit page, each on its assertion of the decrypted file it loads"
+
+# A timer whose firing is refused keeps firing: the reporter's timer fires
+# every 5 minutes, so a stand-in timer every 2 seconds fires a unit with the
+# reporter's own assertion; once unlocked, its next firing runs.
+assertion=$(grep -x 'AssertPathExists=.*' /deploy/systemd/ti-reporter@.service)
+cat >/etc/systemd/system/ti-probe-locked.service <<UNIT
+[Unit]
+$assertion
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo fired >>$probe/locked-fired'
+UNIT
+cat >/etc/systemd/system/ti-probe-locked.timer <<UNIT
+[Timer]
+OnCalendar=*:*:0/2
+AccuracySec=100ms
+UNIT
+systemctl daemon-reload
+systemctl start ti-probe-locked.timer
+sleep 5
+test ! -e "$probe/locked-fired" || fail "a firing ran with the secrets locked"
+grep -q 'asserts failed' <<<"$(journalctl -u ti-probe-locked.service --no-pager -o cat)" || fail "the stand-in timer's firings were not refused by the assertion"
+test "$(systemctl show -p ActiveState --value ti-probe-locked.timer)" = active || fail "the stand-in timer stopped after a refused firing"
+
+# A wrong passphrase unlocks nothing.
+if TI_REHEARSAL=1 TI_PROC_SWAPS=/root/ti-no-swaps TI_PASSPHRASE_FD=7 ti-unlock >/dev/null 2>&1 7< <(yes "not the passphrase"); then fail "ti-unlock accepted a wrong passphrase"; fi
+test -z "$(find "$unlocked" -mindepth 1 2>/dev/null)" || fail "a wrong passphrase decrypted something"
+
+# --- The unlock: the files decrypted into a root-only tmpfs; the next timer
+# firing runs; the marker is under /run only.
+with_pass ti-unlock >/dev/null || fail "ti-unlock failed"
+mountpoint -q "$unlocked" || fail "$unlocked is not a mount of its own"
+test "$(stat -f -c %T "$unlocked")" = tmpfs || fail "$unlocked is not a tmpfs"
+test "$(stat -c %U:%G:%a "$unlocked")" = root:root:700 || fail "$unlocked is not root:root 0700"
+for _ in $(seq 50); do test -e "$probe/locked-fired" && break; sleep 0.1; done
+test -e "$probe/locked-fired" || fail "the stand-in timer did not fire once the secrets were unlocked"
+systemctl stop ti-probe-locked.timer
+test -z "$(on_disk "$marker")" || fail "after the unlock the secret is on disk: $(on_disk "$marker")"
+grep -qxF "TI_GITHUB_ISSUES_TOKEN=$marker" "$unlocked/secrets.env" || fail "the unlocked secrets.env does not hold the secret"
+pass "a refused timer firing leaves the timer running; a wrong passphrase unlocks nothing; ti-unlock decrypts into a root-only tmpfs, the next firing runs, and the secret is nowhere on disk"
 
 # The stand-in channels: every POST's path, and its body on one line.
 cat >"$probe/channels.py" <<'PY'
@@ -78,9 +187,6 @@ test "$(grep -o '%d/secrets' <<<"$execstart" | wc -l)" = 1 || fail "the hook's E
 cat >/etc/systemd/system/ti-unit-failed@.service.d/rehearsal.conf <<UNIT
 [Service]
 ExecStartPre=/bin/sh -c 'echo "%i \$MONITOR_INVOCATION_ID" >>/var/lib/trend-investing/reports/hook-instances'
-ReadOnlyPaths=$probe/creds
-ExecStart=
-ExecStart=${execstart//%d/$probe/creds}
 UNIT
 onfailure=$(grep -x 'OnFailure=.*' /deploy/systemd/ti-engine@.service) || fail "the engine unit names no OnFailure="
 cat >/etc/systemd/system/ti-engine@.service <<UNIT
@@ -200,4 +306,11 @@ if test "$(instances)" = "$before" && test "$(run_of)" != "$run3"; then
 else
   note "systemd started the hook for a start refused while $engine was already failed"
 fi
+# After the unlock the reporter's own unit is no longer refused: it runs, and
+# stops at its own check that the Boost engine has run once.
+systemctl start ti-reporter@boost.service 2>/dev/null || true
+test "$(systemctl show -p AssertResult --value ti-reporter@boost.service)" = yes || fail "the reporter is still refused after the unlock"
+grep -q 'run.env is missing or empty' <<<"$(journalctl -u ti-reporter@boost.service --no-pager -o cat)" || fail "the unlocked reporter did not run its own checks: $(journalctl -u ti-reporter@boost.service --no-pager -o cat | tail -n 5)"
+test -z "$(on_disk "$marker")" || fail "the secret is on disk at the end: $(on_disk "$marker")"
+pass "after the unlock the hook read its channels from the credential systemd handed it, the reporter's unit is no longer refused, and the secret is nowhere on disk"
 echo "REHEARSAL (systemd) complete"

@@ -19,8 +19,13 @@
 #                                       if Tailscale is already signed in
 #
 # Secrets: this script never reads, writes or prints a credential. It creates
-# empty root-only stubs for the owner to fill in under /etc/trend-investing/,
-# outside the repository. Do not run it with `bash -x`.
+# root-only stubs, names only, for the owner to fill in under
+# /etc/trend-investing/, outside the repository, and has ti-secrets
+# (deploy/secrets.sh) encrypt every secret file still in plain text, a stub
+# or an earlier server's file, so none rests on disk unencrypted (ADR
+# 0028). ti-secrets asks the owner for the passphrase at the
+# terminal only when there is something to encrypt. Do not run it with
+# `bash -x`.
 #
 # TI_REHEARSAL=1 (container rehearsal only): skip steps that need a running
 # systemd, a kernel firewall or a network identity.
@@ -188,11 +193,11 @@ step_base() {
     # the owner's tools as ti-trader, and nano for editing the configuration
     # and secret files in place.
     apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl unzip unattended-upgrades python3 tzdata tzdata-legacy sudo nano >/dev/null
+      ca-certificates curl unzip unattended-upgrades python3 tzdata tzdata-legacy sudo nano gnupg >/dev/null
   else
     apt-get install -y -qq --no-install-recommends \
       ca-certificates curl unzip xvfb xauth ufw unattended-upgrades \
-      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata tzdata-legacy iptables >/dev/null
+      libxtst6 libxrender1 libxi6 libxext6 fontconfig python3 tzdata tzdata-legacy iptables gnupg >/dev/null
   fi
 
   log "service users (non-root, no login shell)"
@@ -493,17 +498,25 @@ step_adapter() {
   mv "$adapter_root.new" "$adapter_root"
 }
 
-# write_stub PATH TEMPLATE: root-only, empty, created once and never
-# overwritten, so a re-run cannot erase what the owner entered.
+# write_stub PATH TEMPLATE: root-only, names only, created once when neither
+# PATH nor its encrypted copy PATH.gpg exists, and never overwritten, so a
+# re-run cannot erase what the owner entered. secrets_migrate then encrypts it.
 write_stub() {
   local path=$1 template=$2
-  if ! test -e "$path"; then
+  if ! test -e "$path" && ! test -e "$path.gpg"; then
     install -m 0600 -o root -g root "$template" "$path"
-    log "created $path (owner step: fill it in)"
+    log "created $path (owner step: fill it in with sudo ti-secrets edit)"
   fi
-  chmod 0600 "$path"
-  chown root:root "$path"
+  if test -e "$path"; then
+    chmod 0600 "$path"
+    chown root:root "$path"
+  fi
 }
+
+# secrets_migrate: every secret file still in plain text encrypted, checked
+# by decrypting it, then shredded (deploy/secrets.sh, "migrate"); a check
+# that fails stops provisioning with the plain text kept.
+secrets_migrate() { "$here/secrets.sh" migrate; }
 
 # elf_machine FILE: FILE's ELF e_machine (62 x86-64, 183 AArch64), the two
 # little-endian bytes at offset 18; empty if FILE is not an ELF file.
@@ -589,6 +602,11 @@ CONF
   # and empty, the reader names the line to fill in (ti-flex@.service).
   write_stub "$etc/accounts/trad-ira.env" "$here/etc/accounts/trad-ira.env.example"
   write_stub "$etc/accounts/roth-ira.env" "$here/etc/accounts/roth-ira.env.example"
+  # The owner's secrets tools: ti-unlock after each boot, ti-secrets to edit
+  # a file or change the passphrase (docs/manual/server.md).
+  install -m 0755 "$here/secrets.sh" /usr/local/sbin/ti-secrets
+  ln -sfn ti-secrets /usr/local/sbin/ti-unlock
+  secrets_migrate
   if mac_mini; then ensure_operator_user 2003; else ensure_operator_user; fi
   install -d -o ti-trader -g ti-trader -m 0750 \
     /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines \
@@ -791,7 +809,7 @@ CONF
     systemctl enable ti-ntfy.service
     systemctl restart ti-ntfy.service
   fi
-  log "ntfy listens on http://${addr}:2586 (the tailnet only). Owner step: in /etc/trend-investing/secrets.env set TI_NTFY_SERVER=http://${addr}:2586 and an unguessable TI_NTFY_TOPIC, and subscribe to that topic on that server in the ntfy app on a phone that keeps Tailscale on (always-on VPN); then send a test message to check delivery end to end (docs/manual/server.md, \"Your own ntfy server\")."
+  log "ntfy listens on http://${addr}:2586 (the tailnet only). Owner step: with sudo ti-secrets edit secrets.env set TI_NTFY_SERVER=http://${addr}:2586 and an unguessable TI_NTFY_TOPIC, and subscribe to that topic on that server in the ntfy app on a phone that keeps Tailscale on (always-on VPN); then send a test message to check delivery end to end (docs/manual/server.md, \"Your own ntfy server\")."
 }
 
 # reown NAME OLD_UID [OLD_GID] [--force-id] (the Mac mini only): after a container

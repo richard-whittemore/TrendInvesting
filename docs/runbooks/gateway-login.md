@@ -30,7 +30,7 @@ IBKR view.
    other session, then `sudo systemctl restart ti-gateway`.
 4. **Bad credentials**: do not retry in a loop (IBKR locks the login).
    `sudo systemctl stop ti-gateway`, **[OWNER]** correct
-   `/etc/trend-investing/ibkr-login.env`, start it again.
+   the login with `sudo ti-secrets edit ibkr-login.env`, start it again.
 5. **A long outage during market hours with the joint account boosted**:
    check the account in IBKR's own app. If Excess Liquidity is falling, act
    there (the program cannot), and record the kill switch so the program
