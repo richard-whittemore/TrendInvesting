@@ -193,6 +193,20 @@ func TestTheServiceFileRunsTheReporterOnTheEnginesLog(t *testing.T) {
 	if indexOf(args, "-summary") < 0 {
 		t.Errorf("ExecStart %v does not send the daily summary", args)
 	}
+	// The instance's engine and adapter are checked, and the reporter's own
+	// failure page is resolved by a clean firing.
+	for flag, value := range map[string]string{
+		"-units":     "ti-engine@boost.service,ti-adapter-boost.service",
+		"-self-unit": "ti-reporter@boost.service",
+	} {
+		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
+			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)
+		}
+	}
+	// The server's systemctl is not on this machine: a stand-in with no unit failed.
+	systemd := newStandInSystemd(t)
+	systemd.fail()
+	args = append(args, "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl())
 
 	if err := os.Rename(writeDurableLog(t, t.TempDir()), filepath.Join(state, env["TI_RUN"]+".log")); err != nil {
 		t.Fatal(err)
@@ -289,8 +303,11 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 	if _, faults, err := buildSenders("ntfy,pagerduty", recording, http.DefaultClient, io.Discard); err != nil || len(faults) != 0 {
 		t.Fatal(err, faults)
 	}
+	// The outside heartbeat's address, read when a firing ends; a stand-in
+	// transport answers, so nothing leaves this machine.
+	pingHeartbeat(recording, &http.Client{Transport: &relay{sent: map[string][]string{}}}, io.Discard)
 	example := readAssignments(t, secretsExample)
-	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY"} {
+	for _, need := range []string{"TI_NTFY_TOPIC", "TI_NTFY_SERVER", "TI_PAGERDUTY_ROUTING_KEY", "TI_HEARTBEAT_URL"} {
 		if _, ok := example[need]; !ok {
 			t.Errorf("secrets.env.example has no %s line", need)
 		}

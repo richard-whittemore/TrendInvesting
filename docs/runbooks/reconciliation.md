@@ -183,8 +183,10 @@ Some cases need one more step before step 4:
 
 If the reporter's "no sign of life from the engine" alert fires, or you
 notice nothing has come for a day, the engine is down or stuck and cannot
-report its own state. **The outside heartbeat monitor is not built**, so if
-the whole server is down, nothing will tell you.
+report its own state. If the whole server is down, the outside heartbeat
+(Healthchecks, `docs/manual/server.md`, "The outside heartbeat") pages you
+when the reporter's pings stop; if you have not set that up yet, nothing will
+tell you.
 
 1. Look at each account in IBKR's own app. These accounts have no stop
    orders at IBKR, so nothing there protects them: for the joint account,
@@ -212,8 +214,10 @@ the whole server is down, nothing will tell you.
   channels, and prove that a Degraded or Halted alert repeats until it is
   acknowledged, at the interval the server actually runs the reporter
   ([server](../manual/server.md)).
-- Provision the outside heartbeat monitor and prove it pages when the engine
-  is stopped and when it is stuck.
+- Prove the outside heartbeat pages when the reporter stops (the test in
+  `docs/manual/server.md`, "The outside heartbeat"), and that a stopped engine
+  or adapter unit pages within minutes (`systemctl kill --signal=SIGKILL
+  ti-engine@boost` in paper).
 
 ## What is not built yet
 
@@ -224,6 +228,5 @@ the whole server is down, nothing will tell you.
   corporate action.
 - Matching each cash item with IBKR's own activity rows, rather than one net
   total.
-- The outside heartbeat monitor.
 - The alert text without the stop-order lines, pointing here and to
   `docs/runbooks/halted-account.md`.
