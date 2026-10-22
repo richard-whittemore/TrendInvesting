@@ -895,7 +895,7 @@
       "function": "(*Handler).applyApproval",
       "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
       "category": "unreachable-by-construction",
-      "reason": "risklimit.Gate.RestoreSaleAttempt refuses three calls: an empty incident ID; a second restore of one incident; and an incident that already has its attempt record, which Sale writes into the same attempts record when this run has already attempted that incident's sale. OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules). And no attempt record can exist when the approval reaches it: Apply refuses an approval read after any input but the configuration (TestAnApprovalIsTheFirstInputAfterTheConfiguration), so the gate is the one New built, with no attempt record, since only Sale writes one and Sale runs only from a session close or a broker snapshot, both of which come after the approval."
+      "reason": "risklimit.Gate.RestoreSaleAttempt refuses four calls: an empty incident ID; fewer than none retired attempts, which OperatorRunApprovedPayload.Validate also refuses (TestAnApprovalCarriesTheIncidentsRetiredSaleAttempts); a second restore of one incident; and an incident that already has its attempt record, which Sale writes into the same attempts record when this run has already attempted that incident's sale. OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules). And no attempt record can exist when the approval reaches it: Apply refuses an approval read after any input but the configuration (TestAnApprovalIsTheFirstInputAfterTheConfiguration), so the gate is the one New built, with no attempt record, since only Sale writes one and Sale runs only from a session close or a broker snapshot, both of which come after the approval."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -920,6 +920,14 @@
       "occurrence": 3,
       "category": "unreachable-by-construction",
       "reason": "risklimit.Gate.RestoreReleased refuses an order for another account, an unnamed or already known order, or one with no shares released (TestARestoredOrderReadsItsReportsFromTheFillsBeforeTheRestart). The cleared order carries the configuration's own account; TargetsDecidedPayload.Validate, run by decodeInput above, refuses a cleared order with no client order ID, one named twice, one also undecided, and one with no side, no released shares or no positive limit (TestBoostClearedOrdersValidate), and the watched order is skipped here, so no cleared order restored is one already restored. applyRecovery runs once, before any approval, bar or session, so the only order the gate can know by then is a sale back to 98% a broker snapshot released, whose client order ID derives from the sale's own tag, never from a decided session's."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRecovery",
+      "statement": "return fmt.Errorf(\"targetweight: recovered decision %s: %w\", in.ID, err)",
+      "occurrence": 6,
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.RestoreRetiredSale refuses only an empty tag, an empty instrument or an attempt below 1. It is reached only for a retired order recording a sale tag; TargetsDecidedPayload.Validate, run by decodeInput above, refuses a retired order recording a tag without an attempt or an attempt below 1 (TestBoostRetiredSaleAndNamedOrdersValidate), and the instrument is the configuration's Boost instrument, which TargetWeightConfigurationPayload.Validate requires (TestTargetWeightConfigurationValidate)."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -986,6 +994,28 @@
       "statement": "panic(fmt.Sprintf(\"nysecalendar: load %s: %v\", name, err))",
       "category": "unreachable-by-construction",
       "reason": "The package imports time/tzdata, so America/New_York loads from the embedded zone database whatever the host has."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRetired",
+      "statement": "return err",
+      "occurrence": 3,
+      "category": "unreachable-by-invariant",
+      "reason": "BoostVerdicts.Retire refuses only an order not among those awaiting the venue's word or one the venue has named there (its retirable rule). It is reached only when RetirementVerdict reported the order held, which it does only after that same retirable rule passed against the same count (TestRetirementVerdictIsTheEngineRule), and nothing changes the count between the two calls."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyRetired",
+      "statement": "return fmt.Errorf(\"targetweight: %s %s: %w\", in.Type, in.ID, err)",
+      "category": "unreachable-by-invariant",
+      "reason": "The gate's end of a retired order, by a synthetic report the engine never journals, built from the very release the gate holds (its account, client order ID, instrument, side, quantity and limit) with a validated whole-second time, a message and no venue order ID: Validate, reportedOrder and the quantity and limit match all pass by construction, and an empty venue order ID is never held by another sell (venueHolder)."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "(*momentumRun).applyRetired",
+      "statement": "return nil, fmt.Errorf(\"targetweight: retirement %s: %w\", in.ID, err)",
+      "category": "unreachable-by-invariant",
+      "reason": "The gate's end of a retired order, by a synthetic report the engine never journals, built from the very release the gate holds (its account, client order ID, instrument, side, quantity and limit) with a validated whole-second time, a message and no venue order ID: Validate, reportedOrder and the quantity and limit match all pass by construction, and an empty venue order ID is never held by another sell (venueHolder)."
     }
   ]
 }

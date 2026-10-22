@@ -312,6 +312,60 @@ order after all, the clearance was wrong: Boost refuses the report, which
 stops the engine until you reconcile with IBKR and start a fresh run, as
 for an IRA.
 
+You no longer need a clearance for an order whose day ended before the
+adapter could send it, or for one IBKR can never accept: those are
+**retired** (next section), and a retirement ends the order in the engine
+and lets it plan again, which a Boost clearance does not.
+
+## Retiring an order the adapter can never send
+
+Sometimes the adapter refuses an order before writing "about to send", so
+the order never leaves the adapter (the owner's decision of 2026-10-22;
+[order lifecycle](order-lifecycle.md), "An order IBKR can never accept"):
+
+- **Its session is over** (it was for a day that has ended). The adapter
+  retires it **by itself**. You do nothing; you get a routine message.
+- **IBKR can never accept it as it stands**: it is not a limit order, it is
+  for a fraction of a share, or the stock has no IBKR contract number in
+  the adapter's configuration. The adapter **stops at that order** and you
+  are paged ("order ... not acknowledged"). Once you have found the cause,
+  you retire it yourself with the adapter's own command:
+
+```
+sudo -u ti-trader python3 adapter/ibkr/relay.py retire \
+  /var/lib/trend-investing/adapters/boost/pending.json <client order id> \
+  --by <your name> --reason "no contract number for SPY; added to con_ids"
+```
+
+**Who may run it.** Only you, the owner, with the adapter **stopped**. It is
+a command of the adapter (`relay.py`), not of `operator`, because it settles
+the adapter's own record of the order as well as telling the engine. Run it
+as the user that owns the adapter's files, `ti-trader` on the server (`sudo
+-u ti-trader ...`, which only an administrator can do); it refuses to run as
+root or as any other user, and refuses while an adapter holds the pending
+file. `--by` must name you; the adapter's own name (`adapter`) is refused.
+
+**What it accepts.** Only the order the adapter stopped at for a shape IBKR
+can never accept, for the input it stopped on, and not yet handed over. It
+refuses a typo (it names the order it is refusing), an order the record
+marks as sent or about to be sent, an order the adapter stopped at for any
+other reason (a login that does not manage the account, sending switched
+off, no order number from IBKR yet: fix those and start the adapter again),
+and nothing stopped at all.
+
+**What it records.** Three things, in this order, beside the adapter's
+pending file: an `execution.order.retired` input in the adapter's outbox
+for the engine (reason `owner retired`, your name as who retired it, your
+reason as its detail, and the time); a line `"decision": "retired"` in
+`PENDING_FILE.handover.decisions` with your name, reason and the session
+date; and the order marked never sent. It is a refusal of an order that
+never left the adapter, never a cancel of an order at IBKR. When you start
+the adapter it checks IBKR once more (if IBKR shows the order after all, it
+stops: [re-delivery](redelivery.md)), goes on past the input it stopped on,
+and sends the retirement to the engine, which journals it and re-plans at
+its next decision. You then get one routine message, "order ... retired
+(owner retired)".
+
 ## Acknowledging an alert
 
 A Degraded, Halted or reconciliation alert is sent again every
@@ -517,6 +571,21 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `operator: <file> already exists; an approval is evidence and is never overwritten (ADR 0018)` | Nothing written | Choose a new `-out` name |
 | The approval prints `the kill switch was engaged when it ended; a fresh run starts with it released ...` | The approval is written; the fresh run will start with the switch off | Record `operator kill-switch -state engaged` before starting the engine |
 
+### When you retire an order
+
+These are what `relay.py retire` prints after `refused:`; it records
+nothing when it refuses.
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| `refused: only the owner retires an order, as the user that owns the adapter's files ...` | Nothing recorded: you ran it as root or as a user that does not own the adapter's pending file | Run it again as `sudo -u ti-trader python3 adapter/ibkr/relay.py retire ...` |
+| `refused: --by must name the owner retiring the order ...` or `refused: a reason is required: it is journalled with the retirement` | Nothing recorded | Give `--by <your name>` and a `--reason` that says what was wrong and what you changed |
+| `refused: the adapter holds the pending file ...; stop it first` | Nothing recorded: an adapter is running (or hung) | Stop the adapter, then run it again |
+| `refused: no input awaits its reply in ..., so no order is stopped` or `refused: the adapter has recorded no refused order for the input awaiting its reply ...` | Nothing recorded: the adapter is not stopped at an order | Nothing to retire. Check the adapter's last stop message |
+| `refused: the adapter is refusing order <id> (...), not <id>` | Nothing recorded: a typo | Run it again with the client order ID it names |
+| `refused: order <id> is marked ...: it was handed over or settled already` | Nothing recorded: the order may be at IBKR | Settle it as [re-delivery](redelivery.md) says, never by retiring it |
+| `refused: the adapter refused order <id> for a reason that is not a shape IBKR can never accept (...)` | Nothing recorded: the stop has another cause, which will clear once fixed | Fix that cause (the reason is quoted) and start the adapter again; if the order must never go out, settle it with `resolve --never-sent` ([re-delivery](redelivery.md)) |
+
 ### After the tool has written it
 
 | What you see | What the program does | What you do |
@@ -610,7 +679,16 @@ enveloped by the functions the engine delivers with, and no repeat after it
 on either channel); `TestAnAlertAcknowledgementIsDeliveredAndJournalled`
 (`cmd/engine`, the engine delivering and journalling it, with no refusal);
 `TestARefusalRecordedAtAnotherSequenceStatesIt` (`transport`);
-`TestRebalanceClearedValidate` (`internal/event`);
+`TestRebalanceClearedValidate` (`internal/event`); for the retire command,
+the owner's decision of 2026-10-22 (ADR 0026, point 2, "Boost", amended
+2026-10-22) and `RetireTests` in `adapter/ibkr/tests/test_relay.py`
+(`test_the_owners_retire_clears_the_stopped_order_and_the_relay_goes_on`,
+`test_the_retire_command_refuses_an_order_that_is_not_stopped_as_unsendable`,
+`test_the_retire_command_refuses_a_refusal_that_is_not_a_shape_ibkr_can_never_accept`,
+`test_the_retire_command_refuses_anyone_but_the_owner`,
+`test_the_retire_command_line`) and
+`test_an_order_ibkr_can_never_accept_stops_until_the_owner_retires_it`
+(`adapter/ibkr/tests/test_paper.py`);
 `deploy/rehearsal/test-operator-user.sh` (the provisioner gives an existing
 `ti-operator` the group `ti-trader`, or stops naming the mismatch).
 

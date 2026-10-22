@@ -312,7 +312,56 @@ ADR 0026, points 2.5 and 4).
 **Once per incident.** An incident runs from the first move out of Normal
 until recovery. Going from Degraded to Halted is the same incident. Under the
 kill switch, it is once per engagement. For the urgent alarm, it is once per
-alarm.
+alarm. A sale the adapter never sent and retired (its day was over, or you
+retired it because IBKR could never accept it) used nothing up: nothing was
+sent, so it is tried again at the next IBKR reading while the exit is still
+refused or the alarm still urgent, as a new order with a client order ID of
+its own ([order lifecycle](order-lifecycle.md), "An order IBKR can never
+accept"). That holds for an urgent-alarm sale made while Halted, Degraded or
+under the kill switch too, though it carries the incident's or the
+engagement's tag. The new order's ID survives a restart: each decision
+records the retired sale and its attempt number, `operator approve`
+writes how many of the incident's sales were retired into the fresh run's
+approval (`sale_retired_attempts`), and each decision made while the
+incident is in force records the count its approval carried, if any, and
+whether the sale has been attempted, by an earlier run or this one
+(`restored_sale`), whether or not the run was approved, so a run
+restarted from any of them, or a later fresh run, never gives an attempt
+a retired order's ID, nor attempts again a sale already attempted. The
+decision records the sale as it stands once the session's own orders are
+done, so a sale its own session fired is recorded as attempted. A sale
+the program placed that is still live when the decision is recorded (not
+ended, nothing filled, and no report from IBKR has named it to the
+program) is recorded with its order, so a run restarted from that
+decision holds it as its own: a retirement of it frees the attempt and
+the sale is tried again, and a fill or cancel IBKR reports on it is read,
+as in a run that never restarted. The adapter has no path that retires
+an earlier run's never-sent sale for a fresh run: `resolve --run-ended`
+records the earlier run's unsent orders as refused and tells the engine
+nothing, so that run's log still records the sale as attempted,
+`operator approve` carries it attempted into the fresh run's approval, and
+the fresh run never tries it again. If the alarm still needs the sale,
+you make it by hand, as "Selling by hand safely" below says. A
+retirement frees only an attempt the program made in this run or the run
+it restarted from: an attempt the approval says an earlier run made stays
+attempted.
+
+*Limit.* A decision knows only the attempts made by the time it was
+recorded. If the run restarts from a decision made before the incident
+began, the restarted run knows nothing of the incident's sale: it refuses
+an IBKR reading that would fire that sale until its first bar or session,
+and treats the sale as not attempted after that. A decision made during
+the incident records its sale, attempted or not, so a restart from one
+accepts such a reading. A restart from a decision recorded before the
+run's later attempt of the sale does not know that attempt; such a
+restart is not used by the production start, which always begins a fresh
+run from your `operator approve`, whose approval carries the attempt count
+([operator](operator.md)). A restart from a decision reads
+that decision before any IBKR reading that would fire the incident's
+sale; a reading that arrives first, or after a decision that records no
+attempt for that incident, is refused before it changes anything, so the
+alarm it would have raised and the sale it would have fired are raised
+and fired by the next such reading once the decision has been read.
 
 **When it does not go.** It is *withheld*, and recorded as
 `risk.sale.withheld`, when:

@@ -169,3 +169,104 @@ func TestBoostVerdictsRefuseAClearanceNamingAnOrderTwice(t *testing.T) {
 		t.Errorf("a refused clearance cleared the order: %v; want it still awaiting the venue's word", got)
 	}
 }
+
+// TestBoostVerdictsRetireAnOrderNeverSent: retiring an order the adapter
+// never sent takes it off the orders awaiting the venue's word, counted
+// neither way, and is refused for an order not awaiting it or one the venue
+// has named, which was sent (ADR 0026, point 2, "Boost", amended
+// 2026-10-22; fail closed).
+func TestBoostVerdictsRetireAnOrderNeverSent(t *testing.T) {
+	var v targetweight.BoostVerdicts
+	v.Recover(recorded())
+	v.Release("unsent")
+	if err := v.Retire("retire:1", "unsent"); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Observe("unsent", true); got != targetweight.VerdictNone || v.Rejections() != 1 {
+		t.Errorf("a word on a retired order: %v, count %d; want none, still 1", got, v.Rejections())
+	}
+	for _, c := range []struct{ id, want string }{
+		{"unsent", "not among the orders awaiting"},
+		{"missing", "not among the orders awaiting"},
+		{"young", "already named"},
+	} {
+		if err := v.Retire("retire:2", c.id); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("retiring %s: %v; want %q", c.id, err, c.want)
+		}
+	}
+	if err := v.Retire("retire:3", "old"); err != nil {
+		t.Fatal(err)
+	}
+	// old was released before the rejection counted: leaving takes it off
+	// the count of older orders, so young's acceptance now sets it back.
+	if got := v.Observe("young", false); got != targetweight.VerdictAccepted || v.Rejections() != 0 {
+		t.Errorf("an acceptance after the older order retired: %v, count %d; want accepted, 0", got, v.Rejections())
+	}
+}
+
+// TestRetirementVerdictIsTheEngineRule: the one rule by which a retirement
+// as never sent is applied, which the engine, the reporter and the restart
+// reading all call (ADR 0026, point 2, "Boost", amended 2026-10-22, and
+// point 5: recovered, never recomputed). It must be for the run's account,
+// in a run that sends orders, of an order released as the retirement
+// describes it and released to a venue, neither cleared nor retired before;
+// an order the Boost count holds passes that count's rule and any other may
+// never have been named by a venue. It changes nothing.
+func TestRetirementVerdictIsTheEngineRule(t *testing.T) {
+	sale := event.OrderReleasedPayload{AccountID: "joint", ClientOrderID: "sale", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 5, LimitPrice: 90, Mode: event.TradingModePaper, Send: true}
+	retire := func(id string) event.OrderRetiredPayload {
+		return event.OrderRetiredPayload{AccountID: "joint", ClientOrderID: id, InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 5, LimitPrice: 90}
+	}
+	var v targetweight.BoostVerdicts
+	v.Recover(recorded())
+	v.Release("unsent")
+	released := map[string]event.OrderReleasedPayload{}
+	for _, id := range []string{"sale", "unsent", "young", "dry"} {
+		o := sale
+		o.ClientOrderID = id
+		released[id] = o
+	}
+	dry := released["dry"]
+	dry.Mode, dry.Send = event.TradingModeDryRun, false
+	released["dry"] = dry
+	in := func(ids ...string) func(string) bool { return func(id string) bool { return slices.Contains(ids, id) } }
+	state := targetweight.RetirementState{
+		AccountID: "joint",
+		Released:  func(id string) (event.OrderReleasedPayload, bool) { o, ok := released[id]; return o, ok },
+		Verdicts:  &v,
+	}
+	for _, c := range []struct {
+		name  string
+		edit  func(*targetweight.RetirementState, *event.OrderRetiredPayload)
+		id    string
+		held  bool
+		error string
+	}{
+		{"an order the count does not hold, never named", nil, "sale", false, ""},
+		{"an order the count holds", nil, "unsent", true, ""},
+		{"a dry-run", func(s *targetweight.RetirementState, _ *event.OrderRetiredPayload) { s.DryRun = true }, "sale", false, "dry-run"},
+		{"an order a dry-run released", nil, "dry", false, "dry-run"},
+		{"another account's", func(_ *targetweight.RetirementState, p *event.OrderRetiredPayload) { p.AccountID = "ira" }, "sale", false, "account"},
+		{"an order never released", nil, "missing", false, "did not release"},
+		{"an order cleared", func(s *targetweight.RetirementState, _ *event.OrderRetiredPayload) { s.Cleared = in("sale") }, "sale", false, "cleared"},
+		{"an order retired", func(s *targetweight.RetirementState, _ *event.OrderRetiredPayload) { s.Retired = in("sale") }, "sale", false, "retired already"},
+		{"a retirement not describing the release", func(_ *targetweight.RetirementState, p *event.OrderRetiredPayload) { p.Quantity = 6 }, "sale", false, "was released as"},
+		{"an order a venue named", func(s *targetweight.RetirementState, _ *event.OrderRetiredPayload) { s.Named = in("sale") }, "sale", false, "named"},
+		{"an order the count holds that the venue named", nil, "young", false, "already named"},
+	} {
+		s, p := state, retire(c.id)
+		if c.edit != nil {
+			c.edit(&s, &p)
+		}
+		held, err := targetweight.RetirementVerdict(s, "retire:1", p)
+		switch {
+		case c.error == "" && (err != nil || held != c.held):
+			t.Errorf("%s: held %v, %v; want held %v, applied", c.name, held, err, c.held)
+		case c.error != "" && (err == nil || !strings.Contains(err.Error(), c.error)):
+			t.Errorf("%s: %v; want a refusal naming %q", c.name, err, c.error)
+		}
+	}
+	if !v.Holds("unsent") {
+		t.Error("the verdict took the order off the count; it changes nothing")
+	}
+}

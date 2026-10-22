@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0))
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0))
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -1388,3 +1388,150 @@ table), and is target-weight rules version 1.22.0 (ADR 0016).
 - **Replay.** A dry-run Boost journal decides differently from one written
   under 1.21.0, so a journal written under 1.21.0 does not replay under
   1.22.0; paper and live journals are unaffected.
+
+## Amendment (2026-10-22, owner): an order the adapter can never send is retired
+
+The owner's decision of 2026-10-22, part of the Boost-to-paper plan. It
+amends point 2, "Boost" (the re-plan of the watched order), and point 5
+(a rebalance in progress), and is target-weight rules version 1.23.0 (ADR
+0016).
+
+- **Before.** A released order the IBKR adapter's paper sender refused
+  before any write-ahead mark, for good, stopped the adapter at that order
+  until the owner settled it as never sent. The engine was never told: the
+  order stayed released and awaiting the venue's word, so a never-sent Boost
+  sell kept counting as being sold, a never-sent buy was never planned
+  again, and a momentum rebalance stayed in progress until the owner's
+  clearance.
+- **The input.** `execution.order.retired` version 1
+  (`OrderRetiredPayload`): the order as released, a reason from a closed
+  set, what refused it or why, who retired it and when. It is a refusal of
+  an order that never left the adapter, never a cancel of an order at the
+  venue, so it is a type of its own, not a lifecycle status.
+- **Its session is over.** An order released for a session that has ended
+  before the adapter could send it is never sent (point 2, "Order type and
+  price": a DAY limit order for its own session). The adapter retires it
+  itself, reason `session over`, retired by `adapter`, after the same check
+  at IBKR as any order (an order IBKR shows under its tag was sent, and is
+  never retired), and goes on. The owner is told by a routine notice, never
+  a page.
+- **IBKR can never accept it as it stands.** Not a limit order, a fraction
+  of a share, or no IBKR contract ID: the adapter stops at that order, the
+  owner is paged urgently (the order goes unacknowledged), and the owner,
+  once the cause is found, retires it with the relay's retire command,
+  reason `owner retired`, retired by the owner named, owner only. Any other
+  refusal is not retired.
+- **The rule.** The engine reads a retirement only for an order of its
+  account it released, as released, that no venue has reported on and the
+  owner has not cleared (in Boost: that no venue has named, by a report, an
+  execution or a broker snapshot's open-order listing). Every session-over
+  retirement, and every owner's retirement, ends the order with nothing
+  filled, in every strategy, the sale back to 98% included. In Boost an
+  order among those awaiting the venue's word leaves them, counted neither
+  accepted nor rejected; any other order Boost released, the sale back to
+  98% and any order released outside a decided session among them, is
+  retired by the same rule without that count. The gate no longer counts a
+  retired sell as being sold, and the watched order so retired is
+  re-planned at the next decided session as `unfilled`. A retired sale back
+  to 98% sent nothing, so ADR 0019's readings of 2026-10-17 count it as no
+  attempt (reading 4): the sale is attempted again under its own rule at
+  the next opportunity, its tag and trigger unchanged, as reading 1 retries
+  a sale withheld from a snapshot that could not size it (the next readable,
+  fresh, positive broker snapshot while what fired it is in force, or its
+  trigger's next firing), and a fresh run's approval does not state it
+  attempted. Each attempt after a retired one is its own order, with a
+  client order ID of its own (point 2, "Order identity": the sale's phase
+  numbered by attempt), so a venue report naming the retired one is never
+  read as the new one's. In a momentum run the order is terminal by the
+  shared report rule; a retired sell ends the rebalance's buy phase, which
+  is never started, since it would buy from the decision's targets, prices
+  and cash after a session that sold nothing it planned, and once the
+  rebalance's orders are all terminal the next decision decides afresh. A
+  venue report on a retired order proves the retirement wrong and is
+  refused. Each Boost decision records the orders retired
+  (`retired_orders`, `strategy.targets.decided` version 7), a retired sale
+  back to 98% with its tag and the number of the attempt retired
+  (`sale_tag`, `sale_attempt`), and the watched, undecided and working
+  orders a venue has named (`named_orders`), so a run restarted from it
+  refuses such a report, and the retirement of an order a venue named, as
+  the full run does, and gives the next attempt of a retired sale a client
+  order ID of its own (point 5: recovered, never recomputed). A fresh run's
+  approval carries how many of the incident's sales were retired
+  (`operator.run.approved` version 4, ADR 0027), counted only from
+  retirements the engine applied, by the engine's one rule for applying a
+  retirement, which the reporter and the restart reading call too, so its
+  next attempt follows them too; each decision records the sale attempt
+  as the run holds it at the decision (`restored_sale`): the one the fresh
+  run's approval restored or, with none restored, that of the incident in
+  force on Boost's instrument, approved or not: attempted once the approval
+  or the run itself attempted it and no retirement has since freed it, with
+  the approval's retired count, the run's own retirements being recorded
+  among the retired orders, so a run restarted from one restores it as the
+  run held it and never attempts the sale again under a live attempt's
+  client order ID. It is read when the decision is recorded, after the
+  session's own orders and the sale their refusal fires, so a decision
+  states an attempt its own session made. A sale the run attempted itself
+  and released that is still live (not ended, nothing filled, named by no
+  venue) is recorded with its order (`restored_sale.order`), so a run
+  restarted from the decision holds it as that run's own attempt,
+  released, and a retirement of it frees the attempt as in the full run;
+  an attempt withheld for a person, or one that reached IBKR, stays spent.
+  A retirement frees only an attempt this run, or the run whose decision
+  it was restarted from, made: never one the approval restored as an
+  earlier run's. Stated limit: a recovered decision states only the
+  attempts made by the time it was recorded. One made before the incident
+  began restores no attempt of it, so the restarted run refuses a snapshot
+  that would fire the recorded incident's sale until its first bar or
+  session, as below, and holds the sale as not attempted after it. One
+  made during the incident records its sale, attempted or not
+  (`restored_sale`), which states the incident's attempts, so such a
+  snapshot is accepted. A restart from a decision recorded before the
+  run's later attempt does not know that attempt; such a restart is not
+  used by the production start, which always begins a fresh run from an
+  owner approval that carries the attempt count (ADR 0027; "Which start
+  reads a recorded decision", above). A recovered
+  decision comes before any broker snapshot that would fire the sale of an
+  incident an earlier run's recorded engine state restored: such a
+  snapshot read before the approval, before a recovered decision that
+  restored that incident's attempt, and before the run's first bar or
+  session, is refused, since only the approval or such a decision states
+  that incident's attempts. It is refused on what it would fire, before it
+  is observed, so the refusal changes no alarm and no retry, and a later
+  snapshot fires what it would have (ADR 0027, section 6). A
+  retired urgent sale is attempted again while the alarm stays urgent
+  whatever its tag: one fired while Halted, Degraded on the instrument or
+  under the kill switch carries the incident's or the engagement's tag. A
+  dry-run sends nothing, so it refuses every retirement.
+- **The adapter.** The owner's `retire` command is the only settlement of
+  an order IBKR can never accept: `resolve --never-sent`, which tells the
+  engine nothing, is refused for it. A retirement the adapter or the command
+  began and a stop left unfinished is finished when the adapter starts
+  again, before the order is judged sendable, so an order the engine is
+  told was never sent is never sent. A retirement recorded for the input
+  awaiting its reply counts as begun: one recorded for another input under
+  the same client order ID is not this order's. A retirement recorded with
+  no input is read as this order's unless a later one for another input
+  follows it, so an order is never sent on a record that cannot say whose
+  it is; when that record's entry has already reached the engine, the
+  engine is told again of this input's release, under an entry named after
+  the order and the input, and the retirement is recorded for this input,
+  so the engine ends the order and the record says whose it was. Found
+  again after a stop under either name, that entry is never queued twice.
+  It is queued only while the adapter holds its lock, only once IBKR shows
+  nothing under the order's tag, and only from a record that reads as a
+  retirement the adapter writes: one of the two reasons, a detail, and who
+  retired it fitting the reason; anything else stops the adapter. IBKR
+  showing the order's tag wins on every path: every retirement of the
+  order still queued in the outbox, under either name, is struck off, the
+  order is marked never sent, and the adapter stops for `resolve --sent`,
+  so no retirement of an order IBKR shows ever reaches the engine. Stated
+  limit: an entry named after the order alone that already reached the
+  engine is struck from the outbox, so the adapter cannot tell whether the
+  engine applied it to this order; it tells the engine of this input's
+  release again, and an engine that already retired the order refuses the
+  second retirement, as it refuses every retirement of an order retired
+  already, rather than end an order twice. The owner checks that the
+  engine's log holds the order's first retirement and that IBKR shows
+  nothing under its tag, as the manual's redelivery chapter says.
+- **Replay.** Rules version 1.22.0 refused the input, so a journal holding
+  a retirement decides differently and does not replay across the two.

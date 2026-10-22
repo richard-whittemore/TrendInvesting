@@ -526,7 +526,7 @@ func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
 	if s, ok := requestSale(t, g, event.SaleTriggerExit); !ok || s.Order == nil {
 		t.Fatalf("the incident's first sale = %+v, %v; want an order", s, ok)
 	}
-	if err := g.RestoreSaleAttempt(halted.StateID, false); err == nil {
+	if err := g.RestoreSaleAttempt(halted.StateID, false, 0); err == nil {
 		t.Error("an incident whose sale this run attempted was restored as not attempted")
 	}
 	if s, ok := requestSale(t, g, event.SaleTriggerExit); ok {
@@ -534,14 +534,53 @@ func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
 	}
 
 	twice := gate(t, limits(), event.TradingModeDryRun)
-	if err := twice.RestoreSaleAttempt("incident-1", false); err != nil {
+	if err := twice.RestoreSaleAttempt("incident-1", false, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := twice.RestoreSaleAttempt("incident-1", false); err == nil {
+	if err := twice.RestoreSaleAttempt("incident-1", false, 0); err == nil {
 		t.Error("an incident's attempt was restored twice")
 	}
-	if err := twice.RestoreSaleAttempt("", false); err == nil {
+	if err := twice.RestoreSaleAttempt("", false, 0); err == nil {
 		t.Error("an attempt was restored for no incident")
+	}
+}
+
+// TestARestoredSaleAttemptIsReportedAsRestored: the gate reports the sale
+// attempt the owner's approval restored, as restored, so a decision records
+// it and a run restarted from the decision restores it (ADR 0026, point 2,
+// "Order identity", and point 5); a gate that restored none reports the
+// attempt of the incident in force as this run holds it, so its own attempt
+// is recorded too and never made again after a restart (ADR 0019, amended
+// 2026-10-15: one attempt), and a Normal gate that restored none reports
+// none.
+func TestARestoredSaleAttemptIsReportedAsRestored(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	if id, _, _, ok := g.RestoredSaleAttempt("SPY"); ok {
+		t.Errorf("a Normal gate that restored no attempt reports %q", id)
+	}
+	halt(t, g)
+	if id, attempted, _, ok := g.RestoredSaleAttempt("SPY"); !ok || id != g.Incident() || attempted {
+		t.Errorf("a Halted gate before its sale reports %q %v %v, want the incident's, not attempted", id, attempted, ok)
+	}
+	if _, ok := requestSale(t, g, event.SaleTriggerExit); !ok {
+		t.Fatal("setup: no sale")
+	}
+	if id, attempted, retired, ok := g.RestoredSaleAttempt("SPY"); !ok || id != g.Incident() || !attempted || retired != 0 {
+		t.Errorf("a Halted gate after its own sale reports %q %v %d %v, want the incident's, attempted, none retired", id, attempted, retired, ok)
+	}
+	if g.RestoredIncident() != "" {
+		t.Errorf("a gate that restored no attempt names %q restored", g.RestoredIncident())
+	}
+	if tag := g.SaleTag(event.SaleTriggerExit, "SPY"); tag != g.Incident() {
+		t.Errorf("a Halted gate names sale tag %q, want the incident's %q", tag, g.Incident())
+	}
+	restored := gate(t, limits(), event.TradingModeDryRun)
+	if err := restored.RestoreSaleAttempt("incident-1", true, 2); err != nil {
+		t.Fatal(err)
+	}
+	if id, attempted, retired, ok := restored.RestoredSaleAttempt("SPY"); !ok || id != "incident-1" || !attempted || retired != 2 {
+		t.Errorf("restored attempt %q %v %d %v, want incident-1, attempted, 2 retired", id, attempted, retired, ok)
 	}
 }
 

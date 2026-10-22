@@ -20,7 +20,7 @@ from test_connection import Harness, config
 from connection import NotConnected
 from orders import collect_broker_orders
 from sender import (OrderRequest, DryRunSender, LiveSendingDisabled, NotReconciled, PaperSender, SendRefused,
-                    make_sender, release_to_request)
+                    SessionOver, UnsendableOrder, make_sender, release_to_request)
 
 
 # The New York date of the session the test orders are released in, and the
@@ -303,6 +303,46 @@ class PaperSenderTests(unittest.TestCase):
         self.assertEqual(h.conn.next_order_id, 7)
         self.assertEqual(journal, [])
 
+    def test_an_order_whose_session_is_over_is_refused_as_session_over(self):
+        # The owner's decision of 2026-10-22: an order released for an
+        # earlier session than today's is retired by the adapter itself, so
+        # the sender names that case apart (SessionOver, still a SendRefused)
+        # from a session it cannot read, or one not yet begun, which stop
+        # for a person as before.
+        h = paper_harness()
+        sender = paper_sender(h, [], today=date(2026, 10, 17))
+        with self.assertRaises(SessionOver) as over:
+            sender.check(limit_request())
+        self.assertIsInstance(over.exception, SendRefused)
+        self.assertIn("2026-10-16", str(over.exception))
+        self.assertNotIn("--never-sent", str(over.exception), "a session over is retired, never settled by hand")
+        for unread in (limit_request(session=None), limit_request(session="2026-10-16"),
+                       limit_request(session=date(2026, 10, 18))):
+            with self.subTest(session=unread.session), self.assertRaises(SendRefused) as refused:
+                sender.check(unread)
+            self.assertNotIsInstance(refused.exception, SessionOver)
+        self.assertEqual(h.fake.placed, [])
+
+    def test_an_order_of_a_shape_ibkr_can_never_accept_is_refused_as_unsendable(self):
+        # The owner's decision of 2026-10-22: a released order that is not a
+        # limit order, is for a fraction of a share, or has no IBKR contract
+        # ID can never be sent as it stands, so the adapter stops at it for
+        # the owner's retire command; the sender names those shapes apart
+        # (UnsendableOrder, still a ValueError) from its other refusals.
+        h = paper_harness()
+        sender = paper_sender(h, [])
+        for bad in (request(), limit_request(quantity=Decimal("9.5")), limit_request(con_id=None),
+                    limit_request(con_id=0)):
+            with self.subTest(bad=bad):
+                for step in (sender.check, sender.send):
+                    with self.assertRaises(UnsendableOrder):
+                        step(bad)
+        for other in (limit_request(account_id="DU0000002"), limit_request(tif="GTC")):
+            with self.subTest(other=other), self.assertRaises(ValueError) as refused:
+                sender.check(other)
+            self.assertNotIsInstance(refused.exception, UnsendableOrder)
+        self.assertEqual(h.fake.placed, [])
+
     def test_a_client_that_cannot_place_orders_is_refused_before_any_order_id_is_used(self):
         # The real client places nothing until the paper-account test enables
         # it; the sender asks before the relay marks the order, so the
@@ -351,6 +391,17 @@ class ReleaseToRequestTests(unittest.TestCase):
                     dict(limit_price=0), dict(limit_price=float("nan"))):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 release_to_request(self.released(**bad), "paper", {"SPY": 756733}, SESSION)
+
+    def test_a_release_with_no_contract_or_a_fractional_quantity_is_unsendable(self):
+        # The owner's decision of 2026-10-22: no IBKR contract ID, or a
+        # fraction of a share, can never be sent as it stands.
+        for bad in (dict(instrument_id="QQQ"), dict(quantity=9.5), dict(quantity=Decimal("9.5"))):
+            with self.subTest(bad=bad), self.assertRaises(UnsendableOrder):
+                release_to_request(self.released(**bad), "paper", {"SPY": 756733}, SESSION)
+        for other in (dict(quantity=0), dict(quantity=True), dict(side="hold"), dict(send=False)):
+            with self.subTest(other=other), self.assertRaises(ValueError) as refused:
+                release_to_request(self.released(**other), "paper", {"SPY": 756733}, SESSION)
+            self.assertNotIsInstance(refused.exception, UnsendableOrder)
 
     def test_a_release_with_no_session_is_refused(self):
         for session in (None, "2026-10-16"):

@@ -41,7 +41,7 @@ func TestApprovalInputRules(t *testing.T) {
 	at := sessionEnd(0)
 	h, s := configured(t)
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 1, "x", at, approval(false)), "schema version")
-	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 4, "x", at, approval(false)), "schema version")
+	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 5, "x", at, approval(false)), "schema version")
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "x", at, event.OperatorRunApprovedPayload{}), "invalid")
 	other := approval(false)
 	other.AccountID = "ira"
@@ -202,20 +202,16 @@ func TestAFreshRunReadsNothingBeforeItsApproval(t *testing.T) {
 
 // TestAnApprovalIsTheFirstInputAfterTheConfiguration: an approval read
 // after any other input is refused, so no recorded state or sale of this run
-// can precede it. A recorded Halted incident followed by an urgent broker
-// snapshot fires that incident's sale; an approval naming the incident
+// can precede it. A recorded Halted incident followed by a broker snapshot
+// leaves the gate in that incident; an approval naming the incident
 // afterwards is refused for its place in the stream, before the gate is
-// asked to restore an attempt this run already made.
+// asked to restore its attempt.
 func TestAnApprovalIsTheFirstInputAfterTheConfiguration(t *testing.T) {
 	at := sessionEnd(0)
 	h, s := configured(t)
 	mustApply(t, h, haltedState(t))
 	held := &account{cash: -2000, held: 60}
-	urgent := held.broker(at, 100)
-	urgent.ExcessLiquidity = 0.1 * urgent.NetLiquidation
-	if sold := sales(t, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k", at, urgent))); len(sold) != 1 {
-		t.Fatalf("planned %d sale(s), want the recorded incident's one sale", len(sold))
-	}
+	mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k", at, held.broker(at, 100)))
 	p := approval(false)
 	p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:recorded", State: event.EngineStateHalted, SaleAttempted: new(false)}
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p), "straight after the configuration")

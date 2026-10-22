@@ -171,7 +171,7 @@ nyse_calendar = marketdata_module("nyse_calendar")
 CASH_MOVEMENT = ("account.cash-movement", 2)   # internal/event CashMovementTransferVersion
 COST = ("account.cost", 1)                      # internal/event CostSchemaVersion
 ACCOUNT_SNAPSHOT = ("account.snapshot", 3)      # internal/event AccountSnapshotPositionsVersion
-FIRST_RUN_APPROVAL_VERSION = 3                  # the operator.run.approved that states the starting book
+FIRST_RUN_APPROVAL_VERSIONS = (3, 4)            # the operator.run.approved versions that state the starting book
 # internal/event EquityBeforeNextSnapshotLessAmount and EquityBeforeSameDaySnapshotLessAmount.
 NEXT_SNAPSHOT_LESS_AMOUNT = "next-snapshot-less-amount"
 SAME_DAY_SNAPSHOT_LESS_AMOUNT = "same-day-snapshot-less-amount"
@@ -530,7 +530,7 @@ def read_chain(engine_log_path):
                                "book, so the first book's time is not known".format(engine_log_path))
     path, envelope = first
     approved_at = None
-    if envelope["schema_version"] == FIRST_RUN_APPROVAL_VERSION and isinstance(
+    if envelope["schema_version"] in FIRST_RUN_APPROVAL_VERSIONS and isinstance(
             envelope["payload"].get("approved_at"), str):
         try:
             approved_at = datetime.fromisoformat(envelope["payload"]["approved_at"].replace("Z", "+00:00"))
@@ -538,7 +538,7 @@ def read_chain(engine_log_path):
             approved_at = None
     if approved_at is None or approved_at.tzinfo is None:
         raise StatementRefused("the first run's approval in {} (the starting book) has no approved_at time at version "
-                               "{}".format(path, FIRST_RUN_APPROVAL_VERSION))
+                               "{}".format(path, " or ".join(map(str, FIRST_RUN_APPROVAL_VERSIONS))))
     return approved_at, sorted(found)
 
 

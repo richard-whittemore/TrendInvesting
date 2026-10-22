@@ -78,6 +78,27 @@ class SendRefused(LiveSendingDisabled):
     """
 
 
+class SessionOver(SendRefused):
+    """The order was released for a session that is over; nothing is sent.
+
+    A released order is a DAY limit order for its own session only (ADR
+    0026 point 2), so one asked for again on a later day is never sent. The
+    owner's decision of 2026-10-22: the relay retires such an order itself,
+    as a refusal for "session over", never a cancel of an order at IBKR, and
+    goes on to its next input (relay.Relay).
+    """
+
+
+class UnsendableOrder(ValueError):
+    """The order can never be sent as it stands: not a limit order, a fraction of a share, or no IBKR contract ID.
+
+    The owner's decision of 2026-10-22: the adapter stops at such an order
+    for a person, who finds the cause and then retires it with the relay's
+    retire command (relay.retire). A subclass of ValueError, the sender's
+    refusal of a request out of shape.
+    """
+
+
 def _session_today():
     return datetime.now(SESSION_ZONE).date()
 
@@ -176,6 +197,10 @@ class PaperSender:
         # A late order needs a person: its limit and the engine's checks
         # behind it were made for its own session.
         today = self._today()
+        if _is_date(request.session) and request.session < today:
+            raise SessionOver("order {} was released for the session of {}, not today's ({}); its session is "
+                              "over, so it is never sent (docs/manual/paper-trading.md)".format(
+                                  request.client_order_id, request.session, today))
         if not _is_date(request.session) or request.session != today:
             raise SendRefused("order {} was released for the session of {}, not today's ({}); it is never sent, "
                               "and the adapter stops here until a person settles it with relay.py resolve "
@@ -209,13 +234,13 @@ class PaperSender:
             raise ValueError("request for account {!r} on the connection to paper account {!r}".format(
                 request.account_id, config.account_id))
         if request.order_type != RELEASE_ORDER_TYPE:
-            raise ValueError("a released order is a limit order, not {!r}".format(request.order_type))
+            raise UnsendableOrder("a released order is a limit order, not {!r}".format(request.order_type))
         if request.tif != RELEASE_TIF:
             raise ValueError("a released order is a {} order, not {!r}".format(RELEASE_TIF, request.tif))
         if request.quantity != request.quantity.to_integral_value():
-            raise ValueError("quantity {} is not whole shares".format(request.quantity))
+            raise UnsendableOrder("quantity {} is not whole shares".format(request.quantity))
         if not isinstance(request.con_id, int) or isinstance(request.con_id, bool) or request.con_id <= 0:
-            raise ValueError("con_id must be IBKR's positive contract ID")
+            raise UnsendableOrder("con_id must be IBKR's positive contract ID")
         return config
 
     def send(self, request):
@@ -252,7 +277,8 @@ def release_to_request(order, mode, con_ids, session=None):
     Only a release marked send whose mode is the adapter's own is sent
     (ADR 0026 point 3, "Mode"). con_ids maps the engine's instrument ID to
     IBKR's contract ID; an instrument with none is refused, never looked up
-    by name. session is the New York date of the input whose reply released
+    by name. That refusal, and a quantity with a fraction of a share, raise
+    UnsendableOrder: the order can never be sent as it stands. session is the New York date of the input whose reply released
     the order; without one the order is refused.
     """
     if order.get("send") is not True:
@@ -265,8 +291,10 @@ def release_to_request(order, mode, con_ids, session=None):
         raise ValueError("side {!r} is not buy or sell".format(order.get("side")))
     symbol = order.get("instrument_id")
     if symbol not in con_ids:
-        raise ValueError("no IBKR contract ID is configured for {!r}".format(symbol))
+        raise UnsendableOrder("no IBKR contract ID is configured for {!r}".format(symbol))
     quantity = order.get("quantity")
+    if _is_fraction(quantity):
+        raise UnsendableOrder("quantity {!r} is a fraction of a share; IBKR takes whole shares only".format(quantity))
     if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
         raise ValueError("quantity {!r} is not a positive whole number of shares".format(quantity))
     limit = to_decimal(order.get("limit_price"), "limit_price")
@@ -278,6 +306,17 @@ def release_to_request(order, mode, con_ids, session=None):
                         con_id=con_ids[symbol], symbol=symbol, action=action, quantity=Decimal(quantity),
                         order_type=RELEASE_ORDER_TYPE, limit_price=limit, tif=RELEASE_TIF,
                         session=session)
+
+
+def _is_fraction(value):
+    """Whether value is a positive, finite number of shares that is not whole."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return False
+    try:
+        number = Decimal(value)
+    except (ValueError, ArithmeticError):
+        return False
+    return number.is_finite() and number > 0 and number != number.to_integral_value()
 
 
 def _is_date(value):

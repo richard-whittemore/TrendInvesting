@@ -150,6 +150,12 @@ type rebalance struct {
 	sold         map[string]int64
 	sellsPlanned int
 	budget       *orderplan.Budget
+	// sellRetired is set once a sell of the rebalance is retired as never
+	// sent (applyRetired): the rebalance then ends with its buy phase never
+	// started, since that phase would buy from the decision's targets,
+	// prices and cash after a session that sold nothing it planned (ADR
+	// 0026, point 5, amended 2026-10-22).
+	sellRetired bool
 }
 
 func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opts Options) (*Handler, error) {
@@ -240,6 +246,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return r.applyLifecycle(in)
 	case event.FillEventType:
 		return r.applyFill(in)
+	case event.OrderRetiredEventType:
+		return r.applyRetired(in)
 	case event.ReconciliationEventType:
 		return r.h.applyReconciliation(in)
 	case event.MarketCorporateActionEventType:
@@ -931,6 +939,52 @@ func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error
 	return nil, nil
 }
 
+// applyRetired reads the retirement of an order the adapter never sent
+// (execution.order.retired): its session ended before the adapter could
+// send it, or the owner retired an order the adapter can never send (the
+// owner's decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
+// 2026-10-22, read alike here). By the shared report rule
+// (event.OrderReports' Retire) it must name an order this run released, as
+// released, that no venue has reported on and that is not terminal; it then
+// ends the order with nothing filled, as a venue's cancellation of an
+// unfilled order would: the gate no longer counts a sell as pending, a buy
+// commits nothing more, a retired sell means the rebalance's buy phase is
+// never started, and once the rebalance's orders are all terminal the next
+// decision decides afresh (ADR 0026, point 5, amended 2026-10-22). A dry-run sends
+// nothing and ends each order itself, so it refuses every retirement.
+func (r *momentumRun) applyRetired(in event.Envelope) ([]event.Envelope, error) {
+	p, err := decodeInput[event.OrderRetiredPayload](in, event.OrderRetiredSchemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	if r.h.cfg.Mode == event.TradingModeDryRun {
+		return nil, fmt.Errorf("targetweight: retirement %s names order %s in a dry-run, which sends no order and ends each it releases with its own synthetic cancel, so it has nothing to retire: find what fed it before going on", in.ID, p.ClientOrderID)
+	}
+	if err := r.forAccount(in, p.AccountID); err != nil {
+		return nil, err
+	}
+	o, err := r.orders.Retire(p)
+	if err != nil {
+		return nil, refusal(in, err)
+	}
+	// The gate ends the order as a cancellation with nothing filled would,
+	// by a report the engine never journals: marked synthetic and naming no
+	// venue order, so the gate cannot take it for a venue's.
+	q := o.Released
+	end := event.LimitOrderLifecyclePayload{
+		AccountID: q.AccountID, ClientOrderID: q.ClientOrderID, InstrumentID: q.InstrumentID, Side: q.Side,
+		Status: event.OrderLifecycleStatusCanceled, Quantity: q.Quantity, LimitPrice: q.LimitPrice,
+		OccurredAt: p.RetiredAt, Synthetic: true, Message: "retired unsent: " + p.Reason,
+	}
+	if err := r.h.gate.ObserveLifecycle(end); err != nil {
+		return nil, fmt.Errorf("targetweight: retirement %s: %w", in.ID, err)
+	}
+	if q.Side == event.OrderSideSell && r.rebalance != nil {
+		r.rebalance.sellRetired = true
+	}
+	return r.terminal(in, o, p.RetiredAt)
+}
+
 func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeInput[event.TargetWeightFillPayload](in, event.FillTargetWeightVersion)
 	if err != nil {
@@ -968,7 +1022,7 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 
 // terminal follows a report that made o terminal: when it was the last
 // working sell of the rebalance in progress, it plans the buy phase, caused
-// by this report.
+// by this report, unless a sell of the rebalance was retired as never sent.
 //
 // Every order not yet terminal belongs to the rebalance in progress: a new
 // rebalance is planned only once every order is terminal (withhold). And the
@@ -980,7 +1034,7 @@ func (r *momentumRun) terminal(in event.Envelope, o *event.ReportedOrder, at tim
 		reb.budget.Close(o.Released.ClientOrderID)
 		return nil, nil
 	}
-	if !r.sellsTerminal(reb) {
+	if reb.sellRetired || !r.sellsTerminal(reb) {
 		return nil, nil
 	}
 	b := &emissions{h: r.h, in: in, at: at}
