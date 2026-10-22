@@ -26,7 +26,9 @@ import (
 type fakeTracker struct {
 	issues  []*fakeIssue
 	failing error
-	writes  int
+	// closeFailing, when set, is the answer to every close.
+	closeFailing error
+	writes       int
 	// delay is how long each call takes, unless its deadline comes first.
 	delay time.Duration
 	// onCall, when set, is told of each call.
@@ -56,8 +58,18 @@ type fakeIssue struct {
 	comments []string
 	open     bool
 	// strangers are the indexes of the comments someone other than the
-	// channel's own identity wrote.
-	strangers map[int]bool
+	// channel's own identity wrote; anonymous those GitHub names no author of.
+	strangers, anonymous map[int]bool
+}
+
+// labelled reports whether the issue carries the alert label.
+func (i *fakeIssue) labelled() bool {
+	for _, l := range i.labels {
+		if l == alertLabel {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeTracker) Latest(ctx context.Context, marker string) (trackedIssue, bool, error) {
@@ -65,7 +77,7 @@ func (f *fakeTracker) Latest(ctx context.Context, marker string) (trackedIssue, 
 		return trackedIssue{}, false, err
 	}
 	for n := len(f.issues) - 1; n >= 0; n-- {
-		if i := f.issues[n]; strings.Contains(i.body, marker) {
+		if i := f.issues[n]; i.labelled() && strings.Contains(i.body, marker) {
 			return trackedIssue{Number: i.number, Open: i.open, Comments: len(i.comments)}, true, nil
 		}
 	}
@@ -107,8 +119,20 @@ func (f *fakeTracker) CloseIssue(ctx context.Context, number int) error {
 	if err := f.call(ctx); err != nil {
 		return err
 	}
+	if f.closeFailing != nil {
+		return f.closeFailing
+	}
 	f.writes++
 	f.issues[number-1].open = false
+	return nil
+}
+
+func (f *fakeTracker) Unlabel(ctx context.Context, number int) error {
+	if err := f.call(ctx); err != nil {
+		return err
+	}
+	f.writes++
+	f.issues[number-1].labels = nil
 	return nil
 }
 
@@ -248,8 +272,8 @@ func TestAnAcknowledgedAlertClosesItsIssueOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if tr.issues[0].open || tr.writes != 3 || len(tr.issues[0].comments) != 1 {
-		t.Fatalf("open=%v writes=%d comments=%d, want closed with one create, one closing comment and one close", tr.issues[0].open, tr.writes, len(tr.issues[0].comments))
+	if tr.issues[0].open || tr.writes != 4 || len(tr.issues[0].comments) != 1 || tr.issues[0].labelled() {
+		t.Fatalf("open=%v writes=%d comments=%d labels=%v, want closed with one create, one closing comment, one close and the label taken off", tr.issues[0].open, tr.writes, len(tr.issues[0].comments), tr.issues[0].labels)
 	}
 	// The record stops the alert being delivered again: it would reopen.
 	if err := deliver([]sender{s}, a, seen, map[string]time.Time{}, map[string]int{}, t0.Add(time.Hour), time.Minute, func() error { return nil }); err != nil || len(tr.issues) != 1 {
@@ -286,6 +310,10 @@ type fakeGitHub struct {
 	// stallWrites answers each write's headers, then stops sending its body
 	// until the client gives up.
 	stallWrites bool
+	// userStatus, when not zero, answers the token's user (GET /user) with
+	// it; userID, when not zero, is the id that answer names.
+	userStatus int
+	userID     int
 }
 
 // fakeSelf and fakeStranger are the ids of the channel's own identity and of
@@ -334,7 +362,15 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/user" {
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": fakeSelf, "login": "reporter"})
+		if g.userStatus != 0 {
+			w.WriteHeader(g.userStatus)
+			return
+		}
+		id := fakeSelf
+		if g.userID != 0 {
+			id = g.userID
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "login": "reporter"})
 		return
 	}
 	var in struct {
@@ -360,7 +396,7 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		var out []any
 		for n := len(g.issues) - 1; n >= 0; n-- {
 			i := g.issues[n]
-			if state == "open" && !i.open {
+			if (state == "open" && !i.open) || !i.labelled() {
 				continue
 			}
 			s := "closed"
@@ -382,6 +418,10 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 			if i.strangers[n] {
 				by = fakeStranger
 			}
+			if i.anonymous[n] {
+				out = append(out, map[string]any{"body": c, "user": nil})
+				continue
+			}
 			out = append(out, map[string]any{"body": c, "user": map[string]any{"id": by}})
 		}
 		page(w, r, out)
@@ -398,6 +438,14 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		g.issues[n-1].comments = append(g.issues[n-1].comments, in.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("{}"))
+	case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/labels/"+alertLabel):
+		i := g.issues[issueNumber(r.URL.Path)-1]
+		if !i.labelled() {
+			http.Error(w, `{"message":"Label does not exist"}`, http.StatusNotFound)
+			return
+		}
+		i.labels = nil
+		_, _ = w.Write([]byte("[]"))
 	case r.Method == http.MethodPatch:
 		if g.patchFailures > 0 {
 			g.patchFailures--

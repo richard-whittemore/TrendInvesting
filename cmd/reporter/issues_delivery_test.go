@@ -277,7 +277,7 @@ func figureJournal(t *testing.T, dir string, rng *rand.Rand) (path string, figur
 		Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: held}}}
 	refused := event.OrderRefusedPayload{AccountID: "joint", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",
 		Side: event.OrderSideBuy, Quantity: qty, LimitPrice: limit, Reason: event.RefusedOrderSize,
-		Detail: fmt.Sprintf("short %d shares at %s (qty:%d); %sUSD %s\u20ac \u00a3%d %d-%d sell-%d #%d %v %g x%d %d\u00a0shares \u2212%d %d\u2014%d limit-%s",
+		Detail: fmt.Sprintf("sell-40 qty-12 at 12.35, 7 left, tw-17 in 5m; short %d shares at %s (qty:%d); %sUSD %s\u20ac \u00a3%d %d-%d sell-%d #%d %v %g x%d %d\u00a0shares \u2212%d %d\u2014%d limit-%s",
 			short, strconv.FormatFloat(limit, 'f', -1, 64), qty, strconv.FormatFloat(limit, 'f', -1, 64), strconv.FormatFloat(ref, 'f', -1, 64),
 			held, short, qty, qty, held, netLiq*10, ref*1000, held, short, qty, held, short, strconv.FormatFloat(netLiq, 'f', -1, 64)),
 		Figures: event.RiskFigures{NetLiquidation: netLiq, ReferencePrice: ref, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}}
@@ -294,7 +294,10 @@ func figureJournal(t *testing.T, dir string, rng *rand.Rand) (path string, figur
 	return path, figures
 }
 
-var digitRun = regexp.MustCompile(`\d+`)
+var (
+	digitRun       = regexp.MustCompile(`\d+`)
+	issueAllowList = regexp.MustCompile(`(?:19|20)\d\d-\d\d-\d\d(?:T\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d)?)?|\b\d\d:\d\d(?::\d\d)?Z?|ADR \d{4}`)
+)
 
 // No figure of the journal reaches a public issue, wherever it sits: in the
 // alert's text, in a journal record at any depth, in a record's free text,
@@ -317,13 +320,18 @@ func TestNoFigureOfTheJournalReachesAnIssue(t *testing.T) {
 		}
 		hidden := regexp.MustCompile(`<!--.*?-->`)
 		for _, i := range issues {
-			all := hidden.ReplaceAllString(i.title+"\n"+i.body+"\n"+strings.Join(i.comments, "\n"), "")
+			// No digit of any length is left but the allow-list's: a date or
+			// a time, and an ADR's number.
+			rest := issueAllowList.ReplaceAllString(hidden.ReplaceAllString(i.title+"\n"+i.body+"\n"+strings.Join(i.comments, "\n"), ""), "")
 			for _, f := range figures {
 				for _, part := range digitRun.FindAllString(f, -1) {
-					if len(part) >= 4 && strings.Contains(all, part) {
-						t.Errorf("round %d: issue %q holds %s of the figure %s:\n%s", round, i.title, part, f, all)
+					if strings.Contains(rest, part) {
+						t.Errorf("round %d: issue %q holds %s of the figure %s:\n%s", round, i.title, part, f, rest)
 					}
 				}
+			}
+			if regexp.MustCompile(`\p{Nd}`).MatchString(rest) {
+				t.Errorf("round %d: issue %q holds a digit outside the allow-list:\n%s", round, i.title, rest)
 			}
 		}
 	}

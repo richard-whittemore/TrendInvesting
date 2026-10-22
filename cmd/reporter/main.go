@@ -200,6 +200,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	examined := false
 	var forgotten []string
 	withIssueEvidence(senders, *journalPath)
+	withIssueRecords(senders, repeats)
 	if refused == nil {
 		var restored, current string
 		restored, current, examined = restoredLogNewer(*journalPath)

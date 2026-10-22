@@ -278,3 +278,259 @@ func TestAUnitReminderPagesFirstAndCommentsOnTheIssue(t *testing.T) {
 		}
 	}
 }
+
+// The firing's time for the tracker is spent only by tracker work: local
+// work between two deliveries (a unit step, a clock check) is not charged to
+// the later one.
+func TestOnlyTrackerWorkSpendsTheFiringsTrackerTime(t *testing.T) {
+	tr := &fakeTracker{delay: 50 * time.Millisecond}
+	s := newIssues(tr)
+	s.timeout = 300 * time.Millisecond
+	a, b := haltAlert(), haltAlert()
+	b.Key = "clock-drift:host"
+	if err := s.send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if err := s.send(b, 0); err != nil {
+		t.Fatalf("a delivery after 400ms of local work, with 200ms of tracker time left, was refused: %v", err)
+	}
+}
+
+// A close that keeps failing for an alert the run forgot (a history whole
+// again, a restored log cleared) is tried again at every firing, whether or
+// not the fault is back, and after maxCloseTries firings its record is
+// dropped, so the next incident opens a fresh issue naming the one left
+// open: an unfinished close never suppresses the next incident for ever.
+func TestAForgottenAlertWhoseCloseKeepsFailingOpensAFreshIssue(t *testing.T) {
+	tr := &fakeTracker{}
+	s := newIssues(tr)
+	prefix := report.HistoryUnavailableKeyPrefix("joint")
+	a := haltAlert()
+	a.Key, a.Repeat = prefix+"7", false
+	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
+	s.records = repeats
+	record := func() error { return nil }
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0, time.Minute, record); err != nil {
+		t.Fatal(err)
+	}
+	forget(prefix, seen, sent, repeats)
+	tr.closeFailing = fmt.Errorf("GitHub answered 422")
+	if err := closeForgotten([]sender{s}, []string{prefix}, seen, sent, repeats); err == nil {
+		t.Fatal("a failed close is not an error")
+	}
+	// The fault is back: the run forgets nothing, yet the close is tried.
+	for n := 1; n < maxCloseTries; n++ {
+		if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(time.Duration(n)*time.Hour), time.Minute, record); err != nil {
+			t.Fatal(err)
+		}
+		if err := closeForgotten([]sender{s}, nil, seen, sent, repeats); err == nil {
+			t.Fatalf("try %d: a failed close is not an error", n+1)
+		}
+	}
+	if seen[channelKey(issuesChannel, a.Key)] {
+		t.Fatal("the record of the cleared incident is kept after every try failed")
+	}
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(10*time.Hour), time.Minute, record); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.issues) != 2 || !tr.issues[1].open || !strings.Contains(tr.issues[1].body, "#1") {
+		t.Fatalf("%d issues; the next incident must open a fresh issue naming #1: %+v", len(tr.issues), tr.issues)
+	}
+}
+
+// A close tried again while the fault is back that succeeds drops the
+// record, so the incident in force opens its own issue.
+func TestAForgottenAlertsCloseIsRetriedWhileTheFaultIsBack(t *testing.T) {
+	tr := &fakeTracker{}
+	s := newIssues(tr)
+	prefix := report.HistoryUnavailableKeyPrefix("joint")
+	a := haltAlert()
+	a.Key, a.Repeat = prefix+"7", false
+	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
+	s.records = repeats
+	record := func() error { return nil }
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0, time.Minute, record); err != nil {
+		t.Fatal(err)
+	}
+	forget(prefix, seen, sent, repeats)
+	tr.closeFailing = fmt.Errorf("GitHub answered 422")
+	_ = closeForgotten([]sender{s}, []string{prefix}, seen, sent, repeats)
+	tr.closeFailing = nil
+	if err := closeForgotten([]sender{s}, nil, seen, sent, repeats); err != nil {
+		t.Fatal(err)
+	}
+	if tr.issues[0].open || seen[channelKey(issuesChannel, a.Key)] || len(repeats) != 0 {
+		t.Fatalf("open=%v seen=%v repeats=%v: the retried close must close and drop its records", tr.issues[0].open, seen, repeats)
+	}
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(time.Hour), time.Minute, record); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.issues) != 2 || !tr.issues[1].open {
+		t.Fatalf("%d issues, want a new open one for the incident in force", len(tr.issues))
+	}
+}
+
+// A resolved issue loses the alert label, so closed incidents leave the
+// listing and never fill it.
+func TestAResolvedIssueLosesItsAlertLabel(t *testing.T) {
+	gh := &fakeGitHub{}
+	url := fakeGitHubServer(t, gh)
+	a := haltAlert()
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := githubChannel(t, url, time.Second).resolve(a.Key); err != nil {
+		t.Fatal(err)
+	}
+	if i := gh.snapshot()[0]; i.open || len(i.labels) != 0 {
+		t.Fatalf("open=%v labels=%v, want closed with no alert label", i.open, i.labels)
+	}
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	if issues := gh.snapshot(); len(issues) != 2 || !issues[1].open {
+		t.Fatalf("%d issues, want a new incident's open issue", len(issues))
+	}
+}
+
+// overLimit gives the issue more comments than the channel reads.
+func overLimit(gh *fakeGitHub, n int) {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	for c := range maxCommentPages*100 + 1 {
+		gh.issues[n-1].comments = append(gh.issues[n-1].comments, fmt.Sprintf("note %d", c))
+	}
+}
+
+// An issue over the comment limit closes with no closing comment, so a
+// close tried again after a failed state change posts nothing.
+func TestAResolveOverTheCommentLimitPostsNoClosingComment(t *testing.T) {
+	gh := &fakeGitHub{}
+	url := fakeGitHubServer(t, gh)
+	a := haltAlert()
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	overLimit(gh, 1)
+	gh.mu.Lock()
+	gh.patchFailures = 1
+	gh.mu.Unlock()
+	if err := githubChannel(t, url, 5*time.Second).resolve(a.Key); err == nil {
+		t.Fatal("a refused close must fail the resolve")
+	}
+	if err := githubChannel(t, url, 5*time.Second).resolve(a.Key); err != nil {
+		t.Fatal(err)
+	}
+	if i := gh.snapshot()[0]; i.open || len(i.comments) != maxCommentPages*100+1 {
+		t.Fatalf("open=%v with %d comments, want closed with no comment added", i.open, len(i.comments))
+	}
+}
+
+// A closed issue over the comment limit is taken as closed by overflow: the
+// next incident of its key opens a fresh issue that says why.
+func TestAnIssueOverTheCommentLimitDoesNotBlockTheNextIncident(t *testing.T) {
+	gh := &fakeGitHub{}
+	url := fakeGitHubServer(t, gh)
+	a := haltAlert()
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	overLimit(gh, 1)
+	gh.mu.Lock()
+	gh.issues[0].open = false
+	gh.mu.Unlock()
+	if err := githubChannel(t, url, 5*time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	issues := gh.snapshot()
+	if len(issues) != 2 || !issues[1].open || !strings.Contains(issues[1].body, "#1") {
+		t.Fatalf("%d issues; want a fresh open issue naming #1", len(issues))
+	}
+}
+
+// A comment GitHub names no author of makes the delivery fail closed: it is
+// not taken for somebody else's, and nothing is written.
+func TestACommentOfNoAuthorFailsTheDeliveryClosed(t *testing.T) {
+	gh := &fakeGitHub{}
+	url := fakeGitHubServer(t, gh)
+	a := haltAlert()
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	gh.mu.Lock()
+	gh.issues[0].comments = append(gh.issues[0].comments, deliveryMarker(a.Key, 1))
+	gh.issues[0].anonymous = map[int]bool{0: true}
+	gh.mu.Unlock()
+	if err := githubChannel(t, url, time.Second).send(a, 1); err == nil {
+		t.Fatal("a comment of no author was taken as somebody else's")
+	}
+	if n := len(gh.snapshot()[0].comments); n != 1 {
+		t.Fatalf("%d comments, want the one already there", n)
+	}
+}
+
+// A failed lookup of the token's user is made once in a firing and remembered:
+// the later deliveries that need it fail at once, and nothing is written.
+func TestAFailedIdentityLookupIsMadeOnceAndWritesNothing(t *testing.T) {
+	for name, gh := range map[string]*fakeGitHub{
+		"401":        {userStatus: http.StatusUnauthorized},
+		"invalid id": {userID: -1},
+	} {
+		url := fakeGitHubServer(t, gh)
+		a, b := haltAlert(), haltAlert()
+		b.Key = "reconciliation:x@joint"
+		for _, x := range []report.Alert{a, b} {
+			if err := githubChannel(t, url, time.Second).send(x, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		gh.mu.Lock()
+		gh.methods = nil
+		gh.mu.Unlock()
+		s := githubChannel(t, url, time.Second)
+		for _, x := range []report.Alert{a, b} {
+			if err := s.send(x, 1); err == nil {
+				t.Fatalf("%s: a repeat was delivered with no identity to check it by", name)
+			}
+		}
+		gh.mu.Lock()
+		users := 0
+		for _, m := range gh.methods {
+			if m == "GET /user" {
+				users++
+			}
+		}
+		gh.mu.Unlock()
+		if users != 1 || commentsOf(gh.snapshot()) != 0 {
+			t.Fatalf("%s: the token's user was asked %d times and %d comments written, want once and none", name, users, commentsOf(gh.snapshot()))
+		}
+	}
+}
+
+// An issue closed by hand whose alert label was also removed is out of
+// sight: resolving its alert writes nothing, and the next incident opens a
+// new issue.
+func TestAHandClosedUnlabelledIssueResolvesQuietly(t *testing.T) {
+	gh := &fakeGitHub{}
+	url := fakeGitHubServer(t, gh)
+	a := haltAlert()
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	gh.mu.Lock()
+	gh.issues[0].open, gh.issues[0].labels = false, nil
+	gh.mu.Unlock()
+	if err := githubChannel(t, url, time.Second).resolve(a.Key); err != nil {
+		t.Fatal(err)
+	}
+	if n := commentsOf(gh.snapshot()); n != 0 {
+		t.Fatalf("resolving an issue out of sight wrote %d comments", n)
+	}
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	if issues := gh.snapshot(); len(issues) != 2 || !issues[1].open {
+		t.Fatalf("%d issues, want the next incident's new open issue", len(issues))
+	}
+}

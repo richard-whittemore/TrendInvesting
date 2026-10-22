@@ -125,12 +125,12 @@ func TestRecordWithholdsQuantitiesPricesAndPositionsAtAnyDepth(t *testing.T) {
 func TestTextRemovesEveryBareFigure(t *testing.T) {
 	in := "buy 7391 SPY at 8264.17 (-0.48, +12%) of 1,234,567 at 2024-01-02T21:00:00Z, record #4, qty:39 and 39/100 (ADR 0019), order tw-17, every 30m."
 	got := report.NewRedactor(nil).Text(in)
-	for _, leak := range []string{"7391", "8264", "0.48", "12%", "1,234", "567", "qty:39", " 39/", "100", "#4"} {
+	for _, leak := range []string{"7391", "8264", "0.48", "12%", "1,234", "567", "qty:39", " 39/", "100", "#4", "tw-17", "30m"} {
 		if strings.Contains(got, leak) {
 			t.Errorf("text still holds %q:\n%s", leak, got)
 		}
 	}
-	for _, want := range []string{"buy", "SPY", "2024-01-02T21:00:00Z", "ADR 0019", "tw-17", "30m"} {
+	for _, want := range []string{"buy", "SPY", "2024-01-02T21:00:00Z", "ADR 0019"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("text lacks %q:\n%s", want, got)
 		}
@@ -196,9 +196,18 @@ func TestTextRedactsAFigureWhateverItsNeighbours(t *testing.T) {
 		"412.35-415.00", "5:412.35", "123-45-67", "sell-400", "qty-412.35", "limit-412.35", "#400", "#4", "1.234567e+06",
 		"1.234567E-06", "100\u00a0shares", "x400", "400x", "tw-1234", "2024-13-45", "25:99", "ADR 26", "ADR-0026",
 		"ADR 00261", "999m", "1.5s", "30mm", "30m5", "2024-01-02T25:00:00Z", "v2", "sha256",
+		// No identifier or duration is kept: a public issue needs neither, and
+		// either can carry a small figure.
+		"tw-17", "qty-50", "fill-3", "x-42", "5m", "99s", "250ms", "1h30m",
+		// A date or time is kept only when it is on the calendar and the
+		// 24-hour clock, in a year of 19xx or 20xx, and with no fraction of a
+		// second, whose digits could carry a figure.
+		"2026-02-31", "2026-04-31", "2025-02-29", "5000-10-10", "0412-12-31", "2024-01-02T21:00:00.123456789Z", "21:00:00.5",
+		// Digits of any script are digits.
+		"\u0664\u0660\u0660", "\uff14\uff10\uff10", "\u096a\u0966\u0966", "x\u0664\u0662", "sell-\u0664\u0660", "2024-01-0\u0662", "ADR \u0660\u0660\u0661\u0669",
 	} {
 		got := r.Text("saw " + in + " here")
-		if strings.ContainsAny(got, "0123456789") {
+		if anyDigit.MatchString(got) {
 			t.Errorf("Text(%q) = %q: a digit survived", in, got)
 		}
 		if !strings.Contains(got, report.Redacted) {
@@ -208,13 +217,13 @@ func TestTextRedactsAFigureWhateverItsNeighbours(t *testing.T) {
 }
 
 // TestTextKeepsOnlyTheAllowedShapes: the only numbers kept are ISO dates and
-// times, ADR numbers written "ADR 0026", short durations and identifiers of
-// letters, a dash and at most two digits, each matched as a whole token.
+// times that are on the calendar and the 24-hour clock, and ADR numbers
+// written "ADR 0026", each matched as a whole token.
 func TestTextKeepsOnlyTheAllowedShapes(t *testing.T) {
 	r := report.NewRedactor(nil)
 	for _, in := range []string{
-		"2024-01-02", "2024-01-02T21:00:00Z", "2024-01-02T21:00:00.123456789+02:00", "2024-01-02T21:00Z", "21:00", "21:00:00",
-		"(ADR 0026)", "ADR 0019,", "30m", "5s", "1h30m", "250ms", "2m0s.", "tw-17", "fill-3", "(tw-9);",
+		"2024-01-02", "2024-02-29", "1998-12-31", "2024-01-02T21:00:00Z", "2024-01-02T21:00:00+02:00", "2024-01-02T23:59:59-05:00",
+		"2024-01-02T21:00Z", "21:00", "21:00:00", "00:00", "23:59:59Z", "(ADR 0026)", "ADR 0019,",
 	} {
 		if got := r.Text("at " + in + " now"); got != "at "+in+" now" {
 			t.Errorf("Text(%q) = %q, want it kept", in, got)
@@ -222,16 +231,27 @@ func TestTextKeepsOnlyTheAllowedShapes(t *testing.T) {
 	}
 }
 
-// TestNoRandomFigureSurvivesBesideAnything: a random figure, whole, decimal,
-// grouped, signed or in exponent form, placed beside letters, signs, dashes,
-// colons, '#' and non-ASCII characters, never survives.
+// TestNoRandomFigureSurvivesBesideAnything: a random figure of one to seven
+// digits, whole, decimal, grouped, signed or in exponent form, in ASCII
+// digits or another script's, placed beside letters, signs, dashes, colons,
+// '#' and non-ASCII characters, leaves no digit of any length but what the
+// allow-list keeps ("ADR nnnn").
 func TestNoRandomFigureSurvivesBesideAnything(t *testing.T) {
 	rng := rand.New(rand.NewSource(20261022))
 	r := report.NewRedactor(nil)
-	sides := []string{"", " ", "x", "USD", "qty", "sell-", "-", "\u2014", "\u2013", "\u2212", "\u20ac", "\u00a3", "\u00d7",
-		"\u00a0", ":", "#", "+", "e", "_", "/", ".", ",", "(", "\"", "%", "$", "\u00e9", "\u4e2d", "ADR "}
-	for n := 0; n < 2000; n++ {
-		whole := 100000 + rng.Int63n(9000000)
+	sides := []string{"", " ", "x", "USD", "qty", "qty-", "sell-", "tw-", "-", "\u2014", "\u2013", "\u2212", "\u20ac", "\u00a3", "\u00d7",
+		"\u00a0", ":", "#", "+", "e", "_", "/", ".", ",", "(", "\"", "%", "$", "\u00e9", "\u4e2d", "ADR ", "m", "s", "ms", "h"}
+	scripts := []rune{'0', '\u0660', '\u0966', '\uff10'}
+	for n := 0; n < 4000; n++ {
+		digits := 1 + rng.Intn(7)
+		lo := int64(1)
+		for range digits - 1 {
+			lo *= 10
+		}
+		whole := lo + rng.Int63n(9*lo)
+		if digits == 1 {
+			whole = rng.Int63n(10)
+		}
 		var figure string
 		switch rng.Intn(5) {
 		case 0:
@@ -245,17 +265,28 @@ func TestNoRandomFigureSurvivesBesideAnything(t *testing.T) {
 		default:
 			figure = fmt.Sprintf("%d,%03d", whole/1000, whole%1000)
 		}
+		if zero := scripts[rng.Intn(len(scripts))]; zero != '0' {
+			figure = strings.Map(func(c rune) rune {
+				if c >= '0' && c <= '9' {
+					return zero + c - '0'
+				}
+				return c
+			}, figure)
+		}
 		in := sides[rng.Intn(len(sides))] + figure + sides[rng.Intn(len(sides))]
 		got := r.Text("saw " + in + " here")
-		for _, part := range digitRuns.FindAllString(figure, -1) {
-			if len(part) >= 3 && strings.Contains(got, part) {
-				t.Fatalf("Text(%q) = %q holds %q", in, got, part)
-			}
+		if rest := allowed.ReplaceAllString(got, ""); anyDigit.MatchString(rest) {
+			t.Fatalf("Text(%q) = %q: a digit survived outside the allow-list", in, got)
 		}
 	}
 }
 
-var digitRuns = regexp.MustCompile(`\d+`)
+// anyDigit is a digit of any script; allowed is the one allow-listed shape
+// a random figure beside random text can make, an ADR's number.
+var (
+	anyDigit = regexp.MustCompile(`\p{Nd}`)
+	allowed  = regexp.MustCompile(`ADR \d{4}`)
+)
 
 // TestFieldNamesThatRedactAlikeAreAllKept: two field names that redact to
 // the same text both keep their values, in an order that never depends on
