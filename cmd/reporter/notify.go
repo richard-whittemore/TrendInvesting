@@ -128,8 +128,10 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 			s, err = ntfyFrom(getenv, client)
 		case "pagerduty":
 			s, err = pagerDutyFrom(getenv, client)
+		case issuesChannel:
+			s, err = githubIssuesFrom(getenv, client)
 		default:
-			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty)", c)
+			err = fmt.Errorf("reporter: unknown channel %q (stdout, ntfy, pagerduty, github-issues)", c)
 		}
 		if err != nil {
 			faults = append(faults, channelFault{channel: name, err: err})
@@ -222,6 +224,9 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 	if reaching == 0 {
 		return nil
 	}
+	// An issue tracker is sent the alert after every other channel, so a
+	// slow one never holds back a page (ADR 0019, "Alerting").
+	pending = trackersLast(pending)
 	var failures []error
 	for _, s := range pending {
 		key := channelKey(s.name(), a.Key)
@@ -249,6 +254,30 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[st
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// issueTracking marks a channel that writes to an issue tracker
+// (issuesSender): it is sent every alert after the channels that page.
+type issueTracking interface{ tracksIssues() }
+
+// trackersLast is senders in their order, with the issue trackers moved to
+// the end.
+func trackersLast(senders []sender) []sender {
+	first, last := splitTrackers(senders)
+	return append(first, last...)
+}
+
+// splitTrackers parts senders into the channels that page and the issue
+// trackers, each in its order.
+func splitTrackers(senders []sender) (paging, trackers []sender) {
+	for _, s := range senders {
+		if _, ok := s.(issueTracking); ok {
+			trackers = append(trackers, s)
+			continue
+		}
+		paging = append(paging, s)
+	}
+	return paging, trackers
 }
 
 type stdoutSender struct{ out io.Writer }

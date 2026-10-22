@@ -88,7 +88,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	flags.SetOutput(out)
 	journalPath := flags.String("journal", "", "path to the account's journal (read only)")
 	statePath := flags.String("state", "", "path to the reporter's own state file of delivered alerts")
-	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty")
+	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty, github-issues (one issue per alert, closed when it resolves)")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	date := flags.String("date", "", "summary date, YYYY-MM-DD, sent once the log records that day's session closed (default: the latest closed session)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
@@ -156,6 +156,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	for _, f := range setAside {
 		failures = append(failures, f.err)
 	}
+	withRedaction(senders, secretValues(getenv, *secretsFile))
 	// systemd is asked once, at the start of the firing, before anything is
 	// delivered: a unit that fails while the firing runs is paged by its
 	// hook, and its page is newer than this sample, so it is never resolved
@@ -197,6 +198,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		label = account
 	}
 	examined := false
+	var forgotten []string
+	withIssueEvidence(senders, *journalPath)
+	withIssueRecords(senders, repeats)
 	if refused == nil {
 		var restored, current string
 		restored, current, examined = restoredLogNewer(*journalPath)
@@ -209,12 +213,14 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		// break after a repair is a new incident (ADR 0019, "Alerting":
 		// once per incident).
 		forget(report.HistoryUnavailableKeyPrefix(account), seen, sent, repeats)
+		forgotten = append(forgotten, report.HistoryUnavailableKeyPrefix(account))
 	}
 	if refused == nil && examined && !slices.ContainsFunc(alerts, func(a report.Alert) bool { return a.Kind == report.KindRestoredLogNewer }) {
 		// A folder examined with no log newer than the current run clears
 		// the restored-log alerts delivered for the account, so the same log restored wrongly again
 		// is a new incident (ADR 0019, "Alerting": once per incident).
 		forget(report.RestoredLogNewerKeyPrefix(account), seen, sent, repeats)
+		forgotten = append(forgotten, report.RestoredLogNewerKeyPrefix(account))
 	}
 	// The heartbeat is checked first so a refused journal's alert can say
 	// whether liveness is monitored.
@@ -260,23 +266,43 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if unitStatePath == "" {
 		unitStatePath = filepath.Join(filepath.Dir(*statePath), "unit-failures.json")
 	}
-	if refused == nil {
-		if err := tellStateAtStart(senders, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
-			failures = append(failures, err)
+	// Every alert reaches the channels that page before any reaches an issue
+	// tracker, so a slow or failing tracker never holds back a page (ADR
+	// 0019, "Alerting": one channel's fault must not silence another).
+	paging, trackers := splitTrackers(senders)
+	for _, group := range [][]sender{paging, trackers} {
+		if len(group) == 0 {
+			continue
 		}
-	}
-	for _, a := range report.Fresh(alerts, nil) {
-		current, starting := sendersFor(senders, a, baselines, seen)
-		if err := deliver(current, a, seen, sent, repeats, at, *repeat, record); err != nil {
-			failures = append(failures, err)
-		}
-		if len(starting) > 0 {
-			marked := a
-			marked.Title = report.StateAtStartTitle + a.Title
-			if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record); err != nil {
+		if refused == nil {
+			if err := tellStateAtStart(group, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
 				failures = append(failures, err)
 			}
 		}
+		for _, a := range report.Fresh(alerts, nil) {
+			current, starting := sendersFor(group, a, baselines, seen)
+			if err := deliver(current, a, seen, sent, repeats, at, *repeat, record); err != nil {
+				failures = append(failures, err)
+			}
+			if len(starting) > 0 {
+				marked := a
+				marked.Title = report.StateAtStartTitle + a.Title
+				if err := deliver(starting, marked, seen, sent, repeats, at, *repeat, record); err != nil {
+					failures = append(failures, err)
+				}
+			}
+		}
+	}
+	// A repeating alert the owner has acknowledged closes its issue.
+	if err := closeAcknowledged(senders, alerts, seen); err != nil {
+		failures = append(failures, err)
+	}
+	// A forgotten alert closes its issue, so its next incident is a new one.
+	if err := closeForgotten(senders, forgotten, seen, sent, repeats); err != nil {
+		failures = append(failures, err)
+	}
+	if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
+		failures = append(failures, err)
 	}
 	// A failed trading unit is paged by the OnFailure hook at the moment it
 	// fails; this firing pages a failure episode the hook missed and resolves
@@ -618,10 +644,11 @@ func restoredLogNewer(path string) (restored, current string, examined bool) {
 }
 
 // forget removes from the delivery state every channel's record of the
-// alerts whose keys begin with prefix.
+// alerts whose keys begin with prefix, except an issue tracker's: its record
+// is dropped once closeForgotten has closed the alert's issue.
 func forget(prefix string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) {
 	for k := range seen {
-		if _, key, ok := strings.Cut(k, "|"); ok && strings.HasPrefix(key, prefix) {
+		if ch, key, ok := strings.Cut(k, "|"); ok && ch != issuesChannel && strings.HasPrefix(key, prefix) {
 			delete(seen, k)
 			delete(sent, k)
 			delete(repeats, k)
