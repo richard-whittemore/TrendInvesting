@@ -805,8 +805,39 @@ func TestALabelRemovedAndRestoredStillLetsTheNextIncidentOpen(t *testing.T) {
 	}
 }
 
+// A firing starts its closed checks after the last record the one before
+// checked, so a closed record behind records that keep answering open is
+// reached within two firings (ADR 0019, "Alerting": bounded requests, no
+// record left unchecked).
+func TestTheClosedChecksRotateSoNoRecordStarves(t *testing.T) {
+	key := forgottenAlert().Key
+	tr, repeats := &fakeTracker{}, map[string]int{}
+	for i := 1; i <= maxClosedChecks; i++ {
+		tr.issues = append(tr.issues, &fakeIssue{number: i, body: issueMarker(key), open: true})
+		repeats[unclosedKey(key, i)] = 1
+	}
+	closed := maxClosedChecks + 1
+	tr.issues = append(tr.issues, &fakeIssue{number: closed, body: issueMarker(key), open: false})
+	repeats[unclosedKey(key, closed)] = 1
+	tr.issues = append(tr.issues, &fakeIssue{number: closed + 1, body: issueMarker(key), labels: []string{alertLabel}, open: true})
+	pruned := 0
+	for firing := 1; firing <= 2 && pruned == 0; firing++ {
+		s := newIssues(tr)
+		s.records = repeats
+		if err := s.send(haltAlert(), 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, kept := repeats[unclosedKey(key, closed)]; !kept {
+			pruned = firing
+		}
+	}
+	if pruned == 0 {
+		t.Fatalf("the closed record was not checked within two firings: %v", repeats)
+	}
+}
+
 // unlistedRecords is a tracker with n abandoned issues of one alert key, each
-// open with its label off (so unlisted), a record for each, and a newer open
+// closed with its label off (so unlisted), a record for each, and a newer open
 // issue of the key that replaced them.
 func unlistedRecords(n int) (tr *fakeTracker, repeats map[string]int) {
 	key := forgottenAlert().Key
@@ -833,15 +864,15 @@ func TestTheClosedChecksOfAFiringAreBoundedAndBudgeted(t *testing.T) {
 	if err := s.send(haltAlert(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if tr.closedCalls != maxClosedChecks || len(repeats) != n-maxClosedChecks {
-		t.Fatalf("closed checks=%d records left=%d, want %d checks and %d left", tr.closedCalls, len(repeats), maxClosedChecks, n-maxClosedChecks)
+	if tr.closedCalls != maxClosedChecks || unclosedCount(repeats) != n-maxClosedChecks {
+		t.Fatalf("closed checks=%d records left=%d, want %d checks and %d left", tr.closedCalls, unclosedCount(repeats), maxClosedChecks, n-maxClosedChecks)
 	}
 	s = newIssues(tr)
 	s.records = repeats
 	if err := s.send(haltAlert(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if len(repeats) != 0 {
+	if unclosedCount(repeats) != 0 {
 		t.Fatalf("repeats=%v: the next firing must check the rest", repeats)
 	}
 }
@@ -882,7 +913,7 @@ func TestAFailedClosedCheckKeepsTheRecord(t *testing.T) {
 	if err := s.send(haltAlert(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if tr.closedCalls != 1 || len(repeats) != 1 {
+	if tr.closedCalls != 1 || unclosedCount(repeats) != 1 {
 		t.Fatalf("checks=%d records=%v: a failed check must keep the record", tr.closedCalls, repeats)
 	}
 }
@@ -919,4 +950,16 @@ func TestGitHubTrackerClosedReadsTheIssueState(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unclosedCount is how many unclosed records (unclosedKey) the state holds,
+// not counting the closed-cursor record.
+func unclosedCount(repeats map[string]int) int {
+	n := 0
+	for k := range repeats {
+		if strings.HasPrefix(k, channelKey(issuesChannel, "unclosed:")) {
+			n++
+		}
+	}
+	return n
 }

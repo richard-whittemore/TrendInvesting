@@ -298,8 +298,10 @@ func (s *issuesSender) addComment(a report.Alert, id, heading string) error {
 
 // latest is the tracker's newest issue holding marker, and, the first time in
 // a firing the listing is read, prunes the records of issues left open
-// (unclosedKey) that are neither listed nor closed on GitHub, so a record
-// stays while its issue may still be open, whatever its labels.
+// (unclosedKey) that are unlisted, have a newer listed issue of their key, and
+// are closed on GitHub or gone. Each firing checks at most maxClosedChecks
+// records, starting after the last one the previous firing checked (the
+// closed-cursor record), so no record starves behind ones that stay open.
 func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue, bool, error) {
 	issue, found, err := s.tracker.Latest(ctx, marker)
 	if err != nil || s.pruned {
@@ -312,15 +314,27 @@ func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue,
 	}
 	s.pruned = true
 	prefix := channelKey(issuesChannel, "unclosed:")
-	checks := 0
-	// Sorted, so which records a firing checks first does not depend on the
-	// map's order.
-	for _, k := range slices.Sorted(maps.Keys(s.records)) {
-		rest, ok := strings.CutPrefix(k, prefix)
-		if !ok {
-			continue
+	cursorPrefix := channelKey(issuesChannel, "closed-cursor:")
+	// Sorted, so the walk does not depend on the map's order.
+	var keys []string
+	cursor := ""
+	for k := range s.records {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
 		}
-		numText, alertKey, _ := strings.Cut(rest, ":")
+		if rest, ok := strings.CutPrefix(k, cursorPrefix); ok {
+			cursor = rest
+		}
+	}
+	slices.Sort(keys)
+	start, found2 := slices.BinarySearch(keys, cursor)
+	if found2 {
+		start++
+	}
+	checks, last := 0, ""
+	for i := 0; i < len(keys); i++ {
+		k := keys[(start+i)%len(keys)]
+		numText, alertKey, _ := strings.Cut(strings.TrimPrefix(k, prefix), ":")
 		n, err := strconv.Atoi(numText)
 		if err != nil || listed[n] {
 			continue
@@ -335,6 +349,7 @@ func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue,
 			break
 		}
 		checks++
+		last = k
 		// Off the listing is not gone: a label taken off an open issue leaves
 		// it unlisted, so the record goes only once GitHub says it is closed
 		// or has no such issue. A failed check keeps the record.
@@ -342,14 +357,30 @@ func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue,
 			delete(s.records, k)
 		}
 	}
+	if last != "" {
+		for k := range s.records {
+			if strings.HasPrefix(k, cursorPrefix) {
+				delete(s.records, k)
+			}
+		}
+		s.records[closedCursorKey(last)] = 1
+	}
 	return issue, found, nil
 }
 
+// closedCursorKey is the record naming, in its key, the unclosed record
+// (unclosedKey) that the last firing's closed checks ended at; the next firing
+// starts after it.
+func closedCursorKey(key string) string {
+	return channelKey(issuesChannel, "closed-cursor:"+key)
+}
+
 // unclosedKey is the record (issuesSender.records) that issue number n of an
-// alert was left open when its close was given up. It stays until that issue
-// is closed or gone, so the issue never suppresses a later incident, however
-// the issues that replaced it end: the replacement chain is the local
-// record's, never the listing's.
+// alert was left open when its close was given up. It is pruned only when
+// that issue is unlisted, a newer issue of its key is listed, and GitHub says
+// it is closed or gone. A record whose replacement was resolved stays until
+// the key's next incident: one record per abandoned issue, so the issue never
+// suppresses a later incident.
 func unclosedKey(key string, n int) string {
 	return channelKey(issuesChannel, fmt.Sprintf("unclosed:%d:%s", n, key))
 }
