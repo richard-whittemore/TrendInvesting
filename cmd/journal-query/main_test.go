@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 )
 
 func TestFillsForAnInstrumentListsEachFillWithQuantityPriceAndCommission(t *testing.T) {
@@ -308,24 +310,41 @@ func TestNoQueryChangesAJournalByAByte(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, report := range []string{"orders", "fills", "refusals", "totals", "positions", "reconcile"} {
+	// assertUnchanged compares every fixture's bytes with the bytes read
+	// before any query. It runs after each call, before that call's error is
+	// judged, so a write made on the way to a refusal is still caught.
+	assertUnchanged := func(call string) {
+		t.Helper()
+		for i, p := range paths {
+			after, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before[i], after) {
+				t.Errorf("%s changed after %s", p, call)
+			}
+		}
+	}
+	for _, report := range []string{"orders", "fills", "refusals", "totals", "positions"} {
 		for _, format := range []string{"text", "csv", "json"} {
-			// reconcile exits non-zero on these fixtures (a disagreement, or a
-			// journal with no snapshot to compare); only the bytes matter here.
 			args := append([]string{report, "-format", format}, paths...)
 			_, err := query(t, args...)
-			if err != nil && report != "reconcile" {
+			assertUnchanged(report + " " + format)
+			if err != nil {
 				t.Fatalf("%s %s: %v", report, format, err)
 			}
 		}
 	}
-	for i, p := range paths {
-		after, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(before[i], after) {
-			t.Errorf("%s changed after querying it", p)
+	// reconcile runs on positionsJournal alone. It holds snapshots, so the
+	// rebuild and the table are reached, and its disagreement on 2026-01-20 is
+	// refused with the table printed. Given all three paths, reconcile stops at
+	// tradingJournal (no snapshot, so nothing compared) before either.
+	for _, format := range []string{"text", "csv", "json"} {
+		out, err := query(t, "reconcile", "-format", format, paths[2])
+		assertUnchanged("reconcile " + format)
+		var dis *journalquery.DisagreementError
+		if !errors.As(err, &dis) || out == "" {
+			t.Fatalf("reconcile %s: want the table and a DisagreementError, got %q, %v", format, out, err)
 		}
 	}
 }
