@@ -341,14 +341,24 @@ restarted, an execution IBKR sends again counts once, only the shares
 still unfilled are counted as being sold, and the sale is not tried a
 second time while it works. A retirement of it frees the attempt, so the
 sale is tried again, only while IBKR has never named it; once IBKR has,
-the retirement is refused, as in a run that never restarted. One gap is
-left: a sale that had already ended when the decision was recorded
-(cancelled, expired or filled in full) is recorded as spent, without its
-order, so a run restarted from that decision refuses every report IBKR
-sends on it afterwards: a late fill after its cancel, a fill of a sale
-filled in full that IBKR sends again, or any later status report. Each
-stops the run for you to reconcile the account with IBKR. Closing that gap
-is a later change, which will let a restarted run read such a report. A sale an earlier run released that
+the retirement is refused, as in a run that never restarted. A sale that
+had already ended when the decision was recorded (cancelled, expired or
+refused by IBKR, part filled or not, or filled in full) is recorded with
+its order too, once IBKR has given its own ID for it: how it ended and
+when, and every execution so far (rules version 1.25.0). A run restarted
+from that decision reads every report IBKR sends on it afterwards as a run
+that never restarted would: a late fill after its cancel counts, once; a
+fill IBKR sends again, of a part or of a sale filled in full, is
+recognised by its execution ID and counts nothing; a later status report
+is read. A fill that would take the sale past the shares it released, or
+reuse an execution ID for a different trade, is refused by both, with the
+same message, and stops the run for you to reconcile. The program reads
+such reports on the incident's one sale for as long as the incident stands,
+which is the rest of the run, so a decision always carries that one sale.
+One case is still refused: a sale that ended before IBKR ever named it by
+its own ID (in practice, one filled in full with no acknowledgement or
+listing) is recorded as spent, and a restarted run refuses a later report
+on it; that stops the run for you to reconcile the account with IBKR. A sale an earlier run released that
 the adapter never sent before that run ended is retired for the fresh run
 too, though that run's engine can no longer be told: before you approve
 the fresh run, `relay.py settle-ended-run` writes the adapter's

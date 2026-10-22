@@ -1836,3 +1836,103 @@ func TestARunsOwnLiveSaleAVenueNamedIsRestoredWithItsExecutions(t *testing.T) {
 		t.Error("an execution past the restored sale's shares was read")
 	}
 }
+
+// TestARunsOwnEndedSaleIsRestoredAndReadsALateFill: the run's own sale,
+// acknowledged under venue order ib-1, executes one share and is canceled;
+// the gate reports it ended, canceled, at the cancel's second, with its one
+// execution. A gate restored from that record reads the venue's later
+// reports on it as the full gate does: an execution after the cancel counts
+// once (ADR 0022), the same execution sent again is a redelivery (ADR 0019,
+// "Explained means"), a further cancel is read, and an execution past the
+// released shares is refused with the full gate's words. The pending count
+// is the full gate's throughout, and the sale is never attempted again.
+func TestARunsOwnEndedSaleIsRestoredAndReadsALateFill(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:0", boosted())
+	halt(t, g)
+	incident := g.Incident()
+	s, ok := requestSale(t, g, event.SaleTriggerExit)
+	if !ok || s.Order == nil || s.Order.Quantity < 3 {
+		t.Fatalf("setup: the incident's sale: %+v", s)
+	}
+	released(t, check(t, g, saleOrder(s.Order))[0])
+	sale := *s.Order
+	fill := func(id string, shares int64, after time.Duration) event.TargetWeightFillPayload {
+		return event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: sale.ClientOrderID, FillID: id, InstrumentID: "SPY",
+			Side: event.OrderSideSell, Quantity: shares, Price: sale.LimitPrice, Commission: 1, FilledAt: at.Add(after)}
+	}
+	lifecycle := func(status string, after time.Duration) event.LimitOrderLifecyclePayload {
+		return event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: sale.ClientOrderID, OrderID: "ib-1", InstrumentID: "SPY",
+			Side: event.OrderSideSell, Status: status, Quantity: sale.Quantity, LimitPrice: sale.LimitPrice, OccurredAt: at.Add(after)}
+	}
+	for _, err := range []error{
+		g.ObserveLifecycle(lifecycle(event.OrderLifecycleStatusSubmitted, time.Minute)),
+		g.ObserveFill(fill("exec-1", 1, 2*time.Minute)),
+		g.ObserveLifecycle(lifecycle(event.OrderLifecycleStatusCanceled, 3*time.Minute+500*time.Millisecond)),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, live := g.OwnLiveSale(incident, "SPY"); live {
+		t.Fatal("a canceled sale is reported live")
+	}
+	ended, ok := g.OwnReleasedSale(incident, "SPY")
+	if !ok || ended.Live() || ended.EndStatus != event.OrderLifecycleStatusCanceled || !ended.Ended.Equal(at.Add(3*time.Minute)) ||
+		ended.VenueOrderID != "ib-1" || len(ended.Fills) != 1 || ended.Attempt != 1 {
+		t.Fatalf("the canceled sale is reported as %+v %v, want it canceled at %s under venue order ib-1 with its one execution", ended, ok, at.Add(3*time.Minute))
+	}
+	r := gate(t, limits(), event.TradingModeDryRun)
+	if err := r.RestoreIncidentState(incident, event.EngineStateHalted, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	o := event.OrderReleasedPayload{AccountID: "joint", Tag: incident, ClientOrderID: sale.ClientOrderID, InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: sale.Quantity, LimitPrice: sale.LimitPrice}
+	if err := r.RestoreRecovery(risklimit.Recovery{
+		SaleAttempt: &risklimit.RestoredSaleAttempt{IncidentID: incident},
+		OwnSale: &risklimit.RestoredOwnSale{RestoredOrder: risklimit.RestoredOrder{Order: o, Fills: ended.Fills, Ended: ended.Ended, VenueOrderID: ended.VenueOrderID},
+			Trigger: event.SaleTriggerExit, Attempt: ended.Attempt, EndStatus: ended.EndStatus},
+	}); err != nil {
+		t.Fatalf("the canceled sale was not restored: %v", err)
+	}
+	if got, ok := r.OwnReleasedSale(incident, "SPY"); !ok || !reflectEqualOwnSale(got, ended) {
+		t.Errorf("the restored gate reports its own sale as %+v %v, want the full gate's %+v", got, ok, ended)
+	}
+	both := func(name string, read func(*risklimit.Gate) error) {
+		t.Helper()
+		want, got := read(g), read(r)
+		if (want == nil) != (got == nil) || want != nil && want.Error() != got.Error() {
+			t.Errorf("%s: the restored gate read it as %v, want the full gate's %v", name, got, want)
+		}
+		if w, gp := g.PendingSells("SPY"), r.PendingSells("SPY"); w != gp {
+			t.Errorf("%s: the restored gate counts %d shares being sold, want the full gate's %d", name, gp, w)
+		}
+		if w, gf := g.Filled(sale.ClientOrderID), r.Filled(sale.ClientOrderID); w != gf {
+			t.Errorf("%s: the restored gate holds %d filled, want the full gate's %d", name, gf, w)
+		}
+	}
+	late := fill("exec-2", 1, 4*time.Minute)
+	both("a fill after the cancel", func(x *risklimit.Gate) error { return x.ObserveFill(late) })
+	both("the late fill sent again", func(x *risklimit.Gate) error { return x.ObserveFill(late) })
+	both("a further cancel", func(x *risklimit.Gate) error {
+		return x.ObserveLifecycle(lifecycle(event.OrderLifecycleStatusCanceled, 5*time.Minute))
+	})
+	both("a fill past the released shares", func(x *risklimit.Gate) error { return x.ObserveFill(fill("exec-3", sale.Quantity, 6*time.Minute)) })
+	if r.Filled(sale.ClientOrderID) != 2 {
+		t.Errorf("the restored gate holds %d filled, want each execution once, 2", r.Filled(sale.ClientOrderID))
+	}
+	observe(t, r, "broker:1", boosted())
+	if s, ok := requestSale(t, r, event.SaleTriggerExit); ok || s.Order != nil {
+		t.Errorf("the restored gate attempted the ended sale again: %+v", s)
+	}
+}
+
+// reflectEqualOwnSale reports whether two reports of the run's own sale
+// state the same order as a decision records it (its client order ID,
+// shares, limit and trigger), attempt, venue order ID, end and executions,
+// each instant the same however its offset is written.
+func reflectEqualOwnSale(a, b risklimit.OwnSale) bool {
+	return a.Order.ClientOrderID == b.Order.ClientOrderID && a.Order.Quantity == b.Order.Quantity && a.Order.LimitPrice == b.Order.LimitPrice &&
+		a.Order.Sale.Trigger == b.Order.Sale.Trigger && a.Attempt == b.Attempt && a.VenueOrderID == b.VenueOrderID && a.EndStatus == b.EndStatus &&
+		a.Ended.Equal(b.Ended) && slices.Equal(a.Fills, b.Fills)
+}
