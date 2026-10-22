@@ -37,7 +37,9 @@ type CostPayload struct {
 	Kind string `json:"kind"`
 	// Amount is as IBKR states the posting: negative is money out of the
 	// account (a commission, a fee, interest paid), positive money in
-	// (interest received, or a commission refunded). Finite and non-zero.
+	// (interest received, or a commission refunded). Finite and non-zero; the
+	// costs ledger also holds a zero on a restatement line, which reverses the
+	// earlier amount (internal/report, ParseCostLedger).
 	Amount float64 `json:"amount"`
 	// Currency is the currency Amount is stated in.
 	Currency string `json:"currency"`

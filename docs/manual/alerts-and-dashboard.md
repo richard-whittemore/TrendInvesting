@@ -782,8 +782,10 @@ the reporter and the dashboard do the matching:
   revision (the higher last part of the ID, whatever order the log holds
   them in). A commission adjustment under a numeric ID cannot be matched to
   an execution, so it is counted as an adjustment (an assumption, reconciliation
-  chapter). A cost IBKR restates counts once, at its latest value, and the
-  text says how many were restated. The text under the table says how many postings were left
+  chapter). A cost IBKR restates counts once, at its latest value (a cost
+  restated to zero counts as reversed), and the text counts every restatement
+  ("N restatement(s) by IBKR (latest <day>)") and says how many the last
+  reading recorded. The text under the table says how many postings were left
   out. IBKR's Cash Transactions normally holds only "Commission
   Adjustments", under IBKR's numeric transaction IDs, so the per-trade
   commissions come from the fills; the matching is **an assumption until the

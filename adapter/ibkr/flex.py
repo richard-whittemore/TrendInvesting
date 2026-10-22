@@ -61,8 +61,9 @@ read from IBKR"). One reading:
    cash read becomes Degraded (ADR 0019, amended 2026-10-21) while
    trading-side cash waits on it. A cost IBKR restates is recorded again as
    its restatement (RESTATED), never changed, written with the reading's other
-   costs and said once; the latest value counts. A restatement to nothing or to
-   a value that is not a finite number sets the costs aside, nothing written. The costs keep their own status file
+   costs and said once; the latest value counts. A restatement to nothing is a
+   reversal, written as a restatement of amount 0 (only a restatement may be 0); one to a value that is not a
+   finite number sets the costs aside, nothing written. The costs keep their own status file
    ("running" when their step starts, as the cash status) and their own
    period (COVERAGE_SUFFIX beside the costs ledger), checked as the cash
    ledger's is, so a first costs reading reaches back to the first run's
@@ -800,11 +801,12 @@ def costs_path(ledger_path):
     return os.path.join(os.path.dirname(ledger_path), COSTS_NAME)
 
 
-def _cost_as_written(payload):
+def _cost_as_written(payload, restatement=False):
     """Whether payload holds the fields _cost_record writes, each of the type it writes: a cost kind, a finite
-    non-zero amount, a three-letter currency, an as-of stamp and a transaction ID (internal/event CostPayload)."""
+    amount (non-zero unless it is a restatement, which reverses the earlier amount), a three-letter currency, an
+    as-of stamp and a transaction ID (internal/event CostPayload)."""
     return (set(payload) == set(COST_PAYLOAD_FIELDS) and payload["kind"] in COST_KINDS
-            and _number(payload["amount"]) and payload["amount"] != 0
+            and _number(payload["amount"]) and (restatement or payload["amount"] != 0)
             and isinstance(payload["currency"], str) and re.fullmatch(r"[A-Z]{3}", payload["currency"]) is not None
             and _parse_stamp(payload["as_of"]) is not None
             and isinstance(payload["transaction_id"], str) and bool(payload["transaction_id"]))
@@ -834,7 +836,8 @@ def read_costs(path):
         payload = record.get("payload") if isinstance(record, dict) else None
         if (not isinstance(record, dict) or set(record) - set(OPTIONAL_RECORD_FIELDS) != set(RECORD_FIELDS)
                 or (record["type"], record["schema_version"], record["source"]) != COST + (SOURCE,)
-                or not isinstance(payload, dict) or not _cost_as_written(payload)
+                or not isinstance(payload, dict)
+                or not _cost_as_written(payload, ID_PREFIX + str(payload.get("transaction_id")) in records)
                 or record["event_time"] != payload["as_of"]
                 or not _cost_id_as_written(record, records, restated)):
             raise StatementRefused("the costs ledger {} line {} is not a cost as this reader writes it; it is never "
@@ -886,9 +889,11 @@ def new_costs(statement, costs, approved_at):
         recorded = costs.get(ID_PREFIX + posting.transaction_id)
         if recorded is not None:
             stated = recorded["payload"]
-            if (Decimal(repr(float(stated["amount"]))) != posting.amount or stated["currency"] != posting.currency
+            # The writer stores float(amount), so the two are compared as it formats them (repr of the float), never as
+            # floats and never as the statement's own digits, which the ledger cannot hold past a float.
+            if (repr(float(stated["amount"])) != repr(float(posting.amount)) or stated["currency"] != posting.currency
                     or stated["as_of"] != _stamp(posting.as_of) or stated["kind"] != posting.kind):
-                restatements.append(_checked_cost(_cost_record(posting, restates=recorded)))
+                restatements.append(_checked_cost(_cost_record(posting, restates=recorded), restatement=True))
             continue
         if posting.as_of.astimezone(NEW_YORK).date() < first_day:
             before.append(posting.transaction_id)
@@ -897,13 +902,13 @@ def new_costs(statement, costs, approved_at):
     return written, before, restatements
 
 
-def _checked_cost(record):
+def _checked_cost(record, restatement=False):
     """record, once it passes the test read_costs applies to every line (_cost_as_written); StatementRefused naming
-    the transaction otherwise, so a cost restated to nothing or past a float is set aside with its reason and never
-    appended as a line both readers then refuse."""
-    if not _cost_as_written(record["payload"]):
+    the transaction otherwise, so a cost restated past a float (or a new cost of nothing) is set aside with its reason and
+    never appended as a line both readers then refuse."""
+    if not _cost_as_written(record["payload"], restatement):
         raise StatementRefused("cost {} is stated as {} {}, which is not a cost this reader can write (a finite "
-                               "non-zero amount); nothing is written for it".format(
+                               "amount, non-zero unless a restatement); nothing is written for it".format(
                                    record["payload"]["transaction_id"], record["payload"]["amount"],
                                    record["payload"]["currency"]))
     return record

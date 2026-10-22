@@ -572,16 +572,21 @@ func TestARestatedCostCountsAtItsLatestValue(t *testing.T) {
 	once := raw + restated("1", "-11", "restated: was fee -10.0 USD on x, now fee -11.0 USD on x")
 	twice := once + restated("2", "-12", "restated: was fee -11.0 USD on x, now fee -12.0 USD on x")
 	for name, tc := range map[string]struct {
-		raw  string
-		fees float64
-	}{"once": {once, 12}, "twice": {twice, 13}} {
+		raw       string
+		fees      float64
+		restated  int
+		wantInfix string
+	}{
+		"once":  {once, 12, 1, "1 restatement(s) by IBKR (latest 2024-01-03)"},
+		"twice": {twice, 13, 2, "2 restatement(s) by IBKR (latest 2024-01-03)"},
+	} {
 		ledger := report.ParseCostLedger([]byte(tc.raw))
 		if ledger.Unreadable != "" {
 			t.Fatalf("%s: %s", name, ledger.Unreadable)
 		}
 		ledger.State, ledger.CoveredTo = "read", "2024-01-04"
 		got := summarizeCosts(t, costSeries(t), ledger, "2024-01-05").Costs
-		if !near(got.Since.Fees, tc.fees) || ledger.Restated != 1 || !strings.Contains(got.Note, "1 cost(s) restated by IBKR") {
+		if !near(got.Since.Fees, tc.fees) || ledger.Restated != tc.restated || !strings.Contains(got.Note, tc.wantInfix) {
 			t.Errorf("%s: fees %v, restated %d, note %q", name, got.Since.Fees, ledger.Restated, got.Note)
 		}
 	}
@@ -596,6 +601,28 @@ func TestARestatedCostCountsAtItsLatestValue(t *testing.T) {
 		if got := report.ParseCostLedger([]byte(bad)); got.Read {
 			t.Errorf("%s: a restatement not as the reader writes it is read", name)
 		}
+	}
+}
+
+func TestAHexadecimalRevisionIsComparedAsHexadecimal(t *testing.T) {
+	s := costSeries(t)
+	// IBKR's execution IDs are hex-segmented: 0a follows 09, whatever the fill times say.
+	s.fillWithCommission(1, "0001f4e8.65a1b2c7.01.0a", 1.10)
+	s.fillWithCommission(2, "0001f4e8.65a1b2c7.01.09", 1.00)
+	got := summarizeCosts(t, s, report.CostLedger{}, "2024-01-05").Costs
+	if !near(got.Since.Commissions, 1.10) {
+		t.Errorf("commissions %v, want revision 0a's 1.10 alone", got.Since.Commissions)
+	}
+}
+
+func TestAFullTieKeepsTheLatestJournalledRevision(t *testing.T) {
+	s := costSeries(t)
+	// The same revision (0a and 0A) at the same time: the later journalled is the execution's.
+	s.fillWithCommission(1, "0001f4e8.65a1b2c8.01.0a", 1.00)
+	s.fillWithCommission(1, "0001f4e8.65a1b2c8.01.0A", 2.00)
+	got := summarizeCosts(t, s, report.CostLedger{}, "2024-01-05").Costs
+	if !near(got.Since.Commissions, 2.00) {
+		t.Errorf("commissions %v, want the later journalled 2.00 alone", got.Since.Commissions)
 	}
 }
 
@@ -627,10 +654,55 @@ func TestACorrectionsRevisionIsComparedNumericallyWhereBothAreNumbers(t *testing
 	s.fillWithCommission(1, "0001f4e8.65a1b2c5.01.09", 1.00)
 	s.fillWithCommission(2, "0001f4e8.65a1b2c5.01.10", 1.10)
 	// Not numbers: the later fill time is the later record, never byte order.
-	s.fillWithCommission(1, "0001f4e8.65a1b2c6.01.b", 2.00)
-	s.fillWithCommission(2, "0001f4e8.65a1b2c6.01.a", 2.20)
+	s.fillWithCommission(1, "0001f4e8.65a1b2c6.01.z", 2.00)
+	s.fillWithCommission(2, "0001f4e8.65a1b2c6.01.y", 2.20)
 	got := summarizeCosts(t, s, report.CostLedger{}, "2024-01-05").Costs
 	if !near(got.Since.Commissions, 3.30) {
 		t.Errorf("commissions %v, want 1.10 and 2.20 alone", got.Since.Commissions)
+	}
+}
+
+func TestACostRestatedToZeroReversesTheEarlierAmount(t *testing.T) {
+	raw := string(costLedgerOf(t, cost{"c1", event.CostFee, at(3), -10}))
+	stamp := at(3).UTC().Format(time.RFC3339)
+	line := func(id, amount string) string {
+		return `{"id":"ibkr-flex:` + id + `","type":"account.cost","schema_version":1,"event_time":"` + stamp +
+			`","source":"ibkr-flex","payload":{"kind":"fee","amount":` + amount + `,"currency":"USD","as_of":"` + stamp +
+			`","transaction_id":"c1"},"note":"restated: was fee -10.0 USD on x, now fee 0.0 USD on x"}` + "\n"
+	}
+	ledger := report.ParseCostLedger([]byte(raw + line("c1:restated:1", "0.0")))
+	if ledger.Unreadable != "" || ledger.Restated != 1 || ledger.Reversed != 1 {
+		t.Fatalf("a restatement to zero is a reversal: %+v", ledger)
+	}
+	ledger.State, ledger.CoveredTo = "read", "2024-01-04"
+	got := summarizeCosts(t, costSeries(t), ledger, "2024-01-05").Costs
+	if got.Since.Fees != 0 || !strings.Contains(got.Note, "1 reversing a cost to zero") {
+		t.Errorf("fees %v, note %q", got.Since.Fees, got.Note)
+	}
+	// A zero is accepted only on a restated line, never on a new cost.
+	if got := report.ParseCostLedger([]byte(strings.Replace(raw, "-10", "0", 1))); got.Read {
+		t.Errorf("a new cost of nothing is read")
+	}
+}
+
+func TestTheCostsStatusRestatedCountIsCarriedToTheNote(t *testing.T) {
+	stamp := at(3).UTC().Format(time.RFC3339)
+	files := map[string][]byte{
+		"/var/lib/flex/boost/costs.jsonl": append(costLedgerOf(t, cost{"c1", event.CostFee, at(3), -10}),
+			[]byte(`{"id":"ibkr-flex:c1:restated:1","type":"account.cost","schema_version":1,"event_time":"`+stamp+
+				`","source":"ibkr-flex","payload":{"kind":"fee","amount":-11,"currency":"USD","as_of":"`+stamp+
+				`","transaction_id":"c1"},"note":"restated: was x"}`+"\n")...),
+		"/var/lib/flex/boost/costs.jsonl.status.json": []byte(`{"state":"read","covered_to":"20240104","checked_at":"2024-01-05T22:00:00Z","restated":3}`),
+	}
+	readFile := func(p string) ([]byte, error) {
+		if b, ok := files[p]; ok {
+			return b, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	ledger := report.LoadCostLedgerFor("/var/lib/flex/boost/cash-movements.jsonl", "boost", readFile)
+	got := summarizeCosts(t, costSeries(t), ledger, "2024-01-05").Costs
+	if ledger.RestatedLast != 3 || !strings.Contains(got.Note, "3 restated in the last reading") {
+		t.Errorf("restated last %d, note %q", ledger.RestatedLast, got.Note)
 	}
 }

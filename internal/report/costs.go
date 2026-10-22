@@ -44,17 +44,24 @@ type CostPosting struct {
 // "coverage-gap"; "" when there is none) and CheckedAt the New York day of
 // that reading: the costs are read in their own step, so they can be set
 // aside while the cash ledger is read (adapter/ibkr/flex.py, read_once).
-// Postings holds each cost once, at its latest value; Restated counts the
-// costs IBKR restated (ParseCostLedger).
+// Postings holds each cost once, at its latest value; Restated counts every
+// restatement line the ledger holds (a cost restated twice counts twice),
+// RestatedTo is the New York day of the latest one's posting, Reversed counts
+// the restatements to zero, and RestatedLast is the costs status's own count
+// of the restatements the last reading recorded (ParseCostLedger,
+// costsStatusOf).
 type CostLedger struct {
-	Read        bool
-	Unreadable  string
-	NotAccepted string
-	CoveredTo   string
-	State       string
-	CheckedAt   string
-	Postings    []CostPosting
-	Restated    int
+	Read         bool
+	Unreadable   string
+	NotAccepted  string
+	CoveredTo    string
+	State        string
+	CheckedAt    string
+	Postings     []CostPosting
+	Restated     int
+	RestatedTo   string
+	Reversed     int
+	RestatedLast int
 }
 
 // LoadCostLedgerFor reads the costs ledger beside the cash ledger at
@@ -76,42 +83,45 @@ func LoadCostLedgerFor(cashLedgerPath, instance string, readFile func(string) ([
 	}
 	path := filepath.Join(dir, costsFileName)
 	coveredTo := coveredToOf(path+flexStatusSuffix, readFile)
-	state, checkedAt := costsStatusOf(path+flexStatusSuffix, readFile)
+	state, checkedAt, restatedLast := costsStatusOf(path+flexStatusSuffix, readFile)
 	raw, err := readFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if coveredTo == "" && state == "" {
 			return CostLedger{}
 		}
-		return CostLedger{Read: true, CoveredTo: coveredTo, State: state, CheckedAt: checkedAt}
+		return CostLedger{Read: true, CoveredTo: coveredTo, State: state, CheckedAt: checkedAt, RestatedLast: restatedLast}
 	}
 	if err != nil {
 		return CostLedger{Unreadable: fmt.Sprintf("the costs ledger cannot be read: %v", withoutPath(err))}
 	}
 	ledger := ParseCostLedger(raw)
 	if ledger.Read {
-		ledger.CoveredTo, ledger.State, ledger.CheckedAt = coveredTo, state, checkedAt
+		ledger.CoveredTo, ledger.State, ledger.CheckedAt, ledger.RestatedLast = coveredTo, state, checkedAt, restatedLast
 	}
 	return ledger
 }
 
 // costsStatusOf is the state of the costs status file at path and the New
-// York day of its checked_at, "" for either it does not hold.
-func costsStatusOf(path string, readFile func(string) ([]byte, error)) (state, checkedAt string) {
+// York day of its checked_at, "" for either it does not hold, and the
+// number of restatements the reading recorded (its "restated"), 0 when it
+// says none.
+func costsStatusOf(path string, readFile func(string) ([]byte, error)) (state, checkedAt string, restated int) {
 	raw, err := readFile(path)
 	if err != nil {
-		return "", ""
+		return "", "", 0
 	}
 	var status struct {
 		State     string    `json:"state"`
 		CheckedAt time.Time `json:"checked_at"`
+		Restated  int       `json:"restated"`
 	}
 	if json.Unmarshal(raw, &status) != nil {
-		return "", ""
+		return "", "", 0
 	}
 	if !status.CheckedAt.IsZero() {
 		checkedAt = newYorkDateOf(status.CheckedAt)
 	}
-	return status.State, checkedAt
+	return status.State, checkedAt, max(status.Restated, 0)
 }
 
 // newYorkDateOf is the New York day of at: IBKR's day, by which the Flex
@@ -146,10 +156,16 @@ func ParseCostLedger(raw []byte) CostLedger {
 	}
 	at := map[string]int{}
 	restatements := map[string]int{}
+	var restatedLines, reversed int
+	var restatedTo string
 	var postings []CostPosting
 	for n, line := range bytes.Split(raw[:len(raw)-1], []byte("\n")) {
 		c, id, note, ok := readCostLine(line)
 		i, seen := at[c.TransactionID]
+		// A restatement to zero reverses the earlier amount; a new cost of nothing is not a cost.
+		if ok && c.Amount == 0 && !seen {
+			ok = false
+		}
 		want := flexIDPrefix + c.TransactionID
 		if seen {
 			want += costRestated + strconv.Itoa(restatements[c.TransactionID]+1)
@@ -159,13 +175,18 @@ func ParseCostLedger(raw []byte) CostLedger {
 		}
 		if seen {
 			restatements[c.TransactionID]++
+			restatedLines++
+			restatedTo = newYorkDateOf(c.AsOf)
+			if c.Amount == 0 {
+				reversed++
+			}
 			postings[i] = c
 			continue
 		}
 		at[c.TransactionID] = len(postings)
 		postings = append(postings, c)
 	}
-	return CostLedger{Read: true, Postings: postings, Restated: len(restatements)}
+	return CostLedger{Read: true, Postings: postings, Restated: restatedLines, RestatedTo: restatedTo, Reversed: reversed}
 }
 
 // readCostLine is a costs line's posting, ID and note, and whether it is an
@@ -180,7 +201,15 @@ func readCostLine(line []byte) (c CostPosting, id, note string, ok bool) {
 	var p event.CostPayload
 	pd := json.NewDecoder(bytes.NewReader(r.Payload))
 	pd.DisallowUnknownFields()
-	if pd.Decode(&p) != nil || p.ValidateSchema(r.SchemaVersion) != nil || !r.EventTime.Equal(p.AsOf) {
+	if pd.Decode(&p) != nil {
+		return CostPosting{}, "", "", false
+	}
+	// Nothing is a valid amount only on a restatement line (ParseCostLedger decides which this is).
+	checked := p
+	if checked.Amount == 0 {
+		checked.Amount = 1
+	}
+	if checked.ValidateSchema(r.SchemaVersion) != nil || !r.EventTime.Equal(p.AsOf) {
 		return CostPosting{}, "", "", false
 	}
 	return CostPosting{Kind: p.Kind, Amount: p.Amount, Currency: p.Currency, AsOf: p.AsOf, TransactionID: p.TransactionID}, r.ID, r.Note, true
@@ -321,18 +350,19 @@ func executionBase(id string) string {
 
 // laterRevision reports whether fill f is a later record of its execution
 // than kept: a higher last segment of the execution ID, which a correction
-// raises (executionBase), compared as numbers where both are whole numbers
-// (so a 10th revision follows a 9th), and otherwise, or when equal, the
-// later fill time: a last segment that is not a whole number is never
-// ordered by its bytes. Journal order is not
-// used, so a redelivered original never replaces its correction.
+// raises (executionBase). IBKR's execution IDs are hex-segmented, so the
+// segments are compared as hexadecimal numbers where both parse as hex (0a
+// follows 09, 10 follows 9); otherwise, or when equal, the later fill time
+// decides, and on a full tie the later journalled fill is the execution's
+// (the order the envelopes are read in), so a last segment that is not a
+// number is never ordered by its bytes.
 func laterRevision(f, kept fillCost) bool {
-	a, errA := strconv.ParseUint(f.id[strings.LastIndex(f.id, ".")+1:], 10, 64)
-	b, errB := strconv.ParseUint(kept.id[strings.LastIndex(kept.id, ".")+1:], 10, 64)
+	a, errA := strconv.ParseUint(f.id[strings.LastIndex(f.id, ".")+1:], 16, 64)
+	b, errB := strconv.ParseUint(kept.id[strings.LastIndex(kept.id, ".")+1:], 16, 64)
 	if errA == nil && errB == nil && a != b {
 		return a > b
 	}
-	return f.at.After(kept.at)
+	return !f.at.Before(kept.at)
 }
 
 // costMatchesFill reports whether a commission posting with transaction ID
@@ -483,7 +513,14 @@ func costsNote(c Costs, ledger CostLedger, date string) (incomplete, note string
 		parts = append(parts, "fees and interest not yet recorded by the Flex reader")
 	}
 	if ledger.Restated > 0 {
-		parts = append(parts, fmt.Sprintf("%d cost(s) restated by IBKR, counted at the latest value", ledger.Restated))
+		text := fmt.Sprintf("%d restatement(s) by IBKR (latest %s), each cost counted at its latest value", ledger.Restated, ledger.RestatedTo)
+		if ledger.Reversed > 0 {
+			text += fmt.Sprintf(", %d reversing a cost to zero", ledger.Reversed)
+		}
+		parts = append(parts, text)
+	}
+	if ledger.RestatedLast > 0 {
+		parts = append(parts, fmt.Sprintf("%d restated in the last reading", ledger.RestatedLast))
 	}
 	if c.MatchedCommissions > 0 {
 		parts = append(parts, fmt.Sprintf("%d commission posting(s) already counted on a fill are not counted again", c.MatchedCommissions))

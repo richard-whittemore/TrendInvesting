@@ -1013,13 +1013,43 @@ class ReadOnceTests(unittest.TestCase):
         self.assertTrue(self.read(FakeFlex(statements=(again,))))
         self.assertIn("ibkr-flex:900000107:restated:2", [r["id"] for r in self.costs()])
 
-    def test_a_cost_restated_to_nothing_or_past_a_float_sets_the_costs_aside_writing_nothing(self):
+    def test_a_cost_restated_to_zero_is_a_reversal_both_readers_accept(self):
         self.read(FakeFlex())
-        for amount in ("0", "1e999"):
-            with self.subTest(amount):
-                status = self.assert_costs_set_aside(self.restated_statement(amount), "900000107")
-                self.assertNotIn("not a cost as this reader writes it", status["reason"])
-                self.assertTrue(self.read(FakeFlex()), "the ledger is still one both readers accept")
+        before = self.costs()
+        self.assertTrue(self.read(FakeFlex(statements=(self.restated_statement("0"),))), "a reversal does not fail")
+        status = self.costs_status()
+        self.assertEqual((status["state"], status["restated"]), ("read", 1))
+        reversal = self.costs()[len(before)]
+        self.assertEqual((reversal["id"], reversal["payload"]["amount"]), ("ibkr-flex:900000107:restated:1", 0.0))
+        self.assertTrue(self.read(FakeFlex(statements=(self.restated_statement("0"),))), "the next reading reads it")
+        self.assertEqual(self.costs_status().get("restated", 0), 0, "and does not record it again")
+        self.assertEqual(len(self.costs()), len(before) + 1)
+        self.assertTrue(self.read(FakeFlex(statements=(self.restated_statement("-12"),))), "and can be restated again")
+        self.assertIn("ibkr-flex:900000107:restated:2", [r["id"] for r in self.costs()])
+
+    def test_a_new_cost_of_zero_is_never_read_as_written(self):
+        self.read(FakeFlex())
+        lines = self.costs_ledger.read_text().splitlines()
+        zero = json.loads(lines[0])
+        zero["payload"]["amount"] = 0.0
+        self.costs_ledger.write_text("".join(json.dumps(r) + "\n" for r in [zero] + [json.loads(x) for x in lines[1:]]))
+        self.assert_costs_set_aside(fixture("statement.xml"), "not a cost as this reader writes it")
+
+    def test_a_cost_restated_past_a_float_sets_the_costs_aside_writing_nothing(self):
+        self.read(FakeFlex())
+        status = self.assert_costs_set_aside(self.restated_statement("1e999"), "900000107")
+        self.assertNotIn("not a cost as this reader writes it", status["reason"])
+        self.assertTrue(self.read(FakeFlex()), "the ledger is still one both readers accept")
+
+    def test_a_cost_that_does_not_round_trip_through_a_float_is_not_restated_every_reading(self):
+        long = "-1234567890.12345678901"
+        statement = fixture("statement.xml").replace(b'amount="-10" transactionID', 'amount="{}" transactionID'.format(long).encode())
+        self.assertTrue(self.read(FakeFlex(statements=(statement,))))
+        first = self.costs_ledger.read_bytes()
+        for _ in range(2):
+            self.assertTrue(self.read(FakeFlex(statements=(statement,))))
+            self.assertEqual(self.costs_ledger.read_bytes(), first, "the same statement adds nothing")
+            self.assertEqual(self.costs_status().get("restated", 0), 0)
 
     def test_a_restatement_line_not_as_the_reader_writes_it_sets_the_costs_aside(self):
         self.read(FakeFlex())
