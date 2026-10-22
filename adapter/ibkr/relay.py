@@ -269,6 +269,10 @@ CLIENT_ORDER_ID_SHAPE = re.compile(r"tw-[0-9a-z]+(?:-[0-9a-z]+)*")
 # The shape of the input ID a retirement's entry ID may end with
 # (_finish_retirement): non-empty, with no space.
 INPUT_ID_SHAPE = re.compile(r"\S+")
+# The largest whole number the engine reads as an int64 (internal/event
+# OrderRetiredPayload's quantity), so a queued retirement's quantity past it
+# is not one the relay queues (fail closed, AGENTS.md).
+INT64_MAX = 2 ** 63 - 1
 # The input an earlier engine run left awaiting its reply (resolve_run_ended),
 # settled apart from the order decisions above.
 DECIDE_RUN_ENDED = "run-ended"
@@ -539,17 +543,23 @@ class Outbox:
         return self._read()[0]
 
     def load_texts(self):
-        """Each entry load reads, with its own text as the file holds it, byte for byte, as (entry, text), oldest first."""
+        """Each entry load reads, with its own text as the file holds it, as (entry, text), oldest first.
+
+        The file is read as bytes and decoded as UTF-8, never with a line end
+        translated, so each text encodes back to the entry's own bytes, a
+        "\r" included (fail closed, AGENTS.md).
+        """
         entries, text = self._read()
         return list(zip(entries, _element_texts(text))) if entries else []
 
     def _read(self):
         try:
-            with open(self.path, encoding="utf-8") as f:
-                text = f.read()
+            with open(self.path, "rb") as f:
+                data = f.read()
         except FileNotFoundError:
             return [], None
         try:
+            text = data.decode("utf-8")
             entries = json.loads(text)
         except ValueError as err:
             raise OutboxInvalid("{} is not JSON: {}".format(self.path, err)) from None
@@ -604,22 +614,29 @@ class Outbox:
                 self._write(kept)
 
     def strike_all(self, input_ids):
-        """Remove the entries for every one of input_ids in one write: all of them or none."""
+        """Remove the entries for every one of input_ids in one write: all of them or none.
+
+        Each kept entry is copied as the file holds it (load_texts), never
+        written again from what was read, so a kept entry whose numbers no
+        JSON writer of the adapter writes (NaN, an exponent past a float's
+        range) never makes the strike raise (fail closed, AGENTS.md).
+        """
         gone = set(input_ids)
         with self._locked():
-            entries = self.load()
-            kept = [e for e in entries if e["id"] not in gone]
-            if len(kept) != len(entries):
-                self._write(kept)
+            texts = self.load_texts()
+            kept = [t for e, t in texts if e["id"] not in gone]
+            if len(kept) != len(texts):
+                self._write_text("[" + ",".join(kept) + "]", self.path)
 
     def set_aside_texts(self):
         """The text of each entry set aside (set_aside), oldest first; a file that is not a list of entries raises OutboxInvalid."""
         try:
-            with open(self.set_aside_path, encoding="utf-8") as f:
-                text = f.read()
+            with open(self.set_aside_path, "rb") as f:
+                data = f.read()
         except FileNotFoundError:
             return []
         try:
+            text = data.decode("utf-8")
             entries = json.loads(text)
         except ValueError as err:
             raise OutboxInvalid("{} is not JSON: {}".format(self.set_aside_path, err)) from None
@@ -630,10 +647,12 @@ class Outbox:
     def set_aside(self, texts):
         """Copy each entry's own text (load_texts) into the set-aside file behind those already there, each once.
 
-        Each is copied byte for byte, never written again from what was
-        read, so an entry whose numbers no JSON writer of the adapter writes
-        (NaN, an exponent past a float's range) is kept as the outbox held
-        it. Written under the outbox's lock, as a temporary file renamed
+        Each entry's text, and each already set aside, is copied as the file
+        held it (read as bytes, no line end translated), never written again
+        from what was read, so an entry whose numbers no JSON writer of the
+        adapter writes (NaN, an exponent past a float's range) is kept as the
+        outbox held it; only the list's brackets and commas around them are
+        the adapter's own. Written under the outbox's lock, as a temporary file renamed
         over the file, so a stop leaves it as it was or with every entry; an
         entry set aside is never removed from it, and nothing is struck
         here (fail closed, AGENTS.md). The caller strikes each entry off the
@@ -660,8 +679,9 @@ class Outbox:
 
     def _write_text(self, text, path):
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
+        # As bytes, so no line end is translated (load_texts).
+        with open(tmp, "wb") as f:
+            f.write(text.encode("utf-8"))
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -1822,7 +1842,8 @@ def _is_queued_retirement(entry):
     fields and the payload's and no others, each value of its JSON type: the
     order's identity as the engine's retirement input requires it (an
     account, an instrument, buy or sell, a whole quantity above zero and a
-    finite limit above zero: OrderRetiredPayload.Validate), a client order
+    finite limit above zero: OrderRetiredPayload.Validate; the quantity no
+    more than an int64 holds, INT64_MAX), a client order
     ID of the engine's shape (CLIENT_ORDER_ID_SHAPE), a retirement as the
     relay records one (_is_retirement), the real whole-second time the
     adapter stamps it with, an event time as real, never before the
@@ -1841,7 +1862,7 @@ def _is_queued_retirement(entry):
     if not isinstance(cid, str) or CLIENT_ORDER_ID_SHAPE.fullmatch(cid) is None:
         return False
     if (not _is_text(p["account_id"]) or not _is_text(p["instrument_id"]) or p["side"] not in ("buy", "sell")
-            or not _is_count(p["quantity"]) or not _is_number(p["limit_price"]) or p["limit_price"] <= 0):
+            or not _is_count(p["quantity"]) or p["quantity"] > INT64_MAX or not _is_number(p["limit_price"]) or p["limit_price"] <= 0):
         return False
     if not _is_retirement(p["reason"], p["detail"], p["retired_by"]):
         return False
@@ -2158,7 +2179,8 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None, se
     sell by hand if needed (ADR 0019, amended 2026-10-17, reading 4).
     Returns the text of every entry this input's settlements set aside,
     those of a rerun after a stop part way included, so the owner is told
-    of each until the input is settled. today defaults to today in New
+    of each on every rerun; once the input is cleared, a rerun returns those
+    its settlements name, changing nothing. today defaults to today in New
     York.
     """
     if not reason or not reason.strip():
@@ -2169,6 +2191,13 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None, se
     try:
         waiting = pending.load()
         if waiting is None:
+            # A stop after the clear and before the notice is printed: the
+            # input's own settlements still name what they set aside, so each
+            # is returned, and printed, on every rerun (ADR 0019, amended
+            # 2026-10-17, reading 4; fail closed, AGENTS.md).
+            named = [t for e in pending.run_ended() if e["input"]["id"] == input_id for t in e.get("set_aside", ())]
+            if named:
+                return named
             raise ResolveRefused("no input awaits its reply in {}, so there is nothing to settle".format(pending.path))
         if waiting.get("id") != input_id:
             raise ResolveRefused("the input awaiting its reply is {}, not {}; check the input ID the adapter's stop "

@@ -1667,6 +1667,116 @@ class LoopTests(unittest.TestCase):
                 self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[raw]])
                 self.assertIsNone(pending.load())
 
+    def test_set_aside_malformed_prints_the_by_hand_sale_on_every_rerun_after_a_stop_past_the_clear(self):
+        # A stop after the pending file is cleared and before the notice is
+        # printed leaves no input awaiting its reply; each rerun still finds
+        # the entries set aside in the input's own settlement (its
+        # set_aside) and prints each, with its order, every time, so the
+        # by-hand sale is never left untold (fail closed, AGENTS.md; ADR
+        # 0019, amended 2026-10-17, reading 4).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+        pending = PendingInput(self.pending)
+        clear = PendingInput.clear
+
+        def stop_after_the_clear(self_):
+            clear(self_)
+            raise OSError("stopped")
+
+        with mock.patch.object(PendingInput, "clear", stop_after_the_clear):
+            with self.assertRaises(OSError):
+                relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot", str(second.path),
+                                               today=SESSION, set_aside_malformed=True)
+        self.assertIsNone(pending.load())
+        raw = json.dumps(damaged, separators=(",", ":"))
+        for option in (["--set-aside-malformed"], [], ["--set-aside-malformed"]):
+            with self.subTest(option=option):
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)[:-1] + option), 0)
+                self.assertEqual(printed.getvalue().count("by hand"), 1)
+                for part in (raw, "'tw-paper-1'", self.pending + OUTBOX_SUFFIX + ".set-aside"):
+                    self.assertIn(part, printed.getvalue())
+        self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[raw]])
+
+    def test_set_aside_malformed_keeps_line_ends_byte_for_byte(self):
+        # The outbox and the set-aside file are read as bytes, never with a
+        # newline translated: an entry holding CRLF or a bare CR is set aside,
+        # recorded and printed with each "\r" kept, and an entry already set
+        # aside keeps its own line ends when another is added (fail closed,
+        # AGENTS.md).
+        for new in ('"schema_version":\r\ntrue,', '"schema_version":\rtrue,'):
+            with self.subTest(new=new):
+                self.setUp()
+                second, entry = self.damaged_retirement_left_by_the_first_run(lambda e: None)
+                path = self.pending + OUTBOX_SUFFIX
+                data = Path(path).read_bytes()
+                compact = json.dumps(entry, separators=(",", ":"))
+                damaged = compact.replace('"schema_version":1,', new)
+                self.assertNotEqual(damaged, compact)
+                Path(path).write_bytes(data.replace(compact.encode(), damaged.encode()))
+                earlier = '{"id":"set-aside-before",\r\n"payload":{}}'
+                Path(path + ".set-aside").write_bytes(("[" + earlier + "]").encode())
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+                aside = Path(path + ".set-aside").read_bytes()
+                self.assertIn(damaged.encode(), aside)
+                self.assertIn(earlier.encode(), aside)
+                self.assertIn(damaged, printed.getvalue())
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual(settled["set_aside"], [damaged])
+
+    def test_strike_all_copies_each_kept_entry_as_the_outbox_holds_it(self):
+        # A strike rewrites the outbox by copying each kept entry's own text,
+        # never by writing it again from what was read, so a kept entry
+        # holding a number the adapter never writes (NaN, Infinity, an
+        # exponent past a float's range) never makes the strike raise, and
+        # is kept byte for byte (fail closed, AGENTS.md).
+        for number in ("NaN", "-Infinity", "1e309"):
+            with self.subTest(number=number):
+                path = os.path.join(self.dir.name, "strike-" + number + OUTBOX_SUFFIX)
+                gone = '{"event_time":"2026-10-16T20:30:00Z","event_type":"x","id":"gone","payload":{},"schema_version":1}'
+                kept = ('{"event_time":"2026-10-16T20:30:00Z",\r\n "event_type":"x","id":"kept",'
+                        '"payload":{"price":' + number + '},"schema_version":1}')
+                Path(path).write_bytes(("[" + gone + "," + kept + "]").encode())
+                outbox = Outbox(path)
+                outbox.strike_all(["gone"])
+                self.assertEqual(Path(path).read_bytes(), ("[" + kept + "]").encode())
+                self.assertEqual([e["id"] for e in outbox.load()], ["kept"])
+
+    def test_run_ended_refuses_a_queued_retirement_quantity_past_the_engines_int64(self):
+        # The engine reads a retirement's quantity as an int64 (internal/event
+        # OrderRetiredPayload), so a quantity above 2**63-1 is not one the
+        # relay queues: the settlement is refused naming the entry, and with
+        # --set-aside-malformed it is set aside (fail closed, AGENTS.md).
+        def quantity(value):
+            def damage(e):
+                e["payload"]["quantity"] = value
+            return damage
+
+        for value in (2 ** 63, 2 ** 64 + 1):
+            with self.subTest(quantity=value):
+                self.setUp()
+                second, damaged = self.damaged_retirement_left_by_the_first_run(quantity(value))
+                printed = io.StringIO()
+                with contextlib.redirect_stderr(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)[:-1]), 1)
+                self.assertIn("order-retired:tw-paper-1", printed.getvalue())
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual([json.loads(t) for t in settled["set_aside"]], [damaged])
+        with self.subTest(quantity=2 ** 63 - 1):
+            self.setUp()
+            second, _ = self.damaged_retirement_left_by_the_first_run(quantity(2 ** 63 - 1))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(relay_main(self.set_aside_args(second)[:-1]), 0)
+            [settled] = PendingInput(self.pending).run_ended()
+            self.assertEqual([e["id"] for e in settled["outbox"]], ["order-retired:tw-paper-1"])
+
     def fresh_run_released(self, client_order_id):
         """The first run's input left waiting, and a fresh run whose own log released order client_order_id."""
         second = self.left_waiting_by_the_first_run("session:1", commits=True)
