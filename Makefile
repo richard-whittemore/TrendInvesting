@@ -125,6 +125,7 @@ research-test:
 deploy-test:
 	./deploy/rehearsal/test-platform.sh
 	./deploy/rehearsal/test-build.sh
+	./deploy/rehearsal/test-release.sh
 	./deploy/rehearsal/test-provision-arch.sh
 	./deploy/mac-mini/test-programs-lib.sh
 	cd deploy/rehearsal && python3 -m unittest test_twsapi_archive

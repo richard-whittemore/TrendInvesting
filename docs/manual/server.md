@@ -54,6 +54,18 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 Updates: `unattended-upgrades` applies security updates only and never
 reboots by itself, because a reboot logs the Gateway out.
 
+## Upgrading the programs
+
+The server has no Go and does not update itself. To put a fix on it, tag the merged commit on your Mac (`git tag -a v1.2.3 -m "v1.2.3"` and push the tag); GitHub builds the five programs and publishes them with their checksums and a build attestation. Then, on the server over Tailscale, run `sudo ti-release v1.2.3`. It downloads that release, checks it, keeps the build now installed as the previous one, installs the new one, restarts the dashboard and prints what changed. If the dashboard does not come back, it puts the previous build back and tells you.
+
+Two things it never does. It never restarts an engine: a running engine keeps the build it started with, and a new engine build takes effect only at the next fresh run you approve. And nothing is ever deployed because something was merged: only a tag you push and a command you run.
+
+`sudo ti-release --rollback` puts the previous build back. It refuses while an engine unit is starting or stopping; wait and run it again. The step-by-step is in `docs/runbooks/lightsail-deployment.md`, "Upgrading: tag, release, `ti-release`".
+
+`ti-release` checks, before it installs anything, that each program matches the release's checksums, that each is a Linux program for this server, and that GitHub's build attestation says it was built by this repository's release workflow from exactly the commit the tag names, so an older release cannot be passed off under a newer tag. That check needs `gh`, which the first install puts on the server; without `gh`, `ti-release` refuses and installs nothing. It also refuses while any engine unit is starting or stopping (it asks again just before it swaps the programs), and treats a dashboard that comes up and then stops within a few seconds as not come back. If any step of the install fails, it puts the build that was current back and records nothing.
+
+**If a release fails part way.** `ti-release` normally puts the previous build back by itself and says so. In the rare case it cannot, it leaves a copy of a build in the releases folder under a name starting with a dot. Only `.replaced` stops `ti-release`: it holds a build that could not be kept after a release, and while it is there `ti-release` prints an ALERT naming the build's tag and installs nothing. `.rescue-<tag>` holds a build that could not be moved back into its own folder; its ALERT names it, it is the only copy so nothing deletes it, and it never blocks a run. To see which build is installed and whether anything is kept, run `ti-release --status`: it prints the current and previous tags and any kept copy, and changes nothing. To clear a copy, follow the ALERT's tag and the runbook's "Upgrading" section, which shows how to move it back by hand or aside. Once `.replaced` is clear, `ti-release` runs again, and `sudo ti-release --rollback` is available to put the previous build back.
+
 ## Where the configuration lives
 
 In the paths and unit names below, `<instance>` is the engine instance: the
