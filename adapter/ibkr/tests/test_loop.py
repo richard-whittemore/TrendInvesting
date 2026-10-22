@@ -1403,7 +1403,10 @@ class LoopTests(unittest.TestCase):
         def input_id_with_a_space(e):
             e["id"] = "order-retired:tw-paper-1:session 1"
 
-        damages = (owner_by_adapter, unnamed_owner, session_over_by_owner, unknown_reason, no_detail,
+        def oversized_limit_price(e):
+            e["payload"]["limit_price"] = 10 ** 400
+
+        damages = (oversized_limit_price, owner_by_adapter, unnamed_owner, session_over_by_owner, unknown_reason, no_detail,
                    no_client_order_id, unsupported_version, another_orders_id, empty_input_id, unrecognised_id,
                    retirement_id_of_another_type, no_side, client_order_id_of_another_shape,
                    client_order_id_with_a_colon, input_id_with_a_space,
@@ -1452,16 +1455,7 @@ class LoopTests(unittest.TestCase):
         # input and struck off, and the fresh run's own order's stays for
         # its engine (ADR 0026, amended 2026-10-22, "The adapter"; fail
         # closed, AGENTS.md rule 5).
-        second = self.left_waiting_by_the_first_run("session:1", commits=True)
-        own = json.loads((TESTDATA / "paper_released.json").read_text())
-        own["client_order_id"] = "tw-paper-2"
-        second.decisions["fresh:1"] = [{"type": RELEASED, "payload": own}]
-        raw = json.dumps({"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]}, separators=(",", ":"))
-        second.decide({"id": "fresh:1", "type": "market.session.closed", "envelope_version": 1,
-                       "schema_version": 1, "event_time": SESSION_CLOSED, "recorded_at": "2026-10-17T14:05:00Z",
-                       "sequence": second.next_sequence, "source": SOURCE, "configuration_hash": CONFIGURATION_HASH,
-                       "strategy_version": STRATEGY_VERSION,
-                       "payload": json.loads(raw), "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+        second, own = self.fresh_run_released("tw-paper-2")
         pending = PendingInput(self.pending)
         earlier = json.loads((TESTDATA / "paper_released.json").read_text())
         older = dict(earlier, client_order_id="tw-paper-3")
@@ -1521,7 +1515,11 @@ class LoopTests(unittest.TestCase):
         def extra_entry_field(e):
             e["run"] = "run-1"
 
-        for damage in (bool_version, float_version, impossible_retired_at, extra_payload_field, extra_entry_field):
+        def oversized_limit_price(e):
+            e["payload"]["limit_price"] = 10 ** 400
+
+        for damage in (bool_version, float_version, impossible_retired_at, extra_payload_field, extra_entry_field,
+                       oversized_limit_price):
             with self.subTest(damage.__name__):
                 self.setUp()
                 second, damaged = self.damaged_retirement_left_by_the_first_run(damage)
@@ -1535,12 +1533,13 @@ class LoopTests(unittest.TestCase):
                 aside = self.pending + OUTBOX_SUFFIX + ".set-aside"
                 with open(aside, encoding="utf-8") as f:
                     self.assertEqual(json.load(f), [damaged], "set aside whole, never deleted")
-                for part in ("order-retired:tw-paper-1", aside, "tw-paper-1", "by hand"):
+                raw = json.dumps(damaged, separators=(",", ":"))
+                for part in ("order-retired:tw-paper-1", aside, "tw-paper-1", "by hand", raw):
                     self.assertIn(part, printed.getvalue())
                 self.assertEqual(self.queued_retirements(), [])
                 self.assertIsNone(PendingInput(self.pending).load())
                 [settled] = PendingInput(self.pending).run_ended()
-                self.assertEqual(settled["set_aside"], [damaged])
+                self.assertEqual(settled["set_aside"], [raw], "named as the outbox held it")
                 self.assertEqual(settled["outbox"], [])
                 loop = self.loop(engine=second, engine_log=second.path)
                 loop.start()
@@ -1569,7 +1568,182 @@ class LoopTests(unittest.TestCase):
                                          "--set-aside-malformed"]), 0)
         with open(self.pending + OUTBOX_SUFFIX + ".set-aside", encoding="utf-8") as f:
             self.assertEqual(json.load(f), [damaged])
-        self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[damaged]])
+        self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[json.dumps(damaged, separators=(",", ":"))]])
+
+    def set_aside_args(self, second):
+        """The owner's resolve --run-ended --set-aside-malformed of the first run's input, against the fresh run."""
+        return ["resolve", "--run-ended", self.pending, "session:1", "--journal", str(second.path), "--reason",
+                "a fresh run after a reboot", "--set-aside-malformed"]
+
+    def test_set_aside_malformed_keeps_each_entry_byte_for_byte_even_with_numbers_no_writer_writes(self):
+        # The set-aside file and the settlement keep each malformed entry as
+        # the outbox holds it, byte for byte, never written again from what
+        # was read: one whose numbers the outbox's reader accepts but the
+        # adapter never writes (an exponent past a float's range, NaN,
+        # Infinity), or whose spacing is not the adapter's, is still set
+        # aside whole, printed as it is, and struck off (fail closed,
+        # AGENTS.md).
+        cases = (('"limit_price":401.5', '"limit_price":1e309'),
+                 ('"limit_price":401.5', '"limit_price":NaN'),
+                 ('"limit_price":401.5', '"limit_price":-Infinity'),
+                 ('"schema_version":1,', '"schema_version" :  true,'))
+        for old, new in cases:
+            with self.subTest(new):
+                self.setUp()
+                second, entry = self.damaged_retirement_left_by_the_first_run(lambda e: None)
+                path = self.pending + OUTBOX_SUFFIX
+                text = Path(path).read_text(encoding="utf-8")
+                compact = json.dumps(entry, separators=(",", ":"))
+                self.assertIn(compact, text)
+                self.assertIn(old, compact)
+                damaged = compact.replace(old, new)
+                Path(path).write_text(text.replace(compact, damaged), encoding="utf-8")
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+                self.assertIn(damaged, Path(path + ".set-aside").read_text(encoding="utf-8"))
+                self.assertIn(damaged, printed.getvalue())
+                [settled] = PendingInput(self.pending).run_ended()
+                self.assertEqual(settled["set_aside"], [damaged])
+                self.assertEqual(self.queued_retirements(), [])
+                self.assertIsNone(PendingInput(self.pending).load())
+
+    def test_set_aside_malformed_after_a_stop_between_the_record_and_the_strike_records_and_copies_once(self):
+        # A stop after the settlement is recorded and before the strike
+        # leaves the entry in the outbox and named by the settlement; the
+        # rerun records no second settlement, copies the entry aside once,
+        # prints it, and strikes it off (fail closed, AGENTS.md).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+        pending = PendingInput(self.pending)
+        with mock.patch.object(Outbox, "strike", side_effect=OSError("disk full")), \
+                mock.patch.object(Outbox, "strike_all", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot", str(second.path),
+                                               today=SESSION, set_aside_malformed=True)
+        self.assertEqual(len(self.queued_retirements()), 1)
+        self.assertEqual(len(pending.run_ended()), 1)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+        raw = json.dumps(damaged, separators=(",", ":"))
+        with open(self.pending + OUTBOX_SUFFIX + ".set-aside", encoding="utf-8") as f:
+            self.assertEqual(json.load(f), [damaged])
+        self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[raw]])
+        for part in (raw, "tw-paper-1", "by hand"):
+            self.assertIn(part, printed.getvalue())
+        self.assertEqual(self.queued_retirements(), [])
+        self.assertIsNone(pending.load())
+
+    def test_set_aside_malformed_prints_the_by_hand_sale_again_after_a_stop_before_the_input_is_cleared(self):
+        # Each entry set aside, and the by-hand sale it may leave, is
+        # printed from the settlement's own record of it (its set_aside) on
+        # every rerun until the input is settled, so a stop after the strike
+        # and before the pending file is cleared, which leaves no such entry
+        # in the outbox, still prints it (fail closed, AGENTS.md; ADR 0019,
+        # amended 2026-10-17, reading 4).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        for option in (["--set-aside-malformed"], []):
+            with self.subTest(option=option):
+                self.setUp()
+                second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+                pending = PendingInput(self.pending)
+                with mock.patch.object(PendingInput, "clear", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot",
+                                                       str(second.path), today=SESSION, set_aside_malformed=True)
+                self.assertEqual(self.queued_retirements(), [])
+                self.assertIsNotNone(pending.load())
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)[:-1] + option), 0)
+                raw = json.dumps(damaged, separators=(",", ":"))
+                for part in (raw, "tw-paper-1", "by hand", self.pending + OUTBOX_SUFFIX + ".set-aside"):
+                    self.assertIn(part, printed.getvalue())
+                self.assertEqual([e["set_aside"] for e in pending.run_ended()], [[raw]])
+                self.assertIsNone(pending.load())
+
+    def fresh_run_released(self, client_order_id):
+        """The first run's input left waiting, and a fresh run whose own log released order client_order_id."""
+        second = self.left_waiting_by_the_first_run("session:1", commits=True)
+        own = json.loads((TESTDATA / "paper_released.json").read_text())
+        own["client_order_id"] = client_order_id
+        second.decisions["fresh:1"] = [{"type": RELEASED, "payload": own}]
+        raw = json.dumps({"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]}, separators=(",", ":"))
+        second.decide({"id": "fresh:1", "type": "market.session.closed", "envelope_version": 1,
+                       "schema_version": 1, "event_time": SESSION_CLOSED, "recorded_at": "2026-10-17T14:05:00Z",
+                       "sequence": second.next_sequence, "source": SOURCE, "configuration_hash": CONFIGURATION_HASH,
+                       "strategy_version": STRATEGY_VERSION,
+                       "payload": json.loads(raw), "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+        return second, own
+
+    def test_set_aside_malformed_refuses_a_malformed_retirement_of_an_order_the_fresh_run_released(self):
+        # A malformed queued retirement of an order the fresh run's own log
+        # released, named so by its payload or by its entry ID, may be the
+        # fresh run's own, which its engine reads, so it is never set aside:
+        # the command refuses naming it, with nothing struck, copied or
+        # recorded (fail closed, AGENTS.md rule 5; ADR 0026, amended
+        # 2026-10-22, "The adapter").
+        def bool_version(e):
+            e["schema_version"] = True
+
+        def no_client_order_id(e):
+            e["payload"]["client_order_id"] = None
+
+        for damage in (bool_version, no_client_order_id):
+            with self.subTest(damage.__name__):
+                self.setUp()
+                second, own = self.fresh_run_released("tw-paper-2")
+                pending = PendingInput(self.pending)
+                retire_order(pending, own, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "fresh:1")
+                outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+                entries = outbox.load()
+                [entry] = [e for e in entries if e["id"] == "order-retired:tw-paper-2"]
+                damage(entry)
+                outbox._write(entries)
+                before = [outbox.load(), pending.load(), pending.run_ended(), pending.decisions()]
+                printed = io.StringIO()
+                with contextlib.redirect_stderr(printed):
+                    self.assertEqual(relay_main(self.set_aside_args(second)), 1)
+                for part in ("order-retired:tw-paper-2", "tw-paper-2", "released"):
+                    self.assertIn(part, printed.getvalue())
+                self.assertEqual([outbox.load(), pending.load(), pending.run_ended(), pending.decisions()], before,
+                                 "nothing is struck and nothing is recorded")
+                self.assertFalse(Path(self.pending + OUTBOX_SUFFIX + ".set-aside").exists())
+
+    def test_run_ended_reads_a_settlements_set_aside_strictly(self):
+        # A settlement's set_aside is read as resolve --run-ended writes it:
+        # a non-empty list, each item the outbox's own text of one outbox
+        # entry. Anything else stops the start naming the line; a settlement
+        # that set nothing aside reads without it (fail closed, AGENTS.md).
+        def bool_version(e):
+            e["schema_version"] = True
+
+        second, damaged = self.damaged_retirement_left_by_the_first_run(bool_version)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(relay_main(self.set_aside_args(second)), 0)
+        path = Path(PendingInput(self.pending).run_ended_path)
+        [line] = path.read_text(encoding="utf-8").splitlines()
+        written = json.loads(line)
+        raw = written["set_aside"][0]
+        for bad in ([], "x", None, {}, [{}], [damaged], ["x"], ["{}"], ["[]"], [raw, 7]):
+            with self.subTest(set_aside=bad):
+                path.write_text(json.dumps(dict(written, set_aside=bad)) + "\n", encoding="utf-8")
+                with self.assertRaises(HandoverRecordInvalid) as refused:
+                    PendingInput(self.pending).run_ended()
+                self.assertIn("line 1", str(refused.exception))
+        with self.subTest("an extra field"):
+            path.write_text(json.dumps(dict(written, aside=[raw])) + "\n", encoding="utf-8")
+            with self.assertRaises(HandoverRecordInvalid):
+                PendingInput(self.pending).run_ended()
+        without = {k: v for k, v in written.items() if k != "set_aside"}
+        path.write_text(json.dumps(without) + "\n", encoding="utf-8")
+        self.assertEqual(PendingInput(self.pending).run_ended(), [without])
 
     def test_set_aside_malformed_is_only_for_run_ended(self):
         printed = io.StringIO()

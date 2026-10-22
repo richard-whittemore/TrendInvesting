@@ -536,18 +536,28 @@ class Outbox:
         self.set_aside_path = path + SET_ASIDE_SUFFIX
 
     def load(self):
+        return self._read()[0]
+
+    def load_texts(self):
+        """Each entry load reads, with its own text as the file holds it, byte for byte, as (entry, text), oldest first."""
+        entries, text = self._read()
+        return list(zip(entries, _element_texts(text))) if entries else []
+
+    def _read(self):
         try:
             with open(self.path, encoding="utf-8") as f:
-                entries = json.load(f)
+                text = f.read()
         except FileNotFoundError:
-            return []
+            return [], None
+        try:
+            entries = json.loads(text)
         except ValueError as err:
             raise OutboxInvalid("{} is not JSON: {}".format(self.path, err)) from None
         if not isinstance(entries, list) or not all(_is_outbox_entry(e) for e in entries):
             raise OutboxInvalid("{} is not a list of inputs as the adapter records them".format(self.path))
         if len({e["id"] for e in entries}) != len(entries):
             raise OutboxInvalid("{} names one input twice".format(self.path))
-        return entries
+        return entries, text
 
     def append(self, entry):
         self.extend([entry])
@@ -602,32 +612,38 @@ class Outbox:
             if len(kept) != len(entries):
                 self._write(kept)
 
-    def set_aside_entries(self):
-        """The entries set aside (set_aside), oldest first; a file that is not a list of entries raises OutboxInvalid."""
+    def set_aside_texts(self):
+        """The text of each entry set aside (set_aside), oldest first; a file that is not a list of entries raises OutboxInvalid."""
         try:
             with open(self.set_aside_path, encoding="utf-8") as f:
-                entries = json.load(f)
+                text = f.read()
         except FileNotFoundError:
             return []
+        try:
+            entries = json.loads(text)
         except ValueError as err:
             raise OutboxInvalid("{} is not JSON: {}".format(self.set_aside_path, err)) from None
         if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
             raise OutboxInvalid("{} is not a list of entries set aside".format(self.set_aside_path))
-        return entries
+        return _element_texts(text)
 
-    def set_aside(self, entries):
-        """Copy entries, whole, into the set-aside file behind those already there, each once; nothing is struck.
+    def set_aside(self, texts):
+        """Copy each entry's own text (load_texts) into the set-aside file behind those already there, each once.
 
-        Written under the outbox's lock, as a temporary file renamed over
-        the file, so a stop leaves it as it was or with every entry; an
-        entry set aside is never removed from it (fail closed, AGENTS.md).
-        The caller strikes each entry off the outbox only after this.
+        Each is copied byte for byte, never written again from what was
+        read, so an entry whose numbers no JSON writer of the adapter writes
+        (NaN, an exponent past a float's range) is kept as the outbox held
+        it. Written under the outbox's lock, as a temporary file renamed
+        over the file, so a stop leaves it as it was or with every entry; an
+        entry set aside is never removed from it, and nothing is struck
+        here (fail closed, AGENTS.md). The caller strikes each entry off the
+        outbox only after this.
         """
         with self._locked():
-            kept = self.set_aside_entries()
-            added = [e for e in entries if e not in kept]
+            kept = self.set_aside_texts()
+            added = [t for t in texts if t not in kept]
             if added:
-                self._write(kept + added, self.set_aside_path)
+                self._write_text("[" + ",".join(kept + added) + "]", self.set_aside_path)
 
     @contextlib.contextmanager
     def _locked(self):
@@ -639,11 +655,13 @@ class Outbox:
         finally:
             os.close(fd)
 
-    def _write(self, entries, path=None):
-        path = path or self.path
+    def _write(self, entries):
+        self._write_text(json.dumps(entries, separators=(",", ":"), allow_nan=False), self.path)
+
+    def _write_text(self, text, path):
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(entries, f, separators=(",", ":"), allow_nan=False)
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -916,7 +934,7 @@ class PendingInput:
                 raise HandoverRecordInvalid("{} line {} is not JSON: {}".format(self.run_ended_path, n, err)) from None
             if (not isinstance(entry, dict) or tuple(sorted(entry)) not in (RUN_ENDED_FIELDS, RUN_ENDED_SET_ASIDE_FIELDS)
                     or "set_aside" in entry and not (isinstance(entry["set_aside"], list) and entry["set_aside"]
-                                                     and all(_is_outbox_entry(e) for e in entry["set_aside"]))
+                                                     and all(_is_entry_text(t) for t in entry["set_aside"]))
                     or not isinstance(entry["input"], dict) or not _is_text(entry["input"].get("id"))
                     or entry["refused"] != RUN_ENDED
                     or not all(_is_text(entry[k]) for k in ("at", "reason", "session_date"))
@@ -1866,6 +1884,37 @@ def _not_a_queued_retirement(path, e):
             RETIRED_SESSION_OVER, RETIRED_BY_ADAPTER, RETIRED_BY_OWNER, RETIRED_ID, path + SET_ASIDE_SUFFIX))
 
 
+def _orders_retired(entry):
+    """The client order IDs outbox entry entry may retire: its payload's, and the one its entry ID names after RETIRED_ID."""
+    named = set()
+    cid = entry["payload"].get("client_order_id")
+    if _is_text(cid):
+        named.add(cid)
+    if entry["id"].startswith(RETIRED_ID):
+        named.add(entry["id"][len(RETIRED_ID):].split(":", 1)[0])
+    return named
+
+
+def _fresh_runs_malformed_retirement(path, e, orders, engine_log_path):
+    """HandoverRecordInvalid naming outbox entry e, at path, a malformed retirement of orders engine_log_path released."""
+    return HandoverRecordInvalid(
+        "{} holds entry {} as a retirement of order {}, which the fresh run's log {} released: it is not a "
+        "retirement as the relay queues one, and it may be the fresh run's own, which its engine reads, so it is "
+        "never set aside, even with --set-aside-malformed; nothing is settled, struck or recorded. Never edit or "
+        "delete it by hand: keep the adapter stopped and the outbox as it is, check the order at IBKR, and have "
+        "the entry repaired by someone who knows the adapter's files (docs/manual/redelivery.md)".format(
+            path, e["id"], ", ".join(sorted(orders)), engine_log_path))
+
+
+def _set_aside_notice(text, set_aside_path):
+    """The line resolve --run-ended prints for one outbox entry set aside, its own text, into set_aside_path."""
+    e = json.loads(text)
+    return ("set aside outbox entry {} into {}, never sent: not a retirement as the relay queues one: {}. If it "
+            "retires order {!r}, that order's sale stays attempted: check the order at IBKR and sell by hand if "
+            "needed (docs/manual/redelivery.md)".format(e["id"], set_aside_path, text,
+                                                        e["payload"].get("client_order_id")))
+
+
 def _effective_user():
     return os.geteuid()
 
@@ -2095,14 +2144,22 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None, se
     HandoverRecordInvalid naming its outbox entry, with nothing struck or
     recorded, so no retirement is struck on a record the relay did not write
     (fail closed, AGENTS.md), unless set_aside_malformed, the owner's
-    remedy: each such entry is then copied whole into the outbox's
-    set-aside file (Outbox.set_aside, never deleted), named in the
-    settlement (its set_aside), and struck off the outbox with the
-    settlement's other entries. Nothing is lost to the fresh run: its
-    engine refuses an earlier run's retirement (internal/targetweight
-    RetirementVerdict), and the order's sale stays attempted, for the owner
-    to sell by hand if needed (ADR 0019, amended 2026-10-17, reading 4).
-    Returns the entries set aside. today defaults to today in New York.
+    remedy: each such entry is then copied, byte for byte, into the
+    outbox's set-aside file (Outbox.set_aside, never deleted), named in the
+    settlement by that same text (its set_aside), and struck off the outbox
+    with the settlement's other entries. Only an entry no order of the
+    fresh run's log is named by is set aside: one naming an order that log
+    released, by its payload or by its entry ID (_orders_retired), may be
+    the fresh run's own, which its engine reads, so it refuses the
+    settlement even so, with nothing struck or recorded. Every other is an
+    earlier run's at most, which the fresh run's engine refuses
+    (internal/targetweight RetirementVerdict), so nothing the fresh run
+    reads is set aside; the order's sale stays attempted, for the owner to
+    sell by hand if needed (ADR 0019, amended 2026-10-17, reading 4).
+    Returns the text of every entry this input's settlements set aside,
+    those of a rerun after a stop part way included, so the owner is told
+    of each until the input is settled. today defaults to today in New
+    York.
     """
     if not reason or not reason.strip():
         raise ResolveRefused("a reason is required: it is kept with the settlement")
@@ -2159,13 +2216,23 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None, se
         # any is struck: one that is not refuses the whole settlement, with
         # nothing struck or recorded (_queued_retirements; fail closed,
         # AGENTS.md).
-        queued = outbox.load()
+        texts = outbox.load_texts()
+        queued = [e for e, _ in texts]
         retirements, malformed = _queued_retirements(queued)
         if malformed and not set_aside_malformed:
             raise _not_a_queued_retirement(outbox.path, malformed[0])
         retiring = {e["id"] for e in retirements}
         aside = {e["id"] for e in malformed}
         own = released_client_order_ids(engine_log_path) - at_broker
+        # A malformed retirement that names an order the fresh run's log
+        # released may be that run's own, which its engine reads, so it is
+        # never set aside (fail closed, AGENTS.md rule 5).
+        for e in malformed:
+            if _orders_retired(e) & own:
+                raise _fresh_runs_malformed_retirement(outbox.path, e, _orders_retired(e) & own, engine_log_path)
+        # Each set aside as the outbox holds it, byte for byte, never
+        # written again from what was read (Outbox.set_aside).
+        malformed_texts = [t for e, t in texts if e["id"] in aside]
         behind = [e for e in queued if e["id"] != input_id and e["id"] not in recorded and e["id"] not in aside
                   and ((e["event_type"] in (LIFECYCLE_TYPE, FILL_TYPE)
                         and e["payload"].get("client_order_id") in earlier)
@@ -2174,9 +2241,9 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None, se
         # leaves each entry in the outbox or the set-aside file, never in
         # neither, and the rerun copies none twice (fail closed, AGENTS.md).
         if malformed:
-            outbox.set_aside(malformed)
-        named = {o["id"] for e in settled for o in e.get("set_aside", ())}
-        unnamed = [e for e in malformed if e["id"] not in named]
+            outbox.set_aside(malformed_texts)
+        named = [t for e in settled if e["input"]["id"] == input_id for t in e.get("set_aside", ())]
+        unnamed = [t for t in malformed_texts if t not in named]
         if input_id not in recorded or behind or unnamed:
             settlement = {
                 "input": waiting, "refused": RUN_ENDED, "reason": reason, "run": ended.run,
@@ -2188,11 +2255,13 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None, se
             pending.record_run_ended(settlement)
         # Recorded first, so a stop before the strike still keeps every
         # entry it names from the fresh run (the loop strikes what a
-        # settlement names).
-        for entry in [{"id": input_id}] + behind + malformed:
-            outbox.strike(entry["id"])
+        # settlement names); struck in one write, so an entry no JSON writer
+        # of the adapter writes is never written again.
+        outbox.strike_all([input_id] + [e["id"] for e in behind + malformed])
         pending.clear()
-        return malformed
+        # Every entry this input's settlements set aside, so a rerun after a
+        # stop past the strike still tells the owner of each.
+        return named + unnamed
     finally:
         os.close(held)
 
@@ -2910,11 +2979,52 @@ def _is_outbox_entry(entry):
                                                   ("event_time", "event_time"), ("payload", "payload")))
 
 
+def _is_entry_text(text):
+    """Whether text is the text of one outbox entry (Outbox.load_texts), as a settlement's set_aside names it."""
+    if not isinstance(text, str):
+        return False
+    try:
+        return _is_outbox_entry(json.loads(text))
+    except ValueError:
+        return False
+
+
 _is_count = engine_log.is_count
 
 
 def _is_number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """Whether value is a finite JSON number (not a bool); an integer past a float's range is not (fail closed, AGENTS.md)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+# JSON's whitespace, and one decoder, for _element_texts.
+_JSON_SPACE = re.compile(r"[ \t\n\r]*")
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _element_texts(text):
+    """The text of each element of text, a JSON list json.loads reads, exactly as written there, in order."""
+    at = _JSON_SPACE.match(text).end()
+    if text[at:at + 1] != "[":
+        raise ValueError("not a JSON list")
+    at = _JSON_SPACE.match(text, at + 1).end()
+    texts = []
+    if text[at:at + 1] == "]":
+        return texts
+    while True:
+        _, end = _JSON_DECODER.raw_decode(text, at)
+        texts.append(text[at:end])
+        at = _JSON_SPACE.match(text, end).end()
+        if text[at:at + 1] == "]":
+            return texts
+        if text[at:at + 1] != ",":
+            raise ValueError("not a JSON list")
+        at = _JSON_SPACE.match(text, at + 1).end()
 
 
 _is_time = engine_log.is_time
@@ -3153,12 +3263,8 @@ def main(argv=None, today=None):
                                      "tell an earlier run's input from that run's")
             aside = resolve_run_ended(pending, args.client_order_id, args.reason, args.journal, today=today,
                                       set_aside_malformed=args.set_aside_malformed)
-            for e in aside:
-                print("set aside outbox entry {} into {}, never sent: not a retirement as the relay queues one: {}. "
-                      "If it retires order {!r}, that order's sale stays attempted: check the order at IBKR and "
-                      "sell by hand if needed (docs/manual/redelivery.md)".format(
-                          e["id"], pending.path + OUTBOX_SUFFIX + SET_ASIDE_SUFFIX,
-                          json.dumps(e, sort_keys=True, separators=(",", ":")), e["payload"].get("client_order_id")))
+            for text in aside:
+                print(_set_aside_notice(text, pending.path + OUTBOX_SUFFIX + SET_ASIDE_SUFFIX))
             print("input {} settled: refused for {}; nothing of it is sent".format(args.client_order_id, RUN_ENDED))
             return 0
         if args.journal:
