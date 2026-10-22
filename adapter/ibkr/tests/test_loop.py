@@ -1095,6 +1095,31 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(pending.handovers(), {"tw-paper-1": "sent"})
         self.assertEqual(self.queued_retirements(), [])
 
+    def test_a_sent_decision_for_an_earlier_input_does_not_stop_sent_recording_one_for_the_input_awaiting(self):
+        # --sent skips its own decision only when the last decision for the
+        # order is one recorded for the input awaiting its reply (_last_decided):
+        # a sent decision of input A does not stand for input B's, so B's
+        # decision is recorded whatever the mark it was settled under, and
+        # settle-ended-run reads each input's own decisions (ADR 0026, amended
+        # 2026-10-22, "The adapter"; fail closed, AGENTS.md).
+        for mark in ("never-sent", "at-broker"):
+            with self.subTest(mark=mark):
+                self.setUp()
+                self.left_waiting_by_the_first_run("session:B", commits=True)
+                pending = PendingInput(self.pending)
+                order = json.loads((TESTDATA / "paper_released.json").read_text())
+                retire_order(pending, order, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:B")
+                pending.record_decision({"client_order_id": order["client_order_id"], "decision": "sent",
+                                         "reason": "IBKR shows it working", "at": "2026-10-16T20:31:00+00:00",
+                                         "session_date": SESSION.isoformat(), "input_id": "session:A"})
+                pending.mark(order["client_order_id"], mark)
+                resolve(pending, order["client_order_id"], "sent", "IBKR shows it working", today=SESSION)
+                decided = [(d["decision"], d.get("input_id")) for d in pending.decisions()
+                           if d["client_order_id"] == order["client_order_id"]]
+                self.assertEqual(decided[-1], ("sent", "session:B"), "the sent decision for the awaiting input is recorded")
+                self.assertEqual(pending.handovers(), {order["client_order_id"]: "sent"})
+
     def test_marking_sent_a_never_sent_order_stopped_after_any_step_delivers_no_retirement_on_restart(self):
         # --sent on an order marked never sent marks it at the broker first,
         # then records the owner's finding, strikes its queued retirements and
