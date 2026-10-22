@@ -79,9 +79,11 @@ Re-delivery closes that gap:
   the run the adapter sent the waiting input to, if one is waiting. It
   reads every input that log commits, not only the waiting one: an order
   you settled `--never-sent` or `--not-handed-over` at an earlier input,
-  or that the adapter retired, is covered too (a decision an earlier
-  build recorded without its input counts only when the log released the
-  order once). A retirement of it still queued for the ended run's engine
+  or that the adapter retired, is covered too. A decision counts only
+  when it names the input and the run it was made in: one an earlier
+  build recorded without its input or its run is never evidence, so its
+  order is listed not settled with that reason and its sale stays
+  attempted (check IBKR and sell by hand if the sale is still needed). A retirement of it still queued for the ended run's engine
   does not stop it being settled: it is struck off. For each order a committed
   reply released to be sent that the adapter's records show never sent, it
   writes one settlement line to `PENDING_FILE.never-sent`: the log, the
@@ -100,8 +102,9 @@ Re-delivery closes that gap:
   sent; one whose last recorded decision was made in another run; one IBKR
   reported on (the ended log or the outbox holds a venue's report) though
   the adapter's records show it never sent; a never-sent mark no recorded
-  decision backs; and a never-sent decision recorded for another input or
-  none. When any is listed it then prints "N order(s) not settled above:
+  decision backs; a never-sent decision recorded for another input, or
+  with no input or no run; and one whose last decision records a run
+  that is not a run's identifier (a damaged file: check it). When any is listed it then prints "N order(s) not settled above:
   each one's sale stays attempted in the fresh run until you act on it as
   its line says". An order simply sent (marked sent, reported on by IBKR,
   or already retired in the ended log) needs nothing of you: it is not
@@ -109,12 +112,28 @@ Re-delivery closes that gap:
   log already retires: nothing to settle". The last line gives the count
   settled and says whether to approve with `-never-sent`. Running it again
   settles nothing twice. It refuses while the adapter runs, for a waiting
-  input sent to another run, while the engine that wrote `ENDED_LOG`
-  still runs (it holds the log locked until it stops: stop it first), with
-  no input waiting for a log that is not the run that ended (the run the adapter's decisions last record; if that
-  run recorded no decision it left nothing to settle, so approve without
-  `-never-sent`), as root or as any user but the one that owns the
-  adapter's files (as `retire`), and without your name and a reason.
+  input sent to another run, while the engine of `ENDED_LOG`'s run still
+  runs (stop it first), with no input waiting for a log that is not the
+  run that ended (the run the adapter's decisions last record: give
+  `--journal` the log of the run the message names), with no input
+  waiting and no decision that records its run (the message says so:
+  which run ended, and which of its orders were never sent, cannot be
+  proved, so nothing is settled; each sale stays attempted, so check IBKR
+  for every order that run released, sell by hand any sale still needed,
+  and approve without `-never-sent`), as root or as any user but the one
+  that owns the adapter's files (as `retire`), and without your name and
+  a reason. A damaged line in the decisions file refuses it naming the
+  line; do not edit the file.
+
+  That the run has ended is proved by the engine's instance lock,
+  `engine.lock` in the engine's state folder (the folder of its `-log`,
+  `/var/lib/trend-investing/engines/<instance>/` on the server): the
+  engine creates it and holds it locked for as long as it runs, whatever
+  log it writes, so an engine that resumed the run into a newer log still
+  holds it. The command refuses while it is held ("still runs"), and
+  refuses a folder with no `engine.lock` at all, since then no engine of
+  this build wrote it and the run's end cannot be proved. Never delete
+  `engine.lock`.
 
   The command writes the file whole each time (a temporary file renamed
   over it), so a stop never leaves half a line. A file left with a torn
@@ -131,7 +150,11 @@ Re-delivery closes that gap:
   adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent
   --reason "what IBKR shows"`, then run `settle-ended-run` again, which
   now refuses that order and withdraws its line (it prints "settlement
-  withdrawn"); a line is never applied for an order marked sent. Then
+  withdrawn"); a line is never applied for an order marked sent. `--sent`
+  records your finding first, then strikes off any retirement of the order
+  still queued, and marks it sent last; if it stops part way (it prints a
+  refusal or an error), run the same `--sent` again before anything else.
+  Then
   approve with `operator approve ... -never-sent PENDING_FILE.never-sent`
   (or without `-never-sent` when the command says no order is settled): the
   tool checks each line against the log by the engine's own retirement
@@ -142,7 +165,9 @@ Re-delivery closes that gap:
   the same lines against the log again before it starts, and the fresh run
   tries the sale again under the next attempt's client order ID. At the
   fresh run's start, settle the waiting input with `resolve --run-ended`
-  as before; nothing of it is sent.
+  as before; nothing of it is sent, and a retirement still queued of an
+  order of it the adapter found at IBKR (`at-broker`) is struck off with
+  it, so it never reaches the fresh run's engine.
 - **A changed input never replaces the one waiting for its reply.** If the
   adapter is asked to send an input under the ID of the one it is still
   waiting on, but with different content, it first finishes the original
@@ -292,9 +317,16 @@ and after a crash.
     `test_settle_ended_run_never_settles_a_client_order_id_released_twice_or_decided_in_another_run`,
     `test_settle_ended_run_prints_only_the_orders_the_owner_must_act_on_and_counts_the_sent_ones`,
     `test_settle_ended_run_with_no_input_waiting_is_refused_for_a_log_that_is_not_the_run_that_ended`,
-    `test_settle_ended_run_is_refused_while_the_ended_runs_engine_still_holds_its_log`
-    (`cmd/engine`, `TestTheEngineHoldsItsDurableLogLockedWhileItRuns`),
-    `test_settle_ended_run_settles_an_earlier_inputs_never_sent_decision_recorded_with_no_input`,
+    `test_settle_ended_run_is_refused_while_the_ended_runs_engine_still_holds_its_instance_lock`
+    (`cmd/engine`,
+    `TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites`,
+    `TestTheEngineRefusesToStartWhileItsInstanceLockIsHeld` and
+    `TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog`),
+    `test_settle_ended_run_never_settles_on_a_decision_recorded_with_no_input_or_no_run`,
+    `test_settle_ended_run_refuses_an_order_whose_last_decision_records_a_malformed_run`,
+    `test_settle_ended_run_with_no_input_waiting_refuses_damaged_decisions_naming_the_line`,
+    `test_marking_sent_a_never_sent_order_records_the_decision_before_it_strikes_any_queued_retirement`,
+    `test_run_ended_strikes_a_queued_retirement_of_an_order_the_relay_found_at_ibkr`,
     `test_a_newline_terminated_damaged_settlement_line_is_refused_never_dropped_as_torn`,
     `test_a_decision_cut_short_mid_write_leaves_the_decisions_readable_and_settle_ended_run_runs_again`,
     `test_settle_ended_run_is_refused_for_a_log_that_is_not_the_run_the_input_was_sent_to`,
@@ -312,7 +344,9 @@ and after a crash.
     marking it sent withdraws its line. `adapter/ibkr/tests/test_relay.py`,
     `test_a_never_sent_order_ibkr_shows_open_or_executed_stops_for_a_person`
     and `test_a_retired_order_ibkr_shows_is_marked_at_broker_and_its_queued_retirement_struck_off`:
-    the relay records the order `at-broker` before it stops.
+    the relay records the order `at-broker` before it stops;
+    `test_a_damaged_decision_line_stops_the_relay_as_an_invalid_record_naming_it`:
+    a damaged decisions line stops the relay naming it.
     `cmd/operator`, `TestTheApprovalReadsTheAdaptersSettlementOfANeverSentSale`,
     and `internal/restart`,
     `TestASaleTheAdapterNeverSentIsNotAttemptedOnceSettled`,

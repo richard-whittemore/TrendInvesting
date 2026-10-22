@@ -1567,6 +1567,22 @@ class RetireTests(unittest.TestCase):
         self.assertEqual(self.retired_entries(), [], "no retirement of an order IBKR shows reaches the engine")
         self.assertEqual(self.pending.handovers(), {"tw-1": "at-broker"})
 
+    def test_a_damaged_decision_line_stops_the_relay_as_an_invalid_record_naming_it(self):
+        # The relay reads the decisions for every released order it has not
+        # sent (whether IBKR was found showing it, or a retirement begun), so
+        # they are read strictly: a damaged line is HandoverRecordInvalid
+        # naming it, which stops the adapter for a person, never a raw JSON
+        # or attribute error, and nothing is sent (fail closed, AGENTS.md).
+        for damaged in ("[]", "5", '{"client_order_id": "tw-1", "decis'):
+            with self.subTest(line=damaged):
+                Path(self.pending.decisions_path).write_text(damaged + "\n", encoding="utf-8")
+                relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}))
+                with self.assertRaises(HandoverRecordInvalid) as caught:
+                    relay.exchange(envelope(0))
+                relay.close()
+                self.assertIn("{} line 1".format(self.pending.decisions_path), str(caught.exception))
+                self.assertEqual(self.sent, [])
+
     def test_a_retirement_already_queued_is_struck_off_for_an_order_ibkr_shows(self):
         # A stop after the retirement was queued for the engine but before the
         # mark leaves the entry in the outbox; IBKR showing the order's tag

@@ -48,6 +48,14 @@ and records everything, and marks every order "do not send".
      only Boost (`compose.go`);
    - the durable log or the journal it is told to write already exists
      (a run name is never reused);
+   - another engine of the instance is running: before it creates its log,
+     the engine locks `engine.lock` in its state folder (the folder of
+     `-log`) and holds it for as long as it runs, whatever log it writes, a
+     resume's new log included, so two never run side by side; and an
+     engine that cannot take that lock at all (a filesystem without
+     `flock`) does not start either, leaving no log behind. The IBKR
+     adapter's `settle-ended-run` reads the same lock as its proof that a
+     run has ended ([re-delivery](redelivery.md));
    - this is a fresh run after an earlier one and you have not approved it,
      or the approval leaves out the state in force (see
      [restart](restart.md));
@@ -234,6 +242,8 @@ Read them with `journalctl -u ti-engine@<instance> -n 20`.
 | `-as-of must be an RFC 3339 time` or `-as-of must be nonzero` | Refuses. | Write `TI_AS_OF` as `2026-10-20T20:00:00Z`, say. |
 | `-log and -out both name ...` | Refuses: the log and the journal must be two files. | Nothing on the server (the unit names them `<TI_RUN>.log` and `<TI_RUN>.journal`). |
 | `... already exists: a durable log is recorded evidence and is never appended to or overwritten`, or `... already exists: a journal is recorded evidence and is never overwritten` | Refuses: `TI_RUN` names a run that already has a log or journal. | Set `TI_RUN` to a new name. Never delete or move the old files. |
+| `another engine of this instance runs: it holds .../engine.lock, the instance lock ...` | Refuses before it writes anything: another engine of the same account is running from the same state folder. | Check `systemctl status ti-engine@<instance>` and any engine you started by hand; stop the other one before starting this one. Never delete `engine.lock`. |
+| `take the instance lock .../engine.lock: ...: the engine does not start without it ...` (`no locks available`, `operation not supported`), or `open the instance lock ...` | Refuses before it writes anything: the state folder's filesystem cannot hold the lock (a network or unusual mount), or the folder cannot be written. No log is left behind, so the same `TI_RUN` can be used again. | Keep `/var/lib/trend-investing/engines/<instance>/` on the server's local disk with its usual owner and mode (`provision.sh`), then start again. |
 | `... so this is a fresh run, and a fresh run decides nothing until the owner's approval is recorded` | Refuses: the folder holds an earlier run, so this start needs your approval. | Write one with `operator approve` and pass it as `-approval` in `TI_RESTART_ARGS` ([restart](restart.md)). |
 | `... is the one it opens with ...: resume ... or declare a new start with -as-of`, or `... opens with this run's configuration input ...: declare a new start with -as-of` | Refuses: `TI_AS_OF` repeats the start of an earlier run in the folder. | Choose a new `TI_AS_OF`, or resume the cut-short log; see [restart](restart.md). |
 | Any other refusal naming an approval, a resume, a log in the folder, a build or a latch | Refuses to start, naming what does not match. | See [restart](restart.md), "What can go wrong", and `docs/runbooks/durable-log.md`. |
@@ -278,8 +288,13 @@ it sells again, sized from the 14 shares held.
 ## What backs this
 
 - ADRs: 0014 (socket), 0016 (configuration hash and build), 0017 (journal),
-  0019 (Degraded and Halted), 0025 (IBKR adapter), 0026 (target-weight
-  strategies and the risk gate), 0027 (durable log, restart).
+  0019 (Degraded and Halted; the instance lock, "A sale an ended run never
+  sent"), 0025 (IBKR adapter), 0026 (target-weight strategies and the risk
+  gate), 0027 (durable log, restart).
+- Tests of the instance lock, in `cmd/engine`:
+  `TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites`,
+  `TestTheEngineRefusesToStartWhileItsInstanceLockIsHeld`,
+  `TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog`.
 - The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
   introduced for momentum in target-weight rules version 1.11.0 and for
   Boost in 1.22.0 (ADR 0016; the rules are at 1.23.0 now, which also reads a retired order: [order lifecycle](order-lifecycle.md)), so a dry-run

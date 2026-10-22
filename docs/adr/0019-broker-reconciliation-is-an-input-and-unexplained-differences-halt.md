@@ -560,7 +560,12 @@ settle-ended-run`): for the waiting input, its write-ahead record leaves
 the order unmarked, or marks it never sent with the owner's or the
 adapter's decision behind the mark; for an earlier input, whose marks were
 cleared with it, the last decision recorded for the order settles it never
-sent for that input. One line each, naming the ended log, the run, the
+sent for that input. A decision is evidence only when it names both the
+input and the run it was made in: one recorded with no input or no run
+(by a relay before the fields, or edited by hand) is never settlement
+evidence, and one whose run is present but not a run's identifier is
+refused, so the order is listed not settled with that reason and its sale
+stays attempted, for the owner to sell by hand (fail closed). One line each, naming the ended log, the run, the
 releasing input, its evidence and the owner's retirement it amounts to;
 the order is marked never sent so no adapter sends it, and any retirement
 of it still queued for the ended run's engine is struck off, since the
@@ -573,12 +578,25 @@ stops; one the ended log released more than once; one whose last decision
 was recorded in another run; a never-sent mark no decision backs; one the
 ended log retires; and one the ended log or the adapter's outbox shows
 reported on or executed (a retirement still queued in the outbox is struck
-off, not a refusal). Only the refusals the owner must act on are listed; an
+off, not a refusal). The owner's `resolve --sent` on such an order records
+the finding first and strikes any queued retirement of it after, before
+the mark that lets the relay go on, so a stop part way still leaves it
+refused. Only the refusals the owner must act on are listed; an
 order simply sent is counted, not listed. With no input waiting, the log
 must be that of the run the adapter's decisions last record (each decision
-carries the run of its input), or the command refuses; and it refuses while
-the engine still holds the log's lock, which the engine takes for as long
-as it runs, so only a run that has ended is settled. The command writes its file whole, atomically, each time it
+carries the run of its input), or the command refuses, saying so; with no
+decision that records a run it refuses too, saying that the run's end and
+its never-sent orders cannot be proved, so each sale stays attempted for
+the owner to sell by hand. That a run has ended is proved by the engine's
+instance lock: one file in its state folder (the folder of `-log`, where
+every log of the instance is written, a resume's new log included), which
+the engine creates and locks exclusively before it creates its log and
+holds for as long as it runs, whatever log it writes. The command refuses
+unless it can share that lock, and refuses a folder without one, so only
+a run that has ended is settled, even one resumed into a later log. An
+engine refuses to start while another holds the lock, and one that cannot
+take it (a filesystem without `flock`) refuses to start, naming it, before
+it creates a log. The command writes its file whole, atomically, each time it
 runs, so a line whose order the owner has since found at IBKR and marked
 sent is withdrawn. The approval tool (`operator approve -never-sent`) applies each
 line to the ended log after its last record, by the engine's own

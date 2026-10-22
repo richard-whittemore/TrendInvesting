@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -20,11 +21,6 @@ import (
 // with the header CreateLog flushes into it (ADR 0027). The directory is
 // taken as spelled, not cleaned: a ".." after a symbolic link climbs from the
 // link's target, so cleaning would name, and flush, another directory.
-//
-// The file is held under an exclusive lock until it is closed, when the run
-// ends: the proof the IBKR adapter's settle-ended-run reads that the run has
-// ended before it settles any order the run released (ADR 0019, amended
-// 2026-10-22; fail closed, AGENTS.md).
 func createLogFile(path string) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -32,10 +28,6 @@ func createLogFile(path string) (*os.File, error) {
 			return nil, fmt.Errorf("engine: %s already exists: a durable log is recorded evidence and is never appended to or overwritten (ADR 0018); to continue its run, pass it to -resume and name a new -log", path)
 		}
 		return nil, fmt.Errorf("engine: create the durable log: %w", err)
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("engine: lock the durable log %s for the run: %w", path, err)
 	}
 	dir, _ := splitAsSpelled(path)
 	if err := syncDir(dir); err != nil {
@@ -206,4 +198,42 @@ func reportResume(out io.Writer, path string, recovery journal.Recovery, approva
 		return fmt.Errorf("engine: report the resume: %w", err)
 	}
 	return nil
+}
+
+// instanceLockName names the instance lock: one file in the engine's state
+// folder, the folder of -log, which every log of the instance's runs is
+// written in (a resume names the latest log there: checkResumesLatest).
+const instanceLockName = "engine.lock"
+
+// instanceFlock takes the instance lock. It is the one seam a test fails the
+// lock through, since a test's filesystem supports flock.
+var instanceFlock = syscall.Flock
+
+// lockInstance takes the instance lock for the folder of logPath, as
+// spelled (createLogFile), exclusively, and returns it open: held until this
+// process ends, whatever log it writes, a resume's new log included. It is
+// the proof the IBKR adapter's settle-ended-run reads that the instance's
+// run has ended before it settles any order the run released (ADR 0019,
+// amended 2026-10-22), so a second engine of the instance never starts
+// beside the first, and an engine that cannot take it (the lock is held, or
+// the filesystem has no flock: ENOLCK, ENOTSUP) does not start (fail closed,
+// AGENTS.md). It is taken before the durable log is created, so a refused
+// start leaves no log behind. The file holds nothing and is never removed: a
+// lock lives on the file's inode, so removing it under a holder would let a
+// second engine lock a new file.
+func lockInstance(logPath string) (*os.File, error) {
+	prefix, _ := filepath.Split(logPath)
+	path := prefix + instanceLockName
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- the folder the operator names with -log.
+	if err != nil {
+		return nil, fmt.Errorf("engine: open the instance lock %s: %w", path, err)
+	}
+	if err := instanceFlock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("engine: another engine of this instance runs: it holds %s, the instance lock an engine holds for as long as it runs; stop it before starting this one (ADR 0019, amended 2026-10-22)", path)
+		}
+		return nil, fmt.Errorf("engine: take the instance lock %s: %w: the engine does not start without it, since it is the proof the IBKR adapter's settle-ended-run reads that a run has ended (ADR 0019, amended 2026-10-22); keep the state folder on a local filesystem that supports flock", path, err)
+	}
+	return file, nil
 }

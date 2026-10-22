@@ -281,6 +281,13 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// journal below is written exactly as before either way.
 	recorder := journal.NewRecorder(reducer)
 	logHeader := journal.NewLogHeader(configurationHash, strategyVersion)
+	if opts.logPath != "" {
+		instance, err := lockInstance(opts.logPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = instance.Close() }()
+	}
 	var recovery journal.Recovery
 	if opts.resumePath != "" {
 		if recovery, err = recoverLogFile(opts.resumePath); err != nil {

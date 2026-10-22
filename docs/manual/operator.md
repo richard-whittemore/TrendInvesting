@@ -471,6 +471,11 @@ approval then carries it attempted, so leave the flag out).
 ended while the adapter still held such an order, settle it first with
 `relay.py settle-ended-run` ([re-delivery](redelivery.md), "An order an
 ended run left unsent"), then add `-never-sent PENDING_FILE.never-sent`.
+Settle with the engine stopped: the command refuses while the engine
+holds its instance lock (`engine.lock` in its state folder, held for as
+long as it runs, a resume included). A sale whose only evidence is a
+decision an earlier build recorded with no input or no run is never
+settled: it stays attempted, so sell it by hand if it is still needed.
 The tool checks each settlement in the file against the log by the
 engine's own retirement rule, and a sale back to 98% it settles is stated
 not attempted, with one more of the incident's sales retired and the

@@ -110,6 +110,11 @@ class LoggedEngine:
         self.connects = 0
         self.records = 0
         self.next_sequence = 1
+        # The instance lock every engine creates in its state folder before
+        # its log and holds while it runs (cmd/engine lockInstance); the
+        # double creates it and never holds it, as an engine that has ended.
+        if self.path.parent.is_dir():
+            (self.path.parent / "engine.lock").touch(exist_ok=True)
         if self.path.exists():
             lines = self.path.read_text(encoding="utf-8").splitlines()[1:]
             self.records = sum(1 for line in lines if line.startswith('{"record"'))
