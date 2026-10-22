@@ -11,6 +11,9 @@
 #                              programs, restart the dashboard, and say what
 #                              changed
 #   sudo ti-release --rollback put the previous build back the same way
+#   ti-release --status        print the current and previous tags and whether a
+#                              kept build (.replaced or .rescue-*) is waiting;
+#                              read-only, takes no lock, needs no root
 #   sudo deploy/release.sh --install
 #                              copy this script to /usr/local/sbin/ti-release
 #   ti-release --unverified v1.2.3
@@ -78,7 +81,7 @@ programs="ti-engine ti-reporter ti-dashboard operator journal-query"
 
 die() { printf 'ti-release: %s\n' "$*" >&2; exit 1; }
 log() { printf 'ti-release: %s\n' "$*"; }
-usage() { echo "usage: ti-release <tag> | --rollback | --install" >&2; exit 1; }
+usage() { echo "usage: ti-release <tag> | --rollback | --status | --install" >&2; exit 1; }
 
 sha() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
@@ -97,6 +100,7 @@ fi
 case ${1:-} in
   --install) test "$unverified" = 0 && test $# -eq 1 || usage; mode=install ;;
   --rollback) test "$unverified" = 0 && test $# -eq 1 || usage; mode=rollback ;;
+  --status) test "$unverified" = 0 && test $# -eq 1 || usage; mode=status ;;
   "" | -*) usage ;;
   *)
     test $# -eq 1 || usage
@@ -108,6 +112,25 @@ case ${1:-} in
     fi
     ;;
 esac
+
+if test "$mode" = status; then
+  st() { cat "$releases/$1" 2>/dev/null || true; }
+  echo "current: $(st current)"
+  echo "previous: $(st previous)"
+  if test -e "$releases/.replaced"; then
+    echo ".replaced: kept build $(cat "$releases/.replaced/TAG" 2>/dev/null || echo '(tag not recorded)') at $releases/.replaced (blocks the next run until moved)"
+  else
+    echo ".replaced: none"
+  fi
+  found=0
+  for d in "$releases"/.rescue-*; do
+    test -e "$d" || continue
+    echo "rescue: $d (a kept copy; never blocks a run)"
+    found=1
+  done
+  test "$found" = 1 || echo "rescue: none"
+  exit 0
+fi
 
 if test "${TI_RELEASE_NO_ROOT:-0}" != 1 && test "$(id -u)" -ne 0; then
   die "run as root (sudo ti-release ...)"
@@ -139,14 +162,19 @@ refuse_if_engine_busy() {
 }
 refuse_if_engine_busy
 
-# A build kept at .replaced by an earlier failed save is the only copy: refuse
-# before the exit trap (which clears .replaced) exists, until it is moved aside.
-if test -e "$releases/.replaced"; then
-  die "ALERT: a kept build was left at $releases/.replaced by an earlier failed save; move it to $releases/<tag> (or aside) by hand first; nothing installed"
-fi
+# The lock comes first, so a second run during another run's legitimate swap
+# (which holds the old build at .replaced for a moment) is told another release
+# is running, not given a false ALERT. Until the full trap exists, only the lock
+# is removed on exit.
 install -d -m 0755 "$releases"
 lock=$releases/.lock
 mkdir "$lock" 2>/dev/null || die "another ti-release is running (or died: remove $lock)"
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+# A build kept at .replaced by an earlier failed save is the only copy: refuse,
+# before the full exit trap (which clears .replaced) exists, until it is moved.
+if test -e "$releases/.replaced"; then
+  die "ALERT: a kept build (tag $(cat "$releases/.replaced/TAG" 2>/dev/null || echo 'not recorded; see ti-release --status')) was left at $releases/.replaced by an earlier failed save; move it to $releases/<that tag> (or to a dot-prefixed name such as $releases/.aside-<that tag>) by hand first; nothing installed"
+fi
 keep_replaced=0
 trap 'rmdir "$lock" 2>/dev/null || true; rm -rf "$releases/.staging"; test "$keep_replaced" = 1 || rm -rf "$releases/.replaced"' EXIT
 
@@ -395,10 +423,17 @@ if test "$mode" = release; then
   # tag is released again) is replaced only now that the release succeeded.
   # If keeping it fails, the old build is put back and nothing is recorded.
   kept=1
-  if test -d "$releases/$tag" && ! mv "$releases/$tag" "$releases/.replaced"; then kept=0; fi
+  if test -d "$releases/$tag"; then
+    if mv "$releases/$tag" "$releases/.replaced"; then
+      printf '%s\n' "$tag" >"$releases/.replaced/TAG" || true
+    else
+      kept=0
+    fi
+  fi
   if test "$kept" = 1 && ! mv "$stage" "$releases/$tag"; then
     kept=0
-    if test -d "$releases/.replaced" && ! mv "$releases/.replaced" "$releases/$tag"; then
+    if test -d "$releases/.replaced" && rm -f "$releases/.replaced/TAG" && ! mv "$releases/.replaced" "$releases/$tag"; then
+      printf '%s\n' "$tag" >"$releases/.replaced/TAG" || true
       # The kept build could not be moved back: it is the only copy, so the
       # exit trap must not delete it.
       keep_replaced=1

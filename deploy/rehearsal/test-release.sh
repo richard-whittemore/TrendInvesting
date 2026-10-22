@@ -297,10 +297,10 @@ done
 # sha, missing fields and a non-JSON answer are all refused as unreadable.
 good_main=$(cat "$work/api/repos/$slug/git/ref/heads/main")
 set_compare v0.9.6 '{"status":"identical"}'
-for body in 'not json' '{}' '[]' '' '{"object":{"sha":"'"$main_sha"'","type":"tag"}}' '{"object":{"sha":"abc123","type":"commit"}}' '{"object":{"sha":"'"$(echo "$main_sha" | tr a-f A-F)"'","type":"commit"}}' '{"object":{"type":"commit"}}' '{"object":{"sha":"'"$main_sha"'"}}' '{"object":"x"}'; do
+for body in 'not json' '{}' '[]' '' '{"object":{"sha":"'"$main_sha"'","type":"tag"}}' '{"object":{"sha":"abc123","type":"commit"}}' '{"object":{"sha":"'"$main_sha"'0","type":"commit"}}' '{"object":{"sha":"'"${main_sha:0:39}"'","type":"commit"}}' '{"object":{"sha":"'"$(echo "$main_sha" | tr a-f A-F)"'","type":"commit"}}' '{"object":{"type":"commit"}}' '{"object":{"sha":"'"$main_sha"'"}}' '{"object":"x"}'; do
   printf '%s\n' "$body" >"$work/api/repos/$slug/git/ref/heads/main"
   expect "a main lookup answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.6)")"
-  grep -q "try again later" "$work/out" || fail "the main lookup answer '$body' does not say to try again later: $(cat "$work/out")"
+  grep -q "whether .* is on main.*try again later" "$work/out" || fail "the main lookup answer '$body' does not say to try again later: $(cat "$work/out")"
   expect "bin untouched after the main lookup answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
 done
 printf '%s\n' "$good_main" >"$work/api/repos/$slug/git/ref/heads/main"
@@ -423,8 +423,39 @@ expect "a later release refuses while .replaced exists" nonzero "$(nonzero "$(ru
 if ! grep -q "ALERT" "$work/out" || ! grep -q "$TI_PREFIX/releases/.replaced" "$work/out"; then fail "the refusal does not name .replaced: $(cat "$work/out")"; fi
 test -f "$TI_PREFIX/releases/.replaced/checksums.txt" || fail "a later release deleted the kept build"
 expect "bin untouched by the refused release" "echo ti-engine v1.1.0" "$(installed ti-engine)"
+# The tag of the kept build is recorded beside it, and the refusal names it.
+expect "the kept build's tag is recorded beside it" v1.0.0 "$(cat "$TI_PREFIX/releases/.replaced/TAG" 2>/dev/null || echo none)"
+grep -q "(tag v1.0.0)" "$work/out" || fail "the refusal does not name the kept build's tag: $(cat "$work/out")"
+
+# --status is read-only: it prints the tags and what is kept, takes no lock
+# and works while an engine unit is mid-restart.
+expect "--status succeeds with a kept build" 0 "$(FAKE_ENGINE_BUSY=1 run --status)"
+grep -q "current: v1.1.0" "$work/out" || fail "--status does not print the current tag: $(cat "$work/out")"
+grep -q "previous: v1.0.0" "$work/out" || fail "--status does not print the previous tag: $(cat "$work/out")"
+grep -q "\.replaced: kept build v1.0.0" "$work/out" || fail "--status does not report .replaced and its tag: $(cat "$work/out")"
+mkdir -p "$TI_PREFIX/releases/.rescue-v9.9.9"
+expect "--status succeeds with a rescue" 0 "$(run --status)"
+grep -q "\.rescue-v9.9.9" "$work/out" || fail "--status does not list the rescue folder: $(cat "$work/out")"
+expect "--status refuses extra arguments" nonzero "$(nonzero "$(run --status v1.0.0)")"
+test ! -e "$TI_PREFIX/releases/.lock" || fail "--status left a lock"
+
+# A rescue folder never blocks a run; only .replaced does.
 mv "$TI_PREFIX/releases/.replaced" "$TI_PREFIX/releases/aside"
-expect "the release goes ahead once .replaced is moved aside" 0 "$(run v1.3.0)"
+expect "the release goes ahead once .replaced is moved aside, a rescue present" 0 "$(run v1.3.0)"
+test -d "$TI_PREFIX/releases/.rescue-v9.9.9" || fail "a release removed the rescue folder"
+expect "--status with nothing kept" 0 "$(run --status)"
+grep -q "\.replaced: none" "$work/out" || fail "--status does not say .replaced is clear: $(cat "$work/out")"
+rm -rf "$TI_PREFIX/releases/.rescue-v9.9.9"
+
+# A second run during a legitimate swap (the lock is held and .replaced is
+# there) says another release is running, not a false ALERT, and touches
+# neither.
+mkdir -p "$TI_PREFIX/releases/.lock" "$TI_PREFIX/releases/.replaced"
+expect "a run while another holds the lock is refused" nonzero "$(nonzero "$(run v1.4.0)")"
+grep -q "another ti-release is running" "$work/out" || fail "the lock message is missing: $(cat "$work/out")"
+if grep -q "ALERT" "$work/out"; then fail "a false ALERT during a legitimate swap: $(cat "$work/out")"; fi
+test -d "$TI_PREFIX/releases/.replaced" && test -d "$TI_PREFIX/releases/.lock" || fail "the refused run disturbed the lock or .replaced"
+rm -rf "$TI_PREFIX/releases/.lock" "$TI_PREFIX/releases/.replaced"
 
 # The first release.
 fresh_server
@@ -586,6 +617,17 @@ grep -Fq 'apt-mark hold gh' "$book" || fail "the runbook does not hold gh at the
 grep -Fq 'apt-mark unhold gh' "$book" || fail "the runbook does not say how to upgrade the held gh"
 if grep -Eq 'apt install gh([^=]|$)' "$book"; then fail "the runbook installs an unpinned gh"; fi
 grep -Fq 'GH_KEY_FINGERPRINTS' "$book" || fail "the runbook does not check gh's key fingerprints"
+server_manual=$repo/docs/manual/server.md
+for doc in "$book" "$server_manual"; do
+  grep -Fq 'ti-release --status' "$doc" || fail "$doc does not point to ti-release --status"
+  if grep -Fq 'ti-release <tag>` for the tag you expect' "$doc"; then fail "$doc still probes the installed build with ti-release <tag>"; fi
+  grep -Fq '.rescue-<tag>.1' "$doc" || [ "$doc" = "$server_manual" ] || fail "$doc names the wrong first extra rescue folder"
+done
+# shellcheck disable=SC2016  # the runbook holds a literal backtick
+if grep -Fq '(or `.rescue-<tag>.2`' "$book"; then fail "the runbook names .rescue-<tag>.2 as the first extra rescue"; fi
+if grep -Fq 'rename the copy to something else' "$book"; then fail "the runbook advises a rename that a later release deletes"; fi
+grep -Fq '.aside-<tag>' "$book" || fail "the runbook does not name a dot-prefixed place to move the copy aside"
+if grep -Fq 'refuses to start until that copy is dealt with' "$book" "$server_manual"; then fail "a doc says a rescue folder blocks a run"; fi
 if grep -Fq -- '--unverified' "$book" && grep -F -- '--unverified' "$book" | grep -Fq 'sudo ti-release'; then fail "the runbook offers --unverified on the server"; fi
 
 # The release workflow: tags only (no deploy on a merge), every action pinned
