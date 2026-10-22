@@ -32,7 +32,7 @@
 # release workflow on a GitHub-hosted runner, for the requested tag's ref and
 # for the commit the tag names (read from the GitHub API), so an older
 # release's programs and attestation cannot be served under a newer tag. That
-# commit must also be on main, asked of the API (compare main...commit is
+# commit must also be on main, asked of the API (main resolved to its commit, then compare that...commit is
 # identical or behind): the workflow's own on-main check runs from the tagged
 # commit, which a moved tag controls. An answer that cannot be read is a
 # refusal. The owner protects v* tags with a repository ruleset as well
@@ -142,7 +142,8 @@ refuse_if_engine_busy
 install -d -m 0755 "$releases"
 lock=$releases/.lock
 mkdir "$lock" 2>/dev/null || die "another ti-release is running (or died: remove $lock)"
-trap 'rmdir "$lock" 2>/dev/null || true; rm -rf "$releases/.staging" "$releases/.replaced"' EXIT
+keep_replaced=0
+trap 'rmdir "$lock" 2>/dev/null || true; rm -rf "$releases/.staging"; test "$keep_replaced" = 1 || rm -rf "$releases/.replaced"' EXIT
 
 read_state() { cat "$releases/$1" 2>/dev/null || true; }
 write_state() { printf '%s\n' "$2" >"$releases/$1.new" && mv "$releases/$1.new" "$releases/$1"; }
@@ -223,13 +224,19 @@ tag_commit() {
 }
 
 # commit_on_main COMMIT: the API says COMMIT is main's head or an ancestor of
-# it (compare main...COMMIT is identical or behind); anything else, or an
-# answer that cannot be read, is no.
+# it. Main is resolved to its commit first and compared by that commit, never
+# by the bare name (a tag called main would stand in for the branch). Returns
+# 0 when on main; 1 when the status says it is not (left in main_status); 2
+# when the API could not be asked or its answer could not be read.
+main_status=
 commit_on_main() {
-  local out=$releases/.staging/compare.json status
-  fetch "$api_url/repos/$repo_slug/compare/main...$1" "$out" || return 1
-  status=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["status"])' "$out" 2>/dev/null) || return 1
-  test "$status" = identical || test "$status" = behind
+  local out=$releases/.staging/compare.json main
+  fetch "$api_url/repos/$repo_slug/git/ref/heads/main" "$out" || return 2
+  main=$(python3 -I -c 'import json, sys; o = json.load(open(sys.argv[1]))["object"]; print(o["sha"] if o["type"] == "commit" else "")' "$out" 2>/dev/null) || return 2
+  [[ $main =~ ^[0-9a-f]{40}$ ]] || return 2
+  fetch "$api_url/repos/$repo_slug/compare/$main...$1" "$out" || return 2
+  main_status=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["status"])' "$out" 2>/dev/null) || return 2
+  test "$main_status" = identical || test "$main_status" = behind || return 1
 }
 
 # install_from DIR: install every program DIR/checksums.txt lists. Each is
@@ -344,8 +351,14 @@ if test "$mode" = release; then
   check_dir "$stage" || die "$tag failed its checksums; nothing installed"
   require_native_programs "$stage"
   if test "$unverified" = 0; then
-    commit=$(tag_commit) || die "could not read the commit $tag names from $api_url; nothing installed"
-    commit_on_main "$commit" || die "$tag names commit $commit, which the API does not show to be on main (or its answer could not be read); nothing installed"
+    commit=$(tag_commit) || die "could not read the commit $tag names from $api_url (a rate limit, the network, or a bad answer); nothing installed; try again later"
+    on_main=0
+    commit_on_main "$commit" || on_main=$?
+    case $on_main in
+      0) ;;
+      1) die "$tag names commit $commit, which is not on main (the API's status is '$main_status'); nothing installed" ;;
+      *) die "could not ask the GitHub API whether $commit is on main (a rate limit or the network); nothing installed; try again later" ;;
+    esac
     for p in $programs; do
       "$gh" attestation verify "$stage/$p" --repo "$repo_slug" --bundle "$stage/attestation.sigstore.json" \
         --signer-workflow "$repo_slug/.github/workflows/release.yml" --source-ref "refs/tags/$tag" \
@@ -381,12 +394,19 @@ if test "$mode" = release; then
   if test -d "$releases/$tag" && ! mv "$releases/$tag" "$releases/.replaced"; then kept=0; fi
   if test "$kept" = 1 && ! mv "$stage" "$releases/$tag"; then
     kept=0
-    if test -d "$releases/.replaced"; then mv "$releases/.replaced" "$releases/$tag" || true; fi
+    if test -d "$releases/.replaced" && ! mv "$releases/.replaced" "$releases/$tag"; then
+      # The kept build could not be moved back: it is the only copy, so the
+      # exit trap must not delete it.
+      keep_replaced=1
+      kept_at=$releases/.replaced
+      if mv "$releases/.replaced" "$releases/.rescue-$tag"; then kept_at=$releases/.rescue-$tag; keep_replaced=0; fi
+      log "ALERT: the kept build $tag could not be moved back; its only copy is $kept_at (state still names it as previous); move it to $releases/$tag by hand"
+    fi
   fi
   if test "$kept" = 0; then
     log "$tag was installed but could not be kept under $releases; putting $cur back"
     put_back "$cur" || true
-    die "release $tag not recorded; the previous build ($cur) was put back"
+    die "release $tag not recorded; the previous build ($cur) was put back${kept_at:+; ALERT: the kept build is at $kept_at}"
   fi
   write_state previous "$cur"
   write_state current "$tag"

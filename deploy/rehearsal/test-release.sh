@@ -50,12 +50,14 @@ reseal() {
     for p in $programs; do printf 'digest %s\n' "$(sha "$d/$p")"; done; } >"$d/attestation.sigstore.json"
 }
 # set_compare TAG BODY: the API's answer to "is the tag's commit on main".
-set_compare() { printf '%s\n' "$2" >"$work/api/repos/$slug/compare/main...$(str_sha "commit-$1")"; }
+main_sha=$(str_sha main-head)
+set_compare() { printf '%s\n' "$2" >"$work/api/repos/$slug/compare/$main_sha...$(str_sha "commit-$1")"; }
 # make_release TAG [DASHBOARD_BODY]: a fake release folder with correct
 # checksums and bundle, and the API's record of its annotated tag (on main).
 make_release() {
   local tag=$1 dash=${2:-} d=$work/rel/$1 p api=$work/api/repos/$slug/git
-  mkdir -p "$d" "$api/ref/tags" "$api/tags" "$work/api/repos/$slug/compare"
+  mkdir -p "$d" "$api/ref/tags" "$api/ref/heads" "$api/tags" "$work/api/repos/$slug/compare"
+  printf '{"ref":"refs/heads/main","object":{"sha":"%s","type":"commit"}}\n' "$main_sha" >"$api/ref/heads/main"
   set_compare "$tag" '{"status":"behind"}'
   for p in $programs; do fake_program "$d/$p" "echo $p $tag"; done
   if test -n "$dash"; then fake_program "$d/ti-dashboard" "echo $dash"; fi
@@ -131,7 +133,8 @@ grep -qx "digest $d" "$bundle" || { echo "gh: $file is not attested" >&2; exit 1
 echo "verify $(basename "$file")" >>"$FAKE_GH_LOG.verified"
 STUB
 # The stand-in curl and mv: each records its arguments and runs the real one;
-# mv fails once when it would rename onto the path in FAKE_MV_FAIL.
+# mv fails the first FAKE_MV_FAIL_N (default 1) times it would rename onto the
+# path in FAKE_MV_FAIL.
 real_curl=$(command -v curl)
 real_mv=$(command -v mv)
 mkdir -p "$work/path"
@@ -143,8 +146,8 @@ STUB
 cat >"$work/path/mv" <<STUB
 #!/bin/bash
 last=\${*: -1}
-if test -n "\${FAKE_MV_FAIL:-}" && test "\$last" = "\$FAKE_MV_FAIL" && ! test -e "\$FAKE_MV_FAIL.failed-once"; then
-  : >"\$FAKE_MV_FAIL.failed-once"
+if test -n "\${FAKE_MV_FAIL:-}" && test "\$last" = "\$FAKE_MV_FAIL" && test "\$(cat "\$FAKE_MV_FAIL.failed-once" 2>/dev/null || echo 0)" -lt "\${FAKE_MV_FAIL_N:-1}"; then
+  echo \$((\$(cat "\$FAKE_MV_FAIL.failed-once" 2>/dev/null || echo 0) + 1)) >"\$FAKE_MV_FAIL.failed-once"
   echo "mv: No space left on device" >&2
   exit 1
 fi
@@ -285,9 +288,34 @@ for body in 'not json' '[]' '{}' '{"status":["behind"]}' '{"status":"behindish"}
   expect "a compare answer '$body' is refused" nonzero "$(nonzero "$(run v0.9.6)")"
   expect "bin untouched after the compare answer '$body'" "echo ti-engine hand" "$(installed ti-engine)"
 done
-rm -f "$work/api/repos/$slug/compare/main...$(str_sha commit-v0.9.6)"
+rm -f "$work/api/repos/$slug/compare/$main_sha...$(str_sha commit-v0.9.6)"
 expect "no compare answer is refused" nonzero "$(nonzero "$(run v0.9.6)")"
 not_current "no release recorded without a compare answer" v0.9.6
+
+# A tag named main must not stand in for the branch: the comparison is made
+# against the branch's own commit, so a tag called main that makes the bare
+# name compare as behind does not let an off-main commit through.
+make_release v0.9.8
+set_compare v0.9.8 '{"status":"diverged"}'
+printf '{"status":"behind"}\n' >"$work/api/repos/$slug/compare/main...$(str_sha commit-v0.9.8)"
+fresh_server
+expect "a tag called main does not vouch for an off-main commit" nonzero "$(nonzero "$(run v0.9.8)")"
+expect "bin untouched under a shadowing main tag" "echo ti-engine hand" "$(installed ti-engine)"
+rm -f "$work/api/repos/$slug/compare/main...$(str_sha commit-v0.9.8)"
+
+# A rate-limited or unreachable API is told apart from a commit that is not on
+# main: the first says to try again later, the second says what the status is.
+make_release v0.9.9
+set_compare v0.9.9 '{"status":"diverged"}'
+fresh_server
+expect "a commit off main is refused" nonzero "$(nonzero "$(run v0.9.9)")"
+grep -q "not on main" "$work/out" || fail "the off-main refusal does not say so: $(cat "$work/out")"
+if grep -qi "try again" "$work/out"; then fail "the off-main refusal suggests retrying: $(cat "$work/out")"; fi
+rm -f "$work/api/repos/$slug/compare/$main_sha...$(str_sha commit-v0.9.9)"
+expect "an unreadable compare answer is refused" nonzero "$(nonzero "$(run v0.9.9)")"
+grep -qi "try again later" "$work/out" || fail "the unreachable-API refusal has no retry hint: $(cat "$work/out")"
+if grep -q "not on main" "$work/out"; then fail "the unreachable-API refusal claims the commit is off main: $(cat "$work/out")"; fi
+set_compare v0.9.9 '{"status":"behind"}'
 
 # A malformed tag answer never reaches gh as a source digest.
 api=$work/api/repos/$slug/git
@@ -335,6 +363,19 @@ not_current "no release recorded after a failed save" v1.0.0
 rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
 expect "the tag installs when asked again" 0 "$(run v1.0.0)"
 all_are "the tag after a failed save" v1.0.0
+
+# The save fails and the kept build cannot be moved back either (the folder of
+# the tag being released again held the previous build): that build is kept
+# under a .rescue name, an ALERT names it, and the exit is non-zero.
+fresh_server
+expect "v1.0.0 installs" 0 "$(run v1.0.0)"
+expect "v1.1.0 installs" 0 "$(run v1.1.0)"
+expect "previous is v1.0.0" v1.0.0 "$(state previous)"
+expect "a failed save with a failed restore is nonzero" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 FAKE_MV_FAIL_N=2 run v1.0.0)")"
+grep -q "ALERT" "$work/out" || fail "no ALERT for the lost build: $(cat "$work/out")"
+grep -q "$TI_PREFIX/releases/.rescue-v1.0.0" "$work/out" || fail "the ALERT does not name the rescued build: $(cat "$work/out")"
+test -f "$TI_PREFIX/releases/.rescue-v1.0.0/checksums.txt" || fail "the kept build was deleted"
+rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
 
 # The first release.
 fresh_server
@@ -492,6 +533,8 @@ book=$repo/docs/runbooks/lightsail-deployment.md
   [[ ${GH_KEY_FINGERPRINTS:-} =~ ^[0-9A-F]{40}\ [0-9A-F]{40}$ ]] ) || fail "versions.env does not pin gh's version and key fingerprints"
 # shellcheck disable=SC2016  # the runbook holds the literal $GH_VERSION
 grep -Fq 'apt install gh="$GH_VERSION"' "$book" || fail "the runbook does not install the pinned gh version"
+grep -Fq 'apt-mark hold gh' "$book" || fail "the runbook does not hold gh at the pinned version"
+grep -Fq 'apt-mark unhold gh' "$book" || fail "the runbook does not say how to upgrade the held gh"
 if grep -Eq 'apt install gh([^=]|$)' "$book"; then fail "the runbook installs an unpinned gh"; fi
 grep -Fq 'GH_KEY_FINGERPRINTS' "$book" || fail "the runbook does not check gh's key fingerprints"
 if grep -Fq -- '--unverified' "$book" && grep -F -- '--unverified' "$book" | grep -Fq 'sudo ti-release'; then fail "the runbook offers --unverified on the server"; fi
