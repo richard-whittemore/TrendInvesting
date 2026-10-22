@@ -28,6 +28,26 @@ CODE_SERVER_LINK_BROKEN = 2110
 # 2100 and above are warnings and notices (market-data farm status and the
 # like); none of them ends a connection attempt.
 FIRST_NOTICE_CODE = 2100
+# The adapter's note, queued in the Inbox, that it has just asked for every
+# open order (see Connection.ask_all_open_orders).
+OPEN_ORDERS_ASKED = "open_orders_asked"
+# Where one open-order list stands (Connection.open_order_list): callbacks
+# still older than the request, the list being answered, or its end taken.
+LIST_BEFORE = "before"
+LIST_READING = "reading"
+LIST_ENDED = "ended"
+# As a session starts, Gateway sends this client's open orders and an end of
+# list that nothing asked for. connect takes them before it returns, so that
+# end can never land inside the first list asked for: it waits for that end,
+# but no longer than VOLUNTEER_QUIET seconds with no volunteered row (or
+# request_timeout, if shorter) and VOLUNTEER_MAX seconds in all.
+VOLUNTEER_QUIET = 2.0
+VOLUNTEER_MAX = 10.0
+# The callbacks of an open-order list: the Inbox is quiet for the list once
+# none of them has arrived for VOLUNTEER_QUIET seconds (see
+# Connection.resync_open_orders).
+LIST_MESSAGES = ("open_order", "open_order_end")
+
 # The first request ID: IBKR answers a request's error under its request ID
 # and an order's rejection under its order ID, with message codes shared by
 # both, so request IDs start far above any order ID an account reaches
@@ -102,6 +122,10 @@ class Connection:
         self.inbox = Inbox()
         self.connected = False
         self.needs_reconciliation = True
+        # The reason the link was last reported down (disconnected, or
+        # Gateway losing IBKR's servers), for a stop that names why the
+        # link kept going; None again once a connect succeeds.
+        self.last_drop_reason = None
         self.next_order_id = None
         self.managed_accounts = frozenset()
         self.last_server_time = None
@@ -119,11 +143,32 @@ class Connection:
         # Monotonic time of a restoration that found server-time requests
         # unanswered; see _settle_time_answers.
         self._time_restored_at = None
+        # Open-order lists asked for on this link, their notes taken from
+        # the Inbox, and the end markers counted as their answers; see
+        # ask_all_open_orders.
+        self._lists_requested = 0
+        self._lists_noted = 0
+        self._list_ends = 0
+        # Order IDs placed on this session, whose openOrder echo is expected
+        # traffic, not a stray (see placing).
+        self._placed = set()
+        self._reset_list_alignment()
+
+    def _reset_list_alignment(self):
+        # The volunteered rows and end connect kept for pump(), which are
+        # Gateway's own list, not strays; the count of strays (an end with
+        # no list outstanding, a row with none outstanding); and whether the
+        # link must be pumped quiet before the next list is asked.
+        self._volunteered = 0
+        self.open_order_strays = 0
+        self._resync_due = False
 
     # -- state reporting -------------------------------------------------
     def _report(self, state, reason="", attempt=None, ibkr_code=None, data_lost=None):
         status = ConnectionStatus(state, reason, self.config.client_id, self._wall_clock(),
                                   attempt, ibkr_code, data_lost)
+        if state in ("disconnected", "connectivity-lost"):
+            self.last_drop_reason = reason
         log.info("ibkr link state=%s reason=%s client_id=%d attempt=%s code=%s", state, reason,
                  self.config.client_id, attempt, ibkr_code)
         self._status_sink(status)
@@ -193,6 +238,115 @@ class Connection:
         self._report("disconnected", "time-answers-unmatched")
         return False
 
+    def ask_all_open_orders(self):
+        """Ask IBKR for every open order (reqAllOpenOrders); return the ticket open_order_list reads it by.
+
+        IBKR's open orders and the end of their list carry no request ID,
+        so at most one list is outstanding on the link at a time: while an
+        earlier list has not ended, this waits for its end (taking its late
+        rows as that list's, never this one's) up to request_timeout, and
+        if it does not come drops the link and raises NotConnected, since no
+        later list on the link could be told from it (ADR 0019: a list not
+        read in full is unread). Gateway's volunteered list was taken by
+        connect. After a row or end with no list outstanding, or a connect
+        that saw no volunteered end, the link is pumped quiet first
+        (resync_open_orders), so a link one list behind is brought level
+        before it is read again; a list that merely ended with no row of
+        its own (as every list does with no open order at IBKR) costs the
+        next read no wait. The request is noted in the Inbox just before it is sent:
+        every callback queued ahead of the note arrived before the request
+        left and is no part of its answer, and an end taken with no list
+        outstanding ends nothing. NotConnected while the link is down.
+        """
+        self.require_connected()
+        if self._list_ends < self._lists_requested:
+            self._await_list_end()
+        if self._resync_due:
+            self.resync_open_orders()
+        self._lists_requested += 1
+        self.inbox.note(OPEN_ORDERS_ASKED)
+        self.api.req_all_open_orders()
+        return self._lists_requested
+
+    def _await_list_end(self):
+        """Take callbacks until the outstanding open-order list ends; drop the link if it does not in request_timeout."""
+        for _ in self.events(self.config.request_timeout):
+            if not self.connected or self._list_ends >= self._lists_requested:
+                break
+        if not self.connected:
+            raise NotConnected("IB Gateway link is down")
+        if self._list_ends < self._lists_requested:
+            self.drop("open-order-list-unended")
+            raise NotConnected("an earlier open-order list never ended, so no later one on this link can be read")
+
+    def resync_open_orders(self):
+        """Take callbacks until no open-order row or end has arrived for VOLUNTEER_QUIET seconds (or request_timeout).
+
+        Waits first for any list still outstanding to end (as
+        ask_all_open_orders does). An end not a list's own that landed
+        inside a list leaves the link one list behind, each list ending on
+        the one before's end; once the Inbox is quiet, every late row and
+        end has been taken with no list outstanding, counted as strays
+        (open_order_strays), and the next list is answered by its own end
+        (ADR 0025 point 5: matched in full before anything is sent). A link
+        never quiet within VOLUNTEER_MAX seconds is dropped (ADR 0019: a
+        list not read in full is unread), even when the cap cuts the last
+        quiet window short. NotConnected while the link is down or once
+        dropped.
+        """
+        self.require_connected()
+        if self._list_ends < self._lists_requested:
+            self._await_list_end()
+        quiet = min(VOLUNTEER_QUIET, self.config.request_timeout)
+        now = self._monotonic()
+        until, quiet_until = now + VOLUNTEER_MAX, now + quiet
+        while True:
+            now = self._monotonic()
+            if now >= quiet_until:
+                break
+            # A wait the VOLUNTEER_MAX cap cuts short is no quiet: a link
+            # silent for less than the quiet window at the cap is dropped.
+            capped = until < quiet_until
+            if now >= until:
+                capped = True
+                event = None
+            else:
+                event = self.pump(min(until, quiet_until) - now)
+            if not self.connected:
+                raise NotConnected("IB Gateway link is down")
+            if event is None:
+                if capped:
+                    self.drop("open-orders-never-quiet")
+                    raise NotConnected("IBKR's open orders never stopped arriving, so no list on this link can be "
+                                       "read")
+                break
+            if event.name in LIST_MESSAGES:
+                quiet_until = self._monotonic() + quiet
+        self._resync_due = False
+
+    def open_order_list(self, ticket):
+        """Where the list ask_all_open_orders gave ticket for stands: LIST_BEFORE, LIST_READING or LIST_ENDED.
+
+        Read after each callback pump() takes: an open order taken while
+        the list is LIST_READING is part of its answer.
+        """
+        if self._lists_noted < ticket:
+            return LIST_BEFORE
+        if self._list_ends >= ticket:
+            return LIST_ENDED
+        return LIST_READING
+
+    def placing(self, order_id):
+        """Note that the adapter is placing order_id on this session, just before placeOrder is sent.
+
+        IBKR echoes every order placed with an openOrder outside any list:
+        that row is matched to the placement by its order ID and is no
+        stray, so the next read is not pumped quiet for it. A row of any
+        other order with no list outstanding, or a later row for this one,
+        is still a stray (ADR 0019: a list not read in full is unread).
+        """
+        self._placed.add(order_id)
+
     def new_req_id(self):
         req_id = self._next_req_id
         self._next_req_id += 1
@@ -217,6 +371,11 @@ class Connection:
         self.time_requests = 0
         self.time_answers = 0
         self._time_restored_at = None
+        self._lists_requested = 0
+        self._lists_noted = 0
+        self._list_ends = 0
+        self._placed = set()
+        self._reset_list_alignment()
         # One deadline covers the socket connect, IBKR's handshake and the
         # wait for nextValidId: EClient.connect is synchronous, so a deadline
         # started after it returns would not bound a stalled socket.
@@ -234,29 +393,73 @@ class Connection:
                 raise ConnectFailed("no handshake within connect_timeout")
             if event.name == "next_valid_id":
                 self.next_order_id = event.args[0]
+                self._take_volunteered_list()
                 self.connected = True
                 self.needs_reconciliation = True
+                self.last_drop_reason = None
                 self._report("connected")
                 return
             if event.name == "managed_accounts":
                 # The session's own state, read here: nothing else needs it.
                 self._apply(event)
                 continue
-            if event.name == "connection_closed":
-                self._abandon()
-                raise ConnectFailed("Gateway closed the connection during the handshake")
-            if event.name == "error":
-                code = event.args[1]
-                if code == CODE_CLIENT_ID_IN_USE:
-                    self._abandon()
-                    self._report("refused", "client-id-in-use", ibkr_code=code)
-                    raise ClientIdInUse("client_id {} is already connected".format(cfg.client_id))
-                if code < FIRST_NOTICE_CODE:
-                    self._abandon()
-                    raise ConnectFailed("IBKR code {} during the handshake".format(code))
+            self._fail_handshake(event)
             # Anything else (notices, the open orders Gateway volunteers on
             # connect) is kept for pump() rather than dropped.
-            self._pending.append(event)
+            self._keep(event)
+
+    def _fail_handshake(self, event):
+        """Abandon the attempt (ConnectFailed, or ClientIdInUse) on a close or a code that ends a connect."""
+        if event.name == "connection_closed":
+            self._abandon()
+            raise ConnectFailed("Gateway closed the connection during the handshake")
+        if event.name == "error":
+            req_id, code = event.args[0], event.args[1]
+            if code == CODE_CLIENT_ID_IN_USE:
+                self._abandon()
+                self._report("refused", "client-id-in-use", ibkr_code=code)
+                raise ClientIdInUse("client_id {} is already connected".format(self.config.client_id))
+            # Only a code under no order (IBKR's -1) ends a connect: IBKR
+            # answers an order's message under its order ID, 0 for an order
+            # placed by hand, and that is kept for pump().
+            if code < FIRST_NOTICE_CODE and (req_id is None or req_id < 0):
+                self._abandon()
+                raise ConnectFailed("IBKR code {} during the handshake".format(code))
+
+    def _keep(self, event):
+        """Keep a callback connect took for pump(); a row or end of Gateway's volunteered list is no stray."""
+        if event.name in LIST_MESSAGES:
+            self._volunteered += 1
+        self._pending.append(event)
+
+    def _take_volunteered_list(self):
+        """Keep for pump() the open orders and end Gateway volunteers as the session starts (see VOLUNTEER_QUIET).
+
+        Taken before the first list is asked for, they stand ahead of its
+        note in the queue, so the volunteered end ends nothing. When no end
+        comes in time the session goes on without it; a start's or
+        reconnect's read of the open orders stands only once two reads in a
+        row agree (orders.collect_settled_broker_orders), and the first list
+        asked is pumped quiet first (resync_open_orders). A close or a code
+        that ends a connect, taken here, fails the attempt as it does
+        during the handshake, so connect_with_backoff retries it: a link
+        already lost is never reported connected.
+        """
+        quiet = min(VOLUNTEER_QUIET, self.config.request_timeout)
+        now = self._monotonic()
+        until, quiet_until = now + VOLUNTEER_MAX, now + quiet
+        while True:
+            wait = min(until, quiet_until) - self._monotonic()
+            event = self.inbox.get(wait) if wait > 0 else None
+            if event is None:
+                self._resync_due = True
+                return
+            self._fail_handshake(event)
+            self._keep(event)
+            if event.name == "open_order_end":
+                return
+            if event.name in ("open_order", "order_status"):
+                quiet_until = self._monotonic() + quiet
 
     def connect_with_backoff(self):
         """Connect, retrying a failed attempt after an exponentially growing, capped delay."""
@@ -333,11 +536,17 @@ class Connection:
 
     # -- consuming callbacks ---------------------------------------------
     def pump(self, timeout):
-        """Take one callback (waiting up to timeout seconds), apply it, and fan it out; None if none."""
+        """Take one callback (waiting up to timeout seconds), apply it, and fan it out; None if none.
+
+        The adapter's own notes (OPEN_ORDERS_ASKED) are applied and returned
+        but never fanned out: they are no callback of IBKR's.
+        """
         event = self._pending.popleft() if self._pending else self.inbox.get(timeout)
         if event is None:
             return None
         self._apply(event)
+        if event.name == OPEN_ORDERS_ASKED:
+            return event  # the adapter's own note, not IBKR's callback
         for handler in self._subscribers:
             handler(event)
         return event
@@ -362,12 +571,43 @@ class Connection:
                 self.connected = False
                 self._lost_at = None
                 self._report("disconnected", "connection-closed")
+        elif event.name == OPEN_ORDERS_ASKED:
+            self._lists_noted += 1
+        elif event.name in LIST_MESSAGES and self._list_ends >= self._lists_noted and self._volunteered:
+            self._volunteered -= 1  # Gateway's volunteered list, which connect took
+        elif event.name == "open_order":
+            if self._list_ends >= self._lists_noted and not self._is_echo(event):
+                # A row with no list outstanding, other than IBKR's echo of
+                # an order placed on this session (see placing), is a stray
+                # as an end is: the next list is asked only once the link is
+                # pumped quiet (ADR 0019: a list not read in full is unread).
+                self.open_order_strays += 1
+                self._resync_due = True
+        elif event.name == "open_order_end":
+            if self._list_ends < self._lists_noted:
+                # A list that ends before any row of its own is no signal on
+                # its own: with no open order at IBKR every list has that
+                # shape. An end not its own that ended it leaves its own end
+                # to arrive later as a stray, which brings the link level.
+                self._list_ends += 1
+            else:
+                self.open_order_strays += 1
+                self._resync_due = True
+                log.info("ibkr open-order list end with no list outstanding ignored")
         elif event.name == "current_time":
             self.time_answers += 1
             self.last_server_time = event.args[0]
             self._probe_sent_at = None
         elif event.name == "error":
             self._apply_error(event.args[1])
+
+    def _is_echo(self, event):
+        """Whether an openOrder row is IBKR's echo of an order this client placed on this session (see placing)."""
+        order_id, order = event.args[0], event.args[2]
+        if order_id in self._placed and getattr(order, "clientId", None) == self.config.client_id:
+            self._placed.discard(order_id)  # taken once: a later row for the ID is a stray
+            return True
+        return False
 
     def _apply_error(self, code):
         if code in (CODE_CONNECTIVITY_LOST, CODE_SERVER_LINK_BROKEN):

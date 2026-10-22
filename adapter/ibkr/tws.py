@@ -135,6 +135,15 @@ class Inbox:
     def __init__(self):
         self._queue = queue.Queue()
 
+    def note(self, name):
+        """Queue the adapter's own note name behind every callback already received.
+
+        Not a callback: Connection.ask_all_open_orders notes a request here
+        just before it is sent, so whatever is queued ahead of the note
+        arrived before the request left and cannot be its answer.
+        """
+        self._queue.put(Event(name, ()))
+
     def get(self, timeout):
         """Return the next callback, or None if none arrives within timeout seconds."""
         try:

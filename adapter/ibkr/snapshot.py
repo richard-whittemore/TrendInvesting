@@ -56,7 +56,8 @@ from types import SimpleNamespace
 
 from account import EXCESS_LIQUIDITY, NET_LIQUIDATION, SUMMARY_GROUP, SUMMARY_TAGS, TOTAL_CASH
 from account import SnapshotIncomplete, SnapshotInvalid, _add_balance, _add_position, _server_time
-from orders import UnrecognisedOrderReport, open_order_record, order_key
+from connection import LIST_ENDED, LIST_READING, NotConnected
+from orders import FINISHED, UnrecognisedOrderReport, open_order_record, order_key, order_label
 from sender import CURRENCY, EXCHANGE, SEC_TYPE
 from values import to_decimal
 
@@ -100,7 +101,6 @@ OPEN_STATUS = {
     "Inactive": "pending",
     "PendingCancel": "cancel-pending",
 }
-FINISHED = frozenset({"Cancelled", "ApiCancelled", "Filled"})
 
 Record = namedtuple("Record", "event_type schema_version payload")
 """One recorded input: its event type, schema version and JSON-ready payload."""
@@ -132,15 +132,24 @@ def read_account(conn):
     done = {"positions": False, "summary": False, "orders": False}
     asked = conn.connected
     if asked:
+        # The open orders are this read's own list, ended only by its own
+        # end, and asked first: an earlier list still outstanding is waited
+        # for before anything else is asked (Connection.ask_all_open_orders).
+        try:
+            ticket = conn.ask_all_open_orders()
+        except NotConnected:
+            asked = False
+    if asked:
         summary_id = conn.new_req_id()
         conn.api.req_positions()
         conn.api.req_account_summary(summary_id, SUMMARY_GROUP, ",".join(SUMMARY_TAGS))
-        conn.api.req_all_open_orders()
         try:
             for event in conn.events(conn.config.request_timeout):
                 if not conn.connected:
                     break
-                _take(event, account, summary_id, positions, balances, orders, unread, done)
+                _take(event, account, summary_id, positions, balances, orders, unread, done,
+                      conn.open_order_list(ticket))
+                done["orders"] = conn.open_order_list(ticket) == LIST_ENDED
                 if all(done.values()):
                     break
         finally:
@@ -185,7 +194,8 @@ def read_account(conn):
         as_of=as_of.replace(microsecond=0))
 
 
-def _take(event, account, summary_id, positions, balances, orders, unread, done):
+def _take(event, account, summary_id, positions, balances, orders, unread, done, open_order_list):
+    """Apply one callback to the read; an open order counts only while the read's own list is answered."""
     name, args = event.name, event.args
     if name == "position":
         _take_position(positions, account, unread, *args)
@@ -201,10 +211,8 @@ def _take(event, account, summary_id, positions, balances, orders, unread, done)
     elif name == "error" and args[0] == summary_id:
         unread.update({NET, EXCESS, CASH})
         done["summary"] = True
-    elif name == "open_order":
+    elif name == "open_order" and open_order_list == LIST_READING:
         _take_order(orders, account, unread, *args)
-    elif name == "open_order_end":
-        done["orders"] = True
 
 
 def _take_position(positions, account, unread, row_account, contract, quantity, avg_cost):
@@ -245,9 +253,8 @@ def _take_order(orders, account, unread, order_id, contract, order, order_state)
             or record.quantity != record.quantity.to_integral_value()):
         unread.add(OPEN_ORDERS)
         return
-    broker_id = "perm:{}".format(key[2]) if key[0] == "perm" else "order:{}:{}".format(key[1], key[2])
     orders[key] = {
-        "broker_order_id": broker_id,
+        "broker_order_id": order_label(key),
         "client_order_id": record.client_order_id or "",
         "instrument_id": record.symbol,
         "side": side,

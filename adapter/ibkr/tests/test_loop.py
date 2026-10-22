@@ -30,7 +30,7 @@ from test_connection import Clock, config
 from connection import AccountNotManaged
 from engine_client import EngineRejected
 from relay import EngineUnavailable
-from loop import (OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch,
+from loop import (OUTBOX_SUFFIX, RECONCILE_CUTOFFS, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch,
                   ReportRecordInvalid, SOURCE)
 from relay import (RELEASED, EarlierRunInput, HandoverRecordInvalid, PendingInput, ResolveRefused, main as relay_main,
                    read_engine_log, run_identity)
@@ -68,8 +68,9 @@ class SwitchFollowsLink(FakeTWS):
 class DropsOnTheRelaysOrderRead(FakeTWS):
     """IB Gateway closes the connection as the relay reads IBKR's orders for an order about to be sent.
 
-    The start's reconciliation reads them twice (the account read and the
-    order match); the third read is the relay's.
+    The start's reconciliation reads them three times (the two agreeing
+    reads of the order match, then the account read); the fourth read is
+    the relay's.
     """
 
     def __init__(self):
@@ -78,7 +79,7 @@ class DropsOnTheRelaysOrderRead(FakeTWS):
 
     def req_all_open_orders(self):
         self.reads += 1
-        if self.reads == 3:
+        if self.reads == 4:
             self.calls.append(("req_all_open_orders",))
             self.drop()
             return
@@ -90,7 +91,7 @@ class LosesIbkrOnTheRelaysOrderRead(DropsOnTheRelaysOrderRead):
 
     def req_all_open_orders(self):
         self.reads += 1
-        if self.reads == 3:
+        if self.reads == 4:
             self.calls.append(("req_all_open_orders",))
             self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
             self.callbacks.error(-1, 1102, "Connectivity between IB and Trader Workstation has been restored - "
@@ -104,11 +105,41 @@ class LosesIbkrAndRestoresLater(DropsOnTheRelaysOrderRead):
 
     def req_all_open_orders(self):
         self.reads += 1
-        if self.reads == 3:
+        if self.reads == 4:
             self.calls.append(("req_all_open_orders",))
             self.callbacks.error(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")
             return
         FakeTWS.req_all_open_orders(self)
+
+
+class NeverQuietAfterARead(FakeTWS):
+    """Stray open-order ends keep arriving after the reqAllOpenOrders numbered in never_quiet_after, so the link is never quiet.
+
+    Each arrives the next time the adapter waits, after the loop's clock has
+    moved on by gap seconds (tick), until the session is dropped.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.never_quiet_after = set()
+        self.tick = None
+        # While set, the stream goes on across reconnects: every new
+        # session's messages never pause either (an account another client
+        # is working, behind a Gateway that keeps the socket up).
+        self.never_pauses = False
+
+    def req_all_open_orders(self):
+        super().req_all_open_orders()
+        if len(self.called("req_all_open_orders")) in self.never_quiet_after:
+            self.later_hook = self.tick
+            self._later.extend([self.callbacks.open_order_end] * 20)
+
+    def connect(self, *args):
+        self.later_hook = None
+        super().connect(*args)
+        if self.never_pauses and self.connected:
+            self.later_hook = self.tick
+            self._later.extend([self.callbacks.open_order_end] * 20)
 
 
 class Interposed:
@@ -279,12 +310,249 @@ class LoopTests(unittest.TestCase):
         self.assertTrue(loop.conn.connected)
         self.assertFalse(loop.conn.needs_reconciliation)
         self.assertEqual(len(self.fake.called("connect")), 2)
-        self.assertEqual(len(self.fake.called("req_executions")), matched + 1, "matched again after the reconnect")
+        self.assertEqual(len(self.fake.called("req_executions")), matched + 2,
+                         "matched again after the reconnect, by two reads that agree")
         self.fills(self.fake)
         self.settle(loop)
         self.assertEqual(len(self.fake.placed), 1)
         self.assertEqual([e["type"] for e in self.engine.inputs()],
                          ["market.session.closed", LIFECYCLE_TYPE, FILL_TYPE, FILL_TYPE])
+
+    def test_a_reconnect_with_an_order_working_reads_ibkrs_whole_list_and_stays_reconciled(self):
+        # Gateway volunteers this client's orders and an end marker as the
+        # new session starts, and sends the list asked for later, in parts.
+        loop = self.loop()
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        self.session_closed(loop)
+        self.settle(loop)
+        self.assertEqual(len(self.fake.placed), 1)
+        manual = (0, contract(), order(order_ref="", client_id=0, perm_id=4242, order_type="LMT", lmt_price=1.0),
+                  SimpleNamespace(status="Submitted"))
+        self.fake.volunteer_open_orders = True
+        self.fake.open_order_batch = 1
+        self.fake.drop()
+        with self.assertLogs("ibkr", "INFO") as logged:
+            self.settle(loop)
+        self.assertTrue(loop.ready(), "matched again: the working order is IBKR's and the engine's")
+        self.assertEqual(len(self.fake.called("connect")), 2)
+        self.assertEqual(len(self.fake.placed), 1, "never sent again")
+        self.assertTrue(any("ibkr reconciled" in line and "open_orders=1 " in line for line in logged.output),
+                        logged.output)
+        # IBKR's whole list is read: an order there that no run released stops the next reconnect.
+        self.fake.open_orders.append(manual)
+        self.fake.drop()
+        with self.assertRaises(ReconcileMismatch):
+            self.settle(loop)
+        self.assertEqual(len(self.fake.placed), 1)
+
+    def test_an_order_only_ibkrs_whole_list_shows_stops_the_start_behind_a_volunteered_end(self):
+        fake = self.gateway()
+        fake.open_orders = [(0, contract(), order(order_ref="", client_id=0, perm_id=4242, order_type="LMT",
+                                                  lmt_price=1.0), SimpleNamespace(status="Submitted"))]
+        fake.volunteer_open_orders = True
+        fake.open_order_batch = 1
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch):
+            loop.start()
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def manual_order(self):
+        return (0, contract(), order(order_ref="", client_id=0, perm_id=4242, order_type="LMT", lmt_price=1.0),
+                SimpleNamespace(status="Submitted"))
+
+    def test_an_order_only_ibkrs_whole_list_shows_stops_the_start_when_the_volunteered_end_follows_the_request(self):
+        fake = self.gateway()
+        fake.open_orders = [self.manual_order()]
+        fake.volunteer_open_orders = True
+        fake.volunteer_after_request = True
+        fake.open_order_batch = 1
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch):
+            loop.start()
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def test_the_start_reads_the_open_orders_again_until_two_reads_agree(self):
+        # Two reads that disagree, then one that agrees with the read before
+        # it, then the account read, which agrees with them: the agreed list
+        # is matched.
+        fake = self.gateway()
+        fake.open_order_answers = [[], [self.manual_order()], [self.manual_order()]]
+        fake.open_orders = [self.manual_order()]
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch):
+            loop.start()
+        self.assertEqual(len(fake.called("req_all_open_orders")), 4)
+        self.assertTrue(loop.conn.needs_reconciliation)
+
+    def test_an_account_read_that_never_agrees_with_the_settled_reads_leaves_the_link_not_reconciled(self):
+        # Each time two reads agree, the account read after them differs:
+        # four account reads, then the link is not reconciled.
+        fake = self.gateway()
+        fake.open_order_answers = [[self.manual_order()], [self.manual_order()], []] * 4
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            loop.start()
+        self.assertIn("account read", str(caught.exception))
+        self.assertEqual(len(fake.called("req_all_open_orders")), 12)
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def test_an_order_that_finishes_between_reads_on_a_healthy_link_still_settles(self):
+        # A hand-placed order is working, then fills while the reads go on;
+        # the account read taken after the two agreeing reads agrees with
+        # them, and the link is reconciled.
+        fake = self.gateway()
+        filled = self.manual_order()[:3] + (SimpleNamespace(status="Filled"),)
+        fake.open_order_answers = [[self.manual_order()], [filled], [], []]
+        loop = self.loop(fake)
+        loop.start()
+        self.assertTrue(loop.ready(), "a book that changed and then settled is reconciled")
+        self.assertEqual(fake.placed, [])
+
+    def never_quiet(self, fake, *reads):
+        fake.never_quiet_after = set(reads)
+
+        def tick():
+            self.clock.now += 1.5
+        fake.tick = tick
+
+    def test_open_orders_never_quiet_during_the_starts_reconcile_reconnect_and_reconcile_the_new_link(self):
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        self.never_quiet(fake, 1)
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.assertEqual(len(fake.called("connect")), 2, "the dropped link was made again")
+        self.assertEqual(fake.placed, [])
+
+    def test_open_orders_never_quiet_during_a_reconnects_reconcile_reconnect_and_never_end_the_adapter(self):
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.never_quiet(fake, len(fake.called("req_all_open_orders")) + 1)
+        fake.drop()
+        self.settle(loop)
+        self.assertTrue(loop.ready())
+        self.assertEqual(len(fake.called("connect")), 3, "the dropped link was made again")
+
+    def test_open_orders_that_never_pause_across_reconnects_stop_the_start_for_a_person(self):
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        self.never_quiet(fake, 1)
+        fake.never_pauses = True
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            loop.start()
+        self.assertIn("open-orders-never-quiet", str(caught.exception))
+        self.assertEqual(len(fake.called("connect")), RECONCILE_CUTOFFS, "the cut-offs are bounded")
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def test_open_orders_that_never_pause_after_a_drop_stop_the_adapter_for_a_person(self):
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        loop.start()
+        self.assertTrue(loop.ready())
+        self.never_quiet(fake, len(fake.called("req_all_open_orders")) + 1)
+        fake.never_pauses = True
+        fake.drop()
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            self.settle(loop)
+        self.assertIn("open-orders-never-quiet", str(caught.exception))
+        self.assertEqual(len(fake.called("connect")), 1 + RECONCILE_CUTOFFS, "the cut-offs are bounded")
+        self.assertEqual(fake.placed, [])
+
+    def test_a_completed_reconcile_resets_the_count_of_cut_off_reconciles(self):
+        # Two cut-offs, a completed reconcile, then two more: never three in
+        # a row, so the adapter is never stopped (ADR 0025 point 5).
+        fake = NeverQuietAfterARead()
+        fake.summary = list(SUMMARY)
+        loop = self.loop(fake)
+        loop.start()
+        self.assertTrue(loop.ready())
+        for episode in range(2):
+            reads = len(fake.called("req_all_open_orders"))
+            self.never_quiet(fake, reads + 1, reads + 2)
+            fake.drop()
+            self.settle(loop)
+            self.assertTrue(loop.ready(), "episode {}: the link was not reconciled again".format(episode + 1))
+            self.assertEqual(loop._reconcile_cutoffs, 0, "a completed reconcile left the cut-offs counted")
+        self.assertEqual(len(fake.called("connect")), 1 + 2 * 3, "each episode: the drop and two cut-offs")
+        self.assertEqual(fake.placed, [])
+
+    def test_the_engines_own_fill_during_the_starts_reads_is_read_again_and_the_start_proceeds(self):
+        # An order an earlier run released is working at IBKR and fills
+        # during the restart's first account read: the reads are taken
+        # again, the fill is among the executions re-read, the engine's
+        # release explains it, and the start goes on with nothing sent.
+        first = self.loop()
+        self.fake.on_place = self.fake.accept
+        first.start()
+        self.session_closed(first)
+        self.settle(first)
+        first.close()
+        self.fake.drop()
+        self.fake.on_place = None
+        positions = self.fake.req_positions
+        filled = []
+
+        def fill_during_the_first_account_read():
+            if not filled:
+                filled.append(True)
+                self.fake.fill(7, shares="9", price=401.25, exec_id="0001f4e8.paper.01.01", cum_qty="9",
+                               commission="1.00", time="20261017 09:30:01 US/Eastern")
+            positions()
+        self.fake.req_positions = fill_during_the_first_account_read
+        executions_asked = len(self.fake.called("req_executions"))
+        second = self.loop()
+        second.start()
+        self.assertTrue(filled, "the fill never came during the account read")
+        self.assertTrue(second.ready(), "the engine's own fill stopped the start")
+        self.assertGreaterEqual(len(self.fake.called("req_executions")) - executions_asked, 4,
+                                "the settled pair was not read again after the fill")
+        self.settle(second)
+        self.assertEqual(len(self.fake.placed), 1, "nothing is sent again")
+        self.assertEqual([e["type"] for e in self.engine.inputs()].count(FILL_TYPE), 1, "the fill is recorded once")
+
+    def test_a_hand_placed_fill_during_the_account_read_is_read_again_and_stops_the_start(self):
+        # An order placed by hand fills after the settled pair's executions
+        # were read and before the account read ends: it is in neither
+        # open-order list, so only the execution shows it. The reads are
+        # taken again and the unexplained execution stops the start.
+        fake = self.gateway()
+        manual = execution(exec_id="0001f4e8.manual.01.01", order_id=0, perm_id=4242, order_ref="", client_id=0)
+        positions = fake.req_positions
+
+        def fill_during_the_account_read():
+            if not fake.executions:
+                fake.executions.append((contract(), manual))
+                fake.callbacks.exec_details(-1, contract(), manual)
+            positions()
+        fake.req_positions = fill_during_the_account_read
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileMismatch) as caught:
+            loop.start()
+        self.assertIn("0001f4e8.manual.01.01", str(caught.exception))
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
+
+    def test_open_order_reads_that_disagree_three_times_leave_the_link_not_reconciled(self):
+        fake = self.gateway()
+        fake.open_order_answers = [[], [self.manual_order()], [], [self.manual_order()]]
+        loop = self.loop(fake)
+        with self.assertRaises(ReconcileIncomplete) as caught:
+            loop.start()
+        self.assertIn("did not agree", str(caught.exception))
+        self.assertEqual(len(fake.called("req_all_open_orders")), 4)
+        self.assertTrue(loop.conn.needs_reconciliation)
+        self.assertEqual(fake.placed, [])
 
     def test_a_restart_sends_nothing_twice_and_records_nothing_twice(self):
         first = self.loop()
