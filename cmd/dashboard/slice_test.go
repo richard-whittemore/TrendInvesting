@@ -72,3 +72,48 @@ func TestTailKeepsTheLastRows(t *testing.T) {
 		t.Errorf("tail kept %d rows from %v", len(got), got[0])
 	}
 }
+
+// TestTheJournalSliceCarriesNoFigure: the slice is no wider than the
+// dashboard's page (docs/live-trading/plan.md section 7: what leaves the
+// server for a reader the owner does not control carries no figure): every
+// withheld column is left out and every figure left is removed, through the
+// reporter's own redactor, so a figure never reaches the triage job, Claude
+// or a push. The rows' words stay.
+func TestTheJournalSliceCarriesNoFigure(t *testing.T) {
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	body := get(h, http.MethodGet, "/api/journal-slice").Body.String()
+	for _, leak := range []string{"101.00", " 39 ", "quantity", "price", "commission", "account  instrument", "joint  SPY"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("slice holds %q:\n%s", leak, body)
+		}
+	}
+	for _, kept := range []string{"refused", "order-size", "SPY", "2024-01-02"} {
+		if !strings.Contains(body, kept) {
+			t.Errorf("slice lost %q:\n%s", kept, body)
+		}
+	}
+}
+
+// TestTheJournalSliceTakesAWindowAndSaysWhatEachRunCovers: the triage job
+// asks for the rows of a time window around the alert, and each log's
+// section first says the span its records cover, so the job can tell
+// whether the slice covers the alert's run and time at all.
+func TestTheJournalSliceTakesAWindowAndSaysWhatEachRunCovers(t *testing.T) {
+	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
+	body := get(h, http.MethodGet, "/api/journal-slice?from=2024-01-05T00:00:00Z&to=2024-01-06T00:00:00Z").Body.String()
+	if !strings.Contains(body, "## joint.journal: covers 2024-01-02T21:00:00Z to 2024-01-02T21:00:00Z") {
+		t.Errorf("slice does not say what the run covers:\n%s", body)
+	}
+	if strings.Contains(body, "order-size") {
+		t.Errorf("slice holds a row outside the window:\n%s", body)
+	}
+	inside := get(h, http.MethodGet, "/api/journal-slice?from=2024-01-01T00:00:00Z&to=2024-01-03T00:00:00Z").Body.String()
+	if !strings.Contains(inside, "order-size") {
+		t.Errorf("slice lacks the row inside the window:\n%s", inside)
+	}
+	for _, bad := range []string{"?from=yesterday", "?to=2024-01-01", "?from=2024-01-03T00:00:00Z&to=2024-01-01T00:00:00Z"} {
+		if rec := get(h, http.MethodGet, "/api/journal-slice"+bad); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s answered %d, want 400", bad, rec.Code)
+		}
+	}
+}

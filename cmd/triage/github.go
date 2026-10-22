@@ -15,17 +15,24 @@ import (
 	"time"
 )
 
-// githubTracker is the repository's issues and pulls over GitHub's REST API
-// (https://docs.github.com/en/rest), under the reporter's own rules for the
-// token (docs/manual/alerts-and-dashboard.md, "Alerts as GitHub Issues"):
+// githubTracker is the alerts repository's issues and the code repository's
+// pulls over GitHub's REST API (https://docs.github.com/en/rest): the alert
+// issues may live in a private repository and the code in the public one
+// (docs/manual/alerts-and-dashboard.md, "Alerts analysed by Claude"). It
+// keeps the reporter's own rules for the token
+// (docs/manual/alerts-and-dashboard.md, "Alerts as GitHub Issues"):
 // the token goes only to api.github.com over https, or to the one host the
 // operator names; a redirect is refused, never followed; every answer is
 // read to a bound and decoded whole or not at all; a listing longer than its
-// bound is an error, never taken as whole.
+// bound is said to be cut, never taken as whole.
 type githubTracker struct {
-	api, base, owner, name, token string
-	client                        *http.Client
-	maxAnswer                     int64 // tests only: the read limit of every answer
+	// alerts and code are each repository's API address; alertsRepo and
+	// codeRepo their owner/name; token is the alerts repository's and
+	// codeToken the code repository's (the same one when one token covers
+	// both).
+	api, alerts, code, alertsRepo, codeRepo, token, codeToken string
+	client                                                    *http.Client
+	maxAnswer                                                 int64 // tests only: the read limit of every answer
 
 	selfLogin string
 	selfID    int64
@@ -46,15 +53,21 @@ const (
 	maxPageAnswer = pageSize * maxItemAnswer
 )
 
-// newGitHubTracker builds the client for repo (owner/name) with token, sent
-// only to api (checkAPIURL).
-func newGitHubTracker(api, allow, repo, token string, client *http.Client) (*githubTracker, error) {
-	if token == "" {
+// validRepo reports whether repo is owner/name.
+func validRepo(repo string) bool {
+	owner, name, ok := strings.Cut(repo, "/")
+	return ok && owner != "" && name != "" && !strings.Contains(name, "/") && !strings.ContainsAny(repo, " ?#%")
+}
+
+// newGitHubTracker builds the client for the alerts repository, with token,
+// and the code repository, with codeToken (each owner/name), each sent only
+// to api (checkAPIURL).
+func newGitHubTracker(api, allow, alertsRepo, codeRepo, token, codeToken string, client *http.Client) (*githubTracker, error) {
+	if token == "" || codeToken == "" {
 		return nil, errors.New("triage: no GitHub token: the token file is empty")
 	}
-	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") || strings.ContainsAny(repo, " ?#") {
-		return nil, errors.New("triage: -repo must be owner/name, the repository the alert issues are in")
+	if !validRepo(alertsRepo) || !validRepo(codeRepo) {
+		return nil, errors.New("triage: -alerts-repo and -code-repo must be owner/name: the repository the alert issues are in, and the one the code is in")
 	}
 	if api == "" {
 		api = defaultGitHubAPIURL
@@ -65,7 +78,8 @@ func newGitHubTracker(api, allow, repo, token string, client *http.Client) (*git
 	noRedirect := *client
 	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	api = strings.TrimRight(api, "/")
-	return &githubTracker{api: api, base: api + "/repos/" + owner + "/" + name, owner: owner, name: name, token: token, client: &noRedirect}, nil
+	return &githubTracker{api: api, alerts: api + "/repos/" + alertsRepo, code: api + "/repos/" + codeRepo,
+		alertsRepo: alertsRepo, codeRepo: codeRepo, token: token, codeToken: codeToken, client: &noRedirect}, nil
 }
 
 // checkAPIURL accepts the address the token is sent to: GitHub's API over
@@ -94,9 +108,14 @@ func checkAPIURL(api, allow string) error {
 	return nil
 }
 
-// call is one request, its answer decoded into out, read to at most limit
-// bytes. The token is never in an error.
+// call is one request to the alerts repository, or to GitHub itself.
 func (g *githubTracker) call(ctx context.Context, method, target string, limit int64, in, out any) (http.Header, error) {
+	return g.callAs(ctx, g.token, method, target, limit, in, out)
+}
+
+// callAs is one request with token, its answer decoded into out, read to at
+// most limit bytes. The token is never in an error.
+func (g *githubTracker) callAs(ctx context.Context, token, method, target string, limit int64, in, out any) (http.Header, error) {
 	var body io.Reader
 	if in != nil {
 		raw, err := json.Marshal(in)
@@ -109,7 +128,7 @@ func (g *githubTracker) call(ctx context.Context, method, target string, limit i
 	if err != nil {
 		return nil, errors.New("build request")
 	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if in != nil {
@@ -181,13 +200,15 @@ func (g *githubTracker) Self(ctx context.Context) (string, error) {
 	return me.Login, nil
 }
 
-// AlertIssues lists label's issues, open and closed, newest first, to the
-// first one opened before since.
-func (g *githubTracker) AlertIssues(ctx context.Context, label string, since time.Time) ([]issue, error) {
+// AlertIssues lists label's issues in the alerts repository, open and
+// closed, newest first, to the first one opened before since or numbered at
+// or below through (already handled). Past maxPages pages it returns what it
+// read, cut, rather than fail: the job then analyses the newest.
+func (g *githubTracker) AlertIssues(ctx context.Context, label string, since time.Time, through int) ([]issue, bool, error) {
 	var out []issue
 	for page := 1; ; page++ {
 		if page > maxPages {
-			return nil, fmt.Errorf("more than %d issues carry the %s label since the job began, so the list is incomplete and none is analysed", maxPages*pageSize, label)
+			return out, true, nil
 		}
 		var items []struct {
 			Number      int             `json:"number"`
@@ -197,26 +218,36 @@ func (g *githubTracker) AlertIssues(ctx context.Context, label string, since tim
 			CreatedAt   time.Time       `json:"created_at"`
 			PullRequest json.RawMessage `json:"pull_request"`
 		}
-		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?labels=%s&state=all&sort=created&direction=desc&per_page=%d&page=%d", g.base, url.QueryEscape(label), pageSize, page), maxPageAnswer, nil, &items)
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?labels=%s&state=all&sort=created&direction=desc&per_page=%d&page=%d", g.alerts, url.QueryEscape(label), pageSize, page), maxPageAnswer, nil, &items)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, it := range items {
 			if len(it.PullRequest) > 0 {
 				continue
 			}
-			if it.CreatedAt.Before(since) {
-				return out, nil
+			// Every item is checked before it is used as the stopping point:
+			// a missing creation time is a malformed answer, never the end.
+			switch {
+			case it.CreatedAt.IsZero():
+				return nil, false, errors.New("GitHub's listing named an issue without its creation time")
+			case it.Number <= 0 || it.User == nil:
+				return nil, false, errors.New("GitHub's listing named an issue without its number or its author")
 			}
-			if it.Number <= 0 || it.User == nil {
-				return nil, errors.New("GitHub's listing named an issue without its number or its author")
+			if it.CreatedAt.Before(since) || it.Number <= through {
+				return out, false, nil
 			}
 			out = append(out, issue{Number: it.Number, Title: it.Title, Body: it.Body, Author: it.User.Login, Created: it.CreatedAt})
 		}
 		if !nextPage(h) {
-			return out, nil
+			return out, false, nil
 		}
 	}
+}
+
+// IssueURL is an alert issue's address on github.com.
+func (g *githubTracker) IssueURL(number int) string {
+	return fmt.Sprintf("https://github.com/%s/issues/%d", g.alertsRepo, number)
 }
 
 // OwnComments reads every page of the issue's comments, at most maxPages,
@@ -235,7 +266,7 @@ func (g *githubTracker) OwnComments(ctx context.Context, number int) ([]string, 
 			Body string  `json:"body"`
 			User *ghUser `json:"user"`
 		}
-		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues/%d/comments?per_page=%d&page=%d", g.base, number, pageSize, page), maxPageAnswer, nil, &items)
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues/%d/comments?per_page=%d&page=%d", g.alerts, number, pageSize, page), maxPageAnswer, nil, &items)
 		if err != nil {
 			return nil, err
 		}
@@ -255,21 +286,22 @@ func (g *githubTracker) OwnComments(ctx context.Context, number int) ([]string, 
 
 // Comment adds one comment to an issue.
 func (g *githubTracker) Comment(ctx context.Context, number int, body string) error {
-	_, err := g.call(ctx, http.MethodPost, fmt.Sprintf("%s/issues/%d/comments", g.base, number), maxItemAnswer, map[string]string{"body": body}, nil)
+	_, err := g.call(ctx, http.MethodPost, fmt.Sprintf("%s/issues/%d/comments", g.alerts, number), maxItemAnswer, map[string]string{"body": body}, nil)
 	return err
 }
 
-// OpenDraftPull opens a draft pull request from head into main. The job
+// OpenDraftPull opens a draft pull request from head into main of the code
+// repository. The job
 // never merges, never marks a PR ready and never asks for a review: this is
 // its only pull request call.
 func (g *githubTracker) OpenDraftPull(ctx context.Context, head, title, body string) (string, error) {
 	var out struct {
 		HTMLURL string `json:"html_url"`
 	}
-	if _, err := g.call(ctx, http.MethodPost, g.base+"/pulls", maxItemAnswer, map[string]any{"title": title, "head": head, "base": "main", "body": body, "draft": true}, &out); err != nil {
+	if _, err := g.callAs(ctx, g.codeToken, http.MethodPost, g.code+"/pulls", maxItemAnswer, map[string]any{"title": title, "head": head, "base": "main", "body": body, "draft": true}, &out); err != nil {
 		return "", err
 	}
-	if !regexp.MustCompile(`^https://github\.com/` + regexp.QuoteMeta(g.owner) + `/` + regexp.QuoteMeta(g.name) + `/pull/\d+$`).MatchString(out.HTMLURL) {
+	if !regexp.MustCompile(`^https://github\.com/` + regexp.QuoteMeta(g.codeRepo) + `/pull/\d+$`).MatchString(out.HTMLURL) {
 		return "", errors.New("GitHub's answer named no pull request of this repository")
 	}
 	return out.HTMLURL, nil

@@ -310,10 +310,10 @@ func TestFieldNamesThatRedactAlikeAreAllKept(t *testing.T) {
 	}
 }
 
-// TestIdentifiersTakesOutWhatNamesTheAccountButKeepsFigures: text bound for
-// a private reader that needs the figures, such as the journal slice the
-// triage job hands Claude, loses every secret, account id, token and
-// Tailscale host or address, exactly as Text does, and keeps its numbers.
+// TestIdentifiersTakesOutWhatNamesTheAccountButKeepsFigures: code bound
+// for a public repository, whose numbers are its own, loses every secret,
+// account id, token and Tailscale host or address, exactly as Text does,
+// and keeps its numbers.
 func TestIdentifiersTakesOutWhatNamesTheAccountButKeepsFigures(t *testing.T) {
 	r := report.NewRedactor([]string{"s3cret-topic-value", "myhost"})
 	in := "topic s3cret-topic-value account DU1234567 and U7654321 tokens ghp_abcdefghijklmnopqrstuvwxyz0123456789 " +

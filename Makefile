@@ -52,8 +52,11 @@ golangci:
 
 lint: fmt-check vet staticcheck golangci
 
+# GOVULNDB, when set, is a local copy of Go's vulnerability database
+# (file:///...), for a check with no network: the triage job's gate
+# (docs/manual/alerts-and-dashboard.md, "Alerts analysed by Claude").
 vuln:
-	go tool govulncheck ./...
+	go tool govulncheck $(if $(GOVULNDB),-db $(GOVULNDB)) ./...
 
 deps:
 	go mod tidy -diff

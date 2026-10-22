@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // httpSlicer fetches the journal slice from the dashboard's read-only route
@@ -44,9 +45,21 @@ func newHTTPSlicer(raw, allow string, client *http.Client) (*httpSlicer, error) 
 	return &httpSlicer{url: raw, client: &c, limit: maxSlice}, nil
 }
 
-// Fetch is the slice's text.
-func (s *httpSlicer) Fetch(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, http.NoBody)
+// Fetch is the slice's text for the window from to to (either zero: open);
+// the route answers each run's span and the window's rows.
+func (s *httpSlicer) Fetch(ctx context.Context, from, to time.Time) (string, error) {
+	q := url.Values{}
+	if !from.IsZero() {
+		q.Set("from", from.UTC().Format(time.RFC3339))
+	}
+	if !to.IsZero() {
+		q.Set("to", to.UTC().Format(time.RFC3339))
+	}
+	target := s.url
+	if len(q) > 0 {
+		target += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 	if err != nil {
 		return "", errors.New("build request")
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -59,9 +61,9 @@ var kindLabels = map[string]string{
 	kindOwner:  "Owner action",
 }
 
-// errNotRed is a test that passed before the fix: the change is not tests
-// first, so no PR is opened.
-var errNotRed = errors.New("the new test did not fail before the fix")
+// errNotRed is a tests' commit at which no new test failed by name: the
+// change is not tests first, so no PR is opened.
+var errNotRed = errors.New("the new test did not fail by name before the fix")
 
 // issue is an alert issue as the job reads it.
 type issue struct {
@@ -77,15 +79,18 @@ type issue struct {
 type tracker interface {
 	// Self is the login of the token's own user.
 	Self(ctx context.Context) (string, error)
-	// AlertIssues lists the issues carrying label, open and closed, opened
-	// at or after since.
-	AlertIssues(ctx context.Context, label string, since time.Time) ([]issue, error)
+	// AlertIssues lists the issues carrying label, open and closed, newest
+	// first, opened at or after since and numbered above through; cut is a
+	// listing that reached its bound before either.
+	AlertIssues(ctx context.Context, label string, since time.Time, through int) (issues []issue, cut bool, err error)
+	// IssueURL is an alert issue's address on GitHub.
+	IssueURL(number int) string
 	// OwnComments is the bodies of the issue's comments the token's own user
 	// wrote.
 	OwnComments(ctx context.Context, number int) ([]string, error)
 	Comment(ctx context.Context, number int, body string) error
-	// OpenDraftPull opens a draft pull request from head into main and
-	// returns its address.
+	// OpenDraftPull opens a draft pull request from head into main of the
+	// code repository and returns its address.
 	OpenDraftPull(ctx context.Context, head, title, body string) (string, error)
 }
 
@@ -100,8 +105,8 @@ type analysis struct {
 }
 
 // analysisRequest is what Claude is handed: the issue and the journal slice,
-// each with every identifier taken out (report.Redactor.Identifiers), and
-// the fresh worktree it may change.
+// each through the reporter's full redactor (report.Redactor.Text: no
+// identifier and no figure), and the fresh worktree it may change.
 type analysisRequest struct {
 	Issue issue
 	Slice string
@@ -114,22 +119,26 @@ type analyst interface {
 	Analyse(ctx context.Context, req analysisRequest) (analysis, error)
 }
 
-// slicer fetches the journal slice over the read-only access path.
+// slicer fetches the journal slice of a window over the read-only access
+// path.
 type slicer interface {
-	Fetch(ctx context.Context) (string, error)
+	Fetch(ctx context.Context, from, to time.Time) (string, error)
 }
 
 // fixer is the repository workspace a fix is made in, and the gate it goes
 // through before it is pushed (gitWorkspace).
 type fixer interface {
+	// GateAvailable reports whether the gate's user and sandbox can run.
+	GateAvailable(ctx context.Context) error
 	// Prepare makes a fresh worktree of main on a new local branch.
 	Prepare(ctx context.Context, branch string) (dir string, err error)
 	// Changed lists every file the session changed, added or removed.
 	Changed(ctx context.Context, dir string) ([]string, error)
-	// Gate commits the tests, then the fix, and fails unless the test command
-	// fails at the tests' commit and the check passes at the fix's.
+	// Gate commits the tests, then the fix, and fails unless a new test fails
+	// by name at the tests' commit and the check passes at the fix's.
 	Gate(ctx context.Context, dir string, tests, fix []string, title string) error
-	// Added is the commits' messages and every line the commits add.
+	// Added is the commits' messages, every path and every line the commits
+	// add; a binary file is an error.
 	Added(ctx context.Context, dir string) (string, error)
 	// Push pushes the local branch, never forced, never to main.
 	Push(ctx context.Context, dir, branch string) error
@@ -154,9 +163,11 @@ type job struct {
 	// location is where the day of the cap begins (New York).
 	location *time.Location
 	now      func() time.Time
-	// testCmd and checkCmd are named in a PR's body as the gate ran them.
-	testCmd, checkCmd string
-	log               io.Writer
+	// sliceWindow is how far before the alert the journal slice reaches.
+	sliceWindow time.Duration
+	// checkCmd is named in a PR's body as the gate ran it.
+	checkCmd string
+	log      io.Writer
 }
 
 // state is the job's record, kept between polls.
@@ -168,6 +179,10 @@ type state struct {
 	// in it.
 	Day   string `json:"day"`
 	Calls int    `json:"calls"`
+	// Through is the highest issue number at and below which every alert
+	// issue since Since is handled: a listing stops there, so a long history
+	// never fills its bound.
+	Through int `json:"through"`
 	// Issues is each issue's record, by number.
 	Issues map[string]issueRecord `json:"issues"`
 }
@@ -175,10 +190,13 @@ type state struct {
 // issueRecord is one issue's progress. Invoked is written before the model is
 // called, so a run that dies during the call never calls it again; Pending is
 // the comment, already redacted, kept until GitHub takes it.
+// Interrupted is a session the job's own stop ended once: the issue is
+// analysed again, once.
 type issueRecord struct {
-	Invoked bool   `json:"invoked,omitempty"`
-	Pending string `json:"pending,omitempty"`
-	Done    bool   `json:"done,omitempty"`
+	Invoked     bool   `json:"invoked,omitempty"`
+	Interrupted bool   `json:"interrupted,omitempty"`
+	Pending     string `json:"pending,omitempty"`
+	Done        bool   `json:"done,omitempty"`
 }
 
 // poll is one run of the job: every alert issue with no triage comment yet
@@ -194,13 +212,10 @@ func (j *job) poll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	now := j.now()
 	if st.Since.IsZero() {
-		st.Since = now
+		st.Since = j.now()
 	}
-	if day := now.In(j.location).Format("2006-01-02"); st.Day != day {
-		st.Day, st.Calls = day, 0
-	}
+	j.today(st)
 	if err := saveState(j.statePath, st); err != nil {
 		return err
 	}
@@ -212,9 +227,12 @@ func (j *job) poll(ctx context.Context) error {
 	if author == "" {
 		author = self
 	}
-	candidates, err := j.candidates(ctx, st, author)
+	candidates, listed, cut, err := j.candidates(ctx, st, author)
 	if err != nil {
 		return err
+	}
+	if cut {
+		_, _ = fmt.Fprintf(j.log, "triage: more than one listing's bound of alert issues are new since issue #%d; the newest are analysed, the older ones not reached: read those yourself\n", st.Through)
 	}
 	var failures []error
 	for _, is := range candidates {
@@ -222,34 +240,68 @@ func (j *job) poll(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("triage: issue #%d: %w", is.Number, err))
 		}
 	}
+	if !cut {
+		j.advance(st, listed)
+		if err := saveState(j.statePath, st); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	return errors.Join(failures...)
 }
 
-// candidates are the reporter's alert issues, under either label, opened
-// since the job began and not yet recorded done, oldest first. An issue the
-// reporter did not open (another author, or no hidden key line) is never
-// read further: its words are not the reporter's.
-func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue, error) {
-	seen := map[int]bool{}
-	var out []issue
-	for _, label := range []string{alertLabel, resolvedLabel} {
-		list, err := j.tracker.AlertIssues(ctx, label, st.Since)
-		if err != nil {
-			return nil, fmt.Errorf("triage: list the %s issues: %w", label, err)
+// today starts the day's count afresh when the New York day has changed.
+func (j *job) today(st *state) {
+	if day := j.now().In(j.location).Format(time.DateOnly); st.Day != day {
+		st.Day, st.Calls = day, 0
+	}
+}
+
+// advance moves Through up over the listed issues, lowest first, while each
+// is handled: done, or never the reporter's (handled by being left alone).
+// An issue still owed its comment stops it, so the next listing reaches it.
+func (j *job) advance(st *state, listed map[int]bool) {
+	numbers := make([]int, 0, len(listed))
+	for n := range listed {
+		numbers = append(numbers, n)
+	}
+	slices.Sort(numbers)
+	for _, n := range numbers {
+		if listed[n] && !st.Issues[strconv.Itoa(n)].Done {
+			return
 		}
+		st.Through = n
+	}
+}
+
+// candidates are the reporter's alert issues, under either label, opened
+// since the job began, numbered above Through and not yet recorded done,
+// oldest first; listed is every issue the listings returned, true for the
+// reporter's (false: one it leaves alone), and cut whether a listing was
+// cut at its bound. An issue the reporter did not open (another author, or
+// no hidden key line) is never read further: its words are not the
+// reporter's.
+func (j *job) candidates(ctx context.Context, st *state, author string) (out []issue, listed map[int]bool, cut bool, err error) {
+	listed = map[int]bool{}
+	for _, label := range []string{alertLabel, resolvedLabel} {
+		list, c, err := j.tracker.AlertIssues(ctx, label, st.Since, st.Through)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("triage: list the %s issues: %w", label, err)
+		}
+		cut = cut || c
 		for _, is := range list {
-			if seen[is.Number] || is.Created.Before(st.Since) || st.Issues[strconv.Itoa(is.Number)].Done {
+			if _, seen := listed[is.Number]; seen || is.Created.Before(st.Since) || is.Number <= st.Through {
 				continue
 			}
-			seen[is.Number] = true
-			if !strings.EqualFold(is.Author, author) || !strings.Contains(is.Body, alertKeyLine) {
+			ours := strings.EqualFold(is.Author, author) && strings.Contains(is.Body, alertKeyLine)
+			listed[is.Number] = ours
+			if !ours || st.Issues[strconv.Itoa(is.Number)].Done {
 				continue
 			}
 			out = append(out, is)
 		}
 	}
 	slices.SortFunc(out, func(a, b issue) int { return a.Number - b.Number })
-	return out, nil
+	return out, listed, cut, nil
 }
 
 // triage brings one issue to its one comment: done if the token's user has
@@ -267,6 +319,8 @@ func (j *job) triage(ctx context.Context, st *state, is issue) error {
 		return saveState(j.statePath, st)
 	}
 	rec := st.Issues[key]
+	// The cap's day is the day of this call, not of the poll's start.
+	j.today(st)
 	switch {
 	case rec.Pending != "":
 	case rec.Invoked:
@@ -282,7 +336,20 @@ func (j *job) triage(ctx context.Context, st *state, is issue) error {
 		if err := saveState(j.statePath, st); err != nil {
 			return fmt.Errorf("the call could not be recorded, so it is not made: %w", err)
 		}
-		rec.Pending = j.analyse(ctx, is)
+		comment, err := j.analyse(ctx, is)
+		if errors.Is(err, errInterrupted) {
+			// The job was stopped during the session: the issue is analysed
+			// again at the next poll, once; stopped twice, it is spent.
+			if !rec.Interrupted {
+				rec = issueRecord{Interrupted: true}
+			}
+			st.Issues[key] = rec
+			if serr := saveState(j.statePath, st); serr != nil {
+				return errors.Join(err, serr)
+			}
+			return err
+		}
+		rec.Pending = comment
 	}
 	st.Issues[key] = rec
 	if err := saveState(j.statePath, st); err != nil {
@@ -296,39 +363,78 @@ func (j *job) triage(ctx context.Context, st *state, is issue) error {
 }
 
 // analyse is the one model call for an issue, and its comment. Every failure
-// becomes the comment, never a second call.
-func (j *job) analyse(ctx context.Context, is issue) string {
-	slice, err := j.slicer.Fetch(ctx)
-	if err != nil {
-		slice = "The journal slice could not be fetched: " + err.Error()
+// becomes the comment, never a second call; only the job's own stop during
+// it is an error (errInterrupted), so the issue is not spent on a restart.
+func (j *job) analyse(ctx context.Context, is issue) (string, error) {
+	if err := j.fixer.GateAvailable(ctx); err != nil {
+		return failedComment("gate unavailable: " + j.clean(err.Error()) + "; no session was started"), nil
 	}
+	slice, covered := j.slice(ctx, is)
 	branch := fmt.Sprintf("triage/alert-%d", is.Number)
 	dir, err := j.fixer.Prepare(ctx, branch)
 	if err != nil {
-		return failedComment("the repository could not be prepared: " + j.clean(err.Error()))
+		return failedComment("the repository could not be prepared: " + j.clean(err.Error())), nil
 	}
-	defer j.fixer.Remove(ctx, dir)
-	is.Title, is.Body = j.redactor.Identifiers(is.Title), j.redactor.Identifiers(is.Body)
-	a, err := j.analyst.Analyse(ctx, analysisRequest{Issue: is, Slice: j.redactor.Identifiers(slice), Dir: dir})
+	defer j.fixer.Remove(context.WithoutCancel(ctx), dir)
+	is.Title, is.Body = j.redactor.Text(is.Title), j.redactor.Text(is.Body)
+	a, err := j.analyst.Analyse(ctx, analysisRequest{Issue: is, Slice: slice, Dir: dir})
+	if errors.Is(err, errInterrupted) {
+		return "", err
+	}
 	if err != nil {
-		return failedComment("the analysis failed: " + j.clean(err.Error()))
+		return failedComment("the analysis failed: " + j.clean(err.Error())), nil
 	}
 	if _, known := kindLabels[a.Kind]; !known {
-		return failedComment("the analysis named no known kind of finding, so none of it is posted")
+		return failedComment("the analysis named no known kind of finding, so none of it is posted"), nil
 	}
 	var b strings.Builder
 	b.WriteString("### Triage\n\n")
 	fmt.Fprintf(&b, "**What happened.** %s\n\n", j.clean(a.WhatHappened))
 	fmt.Fprintf(&b, "**Which rule applied.** %s\n\n", j.clean(a.Rule))
 	fmt.Fprintf(&b, "**Kind.** %s\n\n", kindLabels[a.Kind])
+	if !covered {
+		b.WriteString("**Journal slice.** " + slice + "\n\n")
+	}
 	switch a.Kind {
 	case kindOwner:
 		fmt.Fprintf(&b, "**What you must do.** %s The triage job has not done it and never will: it holds no way to.\n\n", j.clean(a.OwnerAction))
 	case kindDefect:
 		b.WriteString(j.openFix(ctx, is, dir, branch, a) + "\n\n")
 	}
+	if ctx.Err() != nil {
+		// Stopped during the gate: what it says would not be the gate's.
+		return "", errInterrupted
+	}
 	b.WriteString("_Analysed by the triage job on the Mac mini. It reads the alert and the journal slice; it never acts for you._\n\n" + analysisMarker)
-	return b.String()
+	return b.String(), nil
+}
+
+// sliceCovers is a section's line of the span its run's records cover.
+var sliceCovers = regexp.MustCompile(`(?m)^## [^\n]*: covers (\S+) to (\S+)$`)
+
+// slice is the journal slice of the window before the alert, through the
+// reporter's full redactor, and whether it covers the alert: a run whose
+// records began before the issue opened and reach into the window. A slice
+// that does not cover it is not handed over as if it did: it is replaced by
+// a sentence saying so, which the comment repeats.
+func (j *job) slice(ctx context.Context, is issue) (string, bool) {
+	to := j.now()
+	if to.Before(is.Created) {
+		to = is.Created
+	}
+	raw, err := j.slicer.Fetch(ctx, is.Created.Add(-j.sliceWindow), to)
+	if err != nil {
+		return "The journal slice could not be fetched (" + j.clean(err.Error()) + "), so the analysis rests on the alert alone.", false
+	}
+	from := is.Created.Add(-j.sliceWindow)
+	for _, m := range sliceCovers.FindAllStringSubmatch(raw, -1) {
+		first, err1 := time.Parse(time.RFC3339, m[1])
+		last, err2 := time.Parse(time.RFC3339, m[2])
+		if err1 == nil && err2 == nil && !first.After(is.Created) && !last.Before(from) {
+			return j.redactor.Text(raw), true
+		}
+	}
+	return "The journal slice did not cover the alert's run and time (no run's records span the alert), so the analysis rests on the alert alone.", false
 }
 
 // openFix takes a code defect's change through the gate and opens it as a
@@ -338,15 +444,21 @@ func (j *job) openFix(ctx context.Context, is issue, dir, branch string, a analy
 	const none = "**Fix.** No fix PR was opened: "
 	changed, err := j.fixer.Changed(ctx, dir)
 	if err != nil {
-		return none + "the session's changes could not be read."
+		return none + "the session's changes could not be read (" + j.clean(err.Error()) + ")."
 	}
 	var tests, fix []string
 	for _, f := range changed {
-		if isTestFile(f) {
+		switch {
+		case isTestFile(f):
 			tests = append(tests, f)
-		} else {
+		case isFixFile(f):
 			fix = append(fix, f)
+		default:
+			return none + "the session changed a file outside the Go code and docs/ (only *.go files under " + strings.Join(codeFolders, ", ") + " and files under docs/ are opened)."
 		}
+	}
+	if err := textOnly(dir, changed); err != nil {
+		return none + err.Error() + "."
 	}
 	switch {
 	case len(tests) == 0:
@@ -359,12 +471,18 @@ func (j *job) openFix(ctx context.Context, is issue, dir, branch string, a analy
 		title = "a fix for an alert"
 	}
 	if err := j.fixer.Gate(ctx, dir, tests, fix, title); err != nil {
-		if errors.Is(err, errNotRed) {
-			return none + "the new test did not fail before the fix, so the change is not tests first."
+		switch {
+		case errors.Is(err, errNotRed):
+			return none + "the new test did not fail by name before the fix (a test that passed, did not compile or ran out of time is not red), so the change is not tests first."
+		case errors.Is(err, errNoNewTest):
+			return none + "the change adds no new test function, so no test can show the defect by name."
 		}
 		return none + "the change did not pass the gate: " + j.clean(err.Error())
 	}
 	added, err := j.fixer.Added(ctx, dir)
+	if errors.Is(err, errBinary) {
+		return none + "the change holds a binary file, which cannot be checked, so it is not pushed."
+	}
 	if err != nil {
 		return none + "the change could not be read back."
 	}
@@ -374,11 +492,13 @@ func (j *job) openFix(ctx context.Context, is issue, dir, branch string, a analy
 	if err := j.fixer.Push(ctx, dir, branch); err != nil {
 		return none + "the branch could not be pushed: " + j.clean(err.Error())
 	}
-	body := fmt.Sprintf("A fix the triage job proposes for the alert issue #%d.\n\n", is.Number) +
+	// The alert issue may be in a private repository: it is linked by its
+	// address, and none of its text is quoted; only Claude's words, redacted.
+	body := "A fix the triage job proposes for the alert " + j.tracker.IssueURL(is.Number) + ".\n\n" +
 		"**What happened.** " + j.clean(a.WhatHappened) + "\n\n" +
 		"**Which rule applied.** " + j.clean(a.Rule) + "\n\n" +
 		"**The fix.** " + j.clean(a.FixSummary) + "\n\n" +
-		"**Tests first.** The first commit holds only the tests, and `" + j.testCmd + "` failed on it; the second holds the fix, and `" + j.checkCmd + "` passed on it.\n\n" +
+		"**Tests first.** The first commit holds only the tests, and `go test -run` over its new tests showed one failing by name; the second holds the fix, and `" + j.checkCmd + "` passed on it. Both ran in the gate's sandbox, as its own user, with no network.\n\n" +
 		"Opened as a draft by the triage job: it is never merged by the job, which never marks a PR ready either. Review it as any other.\n\n" +
 		"🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 	link, err := j.tracker.OpenDraftPull(ctx, branch, "triage: "+title, body)
@@ -415,19 +535,59 @@ func bounded(s string, n int) string {
 	return s + " [cut]"
 }
 
-// isTestFile reports whether a changed file is a test: a Go or Python test,
-// a shell test or a test fixture, as the repository names them.
-func isTestFile(name string) bool {
-	base := path.Base(name)
-	return strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, "_test.py") ||
-		(strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py")) ||
-		(strings.HasPrefix(base, "test-") && strings.HasSuffix(base, ".sh")) ||
-		strings.HasPrefix(name, "testdata/") || strings.Contains(name, "/testdata/")
+// codeFolders are the repository's Go code folders: the only places a fix
+// and its tests may change.
+var codeFolders = []string{"cmd/", "internal/", "transport/"}
+
+// inCode reports whether name is under one of the code folders.
+func inCode(name string) bool {
+	return slices.ContainsFunc(codeFolders, func(f string) bool { return strings.HasPrefix(name, f) })
 }
 
+// isTestFile reports whether a changed file is a test the gate can run: a
+// Go test file, or a fixture under a testdata folder, in the code folders.
+func isTestFile(name string) bool {
+	return inCode(name) && (strings.HasSuffix(path.Base(name), "_test.go") || strings.Contains(name, "/testdata/"))
+}
+
+// isFixFile reports whether a changed file may be a fix: a Go file in the
+// code folders, or a file under docs/. Nothing that defines the check (the
+// Makefile, scripts), CI, Claude's settings, the deployment or the module's
+// requirements is ever opened as a fix.
+func isFixFile(name string) bool {
+	return inCode(name) && strings.HasSuffix(name, ".go") || strings.HasPrefix(name, "docs/")
+}
+
+// maxChangedFile bounds a changed file the job reads to check it is text.
+const maxChangedFile = 4 << 20
+
+// textOnly refuses a change holding a file that is not plain text: a
+// binary, a link, or one too large to read. A path that is gone was
+// removed.
+func textOnly(dir string, changed []string) error {
+	for _, name := range changed {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxChangedFile {
+			return errors.New("the session left a binary, a link or an oversize file, which is never opened")
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || !utf8.Valid(raw) || bytes.IndexByte(raw, 0) >= 0 {
+			return errors.New("the session left a binary file, which is never opened")
+		}
+	}
+	return nil
+}
+
+// errBadState is a state file that cannot be trusted.
+var errBadState = errors.New("triage: the state file is not understood, so nothing is done")
+
 // loadState reads the job's record; a missing file is a first poll. A file
-// that cannot be read or understood stops the poll: without it the job
-// cannot tell which issues it has already called the model for.
+// that cannot be read, does not parse, or is incomplete or breaks an
+// invariant stops the poll with errBadState: without it the job cannot tell
+// which issues it has already called the model for.
 func loadState(p string) (*state, error) {
 	raw, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
@@ -436,29 +596,84 @@ func loadState(p string) (*state, error) {
 	if err != nil {
 		return nil, fmt.Errorf("triage: the state file cannot be read, so nothing is done: %w", err)
 	}
-	var st state
+	var st *state
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, fmt.Errorf("triage: the state file %s is not understood, so nothing is done; move it aside only once you know which issues were analysed (each has the job's comment)", p)
+		return nil, fmt.Errorf("%w (%s); move it aside only once you know which issues were analysed (each has the job's comment)", errBadState, p)
 	}
-	if st.Issues == nil {
-		st.Issues = map[string]issueRecord{}
+	if why := invalid(st); why != "" {
+		return nil, fmt.Errorf("%w (%s: %s); move it aside only once you know which issues were analysed (each has the job's comment)", errBadState, p, why)
 	}
-	return &st, nil
+	return st, nil
 }
 
-// saveState writes the record whole, through a temporary file and a rename,
-// so a run that dies mid-write leaves the earlier record.
+// invalid says what a parsed record lacks or breaks, or "" when it is whole:
+// the job's start, the day of the count, a count of no less than zero, the
+// issues' records, each under an issue's number, and Through no less than
+// zero.
+func invalid(st *state) string {
+	switch {
+	case st == nil:
+		return "it holds no record"
+	case st.Since.IsZero():
+		return "it names no start"
+	case st.Calls < 0:
+		return "its count of calls is below zero"
+	case st.Through < 0:
+		return "its handled-through number is below zero"
+	case st.Issues == nil:
+		return "it holds no issues' records"
+	}
+	if _, err := time.Parse(time.DateOnly, st.Day); err != nil {
+		return "its day is not a date"
+	}
+	for k := range st.Issues {
+		if n, err := strconv.Atoi(k); err != nil || n <= 0 || strconv.Itoa(n) != k {
+			return "an issue's record is not under its number"
+		}
+	}
+	return ""
+}
+
+// syncFile makes a file's contents durable (tests record it).
+var syncFile = func(f *os.File) error { return f.Sync() }
+
+// saveState writes the record whole, through a temporary file synced to disk
+// and a rename, then syncs the folder, so a run that dies mid-write, or a
+// power loss after it, leaves either the earlier record or this one, and a
+// returned save is durable: an invocation is on disk before its model call.
 func saveState(p string, st *state) error {
 	raw, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("triage: write state: %w", err)
+	}
+	_, err = f.Write(raw)
+	if err == nil {
+		err = syncFile(f)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return fmt.Errorf("triage: write state: %w", err)
 	}
 	if err := os.Rename(tmp, p); err != nil {
 		return fmt.Errorf("triage: write state: %w", err)
+	}
+	d, err := os.Open(filepath.Dir(p))
+	if err != nil {
+		return fmt.Errorf("triage: sync the state's folder: %w", err)
+	}
+	err = syncFile(d)
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("triage: sync the state's folder: %w", err)
 	}
 	return nil
 }

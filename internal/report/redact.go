@@ -118,10 +118,11 @@ func (r Redactor) Text(s string) string {
 }
 
 // Identifiers returns s with every literal value and every identifier
-// pattern removed, as Text removes them, and its figures kept: for text whose
-// reader is the owner's own (the journal slice the triage job hands Claude
-// on the owner's machine), which needs the figures but never the account's
-// names, secrets or hosts. Text bound for a public place goes through Text.
+// pattern removed, as Text removes them, and its figures kept: the check of
+// code bound for a public repository, where numbers are the code's own
+// (the triage job's pre-push check, whose input already never held a
+// figure: the job hands Claude only text through Text). Prose bound for a
+// public place goes through Text.
 func (r Redactor) Identifiers(s string) string {
 	for _, l := range r.literals {
 		s = strings.ReplaceAll(s, l, Redacted)

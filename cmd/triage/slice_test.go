@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func slicerFor(t *testing.T, srv *httptest.Server) *httpSlicer {
@@ -33,7 +34,7 @@ func TestTheSliceIsAPlainGETWithNoCredential(t *testing.T) {
 		_, _ = io.WriteString(w, "## boost.log: journal-query refusals\n")
 	}))
 	defer srv.Close()
-	got, err := slicerFor(t, srv).Fetch(context.Background())
+	got, err := slicerFor(t, srv).Fetch(context.Background(), time.Time{}, time.Time{})
 	if err != nil || !strings.Contains(got, "journal-query refusals") {
 		t.Fatalf("slice %q, err %v", got, err)
 	}
@@ -95,9 +96,28 @@ func TestTheSliceRefusesARedirectAStatusAndAnOversizeAnswer(t *testing.T) {
 			defer srv.Close()
 			s := slicerFor(t, srv)
 			s.limit = 100
-			if _, err := s.Fetch(context.Background()); err == nil {
+			if _, err := s.Fetch(context.Background(), time.Time{}, time.Time{}); err == nil {
 				t.Fatal("no error")
 			}
 		})
+	}
+}
+
+// TestTheSliceIsAskedForTheAlertsWindow: the job asks the route for the
+// rows of one window, as RFC 3339 instants in the query, and nothing else.
+func TestTheSliceIsAskedForTheAlertsWindow(t *testing.T) {
+	var query url.Values
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+	from := time.Date(2026, time.October, 19, 15, 0, 0, 0, time.UTC)
+	to := time.Date(2026, time.October, 22, 15, 0, 0, 0, time.UTC)
+	if _, err := slicerFor(t, srv).Fetch(context.Background(), from, to); err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("from") != "2026-10-19T15:00:00Z" || query.Get("to") != "2026-10-22T15:00:00Z" || len(query) != 2 {
+		t.Errorf("query %v", query)
 	}
 }

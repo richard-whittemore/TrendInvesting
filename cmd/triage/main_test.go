@@ -33,10 +33,12 @@ func newEndToEnd(t *testing.T) *endToEnd {
 			http.Error(w, "read-only dashboard", http.StatusMethodNotAllowed)
 			return
 		}
-		_, _ = io.WriteString(w, "## boost.log: journal-query refusals\n\nrefused DU1234567 order-size\n")
+		now := time.Now().UTC()
+		_, _ = io.WriteString(w, "## boost.log: covers "+now.Add(-time.Hour).Format(time.RFC3339)+" to "+now.Add(2*time.Hour).Format(time.RFC3339)+"\n\n## boost.log: journal-query refusals\n\nrefused DU1234567 order-size\n")
 	}))
 	t.Cleanup(dash.Close)
 	ws, _, _ := gitWorld(t)
+	gate := standInGate(t)
 	claude, record := fakeClaude(t, `{"type":"result","subtype":"success","is_error":false,"structured_output":{"kind":"data-problem","what_happened":"The bar arrived late.","rule":"ADR 0025","owner_action":"","fix_title":"","fix_summary":""}}`, 0)
 	stateDir := t.TempDir()
 	token := filepath.Join(stateDir, "token")
@@ -47,12 +49,13 @@ func newEndToEnd(t *testing.T) *endToEnd {
 	du, _ := url.Parse(dash.URL)
 	e := &endToEnd{
 		github: f, client: srv.Client(), stateDir: stateDir, record: record,
-		environ: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + stateDir, "TI_GITHUB_API_URL=" + srv.URL, "TI_GITHUB_API_ALLOW_HOST=" + gh.Host, "TI_TRIAGE_SLICE_ALLOW_HOST=" + du.Host},
-		args: []string{"-repo", "owner/repo", "-repo-dir", ws.repoDir, "-state-dir", stateDir, "-token-file", token,
-			"-slice-url", dash.URL + "/api/journal-slice", "-claude", claude},
+		environ: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + stateDir, "TI_GITHUB_API_URL=" + srv.URL, "TI_GITHUB_API_ALLOW_HOST=" + gh.Host, "TI_TRIAGE_SLICE_ALLOW_HOST=" + du.Host,
+			"TI_TRIAGE_SUDO=" + gate.sudo, "TI_TRIAGE_SANDBOX_EXEC=" + gate.sandboxExec},
+		args: []string{"-alerts-repo", "owner/repo", "-repo-dir", ws.repoDir, "-state-dir", stateDir, "-token-file", token,
+			"-slice-url", dash.URL + "/api/journal-slice", "-claude", claude, "-gate-dir", gate.root, "-gate-user", gate.user},
 	}
 	// The job's state starts before the issue, as a job switched on earlier.
-	if err := saveState(filepath.Join(stateDir, "state.json"), &state{Since: time.Now().Add(-time.Hour), Issues: map[string]issueRecord{}}); err != nil {
+	if err := saveState(filepath.Join(stateDir, "state.json"), &state{Since: time.Now().Add(-time.Hour), Day: "2026-10-22", Issues: map[string]issueRecord{}}); err != nil {
 		t.Fatal(err)
 	}
 	return e
@@ -124,14 +127,15 @@ func TestRunRefusesBadSettings(t *testing.T) {
 		want string
 	}{
 		"no state dir":      {[]string{"-state-dir", ""}, "-state-dir"},
-		"no repo":           {[]string{"-repo", ""}, "-repo"},
+		"no repo":           {[]string{"-alerts-repo", ""}, "-alerts-repo"},
+		"no gate dir":       {[]string{"-gate-dir", ""}, "-gate-dir"},
 		"no repo dir":       {[]string{"-repo-dir", ""}, "-repo-dir"},
 		"no slice":          {[]string{"-slice-url", ""}, "-slice-url"},
 		"open token":        {[]string{"-token-file", worldReadable}, "only you"},
 		"missing token":     {[]string{"-token-file", filepath.Join(e.stateDir, "absent")}, "token"},
 		"negative cap":      {[]string{"-daily-cap", "-1"}, "-daily-cap"},
 		"no turns":          {[]string{"-max-turns", "0"}, "-max-turns"},
-		"empty test":        {[]string{"-test-cmd", " "}, "-test-cmd"},
+		"empty check":       {[]string{"-check-cmd", " "}, "-check-cmd"},
 		"slice not tailnet": {[]string{"-slice-url", "https://example.com/api/journal-slice"}, "-slice-url"},
 		"unknown flag":      {[]string{"-merge"}, "merge"},
 	} {
@@ -171,12 +175,27 @@ func TestTheLaunchdJobPollsEveryFiveMinutesAndHoldsNoSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	plist := string(raw)
-	for _, want := range []string{"<key>StartInterval</key>\n\t<integer>300</integer>", "-token-file", "-state-dir", "-slice-url", "<string>ti-triage</string>"} {
+	for _, want := range []string{"<key>StartInterval</key>\n\t<integer>300</integer>", "-token-file", "-state-dir", "-slice-url", "<string>ti-triage</string>", "-alerts-repo", "-code-repo", "-gate-dir", "-gate-user"} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("plist lacks %q", want)
 		}
 	}
 	if regexp.MustCompile(`gh[opsu]_|github_pat_|TOKEN</key>|sk-ant-`).MatchString(plist) {
 		t.Error("the plist holds a token")
+	}
+}
+
+// TestOneRepositoryNamesBoth: with only the alerts repository or only the
+// code repository given, the other is the same one.
+func TestOneRepositoryNamesBoth(t *testing.T) {
+	for _, c := range []struct{ alerts, code, wantAlerts, wantCode string }{
+		{"o/alerts", "", "o/alerts", "o/alerts"},
+		{"", "o/code", "o/code", "o/code"},
+		{"o/alerts", "o/code", "o/alerts", "o/code"},
+	} {
+		a, k := repositories(c.alerts, c.code)
+		if a != c.wantAlerts || k != c.wantCode {
+			t.Errorf("repositories(%q, %q) = %q, %q", c.alerts, c.code, a, k)
+		}
 	}
 }

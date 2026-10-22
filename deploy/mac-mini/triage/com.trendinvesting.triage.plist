@@ -5,9 +5,12 @@
   by Claude"; setup: docs/runbooks/mac-mini.md, "2. The alert triage job").
   A LaunchDaemon run as the macOS user ti-triage, which holds no SSH key, no
   gh login and no keychain entry for GitHub. One poll per firing, every five
-  minutes; launchd never starts a firing while the last still runs. The token
-  is named by file, never written here. Replace <server>.<tailnet> with the
-  Lightsail server's tailnet name before installing.
+  minutes; launchd never starts a firing while the last still runs. The
+  tokens are named by file, never written here. The gate's commands run as
+  the macOS user ti-triage-gate, through sudo, in sandbox-exec. Replace
+  <alerts-repo> with the private repository the alert issues are in, and
+  <server>.<tailnet> with the Lightsail server's tailnet name, before
+  installing.
 -->
 <plist version="1.0">
 <dict>
@@ -18,7 +21,9 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/Users/ti-triage/bin/ti-triage</string>
-		<string>-repo</string>
+		<string>-alerts-repo</string>
+		<string>richard-whittemore/&lt;alerts-repo&gt;</string>
+		<string>-code-repo</string>
 		<string>richard-whittemore/TrendInvesting</string>
 		<string>-repo-dir</string>
 		<string>/Users/ti-triage/TrendInvesting-triage</string>
@@ -26,17 +31,23 @@
 		<string>/Users/ti-triage/triage</string>
 		<string>-token-file</string>
 		<string>/Users/ti-triage/.config/ti-triage/github-token</string>
+		<string>-code-token-file</string>
+		<string>/Users/ti-triage/.config/ti-triage/code-token</string>
 		<string>-claude-token-file</string>
 		<string>/Users/ti-triage/.config/ti-triage/claude-token</string>
 		<string>-slice-url</string>
 		<string>https://&lt;server&gt;.&lt;tailnet&gt;.ts.net/api/journal-slice</string>
 		<string>-daily-cap</string>
 		<string>10</string>
+		<string>-gate-dir</string>
+		<string>/Users/Shared/ti-triage-gate</string>
+		<string>-gate-user</string>
+		<string>ti-triage-gate</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/Users/ti-triage/bin:/Users/ti-triage/.local/bin:/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>/Users/ti-triage/bin:/Users/ti-triage/.local/bin:/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>HOME</key>
 		<string>/Users/ti-triage</string>
 	</dict>

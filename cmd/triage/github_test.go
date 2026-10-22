@@ -24,6 +24,7 @@ type fakeGitHub struct {
 	comments map[int][]map[string]any
 	pulls    []map[string]any
 	requests []string // "METHOD path"
+	repos    []string // "owner/name METHOD path-in-the-repository"
 	auth     []string
 	selfID   int64
 	pageSize int
@@ -49,7 +50,13 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	f.auth = append(f.auth, r.Header.Get("Authorization"))
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/owner/repo/"), "/")
+	// Every repository is served alike; repo is the one the request named.
+	repo, rest := "", r.URL.Path
+	if p := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/repos/"), "/", 3); strings.HasPrefix(r.URL.Path, "/repos/") && len(p) == 3 {
+		repo, rest = p[0]+"/"+p[1], "/"+p[2]
+	}
+	f.repos = append(f.repos, repo+" "+r.Method+" "+rest)
+	parts := strings.Split(strings.TrimPrefix(rest, "/"), "/")
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page == 0 {
 		page = 1
@@ -57,7 +64,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/user":
 		writeJSON(w, map[string]any{"login": "owner", "id": f.selfID})
-	case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues":
+	case r.Method == http.MethodGet && repo != "" && rest == "/issues":
 		label := r.URL.Query().Get("labels")
 		var matching []map[string]any
 		for _, is := range f.issues {
@@ -78,12 +85,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.comments[n] = append(f.comments[n], map[string]any{"body": in["body"], "user": map[string]any{"login": "owner", "id": f.selfID}})
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"id": 1})
-	case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls":
+	case r.Method == http.MethodPost && repo != "" && rest == "/pulls":
 		var in map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		f.pulls = append(f.pulls, in)
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"number": 600 + len(f.pulls), "html_url": fmt.Sprintf("https://github.com/owner/repo/pull/%d", 600+len(f.pulls))})
+		writeJSON(w, map[string]any{"number": 600 + len(f.pulls), "html_url": fmt.Sprintf("https://github.com/%s/pull/%d", repo, 600+len(f.pulls))})
 	default:
 		http.Error(w, "not here", http.StatusNotFound)
 	}
@@ -123,7 +130,7 @@ func (f *fakeGitHub) sent() []string {
 func trackerFor(t *testing.T, srv *httptest.Server) *githubTracker {
 	t.Helper()
 	u, _ := url.Parse(srv.URL)
-	g, err := newGitHubTracker(srv.URL, u.Host, "owner/repo", "ghp_testtokentesttokentesttoken00", srv.Client())
+	g, err := newGitHubTracker(srv.URL, u.Host, "owner/repo", "owner/repo", "ghp_testtokentesttokentesttoken00", "ghp_testtokentesttokentesttoken00", srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,10 +155,10 @@ func TestTheAPIAddressMustBeGitHubOverHTTPSOrTheNamedHost(t *testing.T) {
 			t.Errorf("checkAPIURL(%q, %q) = %v, want ok %v", c.api, c.allow, err, c.ok)
 		}
 	}
-	if _, err := newGitHubTracker("https://api.github.com", "", "owner", "t", http.DefaultClient); err == nil {
+	if _, err := newGitHubTracker("https://api.github.com", "", "owner", "owner/repo", "t", "t", http.DefaultClient); err == nil {
 		t.Error("a repository not owner/name was accepted")
 	}
-	if _, err := newGitHubTracker("https://api.github.com", "", "owner/repo", "", http.DefaultClient); err == nil {
+	if _, err := newGitHubTracker("https://api.github.com", "", "owner/repo", "owner/repo", "", "t", http.DefaultClient); err == nil {
 		t.Error("an empty token was accepted")
 	}
 }
@@ -169,8 +176,8 @@ func TestAlertIssuesListsOneLabelUntilTheStartAndSkipsPulls(t *testing.T) {
 	f.addIssue(2, alertLabel, "owner", since.Add(-time.Hour), alertBody)
 	f.addIssue(1, alertLabel, "owner", since.Add(-2*time.Hour), alertBody)
 	f.addIssue(9, resolvedLabel, "owner", since.Add(time.Hour), alertBody)
-	got, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since)
-	if err != nil {
+	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, 0)
+	if err != nil || cut {
 		t.Fatal(err)
 	}
 	if len(got) != 2 || got[0].Number != 5 || got[1].Number != 4 || got[0].Author != "owner" || got[0].Body != alertBody {
@@ -181,15 +188,75 @@ func TestAlertIssuesListsOneLabelUntilTheStartAndSkipsPulls(t *testing.T) {
 	}
 }
 
-func TestAListingLongerThanItsBoundIsAnError(t *testing.T) {
+// TestAListingLongerThanItsBoundIsCutNotFailed: past its bound the listing
+// returns the newest issues and says it was cut, so the job never stops;
+// and it stops at the issues already handled (through), never reading them.
+func TestAListingLongerThanItsBoundIsCutNotFailed(t *testing.T) {
 	f, srv := newFakeGitHub(t)
 	f.pageSize = 1
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
 	for n := maxPages + 2; n > 0; n-- {
 		f.addIssue(n, alertLabel, "owner", since.Add(time.Duration(n)*time.Minute), alertBody)
 	}
-	if _, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since); err == nil || !strings.Contains(err.Error(), "more than") {
-		t.Fatalf("err = %v, want the bound named", err)
+	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, 0)
+	if err != nil || !cut || len(got) != maxPages || got[0].Number != maxPages+2 {
+		t.Fatalf("listed %d, cut %v, err %v; want the newest %d and the cut said", len(got), cut, err, maxPages)
+	}
+	before := len(f.sent())
+	got, cut, err = trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, maxPages)
+	if err != nil || cut || len(got) != 2 || len(f.sent())-before != 3 {
+		t.Fatalf("listed %v, cut %v, err %v, %d requests; want the two past through, stopping at it", got, cut, err, len(f.sent())-before)
+	}
+}
+
+// TestAlertsAreListedFromOneRepositoryAndThePROpenedInAnother: the alerts
+// live in a private repository and the code in the public one; the job
+// lists and comments on issues in the first and opens its draft PR in the
+// second, linking the private issue by its full address.
+func TestAlertsAreListedFromOneRepositoryAndThePROpenedInAnother(t *testing.T) {
+	f, srv := newFakeGitHub(t)
+	f.addIssue(41, alertLabel, "owner", pollTime.Add(time.Minute), alertBody)
+	u, _ := url.Parse(srv.URL)
+	g, err := newGitHubTracker(srv.URL, u.Host, "owner/alerts", "owner/code", "ghp_alertstokenalertstokenalerts00", "ghp_codetokencodetokencodetokenco00", srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newWorld(t)
+	w.job.tracker = g
+	w.analyst.result = analysis{Kind: kindDefect, WhatHappened: "x", Rule: "ADR 0026", FixTitle: "t", FixSummary: "s"}
+	w.fixer.changed = []string{"internal/x/a.go", "internal/x/a_test.go"}
+	w.fixer.added = "+ok"
+	w.poll(t)
+	if len(f.pulls) != 1 || len(f.comments[41]) != 1 {
+		t.Fatalf("pulls %v, comments %v", f.pulls, f.comments[41])
+	}
+	for _, r := range f.repos {
+		switch {
+		case strings.Contains(r, "/pulls"):
+			if !strings.HasPrefix(r, "owner/code ") {
+				t.Errorf("the PR went to %q", r)
+			}
+		case strings.Contains(r, "/issues"):
+			if !strings.HasPrefix(r, "owner/alerts ") {
+				t.Errorf("an issue call went to %q", r)
+			}
+		}
+	}
+	for i, r := range f.repos {
+		want := "Bearer ghp_alertstokenalertstokenalerts00"
+		if strings.Contains(r, "/pulls") {
+			want = "Bearer ghp_codetokencodetokencodetokenco00"
+		}
+		if f.auth[i] != want {
+			t.Errorf("%s was sent %q; want each repository's own token", r, f.auth[i])
+		}
+	}
+	body := f.pulls[0]["body"].(string)
+	if !strings.Contains(body, "https://github.com/owner/alerts/issues/41") || strings.Contains(body, "risk gate refused") {
+		t.Errorf("PR body %q; want the private issue linked by its address and none of its text", body)
+	}
+	if c := f.comments[41][0]["body"].(string); !strings.Contains(c, "https://github.com/owner/code/pull/601") {
+		t.Errorf("the comment does not link the PR in the code repository: %q", c)
 	}
 }
 
@@ -267,7 +334,7 @@ func TestADefectGoesThroughTheGateToADraftPullRequestOnGitHub(t *testing.T) {
 	w := newWorld(t)
 	w.job.tracker = trackerFor(t, srv)
 	w.analyst.result = analysis{Kind: kindDefect, WhatHappened: "x", Rule: "ADR 0026", FixTitle: "Fix @coderabbitai the side", FixSummary: "@greptileai review"}
-	w.fixer.changed = []string{"a.go", "a_test.go"}
+	w.fixer.changed = []string{"internal/x/a.go", "internal/x/a_test.go"}
 	w.fixer.added = "+ok"
 	w.poll(t)
 	w.poll(t)
@@ -287,5 +354,26 @@ func TestADefectGoesThroughTheGateToADraftPullRequestOnGitHub(t *testing.T) {
 		if strings.Contains(req, "/merge") || strings.Contains(req, "requested_reviewers") || strings.HasPrefix(req, "PUT") || strings.HasPrefix(req, "DELETE") || strings.HasPrefix(req, "PATCH") {
 			t.Errorf("the job asked GitHub %q", req)
 		}
+	}
+}
+
+// TestAnIssueWithoutItsCreationTimeIsAnError: the creation time is the
+// listing's stopping point, so an item without one is a malformed answer,
+// never the end of the history: the listing fails whole.
+func TestAnIssueWithoutItsCreationTimeIsAnError(t *testing.T) {
+	for name, created := range map[string]any{"absent": nil, "null": "null"} {
+		t.Run(name, func(t *testing.T) {
+			f, srv := newFakeGitHub(t)
+			since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
+			bad := map[string]any{"number": 6, "title": "x", "body": alertBody, "user": map[string]any{"login": "owner", "id": 99}, "labels": []map[string]any{{"name": alertLabel}}}
+			if created != nil {
+				bad["created_at"] = nil
+			}
+			f.issues = append(f.issues, bad)
+			f.addIssue(5, alertLabel, "owner", since.Add(time.Hour), alertBody)
+			if _, _, err := trackerFor(t, srv).AlertIssues(context.Background(), alertLabel, since, 0); err == nil || !strings.Contains(err.Error(), "creation time") {
+				t.Fatalf("err = %v, want the missing creation time named", err)
+			}
+		})
 	}
 }
