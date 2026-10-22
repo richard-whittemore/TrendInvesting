@@ -512,6 +512,20 @@ grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release r
 printf '/bin/bash\0-e\0-x\0deploy/release.sh\0v1.2.3\0' >"$TI_PROC/999999/cmdline"
 expect "--status with two shell options before the script" 0 "$(run --status)"
 grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash -e -x release.sh: $(cat "$work/out")"
+# A shell option that takes an argument (bash -o pipefail) does not make that
+# argument the script: the release is the word after it.
+printf '/bin/bash\0-o\0pipefail\0/usr/local/sbin/ti-release\0v1\0' >"$TI_PROC/999999/cmdline"
+expect "--status with a shell option that takes an argument" 0 "$(run --status)"
+grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash -o pipefail ti-release: $(cat "$work/out")"
+# A shell with only options and no script is another program; the option-only
+# command line must not trip set -u.
+printf '/bin/bash\0-x\0' >"$TI_PROC/999999/cmdline"
+expect "--status with a shell that has only options" 0 "$(run --status)"
+grep -q "pid reused; the lock is stale" "$work/out" || fail "--status takes an option-only shell for the release: $(cat "$work/out")"
+# A -- word before the script does not hide the release.
+printf '/bin/bash\0--\0/usr/local/sbin/ti-release\0v1\0' >"$TI_PROC/999999/cmdline"
+expect "--status with -- before the script" 0 "$(run --status)"
+grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash -- ti-release: $(cat "$work/out")"
 # A shell running some other script is another program, not the release.
 printf '/bin/bash\0/tmp/other.sh\0' >"$TI_PROC/999999/cmdline"
 expect "--status with a shell running another script" 0 "$(run --status)"

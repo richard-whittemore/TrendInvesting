@@ -150,34 +150,29 @@ if test "$mode" = status; then
       # The release runs as root, so a plain user cannot signal it (kill -0
       # would fail): look at the process table instead, and at what the pid
       # runs, since a dead release's pid may have been given to another program.
-      # Only argv[0], or argv[1] when a shell is argv[0], can be the
-      # release: a program that merely names the script is not.
+      # argv[0] names the release, or, when it is a shell, any later word
+      # does: shell options (bash -x) and options that take an argument
+      # (bash -o pipefail) come before the script, so no option is skipped.
+      # A program that merely names the script in an argument is not the release.
       a0=""
-      a1=""
+      rel=0
       {
-        IFS= read -r -d '' a0 && IFS= read -r -d '' a1
-        # Shell options (bash -x, bash -e) come before the script: skip them.
+        IFS= read -r -d '' a0 || true
         case ${a0##*/} in
+          ti-release | release.sh) rel=1 ;;
           bash | sh | dash)
-            while case $a1 in -*) true ;; *) false ;; esac; do
-              IFS= read -r -d '' a1 || { a1=""; break; }
+            while IFS= read -r -d '' w; do
+              case ${w##*/} in ti-release | release.sh) rel=1; break ;; esac
             done
             ;;
         esac
       } <"$proc/$lpid/cmdline" 2>/dev/null || true
       if test -z "$a0"; then
         lstate="pid $lpid is running (its command line cannot be read)"
+      elif test "$rel" = 1; then
+        lstate="pid $lpid is running"
       else
-        case ${a0##*/} in
-          ti-release | release.sh) lstate="pid $lpid is running" ;;
-          bash | sh | dash)
-            case ${a1##*/} in
-              ti-release | release.sh) lstate="pid $lpid is running" ;;
-              *) lstate="pid $lpid is another program (pid reused; the lock is stale); see the runbook before removing it" ;;
-            esac
-            ;;
-          *) lstate="pid $lpid is another program (pid reused; the lock is stale); see the runbook before removing it" ;;
-        esac
+        lstate="pid $lpid is another program (pid reused; the lock is stale); see the runbook before removing it"
       fi
     fi
     case $lstate in *stale*) lock_stale=1 ;; esac
