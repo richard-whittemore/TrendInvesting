@@ -598,3 +598,39 @@ func TestARestatedCostCountsAtItsLatestValue(t *testing.T) {
 		}
 	}
 }
+
+func TestAFillIsCutByItsFilledAtNotByTheEnvelopesTime(t *testing.T) {
+	s := costSeries(t)
+	// Filled 20:30 New York on 2024-01-31 (01:30 UTC on 2024-02-01), recorded after the 2nd's midnight.
+	filled := time.Date(2024, time.February, 1, 1, 30, 0, 0, time.UTC)
+	recorded := time.Date(2024, time.February, 2, 6, 0, 0, 0, time.UTC)
+	s.add(event.FillEventType, event.FillTargetWeightVersion, "fill:late.01", recorded,
+		event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "late.01", InstrumentID: "SPY",
+			Side: event.OrderSideBuy, Quantity: 10, Price: 100, Commission: 2, FilledAt: filled})
+	if got := summarizeCosts(t, s, report.CostLedger{}, "2024-01-31").Costs; got.Month.Commissions != 2 {
+		t.Errorf("commissions %v: the fill was filled on the 31st in New York, so the 31st counts it", got.Month.Commissions)
+	}
+	s2 := costSeries(t)
+	early := time.Date(2024, time.January, 30, 15, 0, 0, 0, time.UTC)
+	s2.add(event.FillEventType, event.FillTargetWeightVersion, "fill:early.01", early,
+		event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "early.01", InstrumentID: "SPY",
+			Side: event.OrderSideBuy, Quantity: 10, Price: 100, Commission: 3, FilledAt: time.Date(2024, time.February, 2, 15, 0, 0, 0, time.UTC)})
+	if got := summarizeCosts(t, s2, report.CostLedger{}, "2024-01-31").Costs; got.Since.Commissions != 0 {
+		t.Errorf("commissions %v: a fill filled on the 2nd is not counted by the 31st whatever time it was recorded", got.Since.Commissions)
+	}
+}
+
+func TestACorrectionsRevisionIsComparedNumericallyWhereBothAreNumbers(t *testing.T) {
+	s := costSeries(t)
+	// Both last segments are numbers: 10 follows 9 whatever their byte order or length, and the leading zero is no
+	// later than the number it equals.
+	s.fillWithCommission(1, "0001f4e8.65a1b2c5.01.09", 1.00)
+	s.fillWithCommission(2, "0001f4e8.65a1b2c5.01.10", 1.10)
+	// Not numbers: the later fill time is the later record, never byte order.
+	s.fillWithCommission(1, "0001f4e8.65a1b2c6.01.b", 2.00)
+	s.fillWithCommission(2, "0001f4e8.65a1b2c6.01.a", 2.20)
+	got := summarizeCosts(t, s, report.CostLedger{}, "2024-01-05").Costs
+	if !near(got.Since.Commissions, 3.30) {
+		t.Errorf("commissions %v, want 1.10 and 2.20 alone", got.Since.Commissions)
+	}
+}

@@ -321,15 +321,15 @@ func executionBase(id string) string {
 
 // laterRevision reports whether fill f is a later record of its execution
 // than kept: a higher last segment of the execution ID, which a correction
-// raises (executionBase; the longer is the higher, so a 10th revision
-// follows a 9th), or the same ID filled later. Journal order is not used,
-// so a redelivered original never replaces its correction.
+// raises (executionBase), compared as numbers where both are whole numbers
+// (so a 10th revision follows a 9th), and otherwise, or when equal, the
+// later fill time: a last segment that is not a whole number is never
+// ordered by its bytes. Journal order is not
+// used, so a redelivered original never replaces its correction.
 func laterRevision(f, kept fillCost) bool {
-	a, b := f.id[strings.LastIndex(f.id, ".")+1:], kept.id[strings.LastIndex(kept.id, ".")+1:]
-	switch {
-	case len(a) != len(b):
-		return len(a) > len(b)
-	case a != b:
+	a, errA := strconv.ParseUint(f.id[strings.LastIndex(f.id, ".")+1:], 10, 64)
+	b, errB := strconv.ParseUint(kept.id[strings.LastIndex(kept.id, ".")+1:], 10, 64)
+	if errA == nil && errB == nil && a != b {
 		return a > b
 	}
 	return f.at.After(kept.at)
@@ -348,7 +348,7 @@ func costMatchesFill(id string, fills, bases map[string]bool) bool {
 }
 
 // costsOf totals the costs through date, a New York day, from the fills in
-// earlier and envelopes recorded before that day ends in New York (utcEnd is
+// earlier and envelopes filled before that day ends in New York (utcEnd is
 // the midnight that ends it in UTC), and the
 // ledger: the same cut for both, so a fill late in the UTC evening counts on
 // its New York day as a posting does (newYorkDateOf). netBy is the account's
@@ -383,12 +383,19 @@ func costsOf(earlier, envelopes []event.Envelope, utcEnd time.Time, date string,
 	latest := map[string]fillCost{}
 	for _, list := range [][]event.Envelope{earlier, envelopes} {
 		for _, e := range list {
-			if (e.Type != event.FillEventType && e.Type != earlierFillType) || !e.EventTime.Before(end) {
+			if e.Type != event.FillEventType && e.Type != earlierFillType {
 				continue
 			}
 			f, err := readFillCost(e)
 			if err != nil {
-				c.FillsNotRead++
+				// A fill that does not read has no fill time, so only its envelope's time can place it.
+				if e.EventTime.Before(end) {
+					c.FillsNotRead++
+				}
+				continue
+			}
+			// The cut is the fill's own time, the one count dates its commission by.
+			if !f.at.Before(end) {
 				continue
 			}
 			fills[f.id] = true

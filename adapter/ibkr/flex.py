@@ -60,8 +60,9 @@ read from IBKR"). One reading:
    aside the costs alone and never stops a transfer being recorded: a pending
    cash read becomes Degraded (ADR 0019, amended 2026-10-21) while
    trading-side cash waits on it. A cost IBKR restates is recorded again as
-   its restatement (RESTATED), never changed, and sets the costs aside that
-   once; the latest value counts. The costs keep their own status file
+   its restatement (RESTATED), never changed, written with the reading's other
+   costs and said once; the latest value counts. A restatement to nothing or to
+   a value that is not a finite number sets the costs aside, nothing written. The costs keep their own status file
    ("running" when their step starts, as the cash status) and their own
    period (COVERAGE_SUFFIX beside the costs ledger), checked as the cash
    ledger's is, so a first costs reading reaches back to the first run's
@@ -887,13 +888,25 @@ def new_costs(statement, costs, approved_at):
             stated = recorded["payload"]
             if (Decimal(repr(float(stated["amount"]))) != posting.amount or stated["currency"] != posting.currency
                     or stated["as_of"] != _stamp(posting.as_of) or stated["kind"] != posting.kind):
-                restatements.append(_cost_record(posting, restates=recorded))
+                restatements.append(_checked_cost(_cost_record(posting, restates=recorded)))
             continue
         if posting.as_of.astimezone(NEW_YORK).date() < first_day:
             before.append(posting.transaction_id)
         elif posting.amount != 0:
-            written.append(_cost_record(posting))
+            written.append(_checked_cost(_cost_record(posting)))
     return written, before, restatements
+
+
+def _checked_cost(record):
+    """record, once it passes the test read_costs applies to every line (_cost_as_written); StatementRefused naming
+    the transaction otherwise, so a cost restated to nothing or past a float is set aside with its reason and never
+    appended as a line both readers then refuse."""
+    if not _cost_as_written(record["payload"]):
+        raise StatementRefused("cost {} is stated as {} {}, which is not a cost this reader can write (a finite "
+                               "non-zero amount); nothing is written for it".format(
+                                   record["payload"]["transaction_id"], record["payload"]["amount"],
+                                   record["payload"]["currency"]))
+    return record
 
 
 def _write_whole(path, text):
@@ -1190,8 +1203,10 @@ def _read_costs_once(statement, approved_at, status, costs_file, now, say, token
     (COVERAGE_SUFFIX beside it), so a costs ledger read later than the cash ledger first reaches back to the first
     run's approval day as the cash ledger's first reading did. A statement the cash reading did not get, status
     saying why, sets the costs aside with it; a costs refusal sets aside the costs alone. A cost IBKR restates is
-    recorded as its restatement and sets the costs aside this once: the next reading finds the restated value
-    recorded and reads on. The costs status says "running" first, as the cash status does, as the reporter reads it
+    recorded as its restatement beside the reading's other costs, and said once as a notice (the status's
+    "restated"): the reading goes on and advances the period, so a cost restated every day cannot grow the ledger
+    without the period moving. A restatement that is not a cost this reader can write sets the costs aside, nothing
+    written. The costs status says "running" first, as the cash status does, as the reporter reads it
     alone (internal/report, LoadCostLedgerFor)."""
     costs_status = {"state": "read", "checked_at": status["checked_at"]}
     coverage_path = costs_file + COVERAGE_SUFFIX
@@ -1203,23 +1218,24 @@ def _read_costs_once(statement, approved_at, status, costs_file, now, say, token
         coverage = read_coverage(coverage_path)
         _check_coverage(statement, coverage, approved_at, now().astimezone(NEW_YORK).date())
         cost_records, costs_before, restatements = new_costs(statement, costs, approved_at)
-        if restatements:
-            _append(costs_file, costs, restatements)
-            raise StatementRefused("IBKR restated {}; recorded as restated, the latest value counts, and the next "
-                                   "reading reads on (docs/manual/reconciliation.md)".format(
-                                       "; ".join("transaction {} ({})".format(r["payload"]["transaction_id"],
-                                                                              r["note"]) for r in restatements)))
+        # A restatement is written with the reading's other costs and the reading goes on: one restated every
+        # reading still advances the period.
         for transaction_id in costs_before:
             say("flex: cost {} is dated before the first run's approval day, so it is not written".format(
                 transaction_id))
-        if cost_records:
-            _append(costs_file, costs, cost_records)
+        if restatements or cost_records:
+            _append(costs_file, costs, restatements + cost_records)
         covered_to = _covered_to(statement, coverage)
         _write_whole(coverage_path, json.dumps({"from_date": statement.from_date, "covered_to": covered_to},
                                                sort_keys=True) + "\n")
         costs_status.update(costs_written=len(cost_records), period=[statement.from_date, statement.to_date],
                             covered_to=covered_to)
         say("flex: wrote {} cost(s)".format(len(cost_records)))
+        if restatements:
+            costs_status["restated"] = len(restatements)
+            say("flex: IBKR restated {}; recorded as restated, the latest value counts (docs/manual/reconciliation.md)"
+                .format("; ".join("transaction {} ({})".format(r["payload"]["transaction_id"], r["note"])
+                                  for r in restatements)))
     except (StatementRefused, OSError) as refused:
         costs_status.update(_set_aside(refused, token, account_id))
         say("flex: costs set aside: " + costs_status["reason"])

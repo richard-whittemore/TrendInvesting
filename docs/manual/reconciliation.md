@@ -379,7 +379,7 @@ does not end with a whole line, is never appended to.
 
 The costs are read **in their own step, after the cash ledger is written**,
 so nothing in the costs can stop a deposit or withdrawal being recorded: a
-cost IBKR restates, a damaged costs ledger, or a costs status file that
+cost IBKR restates to nothing or to an impossible amount, a damaged costs ledger, or a costs status file that
 cannot be written, sets aside the costs alone. The cash ledger, its period
 and its status file are written as usual (`state` "read"), and only then do
 the costs start: they keep their own status file beside the costs ledger
@@ -403,9 +403,12 @@ ledger with another amount, kind, date or currency, the reader never
 changes the line it wrote: it adds a restatement line for the same
 transaction (`ibkr-flex:<ID>:restated:1`, then `:restated:2`, and so on)
 holding what IBKR now states, with a note naming the old and the new value
-("restated: was fee -10.0 USD on …, now fee -11.0 USD on …"). That reading
-sets the costs aside once, so the unit fails and you see it; the next
-reading finds the restated value recorded and reads on. The reporter and the
+("restated: was fee -10.0 USD on …, now fee -11.0 USD on …"). The restatement is
+written with the reading's other costs and the reading goes on, so the period
+still advances; the costs status says how many were restated ("restated") and
+the unit's log names each, once. A cost IBKR restates to zero, or to an amount
+that is not a finite number, is not written at all: the costs are set aside
+with the transaction named, until IBKR states it otherwise. The reporter and the
 dashboard count each cost once, at its latest value, and the costs text says
 how many were restated.
 
@@ -713,7 +716,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | `ti-flex@<instance>` failed; its status file says **the coverage file ... is not as this reader writes it** | Refused: the days the last reading covered are not known, so no day can be checked | Put the file back from a backup or the server's snapshot; never edit it by hand. Without one, tell the developer |
 | A ledger record has a `note` that a later (or earlier) transfer in the same interval was written first; the status file's `out_of_order` is above 0 | Information only: the transfer reached IBKR's report a day late. It is written, with the right figure; the record written before it keeps an `equity_before` that leaves this transfer out, and is not rewritten | Nothing; keep it in mind when reading that record's `equity_before` |
 | The reader's log says "transfer N is dated by day alone on the first run's approval day" | Information only: the approval came before that day's close, so it is written as after the approval (above, "The first book"); counted in `date_only_on_approval_day` | Check the transfer was made after you read the book in IBKR; if it was before, tell the developer |
-| `ti-flex@<instance>` failed; the cash status file says `"state": "read"` but the costs status file (`costs.jsonl.status.json`) says `"set-aside"` or `"coverage-gap"`: **IBKR restated transaction N (restated: was …, now …)**, **the costs status cannot be written** (in the unit's log), **the costs ledger ... line N is not a cost as this reader writes it** (or is not UTF-8 text, or does not end with a whole line), or the first costs reading **starts after the first run's approval day** | The costs alone are set aside: the deposits and withdrawals are still written and the cash status is "read", so the cash checks are unaffected. No new cost is written (a restatement writes only its restatement line); the daily summary's costs line says "costs incomplete" | A restated cost: nothing to do; the next evening's reading reads on and counts the latest value (check it in IBKR's activity statement if the amount surprises you). A costs status that cannot be written: check the folder `/var/lib/trend-investing/flex/<instance>/` is writable by the unit and that `costs.jsonl.status.json` is a file, then `sudo systemctl start ti-flex@<instance>`. A damaged line: put it back from a backup or the server's snapshot; never edit the ledger by hand. A first reading that does not reach back: set the Flex query's period to a custom range from the approval day, `sudo systemctl start ti-flex@<instance>`, then set it back, as for the cash coverage gap above |
+| `ti-flex@<instance>` failed; the cash status file says `"state": "read"` but the costs status file (`costs.jsonl.status.json`) says `"set-aside"` or `"coverage-gap"`: **cost N is stated as … which is not a cost this reader can write**, **the costs status cannot be written** (in the unit's log), **the costs ledger ... line N is not a cost as this reader writes it** (or is not UTF-8 text, or does not end with a whole line), or the first costs reading **starts after the first run's approval day** | The costs alone are set aside: the deposits and withdrawals are still written and the cash status is "read", so the cash checks are unaffected. No new cost is written; the daily summary's costs line says "costs incomplete" | A cost restated to nothing: check it in IBKR's activity statement; the costs stay set aside until IBKR states it otherwise. (An ordinary restatement sets nothing aside; it is said in the unit's log.) A costs status that cannot be written: check the folder `/var/lib/trend-investing/flex/<instance>/` is writable by the unit and that `costs.jsonl.status.json` is a file, then `sudo systemctl start ti-flex@<instance>`. A damaged line: put it back from a backup or the server's snapshot; never edit the ledger by hand. A first reading that does not reach back: set the Flex query's period to a custom range from the approval day, `sudo systemctl start ti-flex@<instance>`, then set it back, as for the cash coverage gap above |
 | The status file says `"state": "running"` with a `checked_at` more than 45 minutes old | The reading was stopped part way (above, "The status file"); the ledger is as it was | Read `journalctl -u ti-flex@<instance>`; the next firing reads again |
 | The status file's `unknown_types` is not `{}` | Information only: those rows are read but not classified, so not written | Tell the developer the type's name, so the reader can learn it |
 | The reader's log says "transfer N not written: ... before the first run's approval" | Information only: that transfer is already in the starting book you stated; the status file counts it (`in_first_book`) | Nothing |

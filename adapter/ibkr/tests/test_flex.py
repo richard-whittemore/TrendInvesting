@@ -968,21 +968,34 @@ class ReadOnceTests(unittest.TestCase):
             self.assertIn(text, status["reason"])
         return status
 
-    def test_a_known_cost_restated_sets_aside_the_costs_once_and_is_recorded_as_a_restatement(self):
-        self.read(FakeFlex())
-        before = self.costs()
-        changed = fixture("statement.xml").replace(b'amount="-10" transactionID', b'amount="-11" transactionID')
-        changed = changed.replace(
+    def restated_statement(self, amount="-11"):
+        """The fixture statement with cost 900000107 stated at amount, and a new deposit beside it."""
+        changed = fixture("statement.xml").replace(b'amount="-10" transactionID',
+                                                   'amount="{}" transactionID'.format(amount).encode())
+        return changed.replace(
             b'<CashTransaction accountId="DU0000001" currency="USD" type="Dividends"',
             b'<CashTransaction accountId="DU0000001" currency="USD" type="Deposits/Withdrawals" '
             b'dateTime="20270115;120000" amount="100" transactionID="900000130" levelOfDetail="DETAIL"/>\n'
             b'<CashTransaction accountId="DU0000001" currency="USD" type="Dividends"')
-        self.assertFalse(self.read(FakeFlex(statements=(changed,))), "a restatement sets the costs aside once")
-        self.assertEqual(self.status()["state"], "read", "the costs never stop the cash reading")
+
+    def test_a_known_cost_restated_is_recorded_and_the_same_reading_reads_on(self):
+        self.read(FakeFlex())
+        before = self.costs()
+        changed = self.restated_statement()
+        later = changed.replace(
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees"',
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees" dateTime="20270115" '
+            b'amount="-2.50" transactionID="900000120" levelOfDetail="DETAIL"/>\n'
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees"')
+        self.assertTrue(self.read(FakeFlex(statements=(later,))), "a restatement does not fail the reading")
+        self.assertEqual(self.status()["state"], "read")
         self.assertIn("ibkr-flex:900000130", [r["id"] for r in self.records()], "the new deposit is still recorded")
         status = self.costs_status()
-        self.assertEqual(status["state"], "set-aside")
-        self.assertIn("900000107", status["reason"])
+        self.assertEqual(status["state"], "read", "the same reading reads on")
+        self.assertEqual(status["covered_to"], "20270114", "and advances the period")
+        self.assertEqual(status["costs_written"], 1, "the other new cost is written in the same reading")
+        self.assertEqual(status["restated"], 1)
+        self.assertIn("900000107", self.out.getvalue(), "the restatement is said once as a notice")
         self.assertEqual(self.costs()[:len(before)], before, "a record once written is never changed")
         self.assertEqual(self.costs()[len(before):], [
             {"id": "ibkr-flex:900000107:restated:1", "type": "account.cost", "schema_version": 1,
@@ -990,14 +1003,23 @@ class ReadOnceTests(unittest.TestCase):
              "payload": {"kind": "fee", "amount": -11.0, "currency": "USD",
                          "as_of": "2027-01-13T05:00:00Z", "transaction_id": "900000107"},
              "note": "restated: was fee -10.0 USD on 2027-01-13T05:00:00Z, now fee -11.0 USD on 2027-01-13T05:00:00Z"},
+            self.costs()[-1],
         ], "the restatement names the old and the new value; the latest counts")
-        self.assertTrue(self.read(FakeFlex(statements=(changed,))), "the next reading reads on")
-        self.assertEqual((self.costs_status()["state"], self.costs_status()["covered_to"]), ("read", "20270114"))
-        self.assertEqual(len(self.costs()), len(before) + 1, "the restated value is now the ledger's")
-        again = changed.replace(b'amount="-11" transactionID', b'amount="-12" transactionID')
-        self.assertFalse(self.read(FakeFlex(statements=(again,))))
-        self.assertEqual(self.costs()[-1]["id"], "ibkr-flex:900000107:restated:2")
+        self.assertEqual(self.costs()[-1]["id"], "ibkr-flex:900000120")
+        self.assertTrue(self.read(FakeFlex(statements=(later,))), "the next reading reads on")
+        self.assertEqual(self.costs_status().get("restated", 0), 0, "and says nothing more of it")
+        self.assertEqual(len(self.costs()), len(before) + 2, "the restated value is now the ledger's")
+        again = later.replace(b'amount="-11" transactionID', b'amount="-12" transactionID')
         self.assertTrue(self.read(FakeFlex(statements=(again,))))
+        self.assertIn("ibkr-flex:900000107:restated:2", [r["id"] for r in self.costs()])
+
+    def test_a_cost_restated_to_nothing_or_past_a_float_sets_the_costs_aside_writing_nothing(self):
+        self.read(FakeFlex())
+        for amount in ("0", "1e999"):
+            with self.subTest(amount):
+                status = self.assert_costs_set_aside(self.restated_statement(amount), "900000107")
+                self.assertNotIn("not a cost as this reader writes it", status["reason"])
+                self.assertTrue(self.read(FakeFlex()), "the ledger is still one both readers accept")
 
     def test_a_restatement_line_not_as_the_reader_writes_it_sets_the_costs_aside(self):
         self.read(FakeFlex())
