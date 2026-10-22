@@ -626,10 +626,11 @@ func TestAClearanceIsJudgedAgainstTheCurrentRunsCountAndOwnAccount(t *testing.T)
 		approve bool
 		account string
 		want    int
+		refused bool
 	}{
-		"same run":          {false, "joint", 0},
-		"after a fresh run": {true, "joint", 1},
-		"another account":   {true, "other", 0},
+		"same run":          {false, "joint", 0, false},
+		"after a fresh run": {true, "joint", 1, true},
+		"another account":   {true, "other", 1, true},
 	} {
 		l := newBoostLog(t)
 		l.decide(0)
@@ -641,6 +642,9 @@ func TestAClearanceIsJudgedAgainstTheCurrentRunsCountAndOwnAccount(t *testing.T)
 		_, unread, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
 		if err != nil || len(unread) != c.want {
 			t.Errorf("%s: unread %+v, %v; want %d", name, unread, err, c.want)
+		}
+		if len(unread) == 1 && unread[0].Refused != c.refused {
+			t.Errorf("%s: refused %v, want %v: the engine refuses it, so it is paged as refused", name, unread[0].Refused, c.refused)
 		}
 	}
 }

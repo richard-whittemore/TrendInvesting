@@ -130,7 +130,9 @@ when `ntfy` is in the reporter's channels.
    server over Tailscale, so with Tailscale off it shows nothing new from
    this server, the daily summary included.
 4. In the ntfy app, subscribe to that topic on that server (the app's "use
-   another server" option, with the same URL).
+   another server" option, with the same URL). On an iPhone, also set the
+   app's Default Server to that same exact URL: ntfy delivers only when the
+   two match.
 5. **Test a delivery end to end** before you rely on it. In the ntfy app,
    also subscribe to a throwaway topic on the same server, say `check-1234`
    (not your secret topic). On the server run

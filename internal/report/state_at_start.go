@@ -287,8 +287,8 @@ func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
 // judgeClearance reads the owner's clearance e as the Boost engine does and
 // applies it to the count, returning it as unread when the engine refuses it:
 // Refused false when it cannot decode or validate it, true when its rule
-// (targetweight.BoostVerdicts.ClearNeverSent) refuses it as a whole. Another
-// account's clearance is no business of this one's.
+// (targetweight.BoostVerdicts.ClearNeverSent) refuses it as a whole. A
+// clearance naming another account is refused as the engine refuses it.
 func (r *boostRejections) judgeClearance(e event.Envelope) *UnreadReport {
 	var p event.RebalanceClearedPayload
 	if err := read(e, clearedVersions, &p); err != nil {
@@ -298,7 +298,7 @@ func (r *boostRejections) judgeClearance(e event.Envelope) *UnreadReport {
 		return &UnreadReport{InputID: e.ID, Type: e.Type, Reason: err.Error(), At: e.RecordedAt, OrderIDs: named.ClientOrderIDs}
 	}
 	if p.AccountID != r.account {
-		return nil
+		return &UnreadReport{InputID: e.ID, Type: e.Type, Reason: fmt.Sprintf("clearance %s is for account %q; this run decides %q", e.ID, p.AccountID, r.account), At: e.RecordedAt, OrderIDs: p.ClientOrderIDs, Refused: true}
 	}
 	sideOf := func(id string) string { return r.released[id].Side }
 	if err := r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf); err != nil {

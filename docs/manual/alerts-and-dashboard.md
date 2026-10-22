@@ -321,7 +321,7 @@ The delivery rules:
   the order as released, and a report on an order cleared as never sent
   count for nothing, as the engine refuses them; on a Boost account, a
   clearance the engine's Boost rule refuses (it names an order this run
-  never released, or one the venue has already named) is paged on every
+  never released, one the venue has already named, or another account's) is paged on every
   channel as an urgent "operator clearance <id> refused" alert naming its
   orders, and named on the page; a clearance record the reporter cannot read
   or validate (a record that names an order twice does not validate), which
@@ -1050,7 +1050,7 @@ passes `-clock-check`.
   `TestAJournalTheReporterCannotReadStillAlertsAndChecksTheHeartbeat`,
   `TestAFailureOnOneChannelIsNeverADeliveryAndOnlyThatChannelIsRetried`,
   `TestAnUnacknowledgedHaltRepeatsOnBothChannelsUntilAcknowledged`,
-  `TestTheDailySummaryNeverGoesThroughThePublicRelay`,
+  `TestTheDailySummaryNeverGoesThroughThePublicRelayOrToPagerDuty`,
   `TestTheSecretsFileSuppliesTheChannelSecrets`,
   `TestOneChannelsBadSecretNeverSilencesTheOther`,
   `TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset`,
