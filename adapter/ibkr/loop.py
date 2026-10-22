@@ -392,7 +392,8 @@ class AdapterLoop:
         self.relay = Relay(lambda: _AskedOnItsOwnThread(self._engine_connect(), self._await_engine), sender,
                            self.pending, lambda: collect_broker_orders(self.conn),
                            lambda order, session: release_to_request(order, cfg.mode, cfg.con_ids, session),
-                           today=self._today, settled=lambda envelope: self.outbox.strike(envelope["id"]))
+                           today=self._today, settled=lambda envelope: self.outbox.strike(envelope["id"]),
+                           now=self._now)
         # The engine opens its socket only once its start is recorded, a
         # fresh run's Run approval included (cmd/engine), so nothing of the
         # log is read, and nothing of IBKR's journalled, before it listens:

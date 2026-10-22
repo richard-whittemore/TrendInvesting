@@ -27,8 +27,9 @@ type BoostVerdicts struct {
 	// undecided are the orders decided sessions released that the venue has
 	// not yet ruled on, in release order, so a late verdict on any of them
 	// is counted (BoostFigures.UndecidedOrders). An order leaves it at the
-	// venue's first word on it, or when the owner settles it as never sent
-	// (ClearNeverSent); a dry-run's orders, which no venue receives, never
+	// venue's first word on it, when the owner settles it as never sent
+	// (ClearNeverSent), or when it is retired as never sent (Retire); a
+	// dry-run's orders, which no venue receives, never
 	// join it.
 	undecided []undecidedOrder
 	// olderThanRejection counts the first of undecided, in release order,
@@ -205,6 +206,118 @@ func (v *BoostVerdicts) ClearNeverSent(inputID string, p event.RebalanceClearedP
 		v.leave(slices.IndexFunc(v.undecided, func(o undecidedOrder) bool { return o.id == id }))
 	}
 	return nil
+}
+
+// Holds reports whether order id is among the orders awaiting the venue's
+// word, so its retirement is this count's to read (Retire).
+func (v *BoostVerdicts) Holds(id string) bool {
+	return slices.ContainsFunc(v.undecided, func(o undecidedOrder) bool { return o.id == id })
+}
+
+// Retire takes order id off the orders awaiting the venue's word when it is
+// retired as never sent (execution.order.retired, journalled as input
+// inputID): its session ended before the adapter could send it, or the owner
+// retired one the adapter can never send, so no venue will ever rule on it,
+// and it is counted neither accepted nor rejected (ADR 0026, point 2,
+// "Boost", amended 2026-10-22). It applies only to an order the count holds
+// (Holds), which must never have been named by the venue, else it is
+// refused and nothing changes (fail closed): an order the venue has named,
+// even only as submitted, was sent. An order the count does not hold, the
+// sale back to 98% among them, is retired by the caller's own rule.
+func (v *BoostVerdicts) Retire(inputID, id string) error {
+	i, err := v.retirable(inputID, id)
+	if err != nil {
+		return err
+	}
+	v.leave(i)
+	return nil
+}
+
+// retirable is Retire's rule, changing nothing: the index of order id among
+// the orders awaiting the venue's word, or the refusal.
+func (v *BoostVerdicts) retirable(inputID, id string) (int, error) {
+	i := slices.IndexFunc(v.undecided, func(o undecidedOrder) bool { return o.id == id })
+	switch {
+	case i < 0:
+		return 0, fmt.Errorf("targetweight: retirement %s names order %s, which is not among the orders awaiting the venue's word", inputID, id)
+	case v.undecided[i].venueID != "":
+		return 0, fmt.Errorf("targetweight: retirement %s names order %s, which the venue has already named as order %s; it was sent, and only an order no venue received is retired", inputID, id, v.undecided[i].venueID)
+	}
+	return i, nil
+}
+
+// RetirementState is what a reader of Boost's orders holds of those a
+// retirement as never sent (execution.order.retired) may name, for
+// RetirementVerdict: the run's account, whether it is a dry-run, each
+// order's first release, the orders the owner's clearance the engine
+// applied settled (Cleared), those whose retirement it applied (Retired),
+// those a venue named in a report, an execution or a broker listing the
+// engine read (Named), and the Boost count (Verdicts). A nil func holds no
+// order, and a nil Verdicts holds none awaiting the venue's word.
+type RetirementState struct {
+	AccountID string
+	DryRun    bool
+	Released  func(id string) (event.OrderReleasedPayload, bool)
+	Cleared   func(id string) bool
+	Retired   func(id string) bool
+	Named     func(id string) bool
+	Verdicts  *BoostVerdicts
+}
+
+// has reports whether set holds id; a nil set holds nothing.
+func has(set func(string) bool, id string) bool { return set != nil && set(id) }
+
+// RetirementVerdict is the one rule by which Boost applies retirement p of
+// an order the adapter never sent, journalled as input inputID (the owner's
+// decision of 2026-10-22; ADR 0026, point 2, "Boost", amended 2026-10-22):
+// the engine (applyRetired), the reporter and the restart reading each call
+// it, so none re-implements it (AGENTS.md). It must be for the run's
+// account, in a run that sends orders (a dry-run, or an order a dry-run
+// released, has nothing to retire), of an order released as p describes it
+// (event's Describes), neither cleared nor retired before. An order the
+// Boost count holds as awaiting the venue's word must pass that count's
+// rule (BoostVerdicts.Retire) and is reported held, for the caller to take
+// off the count; any other, the sale back to 98% among them, may never have
+// been named by a venue. Anything else is refused, so a retirement never
+// ends an order that may be working (fail closed, AGENTS.md). It is pure:
+// it changes nothing.
+func RetirementVerdict(s RetirementState, inputID string, p event.OrderRetiredPayload) (held bool, err error) {
+	id := p.ClientOrderID
+	dryRun := fmt.Errorf("targetweight: retirement %s names order %s in a dry-run, which sends no order and ends each it releases with its own synthetic cancel, so it has nothing to retire: find what fed it before going on", inputID, id)
+	if s.DryRun {
+		return false, dryRun
+	}
+	if p.AccountID != s.AccountID {
+		return false, fmt.Errorf("targetweight: retirement %s is for account %q; this run decides %q", inputID, p.AccountID, s.AccountID)
+	}
+	var o event.OrderReleasedPayload
+	ok := false
+	if s.Released != nil {
+		o, ok = s.Released(id)
+	}
+	switch {
+	case !ok:
+		return false, fmt.Errorf("targetweight: retirement %s names order %s, which this run did not release", inputID, id)
+	case o.Mode == event.TradingModeDryRun:
+		return false, dryRun
+	case has(s.Cleared, id):
+		return false, fmt.Errorf("targetweight: retirement %s names order %s, which the owner cleared as never sent already", inputID, id)
+	case has(s.Retired, id):
+		return false, fmt.Errorf("targetweight: retirement %s names order %s, which is retired already", inputID, id)
+	case !p.Describes(o):
+		return false, fmt.Errorf("targetweight: retirement %s retires %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
+			inputID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, id, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
+	}
+	if s.Verdicts != nil && s.Verdicts.Holds(id) {
+		if _, err := s.Verdicts.retirable(inputID, id); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if has(s.Named, id) {
+		return false, fmt.Errorf("targetweight: retirement %s names order %s, which a venue has named or reported executed; it was sent, and only an order no venue received is retired", inputID, id)
+	}
+	return false, nil
 }
 
 // Rejections is the count in force.

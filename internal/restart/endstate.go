@@ -10,6 +10,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 // EndState is the state an approved log ends in that a fresh run cannot
@@ -35,6 +36,11 @@ type EndState struct {
 	// (ADR 0019, amended 2026-10-15; saleAttemptAtEnd).
 	SaleAttempted     bool
 	SaleClientOrderID string
+	// SaleRetiredAttempts is how many of that incident's sales were retired
+	// as never sent, by a retirement the engine applied, counting those an
+	// earlier approval carried (saleAttemptAtEnd): each had a client order
+	// ID of its own, which the fresh run's next attempt must not reuse.
+	SaleRetiredAttempts int
 	// KillSwitchEngaged is whether the log's last operator.kill-switch the
 	// gate accepted, one for the log's own account that validates and states
 	// no time before the last accepted, engaged it; a kill switch for another
@@ -74,7 +80,7 @@ func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState,
 	}
 	end.Scope = slices.Sorted(slices.Values(end.Scope))
 	end.ScopeCash = slices.Sorted(slices.Values(end.ScopeCash))
-	if end.SaleAttempted, end.SaleClientOrderID, err = saleAttemptAtEnd(entries, end.IncidentID, logName); err != nil {
+	if end.SaleAttempted, end.SaleClientOrderID, end.SaleRetiredAttempts, err = saleAttemptAtEnd(entries, end.IncidentID, accountID, logName); err != nil {
 		return EndState{}, err
 	}
 	if end.PendingCash, err = pendingCashAtEnd(entries, logName); err != nil {
@@ -100,60 +106,199 @@ func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState,
 }
 
 // saleAttemptAtEnd reports whether incident's one sale back to 98% was
-// attempted in the approved log: planned under the incident's tag, withheld
-// under it for a person (event.SaleWithheldPayload.Attempted), or carried in
-// force as attempted by the log's own approval (ADR 0019, amended
-// 2026-10-15: one attempt per incident, never retried automatically). It
-// returns the attempt's client order ID when the sale was sent. A log that
-// ended Normal has no incident and no attempt.
-func saleAttemptAtEnd(entries []journal.Entry, incident, logName string) (attempted bool, clientOrderID string, err error) {
+// attempted in the approved log, recorded for accountID: planned under the
+// incident's tag, withheld under it for a person
+// (event.SaleWithheldPayload.Attempted), or carried in force as attempted by
+// the log's own approval (ADR 0019, amended 2026-10-15: one attempt per
+// incident, never retried automatically). A sale retired as never sent
+// after it was planned is no attempt, since nothing was sent (ADR 0019,
+// amended 2026-10-17, reading 4, as the owner's decision of 2026-10-22
+// reads it), but only by a retirement the engine applies (retirements):
+// one it refuses leaves the attempt spent (fail closed, AGENTS.md). It
+// returns the attempt's client order ID when the sale was sent, and how many
+// of the incident's sales were retired, counting those the log's own
+// approval carried, so the next attempt's client order ID is never a
+// retired order's (ADR 0026, point 2, "Order identity"). A log that ended
+// Normal has no incident and no attempt.
+func saleAttemptAtEnd(entries []journal.Entry, incident, accountID, logName string) (attempted bool, clientOrderID string, retired int, err error) {
 	if incident == "" {
-		return false, "", nil
+		return false, "", 0, nil
 	}
+	decode := func(env event.Envelope, v any) error {
+		if err := json.Unmarshal(env.Payload, v); err != nil {
+			return fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+		}
+		return nil
+	}
+	sales := map[string]bool{} // the incident's planned sales, by client order ID
+	r := newRetirements(accountID)
 	for _, entry := range entries {
 		env := entry.Envelope
 		switch {
 		case entry.Kind == journal.KindInput && env.Type == event.OperatorRunApprovedEventType:
 			// Decoded already by incidentAtEnd, at its recorded version.
 			inherited, _ := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion)
-			if in := inherited.IncidentInForce; in != nil && in.IncidentID == incident && *in.SaleAttempted {
-				attempted, clientOrderID = true, in.SaleClientOrderID
+			if in := inherited.IncidentInForce; in != nil && in.IncidentID == incident {
+				attempted, clientOrderID, retired = *in.SaleAttempted, in.SaleClientOrderID, in.SaleRetiredAttempts
 			}
 		case entry.Kind == journal.KindDecision && env.Type == event.OrderPlannedEventType:
 			var p event.OrderPlannedPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				return false, "", fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+			if err := decode(env, &p); err != nil {
+				return false, "", 0, err
 			}
 			if p.Sale != (event.SaleFigures{}) && p.Tag == incident {
 				attempted, clientOrderID = true, p.ClientOrderID
+				sales[p.ClientOrderID] = true
 			}
 		case entry.Kind == journal.KindDecision && env.Type == event.SaleWithheldEventType:
 			var p event.SaleWithheldPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				return false, "", fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+			if err := decode(env, &p); err != nil {
+				return false, "", 0, err
 			}
 			if p.Tag == incident && p.Attempted() {
 				attempted = true
 			}
+		case entry.Kind == journal.KindInput && env.Type == event.OrderRetiredEventType:
+			var p event.OrderRetiredPayload
+			if err := decode(env, &p); err != nil {
+				return false, "", 0, err
+			}
+			if !sales[p.ClientOrderID] || !r.retire(env.ID, p) {
+				continue
+			}
+			// A sale retired as never sent spent nothing: it was not an
+			// attempt (ADR 0019, amended 2026-10-17, reading 4, as the
+			// owner's decision of 2026-10-22 reads it).
+			retired++
+			if attempted && p.ClientOrderID == clientOrderID {
+				attempted, clientOrderID = false, ""
+			}
+		default:
+			if err := r.observe(entry, decode); err != nil {
+				return false, "", 0, err
+			}
 		}
 	}
-	return attempted, clientOrderID, nil
+	return attempted, clientOrderID, retired, nil
+}
+
+// retirements reads a log's retirements of the incident's sales back to 98%
+// by the engine's own rule (targetweight.RetirementVerdict), against what
+// the log records of each sale as the engine reads it: its first release,
+// the retirements applied, and the venue's reports, executions and broker
+// listings naming it that the engine reads (ADR 0026, point 2, "Boost",
+// amended 2026-10-22, and point 5: recovered, never recomputed). No
+// clearance the engine applies names a sale: it clears only an order its
+// Boost count holds as awaiting a decided session's verdict
+// (targetweight.BoostVerdicts.ClearNeverSent), which a sale never is, so
+// neither a clearance nor the count is read.
+type retirements struct {
+	account  string
+	released map[string]event.OrderReleasedPayload
+	retired  map[string]bool // retirements applied
+	named    map[string]bool // named by a venue as the engine reads it: it was sent
+}
+
+func newRetirements(account string) *retirements {
+	return &retirements{account: account, released: map[string]event.OrderReleasedPayload{}, retired: map[string]bool{}, named: map[string]bool{}}
+}
+
+// observe records what entry says of an order a retirement may name, as the
+// engine reads it: a lifecycle report of its account, at the version the
+// engine reads, describing the order as released (event's Describes); an
+// execution of its account; and a broker snapshot of its account listing
+// the order under its instrument. A report or execution on an order retired
+// already contradicts the retirement and is refused, naming nothing. A
+// record that cannot be decoded refuses, through decode.
+func (r *retirements) observe(entry journal.Entry, decode func(event.Envelope, any) error) error {
+	env := entry.Envelope
+	switch {
+	case entry.Kind == journal.KindDecision && env.Type == event.OrderReleasedEventType:
+		var p event.OrderReleasedPayload
+		if err := decode(env, &p); err != nil {
+			return err
+		}
+		if _, ok := r.released[p.ClientOrderID]; !ok {
+			r.released[p.ClientOrderID] = p
+		}
+	case entry.Kind != journal.KindInput:
+	case env.Type == event.OrderLifecycleEventType:
+		var p event.LimitOrderLifecyclePayload
+		if err := decode(env, &p); err != nil {
+			return err
+		}
+		if o, ok := r.released[p.ClientOrderID]; ok && env.SchemaVersion == event.OrderLifecycleLimitVersion && p.AccountID == r.account && !r.retired[p.ClientOrderID] && p.Describes(o) {
+			r.named[p.ClientOrderID] = true
+		}
+	case env.Type == event.FillEventType:
+		var p event.TargetWeightFillPayload
+		if err := decode(env, &p); err != nil {
+			return err
+		}
+		if _, ok := r.released[p.ClientOrderID]; ok && p.AccountID == r.account && !r.retired[p.ClientOrderID] {
+			r.named[p.ClientOrderID] = true
+		}
+	case env.Type == event.BrokerSnapshotEventType:
+		var p struct {
+			AccountID  string `json:"account_id"`
+			OpenOrders []struct {
+				ClientOrderID string `json:"client_order_id"`
+				InstrumentID  string `json:"instrument_id"`
+			} `json:"open_orders"`
+		}
+		if err := decode(env, &p); err != nil {
+			return err
+		}
+		for _, l := range p.OpenOrders {
+			if o, ok := r.released[l.ClientOrderID]; ok && p.AccountID == r.account && l.ClientOrderID != "" && o.InstrumentID == l.InstrumentID {
+				r.named[l.ClientOrderID] = true
+			}
+		}
+	}
+	return nil
+}
+
+// retire reports whether the engine applies retirement p, journalled as
+// input inputID, by its own rule (targetweight.RetirementVerdict), and
+// records it when it does. A retirement the engine may have refused is
+// never taken as applied (fail closed, AGENTS.md).
+func (r *retirements) retire(inputID string, p event.OrderRetiredPayload) bool {
+	_, err := targetweight.RetirementVerdict(targetweight.RetirementState{
+		AccountID: r.account,
+		Released:  func(id string) (event.OrderReleasedPayload, bool) { o, ok := r.released[id]; return o, ok },
+		Retired:   func(id string) bool { return r.retired[id] },
+		Named:     func(id string) bool { return r.named[id] },
+	}, inputID, p)
+	if err != nil {
+		return false
+	}
+	r.retired[p.ClientOrderID] = true
+	return true
 }
 
 // CheckSaleAttempt refuses an approval that carries the approved log's
 // incident in force with its one sale back to 98% stated not attempted when
 // the log records an attempt: a fresh run learns of an earlier attempt only
 // from the approval, and would otherwise attempt the sale twice (ADR 0019,
-// amended 2026-10-15). Stating an attempt is always accepted, since the
-// owner may have sold by hand. logName names the approved log in a refusal.
+// amended 2026-10-15), and one stating fewer of the incident's sales
+// retired as never sent than the log records, since the next attempt would
+// reuse a retired order's client order ID (ADR 0026, point 2, "Order
+// identity"). Stating an attempt is always accepted, since the owner may
+// have sold by hand. logName names the approved log in a refusal.
 func CheckSaleAttempt(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
 	in := approval.IncidentInForce
 	if in == nil || *in.SaleAttempted {
 		return nil
 	}
-	attempted, clientOrderID, err := saleAttemptAtEnd(entries, in.IncidentID, logName)
-	if err != nil || !attempted {
+	attempted, clientOrderID, retired, err := saleAttemptAtEnd(entries, in.IncidentID, approval.AccountID, logName)
+	switch {
+	case err != nil:
 		return err
+	case !attempted && in.SaleRetiredAttempts < retired:
+		return fmt.Errorf("engine: %s records %d of incident %s's sales back to 98%% retired as never sent, but the approval states %d: each had a client order ID of its own, which the next attempt must not reuse (ADR 0026, point 2, \"Order identity\")",
+			logName, retired, in.IncidentID, in.SaleRetiredAttempts)
+	case !attempted:
+		return nil
 	}
 	return fmt.Errorf("engine: %s records an attempt of incident %s's one sale back to 98%% (sale client order %q), but the approval states it not attempted: it is attempted once per incident and never retried automatically (ADR 0019, amended 2026-10-15)",
 		logName, in.IncidentID, clientOrderID)
@@ -216,6 +361,7 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 		p.IncidentInForce = &event.IncidentInForce{
 			IncidentID: end.IncidentID, State: end.State, ScopeInstrumentIDs: end.Scope, ScopeCashComponents: end.ScopeCash,
 			SaleAttempted: new(end.SaleAttempted || req.SaleAttempted), SaleClientOrderID: end.SaleClientOrderID,
+			SaleRetiredAttempts: end.SaleRetiredAttempts,
 		}
 	}
 	if err := p.Validate(); err != nil {

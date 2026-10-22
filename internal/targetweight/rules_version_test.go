@@ -316,3 +316,21 @@ func TestRulesVersionDeclaresTheDryRunBoostSyntheticReports(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheRetiredOrder pins ADR 0016's
+// same-rules-version replay guarantee for a retired order (the owner's
+// decision of 2026-10-22; ADR 0026, point 2, "Boost", amended 2026-10-22):
+// an execution.order.retired ends a released order no venue received with
+// nothing filled, so Boost re-plans it and a momentum rebalance completes,
+// where 1.22.0 refused the input and kept the order working. A journal
+// holding one decides differently, so the build must not claim 1.22.0 or
+// earlier.
+func TestRulesVersionDeclaresTheRetiredOrder(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0", "1.17.0", "1.18.0", "1.19.0", "1.20.0", "1.21.0", "1.22.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.22.0 once a retired order is read", targetweight.RulesVersion)
+		}
+	}
+}

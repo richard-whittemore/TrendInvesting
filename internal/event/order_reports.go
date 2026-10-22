@@ -25,7 +25,8 @@ var ErrNotReleased = errors.New("which this run never released")
 // The same execution delivered again (SameExecution) is a redelivery and
 // changes nothing. An order becomes terminal on a lifecycle report that is
 // terminal (cancelled or invalid; LimitOrderLifecyclePayload's Terminal), on
-// the fill that completes its quantity, or on the owner's clearance (Clear).
+// the fill that completes its quantity, on the owner's clearance (Clear), or
+// on its retirement as an order no venue received (Retire).
 type OrderReports struct {
 	orders map[string]*ReportedOrder
 	fills  map[string]TargetWeightFillPayload
@@ -37,6 +38,9 @@ type ReportedOrder struct {
 	Filled   int64
 	Terminal bool
 	Fills    map[string]TargetWeightFillPayload // its fills read, by fill id
+	// Venue is set once a lifecycle report or a fill on it is read: the
+	// venue received it, so it can no longer be retired as never sent.
+	Venue bool
 }
 
 // NewOrderReports returns the rule with no order released.
@@ -112,9 +116,36 @@ func (r *OrderReports) Lifecycle(p LimitOrderLifecyclePayload) (*ReportedOrder, 
 		return nil, fmt.Errorf("reports %s %s %d %s at %v, which describes no order %s as released (%s %s %d %s at %v)",
 			p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, q.ClientOrderID, q.AccountID, q.Side, q.Quantity, q.InstrumentID, q.LimitPrice)
 	}
+	o.Venue = true
 	if p.Terminal() {
 		o.Terminal = true
 	}
+	return o, nil
+}
+
+// Retire reads the retirement of a released order the adapter never sent,
+// or says why it is not read: the session it was released for ended before
+// it could be sent, or the owner retired an order the adapter can never
+// send (the owner's decision of 2026-10-22; ADR 0026, point 2, "Boost",
+// amended 2026-10-22). It must name a released order that is not terminal,
+// describe it as released (OrderRetiredPayload's Describes), and name one no
+// venue has reported on: a lifecycle report or a fill shows the venue
+// received it, so it was sent. Once read the order is terminal with nothing
+// filled, so a later venue report on it is refused as on any terminal order.
+func (r *OrderReports) Retire(p OrderRetiredPayload) (*ReportedOrder, error) {
+	o, err := r.open(p.ClientOrderID)
+	if err != nil {
+		return nil, err
+	}
+	q := o.Released
+	switch {
+	case !p.Describes(q):
+		return nil, fmt.Errorf("retires %s %s %d %s at %v, which describes no order %s as released (%s %s %d %s at %v)",
+			p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, q.ClientOrderID, q.AccountID, q.Side, q.Quantity, q.InstrumentID, q.LimitPrice)
+	case o.Venue:
+		return nil, fmt.Errorf("retires order %s, which the venue has reported on, so it was sent: only an order no venue received is retired", q.ClientOrderID)
+	}
+	o.Terminal = true
 	return o, nil
 }
 
@@ -140,6 +171,7 @@ func (r *OrderReports) Fill(p TargetWeightFillPayload) (o *ReportedOrder, redeli
 		return nil, false, fmt.Errorf("takes order %s past its %d shares", q.ClientOrderID, q.Quantity)
 	}
 	r.fills[p.FillID] = p
+	o.Venue = true
 	o.Fills[p.FillID] = p
 	o.Filled += p.Quantity
 	o.Terminal = o.Filled == q.Quantity

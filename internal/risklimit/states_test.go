@@ -507,6 +507,41 @@ func TestMarginAlarmLevels(t *testing.T) {
 	}
 }
 
+// TestBrokerFiresTellsWhatObservingWouldFireAndChangesNothing: BrokerFires
+// reads, by ObserveBroker's own rules, which sale back to 98% a broker
+// snapshot would fire, and changes nothing, so a caller that refuses the
+// snapshot on it leaves the alarm for the next one (fail closed, AGENTS.md).
+func TestBrokerFiresTellsWhatObservingWouldFireAndChangesNothing(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	blind := broker(14700)
+	blind.Unreadable, blind.ExcessLiquidity = []string{event.BrokerComponentExcessLiquidity}, 0
+	if urgent, exit, err := g.BrokerFires("broker:0", blind); err != nil || urgent || exit {
+		t.Errorf("a first snapshot with no reading starts the stale clock: %v %v %v, want nothing fired", urgent, exit, err)
+	}
+	s := broker(14700)
+	s.ExcessLiquidity = 1000
+	for range 2 {
+		if urgent, exit, err := g.BrokerFires("broker:1", s); err != nil || !urgent || exit {
+			t.Fatalf("an urgent reading: %v %v %v, want the urgent sale", urgent, exit, err)
+		}
+	}
+	if obs := observe(t, g, "broker:1", s); !obs.Urgent || obs.Alarm == nil {
+		t.Fatalf("observed after BrokerFires: %+v, want the urgent alarm and its sale", obs)
+	}
+	s.AsOf = at.Add(time.Minute)
+	if urgent, _, err := g.BrokerFires("broker:2", s); err != nil || urgent {
+		t.Errorf("the level stands: %v %v, want nothing fired", urgent, err)
+	}
+	other := s
+	other.AccountID = "ira"
+	if _, _, err := g.BrokerFires("broker:3", other); err == nil {
+		t.Error("a snapshot ObserveBroker refuses was read")
+	}
+	if urgent, exit, err := iraGate(t, 0).BrokerFires("broker:1", s); err != nil || urgent || exit {
+		t.Errorf("an IRA has no margin alarm: %v %v %v", urgent, exit, err)
+	}
+}
+
 func TestMarginAlarmChangesOnlyOnANewLevel(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	s := broker(14700)
@@ -758,7 +793,7 @@ func TestARestoredIncidentsEarlierAttemptIsNotRepeated(t *testing.T) {
 
 	restored := func(attempted bool) *risklimit.Gate {
 		r := gate(t, limits(), event.TradingModeDryRun)
-		if err := r.RestoreSaleAttempt(halted.StateID, attempted); err != nil {
+		if err := r.RestoreSaleAttempt(halted.StateID, attempted, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := r.RestoreIncidentState(halted.StateID, event.EngineStateHalted, nil, nil); err != nil {
@@ -1401,5 +1436,312 @@ func TestAPostCloseSnapshotWithoutIBKRsNetLiquidationNeverAlarms(t *testing.T) {
 	s.ReadAt, s.AsOfClose = s.AsOf.Add(70*time.Minute), true
 	if obs, err := g.ObserveBroker("broker:1", s); err == nil || obs.Alarm != nil || obs.Urgent {
 		t.Fatalf("observation %+v, err %v: want the snapshot refused with no alarm", obs, err)
+	}
+}
+
+// retireUnsent ends the released sale p as the engine does when it reads
+// its retirement as never sent, a synthetic cancel with nothing filled, and
+// tells the gate (RetireSale).
+func retireUnsent(t *testing.T, g *risklimit.Gate, p *event.OrderPlannedPayload) bool {
+	t.Helper()
+	end := event.LimitOrderLifecyclePayload{AccountID: p.AccountID, ClientOrderID: p.ClientOrderID, InstrumentID: p.InstrumentID, Side: p.Side,
+		Status: event.OrderLifecycleStatusCanceled, Quantity: p.Quantity, LimitPrice: p.LimitPrice, OccurredAt: now(g), Synthetic: true, Message: "retired unsent"}
+	if err := g.ObserveLifecycle(end); err != nil {
+		t.Fatal(err)
+	}
+	_, _, ok := g.RetireSale(p.ClientOrderID)
+	return ok
+}
+
+// TestARetiredSaleSpendsNoAttempt: a sale back to 98% retired as never sent
+// spent nothing, so it is attempted again under its own rule at the next
+// readable broker snapshot while what fired it is in force, for the same
+// shares and under a client order ID of its own; once what fired it is no
+// longer in force, nothing is retried and nothing lapses, since nothing was
+// withheld (ADR 0019, amended 2026-10-17, readings 1 and 4, as the owner's
+// decision of 2026-10-22 reads them). Only a sale this gate released is one.
+func TestARetiredSaleSpendsNoAttempt(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	kill(t, g, "kill:1", true)
+	observe(t, g, "broker:0", boosted())
+	refusedFor(t, check(t, g, order(event.OrderSideSell, 54, 147))[0], event.RefusedKillSwitch)
+	_, _, sell := g.RetireSale("tw-sell")
+	_, _, nothing := g.RetireSale("tw-nothing")
+	if sell || nothing {
+		t.Error("an order that is not a sale this gate released was read as a retired sale")
+	}
+	s, ok := requestSale(t, g, event.SaleTriggerExit)
+	if !ok || s.Order == nil {
+		t.Fatalf("setup: the exit's sale: %+v", s)
+	}
+	first := s.Order
+	released(t, check(t, g, saleOrder(first))[0])
+	if !retireUnsent(t, g, first) {
+		t.Fatal("the released sale was not read as a retired sale")
+	}
+	next := boosted()
+	next.AsOf = at.Add(time.Minute)
+	if obs := observe(t, g, "broker:1", next); !obs.RetryExit {
+		t.Fatalf("the next snapshot does not attempt the retired sale again: %+v", obs)
+	}
+	s, ok = requestSale(t, g, event.SaleTriggerExit)
+	if !ok || s.Order == nil || s.Order.Quantity != first.Quantity || s.Order.Tag != first.Tag {
+		t.Fatalf("second attempt %+v, want %d shares under %s", s, first.Quantity, first.Tag)
+	}
+	if want := orderplan.SaleAttemptClientOrderID(first.Tag, "SPY", 1); s.Order.ClientOrderID != want || want == first.ClientOrderID {
+		t.Errorf("second attempt %s, want %s, an ID of its own", s.Order.ClientOrderID, want)
+	}
+	second := s.Order
+	released(t, check(t, g, saleOrder(second))[0])
+	kill(t, g, "kill:2", false)
+	if !retireUnsent(t, g, second) {
+		t.Fatal("the second attempt was not read as a retired sale")
+	}
+	later := boosted()
+	later.AsOf = at.Add(2 * time.Minute)
+	if obs := observe(t, g, "broker:2", later); obs.RetryExit || len(obs.Lapsed) != 0 {
+		t.Errorf("with the exit no longer refused: %+v, want no retry and nothing lapsed", obs)
+	}
+
+	// Armed while the exit is refused, then the switch released: the retry
+	// ends, and nothing lapses, since nothing was withheld.
+	g = gate(t, limits(), event.TradingModeDryRun)
+	kill(t, g, "kill:1", true)
+	observe(t, g, "broker:0", boosted())
+	refusedFor(t, check(t, g, order(event.OrderSideSell, 54, 147))[0], event.RefusedKillSwitch)
+	s, _ = requestSale(t, g, event.SaleTriggerExit)
+	released(t, check(t, g, saleOrder(s.Order))[0])
+	retireUnsent(t, g, s.Order)
+	kill(t, g, "kill:2", false)
+	if obs := observe(t, g, "broker:1", next); obs.RetryExit || len(obs.Lapsed) != 0 {
+		t.Errorf("the switch released after the retirement: %+v, want no retry and nothing lapsed", obs)
+	}
+}
+
+// TestARetiredUrgentSaleIsAttemptedAgainWhileTheAlarmIsUrgent: the urgent
+// alarm's sale, retired as never sent, is attempted again at the next
+// snapshot while the alarm is still urgent; retired once the alarm has
+// cleared, it is not (ADR 0019, amended 2026-10-17, readings 1 and 4, as
+// the owner's decision of 2026-10-22 reads them).
+func TestARetiredUrgentSaleIsAttemptedAgainWhileTheAlarmIsUrgent(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:0", boosted())
+	low := func(minutes int) event.BrokerSnapshotPayload {
+		s := boosted()
+		s.AsOf, s.ExcessLiquidity = at.Add(time.Duration(minutes)*time.Minute), 1500
+		return s
+	}
+	if obs := observe(t, g, "broker:1", low(1)); !obs.Urgent {
+		t.Fatalf("setup: not urgent: %+v", obs.Alarm)
+	}
+	s, _ := requestSale(t, g, event.SaleTriggerMarginUrgent)
+	if s.Order == nil {
+		t.Fatalf("setup: the urgent sale: %+v", s)
+	}
+	released(t, check(t, g, saleOrder(s.Order))[0])
+	retireUnsent(t, g, s.Order)
+	if obs := observe(t, g, "broker:2", low(2)); !obs.Urgent {
+		t.Fatalf("the alarm still urgent, the retired sale is not attempted again: %+v", obs)
+	}
+	again, _ := requestSale(t, g, event.SaleTriggerMarginUrgent)
+	if again.Order == nil || again.Order.ClientOrderID == s.Order.ClientOrderID {
+		t.Fatalf("second attempt %+v, want an order with an ID of its own", again)
+	}
+	released(t, check(t, g, saleOrder(again.Order))[0])
+	calm := boosted()
+	calm.AsOf = at.Add(3 * time.Minute)
+	observe(t, g, "broker:3", calm)
+	retireUnsent(t, g, again.Order)
+	calm.AsOf = at.Add(4 * time.Minute)
+	if obs := observe(t, g, "broker:4", calm); obs.Urgent {
+		t.Error("retired after the alarm cleared, the sale was attempted again")
+	}
+}
+
+// TestARetiredUrgentSaleIsAttemptedAgainWhateverItsTag: the urgent alarm's
+// sale fired while the account is Halted, Degraded on the instrument or
+// under the kill switch carries the incident's or the engagement's tag, not
+// the alarm's; retired as never sent while the alarm stays urgent, it is
+// attempted again at the next snapshot all the same, since what fired it is
+// still in force (ADR 0019, amended 2026-10-17, readings 1 and 4, as the
+// owner's decision of 2026-10-22 reads them).
+func TestARetiredUrgentSaleIsAttemptedAgainWhateverItsTag(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, g *risklimit.Gate){
+		"halted":          func(t *testing.T, g *risklimit.Gate) { halt(t, g) },
+		"degraded on SPY": func(t *testing.T, g *risklimit.Gate) { degrade(t, g) },
+		"kill switch on":  func(t *testing.T, g *risklimit.Gate) { kill(t, g, "kill:1", true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := gate(t, limits(), event.TradingModeDryRun)
+			observe(t, g, "broker:0", boosted())
+			setup(t, g)
+			low := func(minutes int) event.BrokerSnapshotPayload {
+				s := boosted()
+				s.AsOf, s.ExcessLiquidity = at.Add(time.Duration(minutes)*time.Minute), 1500
+				return s
+			}
+			if obs := observe(t, g, "broker:1", low(1)); !obs.Urgent {
+				t.Fatalf("setup: not urgent: %+v", obs.Alarm)
+			}
+			s, _ := requestSale(t, g, event.SaleTriggerMarginUrgent)
+			if s.Order == nil || s.Order.Sale.Kind != event.SaleKindIncident {
+				t.Fatalf("setup: the urgent sale under the incident's or engagement's tag: %+v", s)
+			}
+			released(t, check(t, g, saleOrder(s.Order))[0])
+			retireUnsent(t, g, s.Order)
+			if obs := observe(t, g, "broker:2", low(2)); !obs.Urgent {
+				t.Fatalf("the alarm still urgent, the retired sale under %s is not attempted again: %+v", s.Order.Tag, obs)
+			}
+			again, _ := requestSale(t, g, event.SaleTriggerMarginUrgent)
+			if again.Order == nil || again.Order.ClientOrderID == s.Order.ClientOrderID || again.Order.Tag != s.Order.Tag {
+				t.Errorf("second attempt %+v, want an order under %s with an ID of its own", again, s.Order.Tag)
+			}
+		})
+	}
+}
+
+// TestARestoredRetiredSaleGivesTheNextAttemptAnIDOfItsOwn: the attempts an
+// earlier run retired as never sent, restored from the owner's approval or
+// from a recovered decision, are counted before the next attempt, so its
+// client order ID is never a retired order's (ADR 0026, point 2, "Order
+// identity"). A restore that names no tag, no instrument, an attempt below
+// the first, or fewer than none retired is refused.
+func TestARestoredRetiredSaleGivesTheNextAttemptAnIDOfItsOwn(t *testing.T) {
+	for name, restore := range map[string]func(t *testing.T, g *risklimit.Gate, incident string){
+		"from the approval": func(t *testing.T, g *risklimit.Gate, incident string) {
+			if err := g.RestoreSaleAttempt(incident, false, 1); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"from a recovered decision": func(t *testing.T, g *risklimit.Gate, incident string) {
+			if err := g.RestoreRetiredSale(incident, "SPY", 1); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := gate(t, limits(), event.TradingModeDryRun)
+			const incident = "engine-state:joint:1"
+			restore(t, g, incident)
+			if err := g.RestoreIncidentState(incident, event.EngineStateHalted, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			observe(t, g, "broker:0", boosted())
+			s, ok := requestSale(t, g, event.SaleTriggerExit)
+			if want := orderplan.SaleAttemptClientOrderID(incident, "SPY", 1); !ok || s.Order == nil || s.Order.ClientOrderID != want {
+				t.Fatalf("the sale %+v, want the second attempt's ID %s", s, want)
+			}
+		})
+	}
+	g := gate(t, limits(), event.TradingModeDryRun)
+	for _, c := range []struct {
+		tag, instrument string
+		attempt         int
+	}{{"", "SPY", 1}, {"kill:1", "", 1}, {"kill:1", "SPY", 0}} {
+		if err := g.RestoreRetiredSale(c.tag, c.instrument, c.attempt); err == nil {
+			t.Errorf("a retired sale restored as %+v", c)
+		}
+	}
+	if err := g.RestoreSaleAttempt("engine-state:joint:1", false, -1); err == nil {
+		t.Error("fewer than none retired was restored")
+	}
+}
+
+// TestARunsOwnLiveSaleIsHeldAsItsOwnAfterARestart: the incident's sale this
+// run released is reported as its own live sale only while it is still
+// live, and a gate restored from it holds it as this run's own attempt,
+// never one an earlier run spent: it is not attempted again while it
+// stands, and its retirement as never sent frees it for an attempt under
+// the next client order ID (ADR 0019, amended 2026-10-15 and 2026-10-17,
+// reading 4; ADR 0026, point 2, "Order identity", and point 5). A restore
+// that does not fit is refused (fail closed, AGENTS.md).
+func TestARunsOwnLiveSaleIsHeldAsItsOwnAfterARestart(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:0", boosted())
+	halt(t, g)
+	incident := g.Incident()
+	if _, ok := g.OwnLiveSale(incident, "SPY"); ok {
+		t.Error("a sale not yet attempted is reported live")
+	}
+	s, ok := requestSale(t, g, event.SaleTriggerExit)
+	if !ok || s.Order == nil {
+		t.Fatalf("setup: the incident's sale: %+v", s)
+	}
+	if _, ok := g.OwnLiveSale(incident, "SPY"); ok {
+		t.Error("a sale planned and not yet released is reported live")
+	}
+	released(t, check(t, g, saleOrder(s.Order))[0])
+	live, ok := g.OwnLiveSale(incident, "SPY")
+	if !ok || live.ClientOrderID != s.Order.ClientOrderID || live.Sale.Trigger != event.SaleTriggerExit {
+		t.Fatalf("the released sale is reported as %+v %v, want %s, fired by the exit", live, ok, s.Order.ClientOrderID)
+	}
+	if _, ok := g.OwnLiveSale("kill:1", "SPY"); ok {
+		t.Error("a tag with no attempt reports a live sale")
+	}
+	filled := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, filled, "broker:0", boosted())
+	halt(t, filled)
+	fs, _ := requestSale(t, filled, event.SaleTriggerExit)
+	released(t, check(t, filled, saleOrder(fs.Order))[0])
+	if err := filled.ObserveFill(event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: fs.Order.ClientOrderID, FillID: "exec-1", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: 1, Price: fs.Order.LimitPrice, FilledAt: at.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := filled.OwnLiveSale(filled.Incident(), "SPY"); ok {
+		t.Error("a sale with a fill reported is reported live")
+	}
+
+	o := event.OrderReleasedPayload{AccountID: "joint", Tag: incident, ClientOrderID: live.ClientOrderID, InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: live.Quantity, LimitPrice: live.LimitPrice}
+	restoredAs := func(attempted bool) *risklimit.Gate {
+		r := gate(t, limits(), event.TradingModeDryRun)
+		if err := r.RestoreSaleAttempt(incident, attempted, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.RestoreIncidentState(incident, event.EngineStateHalted, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	for name, bad := range map[string]func(*event.OrderReleasedPayload, *string){
+		"another tag":          func(p *event.OrderReleasedPayload, _ *string) { p.Tag = "kill:1" },
+		"a buy":                func(p *event.OrderReleasedPayload, _ *string) { p.Side = event.OrderSideBuy },
+		"another trigger":      func(_ *event.OrderReleasedPayload, tr *string) { *tr = "manual" },
+		"another attempt's ID": func(p *event.OrderReleasedPayload, _ *string) { p.ClientOrderID = "tw-other" },
+		"another account":      func(p *event.OrderReleasedPayload, _ *string) { p.AccountID = "ira" },
+	} {
+		p, trigger := o, event.SaleTriggerExit
+		bad(&p, &trigger)
+		if err := restoredAs(false).RestoreOwnSale(p, trigger); err == nil {
+			t.Errorf("a restored own sale under %s was read", name)
+		}
+	}
+	if err := restoredAs(true).RestoreOwnSale(o, event.SaleTriggerExit); err == nil {
+		t.Error("an own sale was restored under an attempt an earlier run spent")
+	}
+	r := restoredAs(false)
+	if err := r.RestoreOwnSale(o, event.SaleTriggerExit); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RestoreOwnSale(o, event.SaleTriggerExit); err == nil {
+		t.Error("an own sale was restored twice")
+	}
+	if got, ok := r.OwnLiveSale(incident, "SPY"); !ok || got.ClientOrderID != live.ClientOrderID {
+		t.Errorf("the restored gate reports its own live sale as %+v %v", got, ok)
+	}
+	observe(t, r, "broker:1", boosted())
+	if s, ok := requestSale(t, r, event.SaleTriggerExit); ok || s.Order != nil {
+		t.Fatalf("the restored gate attempted the standing sale again: %+v", s)
+	}
+	restoredPlan := live
+	if !retireUnsent(t, r, &restoredPlan) {
+		t.Fatal("the restored own sale's retirement was not read as a retired sale")
+	}
+	next := boosted()
+	next.AsOf = at.Add(time.Minute)
+	observe(t, r, "broker:2", next)
+	again, ok := requestSale(t, r, event.SaleTriggerExit)
+	if want := orderplan.SaleAttemptClientOrderID(incident, "SPY", 1); !ok || again.Order == nil || again.Order.ClientOrderID != want {
+		t.Fatalf("after the retirement the sale is %+v, want it attempted again under %s", again, want)
 	}
 }

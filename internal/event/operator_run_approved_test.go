@@ -239,7 +239,7 @@ func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
 	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 2); err != nil {
 		t.Errorf("a version 2 approval: %v", err)
 	}
-	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 4); err == nil || !strings.Contains(err.Error(), "schema version 4") {
+	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 5); err == nil || !strings.Contains(err.Error(), "schema version 5") {
 		t.Errorf("an approval at an unknown schema version: %v", err)
 	}
 }
@@ -266,7 +266,7 @@ func TestOperatorRunApprovedValidateSchema(t *testing.T) {
 	if err := withCash.ValidateSchema(1); err == nil || !strings.Contains(err.Error(), "cash") {
 		t.Errorf("version 1 naming a cash scope: %v", err)
 	}
-	for _, v := range []uint32{0, 4} {
+	for _, v := range []uint32{0, 5} {
 		if err := plain.ValidateSchema(v); err == nil || !strings.Contains(err.Error(), "schema version") {
 			t.Errorf("version %d: %v", v, err)
 		}
@@ -296,8 +296,8 @@ func firstRunApproval() event.OperatorRunApprovedPayload {
 // 2026-10-18; ADR 0027). A fresh run's approval may state one too, the book
 // the owner confirms after a change no fill explains (a transfer, a deposit).
 func TestAFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
-	if event.OperatorRunApprovedSchemaVersion != 3 {
-		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 3 once an approval states a starting book", event.OperatorRunApprovedSchemaVersion)
+	if event.OperatorRunApprovedSchemaVersion < 3 {
+		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 3 or later once an approval states a starting book", event.OperatorRunApprovedSchemaVersion)
 	}
 	first := firstRunApproval()
 	if err := first.Validate(); err != nil {
@@ -382,5 +382,42 @@ func TestAFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
 	}
 	if _, err := event.DecodeRecordedOperatorRunApproved(chained, 2); err == nil || !strings.Contains(err.Error(), "starting_book") {
 		t.Errorf("a version 2 approval stating starting_book: %v", err)
+	}
+}
+
+// TestAnApprovalCarriesTheIncidentsRetiredSaleAttempts: from schema version
+// 4 an incident in force states how many of its sales were retired as never
+// sent, never fewer than none, so the fresh run's next attempt has a client
+// order ID of its own; an earlier version cannot state it, and a decoded
+// approval may leave it out, as none (ADR 0026, point 2, "Order identity";
+// ADR 0015).
+func TestAnApprovalCarriesTheIncidentsRetiredSaleAttempts(t *testing.T) {
+	if event.OperatorRunApprovedSchemaVersion != 4 {
+		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 4 once an approval states the retired sale attempts", event.OperatorRunApprovedSchemaVersion)
+	}
+	p := validOperatorRunApprovedInIncident()
+	p.IncidentInForce.SaleRetiredAttempts = 2
+	if err := p.ValidateSchema(4); err != nil {
+		t.Errorf("version 4 stating two retired attempts: %v", err)
+	}
+	for _, v := range []uint32{2, 3} {
+		if err := p.ValidateSchema(v); err == nil || !strings.Contains(err.Error(), "retired") {
+			t.Errorf("version %d stating retired attempts: %v", v, err)
+		}
+	}
+	p.IncidentInForce.SaleRetiredAttempts = -1
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Errorf("a negative count of retired attempts: %v", err)
+	}
+	p.IncidentInForce.SaleRetiredAttempts = 0
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sale_retired_attempts") {
+		t.Errorf("none retired is left out: %s", raw)
+	}
+	if _, err := event.DecodeRecordedOperatorRunApproved(raw, 4); err != nil {
+		t.Errorf("a version 4 approval leaving the retired attempts out: %v", err)
 	}
 }

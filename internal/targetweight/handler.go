@@ -234,7 +234,28 @@ import (
 //     unsent sell as still being sold and read such reports, a dry-run Boost
 //     journal decides differently, so one written under 1.21.0 does not
 //     replay. Paper and live decisions are unchanged.
-const RulesVersion = "1.22.0"
+//   - 1.23.0 reads execution.order.retired, the IBKR adapter's retirement
+//     of a released order it never sent because its session was over, or
+//     the owner's retirement of one the adapter can never send (the owner's
+//     decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
+//     2026-10-22). The order must be one the run released, as released,
+//     that no venue has reported on; it ends with nothing filled, in every
+//     strategy. In Boost one awaiting the venue's word leaves those orders,
+//     and any other, the sale back to 98% included, is retired by its own
+//     rule; a retired sell is no longer counted as being sold, the watched
+//     order so retired is re-planned at the next decided session as
+//     unfilled, and a retired sale back to 98% spent no attempt, so it is
+//     attempted again under its own rule, under a client order ID of its
+//     own. Each Boost decision records the retired orders (decision schema
+//     7), so a restart refuses a venue report on one as the full run does,
+//     and the sale attempt the owner's approval restored, so a restart
+//     restores it.
+//     A momentum rebalance with a retired sell never starts its buy phase,
+//     and once its orders are all terminal it completes. A venue report on
+//     a retired order is refused. A dry-run refuses every retirement.
+//     1.22.0 refused the input, so a journal holding one decides
+//     differently.
+const RulesVersion = "1.23.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -298,6 +319,10 @@ type Options struct {
 //     naming the decision that released it and that order, which settles an
 //     order the adapter never sent: no venue will rule on it, so it is no
 //     longer awaited (applyClearance);
+//   - after an order's release: the adapter's execution.order.retired, for
+//     an order it never sent because its session was over, or the owner's,
+//     for one it can never send, which ends the order with nothing filled,
+//     so the watched order is re-planned as unfilled (applyRetired);
 //   - at any time after the configuration: account.cash-movement version 2
 //     and account.flex-status, the Flex reader's journalled transfers and its
 //     status, which a reconciliation's cash is bridged by and judged against
@@ -341,9 +366,12 @@ type Handler struct {
 	started    bool // a bar or session has been applied
 	recovered  bool
 	approved   bool
-	awaiting   bool      // a fresh run: nothing but the approval is read until it is recorded
-	prelude    bool      // an input other than the configuration and an approval has been read
-	quietUntil time.Time // sessions at or before it only feed the indicators
+	awaiting   bool // a fresh run: nothing but the approval is read until it is recorded
+	prelude    bool // an input other than the configuration and an approval has been read
+	// recordedIncident is the incident an earlier run's recorded engine
+	// state restored, "" when none did (refuseUnstatedSale).
+	recordedIncident string
+	quietUntil       time.Time // sessions at or before it only feed the indicators
 
 	indicators *boost.Indicators
 	latched    bool
@@ -377,6 +405,16 @@ type Handler struct {
 	// cleared (BoostFigures.ClearedOrders): off undecided, but released in
 	// the gate still, so a decision records them for a restart to restore.
 	cleared []string
+	// retired are the orders the adapter or the owner retired as never sent
+	// (applyRetired), in the order retired, each with its release and when
+	// (BoostFigures.RetiredOrders): ended with nothing filled, so a venue
+	// report on one is refused, and a decision records them for a restart to
+	// restore.
+	retired []event.BoostRetiredOrder
+	// named are the orders a venue has named, by client order ID: a lifecycle
+	// report, an execution or a broker snapshot's open-order listing, which
+	// show the order reached IBKR, so it is never retired.
+	named map[string]bool
 	// working are the orders the venue accepted that were not fully filled
 	// or ended when last read, in the order the venue accepted them, whichever order is watched
 	// now (BoostFigures.WorkingOrders): a later order replaces them as the
@@ -510,6 +548,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyAcknowledgement(in)
 	case event.RebalanceClearedEventType:
 		return nil, h.applyClearance(in)
+	case event.OrderRetiredEventType:
+		return nil, h.applyRetired(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -675,6 +715,66 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		}
 		h.cleared = append(h.cleared, r.ClientOrderID)
 	}
+	// The sale attempt the approved run's approval restored is restored as
+	// that run held it, before the sales it retired, so the next attempt's
+	// client order ID follows every retired one (ADR 0026, point 2, "Order
+	// identity", and point 5: recovered, never recomputed). A sale the run
+	// attempted itself and released, still live, is restored as that run's
+	// own attempt, below, never as one an earlier run spent, so its
+	// retirement frees it as in the full run.
+	if r := p.Boost.RestoredSale; r != nil {
+		if err := h.gate.RestoreSaleAttempt(r.IncidentID, r.Attempted && r.Order == nil, r.RetiredAttempts); err != nil {
+			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+		}
+	}
+	// A retired order is restored as released and ended at its retirement,
+	// so a venue report on it is refused after a restart as in the full run
+	// (ADR 0026, point 5: recovered, never recomputed). The watched one is
+	// restored above, ended.
+	for _, r := range p.Boost.RetiredOrders {
+		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
+			o := event.OrderReleasedPayload{
+				AccountID: h.cfg.AccountID, ClientOrderID: r.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
+				Side: r.Side, Quantity: r.Released, LimitPrice: r.LimitPrice,
+			}
+			if err := h.gate.RestoreReleased(o, nil, r.RetiredAt, ""); err != nil {
+				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+			}
+			h.release(o)
+		}
+		// A retired sale back to 98% counts among its tag's retired
+		// attempts, so the next has an ID of its own; one whose ID is not
+		// the attempt's it records is refused (ADR 0026, point 2, "Order
+		// identity"; fail closed, AGENTS.md).
+		if r.SaleTag != "" {
+			if want := orderplan.SaleAttemptClientOrderID(r.SaleTag, h.cfg.Boost.InstrumentID, r.SaleAttempt-1); want != r.ClientOrderID {
+				return fmt.Errorf("targetweight: recovered decision %s: retired order %s is recorded as attempt %d of %s's sale, whose client order ID is %s", in.ID, r.ClientOrderID, r.SaleAttempt, r.SaleTag, want)
+			}
+			if err := h.gate.RestoreRetiredSale(r.SaleTag, h.cfg.Boost.InstrumentID, r.SaleAttempt); err != nil {
+				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+			}
+		}
+		h.retired = append(h.retired, r)
+	}
+	// The run's own live sale is restored after every retired one, so its
+	// client order ID is checked against the attempt that follows them (ADR
+	// 0026, point 2, "Order identity").
+	if r := p.Boost.RestoredSale; r != nil && r.Order != nil {
+		o := event.OrderReleasedPayload{
+			AccountID: h.cfg.AccountID, Tag: r.IncidentID, ClientOrderID: r.Order.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
+			Side: event.OrderSideSell, Quantity: r.Order.Released, LimitPrice: r.Order.LimitPrice, Mode: h.cfg.Mode,
+		}
+		if err := h.gate.RestoreOwnSale(o, r.Order.Trigger); err != nil {
+			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+		}
+		h.release(o)
+	}
+	// An order a venue named before the decision reached IBKR, so the
+	// restarted run refuses its retirement as the full run does (ADR 0026,
+	// point 2, "Boost", and point 5, amended 2026-10-22).
+	for _, id := range p.Boost.NamedOrders {
+		h.name(id)
+	}
 	// An accepted order still working beside the watched one is restored
 	// with its executions, latest first so the gate keeps release order,
 	// and the venue's later reports on it are read as on an order this run
@@ -726,8 +826,9 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 		return errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
 	}
 	// Version 3 adds the starting book, which the IBKR adapter reads (ADR
-	// 0027, amended 2026-10-18); a version 2 approval still replays.
-	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, event.OperatorRunApprovedSchemaVersion})
+	// 0027, amended 2026-10-18), and version 4 the incident's retired sale
+	// attempts; a version 2 or 3 approval still replays.
+	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, 3, event.OperatorRunApprovedSchemaVersion})
 	if err != nil {
 		return err
 	}
@@ -738,7 +839,7 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 		return fmt.Errorf("targetweight: approval %s is for another account, %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
 	}
 	if incident := p.IncidentInForce; incident != nil {
-		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted); err != nil {
+		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted, incident.SaleRetiredAttempts); err != nil {
 			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
 		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs, incident.ScopeCashComponents); err != nil {
@@ -769,6 +870,7 @@ func (h *Handler) applyRecordedState(in event.Envelope) error {
 	if err := h.gate.RestoreState(in.ID, p, in.SchemaVersion); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	h.recordedIncident = h.gate.Incident()
 	return nil
 }
 
@@ -1043,9 +1145,13 @@ func (h *Handler) applyFill(in event.Envelope) error {
 	if slices.Contains(h.cleared, p.ClientOrderID) {
 		return h.contradictsClearance(in, p.ClientOrderID)
 	}
+	if h.isRetired(p.ClientOrderID) {
+		return h.contradictsRetirement(in, p.ClientOrderID)
+	}
 	if err := h.gate.ObserveFill(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	h.name(p.ClientOrderID)
 	// An execution shows the venue accepted the order.
 	h.observeOutcome(p.ClientOrderID, false)
 	return nil
@@ -1147,6 +1253,9 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	if err := h.refuseSharedVenue(in, p.OpenOrders); err != nil {
 		return nil, err
 	}
+	if err := h.refuseUnstatedSale(in, p); err != nil {
+		return nil, err
+	}
 	obs, err := h.gate.ObserveBroker(in.ID, p)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
@@ -1159,13 +1268,51 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	for _, l := range obs.Lapsed {
 		b.lapsed(l)
 	}
-	if obs.Urgent {
-		b.sale(event.SaleTriggerMarginUrgent)
-	}
-	if obs.RetryExit {
-		b.sale(event.SaleTriggerExit)
+	for _, trigger := range []struct {
+		fired bool
+		name  string
+	}{{obs.Urgent, event.SaleTriggerMarginUrgent}, {obs.RetryExit, event.SaleTriggerExit}} {
+		if !trigger.fired {
+			continue
+		}
+		b.sale(trigger.name)
 	}
 	return b.result()
+}
+
+// refuseUnstatedSale refuses a broker snapshot read before the recovered
+// decision or the owner's approval states the attempts of the incident an
+// earlier run's recorded engine state restored, and before the run began,
+// that would fire that incident's sale back to 98%: the incident's attempts,
+// attempted or retired, are the earlier run's, which only the approval, or a
+// recovered decision that restored that incident's attempt, states, so the
+// sale is never planned without them under an attempt's client order ID
+// that may be working at IBKR (ADR 0019, amended 2026-10-15: one attempt
+// per incident; ADR 0026, point 5: recovered, never recomputed; fail closed,
+// AGENTS.md). It is decided before the snapshot is observed, on what the
+// gate would fire from it (risklimit.Gate.BrokerFires), so a refused
+// snapshot leaves the alarm and every withheld sale's retry as they were,
+// and a later snapshot fires what this one would have (ADR 0027, section 6:
+// replay goes on past a refused input).
+func (h *Handler) refuseUnstatedSale(in event.Envelope, p event.BrokerSnapshotPayload) error {
+	stated := h.approved || h.recovered && h.gate.RestoredIncident() == h.recordedIncident
+	if h.recordedIncident == "" || stated || h.started {
+		return nil
+	}
+	urgent, retryExit, err := h.gate.BrokerFires(in.ID, p)
+	if err != nil {
+		// The observation's own refusal, worded as applyBrokerSnapshot words it.
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	for _, trigger := range []struct {
+		fired bool
+		name  string
+	}{{urgent, event.SaleTriggerMarginUrgent}, {retryExit, event.SaleTriggerExit}} {
+		if trigger.fired && h.gate.SaleTag(trigger.name, h.cfg.Boost.InstrumentID) == h.recordedIncident {
+			return fmt.Errorf("targetweight: %s %s would fire recorded incident %s's sale before the recovered decision states its attempts; the recovered decision comes before such a snapshot", in.Type, in.ID, h.recordedIncident)
+		}
+	}
+	return nil
 }
 
 // learnListings reads the open orders IBKR lists: one listed under the
@@ -1179,6 +1326,7 @@ func (h *Handler) learnListings(listed []event.BrokerOrder) {
 		if !ok || l.ClientOrderID == "" || o.InstrumentID != l.InstrumentID {
 			continue
 		}
+		h.name(l.ClientOrderID)
 		h.learnVenueID(l.ClientOrderID, l.BrokerOrderID)
 	}
 }
@@ -1270,6 +1418,9 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if slices.Contains(h.cleared, p.ClientOrderID) {
 		return h.contradictsClearance(in, p.ClientOrderID)
 	}
+	if h.isRetired(p.ClientOrderID) {
+		return h.contradictsRetirement(in, p.ClientOrderID)
+	}
 	if !p.Describes(o) {
 		return fmt.Errorf("targetweight: lifecycle %s reports %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
 			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
@@ -1280,6 +1431,7 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	h.name(p.ClientOrderID)
 	h.learnVenueID(p.ClientOrderID, p.OrderID)
 	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && p.Terminal() && w.status == "" {
 		w.status, w.endedAt = p.Status, p.OccurredAt.UTC()
@@ -1321,6 +1473,15 @@ func (h *Handler) refuseDryRunReport(in event.Envelope, id string) error {
 // AGENTS.md).
 func (h *Handler) contradictsClearance(in event.Envelope, id string) error {
 	return fmt.Errorf("targetweight: %s %s reports order %s, which the owner cleared as never sent; the report shows it reached IBKR, so the clearance was wrong: reconcile the account with IBKR and start a fresh run", in.Type, in.ID, id)
+}
+
+// contradictsRetirement refuses a venue report on an order retired as never
+// sent: a report proves the order reached IBKR, so the retirement was wrong,
+// and the run stops for a person to reconcile before it goes on (the owner's
+// decision of 2026-10-22; ADR 0026, point 2, "Boost", amended 2026-10-22;
+// fail closed, AGENTS.md).
+func (h *Handler) contradictsRetirement(in event.Envelope, id string) error {
+	return fmt.Errorf("targetweight: %s %s reports order %s, which was retired as never sent; the report shows it reached IBKR, so the retirement was wrong: reconcile the account with IBKR and start a fresh run", in.Type, in.ID, id)
 }
 
 // undecidedOrder is an order a decided session released that the venue has
@@ -1386,6 +1547,95 @@ func (h *Handler) applyClearance(in event.Envelope) error {
 	}
 	h.cleared = append(h.cleared, p.ClientOrderIDs...)
 	return nil
+}
+
+// applyRetired reads the retirement of a Boost order the adapter never sent
+// (execution.order.retired): its session ended before the adapter could
+// send it, or the owner retired an order the adapter can never send (the
+// owner's decision of 2026-10-22; ADR 0026, point 2, "Boost", amended
+// 2026-10-22). No venue received it, so none will ever rule on it, and it
+// ends with nothing filled, so the gate no longer counts a retired sell as
+// being sold (ADR 0019, amended 2026-10-15, "net of every working sell").
+// It must name an order of this account that this run released, as
+// released (event's Describes), neither cleared nor retired before. An
+// order among those awaiting the venue's word leaves them by that count's
+// rule (BoostVerdicts.Retire), counted neither accepted nor rejected; any
+// other, the sale back to 98% and any order released outside a decided
+// session among them, by its own: no venue may have named it or reported an
+// execution of it. A retired sale back to 98% spent no attempt, so it is
+// attempted again under its own rule at the next opportunity
+// (risklimit.Gate.RetireSale). The watched order so retired ends as
+// canceled at its retirement, so the session's close re-plans it as
+// unfilled (settleWatch), as an order that expired unfilled is. Anything
+// else is refused, so a retirement never ends an order that may be working
+// (fail closed). A dry-run sends nothing, so it refuses every retirement.
+func (h *Handler) applyRetired(in event.Envelope) error {
+	p, err := decodeInput[event.OrderRetiredPayload](in, event.OrderRetiredSchemaVersion)
+	if err != nil {
+		return err
+	}
+	id := p.ClientOrderID
+	held, err := RetirementVerdict(h.retirementState(), in.ID, p)
+	if err != nil {
+		return err
+	}
+	if held {
+		if err := h.verdicts.Retire(in.ID, id); err != nil {
+			return err
+		}
+	}
+	o := h.released[id]
+	// The gate ends the order as a cancellation with nothing filled would.
+	// The report is the engine's own and is never journalled: it is marked
+	// synthetic and names no venue order, so the gate cannot take it for a
+	// venue's (LimitOrderLifecyclePayload.Synthetic).
+	end := event.LimitOrderLifecyclePayload{
+		AccountID: o.AccountID, ClientOrderID: id, InstrumentID: o.InstrumentID, Side: o.Side,
+		Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+		OccurredAt: p.RetiredAt, Synthetic: true, Message: "retired unsent: " + p.Reason,
+	}
+	if err := h.gate.ObserveLifecycle(end); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	r := event.BoostRetiredOrder{ClientOrderID: id, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice, RetiredAt: p.RetiredAt.UTC()}
+	if !held {
+		// A retired sale back to 98% is recorded with its tag and the
+		// attempt retired, so a run restarted from the decision gives the
+		// next attempt an ID of its own (ADR 0026, point 2, "Order
+		// identity", and point 5).
+		if tag, attempt, sale := h.gate.RetireSale(id); sale {
+			r.SaleTag, r.SaleAttempt = tag, attempt
+		}
+	}
+	h.retired = append(h.retired, r)
+	if w := h.watch; w != nil && w.order.ClientOrderID == id && w.status == "" {
+		w.status, w.endedAt = event.OrderLifecycleStatusCanceled, p.RetiredAt.UTC()
+	}
+	return nil
+}
+
+// retirementState is what this run holds of the orders a retirement may
+// name, for RetirementVerdict.
+func (h *Handler) retirementState() RetirementState {
+	return RetirementState{
+		AccountID: h.cfg.AccountID, DryRun: h.cfg.Mode == event.TradingModeDryRun,
+		Released: func(id string) (event.OrderReleasedPayload, bool) { o, ok := h.released[id]; return o, ok },
+		Cleared:  func(id string) bool { return slices.Contains(h.cleared, id) },
+		Retired:  h.isRetired, Named: func(id string) bool { return h.named[id] }, Verdicts: &h.verdicts,
+	}
+}
+
+// isRetired reports whether order id was retired as never sent.
+func (h *Handler) isRetired(id string) bool {
+	return slices.ContainsFunc(h.retired, func(r event.BoostRetiredOrder) bool { return r.ClientOrderID == id })
+}
+
+// name records that a venue named order id.
+func (h *Handler) name(id string) {
+	if h.named == nil {
+		h.named = map[string]bool{}
+	}
+	h.named[id] = true
 }
 
 // recordRejections moves the rejections held for the next decision into
@@ -1494,16 +1744,61 @@ func holdings(positions []event.AccountPosition) map[string]int64 {
 // figures are the Boost figures for this session, with latchedBefore and the
 // latch and target in force as they stand.
 func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigures {
-	return event.BoostFigures{
+	b := event.BoostFigures{
 		InstrumentID: h.cfg.Boost.InstrumentID, Close: r.Close,
 		RSI: r.RSI, RSIReady: r.RSIReady, TrendMean: r.TrendMean, TrendMeanReady: r.TrendMeanReady,
 		ExitMean: r.ExitMean, ExitMeanReady: r.ExitMeanReady,
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
 		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(), WorkingOrders: h.workingFigures(),
-		VenueRejections: h.verdicts.rejections, RejectedInARow: slices.Clone(h.verdicts.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(),
+		VenueRejections: h.verdicts.rejections, RejectedInARow: slices.Clone(h.verdicts.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(), RetiredOrders: slices.Clone(h.retired),
 		UndecidedBeforeRejection: h.verdicts.olderThanRejection, RejectionsWhileStopped: h.verdicts.whileStopped, NoVenue: h.noVenue(),
 	}
+	b.NamedOrders = h.namedFigures(b)
+	b.RestoredSale = h.restoredSale()
+	return b
+}
+
+// restoredSale is the incident's sale attempt as the gate holds it now
+// (BoostFigures.RestoredSale), read when the decision is recorded, after the
+// session's own orders and the sale they fire, so it states an attempt this
+// session made (ADR 0019, amended 2026-10-15: one attempt). A sale this run
+// released that is still live and that no venue has named is recorded with
+// its order, so a run restarted from the decision holds it as this run's
+// own and its retirement frees it (ADR 0026, point 5: recovered, never
+// recomputed); one a venue named reached IBKR, and stays spent.
+func (h *Handler) restoredSale() *event.BoostRestoredSale {
+	incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(h.cfg.Boost.InstrumentID)
+	if !ok {
+		return nil
+	}
+	r := &event.BoostRestoredSale{IncidentID: incident, Attempted: attempted, RetiredAttempts: retired}
+	if o, live := h.gate.OwnLiveSale(incident, h.cfg.Boost.InstrumentID); attempted && live && !h.named[o.ClientOrderID] {
+		r.Order = &event.BoostRestoredSaleOrder{ClientOrderID: o.ClientOrderID, Released: o.Quantity, LimitPrice: o.LimitPrice, Trigger: o.Sale.Trigger}
+	}
+	return r
+}
+
+// namedFigures are the orders b restores as released, the watched, the
+// undecided and the working ones, that a venue has named, ascending
+// (BoostFigures.NamedOrders), so a run restarted from the decision refuses
+// their retirement as the full run does (ADR 0026, point 5).
+func (h *Handler) namedFigures(b event.BoostFigures) []string {
+	var ids []string
+	add := func(id string) {
+		if id != "" && h.named[id] && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	add(b.Watched.ClientOrderID)
+	for _, o := range b.UndecidedOrders {
+		add(o.ClientOrderID)
+	}
+	for _, o := range b.WorkingOrders {
+		add(o.ClientOrderID)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // noVenue is the run's mode when no venue receives its orders, dry-run, so
@@ -1601,13 +1896,14 @@ type emissions struct {
 // that leaves the engine Normal, setting it, and watches the order it
 // released.
 func (b *emissions) settleReplan(i int, decided event.TargetsDecidedPayload) {
-	watched, undecided, working := b.h.watchedFigures(), b.h.undecidedFigures(), b.h.workingFigures()
+	watched, undecided, working, sale := b.h.watchedFigures(), b.h.undecidedFigures(), b.h.workingFigures(), b.h.restoredSale()
 	if decided.Boost.ReplanPending == b.h.replan && decided.Boost.Watched.Equal(watched) && slices.Equal(decided.Boost.UndecidedOrders, undecided) &&
-		slices.EqualFunc(decided.Boost.WorkingOrders, working, event.BoostWatchedOrder.Equal) {
+		slices.EqualFunc(decided.Boost.WorkingOrders, working, event.BoostWatchedOrder.Equal) && decided.Boost.RestoredSale.Equal(sale) {
 		return
 	}
 	decided.Boost.ReplanPending, decided.Boost.Watched, decided.Boost.UndecidedOrders = b.h.replan, watched, undecided
-	decided.Boost.WorkingOrders = working
+	decided.Boost.WorkingOrders, decided.Boost.RestoredSale = working, sale
+	decided.Boost.NamedOrders = b.h.namedFigures(decided.Boost)
 	e, err := b.h.stamp(b.out[i].ID, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, b.at, b.in, decided)
 	b.fail(err)
 	b.out[i] = e

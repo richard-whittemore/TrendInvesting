@@ -5,7 +5,10 @@ here against tests/fake_tws.py, never a real IB Gateway. The released order
 is testdata/paper_released.json, and the records journalled from IBKR's
 answers are testdata/paper_reports.json and paper_rejected.json, which the
 engine's own test reads by the rule it reads a venue's reports by
-(internal/event, TestTheIBKRAdaptersPaperReportsAreReadByOrderReports).
+(internal/event, TestTheIBKRAdaptersPaperReportsAreReadByOrderReports). The
+retirement of that order once its session is over is
+testdata/paper_retired.json, which the engine's test retires the order by
+(TestTheIBKRAdaptersRetirementIsReadByOrderReports).
 """
 import functools
 import json
@@ -28,7 +31,8 @@ from test_relay import Restarts, log_group, log_header
 from connection import AccountNotManaged
 from orders import (CommissionReport, OrderStatusReport, OrderTracker, collect_broker_orders, execution_report,
                     open_order_record)
-from relay import RELEASED, HandoverUnconfirmed, PendingInput, PendingInUse, Relay, main as relay_main
+from relay import (OUTBOX_SUFFIX, RELEASED, HandoverUnconfirmed, OrderUnsendable, Outbox, PendingInput, PendingInUse,
+                   Relay, main as relay_main)
 from reports import FILL_TYPE, FILL_VERSION, LIFECYCLE_TYPE, LIFECYCLE_VERSION, OrderReportJournal, UnreportableOrder
 from sender import NotReconciled, PaperSender, SendRefused, SentRecord, release_to_request
 
@@ -88,7 +92,9 @@ class PaperAdapter:
         # an order about to be sent, so an order the sender would refuse
         # leaves no mark.
         self.relay = Relay(self.engine, self.sender, self.pending, lambda: collect_broker_orders(self.conn),
-                           lambda o, session: release_to_request(o, "paper", self.conn.config.con_ids, session))
+                           lambda o, session: release_to_request(o, "paper", self.conn.config.con_ids, session),
+                           now=lambda: self.received)
+        self.outbox = Outbox(self.pending.path + OUTBOX_SUFFIX)
         # Only then are the held reports read, and journalled if their fills
         # already are: the held file is this adapter's alone.
         try:
@@ -213,9 +219,13 @@ class PaperSendingTests(unittest.TestCase):
             a.reports.check_overdue()
         self.assertEqual([r.event_type for r in a.inputs], [LIFECYCLE_TYPE])
 
-    def test_a_release_left_waiting_past_its_session_is_never_sent(self):
+    def test_a_release_left_waiting_past_its_session_is_retired_and_never_sent(self):
         # Refused yesterday for the link, the input is asked again today: its
-        # order was for yesterday's session, so it is refused before the mark.
+        # order was for yesterday's session, so it is refused before the mark
+        # and, by the owner's decision of 2026-10-22, retired by the adapter
+        # itself: journalled for the engine as a refusal for "session over"
+        # (testdata/paper_retired.json), never a cancel of an order at IBKR,
+        # and the adapter goes on past the input without the owner.
         a = self.adapter()
         a.h.fake.on_place = a.h.fake.accept
         a.conn.connect()
@@ -223,37 +233,45 @@ class PaperSendingTests(unittest.TestCase):
             a.exchange()
         a.today = date(2026, 10, 17)
         a.start()
-        with self.assertRaises(SendRefused):
-            a.exchange()
+        a.exchange()
+        a.drain()
         self.assertEqual(a.placed(), 0)
-        self.assertEqual(a.pending.handovers(), {})
         self.assertEqual(a.conn.next_order_id, 7)
+        self.assertIsNone(a.pending.load(), "the adapter went on past the input")
+        self.assertEqual([{"event_type": e["event_type"], "schema_version": e["schema_version"],
+                           "payload": e["payload"]} for e in a.outbox.load()], fixture("paper_retired.json"))
+        self.assertEqual(a.inputs, [], "IBKR never received it, so it reports nothing")
+        self.assertEqual([d["decision"] for d in a.pending.decisions()], ["retired"])
 
-    def test_a_stale_release_settled_as_never_sent_lets_the_adapter_go_on_and_reports_nothing(self):
+    def test_an_order_ibkr_can_never_accept_stops_until_the_owner_retires_it(self):
+        # No IBKR contract ID is configured for the stock: the order can never
+        # be sent as it stands, so the adapter stops at it, every time, until
+        # the owner retires it; the retirement is journalled for the engine
+        # with the owner's reason, and the adapter then goes on.
         a = self.adapter()
         a.h.fake.on_place = a.h.fake.accept
-        a.conn.connect()
-        with self.assertRaises(NotReconciled):
-            a.exchange()
-        a.today = date(2026, 10, 17)
+        a.conn.config = a.conn.config._replace(con_ids={})
         a.start()
-        with self.assertRaises(SendRefused):
-            a.exchange()
+        for _ in range(2):
+            with self.assertRaises(OrderUnsendable) as stopped:
+                a.exchange()
+        self.assertIn("relay.py retire", str(stopped.exception))
+        self.assertEqual(a.placed(), 0)
+        self.assertEqual(a.outbox.load(), [])
         a.relay.close()
-        self.assertEqual(relay_main(["resolve", a.pending.path, "tw-paper-1", "--never-sent", "--reason",
-                                     "released for 2026-10-16, refused as stale on 2026-10-17"],
-                                    today=date(2026, 10, 17)), 0)
+        self.assertEqual(relay_main(["retire", a.pending.path, "tw-paper-1", "--by", "richard", "--reason",
+                                     "no IBKR contract for SPY configured"], today=SESSION), 0)
+        [entry] = a.outbox.load()
+        self.assertEqual((entry["event_type"], entry["payload"]["reason"], entry["payload"]["retired_by"],
+                          entry["payload"]["detail"]),
+                         ("execution.order.retired", "owner retired", "richard", "no IBKR contract for SPY configured"))
         b = self.restart(a)
-        b.today = date(2026, 10, 17)
+        b.conn.config = b.conn.config._replace(con_ids={})
         b.start()
         b.exchange()
         b.drain()
         self.assertEqual(b.placed(), 0)
         self.assertIsNone(b.pending.load(), "the adapter went on past the input")
-        # Nothing is journalled for the engine: no synthetic cancel or
-        # refusal of an order IBKR never received (ADR 0026 point 3, "Mode").
-        self.assertEqual(b.inputs, [])
-        self.assertEqual([d["decision"] for d in b.pending.decisions()], ["never-sent"])
 
     def test_the_relay_checks_with_the_sender_before_the_mark_whatever_the_mapper(self):
         # A composition whose mapper does no check of its own still refuses

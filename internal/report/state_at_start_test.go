@@ -565,3 +565,85 @@ func TestAClearanceAfterAFreshRunsApprovalIsJudgedBeforeItsFirstDecision(t *test
 		}
 	}
 }
+
+// TestARetiredOrderIsNoRejectionInTheStanding: an order retired as never
+// sent leaves the orders awaiting the venue's word, so a later report on it,
+// which the engine refuses, counts for nothing on the page: a retired order
+// is never named as a rejection that stops buys (ADR 0026, point 2,
+// "Boost", amended 2026-10-22).
+func TestARetiredOrderIsNoRejectionInTheStanding(t *testing.T) {
+	build := func(retired bool) *boostLog {
+		l := newBoostLog(t)
+		l.decide(0, "tw-6")
+		l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+		l.inARow, l.undecided = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, nil
+		l.decide(1, "tw-7")
+		// None of these is a retirement the engine applies: one it cannot
+		// read, another account's, one naming no released order and one
+		// that does not describe tw-7 as released.
+		bad := event.OrderRetiredPayload{AccountID: "joint", ClientOrderID: "tw-7", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101,
+			Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(2)}
+		l.add(event.OrderRetiredEventType, 99, "retired:unread", day(2), map[string]string{})
+		other, unknown, moved := bad, bad, bad
+		other.AccountID, unknown.ClientOrderID, moved.Quantity = "ira", "tw-unknown", 11
+		for id, p := range map[string]event.OrderRetiredPayload{"retired:other": other, "retired:unknown": unknown, "retired:moved": moved} {
+			l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, id, day(2), p)
+		}
+		if retired {
+			l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:1", day(2), event.OrderRetiredPayload{
+				AccountID: "joint", ClientOrderID: "tw-7", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101,
+				Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(2)})
+		}
+		l.report(3, "tw-7", event.OrderLifecycleStatusInvalid)
+		return l
+	}
+	if a, ok := stateAtStart(t, build(false).stream); !ok || !strings.Contains(a.Body, "tw-7") {
+		t.Fatalf("without a retirement the engine applies, the second rejection stops buys: %+v", a)
+	}
+	if a, ok := stateAtStart(t, build(true).stream); ok {
+		t.Errorf("a report on a retired order is no rejection: %+v", a)
+	}
+}
+
+// TestARetirementOfAnOrderTheVenueNamedLeavesItsRejectionCounted: an order
+// the count holds that IBKR has named, even only as submitted, was sent, so
+// the engine refuses its retirement and its rejection still counts, as on
+// the page (ADR 0026, point 2, "Boost", amended 2026-10-22; fail closed).
+func TestARetirementOfAnOrderTheVenueNamedLeavesItsRejectionCounted(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0, "tw-6")
+	l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+	l.inARow, l.undecided = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, nil
+	l.decide(1, "tw-7")
+	l.report(2, "tw-7", event.OrderLifecycleStatusSubmitted)
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:1", day(2), event.OrderRetiredPayload{
+		AccountID: "joint", ClientOrderID: "tw-7", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101,
+		Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(2)})
+	l.report(3, "tw-7", event.OrderLifecycleStatusInvalid)
+	if a, ok := stateAtStart(t, l.stream); !ok || !strings.Contains(a.Body, "tw-7") {
+		t.Errorf("the retirement of an order IBKR named was applied, and its rejection not counted: %+v", a)
+	}
+}
+
+// TestARetirementOfAnOrderIBKRListedLeavesItsRejectionCounted: a broker
+// snapshot listing an order the count holds shows it reached IBKR, so the
+// engine refuses its retirement and its later rejection still counts, as on
+// the page (ADR 0026, point 2, "Boost", amended 2026-10-22; fail closed).
+func TestARetirementOfAnOrderIBKRListedLeavesItsRejectionCounted(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0, "tw-6")
+	l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+	l.inARow, l.undecided = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, nil
+	l.decide(1, "tw-7")
+	l.add(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:1", day(2), event.BrokerSnapshotPayload{
+		AccountID: "joint", AsOf: day(2), NetLiquidation: 10000, ExcessLiquidity: 10000, Positions: []event.BrokerPosition{},
+		OpenOrders: []event.BrokerOrder{{BrokerOrderID: "ib-tw-7", ClientOrderID: "tw-7", InstrumentID: "SPY", Side: event.OrderSideBuy,
+			Status: event.BrokerOrderWorking, RemainingQuantity: 10}}})
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:1", day(2), event.OrderRetiredPayload{
+		AccountID: "joint", ClientOrderID: "tw-7", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101,
+		Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(2)})
+	l.report(3, "tw-7", event.OrderLifecycleStatusInvalid)
+	if a, ok := stateAtStart(t, l.stream); !ok || !strings.Contains(a.Body, "tw-7") {
+		t.Errorf("the retirement of an order IBKR listed was applied, and its rejection not counted: %+v", a)
+	}
+}

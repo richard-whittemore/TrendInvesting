@@ -29,6 +29,11 @@ const (
 	// or a fill naming its client order ID that the engine reads (see
 	// OrderLifecycles).
 	LifecycleAcknowledged OrderState = "acknowledged"
+	// LifecycleRetired: the adapter, or the owner, retired it as never sent
+	// (execution.order.retired) and the engine reads the retirement: no venue
+	// received it, so none will ever acknowledge it (the owner's decision of
+	// 2026-10-22).
+	LifecycleRetired OrderState = "retired"
 )
 
 // Order is one released order and its lifecycle state.
@@ -51,6 +56,14 @@ type Order struct {
 	// Acknowledgement that report's status ("fill" for an execution).
 	AcknowledgedAt  time.Time
 	Acknowledgement string
+	// Retirement is a retired order's reason (event.OrderRetiredSessionOver
+	// or event.OrderRetiredByOwnerReason), RetirementDetail what refused it
+	// or why the owner retired it, RetiredBy who retired it and RetiredAt
+	// when.
+	Retirement       string
+	RetirementDetail string
+	RetiredBy        string
+	RetiredAt        time.Time
 
 	committedIn string // the input whose group holds its release
 }
@@ -89,6 +102,11 @@ type Order struct {
 // it as a whole, is returned as unread too, with its order IDs, and alerts as
 // an operator clearance, not a venue report. Any other strategy reads no
 // clearance (isBoost, isMomentum).
+// The adapter's or the owner's retirement of an order never sent
+// (execution.order.retired) makes it retired when the engine would read it
+// (retire): in a Boost run by the Boost count's rule too, so the order also
+// leaves the orders awaiting the venue's word there. A venue's report on it
+// after is unread, as the engine refuses it.
 // A dry-run momentum run's synthetic report on an order it never sent, a
 // decision, ends the order by the same rule and acknowledges nothing
 // (endSynthetic). A fill in a Boost run is read as the Boost engine reads it,
@@ -140,6 +158,10 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 				case isMomentum(strategyID):
 					applyClearance(e, reports)
 				}
+				continue
+			}
+			if e.Type == event.OrderRetiredEventType {
+				retire(e, strategyID, byID, reports, boost)
 				continue
 			}
 			if u := acknowledge(e, strategyID, byID, reports, fills); u != nil {
@@ -318,6 +340,10 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		return nil // reconciliation's to explain (ADR 0019)
 	case refused != nil:
 		return unread(client, refused.Error())
+	case o.State == LifecycleRetired:
+		// The engine refuses a report on a retired order: it proves the
+		// retirement wrong (targetweight's contradictsRetirement).
+		return unread(client, fmt.Sprintf("it reports on order %s, which is terminal: it was retired as never sent", client))
 	}
 	if o.State != LifecycleAcknowledged {
 		o.State, o.AcknowledgedAt, o.Acknowledgement = LifecycleAcknowledged, at, status
@@ -378,6 +404,36 @@ func applyClearance(e event.Envelope, reports *event.OrderReports) {
 	}
 }
 
+// retire applies a retirement (execution.order.retired) as the engine reads
+// it: by event.OrderReports' Retire in a momentum run, and in a Boost run
+// when it describes a released order no venue has acknowledged and that is
+// not retired already, and the Boost count's rule (boostRejections'
+// retire, targetweight.BoostVerdicts.Retire) takes it off the orders
+// awaiting the venue's word. A retirement the engine would refuse, one that
+// cannot be read included, retires nothing and raises no alert of its own:
+// the order then stays unacknowledged and is paged as such.
+func retire(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports, boost *boostRejections) {
+	var p event.OrderRetiredPayload
+	if read(e, retiredVersions, &p) != nil {
+		return
+	}
+	o, ok := byID[p.ClientOrderID]
+	if !ok || !o.Send || o.State == LifecycleAcknowledged || o.State == LifecycleRetired || !p.Describes(o.released()) {
+		return
+	}
+	switch {
+	case isMomentum(strategyID):
+		if _, err := reports.Retire(p); err != nil {
+			return
+		}
+	case boost != nil:
+		if !boost.retire(e) {
+			return
+		}
+	}
+	o.State, o.Retirement, o.RetirementDetail, o.RetiredBy, o.RetiredAt = LifecycleRetired, p.Reason, p.Detail, p.RetiredBy, p.RetiredAt
+}
+
 // released is the order's identity as its release recorded it, for
 // event.LimitOrderLifecyclePayload's Describes.
 func (o *Order) released() event.OrderReleasedPayload {
@@ -390,7 +446,9 @@ func (o *Order) released() event.OrderReleasedPayload {
 // commit, by now, the caller's clock. It is one incident per order, keyed by
 // its client order ID, however often the reporter runs. An acknowledged
 // order raises nothing; if its alert was already delivered (delivered
-// reports a key as sent), a routine notice says it cleared. A release with
+// reports a key as sent), a routine notice says it cleared. A retired order
+// is never paged: a routine notice says it was retired and why (the owner's
+// decision of 2026-10-22). A release with
 // Send false is never sent and never alerts (ADR 0026, point 3, "Mode"; ADR
 // 0019, "Alerting").
 func UnacknowledgedAlerts(orders []Order, now time.Time, within time.Duration, delivered func(key string) bool) []Alert {
@@ -402,6 +460,14 @@ func UnacknowledgedAlerts(orders []Order, now time.Time, within time.Duration, d
 		key := "order-unacknowledged:" + o.ClientOrderID + "@" + o.AccountID
 		order := fmt.Sprintf("%s %d %s, limit %.2f, client order ID %s", o.Side, o.Quantity, o.InstrumentID, o.LimitPrice, o.ClientOrderID)
 		switch {
+		case o.State == LifecycleRetired:
+			// Told once, whether or not it was paged as unacknowledged first.
+			out = append(out, Alert{
+				Key: "order-retired:" + o.ClientOrderID + "@" + o.AccountID, Kind: KindRetired, Severity: Routine, AccountID: o.AccountID, At: o.RetiredAt,
+				Title: fmt.Sprintf("%s: order %s retired (%s)", o.AccountID, o.ClientOrderID, o.Retirement),
+				Body: fmt.Sprintf("Order %s was never sent and was retired by %s at %s: %s. No venue received it, so none will acknowledge it; any earlier unacknowledged-order alert for it is answered. The engine re-plans at its next decision.",
+					order, o.RetiredBy, o.RetiredAt.UTC().Format(time.RFC3339), o.RetirementDetail),
+			})
 		case o.State == LifecycleAcknowledged && delivered(key):
 			out = append(out, Alert{
 				Key: "order-acknowledged:" + o.ClientOrderID + "@" + o.AccountID, Kind: KindAcknowledged, Severity: Routine, AccountID: o.AccountID, At: o.AcknowledgedAt,

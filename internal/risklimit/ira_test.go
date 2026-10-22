@@ -235,3 +235,15 @@ func TestAnIRASellIsNeverCheckedAgainstAStaleSnapshot(t *testing.T) {
 	book := risklimit.Book{Holdings: map[string]int64{"AAA": 100}, Prices: map[string]float64{"AAA": 1}, At: at.Add(31 * time.Minute)}
 	refusedFor(t, checkBook(t, g, book, sell)[0], event.RefusedStaleBrokerSnapshot)
 }
+
+// TestAnIRAGateNamesNoSaleTag: an IRA plans no sale back to 98%, so no
+// sale's tag is in force, whatever its state (ADR 0019).
+func TestAnIRAGateNamesNoSaleTag(t *testing.T) {
+	g := iraGate(t, 0)
+	if err := g.RestoreIncidentState("incident-1", event.EngineStateHalted, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if tag := g.SaleTag(event.SaleTriggerMarginUrgent, "SPY"); tag != "" {
+		t.Errorf("an IRA gate names sale tag %q, want none", tag)
+	}
+}

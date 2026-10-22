@@ -95,6 +95,8 @@ var (
 	// The owner's clearance of a momentum run's rebalance in progress (ADR
 	// 0026, point 5).
 	clearedVersions = []uint32{event.RebalanceClearedSchemaVersion}
+	// The adapter's or the owner's retirement of an order never sent.
+	retiredVersions = []uint32{event.OrderRetiredSchemaVersion}
 	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
 	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
 	// A reconciliation input, for the day a pending cash read names.
@@ -102,7 +104,7 @@ var (
 	acknowledgedVersions        = []uint32{event.AlertAcknowledgedSchemaVersion}
 	// A fresh run's approval, for the incident it carries in force: version
 	// 1, which could not state a cash scope, and the current version.
-	approvalVersions = []uint32{1, 2, event.OperatorRunApprovedSchemaVersion}
+	approvalVersions = []uint32{1, 2, 3, event.OperatorRunApprovedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }

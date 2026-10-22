@@ -505,6 +505,106 @@ func TestASyntheticReportAcknowledgesNothing(t *testing.T) {
 	}
 }
 
+// TestARetiredOrderIsARoutineNoticeNeverAPage: the adapter retired an order
+// it never sent because its session was over (execution.order.retired), so
+// no venue will ever acknowledge it. It is retired, not awaiting the venue:
+// the reporter tells the owner once, as a routine notice naming the order
+// and why, and never pages it as unacknowledged; an unacknowledged-order
+// page already delivered for it is answered by the same notice. A
+// retirement the engine refuses (one naming no released order, or one that
+// does not describe it) retires nothing. The retirement ends the order as
+// the engine reads it, so a venue's report on it after is unread (the
+// owner's decision of 2026-10-22; ADR 0019, "Alerting").
+func TestARetiredOrderIsARoutineNoticeNeverAPage(t *testing.T) {
+	const within = 10 * time.Minute
+	order := releasedOrder("tw-1", event.TradingModePaper)
+	at := day(1).Add(time.Minute)
+	retire := func(r *logRun, id string, p event.OrderRetiredPayload) {
+		r.add(journal.KindInput, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, id, at, p)
+	}
+	payload := event.OrderRetiredPayload{AccountID: order.AccountID, ClientOrderID: order.ClientOrderID, InstrumentID: order.InstrumentID,
+		Side: order.Side, Quantity: order.Quantity, LimitPrice: order.LimitPrice, Reason: event.OrderRetiredSessionOver,
+		Detail: "released for the session of 2026-10-16, not today's", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at}
+	none := func(string) bool { return false }
+	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
+		t.Run(strategy, func(t *testing.T) {
+			r := &logRun{t: t}
+			if strategy == event.TargetWeightStrategyBoost {
+				// A Boost order is released by a Boost decision of the
+				// account's run, so the count holds it as awaiting the
+				// venue's word, which a retirement the engine applies needs.
+				boostDecisionOf(r, order.Tag)
+			}
+			r.session(0)
+			r.release(0, order)
+			r.session(1)
+			moved := payload
+			moved.Quantity++
+			retire(r, "retired:moved", moved)
+			unknown := payload
+			unknown.ClientOrderID = "tw-9"
+			retire(r, "retired:unknown", unknown)
+			r.add(journal.KindInput, event.OrderRetiredEventType, 2, "retired:other-version", at, payload)
+			orders, _, err := report.OrderLifecycles(r.out, strategy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := report.UnacknowledgedAlerts(orders, day(2), within, none); len(got) != 1 || got[0].Kind != report.KindUnacknowledged {
+				t.Fatalf("after retirements the engine refuses: %+v, want the order still paged as unacknowledged", got)
+			}
+
+			retire(r, "retired:tw-1", payload)
+			r.acknowledge(order, at.Add(time.Minute))
+			orders, unread, err := report.OrderLifecycles(r.out, strategy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := stateOf(t, orders, "tw-1")
+			if o.State != report.LifecycleRetired || o.Retirement != event.OrderRetiredSessionOver || !o.RetiredAt.Equal(at) {
+				t.Fatalf("order %+v, want it retired for %q at %s", o, event.OrderRetiredSessionOver, at)
+			}
+			for _, delivered := range []func(string) bool{none, func(key string) bool { return key == "order-unacknowledged:tw-1@joint" }} {
+				got := report.UnacknowledgedAlerts(orders, day(2), within, delivered)
+				if len(got) != 1 || got[0].Kind != report.KindRetired || got[0].Severity != report.Routine {
+					t.Fatalf("a retired order: %+v, want one routine retirement notice and no page", got)
+				}
+				if got[0].Title != "joint: order tw-1 retired (session over)" || !strings.Contains(got[0].Body, payload.Detail) ||
+					got[0].Key != "order-retired:tw-1@joint" {
+					t.Errorf("notice %+v, want it to name the order, the reason and the adapter's detail", got[0])
+				}
+			}
+			if len(unread) != 1 || unread[0].InputID != "ack:tw-1" || !strings.Contains(unread[0].Reason, "terminal") {
+				t.Errorf("unread %+v, want the venue's report after the retirement unread, as the engine refuses it", unread)
+			}
+		})
+	}
+}
+
+// TestARetirementAfterTheOwnersClearanceRetiresNothing: in a momentum run
+// the owner's clearance ends the orders it names as the engine reads it,
+// so a retirement of one of them afterwards is one the engine refuses, and
+// the reporter does not count the order retired.
+func TestARetirementAfterTheOwnersClearanceRetiresNothing(t *testing.T) {
+	order := releasedOrder("tw-1", event.TradingModePaper)
+	at := day(1).Add(time.Minute)
+	r := &logRun{t: t}
+	r.session(0)
+	r.release(0, order)
+	r.add(journal.KindInput, event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared", at,
+		event.RebalanceClearedPayload{AccountID: order.AccountID, AsOf: at, DecisionID: order.Tag, ClientOrderIDs: []string{"tw-1"}, Operator: "owner", Detail: "cancelled at IBKR"})
+	r.add(journal.KindInput, event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired", at,
+		event.OrderRetiredPayload{AccountID: order.AccountID, ClientOrderID: "tw-1", InstrumentID: order.InstrumentID, Side: order.Side,
+			Quantity: order.Quantity, LimitPrice: order.LimitPrice, Reason: event.OrderRetiredSessionOver, Detail: "over",
+			RetiredBy: event.OrderRetiredByAdapter, RetiredAt: at})
+	orders, _, err := report.OrderLifecycles(r.out, event.TargetWeightStrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := stateOf(t, orders, "tw-1"); o.State == report.LifecycleRetired {
+		t.Errorf("order %+v retired after the clearance ended it", o)
+	}
+}
+
 // TestAnUnreadableBoostClearanceIsAnUnreadRecordTheReporterPages: the Boost
 // engine refuses a clearance it cannot read, and the reporter pages it with
 // the unread records, one incident per input, as it pages an unread venue
@@ -533,7 +633,7 @@ func entriesOf(s *stream) []journal.Entry {
 	for _, e := range s.out {
 		kind := journal.KindDecision
 		switch e.Type {
-		case event.RebalanceClearedEventType, event.OrderLifecycleEventType, event.FillEventType, event.OperatorRunApprovedEventType, event.TargetWeightConfigurationEventType:
+		case event.RebalanceClearedEventType, event.OrderRetiredEventType, event.OrderLifecycleEventType, event.FillEventType, event.OperatorRunApprovedEventType, event.TargetWeightConfigurationEventType, event.BrokerSnapshotEventType:
 			kind = journal.KindInput
 		}
 		out = append(out, journal.Entry{Kind: kind, Envelope: e})
@@ -646,5 +746,62 @@ func TestAClearanceIsJudgedAgainstTheCurrentRunsCountAndOwnAccount(t *testing.T)
 		if len(unread) == 1 && unread[0].Refused != c.refused {
 			t.Errorf("%s: refused %v, want %v: the engine refuses it, so it is paged as refused", name, unread[0].Refused, c.refused)
 		}
+	}
+}
+
+// boostDecisionOf journals a Boost account's configuration and the Boost
+// decision tag that releases its orders, as the engine journals them.
+func boostDecisionOf(r *logRun, tag string) {
+	for _, e := range newStream(r.t).out {
+		r.seq++
+		e.Sequence = r.seq
+		r.out = append(r.out, journal.Entry{Kind: journal.KindInput, Envelope: e})
+	}
+	r.add(journal.KindDecision, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, tag, day(0), event.TargetsDecidedPayload{
+		AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+		Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+		Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100}})
+}
+
+// TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule: in a
+// Boost run the engine reads the retirement of an order its count does not
+// hold as awaiting the venue's word, such as the sale back to 98%, by the
+// order's own rule: it is retired when no venue has named it, by a report,
+// an execution or a broker snapshot's open-order listing (ADR 0026, point
+// 2, "Boost", amended 2026-10-22; fail closed). The reporter reads it alike.
+func TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0)
+	sale := func(id string) event.OrderReleasedPayload {
+		return event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:" + id, Tag: "alarm:u", ClientOrderID: id,
+			InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures}
+	}
+	retired := func(id string) event.OrderRetiredPayload {
+		return event.OrderRetiredPayload{AccountID: "joint", ClientOrderID: id, InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95,
+			Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(1)}
+	}
+	l.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm-1", day(1), sale("alarm-1"))
+	l.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm-2", day(1), sale("alarm-2"))
+	l.add(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:1", day(1), event.BrokerSnapshotPayload{
+		AccountID: "joint", AsOf: day(1), NetLiquidation: 10000, ExcessLiquidity: 10000, Positions: []event.BrokerPosition{},
+		OpenOrders: []event.BrokerOrder{{BrokerOrderID: "7", ClientOrderID: "alarm-2", InstrumentID: "SPY", Side: event.OrderSideSell,
+			Status: event.BrokerOrderWorking, RemainingQuantity: 10}}})
+	// Another account's snapshot, and one that cannot be read, name nothing.
+	l.add(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:ira", day(1), event.BrokerSnapshotPayload{
+		AccountID: "ira", AsOf: day(1), NetLiquidation: 10000, ExcessLiquidity: 10000, Positions: []event.BrokerPosition{},
+		OpenOrders: []event.BrokerOrder{{BrokerOrderID: "8", ClientOrderID: "alarm-1", InstrumentID: "SPY", Side: event.OrderSideSell,
+			Status: event.BrokerOrderWorking, RemainingQuantity: 10}}})
+	l.add(event.BrokerSnapshotEventType, 99, "broker:unread", day(1), map[string]string{})
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:alarm-1", day(1), retired("alarm-1"))
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:alarm-2", day(1), retired("alarm-2"))
+	orders, _, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := stateOf(t, orders, "alarm-1"); o.State != report.LifecycleRetired {
+		t.Errorf("order %+v not retired, though no venue named it", o)
+	}
+	if o := stateOf(t, orders, "alarm-2"); o.State == report.LifecycleRetired {
+		t.Errorf("order %+v retired, though IBKR listed it, so it was sent", o)
 	}
 }

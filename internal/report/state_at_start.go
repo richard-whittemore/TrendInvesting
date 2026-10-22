@@ -102,6 +102,12 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			if read(e, releasedVersions, &p) == nil {
 				rej.release(p)
 			}
+		case event.OrderRetiredEventType:
+			rej.retire(e)
+		case event.BrokerSnapshotEventType:
+			// A listing names the order, so the engine refuses its
+			// retirement as it would after any venue report.
+			rej.listed(e)
 		case event.OrderLifecycleEventType, event.FillEventType, event.RebalanceClearedEventType:
 			if rej.venue(e) == targetweight.VerdictRejected && lastBoost.ID != "" && rej.verdicts.Stopped() {
 				// The decision that records the stop comes with the next
@@ -200,7 +206,7 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 // recomputed), then the venue's words journalled after it, each read only
 // when the engine reads it: a report that describes the order as released
 // (ADR 0022), a fill the gate's fill rule accepts (risklimit.CheckFill) and
-// a clearance the engine applies.
+// a clearance or a retirement the engine applies.
 type boostRejections struct {
 	account    string
 	strategy   string // the account's, from its configuration
@@ -209,12 +215,16 @@ type boostRejections struct {
 	boostTags  map[string]bool                       // IDs of the Boost decisions seen
 	released   map[string]event.OrderReleasedPayload // each order's first release
 	fills      *boostFills
-	refused    []string // clearances the engine refuses, named on the page
-	unread     []string // clearances the reporter cannot read or validate, named on the page (the reporter also pages each as an unread record)
+	named      map[string]bool // orders a venue named: a report, an execution or a broker listing
+	cleared    map[string]bool // orders the owner's clearance the engine applies settled
+	retired    map[string]bool // orders whose retirement the engine reads
+	refused    []string        // clearances the engine refuses, named on the page
+	unread     []string        // clearances the reporter cannot read or validate, named on the page (the reporter also pages each as an unread record)
 }
 
 func newBoostRejections(account, strategy string) *boostRejections {
-	return &boostRejections{account: account, strategy: strategy, boostTags: map[string]bool{}, released: map[string]event.OrderReleasedPayload{}, fills: newBoostFills()}
+	return &boostRejections{account: account, strategy: strategy, boostTags: map[string]bool{}, released: map[string]event.OrderReleasedPayload{}, fills: newBoostFills(),
+		named: map[string]bool{}, cleared: map[string]bool{}, retired: map[string]bool{}}
 }
 
 // freshRun starts the count a fresh run starts with: none (ADR 0026, point
@@ -255,6 +265,7 @@ func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
 		if o, ok := r.released[p.ClientOrderID]; !ok || !p.Describes(o) {
 			return targetweight.VerdictNone
 		}
+		r.named[p.ClientOrderID] = true
 		r.verdicts.LearnVenueID(p.ClientOrderID, p.OrderID)
 		if rejected, decides := targetweight.BoostLifecycleWord(p.Status); decides {
 			return r.verdicts.Observe(p.ClientOrderID, rejected)
@@ -264,6 +275,7 @@ func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
 		if read(e, targetWeightFillVersions, &p) != nil || p.AccountID != r.account || r.fills.accept(p) != nil {
 			return targetweight.VerdictNone
 		}
+		r.named[p.ClientOrderID] = true
 		// An execution shows the venue accepted the order.
 		return r.verdicts.Observe(p.ClientOrderID, false)
 	case event.RebalanceClearedEventType:
@@ -304,7 +316,58 @@ func (r *boostRejections) judgeClearance(e event.Envelope) *UnreadReport {
 	if err := r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf); err != nil {
 		return &UnreadReport{InputID: e.ID, Type: e.Type, Reason: err.Error(), At: e.RecordedAt, OrderIDs: p.ClientOrderIDs, Refused: true}
 	}
+	for _, id := range p.ClientOrderIDs {
+		r.cleared[id] = true
+	}
 	return nil
+}
+
+// retire reads a retirement e (execution.order.retired) of an order never
+// sent as the Boost engine does, and reports whether the engine applies it:
+// it must read, and then pass the engine's own rule
+// (targetweight.RetirementVerdict) against what the reporter holds of the
+// order: its release, the clearances and retirements the engine applied, the
+// venue's names the engine read and the Boost count. An order the count
+// holds as awaiting the venue's word leaves it, so a later report on it,
+// which the engine refuses, counts for nothing (ADR 0026, point 2, "Boost",
+// amended 2026-10-22). Any other retirement changes nothing.
+func (r *boostRejections) retire(e event.Envelope) bool {
+	var p event.OrderRetiredPayload
+	if read(e, retiredVersions, &p) != nil {
+		return false
+	}
+	id := p.ClientOrderID
+	held, err := targetweight.RetirementVerdict(targetweight.RetirementState{
+		AccountID: r.account,
+		Released:  func(id string) (event.OrderReleasedPayload, bool) { o, ok := r.released[id]; return o, ok },
+		Cleared:   func(id string) bool { return r.cleared[id] },
+		Retired:   func(id string) bool { return r.retired[id] },
+		Named:     func(id string) bool { return r.named[id] },
+		Verdicts:  &r.verdicts,
+	}, e.ID, p)
+	if err != nil || held && r.verdicts.Retire(e.ID, id) != nil {
+		return false
+	}
+	r.retired[id] = true
+	return true
+}
+
+// listed reads a broker snapshot e as the Boost engine does for the orders
+// it lists: one listed under the client order ID of an order this run
+// released reached IBKR, so it is named, and its venue order ID is learnt
+// for the count, whose rule then refuses its retirement (targetweight's
+// learnListings).
+func (r *boostRejections) listed(e event.Envelope) {
+	var p event.BrokerSnapshotPayload
+	if read(e, brokerSnapshotVersions, &p) != nil || p.AccountID != r.account {
+		return
+	}
+	for _, l := range p.OpenOrders {
+		if o, ok := r.released[l.ClientOrderID]; ok && l.ClientOrderID != "" && o.InstrumentID == l.InstrumentID {
+			r.verdicts.LearnVenueID(l.ClientOrderID, l.BrokerOrderID)
+			r.named[l.ClientOrderID] = true
+		}
+	}
 }
 
 // observe keeps the count as the log's records move it, in recording order
@@ -322,6 +385,8 @@ func (r *boostRejections) observe(e event.Envelope, kind string) {
 		}
 	case kind == journal.KindInput && (e.Type == event.OrderLifecycleEventType || e.Type == event.FillEventType):
 		r.venue(e)
+	case kind == journal.KindInput && e.Type == event.BrokerSnapshotEventType:
+		r.listed(e)
 	}
 }
 

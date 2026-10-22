@@ -118,6 +118,33 @@ func TestSaleIsSizedNetOfEveryPendingSellTheCallerCounts(t *testing.T) {
 	}
 }
 
+// TestASaleAttemptedAfterARetirementHasAnIDOfItsOwn: an attempt of the sale
+// back to 98% retired as never sent spent nothing, and the next attempt is
+// its own order, under a client order ID of its own, the same sale
+// otherwise (ADR 0026, point 2, "Order identity" and "Boost", amended
+// 2026-10-22). A negative count is refused.
+func TestASaleAttemptedAfterARetirementHasAnIDOfItsOwn(t *testing.T) {
+	in := saleInput(workedExample())
+	first := sale(t, in).Order
+	in.Retired = 1
+	second := sale(t, in).Order
+	in.Retired = 2
+	third := sale(t, in).Order
+	if first.ClientOrderID != orderplan.SaleClientOrderID(first.Tag, "SPY") || orderplan.SaleAttemptClientOrderID(first.Tag, "SPY", 0) != first.ClientOrderID {
+		t.Errorf("first attempt %s, want the sale's own ID", first.ClientOrderID)
+	}
+	if second.ClientOrderID != orderplan.SaleAttemptClientOrderID(first.Tag, "SPY", 1) || second.ClientOrderID == first.ClientOrderID || third.ClientOrderID == second.ClientOrderID {
+		t.Errorf("attempts %s, %s, %s, want an ID of each one's own", first.ClientOrderID, second.ClientOrderID, third.ClientOrderID)
+	}
+	if second.Quantity != first.Quantity || second.Tag != first.Tag {
+		t.Errorf("second attempt %+v, want the same sale as %+v", second, first)
+	}
+	in.Retired = -1
+	if _, err := orderplan.PlanSale(in); err == nil {
+		t.Error("a negative count of retired attempts accepted")
+	}
+}
+
 func TestNoSaleWithAnUnknownWorkingSell(t *testing.T) {
 	s := workedExample()
 	s.OpenOrders = []event.BrokerOrder{{
