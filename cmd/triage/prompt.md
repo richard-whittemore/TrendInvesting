@@ -47,8 +47,10 @@ go wrong" table), the ADRs in `docs/adr/`, and the code.
   On loopback a test may start its own server on a fresh port and reach
   it, but no port another program was already listening on when the
   command started, and Unix sockets only in the folder named by
-  `TI_TEST_SOCKET_DIR`; so a test that fails there has failed, not been
-  stopped by the sandbox.
+  `TI_TEST_SOCKET_DIR`. Tests that stay within that can run, but the
+  sandbox still denies other network use, writes outside the run folder
+  and reads outside the allowed folders: check a failure for a sandbox or
+  environment refusal before you call it a code defect.
 - You never perform an owner action, and you never try to. You hold no way
   to reach the server, the broker or the secrets, and you must not look for
   one. For an owner action, state the step in `owner_action`, in the words

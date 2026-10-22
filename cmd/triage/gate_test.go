@@ -267,6 +267,9 @@ func TestPkillGateUserEndsOnlyTheGateUsersOwn(t *testing.T) {
 		"fails":     "exit 2\n",
 		"is killed": "exit 137\n",
 		"is absent": "",
+		// ps's own "none matched" prints nothing at all; a diagnostic on
+		// stderr with the same status is a ps that could not look.
+		"fails with a diagnostic and status 1": "echo 'ps: could not read the process table' >&2\nexit 1\n",
 	} {
 		ps := filepath.Join(dir, "ps-missing")
 		if body != "" {

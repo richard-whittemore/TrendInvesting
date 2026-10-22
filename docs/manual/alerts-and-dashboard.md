@@ -684,7 +684,10 @@ The session (Claude Code, as `ti-triage`):
   nothing the session wrote. So no code the session wrote ever runs as
   `ti-triage`, the user that holds the Claude token. A command the session
   gives up on (Claude Code's own time limit for a command) is stopped in
-  the gate too. Nothing else is allowed,
+  the gate too, and counts as an interrupted command, never as a gate
+  outage: the job does not keep the alert for a later try because of it.
+  Writing the archive of a copy is bounded by the same command time limit
+  as every other gate command. Nothing else is allowed,
   and in a headless session nothing can be asked: the web, every MCP
   server, `git commit` and `git push`, `go build`, `gh`, `ssh`, `curl`,
   `tailscale`, `sudo` and the like are denied.

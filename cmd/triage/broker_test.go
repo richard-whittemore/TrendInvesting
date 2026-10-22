@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -320,5 +321,69 @@ func TestAGateFailureInASessionsCommandIsKept(t *testing.T) {
 	}
 	if err := done(); !errors.Is(err, errGateUnavailable) {
 		t.Fatalf("done = %v, want the gate's failure kept", err)
+	}
+}
+
+// stalledCatFile puts a git ahead of the real one on PATH whose cat-file
+// never answers (it only sleeps, so killing it ends it); every other git
+// command runs the real git. It signals nothing.
+func stalledCatFile(t *testing.T) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is not installed")
+	}
+	bin := t.TempDir()
+	script(t, bin, "git", "case \" $* \" in *\" cat-file \"*) exec sleep 30 ;; esac\nexec '"+realGit+"' \"$@\"\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestAnArchiveThatStallsEndsAtTheCommandTimeout: the archive of a commit is
+// written under the same time bound as every other gate command, whatever
+// context the caller holds, so a stalled object read never holds the job.
+func TestAnArchiveThatStallsEndsAtTheCommandTimeout(t *testing.T) {
+	w, _, _ := gitWorld(t)
+	stalledCatFile(t)
+	w.run = timedRunner{execRunner{}, 300 * time.Millisecond}
+	start := time.Now()
+	err := w.treeTar(context.Background(), w.repoDir, "HEAD", io.Discard)
+	if err == nil {
+		t.Fatal("a stalled cat-file was taken for a written archive")
+	}
+	if took := time.Since(start); took > 10*time.Second {
+		t.Fatalf("the archive held the job for %s past a 300ms command timeout", took)
+	}
+}
+
+// TestACanceledSessionCommandIsNotAGateOutage: a command the session's
+// wrapper gave up on (its context canceled) during the snapshot or the
+// export is interrupted, not the gate's failure, so a later command that
+// succeeds leaves the session's answer valid.
+func TestACanceledSessionCommandIsNotAGateOutage(t *testing.T) {
+	w, _, _ := gitWorld(t)
+	ctx := context.Background()
+	dir, err := w.Prepare(ctx, "triage/alert-56")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove(ctx, dir)
+	run, done, err := w.OpenTools(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if out, code := run(canceled, "gofmt"); code != toolExitUnavailable {
+		t.Errorf("canceled before the snapshot: exit %d, %q; want %d", code, out, toolExitUnavailable)
+	}
+	stalledCatFile(t)
+	mid, cancelMid := context.WithCancel(ctx)
+	go func() { time.Sleep(300 * time.Millisecond); cancelMid() }()
+	start := time.Now()
+	if out, code := run(mid, "gofmt"); code != toolExitUnavailable || time.Since(start) > 10*time.Second {
+		t.Errorf("canceled during the export: exit %d after %s, %q", code, time.Since(start), out)
+	}
+	if err := done(); err != nil {
+		t.Fatalf("done = %v: a canceled command was kept as the gate's failure", err)
 	}
 }

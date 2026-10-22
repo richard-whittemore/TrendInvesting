@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -411,7 +412,11 @@ func TestTheSandboxDeniesTheNetwork(t *testing.T) {
 	}
 	// Inside a sandbox already (the triage gate's own check of a fix), no
 	// other can be applied (sandbox_apply: Operation not permitted).
-	if err := exec.Command("/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true").Run(); err != nil {
+	nested, err := insideASandbox("/usr/bin/sandbox-exec")
+	if err != nil {
+		t.Fatalf("the sandbox probe failed for a reason other than an enclosing sandbox: %v", err)
+	}
+	if nested {
 		t.Skip("this test runs in a sandbox already, which cannot start another")
 	}
 	g := standInGate(t)
@@ -789,5 +794,41 @@ func TestRedShownSeesABuildFailureBeyondTheTail(t *testing.T) {
 	}
 	if redShown(out, err, []string{"TestFixed"}) {
 		t.Fatal("a build failure beyond the kept tail passed for red")
+	}
+}
+
+// insideASandbox probes whether the sandbox-exec at path can start a
+// sandbox. Only the one failure of an enclosing sandbox
+// (sandbox_apply: Operation not permitted) is nested; any other failure to
+// launch is an error.
+func insideASandbox(path string) (nested bool, err error) {
+	out, err := exec.Command(path, "-p", "(version 1)(allow default)", "/usr/bin/true").CombinedOutput()
+	switch {
+	case err == nil:
+		return false, nil
+	case strings.Contains(string(out), "sandbox_apply: Operation not permitted"):
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+}
+
+// TestTheSandboxProbeSkipsOnlyForAnEnclosingSandbox: the nested-sandbox
+// refusal is the only probe failure that skips the sandbox test.
+func TestTheSandboxProbeSkipsOnlyForAnEnclosingSandbox(t *testing.T) {
+	bin := t.TempDir()
+	nestedPath := script(t, bin, "nested", "echo 'sandbox-exec: sandbox_apply: Operation not permitted' >&2\nexit 71\n")
+	brokenPath := script(t, bin, "broken", "echo 'sandbox-exec: profile invalid' >&2\nexit 65\n")
+	okPath := script(t, bin, "ok", "exit 0\n")
+	if nested, err := insideASandbox(nestedPath); !nested || err != nil {
+		t.Errorf("the nested refusal: nested %v, err %v", nested, err)
+	}
+	if nested, err := insideASandbox(brokenPath); nested || err == nil {
+		t.Errorf("another failure: nested %v, err %v; want an error", nested, err)
+	}
+	if nested, err := insideASandbox(filepath.Join(bin, "absent")); nested || err == nil {
+		t.Errorf("a missing program: nested %v, err %v; want an error", nested, err)
+	}
+	if nested, err := insideASandbox(okPath); nested || err != nil {
+		t.Errorf("a working sandbox: nested %v, err %v", nested, err)
 	}
 }

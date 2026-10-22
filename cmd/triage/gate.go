@@ -102,6 +102,10 @@ func (g *gateBox) socketDir(runDir string) string {
 // folder is missing or wrong, or a check could not be started in it.
 var errGateUnavailable = errors.New("gate unavailable")
 
+// errProcessesLeft is a gate command after which the gate user's processes
+// could not all be ended: a failure of the gate whatever cancelled the command.
+var errProcessesLeft = errors.New("the gate user's processes could not all be ended")
+
 // Available checks the gate before any session: the gate user exists and is
 // neither the job's own nor root, its processes can be ended, sandbox-exec
 // is there, the gate's folder is the job's and no one else can write to it,
@@ -265,7 +269,7 @@ func (g *gateBox) Run(ctx context.Context, runDir, wd string, argv []string) (st
 	_, unlaunched := os.Stat(marker)
 	_ = os.Remove(marker)
 	if serr := g.stopAll(); serr != nil {
-		return out, fmt.Errorf("%w: the gate user's processes could not all be ended (%w)", errGateUnavailable, serr)
+		return out, fmt.Errorf("%w: %w (%w)", errGateUnavailable, errProcessesLeft, serr)
 	}
 	if unlaunched != nil && ctx.Err() == nil {
 		return out, fmt.Errorf("%w: sudo, sandbox-exec or env could not start %s", errGateUnavailable, filepath.Base(argv[0]))
@@ -379,7 +383,7 @@ func pkillGateUser(sudo, gateUser, ps string) func(ctx context.Context) error {
 }
 
 // gateProcessesLeft reports whether ps lists a process of uid's that is not
-// a zombie. Only ps's own "none matched" (exit 1, nothing printed) is no
+// a zombie. Only ps's own "none matched" (exit 1, nothing printed on stdout or stderr) is no
 // process left; a ps that could not run, failed otherwise or ran out of
 // time leaves the state unknown, which is an error (docs/development.md,
 // "Ending processes": fail closed).
@@ -392,7 +396,7 @@ func gateProcessesLeft(ctx context.Context, ps string, uid int) (bool, error) {
 		return false, errors.New("the gate user's processes could not be listed in time")
 	case err == nil:
 		return runningIn(string(listed)), nil
-	case errors.As(err, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(string(listed)) == "":
+	case errors.As(err, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(string(listed)) == "" && strings.TrimSpace(string(exit.Stderr)) == "":
 		return false, nil
 	}
 	return false, errors.New("the gate user's processes could not be listed")
@@ -607,6 +611,9 @@ func (w *gitWorkspace) exportTree(ctx context.Context, dir, rev, runDir string) 
 		return fmt.Errorf("%w: the commit's archive could not be written", errGateUnavailable)
 	}
 	if _, err := w.gate.Run(ctx, runDir, "", []string{"/bin/sh", "-c", copyScript, archive}); err != nil {
+		if errors.Is(err, errProcessesLeft) {
+			return fmt.Errorf("%w: the gate user could not make the copy of the commit: %w", errGateUnavailable, err)
+		}
 		return fmt.Errorf("%w: the gate user could not make the copy of the commit (sudo, sandbox-exec or the archive)", errGateUnavailable)
 	}
 	return nil
@@ -655,6 +662,13 @@ const maxLinkTarget = 4096
 // export-subst) changes what the gate checks, so its copy is exactly the
 // tree that is pushed. A link stays a link; a submodule is an empty folder.
 func (w *gitWorkspace) treeTar(ctx context.Context, dir, rev string, out io.Writer) error {
+	// The same time bound as every other gate command, over the listing, the
+	// object reads and the wait; the caller's own cancellation still ends it.
+	if d := commandTimeout(w.run); d > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
 	listing, err := w.gitOutput(ctx, dir, "ls-tree", "-r", "-z", "--full-tree", rev)
 	if err != nil {
 		return err
@@ -673,6 +687,18 @@ func (w *gitWorkspace) treeTar(ctx context.Context, dir, rev string, out io.Writ
 	if err := cmd.Start(); err != nil {
 		return errors.New("git cat-file could not be started")
 	}
+	// A cat-file whose child holds its output open past the kill would block
+	// the reads below; the deadline closes both pipes.
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = in.Close()
+			_ = objects.Close()
+		case <-finished:
+		}
+	}()
 	r := bufio.NewReader(objects)
 	werr := writeTreeTar(tar.NewWriter(out), listing, in, r)
 	_ = in.Close()
@@ -681,6 +707,14 @@ func (w *gitWorkspace) treeTar(ctx context.Context, dir, rev string, out io.Writ
 		werr = errors.New("git cat-file failed")
 	}
 	return werr
+}
+
+// commandTimeout is the time bound of r's commands, or 0 for a runner with none.
+func commandTimeout(r runner) time.Duration {
+	if t, ok := r.(timedRunner); ok {
+		return t.timeout
+	}
+	return 0
 }
 
 // writeTreeTar writes each entry of an ls-tree -r -z listing to tw, asking
