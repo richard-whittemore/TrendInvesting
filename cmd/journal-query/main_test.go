@@ -528,7 +528,7 @@ func TestReconcileWithTheRegistryAnchorChecksTheFinalRecordHash(t *testing.T) {
 		t.Fatalf("the recorded anchor matches: %v", err)
 	}
 	out, err := query(t, "reconcile", "-final-hash", "sha256:deadbeef", path)
-	if err == nil || !strings.Contains(err.Error(), "not the run's complete history") || out != "" {
+	if err == nil || !strings.Contains(err.Error(), "not the registered run's complete end-of-run journal") || out != "" {
 		t.Fatalf("want a mismatch refusal and no table, got %q, %v", out, err)
 	}
 	if _, err := query(t, "reconcile", "-final-hash", "", path); err == nil {

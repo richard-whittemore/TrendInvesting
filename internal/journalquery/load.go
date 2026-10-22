@@ -129,29 +129,30 @@ func sameHistory(a, b Journal) bool {
 	return shared
 }
 
-// FinalRecordHash is the hash of the journal's last record, or empty when the
-// journal holds no record. Only an end-of-run journal's final hash is what a
-// run registry anchors (ADR 0017); a durable log's chain is its own (ADR
-// 0027).
+// FinalRecordHash is the hash of an end-of-run journal's last record, or empty
+// for a journal that holds no record and for a durable log. Only an end-of-run
+// journal's final hash is what a run registry anchors (ADR 0017); a durable
+// log's chain is its own (ADR 0027).
 func (j Journal) FinalRecordHash() string {
-	switch {
-	case j.Verification != nil:
+	if j.Verification != nil {
 		return j.Verification.FinalRecordHash
-	case j.Recovery != nil:
-		return j.Recovery.FinalRecordHash
 	}
 	return ""
 }
 
-// CheckFinalHash compares the journal's final record hash with the one a run
-// registry recorded. A journal that has lost records from its end still
+// CheckFinalHash compares an end-of-run journal's final record hash with the
+// one a run registry recorded, and refuses a durable log, whose chain the
+// registry never anchors (ADR 0017, ADR 0027). A journal that has lost records from its end still
 // verifies by chain alone, so this comparison is what detects it (ADR 0017).
 func (j Journal) CheckFinalHash(want string) error {
 	if want == "" {
 		return fmt.Errorf("%s: no anchor given: an absent registry entry is not agreement with a final record hash", j.Name)
 	}
+	if j.Verification == nil {
+		return fmt.Errorf("%s: the registry anchors the end-of-run journal's final record hash; this file is a durable log", j.Name)
+	}
 	if got := j.FinalRecordHash(); got != want {
-		return fmt.Errorf("%s: the final record hash is %q but %q was recorded, so the file is not the run's complete history", j.Name, got, want)
+		return fmt.Errorf("%s: the end-of-run journal's final record hash is %q but the registry recorded %q, so this is not the registered run's complete end-of-run journal", j.Name, got, want)
 	}
 	return nil
 }

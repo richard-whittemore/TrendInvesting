@@ -1148,12 +1148,18 @@ func TestLoadKeepsTheVerificationResult(t *testing.T) {
 	if (journalquery.Journal{}).FinalRecordHash() != "" {
 		t.Error("a journal that was never loaded states a final hash")
 	}
-	l := load(t, "l", buildLog(t, false, reconcilable()...))
-	if err := l.CheckFinalHash(l.Recovery.FinalRecordHash); err != nil {
-		t.Errorf("log final hash refused: %v", err)
+	if !strings.Contains(err.Error(), "end-of-run journal") || strings.Contains(err.Error(), "missing") {
+		t.Errorf("the mismatch must name the kind of file and never claim missing records: %v", err)
 	}
-	if err := l.CheckFinalHash("deadbeef"); err == nil {
-		t.Error("a log final-hash mismatch was not reported")
+}
+
+func TestCheckFinalHashRefusesADurableLog(t *testing.T) {
+	l := load(t, "l", buildLog(t, false, reconcilable()...))
+	for _, want := range []string{l.Recovery.FinalRecordHash, "deadbeef"} {
+		err := l.CheckFinalHash(want)
+		if err == nil || !strings.Contains(err.Error(), "the registry anchors the end-of-run journal's final record hash; this file is a durable log") {
+			t.Errorf("a durable log must be refused as the wrong kind of file for the anchor, got %v", err)
+		}
 	}
 }
 

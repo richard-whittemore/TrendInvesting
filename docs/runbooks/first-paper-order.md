@@ -429,8 +429,13 @@ Check in this order, and compare the three: they must agree.
    go run ./cmd/journal-query fills   <durable log>   # each fill: quantity, price, commission
    go run ./cmd/journal-query refusals <durable log>  # nothing expected
    go run ./cmd/journal-query positions <durable log> # holding rebuilt from the fills
-   go run ./cmd/journal-query reconcile -final-hash <hash from the run registry> <durable log> # fills against the account snapshots; the anchor also catches a log cut short at its end
+   go run ./cmd/journal-query reconcile <durable log> # fills against the account snapshots; it fails on an empty or cut-short log
    ```
+
+   A paper run is not registered, so it has no registry anchor and there is no
+   `-final-hash` here: the flag checks the end-of-run journal of a registered
+   backtest against `artefacts.final_record_hash` in its registry entry, and
+   refuses a durable log (`docs/manual/journal-query.md`).
 
    The order's quantity and limit match IBKR's; the fills add up to the
    quantity IBKR shows executed; the commission on each fill is IBKR's own
