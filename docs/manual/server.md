@@ -50,6 +50,16 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 Updates: `unattended-upgrades` applies security updates only and never
 reboots by itself, because a reboot logs the Gateway out.
 
+## Upgrading the programs
+
+The server has no Go and does not update itself. To put a fix on it, tag the merged commit on your Mac (`git tag -a v1.2.3 -m "v1.2.3"` and push the tag); GitHub builds the five programs and publishes them with their checksums and a build attestation. Then, on the server over Tailscale, run `sudo ti-release v1.2.3`. It downloads that release, checks it, keeps the build now installed as the previous one, installs the new one, restarts the dashboard and prints what changed. If the dashboard does not come back, it puts the previous build back and tells you.
+
+Two things it never does. It never restarts an engine: a running engine keeps the build it started with, and a new engine build takes effect only at the next fresh run you approve. And nothing is ever deployed because something was merged: only a tag you push and a command you run.
+
+`sudo ti-release --rollback` puts the previous build back. It refuses while an engine unit is starting or stopping; wait and run it again. The step-by-step is in `docs/runbooks/lightsail-deployment.md`, "Upgrading: tag, release, `ti-release`".
+
+If the server has no `gh` installed, `ti-release` says it could not check the build attestation and checks the checksums only. Install `gh` on the server to have it checked.
+
 ## Where the configuration lives
 
 In the paths and unit names below, `<instance>` is the engine instance: the
