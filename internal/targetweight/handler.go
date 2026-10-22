@@ -354,23 +354,11 @@ type Handler struct {
 	// released order replaces it, since that order was sized from the
 	// account as it stood (settleWatch).
 	watch *watched
-	// rejections counts the orders decided sessions released that the venue
-	// rejected in a row, whatever their targets, since the last one it
-	// accepted, each as the venue's first word on it is read
-	// (BoostFigures.VenueRejections; observeOutcome). At maxVenueRejections
-	// no session buys until the owner starts a fresh run, and the count
-	// stays there, never above it.
-	rejections int
-	// inARow names the orders rejections counts, in the order read: at the
-	// stop, the two that stopped buys (BoostFigures.RejectedInARow).
-	inARow []event.BoostRejectedOrder
-	// undecided are the orders decided sessions released that the venue has
-	// not yet ruled on, in release order, so a late verdict on any of them
-	// is counted (BoostFigures.UndecidedOrders). An order leaves it at the
-	// venue's first word on it, or when the owner settles it as never sent
-	// (applyClearance); a dry-run's orders, which no venue receives, never
-	// join it.
-	undecided []undecidedOrder
+	// verdicts counts the venue's rejections of the orders decided sessions
+	// released, in a row, and holds the orders it has not yet ruled on
+	// (BoostVerdicts; BoostFigures.VenueRejections, RejectedInARow,
+	// UndecidedOrders, UndecidedBeforeRejection and RejectionsWhileStopped).
+	verdicts BoostVerdicts
 	// cleared are the orders the owner settled as never sent, in the order
 	// cleared (BoostFigures.ClearedOrders): off undecided, but released in
 	// the gate still, so a decision records them for a restart to restore.
@@ -380,12 +368,6 @@ type Handler struct {
 	// now (BoostFigures.WorkingOrders): a later order replaces them as the
 	// watched one, but the venue's fills and cancel of them are still read.
 	working []undecidedOrder
-	// olderThanRejection counts the first of undecided, in release order,
-	// that were released before the latest released of the orders inARow
-	// names: an acceptance of one of them is older than the run of
-	// rejections and does not end it (BoostFigures.UndecidedBeforeRejection;
-	// observeOutcome).
-	olderThanRejection int
 	// withheld is the rejection that brought the count to
 	// maxVenueRejections, whichever order it was, held until the next
 	// decision, decided or withheld, records it (BoostFigures.ReplanWithheld):
@@ -393,11 +375,8 @@ type Handler struct {
 	// does, records nothing.
 	withheld event.BoostReplan
 	// stoppedRejections are the rejections read after that one, held until
-	// the next decision records them (BoostFigures.RejectedWhileStopped),
-	// and rejectionsWhileStopped counts every one since the stop
-	// (BoostFigures.RejectionsWhileStopped).
-	stoppedRejections      []event.BoostReplan
-	rejectionsWhileStopped int
+	// the next decision records them (BoostFigures.RejectedWhileStopped).
+	stoppedRejections []event.BoostReplan
 	// gap lists the sessions, YYYY-MM-DD, that closed with no bar since the
 	// last bar the indicators read; the next decision that reads one
 	// records it (BoostFigures.GapSessions).
@@ -606,10 +585,10 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	// session, by this run as by the earlier one (ADR 0026, point 2, "Boost",
 	// amended 2026-10-18).
 	h.replan = p.Boost.ReplanPending
-	h.rejections = p.Boost.VenueRejections
-	h.inARow = slices.Clone(p.Boost.RejectedInARow)
-	h.olderThanRejection = p.Boost.UndecidedBeforeRejection
-	h.rejectionsWhileStopped = p.Boost.RejectionsWhileStopped
+	// The rejections in a row and the orders the venue has not yet ruled on
+	// are the decision's, so the restarted run counts as the full run does
+	// (ADR 0026, point 5: recovered, never recomputed).
+	h.verdicts.Recover(p.Boost)
 	// A withheld decision carries the pending re-plan's cause forward. A
 	// decided one left a re-plan pending only by its own order's refusal:
 	// refused, unless the order refused was a rejection's one re-plan, which
@@ -649,12 +628,9 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		h.release(o)
 		h.watch = &watched{order: o, status: w.Status, endedAt: w.EndedAt, afterRejection: w.AfterRejection, venueID: w.VenueOrderID}
 	}
-	// The rejections in a row and the orders the venue has not yet ruled on
-	// are the decision's, so the restarted run counts as the full run does
-	// (ADR 0026, point 5: recovered, never recomputed). An undecided order
-	// but the watched one is restored as released, latest first, so the gate
-	// keeps release order: the venue's reports on it are read, and a sell is
-	// netted, as on an order this run released.
+	// An undecided order but the watched one is restored as released,
+	// latest first, so the gate keeps release order: the venue's reports on
+	// it are read, and a sell is netted, as on an order this run released.
 	for i := len(p.Boost.UndecidedOrders) - 1; i >= 0; i-- {
 		r := p.Boost.UndecidedOrders[i]
 		if r.ClientOrderID == p.Boost.Watched.ClientOrderID {
@@ -668,13 +644,6 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
 		}
 		h.release(o)
-	}
-	for _, r := range p.Boost.UndecidedOrders {
-		o := undecidedOrder{id: r.ClientOrderID, venueID: r.VenueOrderID}
-		if h.watch != nil && r.ClientOrderID == h.watch.order.ClientOrderID {
-			o.venueID = h.watch.venueID
-		}
-		h.undecided = append(h.undecided, o)
 	}
 	// A cleared order stays released, the oldest the gate knows of, so a
 	// sell never sent is still counted as sold. The watched one is restored
@@ -969,7 +938,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	// ADR 0027). A sell reduces exposure, so it still goes: Boost's exit, and
 	// a re-plan of one (ADR 0026, point 4's exemption). The decision records
 	// the count, so a restart from it stops too.
-	if ok && h.rejections >= maxVenueRejections && order.Side != event.OrderSideSell {
+	if ok && h.verdicts.Stopped() && order.Side != event.OrderSideSell {
 		ok = false
 	}
 	// A rejection's one re-plan is marked on the order it releases. The mark
@@ -1026,7 +995,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		// it is never listed as awaiting a verdict, and the decision records
 		// why (BoostFigures.NoVenue; ADR 0026, point 3, "Mode").
 		if h.cfg.Mode != event.TradingModeDryRun {
-			h.undecided = append(h.undecided, undecidedOrder{id: outcome.Released.ClientOrderID})
+			h.verdicts.Release(outcome.Released.ClientOrderID)
 		}
 	}
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
@@ -1209,7 +1178,7 @@ func (h *Handler) learnVenueID(id, venueID string) {
 	if w := h.watch; w != nil && w.order.ClientOrderID == id && w.venueID == "" {
 		w.venueID = venueID
 	}
-	for _, list := range [][]undecidedOrder{h.undecided, h.working} {
+	for _, list := range [][]undecidedOrder{h.verdicts.undecided, h.working} {
 		for i := range list {
 			if r := &list[i]; r.id == id && r.venueID == "" {
 				r.venueID = venueID
@@ -1239,7 +1208,7 @@ func (h *Handler) refuseVenue(in event.Envelope, id, venueID string) error {
 			return err
 		}
 	}
-	for _, list := range [][]undecidedOrder{h.undecided, h.working} {
+	for _, list := range [][]undecidedOrder{h.verdicts.undecided, h.working} {
 		for _, r := range list {
 			if err := carried(r.id, r.venueID); err != nil {
 				return err
@@ -1299,12 +1268,8 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	// report but submitted shows the venue accepted the order, whether or
 	// not it is still the watched one: submitted is not enough, as IBKR's
 	// PreSubmitted maps to it and can precede a rejection.
-	switch p.Status {
-	case event.OrderLifecycleStatusInvalid:
-		h.observeOutcome(p.ClientOrderID, true)
-	case event.OrderLifecycleStatusSubmitted:
-	default:
-		h.observeOutcome(p.ClientOrderID, false)
+	if rejected, decides := BoostLifecycleWord(p.Status); decides {
+		h.observeOutcome(p.ClientOrderID, rejected)
 	}
 	// An order the venue ended is no longer working.
 	if p.Terminal() {
@@ -1330,65 +1295,31 @@ type undecidedOrder struct {
 	id, venueID string
 }
 
-// observeOutcome reads the venue's first word on order id, a rejection or
-// an acceptance, when a decided session released it and the venue had not
-// yet ruled on it; any later word, and a word on any other order, changes
-// nothing (ADR 0026, point 2, "Boost", amended 2026-10-18). Before the stop
-// an acceptance of an order released after every rejection the run counts
-// sets the rejections in a row back to none; an acceptance of an older one,
-// read late, does not, since the rejections came after it in release
-// order, so a re-planned order rejected again is always the second in a
-// row. A rejection counts one more, however late it is read: the rejection
-// that brings the count to maxVenueRejections is held for the next decision
-// to record and the reporter to page, whichever order it was and whether
-// or not it is still watched. Once buys are stopped the count stays there,
-// and each rejection read is held so too, and counted as one while
-// stopped.
+// observeOutcome reads the venue's first word on order id by Boost's count
+// (BoostVerdicts.Observe; ADR 0026, point 2, "Boost", amended 2026-10-18).
+// An order accepted works until it is filled or ended. The rejection that
+// brings the count to maxVenueRejections is held for the next decision to
+// record and the reporter to page, whichever order it was and whether or
+// not it is still watched; once buys are stopped each rejection read is
+// held so too.
 func (h *Handler) observeOutcome(id string, rejected bool) {
-	i := slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id })
-	if i < 0 {
+	o, verdict := h.verdicts.observe(id, rejected)
+	if verdict == VerdictNone {
 		return
 	}
-	o := h.undecided[i]
-	older := h.leaveUndecided(i)
-	stopped := h.rejections >= maxVenueRejections
-	if !rejected {
+	if verdict == VerdictAccepted {
 		// Accepted, it works until it is filled or ended, whether or not it
 		// is the watched order when a later one replaces it.
 		h.working = append(h.working, o)
-		if !stopped && !older {
-			h.rejections, h.inARow, h.olderThanRejection = 0, nil, 0
-		}
 		return
 	}
 	record := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: id, Filled: h.gate.Filled(id), Released: h.released[id].Quantity}
-	if stopped {
+	switch {
+	case verdict == VerdictRejectedWhileStopped:
 		h.stoppedRejections = append(h.stoppedRejections, record)
-		h.rejectionsWhileStopped++
-		return
-	}
-	h.rejections++
-	h.inARow = append(h.inARow, event.BoostRejectedOrder{ClientOrderID: id, VenueOrderID: o.venueID})
-	if !older {
-		// The latest released rejection the run counts: every order still
-		// undecided before it in release order is older.
-		h.olderThanRejection = i
-	}
-	if h.rejections >= maxVenueRejections {
+	case h.verdicts.Stopped():
 		h.withheld = record
 	}
-}
-
-// leaveUndecided takes the i-th undecided order off the list and reports
-// whether it was released before the latest released rejection the run
-// counts (olderThanRejection), which then counts one fewer.
-func (h *Handler) leaveUndecided(i int) bool {
-	h.undecided = slices.Delete(h.undecided, i, i+1)
-	older := i < h.olderThanRejection
-	if older {
-		h.olderThanRejection--
-	}
-	return older
 }
 
 // applyClearance reads the owner's settlement of a Boost order the adapter
@@ -1413,22 +1344,11 @@ func (h *Handler) applyClearance(in event.Envelope) error {
 	if p.AccountID != h.cfg.AccountID {
 		return fmt.Errorf("targetweight: clearance %s is for account %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
 	}
-	for _, id := range p.ClientOrderIDs {
-		i := slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id })
-		switch {
-		case i < 0:
-			return fmt.Errorf("targetweight: clearance %s names order %s, which is not an order this run released that the venue has not ruled on; Boost clears only an order the adapter never sent", in.ID, id)
-		case h.undecided[i].venueID != "":
-			return fmt.Errorf("targetweight: clearance %s names order %s, which the venue has already named as order %s; it was sent, so it is not an order the adapter never sent, and Boost clears only an order the adapter never sent", in.ID, id, h.undecided[i].venueID)
-		}
-		if orderplan.ClientOrderID(p.DecisionID, h.cfg.Boost.InstrumentID, h.released[id].Side) != id {
-			return fmt.Errorf("targetweight: clearance %s names order %s, which decision %s did not release", in.ID, id, p.DecisionID)
-		}
+	sideOf := func(id string) string { return h.released[id].Side }
+	if err := h.verdicts.ClearNeverSent(in.ID, p, h.cfg.Boost.InstrumentID, sideOf); err != nil {
+		return err
 	}
-	for _, id := range p.ClientOrderIDs {
-		h.leaveUndecided(slices.IndexFunc(h.undecided, func(o undecidedOrder) bool { return o.id == id }))
-		h.cleared = append(h.cleared, id)
-	}
+	h.cleared = append(h.cleared, p.ClientOrderIDs...)
 	return nil
 }
 
@@ -1504,7 +1424,7 @@ func (h *Handler) settleWatch() {
 			h.replan, h.replanCause = false, event.BoostReplan{}
 		}
 		h.watch = nil
-	case w.status == event.OrderLifecycleStatusInvalid && h.rejections >= maxVenueRejections:
+	case w.status == event.OrderLifecycleStatusInvalid && h.verdicts.Stopped():
 		// A rejection's one re-plan is always the second rejection in a row,
 		// so this bound holds it too.
 		h.watch = nil
@@ -1545,8 +1465,8 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
 		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(), WorkingOrders: h.workingFigures(),
-		VenueRejections: h.rejections, RejectedInARow: slices.Clone(h.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(),
-		UndecidedBeforeRejection: h.olderThanRejection, RejectionsWhileStopped: h.rejectionsWhileStopped, NoVenue: h.noVenue(),
+		VenueRejections: h.verdicts.rejections, RejectedInARow: slices.Clone(h.verdicts.inARow), UndecidedOrders: h.undecidedFigures(), ClearedOrders: h.clearedFigures(),
+		UndecidedBeforeRejection: h.verdicts.olderThanRejection, RejectionsWhileStopped: h.verdicts.whileStopped, NoVenue: h.noVenue(),
 	}
 }
 
@@ -1565,7 +1485,7 @@ func (h *Handler) noVenue() string {
 // watched order with its release and its venue order ID.
 func (h *Handler) undecidedFigures() []event.BoostUndecidedOrder {
 	var out []event.BoostUndecidedOrder
-	for _, r := range h.undecided {
+	for _, r := range h.verdicts.undecided {
 		o := event.BoostUndecidedOrder{ClientOrderID: r.id}
 		if h.watch == nil || h.watch.order.ClientOrderID != r.id {
 			released := h.released[r.id]

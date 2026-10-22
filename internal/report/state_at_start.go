@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 // KindStateAtStart is the account's standing told to a delivery channel that
@@ -37,13 +38,13 @@ var killSwitchVersions = []uint32{event.KillSwitchSchemaVersion}
 // Its public text carries no figure (owner decision 2026-10-17,
 // docs/live-trading/plan.md section 7).
 func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool, error) {
-	account, _, err := AccountOf(envelopes)
+	account, strategy, err := AccountOf(envelopes)
 	if err != nil {
 		return Alert{}, false, err
 	}
-	var state, stopped, killed, pending, alarm []string // each the private line, then the public one
+	var state, stopped, unreadable, killed, pending, alarm []string // each the private line, then the public one
 	headline := "Normal"
-	var rej boostRejections
+	rej := newBoostRejections(account)
 	var lastBoost event.Envelope
 	var lastFigures event.BoostFigures
 	for _, e := range envelopes {
@@ -55,8 +56,8 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			}
 			// A fresh run ends Boost's stop (ADR 0026, point 2, "Boost",
 			// amended 2026-10-18).
-			state, stopped, headline = nil, nil, "Normal"
-			rej = boostRejections{}
+			state, stopped, unreadable, headline = nil, nil, nil, "Normal"
+			rej.freshRun()
 			if in := p.IncidentInForce; in != nil {
 				headline = stateName(in.State)
 				line := fmt.Sprintf("The engine is %s, carried in force by the run's approval (incident %s)%s.",
@@ -75,17 +76,22 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			var p event.TargetsDecidedPayload
 			if err := read(e, decidedVersions, &p); err != nil {
 				// It may be the decision that stopped Boost's buys: fail
-				// closed, and still send everything else in force.
+				// closed, and still send everything else in force. A stop
+				// already known stays named with its orders; a momentum
+				// account has no Boost stop.
 				line := fmt.Sprintf("The decision record %s cannot be read: treat the buy stop as possibly in force.", e.ID)
-				stopped = []string{line, line}
+				if strategy == event.TargetWeightStrategyMomentum {
+					line = fmt.Sprintf("The decision record %s cannot be read: check the account's latest decision before relying on it.", e.ID)
+				}
+				unreadable = []string{line, line}
 				continue
 			}
 			if p.StrategyID == event.TargetWeightStrategyBoost {
-				stopped = nil
+				stopped, unreadable = nil, nil
 				lastBoost, lastFigures = e, p.Boost
 				rej.decided(e.ID, p.Boost)
-				if rej.count >= event.BoostVenueRejectionLimit {
-					line := boostStopped(e.EventTime, lastFigures, rej.ids)
+				if rej.verdicts.Stopped() {
+					line := boostStopped(e.EventTime, lastFigures, rej.verdicts)
 					stopped = []string{line, line}
 				}
 			}
@@ -94,15 +100,11 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			if read(e, releasedVersions, &p) == nil {
 				rej.release(p)
 			}
-		case event.OrderLifecycleEventType:
-			var p event.LimitOrderLifecyclePayload
-			if e.SchemaVersion != event.OrderLifecycleLimitVersion || read(e, lifecycleVersions, &p) != nil || p.AccountID != account {
-				continue
-			}
-			if rej.report(p) && lastBoost.ID != "" && rej.count >= event.BoostVenueRejectionLimit {
+		case event.OrderLifecycleEventType, event.FillEventType, event.RebalanceClearedEventType:
+			if rej.venue(e) == targetweight.VerdictRejected && lastBoost.ID != "" && rej.verdicts.Stopped() {
 				// The decision that records the stop comes with the next
 				// session; the second rejection is in force from its report.
-				line := boostStopped(e.EventTime, lastFigures, rej.ids)
+				line := boostStopped(e.EventTime, lastFigures, rej.verdicts)
 				stopped = []string{line, line}
 			}
 		case event.KillSwitchEventType:
@@ -149,10 +151,17 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 		}
 	}
 	var body, public []string
-	if stopped != nil && headline == "Normal" {
-		headline = "Normal, Boost's buys stopped or possibly stopped"
+	if headline == "Normal" {
+		switch {
+		case stopped != nil:
+			headline = "Normal, Boost's buys stopped"
+		case unreadable != nil && strategy == event.TargetWeightStrategyMomentum:
+			headline = "Normal, a decision record cannot be read"
+		case unreadable != nil:
+			headline = "Normal, Boost's buys possibly stopped"
+		}
 	}
-	for _, l := range [][]string{state, stopped, killed, pending, alarm} {
+	for _, l := range [][]string{state, stopped, unreadable, killed, pending, alarm} {
 		if l != nil {
 			body, public = append(body, l[0]), append(public, l[1])
 		}
@@ -174,83 +183,100 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 	}, true, nil
 }
 
-// boostRejections follows the venue's rejections of Boost's orders as the
-// engine counts them (ADR 0026, point 2, "Boost", amended 2026-10-18), from
-// each Boost decision's count and the venue's reports journalled after it:
-// the first word on an order a decided session released (a rejection counts
-// one more; an acceptance of an order released after every rejection counted
-// sets the count back; neither changes anything once buys are stopped).
+// boostRejections counts the venue's rejections of Boost's orders by the
+// engine's own rule (targetweight.BoostVerdicts; ADR 0026, point 2, "Boost",
+// amended 2026-10-18): from each Boost decision's recorded count and the
+// orders it lists as awaiting the venue's word (point 5: recovered, never
+// recomputed), then the venue's words journalled after it, each read only
+// when the engine reads it: a report that describes the order as released
+// (ADR 0022), a fill the gate's fill rule accepts (risklimit.CheckFill) and
+// a clearance the engine applies.
 type boostRejections struct {
-	count      int
-	ids        []string
-	boostTags  map[string]bool // IDs of the Boost decisions seen
-	released   map[string]int  // client order ID to its release's place, for orders a Boost decision released
-	undecided  map[string]bool // released and not yet ruled on by the venue
-	lastReject int             // place of the latest released rejection counted, -1 when none
-	next       int
+	account    string
+	verdicts   targetweight.BoostVerdicts
+	instrument string                                // the Boost decision's instrument, for a clearance
+	boostTags  map[string]bool                       // IDs of the Boost decisions seen
+	released   map[string]event.OrderReleasedPayload // each order's first release
+	fills      *boostFills
 }
 
-// decided takes a Boost decision's count as the count in force.
+func newBoostRejections(account string) *boostRejections {
+	return &boostRejections{account: account, boostTags: map[string]bool{}, released: map[string]event.OrderReleasedPayload{}, fills: newBoostFills()}
+}
+
+// freshRun starts the count a fresh run starts with: none (ADR 0026, point
+// 2, "Boost", amended 2026-10-18; ADR 0027).
+func (r *boostRejections) freshRun() {
+	r.verdicts, r.boostTags = targetweight.BoostVerdicts{}, map[string]bool{}
+}
+
+// decided takes a Boost decision's recorded count as the count in force.
 func (r *boostRejections) decided(id string, b event.BoostFigures) {
-	if r.boostTags == nil {
-		r.boostTags, r.released, r.undecided = map[string]bool{}, map[string]int{}, map[string]bool{}
-	}
 	r.boostTags[id] = true
-	r.count, r.ids, r.lastReject = b.VenueRejections, nil, -1
-	for _, o := range b.RejectedInARow {
-		r.ids = append(r.ids, orderName(o))
-		if at, ok := r.released[o.ClientOrderID]; ok {
-			r.lastReject = max(r.lastReject, at)
-		}
-	}
+	r.instrument = b.InstrumentID
+	r.verdicts.Recover(b)
 }
 
-// release holds an order a Boost decision released as one the venue has not
-// yet ruled on.
+// release records an order's first release, and an order a Boost decision
+// released to a venue as awaiting the venue's word.
 func (r *boostRejections) release(p event.OrderReleasedPayload) {
-	if !r.boostTags[p.Tag] || !p.Send {
-		return
+	if _, ok := r.released[p.ClientOrderID]; !ok {
+		r.released[p.ClientOrderID] = p
+		r.fills.release(p)
 	}
-	if _, ok := r.released[p.ClientOrderID]; ok {
-		return
+	if r.boostTags[p.Tag] && p.Send {
+		r.verdicts.Release(p.ClientOrderID)
 	}
-	r.released[p.ClientOrderID] = r.next
-	r.undecided[p.ClientOrderID] = true
-	r.next++
 }
 
-// report reads the venue's report p and says whether it added a rejection.
-func (r *boostRejections) report(p event.LimitOrderLifecyclePayload) bool {
-	if !r.undecided[p.ClientOrderID] || p.Status == event.OrderLifecycleStatusSubmitted {
-		return false
-	}
-	delete(r.undecided, p.ClientOrderID)
-	if r.count >= event.BoostVenueRejectionLimit {
-		return false
-	}
-	at := r.released[p.ClientOrderID]
-	if p.Status != event.OrderLifecycleStatusInvalid {
-		if at > r.lastReject {
-			r.count, r.ids, r.lastReject = 0, nil, -1
+// venue reads a venue report, fill or clearance e as the engine reads it,
+// and returns what it did to the count. A record this build cannot read,
+// or another account's, or one the engine refuses, does nothing.
+func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
+	switch e.Type {
+	case event.OrderLifecycleEventType:
+		var p event.LimitOrderLifecyclePayload
+		if e.SchemaVersion != event.OrderLifecycleLimitVersion || read(e, lifecycleVersions, &p) != nil || p.AccountID != r.account {
+			return targetweight.VerdictNone
 		}
-		return false
+		if o, ok := r.released[p.ClientOrderID]; !ok || !p.Describes(o) {
+			return targetweight.VerdictNone
+		}
+		r.verdicts.LearnVenueID(p.ClientOrderID, p.OrderID)
+		if rejected, decides := targetweight.BoostLifecycleWord(p.Status); decides {
+			return r.verdicts.Observe(p.ClientOrderID, rejected)
+		}
+	case event.FillEventType:
+		var p event.TargetWeightFillPayload
+		if read(e, targetWeightFillVersions, &p) != nil || p.AccountID != r.account || r.fills.accept(p) != nil {
+			return targetweight.VerdictNone
+		}
+		// An execution shows the venue accepted the order.
+		return r.verdicts.Observe(p.ClientOrderID, false)
+	case event.RebalanceClearedEventType:
+		var p event.RebalanceClearedPayload
+		if read(e, clearedVersions, &p) == nil && p.AccountID == r.account {
+			sideOf := func(id string) string { return r.released[id].Side }
+			_ = r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf)
+		}
 	}
-	r.count++
-	r.ids = append(r.ids, orderName(event.BoostRejectedOrder{ClientOrderID: p.ClientOrderID, VenueOrderID: p.OrderID}))
-	r.lastReject = max(r.lastReject, at)
-	return true
+	return targetweight.VerdictNone
 }
 
-// boostStopped names Boost's stop: the orders the venue rejected in a row,
-// and whether the boost is on, which a fresh run's approval states (ADR
-// 0026, points 2, "Boost", amended 2026-10-18, and 5).
-func boostStopped(at time.Time, b event.BoostFigures, ids []string) string {
+// boostStopped names Boost's stop: the count the engine holds, the orders
+// it names, and whether the boost is on, which a fresh run's approval
+// states (ADR 0026, points 2, "Boost", amended 2026-10-18, and 5).
+func boostStopped(at time.Time, b event.BoostFigures, v targetweight.BoostVerdicts) string {
 	state := "off"
 	if b.LatchedAfter {
 		state = "on"
 	}
+	var ids []string
+	for _, o := range v.InARow() {
+		ids = append(ids, orderName(o))
+	}
 	return fmt.Sprintf("Boost's buys are stopped as of %s: the venue rejected %d orders in a row (%s), so no session buys until you start a fresh run; its sells still go. The boost is %s (a fresh run's approval states it).",
-		at.UTC().Format(time.RFC3339), len(ids), strings.Join(ids, ", "), state)
+		at.UTC().Format(time.RFC3339), v.Rejections(), strings.Join(ids, ", "), state)
 }
 
 // stateName is an engine state as the owner's manual names it. A record

@@ -310,11 +310,16 @@ The delivery rules:
   history: the channel is sent, once, an urgent page "<account>: state at
   reporter start: Halted" (or Degraded, or Normal) naming the engine state and
   its scope, Boost's buys if two orders the venue rejected in a row have
-  stopped them (with the orders, and whether the boost is on; read from the
-  venue's rejections themselves, so named from the report of the second
-  rejection, before the next decision records it; a decision record the
-  reporter cannot read is named "cannot be read: treat the buy stop as
-  possibly in force"), the kill
+  stopped them (with the count and the orders, and whether the boost is on;
+  counted by the engine's own rule, from the latest decision's recorded
+  count and the venue's reports and fills since it, so named from the
+  report of the second rejection, before the next decision records it; a
+  fill or any report but "submitted" is the venue accepting the order, and
+  a report that does not describe the order as released counts for
+  nothing, as the engine refuses it; a decision record the reporter cannot
+  read is named "cannot be read: treat the buy stop as possibly in force"
+  beside any stop already known, and on a momentum account, which has no
+  Boost stop, only as a record that cannot be read), the kill
   switch if it is engaged, a pending cash read, the margin-cushion alarm if it
   is not clear, and every open alert. Each open
   alert (a Degraded, Halted or reconciliation alert you have not

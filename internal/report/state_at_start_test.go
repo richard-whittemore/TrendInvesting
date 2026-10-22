@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
@@ -203,31 +205,75 @@ func TestAnUnreadableDecisionDoesNotSilenceTheStandingAndIsNamedAsPossiblyStoppi
 	}
 }
 
+// boostLog builds a Boost account's log as the engine journals it: each
+// decision records its count, the orders it names and the orders still
+// awaiting the venue's word, then its release follows; the venue's reports
+// describe the order as released.
+type boostLog struct {
+	*stream
+	inARow    []event.BoostRejectedOrder
+	undecided []string
+	before    int
+}
+
+func newBoostLog(t *testing.T) *boostLog { return &boostLog{stream: newStream(t)} }
+
+// decide journals the decision of session n, which releases the orders ids.
+func (l *boostLog) decide(n int, ids ...string) {
+	l.undecided = append(l.undecided, ids...)
+	b := event.BoostFigures{InstrumentID: "SPY", Close: 100, LatchedBefore: true, LatchedAfter: true,
+		VenueRejections: len(l.inARow), RejectedInARow: l.inARow, UndecidedBeforeRejection: l.before}
+	for _, id := range l.undecided {
+		b.UndecidedOrders = append(b.UndecidedOrders, event.BoostUndecidedOrder{ClientOrderID: id, Side: event.OrderSideBuy, Released: 10, LimitPrice: 101})
+	}
+	l.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, fmt.Sprintf("targets:%d", n), day(n), event.TargetsDecidedPayload{
+		AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
+		Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}}, Boost: b})
+	for _, id := range ids {
+		l.send(n, id)
+	}
+}
+
+// send journals the release of order id by the decision of session n.
+func (l *boostLog) send(n int, id string) {
+	l.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:"+id, day(n),
+		event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:" + id, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: id,
+			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101, Mode: event.TradingModePaper, Send: true, Figures: figures})
+}
+
+// report journals the venue's report of status on order id, as released.
+func (l *boostLog) report(n int, id, status string) {
+	l.reportOf(n, id, status, 10)
+}
+
+// reportOf is report for an order of quantity shares.
+func (l *boostLog) reportOf(n int, id, status string, quantity int64) {
+	l.add(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, fmt.Sprintf("life:%s:%s", id, status), day(n),
+		event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: id, OrderID: "ib-" + id, InstrumentID: "SPY",
+			Side: event.OrderSideBuy, Status: status, Quantity: quantity, LimitPrice: 101, OccurredAt: day(n)})
+}
+
+// filled journals the venue's execution of order id in full.
+func (l *boostLog) filled(n int, id string) {
+	l.add(event.FillEventType, event.FillTargetWeightVersion, "fill:"+id, day(n),
+		event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: id, FillID: "fill:" + id, InstrumentID: "SPY",
+			Side: event.OrderSideBuy, Quantity: 10, Price: 100, Commission: 1, FilledAt: day(n)})
+}
+
 // TestTheSecondRejectionStopsBuysAtOnceInTheStanding: the decision that
 // records the stop comes at the next session, but the second rejection is
 // journalled as the venue's report, and a channel that begins in between is
-// told the stop from the rejections themselves (ADR 0026, point 2, "Boost").
+// told the stop from the rejections themselves, counted by the engine's own
+// rule from the decision's recorded count (ADR 0026, point 2, "Boost",
+// amended 2026-10-18; point 5).
 func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
-	decision := func(s *stream, n, rejections int) {
-		p := event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
-			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
-			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, LatchedBefore: true, LatchedAfter: true, VenueRejections: rejections}}
-		p.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-6"}}[:rejections]
-		s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, fmt.Sprintf("targets:%d", n), day(n), p)
-	}
-	sent := func(s *stream, n int, clientID string) {
-		s.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:"+clientID, day(n),
-			event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
-				InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, LimitPrice: 101, Mode: event.TradingModePaper, Send: true, Figures: figures})
-	}
-	one := func() *stream {
-		s := newStream(t)
-		decision(s, 0, 0)
-		sent(s, 0, "tw-6")
-		sent(s, 0, "tw-7")
-		s.lifecycle(1, "life:6", "tw-6", event.OrderLifecycleStatusInvalid)
-		decision(s, 1, 1)
-		return s
+	one := func() *boostLog {
+		l := newBoostLog(t)
+		l.decide(0, "tw-6", "tw-7")
+		l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+		l.inARow, l.undecided, l.before = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, []string{"tw-7"}, 0
+		l.decide(1)
+		return l
 	}
 	second := one()
 	// None of these is a rejection the engine counts: a dry-run release, a
@@ -235,42 +281,197 @@ func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
 	// report on an order no decision released, an acknowledgement, a report
 	// the build cannot read and another account's.
 	second.released(1, "tw-dry", 10)
-	sent(second, 1, "tw-7")
+	second.send(1, "tw-7")
 	second.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm", day(1),
 		event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:alarm", Tag: "alarm:u", ClientOrderID: "alarm-1",
 			InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures})
 	second.lifecycle(2, "life:alarm", "alarm-1", event.OrderLifecycleStatusInvalid)
-	second.lifecycle(2, "life:unknown", "tw-unknown", event.OrderLifecycleStatusInvalid)
-	second.lifecycle(2, "life:sub", "tw-7", event.OrderLifecycleStatusSubmitted)
+	second.report(2, "tw-dry", event.OrderLifecycleStatusInvalid)
+	second.report(2, "tw-unknown", event.OrderLifecycleStatusInvalid)
+	second.report(2, "tw-7", event.OrderLifecycleStatusSubmitted)
 	second.add(event.OrderLifecycleEventType, 99, "life:unread", day(2), map[string]string{})
 	second.add(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "life:other", day(2),
 		event.LimitOrderLifecyclePayload{AccountID: "ira", ClientOrderID: "tw-7", OrderID: "ib-9", InstrumentID: "SPY",
 			Side: event.OrderSideBuy, Status: event.OrderLifecycleStatusInvalid, Quantity: 10, LimitPrice: 101, OccurredAt: day(2)})
-	if a, ok := stateAtStart(t, second); ok {
+	if a, ok := stateAtStart(t, second.stream); ok {
 		t.Fatalf("what is not a counted rejection stops buys: %+v", a)
 	}
-	second.lifecycle(2, "life:7", "tw-7", event.OrderLifecycleStatusInvalid)
-	sent(second, 1, "tw-9")
-	second.lifecycle(3, "life:9", "tw-9", event.OrderLifecycleStatusInvalid) // read once stopped: counts nothing more
-	a, ok := stateAtStart(t, second)
+	second.report(2, "tw-7", event.OrderLifecycleStatusInvalid)
+	a, ok := stateAtStart(t, second.stream)
 	if !ok {
 		t.Fatal("the second rejection, journalled and not yet decided, does not stop buys in the standing")
 	}
-	for _, want := range []string{"buys are stopped", "tw-6", "tw-7", "boost is on"} {
+	for _, want := range []string{"buys are stopped", "rejected 2 orders", "tw-6", "tw-7", "boost is on"} {
 		if !strings.Contains(a.Body, want) {
 			t.Errorf("the standing does not say %q:\n%s", want, a.Body)
 		}
 	}
 
-	if a, ok := stateAtStart(t, one()); ok {
+	if a, ok := stateAtStart(t, one().stream); ok {
 		t.Errorf("one rejection does not stop buys: %+v", a)
 	}
 
 	accepted := one()
-	sent(accepted, 1, "tw-8")
-	accepted.lifecycle(2, "life:8", "tw-8", event.OrderLifecycleStatusCanceled)
-	accepted.lifecycle(3, "life:7", "tw-7", event.OrderLifecycleStatusInvalid)
-	if a, ok := stateAtStart(t, accepted); ok {
+	accepted.decide(2, "tw-8")
+	accepted.report(3, "tw-8", event.OrderLifecycleStatusCanceled)
+	accepted.report(3, "tw-7", event.OrderLifecycleStatusInvalid)
+	if a, ok := stateAtStart(t, accepted.stream); ok {
 		t.Errorf("an order accepted after the first rejection sets the count back, and a rejection of an older order does not stop buys: %+v", a)
+	}
+}
+
+// TestAFillIsTheVenuesAcceptanceInTheStanding: an order the venue
+// acknowledges as submitted and then fills in full sends no other report,
+// and the engine counts its execution as the venue accepting it, so the
+// count goes back to none and a late rejection of an older order is the
+// first in a row, not the second: the page must not say buys are stopped
+// while the engine still buys (ADR 0026, point 2, "Boost", amended
+// 2026-10-18).
+func TestAFillIsTheVenuesAcceptanceInTheStanding(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0, "tw-5", "tw-6")
+	l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+	l.inARow, l.undecided, l.before = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, []string{"tw-5"}, 1
+	l.decide(1)
+	l.decide(2, "tw-8")
+	l.report(3, "tw-8", event.OrderLifecycleStatusSubmitted)
+	l.filled(3, "tw-8")
+	l.report(4, "tw-5", event.OrderLifecycleStatusInvalid)
+	if a, ok := stateAtStart(t, l.stream); ok {
+		t.Errorf("a fill accepted tw-8, so the late rejection of tw-5 is the first in a row; the page says:\n%s", a.Body)
+	}
+}
+
+// TestAReportTheEngineRefusesIsNoRejectionInTheStanding: a venue report that
+// does not describe the order as released (account, instrument, side,
+// quantity and limit) is refused by the engine and decides nothing, so it is
+// no rejection on the page either (ADR 0022).
+func TestAReportTheEngineRefusesIsNoRejectionInTheStanding(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0, "tw-6", "tw-7")
+	l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+	l.inARow, l.undecided = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, []string{"tw-7"}
+	l.decide(1)
+	l.reportOf(2, "tw-7", event.OrderLifecycleStatusInvalid, 11)
+	if a, ok := stateAtStart(t, l.stream); ok {
+		t.Errorf("a rejection of 11 shares does not describe tw-7 as released (10); the page says:\n%s", a.Body)
+	}
+}
+
+// TestAnUnreadableDecisionKeepsADefiniteStop: a decision record that cannot
+// be read after the decision that stopped Boost's buys leaves that stop in
+// force, named with its orders, and adds the unreadable record (fail
+// closed, AGENTS.md).
+func TestAnUnreadableDecisionKeepsADefiniteStop(t *testing.T) {
+	l := newBoostLog(t)
+	l.inARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-6"}, {ClientOrderID: "tw-7"}}
+	l.decide(1)
+	l.add(event.TargetsDecidedEventType, 99, "targets:2", day(2), map[string]string{})
+	a, ok, err := report.StateAtStartAlert(l.out, nil)
+	if err != nil || !ok {
+		t.Fatalf("the stop is not in force: %+v, %v, %v", a, ok, err)
+	}
+	for _, want := range []string{"buys are stopped", "tw-6", "tw-7", "targets:2", "cannot be read"} {
+		if !strings.Contains(a.Body, want) || !strings.Contains(a.PublicBody, want) {
+			t.Errorf("the standing does not say %q:\n%s", want, a.Body)
+		}
+	}
+	if strings.Contains(a.Title, "possibly") {
+		t.Errorf("a definite stop is not a possible one: %s", a.Title)
+	}
+}
+
+// TestAnUnreadableMomentumDecisionNamesNoBoostStop: a momentum account has
+// no Boost buy stop, so an unreadable decision record is named as
+// unreadable, never as a possible Boost stop.
+func TestAnUnreadableMomentumDecisionNamesNoBoostStop(t *testing.T) {
+	s := &stream{t: t}
+	s.add(event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", day(0).Add(-time.Hour), momentumConfiguration())
+	s.add(event.TargetsDecidedEventType, 99, "targets:2", day(2), map[string]string{})
+	a, ok, err := report.StateAtStartAlert(s.out, nil)
+	if err != nil || !ok {
+		t.Fatalf("an unreadable decision must still page: %+v, %v, %v", a, ok, err)
+	}
+	if !strings.Contains(a.Body, "targets:2") || !strings.Contains(a.Body, "cannot be read") {
+		t.Errorf("the unreadable record is not named:\n%s", a.Body)
+	}
+	if text := strings.ToLower(a.Title + a.Body + a.PublicBody); strings.Contains(text, "boost") || strings.Contains(text, "buy stop") {
+		t.Errorf("a momentum account is named as a Boost stop:\n%s\n%s", a.Title, a.Body)
+	}
+}
+
+// momentumConfiguration is a momentum account's configuration.
+func momentumConfiguration() event.TargetWeightConfigurationPayload {
+	return event.TargetWeightConfigurationPayload{
+		StrategyID: event.TargetWeightStrategyMomentum, AccountID: "ira-traditional", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
+		Momentum: event.MomentumConfiguration{
+			Rule: event.MomentumRuleTrend, ListingType: "CS", UniverseSize: 500, MinPrice: 5,
+			ScoreLookback: 252, ScoreSkip: 21, VolatilityReturns: 252, TopN: 25, SectorCap: 3,
+			InverseVolatility: true, Invested: 0.98, TrendInstrument: "SPY", TrendCloses: 200,
+			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
+			UniverseSource: "massive", SectorSources: []string{"ishares-iwv-gics", "nasdaq-screener"},
+			UniverseInput: event.UniverseInputCompact, MaxUnlabelledShare: 0.20,
+		},
+		Glide: event.GlideConfiguration{
+			Anchors:            []event.GlideAnchor{{AgeYears: 38, Share: 0}, {AgeYears: 53, Share: 0.308}, {AgeYears: 65, Share: 0.5}, {AgeYears: 72, Share: 0.7}},
+			RetirementAgeYears: 65, BondFunds: []event.BondFund{{InstrumentID: "IEF", Fraction: 0.5}, {InstrumentID: "SHY", Fraction: 0.5}}, Birth: "1980-01",
+		},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
+		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 60, MaxOrderFraction: 0.5, PriceBand: 0.05},
+	}
+}
+
+// TestAFillTheGateRefusesIsNoAcceptanceInTheStanding: a fill the gate's
+// fill rule refuses (risklimit.CheckFill), here more shares than released,
+// is not the venue accepting the order, so it does not set the count back.
+func TestAFillTheGateRefusesIsNoAcceptanceInTheStanding(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0, "tw-6", "tw-7")
+	l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+	l.inARow, l.undecided = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, []string{"tw-7"}
+	l.decide(1, "tw-8")
+	l.add(event.FillEventType, event.FillTargetWeightVersion, "fill:over", day(2),
+		event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-8", FillID: "fill:over", InstrumentID: "SPY",
+			Side: event.OrderSideBuy, Quantity: 11, Price: 100, Commission: 1, FilledAt: day(2)})
+	l.report(3, "tw-8", event.OrderLifecycleStatusInvalid)
+	if a, ok := stateAtStart(t, l.stream); !ok || !strings.Contains(a.Body, "buys are stopped") {
+		t.Errorf("a refused fill accepted nothing, so tw-8's rejection is the second in a row: %+v, %v", a, ok)
+	}
+}
+
+// TestAClearedOrderIsNoRejectionInTheStanding: an order the owner settled
+// as never sent leaves the orders awaiting the venue's word, so a report on
+// it counts for nothing (ADR 0026, point 2, "Boost", amended 2026-10-18).
+func TestAClearedOrderIsNoRejectionInTheStanding(t *testing.T) {
+	never := orderplan.ClientOrderID("targets:1", "SPY", event.OrderSideBuy)
+	build := func(cleared bool) *boostLog {
+		l := newBoostLog(t)
+		l.decide(0, "tw-6")
+		l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
+		l.inARow, l.undecided = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, nil
+		l.decide(1, never)
+		if cleared {
+			l.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:1", day(2), event.RebalanceClearedPayload{
+				AccountID: "joint", AsOf: day(2), DecisionID: "targets:1", ClientOrderIDs: []string{never}, Operator: "owner", Detail: "never sent"})
+		}
+		l.report(3, never, event.OrderLifecycleStatusInvalid)
+		return l
+	}
+	if a, ok := stateAtStart(t, build(false).stream); !ok {
+		t.Fatalf("without the clearance the second rejection stops buys: %+v", a)
+	}
+	if a, ok := stateAtStart(t, build(true).stream); ok {
+		t.Errorf("a report on a cleared order is no rejection: %+v", a)
+	}
+}
+
+// TestAnUnreadableBoostDecisionAloneIsAPossibleStop: with nothing else in
+// force, the page's headline names the possible stop.
+func TestAnUnreadableBoostDecisionAloneIsAPossibleStop(t *testing.T) {
+	s := newStream(t)
+	s.add(event.TargetsDecidedEventType, 99, "targets:2", day(2), map[string]string{})
+	a, ok, err := report.StateAtStartAlert(s.out, nil)
+	if err != nil || !ok || !strings.HasSuffix(a.Title, "Normal, Boost's buys possibly stopped") {
+		t.Errorf("an unreadable Boost decision alone: %+v, %v, %v; want a possible stop", a, ok, err)
 	}
 }
