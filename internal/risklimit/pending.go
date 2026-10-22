@@ -138,6 +138,8 @@ type ledgerSell struct {
 	// earliest such report's second.
 	ended bool
 	end   time.Time
+	// endStatus is that report's status, canceled or invalid.
+	endStatus string
 	// venueID is the sell's venue order ID, as a lifecycle report on it, a
 	// listing echoing its client order ID, or a restored sell's decision,
 	// recorded it: a listing under it with no client order ID is the sell's
@@ -705,7 +707,7 @@ func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 	}
 	if s != nil && p.Terminal() {
 		if end := p.OccurredAt.Truncate(time.Second); !s.ended || end.Before(s.end) {
-			s.ended, s.end = true, end
+			s.ended, s.end, s.endStatus = true, end, p.Status
 		}
 	}
 	return nil

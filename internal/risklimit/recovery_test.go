@@ -3,6 +3,7 @@ package risklimit_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
@@ -71,27 +72,57 @@ func TestARecoveryIsRestoredWholeOrNotAtAll(t *testing.T) {
 	}
 }
 
-// TestARestoredOwnSaleThatEndedIsRefused: a run's own live sale is still
-// live, so a recovered decision whose own sale states an end is refused
-// whole, and no part of it is restored (ADR 0026, point 2, "Order identity",
-// and point 5: recovered, never recomputed; fail closed, AGENTS.md).
-func TestARestoredOwnSaleThatEndedIsRefused(t *testing.T) {
+// TestARestoredOwnSaleThatEndedStatesHowItEnded: a run's own sale that a
+// venue ended is restored with how it ended, canceled or invalid, and only
+// then, so a recovered decision whose own sale states an end without how, a
+// way it ended that ends nothing, or how with no end, is refused whole, and
+// no part of it is restored (ADR 0022; ADR 0026, point 5: recovered, never
+// recomputed; fail closed, AGENTS.md).
+func TestARestoredOwnSaleThatEndedStatesHowItEnded(t *testing.T) {
 	const incident = "engine-state:joint:1"
 	own := risklimit.RestoredOwnSale{RestoredOrder: risklimit.RestoredOrder{Order: event.OrderReleasedPayload{AccountID: "joint", Tag: incident,
 		ClientOrderID: orderplan.SaleAttemptClientOrderID(incident, "SPY", 0), InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 5, LimitPrice: 98},
 		VenueOrderID: "ib-own", Ended: at}, Trigger: event.SaleTriggerMarginUrgent, Attempt: 1}
+	for name, c := range map[string]struct {
+		ended  bool
+		status string
+	}{
+		"an end without how":       {true, ""},
+		"an end as submitted":      {true, event.OrderLifecycleStatusSubmitted},
+		"how it ended with no end": {false, event.OrderLifecycleStatusCanceled},
+		"an end as cancel-pending": {true, event.OrderLifecycleStatusCancelPending},
+	} {
+		o := own
+		o.EndStatus = c.status
+		if !c.ended {
+			o.Ended = time.Time{}
+		}
+		g := gate(t, limits(), event.TradingModePaper)
+		err := g.RestoreRecovery(risklimit.Recovery{SaleAttempt: &risklimit.RestoredSaleAttempt{IncidentID: incident}, OwnSale: &o})
+		if err == nil || !strings.Contains(err.Error(), "ended") {
+			t.Errorf("a recovery whose own sale states %s was restored: %v", name, err)
+		}
+		if got := g.RestoredIncident(); got != "" {
+			t.Errorf("the recovery refused for %s restored incident %q's sale attempt", name, got)
+		}
+		if _, ok := g.OwnReleasedSale(incident, "SPY"); ok {
+			t.Errorf("the recovery refused for %s restored the sale", name)
+		}
+	}
+	o := own
+	o.EndStatus = event.OrderLifecycleStatusCanceled
 	g := gate(t, limits(), event.TradingModePaper)
-	err := g.RestoreRecovery(risklimit.Recovery{
-		SaleAttempt: &risklimit.RestoredSaleAttempt{IncidentID: incident},
-		OwnSale:     &own,
-	})
-	if err == nil || !strings.Contains(err.Error(), "ended") {
-		t.Fatalf("a recovery whose own live sale has an end was restored: %v", err)
+	if err := g.RestoreRecovery(risklimit.Recovery{SaleAttempt: &risklimit.RestoredSaleAttempt{IncidentID: incident}, OwnSale: &o}); err != nil {
+		t.Fatalf("a recovery whose own sale was canceled: %v", err)
 	}
-	if got := g.RestoredIncident(); got != "" {
-		t.Errorf("the recovery refused for an ended own sale restored incident %q's sale attempt", got)
+	s, ok := g.OwnReleasedSale(incident, "SPY")
+	if !ok || s.Live() || !s.Ended.Equal(at) || s.EndStatus != event.OrderLifecycleStatusCanceled || s.VenueOrderID != "ib-own" {
+		t.Errorf("the restored canceled sale is %+v %v, want it ended at %s, canceled, under venue order ib-own", s, ok, at)
 	}
-	if _, ok := g.OwnLiveSale(incident, "SPY"); ok {
-		t.Errorf("the recovery refused for an ended own sale restored it as a live sale")
+	if _, live := g.OwnLiveSale(incident, "SPY"); live {
+		t.Error("the restored canceled sale is reported live")
+	}
+	if got := g.PendingSells("SPY"); got != 0 {
+		t.Errorf("the restored canceled sale leaves %d shares being sold, want none", got)
 	}
 }

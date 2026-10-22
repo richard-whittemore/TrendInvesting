@@ -584,29 +584,44 @@ func (g *Gate) saleAttemptedFor(tag, instrumentID string) bool {
 }
 
 // OwnSale is the sale back to 98% this run attempted itself and released,
-// as OwnLiveSale reports it: the order as planned, whose Sale figures name
-// what fired it; the attempt it is, the first being 1; its venue order ID
-// once a venue report or listing named one; and the fill reports applied to
-// it so far, in the order applied.
+// as OwnReleasedSale reports it: the order as planned, whose Sale figures
+// name what fired it; the attempt it is, the first being 1; its venue order
+// ID once a venue report or listing named one; the fill reports applied to
+// it so far, in the order applied; and, once a canceled or invalid
+// lifecycle report ended it, that report's status and the second of the
+// earliest such report (Ended, EndStatus; zero and empty before one).
 type OwnSale struct {
 	Order        event.OrderPlannedPayload
 	Attempt      int
 	VenueOrderID string
 	Fills        []event.TargetWeightFillPayload
+	Ended        time.Time
+	EndStatus    string
 }
 
-// OwnLiveSale is the sale back to 98% under tag for instrumentID that this
-// run attempted itself and released, while it is still live: no earlier
-// run's attempt spent the sale, and it has neither ended nor filled in full,
-// whether or not a venue has named it and whether or not part of it has
-// filled. A decision records it so a run restarted from the decision holds
-// it as this run's own attempt, released, with the executions reported so
-// far: the venue's later reports on it are read as in the full run, and a
-// retirement of it as never sent, while no venue has named it, frees the
-// attempt (ADR 0019, amended 2026-10-17, reading 4; ADR 0026, point 2,
-// "Boost", and point 5: recovered, never recomputed). ok is false
+// Live reports whether s is still live: not ended by a venue and not
+// filled in full.
+func (s OwnSale) Live() bool {
+	var filled int64
+	for _, f := range s.Fills {
+		filled += f.Quantity
+	}
+	return s.Ended.IsZero() && filled < s.Order.Quantity
+}
+
+// OwnReleasedSale is the sale back to 98% under tag for instrumentID that
+// this run attempted itself and released, live or not: no earlier run's
+// attempt spent the sale, and no retirement freed it, whether or not a
+// venue has named it, part or all of it has filled or a venue has ended
+// it. A decision records it so a run restarted from the decision holds it
+// as this run's own attempt, released, with the executions reported so far
+// and, once a venue ended it, that end: the venue's later reports on it are
+// read as in the full run, a late fill after its cancel included (ADR
+// 0022), and a retirement of it as never sent, while no venue has named
+// it, frees the attempt (ADR 0019, amended 2026-10-17, reading 4; ADR 0026,
+// point 2, "Boost", and point 5: recovered, never recomputed). ok is false
 // otherwise.
-func (g *Gate) OwnLiveSale(tag, instrumentID string) (OwnSale, bool) {
+func (g *Gate) OwnReleasedSale(tag, instrumentID string) (OwnSale, bool) {
 	a := g.attempts[tag]
 	if a == nil || a.earlier || !a.instruments[instrumentID] {
 		return OwnSale{}, false
@@ -614,10 +629,24 @@ func (g *Gate) OwnLiveSale(tag, instrumentID string) (OwnSale, bool) {
 	attempt := g.restoredRetired(tag) + g.retiredSales[saleKey(tag, instrumentID)]
 	id := orderplan.SaleAttemptClientOrderID(tag, instrumentID, attempt)
 	o, s := g.orders[id], g.ledger.sells[id]
-	if o == nil || o.planned.Sale == (event.SaleFigures{}) || s == nil || s.ended || o.reported >= o.planned.Quantity {
+	if o == nil || o.planned.Sale == (event.SaleFigures{}) || s == nil {
 		return OwnSale{}, false
 	}
-	return OwnSale{Order: o.planned, Attempt: attempt + 1, VenueOrderID: s.venueID, Fills: slices.Clone(o.fills)}, true
+	own := OwnSale{Order: o.planned, Attempt: attempt + 1, VenueOrderID: s.venueID, Fills: slices.Clone(o.fills)}
+	if s.ended {
+		own.Ended, own.EndStatus = s.end, s.endStatus
+	}
+	return own, true
+}
+
+// OwnLiveSale is OwnReleasedSale while the sale is still live: it has
+// neither ended nor filled in full. ok is false otherwise.
+func (g *Gate) OwnLiveSale(tag, instrumentID string) (OwnSale, bool) {
+	s, ok := g.OwnReleasedSale(tag, instrumentID)
+	if !ok || !s.Live() {
+		return OwnSale{}, false
+	}
+	return s, true
 }
 
 // RestoreOwnSale restores, from a recovered decision, the sale back to 98%

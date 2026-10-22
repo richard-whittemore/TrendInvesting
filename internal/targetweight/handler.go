@@ -266,7 +266,18 @@ import (
 //     only while no venue had named it and nothing had filled, and a run
 //     restarted after one refused the venue's reports on it, so a journal
 //     holding one decides differently.
-const RulesVersion = "1.24.0"
+//   - 1.25.0 records the run's own sale back to 98% in each Boost decision
+//     once it has ended, canceled or invalid, or filled in full, whenever a
+//     venue order ID is known for it, with its end and executions (decision
+//     schema 9), and a run restarted from the decision restores it ended, so
+//     a late fill after its cancel (ADR 0022), an execution sent again and a
+//     later lifecycle report on it are read as in the full run, each
+//     execution counted once (ADR 0026, point 5: recovered, never
+//     recomputed). A report giving another order that sale's venue order ID
+//     is refused on arrival, as for a live one. 1.24.0 recorded the sale as
+//     spent and a run restarted after one refused those reports, so a
+//     journal holding one decides differently.
+const RulesVersion = "1.25.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -815,9 +826,12 @@ func (h *Handler) recovery(p event.TargetsDecidedPayload) (risklimit.Recovery, e
 	// retirement refused or read, as in the full run, and no second attempt
 	// is made while it works (ADR 0019, "Explained means", and amended
 	// 2026-10-15: one attempt; ADR 0026, point 5: recovered, never
-	// recomputed). A decision recorded at version 7 states none of these: it
-	// recorded the sale only while no venue had named it and nothing had
-	// filled.
+	// recomputed). A sale that had ended or filled in full is restored so
+	// too, with its end, so a late fill after its cancel is read as in the
+	// full run (ADR 0022) and never a second attempt. A decision recorded at
+	// version 7 states none of these: it recorded the sale only while no
+	// venue had named it and nothing had filled; one recorded at version 8
+	// recorded it only while it was live.
 	if r := p.Boost.RestoredSale; r != nil {
 		rec.SaleAttempt = &risklimit.RestoredSaleAttempt{IncidentID: r.IncidentID, Attempted: r.Attempted && r.Order == nil, Retired: r.RetiredAttempts}
 		if r.Order != nil {
@@ -829,8 +843,8 @@ func (h *Handler) recovery(p event.TargetsDecidedPayload) (risklimit.Recovery, e
 			for i, f := range w.Fills {
 				fills[i] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
 			}
-			rec.OwnSale = &risklimit.RestoredOwnSale{RestoredOrder: risklimit.RestoredOrder{Order: o, Fills: fills, VenueOrderID: r.Order.VenueOrderID},
-				Trigger: r.Order.Trigger, Attempt: r.Order.Attempt}
+			rec.OwnSale = &risklimit.RestoredOwnSale{RestoredOrder: risklimit.RestoredOrder{Order: o, Fills: fills, Ended: r.Order.EndedAt, VenueOrderID: r.Order.VenueOrderID},
+				Trigger: r.Order.Trigger, Attempt: r.Order.Attempt, EndStatus: r.Order.Status}
 		}
 	}
 	// An accepted order still working beside the watched one is restored
@@ -1395,8 +1409,8 @@ func (h *Handler) learnVenueID(id, venueID string) {
 
 // refuseVenue refuses record in when it would give order id the venue order
 // ID venueID that another order the run lists (the watched order, those
-// awaiting the venue's verdict, the working ones and the run's own live sale
-// back to 98%, as the next decision records each) already carries: a
+// awaiting the venue's verdict, the working ones and the run's own sale back
+// to 98%, live or ended, as the next decision records each) already carries: a
 // venue order ID names one order, and the failure is the input's, refused
 // when it arrives rather than found when the decision is written (ADR 0026,
 // point 5, amended 2026-10-18; fail closed, AGENTS.md). venueID is never
@@ -1816,16 +1830,26 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 // was, reads the venue's later reports on it as this run does, and frees it
 // on a retirement only while no venue has named it (ADR 0026, point 2,
 // "Boost", and point 5, amended 2026-10-22: recovered, never recomputed).
+// One that a venue ended, canceled or invalid, or that filled in full, is
+// recorded so too, with its end, whenever a venue order ID is known for
+// it: the incident's attempt is spent, so it is the one such sale, and this
+// run reads every later report on it for as long as the incident stands,
+// which is the rest of the run, so a run restarted from the decision reads
+// a late fill after its cancel (ADR 0022), an execution sent again and a
+// later lifecycle report on it as this run does.
 func (h *Handler) restoredSale() *event.BoostRestoredSale {
 	incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(h.cfg.Boost.InstrumentID)
 	if !ok {
 		return nil
 	}
 	r := &event.BoostRestoredSale{IncidentID: incident, Attempted: attempted, RetiredAttempts: retired}
-	if s, live := h.gate.OwnLiveSale(incident, h.cfg.Boost.InstrumentID); attempted && live {
+	if s, own := h.gate.OwnReleasedSale(incident, h.cfg.Boost.InstrumentID); attempted && own && (s.Live() || s.VenueOrderID != "") {
 		o := s.Order
 		r.Order = &event.BoostRestoredSaleOrder{ClientOrderID: o.ClientOrderID, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice,
-			Trigger: o.Sale.Trigger, Attempt: s.Attempt, Named: h.named[o.ClientOrderID], VenueOrderID: s.VenueOrderID}
+			Trigger: o.Sale.Trigger, Attempt: s.Attempt, Named: h.named[o.ClientOrderID], VenueOrderID: s.VenueOrderID, Status: s.EndStatus}
+		if !s.Ended.IsZero() {
+			r.Order.EndedAt = s.Ended.UTC()
+		}
 		for _, f := range s.Fills {
 			r.Order.Filled += f.Quantity
 			r.Order.Fills = append(r.Order.Fills, event.BoostWatchedFill{FillID: f.FillID, Quantity: f.Quantity, Price: f.Price, Commission: f.Commission, FilledAt: f.FilledAt.UTC()})

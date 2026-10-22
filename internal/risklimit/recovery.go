@@ -39,21 +39,24 @@ type RetiredSaleAttempt struct {
 	Attempt      int
 }
 
-// RestoredOwnSale is the run's own live sale back to 98% as RestoreOwnSale
-// restores it: the order released, with its executions and venue order ID,
-// what fired it, and the attempt it is, the first being 1 (0 for a decision
-// recorded at version 7, which states none). The embedded Ended must be
-// zero: a live sale cannot be ended, so RestoreOwnSale refuses one that is.
+// RestoredOwnSale is the run's own sale back to 98% as RestoreRecovery
+// restores it (OwnReleasedSale): the order released, with its executions
+// and venue order ID, what fired it, the attempt it is, the first being 1
+// (0 for a decision recorded at version 7, which states none), and, once a
+// venue ended it, the second of that end (the embedded Ended) and how it
+// ended, canceled or invalid (EndStatus): both or neither. Its executions
+// may come to its released shares, a sale filled in full.
 type RestoredOwnSale struct {
 	RestoredOrder
-	Trigger string
-	Attempt int
+	Trigger   string
+	Attempt   int
+	EndStatus string
 }
 
 // Recovery is everything a recovered decision restores into the gate, in
 // the order restored: the orders released before the sale (Released), the
 // incident's sale attempt, the sale attempts retired as never sent, the
-// run's own live sale, and then the working orders (Working). Release order
+// run's own sale, live or ended, and then the working orders (Working). Release order
 // is the order of restoration, so a list restored latest first is given
 // latest first.
 type Recovery struct {
@@ -91,6 +94,7 @@ func (g *Gate) RestoreRecovery(r Recovery) error {
 	if s := r.OwnSale; s != nil {
 		g.applyReleased(s.RestoredOrder)
 		g.orders[s.Order.ClientOrderID].planned.Sale = event.SaleFigures{Kind: event.SaleKindIncident, Trigger: s.Trigger}
+		g.ledger.sells[s.Order.ClientOrderID].endStatus = s.EndStatus
 		g.recordAttempt(s.Order.Tag, s.Order.InstrumentID)
 	}
 	for _, o := range r.Working {
@@ -199,8 +203,9 @@ func (g *Gate) checkOwnSale(s RestoredOwnSale, st *recoveryStage) error {
 		return fmt.Errorf("risklimit: restored sale %s is a %s; a sale back to 98%% is a sell", o.ClientOrderID, o.Side)
 	case s.Trigger != event.SaleTriggerExit && s.Trigger != event.SaleTriggerMarginUrgent:
 		return fmt.Errorf("risklimit: restored sale %s was fired by %q, not exit or margin-urgent", o.ClientOrderID, s.Trigger)
-	case !s.Ended.IsZero():
-		return fmt.Errorf("risklimit: restored sale %s is ended; a live sale cannot be ended", o.ClientOrderID)
+	case s.Ended.IsZero() != (s.EndStatus == ""),
+		s.EndStatus != "" && s.EndStatus != event.OrderLifecycleStatusCanceled && s.EndStatus != event.OrderLifecycleStatusInvalid:
+		return fmt.Errorf("risklimit: restored sale %s is ended at %v as %q; a sale a venue ended states when and how, canceled or invalid, and one it did not end states neither", o.ClientOrderID, s.Ended, s.EndStatus)
 	}
 	next := st.restoredRetired(g, o.Tag) + st.retired(g, o.Tag, o.InstrumentID)
 	if want := orderplan.SaleAttemptClientOrderID(o.Tag, o.InstrumentID, next); o.ClientOrderID != want {
@@ -209,12 +214,20 @@ func (g *Gate) checkOwnSale(s RestoredOwnSale, st *recoveryStage) error {
 	if s.Attempt != 0 && s.Attempt != next+1 {
 		return fmt.Errorf("risklimit: restored sale %s is recorded as attempt %d of incident %q's sale; the next attempt is %d", o.ClientOrderID, s.Attempt, o.Tag, next+1)
 	}
-	return g.checkReleased(s.RestoredOrder, st)
+	return g.checkRestored(s.RestoredOrder, st, true)
 }
 
 // checkReleased is RestoreReleased's check of r, against the gate with st
 // applied; it stages r on success.
 func (g *Gate) checkReleased(r RestoredOrder, st *recoveryStage) error {
+	return g.checkRestored(r, st, false)
+}
+
+// checkRestored is checkReleased, with r's executions allowed to come to its
+// released shares when filledInFull: the run's own sale back to 98% is
+// restored filled in full, where a watched or working order filled in full
+// is recorded no more.
+func (g *Gate) checkRestored(r RestoredOrder, st *recoveryStage, filledInFull bool) error {
 	o := r.Order
 	switch known := g.orders[o.ClientOrderID] != nil || st.orders[o.ClientOrderID]; {
 	case o.AccountID != g.accountID:
@@ -242,7 +255,7 @@ func (g *Gate) checkReleased(r RestoredOrder, st *recoveryStage) error {
 		}
 		// Checked against the shares released before it is added, so the
 		// sum stays below them and can never wrap (fail closed, AGENTS.md).
-		if f.Quantity >= o.Quantity-filled {
+		if f.Quantity > o.Quantity-filled || f.Quantity == o.Quantity-filled && !filledInFull {
 			return fmt.Errorf("risklimit: restored order %s has %d shares filled before fill %s of %d; a watched order has fewer filled than its %d released", o.ClientOrderID, filled, f.FillID, f.Quantity, o.Quantity)
 		}
 		seen[f.FillID] = true
