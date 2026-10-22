@@ -61,8 +61,8 @@ func main() {
 // delivered is the reporter's state file: the incident keys already sent,
 // per channel, when each channel last took each, which times a repeat, how
 // many repeats each channel has taken, which names each repeat, and when each
-// channel was first seen with no record, before which it is sent no alert
-// (see channelBaseline).
+// channel was first seen with no record, before which the log's events are
+// history to it (see channelBaseline).
 type delivered struct {
 	Keys      []string             `json:"keys"`
 	Sent      map[string]time.Time `json:"sent,omitempty"`
@@ -70,11 +70,14 @@ type delivered struct {
 	Baselines map[string]time.Time `json:"baselines,omitempty"`
 }
 
-// channelBaseline is the time before which a channel with no record is sent
-// no alert, given the start of the run that first sees it. A new or lost
-// state file, or a newly named channel, begins at the start of the run, so
-// the log's earlier history is not replayed to it: only events after it are
-// sent (ADR 0019, "Alerting": each incident once). A test replaces it.
+// channelBaseline is the time before which the log's events are history to
+// a channel with no record, given the start of the run that first sees it. A
+// new or lost state file, or a newly named channel, begins at the start of
+// the run, so the log's earlier history is not replayed to it (ADR 0019,
+// "Alerting": each incident once). What is still in force is not history:
+// the channel is told the account's standing once (tellStateAtStart) and
+// every open alert, repeating and not acknowledged, raised before it
+// (sendersFor); events after it are sent as usual. A test replaces it.
 var channelBaseline = func(start time.Time) time.Time { return start }
 
 func run(args []string, getenv func(string) string, now func() time.Time, out io.Writer, client *http.Client) error {
@@ -259,8 +262,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
-	if *summary {
-		if err := saySummaryRoute(senders, label, out, seen, sent, repeats, at, *repeat, record); err != nil {
+	// The notice that the summary has no channel is the account's, keyed by
+	// the account the journal names, so it is said only when the journal
+	// reads, as the summary itself is sent only then.
+	if *summary && refused == nil {
+		if err := saySummaryRoute(senders, setAside, account, out, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -399,13 +405,17 @@ const summaryNoChannelPrefix = "summary-no-channel:"
 // eyes are the channels, so the notice is a routine message on them, not a
 // line in the unit's output alone (ADR 0019, "Alerting"); it carries no
 // balance, and is shown in the unit's output (out, or the stdout echo when
-// named) while no channel has it yet. A server of the owner's own that takes the summary clears the
-// notice, so it returns if the server is later left out or set aside.
-func saySummaryRoute(senders []sender, account string, out io.Writer, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, record func() error) error {
+// named) while no channel has it yet. A server of the owner's own that takes
+// the summary clears the notice, so it returns if the server is later left
+// out or set aside: it is resolved on each working PagerDuty channel that
+// took it, since an incident acknowledged on the phone takes no further
+// triggers under its key, and forgotten channel by channel, keeping the
+// record of a PagerDuty channel set aside or whose resolve failed so the
+// resolve is sent in a later run (ADR 0019, "Alerting"; as clockStep does).
+func saySummaryRoute(senders []sender, setAside []channelFault, account string, out io.Writer, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, at time.Time, every time.Duration, record func() error) error {
 	for _, s := range senders {
 		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
-			forget(summaryNoChannelPrefix, seen, sent, repeats)
-			return nil
+			return clearSummaryNotice(senders, setAside, seen, sent, repeats)
 		}
 	}
 	a := report.Alert{
@@ -420,6 +430,33 @@ func saySummaryRoute(senders []sender, account string, out io.Writer, seen map[s
 		_, _ = fmt.Fprintln(out, "reporter: "+a.Body)
 	}
 	return deliver(senders, a, seen, sent, repeats, at, every, record)
+}
+
+// clearSummaryNotice resolves and forgets every notice that the daily
+// summary had no channel, channel by channel (see saySummaryRoute).
+func clearSummaryNotice(senders []sender, setAside []channelFault, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
+	keys := map[string]bool{}
+	for k := range seen {
+		if _, key, ok := strings.Cut(k, "|"); ok && strings.HasPrefix(key, summaryNoChannelPrefix) {
+			keys[key] = true
+		}
+	}
+	var failures []error
+	for key := range keys {
+		failed, err := resolveAll(senders, key, seen)
+		if err != nil {
+			failures = append(failures, err)
+		}
+		keep := map[string]bool{}
+		for _, f := range setAside {
+			keep[f.channel] = f.channel == "pagerduty"
+		}
+		for _, name := range failed {
+			keep[name] = true
+		}
+		forgetAlert(key, keep, seen, sent, repeats)
+	}
+	return errors.Join(failures...)
 }
 
 // readJournal reads and verifies the journal and returns the history of the

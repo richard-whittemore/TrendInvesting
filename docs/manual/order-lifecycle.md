@@ -75,16 +75,17 @@ log, the alert is no longer raised, and if you were already paged, one
 A report from IBKR that the engine refused acknowledges nothing, and gets
 its own **urgent** alert, "venue report … not read", once per report (it
 does not repeat). That covers any report
-the run would read (an order status report in either run, a fill in a
-momentum run) that cannot be read at all, at a version the run does not read
+the run would read (an order status report or a fill, in either run) that
+cannot be read at all, at a version the run does not read
 or one that does not validate, whatever order it names: its client order ID
 in the alert may be empty, because the report was refused before the order it
 names was known, so check IBKR for every order around the time it was
 recorded. It also covers a report about an order the run released that the
 rule above does not count. A report that can be read about an order the run
 never released raises no alert: it is reconciliation's to explain. A fill in
-a Boost run raises no alert, readable or not, because the reporter does not
-yet read a Boost run's fills by the engine's rule (above). The reporter's
+a Boost run that can be read is judged by the risk gate's own rule: one the
+rule refuses raises this alert only when its order is already acknowledged,
+since otherwise the order's "not acknowledged" alert covers it. The reporter's
 other alerts keep coming: one bad report in the log does not stop the
 reporter reading the rest of it.
 
@@ -129,6 +130,10 @@ incident reach a person; an order IBKR never acknowledged is one.
 - `cmd/reporter`,
   `TestTheReporterAlertsOnceOnAnUnacknowledgedOrderUntilItIsAcknowledged` and
   `TestTheAcknowledgementBoundMustBePositive`.
+- `internal/report`, `TestABoostFillAcknowledgesAnOrderByTheGatesRule` and
+  `TestAnUnreadableBoostFillPagesByItsInputID`: a Boost fill that cannot be
+  read pages as not read, keyed by its input ID, even on an acknowledged
+  order.
 - `cmd/reporter`, `TestAnUnreadVenueReportDoesNotSilenceTheOtherAlerts`: an
   unreadable report raises its own alert once and the unacknowledged-order
   alert still reaches you.

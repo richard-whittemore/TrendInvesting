@@ -16,7 +16,9 @@ import (
 // a fill as acknowledged and does not page it as unacknowledged. A fill the
 // gate refuses acknowledges nothing, and on an order already acknowledged,
 // where no unacknowledged page would follow, it is a venue report the engine
-// did not read, as in a momentum run (ADR 0022; ADR 0019, "Alerting").
+// did not read, as in a momentum run (ADR 0022; ADR 0019, "Alerting"). A
+// fill that cannot be read at all is such a report whatever order it names,
+// as in a momentum run.
 func TestABoostFillAcknowledgesAnOrderByTheGatesRule(t *testing.T) {
 	order := releasedOrder("tw-1", event.TradingModePaper)
 	at := day(0).Add(time.Minute)
@@ -62,7 +64,11 @@ func TestABoostFillAcknowledgesAnOrderByTheGatesRule(t *testing.T) {
 		}, false, "", 0},
 		"a fill that does not validate": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:zero", at, fill("f1", 0, nil))
-		}, false, "", 0},
+		}, false, "", 1},
+		"a fill at a schema version this build does not read, on an acknowledged order": {func(r *logRun) {
+			r.add(journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "submitted", at, submitted)
+			r.add(journal.KindInput, event.FillEventType, 99, "fill:future", at.Add(time.Minute), fill("f1", 4, nil))
+		}, true, "submitted", 1},
 		"a fill id reused for another execution": {func(r *logRun) {
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at, fill("f1", 9, nil))
 			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:reused", at, fill("f1", 1, nil))
@@ -87,7 +93,7 @@ func TestABoostFillAcknowledgesAnOrderByTheGatesRule(t *testing.T) {
 				t.Fatal(err)
 			}
 			if len(unread) != c.unread {
-				t.Errorf("unread %+v, want %d: only a fill the gate refuses on an order already acknowledged is a report the engine did not read", unread, c.unread)
+				t.Errorf("unread %+v, want %d: a fill that cannot be read, or one the gate refuses on an order already acknowledged, is a report the engine did not read", unread, c.unread)
 			}
 			got := stateOf(t, orders, "tw-1")
 			if (got.State == report.LifecycleAcknowledged) != c.acknowledged || got.Acknowledgement != c.by {
@@ -101,5 +107,29 @@ func TestABoostFillAcknowledgesAnOrderByTheGatesRule(t *testing.T) {
 				t.Errorf("an order whose only report the gate refuses must still page as unacknowledged: %+v", alerts)
 			}
 		})
+	}
+}
+
+// TestAnUnreadableBoostFillPagesByItsInputID: a Boost fill at a schema
+// version this build does not read names no client order ID that can be
+// trusted, so it pages as a venue report the engine did not read, keyed by
+// its input's ID, even when the order it was for is already acknowledged
+// and nothing else would page (ADR 0019, "Alerting"; ADR 0015).
+func TestAnUnreadableBoostFillPagesByItsInputID(t *testing.T) {
+	run := &logRun{t: t}
+	run.session(0)
+	run.release(0, releasedOrder("tw-1", event.TradingModePaper))
+	at := day(0).Add(time.Minute)
+	run.add(journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "submitted", at,
+		event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: "tw-1", OrderID: "7", InstrumentID: "SPY", Side: event.OrderSideBuy,
+			Status: event.OrderLifecycleStatusSubmitted, Quantity: 9, LimitPrice: 101, OccurredAt: at})
+	run.add(journal.KindInput, event.FillEventType, 99, "fill:future", at.Add(time.Minute), map[string]string{"shape": "unknown"})
+	_, unread, err := report.OrderLifecycles(run.out, event.TargetWeightStrategyBoost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := report.UnreadReportAlerts("joint", unread)
+	if len(alerts) != 1 || alerts[0].Key != "venue-report-unread:fill:future@joint" || alerts[0].Severity != report.Urgent {
+		t.Fatalf("an unreadable Boost fill raised %+v, want one urgent page keyed by its input ID", alerts)
 	}
 }

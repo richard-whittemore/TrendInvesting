@@ -92,7 +92,7 @@ account.
 | A decision was withheld for another reason | routine | run of the same reason |
 | An order to be sent was not acknowledged by IBKR within `-ack-within` of its commit ([order lifecycle](order-lifecycle.md)). A report that the engine reads counts as the acknowledgement. In a Boost run a fill is read by the risk gate's own rule, so a fill that names the order and fits it (part or whole, even one that arrives after IBKR canceled the order) acknowledges it, and a fill the gate refuses (past the order's size, for another account or side, or a fill number reused for a different execution) does not. A refused fill on an order already acknowledged is paged as a report the engine did not read (two rows down) | urgent | order (its client order ID) |
 | An order already alerted as unacknowledged has since been acknowledged | routine | order |
-| A report from IBKR in the log that the engine did not read: it does not validate, or does not match the order it names ([order lifecycle](order-lifecycle.md)); in a Boost run, also a fill the risk gate's rule refuses on an order already acknowledged | urgent | that report (its input ID) |
+| A report from IBKR in the log that the engine did not read: it does not validate, is at a version this build does not read (its client order ID may then be unknown, so the alert names the report itself), or does not match the order it names ([order lifecycle](order-lifecycle.md)); in a Boost run, also a fill the risk gate's rule refuses on an order already acknowledged | urgent | that report (its input ID) |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
@@ -269,15 +269,25 @@ The delivery rules:
   the summary is not sent. The reporter tells you once, as a routine message
   on the incident channels, "<account>: the daily summary has no channel:
   name your own ntfy server" (on PagerDuty it is a low-urgency `info` event),
-  and in the unit's output (`journalctl -u ti-reporter@boost`). Incident
-  alerts are unaffected and the run is not an error. It tells you again only
-  if your server takes the summary and is later left out or set aside.
+  and in the unit's output (`journalctl -u ti-reporter@boost`). It is said
+  only in a run whose journal reads, since it names the account. Incident
+  alerts are unaffected. When the route is simply absent (ntfy not named, or
+  only the public relay), the run is not an error; when your server's channel
+  is set aside for a bad secret, the run still ends with an error naming that
+  channel, as for any channel set aside. Once your server takes the summary,
+  the notice's PagerDuty incident is resolved and the notice forgotten (if
+  PagerDuty is set aside then, or its resolve fails, its record is kept and
+  the resolve retried at a later firing). It tells you again only if your
+  server is later left out or set aside.
 - ntfy takes a message of at most 4096 bytes. A longer one (an alert naming
   many instruments, or a long summary) is sent as numbered parts, each titled
   with the alert's title and "(1/3)", "(2/3)" and so on; read them in order.
-  The parts together are the whole message. If one part fails, the whole
-  message is sent again at the next firing, so you may see the earlier parts
-  twice.
+  The parts together are the whole message. The time limit
+  (`-send-timeout`) covers all the parts of one message together, not each
+  part, so a message that cannot be sent within it fails the ntfy channel
+  only and the other channels are sent the alert without waiting. If one part
+  fails, or the time runs out, the whole message is sent again at the next
+  firing, so you may see the earlier parts twice.
 - The summary's channel failing (your server unreachable, say) fails the run
   with the channel named, and retries the summary at the next firing. It never
   holds back an incident page: the incidents are sent first, to every channel
@@ -299,8 +309,10 @@ The delivery rules:
   decisions); only events after it are sent. What is still in force is not
   history: the channel is sent, once, an urgent page "<account>: state at
   reporter start: Halted" (or Degraded, or Normal) naming the engine state and
-  its scope, the kill switch if it is engaged, a pending cash read, the
-  margin-cushion alarm if it is not clear, and every open alert. Each open
+  its scope, Boost's buys if two orders the venue rejected in a row have
+  stopped them (with the orders, and whether the boost is on), the kill
+  switch if it is engaged, a pending cash read, the margin-cushion alarm if it
+  is not clear, and every open alert. Each open
   alert (a Degraded, Halted or reconciliation alert you have not
   acknowledged) is then sent to it, its title beginning "state at reporter
   start:", and repeats every `-repeat-interval` until you acknowledge it, as
@@ -310,9 +322,15 @@ The delivery rules:
   set aside for a bad secret is recorded too, so what it missed while set
   aside, and the state in force, reach it once it works. A channel that
   already has alerts recorded in a state file written by an earlier reporter
-  is not new. If the reporter cannot write the file at that moment, it sends
-  that channel the whole log instead, which is noisy but never silent, and
-  the run ends with an error naming the write. The daily summary is keyed by
+  is not new. If the reporter cannot write the file at that moment, the
+  baseline is dropped and that channel is sent every alert the log holds,
+  acknowledged Halted and Degraded incidents included, once each as it would
+  have been at the time (urgent on PagerDuty); and since nothing could be
+  recorded, the same happens again at every firing until the file can be
+  written (PagerDuty folds the repeats into the incidents already open under
+  the same keys; ntfy shows each again). This is noisy but never silent, and
+  each such run ends with an error naming the write (the "reporter: write
+  state" row below). The daily summary is keyed by
   its day, not an event, so a new state file sends the latest closed day's
   summary once.
 - The reporter remembers what each channel has taken in its own state file
@@ -945,7 +963,7 @@ passes `-clock-check`.
 | PagerDuty shows incidents, but your phone shows nothing | Both channels accepted the alert, so the reporter counts it delivered. What your phone does with it is up to the PagerDuty and ntfy apps | Check the PagerDuty app's notification rules, and that the ntfy app is subscribed to exactly the topic (and server) in `secrets.env` |
 | "reporter: the state file is unreadable and is not reset, since a new file forgets which alerts are open: ..." | The run stops before anything is sent, every firing | Move the file aside: `sudo -u ti-trader mv /var/lib/trend-investing/reports/boost.reporter.json /var/lib/trend-investing/reports/boost.reporter.json.bad`. The next firing starts a new state file, which sends none of the log's routine history but pages, once per channel, the state at reporter start and every open alert (see "The delivery rules"); the open alerts then repeat until acknowledged |
 | "reporter: write state: ..." | Alerts may have gone, but were not recorded, so the next firing sends them again | Free disk space, or fix the folder's owner (`ti-trader`) |
-| "<account>: the daily summary has no channel: name your own ntfy server" on your channels, and "reporter: Incident alerts are unaffected, but the daily summary is not sent ..." in the unit's output | Every alert still goes, and the run does not fail. The summary does not: no ntfy server of your own takes it (ntfy is not in `-channel`, or `TI_NTFY_SERVER` is empty or the public ntfy.sh relay, or the ntfy channel was set aside). Said once; PagerDuty never takes the summary | Set up your own ntfy server ([server](server.md), "Your own ntfy server"), put its URL in `TI_NTFY_SERVER` and keep `ntfy` in the unit's `-channel`. Until then read the summary on the dashboard |
+| "<account>: the daily summary has no channel: name your own ntfy server" on your channels, and "reporter: Incident alerts are unaffected, but the daily summary is not sent ..." in the unit's output | Every alert still goes. The summary does not: no ntfy server of your own takes it (ntfy is not in `-channel`, or `TI_NTFY_SERVER` is empty or the public ntfy.sh relay, or the ntfy channel was set aside). Said once. The run does not fail for this, but a channel set aside fails the run naming it, as in the rows above. PagerDuty never takes the summary | Set up your own ntfy server ([server](server.md), "Your own ntfy server"), put its URL in `TI_NTFY_SERVER` and keep `ntfy` in the unit's `-channel`. Until then read the summary on the dashboard |
 | The daily summary stops arriving on your phone while incident pages still do | The ntfy channel failed for the summary (your server stopped, the phone left the tailnet, or Tailscale is down on the server) and the run ended with an error naming `ntfy:`. The summary is tried again at every firing | `systemctl status ti-ntfy` on the server; the phone must be signed in to Tailscale. Incident pages are not affected: they go to PagerDuty as well |
 | "reporter: the daily summary was not sent: ..." | Every alert still goes and is remembered; the summary is tried again at the next firing | Read the record it names with `journal-query`; if the record fails its checks, the log is damaged (row above on reading the journal) |
 | The repeats keep coming after you ran `operator acknowledge` | The engine records an acknowledgement only from its operator inbox, at its next input from the adapter, so with the engine stopped the repeats continue until it runs. One the engine refused leaves a `.refused` note in its notes folder (`operator-notes`, beside the inbox); one for another account, or for a key with a typing slip, is recorded and does nothing | Check the engine is running and read any `.refused` note; record the acknowledgement again with the right account, the current time and the key copied from the alert ([operator](operator.md), "Acknowledging an alert") |
@@ -1011,8 +1029,12 @@ passes `-clock-check`.
   `TestOneChannelsBadSecretNeverSilencesTheOther`,
   `TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset`,
   `TestTheServiceFileRunsTheReporterOnTheEnginesLog`,
-  `TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored` and
-  `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`.
+  `TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored`,
+  `TestAMultipartNtfyMessageHasOneDeadlineForAllItsParts`,
+  `TestRestoringTheSummaryRouteResolvesTheNoticesIncident`,
+  `TestTheNoChannelNoticeIsKeyedByTheAccountAlone` and
+  `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`; in
+  `internal/report`, `TestTheStateAtReporterStartNamesBoostsStoppedBuys`.
 - Tests in `cmd/dashboard`, among them `TestEveryRouteRefusesEveryWritingMethod`,
   `TestDashboardShowsTheDaysSkippedTrades`,
   `TestDashboardRefusesAJournalThatDoesNotVerify`,

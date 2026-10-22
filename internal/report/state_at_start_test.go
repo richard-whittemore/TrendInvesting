@@ -123,7 +123,7 @@ func TestTheStateAtReporterStartRefusesWhatItCannotRead(t *testing.T) {
 	if _, _, err := report.StateAtStartAlert(nil, nil); err == nil {
 		t.Error("a log with no configuration names no account, and must be an error")
 	}
-	for _, eventType := range []string{event.OperatorRunApprovedEventType, event.EngineStateEventType, event.ReconciliationResultEventType, event.MarginAlarmEventType} {
+	for _, eventType := range []string{event.OperatorRunApprovedEventType, event.EngineStateEventType, event.TargetsDecidedEventType, event.ReconciliationResultEventType, event.MarginAlarmEventType} {
 		s := newStream(t)
 		s.add(eventType, 99, "unreadable", day(1), map[string]string{})
 		if _, _, err := report.StateAtStartAlert(s.out, nil); err == nil {
@@ -140,5 +140,41 @@ func TestTheStateAtReporterStartRefusesWhatItCannotRead(t *testing.T) {
 		event.KillSwitchPayload{AccountID: "ira", AsOf: day(1), Engaged: true, Operator: "owner", Detail: "by hand"})
 	if a, ok, err := report.StateAtStartAlert(other.out, nil); err != nil || ok {
 		t.Errorf("another account's kill switch is in force here: %+v, %v, %v", a, ok, err)
+	}
+}
+
+// TestTheStateAtReporterStartNamesBoostsStoppedBuys: two orders the venue
+// rejected in a row stop Boost's buys until the owner starts a fresh run
+// (ADR 0026, point 2, "Boost", amended 2026-10-18). The page that announced
+// it is sent once, not repeated, so a channel that begins after it is told
+// the stop in the standing, with the latch it holds, or the owner sees no
+// reason the account buys nothing (ADR 0019, "Alerting").
+func TestTheStateAtReporterStartNamesBoostsStoppedBuys(t *testing.T) {
+	stoppedAt := func(n int, rejections int, latched bool) event.TargetsDecidedPayload {
+		p := event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
+			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100, LatchedBefore: latched, LatchedAfter: latched, VenueRejections: rejections}}
+		p.Boost.RejectedInARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-6"}, {ClientOrderID: "tw-7"}}[:rejections]
+		return p
+	}
+	stopped := newStream(t)
+	first := stoppedAt(0, 2, true)
+	first.Boost.ReplanWithheld = event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: "tw-7", Released: 37}
+	stopped.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0), first)
+	stopped.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:1", day(1), stoppedAt(1, 2, true))
+	a, ok := stateAtStart(t, stopped)
+	if !ok || a.Severity != report.Urgent {
+		t.Fatalf("Boost's stopped buys are not in force: %+v, %v", a, ok)
+	}
+	for _, want := range []string{"buys are stopped", "tw-6", "tw-7", "fresh run", "boost is on"} {
+		if !strings.Contains(a.Body, want) || !strings.Contains(a.PublicBody, want) {
+			t.Errorf("the standing does not say %q:\n%s\n%s", want, a.Body, a.PublicBody)
+		}
+	}
+
+	counting := newStream(t)
+	counting.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0), stoppedAt(0, 1, false))
+	if a, ok := stateAtStart(t, counting); ok {
+		t.Errorf("one rejection does not stop buys: %+v", a)
 	}
 }

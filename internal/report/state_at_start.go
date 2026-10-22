@@ -25,7 +25,9 @@ var killSwitchVersions = []uint32{event.KillSwitchSchemaVersion}
 // owner (ADR 0019, "Alerting": an alert is a safety requirement). It names
 // the engine state in force when it is Degraded or Halted, with its scope
 // (from the latest engine-state record, or the incident a fresh run's
-// approval carried in force), the kill switch when engaged, a pending cash
+// approval carried in force), Boost's buys when two venue rejections in a
+// row stop them, with the latch it holds (from the latest Boost decision),
+// the kill switch when engaged, a pending cash
 // read the latest reconciliation left undecided, the margin-cushion alarm
 // when not clear, and every open alert (repeating and not acknowledged),
 // which follow it. A kill-switch record that does not read is named as
@@ -39,7 +41,7 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 	if err != nil {
 		return Alert{}, false, err
 	}
-	var state, killed, pending, alarm []string // each the private line, then the public one
+	var state, stopped, killed, pending, alarm []string // each the private line, then the public one
 	headline := "Normal"
 	for _, e := range envelopes {
 		switch e.Type {
@@ -48,7 +50,9 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			if err := read(e, approvalVersions, &p); err != nil {
 				return Alert{}, false, err
 			}
-			state, headline = nil, "Normal"
+			// A fresh run ends Boost's stop (ADR 0026, point 2, "Boost",
+			// amended 2026-10-18).
+			state, stopped, headline = nil, nil, "Normal"
 			if in := p.IncidentInForce; in != nil {
 				headline = stateName(in.State)
 				line := fmt.Sprintf("The engine is %s, carried in force by the run's approval (incident %s)%s.",
@@ -63,6 +67,18 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 			line := fmt.Sprintf("The engine is %s since %s (%s)%s.", stateName(p.State), e.EventTime.UTC().Format(time.RFC3339), p.Reason,
 				scopeOf(p.ScopeInstrumentIDs, p.ScopeOrderIDs, p.ScopeCashComponents))
 			state, headline = []string{line + " " + p.Detail + ".", line}, stateName(p.State)
+		case event.TargetsDecidedEventType:
+			var p event.TargetsDecidedPayload
+			if err := read(e, decidedVersions, &p); err != nil {
+				return Alert{}, false, err
+			}
+			if p.StrategyID == event.TargetWeightStrategyBoost {
+				stopped = nil
+				if p.Boost.VenueRejections >= event.BoostVenueRejectionLimit {
+					line := boostStopped(e, p.Boost)
+					stopped = []string{line, line}
+				}
+			}
 		case event.KillSwitchEventType:
 			var p event.KillSwitchPayload
 			if err := read(e, killSwitchVersions, &p); err != nil {
@@ -107,7 +123,10 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 		}
 	}
 	var body, public []string
-	for _, l := range [][]string{state, killed, pending, alarm} {
+	if stopped != nil && headline == "Normal" {
+		headline = "Normal, Boost's buys stopped"
+	}
+	for _, l := range [][]string{state, stopped, killed, pending, alarm} {
 		if l != nil {
 			body, public = append(body, l[0]), append(public, l[1])
 		}
@@ -127,6 +146,27 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 		Body:       strings.Join(body, " ") + end,
 		PublicBody: strings.Join(public, " ") + end,
 	}, true, nil
+}
+
+// boostStopped names Boost's stop from the decision that records it in
+// force: the orders the venue rejected in a row, and the latch the boost
+// holds, which a fresh run's approval states (ADR 0026, points 2, "Boost",
+// amended 2026-10-18, and 5).
+func boostStopped(e event.Envelope, b event.BoostFigures) string {
+	ids := make([]string, 0, len(b.RejectedInARow))
+	for _, r := range b.RejectedInARow {
+		id := r.ClientOrderID
+		if r.VenueOrderID != "" {
+			id += " (IBKR " + r.VenueOrderID + ")"
+		}
+		ids = append(ids, id)
+	}
+	latch := "off"
+	if b.LatchedAfter {
+		latch = "on"
+	}
+	return fmt.Sprintf("Boost's buys are stopped as of %s: the venue rejected %d orders in a row (%s), so no session buys until you start a fresh run; its sells still go. The boost is %s (the latch a fresh run's approval states).",
+		e.EventTime.UTC().Format(time.RFC3339), b.VenueRejections, strings.Join(ids, ", "), latch)
 }
 
 // stateName is an engine state as the owner's manual names it. A record

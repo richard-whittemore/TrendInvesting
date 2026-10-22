@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -287,11 +288,21 @@ const ntfyMessageLimit = 4096
 // parts, each whole UTF-8 and within the limit, the title ending "(i/n)",
 // rather than failing the channel and never reaching the owner (ADR 0019,
 // "Alerting"). A part that fails fails the send, and the whole alert is
-// posted again at the next firing.
+// posted again at the next firing. The client's timeout (-send-timeout, the
+// longest one send to one channel may take) is one deadline for every part
+// together, so a message that cannot be posted within it fails this channel
+// alone and the other channels are reached without waiting (ADR 0019,
+// "Alerting": one channel's fault must not silence another).
 func (n ntfySender) send(a report.Alert, _ int) error {
 	body := a.Body
 	if n.public && a.PublicBody != "" {
 		body = a.PublicBody
+	}
+	ctx := context.Background()
+	if n.client.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, n.client.Timeout)
+		defer cancel()
 	}
 	parts := splitMessage(body, ntfyMessageLimit)
 	for i, part := range parts {
@@ -299,7 +310,7 @@ func (n ntfySender) send(a report.Alert, _ int) error {
 		if len(parts) > 1 {
 			title = fmt.Sprintf("%s (%d/%d)", a.Title, i+1, len(parts))
 		}
-		if err := n.post(title, part, a.Severity); err != nil {
+		if err := n.post(ctx, title, part, a.Severity); err != nil {
 			return err
 		}
 	}
@@ -325,9 +336,9 @@ func splitMessage(text string, limit int) []string {
 	return append(parts, text)
 }
 
-// post sends one message to the topic.
-func (n ntfySender) post(title, body string, severity report.Severity) error {
-	req, err := http.NewRequest(http.MethodPost, n.server+"/"+url.PathEscape(n.topic), bytes.NewBufferString(body))
+// post sends one message to the topic, within the send's deadline ctx.
+func (n ntfySender) post(ctx context.Context, title, body string, severity report.Severity) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.server+"/"+url.PathEscape(n.topic), bytes.NewBufferString(body))
 	if err != nil {
 		return errors.New("build request")
 	}

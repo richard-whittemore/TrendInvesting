@@ -70,8 +70,8 @@ type Order struct {
 // (version 5) by event.OrderReports, the rule the engine applies: one that
 // does not describe the order, takes it past its quantity in total, reuses
 // a fill id for another execution, or arrives once the order is terminal is
-// refused. A venue report the run would read (a lifecycle report in either
-// run, a fill in a momentum run) that cannot be read at all, at a schema
+// refused. A venue report the run would read (a lifecycle report or a fill,
+// in either run) that cannot be read at all, at a schema
 // version the run does not read or not validating, is returned as unread
 // whatever order it names, and its client order ID may be unknown (empty):
 // it is refused before the order it names is known. A report that is read
@@ -90,11 +90,11 @@ type Order struct {
 // risklimit.Gate.ObserveFill applies), not by event.OrderReports: the rule
 // accepts a fill its order's release describes whatever the lifecycle
 // reports before it said, a late fill after a cancellation included, so such
-// a fill acknowledges the order (ADR 0022). A fill the rule refuses, or one
-// that cannot be read, acknowledges nothing: on an order not yet
-// acknowledged the order alerts as unacknowledged, and on one already
-// acknowledged, where nothing else would alert, it is a report the engine
-// did not read, as in a momentum run.
+// a fill acknowledges the order (ADR 0022). A fill that cannot be read is
+// unread whatever order it names, as above. A fill the rule refuses
+// acknowledges nothing: on an order not yet acknowledged the order alerts as
+// unacknowledged, and on one already acknowledged, where nothing else would
+// alert, it is a report the engine did not read, as in a momentum run.
 func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
 	var unread []UnreadReport
@@ -230,11 +230,13 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		_, _, refused = reports.Fill(p)
 	case e.Type == event.FillEventType:
 		var p event.TargetWeightFillPayload
-		err := read(e, targetWeightFillVersions, &p)
-		if err == nil {
-			err = fills.accept(p)
+		if err := read(e, targetWeightFillVersions, &p); err != nil {
+			// One that cannot be read is unread whatever order it names, as
+			// in a momentum run: its client order ID may be unknown, and
+			// its alert is keyed by its input's ID.
+			return unread(p.ClientOrderID, err.Error())
 		}
-		if err != nil {
+		if err := fills.accept(p); err != nil {
 			// A fill the Boost engine's rule refuses acknowledges nothing.
 			if o, ok := byID[p.ClientOrderID]; ok && o.State == LifecycleAcknowledged {
 				return unread(p.ClientOrderID, err.Error())
