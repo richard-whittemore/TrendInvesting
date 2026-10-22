@@ -375,7 +375,7 @@ class DeployTests(unittest.TestCase):
         runs = [l.strip() for l in body.splitlines()
                 if re.search(r'\bsh "[^"]*installer[^"]*" -q', l) and not l.strip().startswith("#")]
         self.assertEqual(len(runs), 1, runs)
-        self.assertTrue(runs[0].startswith("runuser -u "), "the vendor installer never runs as root: " + runs[0])
+        self.assertTrue(runs[0].startswith("(cd / && runuser -u "), "the vendor installer never runs as root: " + runs[0])
         self.assertRegex(body, r"\binstall -d .*-o root")
 
     def test_the_shipped_adapter_configuration_is_valid_and_sends_nothing(self):

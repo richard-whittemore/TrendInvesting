@@ -50,12 +50,15 @@ rehearsal=${TI_REHEARSAL:-0}
 target=${TI_TARGET:-lightsail}
 etc=/etc/trend-investing
 unit_dir=/etc/systemd/system
-dl_cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
+# Absolute, because the vendor installers run from "/" (cd / && runuser ...).
+dl_cache=${TI_DOWNLOAD_CACHE-/var/cache/trend-investing}
 # The Mac mini's volumes that hold files owned by the service users.
 volume_roots=(/etc/trend-investing /var/lib/trend-investing /opt/trend-investing)
 
 log() { printf 'provision: %s\n' "$*"; }
 die() { printf 'provision: %s\n' "$*" >&2; exit 1; }
+test -n "$dl_cache" || die "TI_DOWNLOAD_CACHE is set but empty"
+case $dl_cache in /*) ;; *) dl_cache=$PWD/$dl_cache ;; esac
 
 need_root() { test "$(id -u)" -eq 0 || die "run as root (sudo)"; }
 
@@ -337,7 +340,7 @@ step_gateway() {
       log "rehearsal: checksum verified, installer not executed (not x86_64)"
       return 0
     fi
-    runuser -u ti-gateway -- env HOME=/var/lib/ti-gateway sh "$installer" -q -dir "$target" >/dev/null
+    (cd / && runuser -u ti-gateway -- env HOME=/var/lib/ti-gateway sh "$installer" -q -dir "$target" >/dev/null)
     test -x "$target/ibgateway" || die "Gateway installer finished but $target/ibgateway is missing"
     touch "$target/.installed-${GATEWAY_SHA256}"
     chown ti-gateway:ti-gateway "$target/.installed-${GATEWAY_SHA256}"
@@ -437,7 +440,7 @@ step_twsapi() {
     chmod 0755 "$scratch"
     install -d -o nobody -g nogroup -m 0700 "$scratch/home" "$scratch/tree"
     install -m 0644 "$installer" "$scratch/installer.sh"
-    runuser -u nobody -- env HOME="$scratch/home" sh "$scratch/installer.sh" -q -dir "$scratch/tree" >/dev/null
+    (cd / && runuser -u nobody -- env HOME="$scratch/home" sh "$scratch/installer.sh" -q -dir "$scratch/tree" >/dev/null)
     local unpacked
     unpacked=$(find "$scratch/tree" -type d -name pythonclient -path '*/source/*' | head -n 2)
     if test "$(printf '%s\n' "$unpacked" | grep -c .)" != 1; then
