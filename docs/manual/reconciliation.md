@@ -372,17 +372,19 @@ the cash ledger, under the same lock: its kind (`commission`, `fee`,
 (negative is money out of the account), the date, the currency and IBKR's
 transaction ID. It follows the cash ledger's rules: a posting whose
 transaction ID is already in it is never written again, a posting IBKR later
-states with another amount, kind, date or currency is refused, and a ledger
+states with another amount, kind, date or currency is recorded again as a
+restatement (below), never changed, and a ledger
 line that is not as the reader writes it (or not UTF-8 text), or a file that
 does not end with a whole line, is never appended to.
 
 The costs are read **in their own step, after the cash ledger is written**,
 so nothing in the costs can stop a deposit or withdrawal being recorded: a
-cost IBKR restates, or a damaged costs ledger, sets aside the costs alone.
-The cash ledger, its period and its status file are written as usual
-(`state` "read"), and the costs keep their own status file beside the costs
-ledger (`costs.jsonl.status.json`): "running" from the moment the reading
-starts, as the cash status says, then "read" with the costs written and how
+cost IBKR restates, a damaged costs ledger, or a costs status file that
+cannot be written, sets aside the costs alone. The cash ledger, its period
+and its status file are written as usual (`state` "read"), and only then do
+the costs start: they keep their own status file beside the costs ledger
+(`costs.jsonl.status.json`), "running" from the moment the costs step
+starts, then "read" with the costs written and how
 far they are recorded (`covered_to`), or "set-aside" (or "coverage-gap")
 with the reason. The unit still fails, so you see it, and the reporter's
 costs line says "costs incomplete" until a good reading clears it. The costs
@@ -392,7 +394,20 @@ was read before the costs were, or a lost costs period file) must start on
 or before the New York day you approved the first run, or the costs alone
 are set aside as a coverage gap until a statement reaching back to that day
 is read. A reading that gets no statement at all (a rejected token, a
-service error, a damaged cash ledger) sets aside both.
+service error, a damaged cash ledger) sets aside both. A reading stopped
+before its costs step leaves the previous costs status as it was, so the
+costs fall behind and the reporter says so ("behind as of <day>").
+
+**A cost IBKR restates.** When IBKR states a cost already in the costs
+ledger with another amount, kind, date or currency, the reader never
+changes the line it wrote: it adds a restatement line for the same
+transaction (`ibkr-flex:<ID>:restated:1`, then `:restated:2`, and so on)
+holding what IBKR now states, with a note naming the old and the new value
+("restated: was fee -10.0 USD on …, now fee -11.0 USD on …"). That reading
+sets the costs aside once, so the unit fails and you see it; the next
+reading finds the restated value recorded and reads on. The reporter and the
+dashboard count each cost once, at its latest value, and the costs text says
+how many were restated.
 
 A cost IBKR dates before the New York day you
 approved the first run is not written, as it belongs to the account before the
@@ -411,15 +426,23 @@ commission posting it finds. The reporter and the dashboard leave out a
 commission posting whose transaction ID is a logged fill's execution ID, or
 a correction of that execution (the same ID but its last dot-separated
 part), and count the fill's; and a corrected execution logged twice (the
-same ID but its last part) is counted once, at its latest commission. **This
+same ID but its last part) is counted once, at its latest commission: the
+one with the higher last part, whatever order the log holds them in, so the
+original execution delivered again after its correction never replaces the
+corrected commission. **This
 matching is an assumption until the first live statement is checked**
 against the owner's activity statement: it guards against IBKR listing a
 trade's commission in Cash Transactions under its execution ID
 (`0001f4e8.65a1b2c3.01.01`), which IBKR's documentation does not show. If
 the first live statement shows per-trade commissions there under a numeric
 ID, they would be counted twice, and the matching has to change before the
-totals are relied on. Interest and fees have no fill, so they are always the
-ledger's.
+totals are relied on. **A further assumption:** a "Commission Adjustment"
+under a numeric transaction ID that corrects a logged execution's commission
+cannot be matched to that execution (nothing in it names it), so it is
+counted as an adjustment, on top of the fill's commission; if IBKR also
+redelivers the corrected execution with its new commission, that correction
+would be counted twice. The first live statement settles this too. Interest
+and fees have no fill, so they are always the ledger's.
 
 **The equity before a transfer** comes from the engine's close snapshots
 (the reading after each close), found back through the chain of runs:
@@ -690,7 +713,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | `ti-flex@<instance>` failed; its status file says **the coverage file ... is not as this reader writes it** | Refused: the days the last reading covered are not known, so no day can be checked | Put the file back from a backup or the server's snapshot; never edit it by hand. Without one, tell the developer |
 | A ledger record has a `note` that a later (or earlier) transfer in the same interval was written first; the status file's `out_of_order` is above 0 | Information only: the transfer reached IBKR's report a day late. It is written, with the right figure; the record written before it keeps an `equity_before` that leaves this transfer out, and is not rewritten | Nothing; keep it in mind when reading that record's `equity_before` |
 | The reader's log says "transfer N is dated by day alone on the first run's approval day" | Information only: the approval came before that day's close, so it is written as after the approval (above, "The first book"); counted in `date_only_on_approval_day` | Check the transfer was made after you read the book in IBKR; if it was before, tell the developer |
-| `ti-flex@<instance>` failed; the cash status file says `"state": "read"` but the costs status file (`costs.jsonl.status.json`) says `"set-aside"` or `"coverage-gap"`: **transaction N is in the costs ledger as one amount, but IBKR now states another**, **the costs ledger ... line N is not a cost as this reader writes it** (or is not UTF-8 text, or does not end with a whole line), or the first costs reading **starts after the first run's approval day** | The costs alone are set aside: the deposits and withdrawals are still written and the cash status is "read", so the cash checks are unaffected. No cost is written; the daily summary's costs line says "costs incomplete" | A restated cost: check it in IBKR's activity statement, leave the costs ledger as it is and tell the developer (a corrected cost needs its own recorded correction, which is not built). A damaged line: put it back from a backup or the server's snapshot; never edit the ledger by hand. A first reading that does not reach back: set the Flex query's period to a custom range from the approval day, `sudo systemctl start ti-flex@<instance>`, then set it back, as for the cash coverage gap above |
+| `ti-flex@<instance>` failed; the cash status file says `"state": "read"` but the costs status file (`costs.jsonl.status.json`) says `"set-aside"` or `"coverage-gap"`: **IBKR restated transaction N (restated: was …, now …)**, **the costs status cannot be written** (in the unit's log), **the costs ledger ... line N is not a cost as this reader writes it** (or is not UTF-8 text, or does not end with a whole line), or the first costs reading **starts after the first run's approval day** | The costs alone are set aside: the deposits and withdrawals are still written and the cash status is "read", so the cash checks are unaffected. No new cost is written (a restatement writes only its restatement line); the daily summary's costs line says "costs incomplete" | A restated cost: nothing to do; the next evening's reading reads on and counts the latest value (check it in IBKR's activity statement if the amount surprises you). A costs status that cannot be written: check the folder `/var/lib/trend-investing/flex/<instance>/` is writable by the unit and that `costs.jsonl.status.json` is a file, then `sudo systemctl start ti-flex@<instance>`. A damaged line: put it back from a backup or the server's snapshot; never edit the ledger by hand. A first reading that does not reach back: set the Flex query's period to a custom range from the approval day, `sudo systemctl start ti-flex@<instance>`, then set it back, as for the cash coverage gap above |
 | The status file says `"state": "running"` with a `checked_at` more than 45 minutes old | The reading was stopped part way (above, "The status file"); the ledger is as it was | Read `journalctl -u ti-flex@<instance>`; the next firing reads again |
 | The status file's `unknown_types` is not `{}` | Information only: those rows are read but not classified, so not written | Tell the developer the type's name, so the reader can learn it |
 | The reader's log says "transfer N not written: ... before the first run's approval" | Information only: that transfer is already in the starting book you stated; the status file counts it (`in_first_book`) | Nothing |

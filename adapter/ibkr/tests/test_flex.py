@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -967,16 +968,59 @@ class ReadOnceTests(unittest.TestCase):
             self.assertIn(text, status["reason"])
         return status
 
-    def test_a_known_cost_restated_differently_sets_aside_only_the_costs(self):
+    def test_a_known_cost_restated_sets_aside_the_costs_once_and_is_recorded_as_a_restatement(self):
         self.read(FakeFlex())
+        before = self.costs()
         changed = fixture("statement.xml").replace(b'amount="-10" transactionID', b'amount="-11" transactionID')
         changed = changed.replace(
             b'<CashTransaction accountId="DU0000001" currency="USD" type="Dividends"',
             b'<CashTransaction accountId="DU0000001" currency="USD" type="Deposits/Withdrawals" '
             b'dateTime="20270115;120000" amount="100" transactionID="900000130" levelOfDetail="DETAIL"/>\n'
             b'<CashTransaction accountId="DU0000001" currency="USD" type="Dividends"')
-        self.assert_costs_set_aside(changed, "900000107")
+        self.assertFalse(self.read(FakeFlex(statements=(changed,))), "a restatement sets the costs aside once")
+        self.assertEqual(self.status()["state"], "read", "the costs never stop the cash reading")
         self.assertIn("ibkr-flex:900000130", [r["id"] for r in self.records()], "the new deposit is still recorded")
+        status = self.costs_status()
+        self.assertEqual(status["state"], "set-aside")
+        self.assertIn("900000107", status["reason"])
+        self.assertEqual(self.costs()[:len(before)], before, "a record once written is never changed")
+        self.assertEqual(self.costs()[len(before):], [
+            {"id": "ibkr-flex:900000107:restated:1", "type": "account.cost", "schema_version": 1,
+             "event_time": "2027-01-13T05:00:00Z", "source": "ibkr-flex",
+             "payload": {"kind": "fee", "amount": -11.0, "currency": "USD",
+                         "as_of": "2027-01-13T05:00:00Z", "transaction_id": "900000107"},
+             "note": "restated: was fee -10.0 USD on 2027-01-13T05:00:00Z, now fee -11.0 USD on 2027-01-13T05:00:00Z"},
+        ], "the restatement names the old and the new value; the latest counts")
+        self.assertTrue(self.read(FakeFlex(statements=(changed,))), "the next reading reads on")
+        self.assertEqual((self.costs_status()["state"], self.costs_status()["covered_to"]), ("read", "20270114"))
+        self.assertEqual(len(self.costs()), len(before) + 1, "the restated value is now the ledger's")
+        again = changed.replace(b'amount="-11" transactionID', b'amount="-12" transactionID')
+        self.assertFalse(self.read(FakeFlex(statements=(again,))))
+        self.assertEqual(self.costs()[-1]["id"], "ibkr-flex:900000107:restated:2")
+        self.assertTrue(self.read(FakeFlex(statements=(again,))))
+
+    def test_a_restatement_line_not_as_the_reader_writes_it_sets_the_costs_aside(self):
+        self.read(FakeFlex())
+        good = self.costs_ledger.read_text()
+        restated = json.loads(good.splitlines()[3])
+        restated["id"] += ":restated:1"
+        restated["note"] = "restated: was fee -10.0 USD on 2027-01-13T05:00:00Z, now fee -10.0 USD on 2027-01-13T05:00:00Z"
+        for name, change in (("a second restatement numbered 1", lambda r: r),
+                             ("a note that is not a restatement", lambda r: dict(r, note="edited")),
+                             ("a restatement of a cost never recorded",
+                              lambda r: dict(r, id="ibkr-flex:900000199:restated:1",
+                                             payload=dict(r["payload"], transaction_id="900000199")))):
+            with self.subTest(name):
+                lines = [restated, change(dict(restated))] if name.startswith("a second") else [change(dict(restated))]
+                self.costs_ledger.write_text(good + "".join(json.dumps(r) + "\n" for r in lines))
+                self.assert_costs_set_aside(fixture("statement.xml"), "not a cost as this reader writes it")
+
+    def test_an_unwritable_costs_status_never_stops_the_transfers_being_recorded(self):
+        Path(str(self.costs_ledger) + flex.STATUS_SUFFIX).mkdir()
+        self.assertFalse(self.read(FakeFlex()), "the costs not recorded fail the unit")
+        self.assertEqual(self.status()["state"], "read")
+        self.assertEqual([r["id"] for r in self.records()], ["ibkr-flex:900000101", "ibkr-flex:900000102"])
+        self.assertIn("costs", self.out.getvalue())
 
     def test_a_torn_costs_line_sets_aside_only_the_costs_and_the_transfers_are_still_written(self):
         self.costs_ledger.write_text('{"id": "something else"}\n')
@@ -987,16 +1031,21 @@ class ReadOnceTests(unittest.TestCase):
         self.costs_ledger.write_bytes(b"\xff\xfe\n")
         self.assert_costs_set_aside(fixture("statement.xml"), "UTF-8")
 
-    def test_the_costs_status_says_running_before_it_asks_ibkr(self):
-        # A reading stopped part way leaves "running" in the costs status too, never the previous "read".
+    def test_the_costs_status_says_running_once_the_cash_reading_is_final(self):
+        # A costs step stopped part way leaves "running" in the costs status, never the previous "read"; it is
+        # written only after the cash ledger, its period and its status, so it can never stop them.
         self.read(FakeFlex())
         seen = []
+        read_costs = flex.read_costs
 
-        def get(url, params):
-            seen.append(self.costs_status())
-            return FakeFlex()(url, params)
-        self.read(get)
-        self.assertEqual((seen[0]["state"], seen[0]["checked_at"]), ("running", "2027-01-16T02:30:00Z"))
+        def spy(path):
+            seen.append((self.costs_status(), self.status()))
+            return read_costs(path)
+        with unittest.mock.patch.object(flex, "read_costs", spy):
+            self.read(FakeFlex(), now=datetime(2027, 1, 17, 2, 30, tzinfo=timezone.utc))
+        costs, cash = seen[0]
+        self.assertEqual((costs["state"], costs["checked_at"]), ("running", "2027-01-17T02:30:00Z"))
+        self.assertEqual((cash["state"], cash["checked_at"]), ("read", "2027-01-17T02:30:00Z"))
         self.assertEqual(self.costs_status()["state"], "read")
 
     def test_a_reading_set_aside_before_its_statement_sets_aside_the_costs_too(self):
