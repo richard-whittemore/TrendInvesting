@@ -606,12 +606,11 @@ class Outbox:
             return True
 
     def strike(self, input_id):
-        """Remove the entry for input_id; one not there is already struck off."""
-        with self._locked():
-            entries = self.load()
-            kept = [e for e in entries if e["id"] != input_id]
-            if len(kept) != len(entries):
-                self._write(kept)
+        """Remove the entry for input_id; one not there is already struck off.
+
+        Copies each kept entry as the file holds it, exactly as strike_all does.
+        """
+        self.strike_all([input_id])
 
     def strike_all(self, input_ids):
         """Remove the entries for every one of input_ids in one write: all of them or none.

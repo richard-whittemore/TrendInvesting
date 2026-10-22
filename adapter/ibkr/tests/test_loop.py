@@ -1747,6 +1747,25 @@ class LoopTests(unittest.TestCase):
                 self.assertEqual(Path(path).read_bytes(), ("[" + kept + "]").encode())
                 self.assertEqual([e["id"] for e in outbox.load()], ["kept"])
 
+    def test_strike_of_one_entry_copies_each_kept_entry_as_the_outbox_holds_it(self):
+        # The single-entry strike copies each kept entry's own text, as
+        # strike_all does, so an outbox also holding a number the adapter
+        # never writes (NaN, Infinity, an exponent past a float's range)
+        # never makes it raise, and the kept entries stay byte for byte
+        # (fail closed, AGENTS.md).
+        for number in ("NaN", "-Infinity", "1e309"):
+            with self.subTest(number=number):
+                path = os.path.join(self.dir.name, "strike-one-" + number + OUTBOX_SUFFIX)
+                gone = '{"event_time":"2026-10-16T20:30:00Z","event_type":"x","id":"gone","payload":{},"schema_version":1}'
+                kept = ('{"event_time":"2026-10-16T20:30:00Z",\r\n "event_type":"x","id":"kept",'
+                        '"payload":{"price":' + number + '},"schema_version":1}')
+                Path(path).write_bytes(("[" + gone + "," + kept + "]").encode())
+                outbox = Outbox(path)
+                outbox.strike("gone")
+                self.assertEqual(Path(path).read_bytes(), ("[" + kept + "]").encode())
+                outbox.strike("absent")
+                self.assertEqual(Path(path).read_bytes(), ("[" + kept + "]").encode())
+
     def test_run_ended_refuses_a_queued_retirement_quantity_past_the_engines_int64(self):
         # The engine reads a retirement's quantity as an int64 (internal/event
         # OrderRetiredPayload), so a quantity above 2**63-1 is not one the
