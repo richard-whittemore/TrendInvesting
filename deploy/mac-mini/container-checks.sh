@@ -187,6 +187,11 @@ ENGINE
 
     # The reporter, fired by hand: its credential is handed over and used.
     curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null "$sink/reset" || fail "the stand-in on the Mac does not answer at $sink"
+    # The fixture log is old: both channels begin recorded long before it, as
+    # on a server whose reporter has run since before the log's events (a
+    # channel with no record is sent none of the log's earlier alerts).
+    printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pagerduty":"2000-01-01T00:00:00Z"}}' >"$state/reports/boost.reporter.json"
+    chown ti-trader:ti-trader "$state/reports/boost.reporter.json"
     systemctl start ti-reporter@boost.service || fail "ti-reporter@boost failed: $(journalctl -u ti-reporter@boost -n 10 --no-pager -o cat)"
     posts=$(sink_posts) || fail "the stand-in on the Mac does not list its requests"
     grep -q '^/rehearsal$' <<<"$posts" || fail "the reporter reached no ntfy stand-in: $posts"

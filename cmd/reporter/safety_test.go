@@ -60,7 +60,7 @@ func TestTheSendTimeoutMustBePositive(t *testing.T) {
 func TestAStateWriteThatIsNotDurableIsAnErrorAndKeepsTheOldState(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.json")
-	if err := saveState(path, map[string]bool{"ntfy|old": true}, nil, nil); err != nil {
+	if err := saveState(path, map[string]bool{"ntfy|old": true}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(path)
@@ -68,7 +68,7 @@ func TestAStateWriteThatIsNotDurableIsAnErrorAndKeepsTheOldState(t *testing.T) {
 	saved := syncFile
 	syncFile = func(*os.File) error { return failing }
 	defer func() { syncFile = saved }()
-	if err := saveState(path, map[string]bool{"ntfy|new": true}, nil, nil); !errors.Is(err, failing) {
+	if err := saveState(path, map[string]bool{"ntfy|new": true}, nil, nil, nil); !errors.Is(err, failing) {
 		t.Fatalf("a state file not synced to disk can come back empty after a power cut, so it must fail: %v", err)
 	}
 	after, _ := os.ReadFile(path)
@@ -105,7 +105,7 @@ func (r *relay) to(host string) []string {
 	return r.sent[host]
 }
 
-func TestTheDailySummaryNeverGoesThroughThePublicRelay(t *testing.T) {
+func TestTheDailySummaryNeverGoesThroughThePublicRelayOrToPagerDuty(t *testing.T) {
 	for name, server := range map[string]string{"default server": "", "named public server": "https://ntfy.sh/"} {
 		t.Run(name, func(t *testing.T) {
 			r := &relay{sent: map[string][]string{}}
@@ -113,42 +113,61 @@ func TestTheDailySummaryNeverGoesThroughThePublicRelay(t *testing.T) {
 			dir := t.TempDir()
 			args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-summary"}
 			environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server, "TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
-			if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, client); err != nil {
-				t.Fatalf("the summary reached PagerDuty, a private channel: %v", err)
+			var out bytes.Buffer
+			if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &out, client); err != nil {
+				t.Fatalf("a summary with nowhere to go is not an error: %v", err)
 			}
 			public := r.to("ntfy.sh")
 			if len(public) == 0 {
 				t.Fatal("the incident alerts must still go to ntfy")
 			}
 			for _, m := range public {
-				if strings.Contains(m, "daily summary") || strings.Contains(m, "Net liquidation") {
+				if strings.Contains(m, "daily summary 2024") || strings.Contains(m, "Net liquidation") {
 					t.Fatalf("the summary, with balances, went to the public relay:\n%s", m)
 				}
 			}
-			if got := strings.Join(r.to("events.pagerduty.test"), "\n"); !strings.Contains(got, "daily summary") {
-				t.Fatalf("the summary did not reach PagerDuty:\n%s", got)
+			got := strings.Join(r.to("events.pagerduty.test"), "\n")
+			if strings.Contains(got, "daily summary 2024") || strings.Contains(got, "Net liquidation") {
+				t.Fatalf("the summary opened a PagerDuty incident:\n%s", got)
+			}
+			if !strings.Contains(got, "engine halted") {
+				t.Fatalf("the incident alerts must still go to PagerDuty:\n%s", got)
+			}
+			if !strings.Contains(out.String(), "the daily summary is not sent") {
+				t.Fatalf("the reporter did not say the summary is not sent:\n%s", out.String())
 			}
 		})
 	}
 }
 
-func TestASummaryWithOnlyThePublicRelayIsRefusedButTheAlertsStillGo(t *testing.T) {
+func TestASummaryWithOnlyThePublicRelayIsNotSentAndSaidSoOnceButTheAlertsStillGo(t *testing.T) {
 	r := &relay{sent: map[string][]string{}}
 	dir := t.TempDir()
 	state := filepath.Join(dir, "s.json")
 	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "ntfy", "-summary"}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t"})
-	err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
-	if err == nil || !strings.Contains(err.Error(), "public relay") {
-		t.Fatalf("a summary no private channel took must be an error, got %v", err)
+	now := func() time.Time { return t0.Add(time.Hour) }
+	var first bytes.Buffer
+	if err := run(args, environment, now, &first, &http.Client{Transport: r}); err != nil {
+		t.Fatalf("a summary with nowhere to go is not an error: %v", err)
+	}
+	if got := strings.Count(first.String(), "the daily summary is not sent"); got != 1 {
+		t.Fatalf("the reporter said the summary is not sent %d times, want once:\n%s", got, first.String())
 	}
 	sent := strings.Join(r.to("ntfy.sh"), "\n")
-	if !strings.Contains(sent, "engine halted") || strings.Contains(sent, "daily summary") {
+	if !strings.Contains(sent, "engine halted") || strings.Contains(sent, "daily summary 2024") {
 		t.Fatalf("alerts must go and the summary must not:\n%s", sent)
 	}
 	raw, _ := os.ReadFile(state)
 	if strings.Contains(string(raw), "summary:") {
 		t.Fatalf("the summary was recorded as delivered: %s", raw)
+	}
+	var second bytes.Buffer
+	if err := run(args, environment, now, &second, &http.Client{Transport: r}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(second.String(), "the daily summary is not sent") {
+		t.Fatalf("the reporter said it again on the next run:\n%s", second.String())
 	}
 }
 
@@ -194,12 +213,14 @@ func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
 // its unit's TimeoutStartSec) leaves behind.
 type killedAt struct {
 	state, left string
-	sends       []string
+	// at is the send the copy is taken at; 0 is the second.
+	at    int
+	sends []string
 }
 
 func (k *killedAt) RoundTrip(req *http.Request) (*http.Response, error) {
 	k.sends = append(k.sends, req.Header.Get("Title"))
-	if len(k.sends) == 2 {
+	if at := k.at; at == 0 && len(k.sends) == 2 || at != 0 && len(k.sends) == at {
 		raw, err := os.ReadFile(k.state)
 		if err == nil {
 			err = os.WriteFile(k.left, raw, 0o600)

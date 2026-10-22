@@ -11,10 +11,10 @@ import (
 // only the venue's first word on an order is read (ADR 0026, point 2,
 // "Boost", amended 2026-10-18).
 func TestAVerdictReadTwiceIsRecordedOnce(t *testing.T) {
-	h := &Handler{rejections: 1, inARow: []event.BoostRejectedOrder{{ClientOrderID: "a"}}}
+	h := &Handler{verdicts: BoostVerdicts{rejections: 1, inARow: []event.BoostRejectedOrder{{ClientOrderID: "a"}}}}
 	h.observeOutcome("a", true)
-	if h.rejections != 1 || len(h.inARow) != 1 || len(h.stoppedRejections) != 0 || h.withheld != (event.BoostReplan{}) {
+	if h.verdicts.rejections != 1 || len(h.verdicts.inARow) != 1 || len(h.stoppedRejections) != 0 || h.withheld != (event.BoostReplan{}) {
 		t.Errorf("rejections %d named %v, stopped %v, withheld %v; want the repeat ignored",
-			h.rejections, h.inARow, h.stoppedRejections, h.withheld)
+			h.verdicts.rejections, h.verdicts.inARow, h.stoppedRejections, h.withheld)
 	}
 }

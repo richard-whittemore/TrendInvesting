@@ -159,3 +159,10 @@ func closesSession(e event.Envelope) bool {
 	var p event.SessionClosedPayload
 	return read(e, sessionVersions, &p) == nil
 }
+
+// isBoost and isMomentum are the one classification of a run's strategy:
+// anything not Boost is not Boost (the Boost-only count fails closed), and
+// anything not momentum is not momentum.
+func isBoost(strategyID string) bool { return strategyID == event.TargetWeightStrategyBoost }
+
+func isMomentum(strategyID string) bool { return strategyID == event.TargetWeightStrategyMomentum }
