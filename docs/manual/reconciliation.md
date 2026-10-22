@@ -631,16 +631,16 @@ developer.
    Service Configuration**, turn the service on and **generate a token**.
    Note the token and its expiry date; IBKR ends a token at its expiry, and
    you generate a new one then.
-3. Put both in the server's secrets file, never anywhere else: `sudo -e
-   /etc/trend-investing/secrets.env`, the lines `TI_IBKR_FLEX_TOKEN=` and
+3. Put both in the server's secrets file, never anywhere else: `sudo ti-secrets
+   edit secrets.env`, the lines `TI_IBKR_FLEX_TOKEN=` and
    `TI_IBKR_FLEX_QUERY_ID=` (no quotes, no spaces). The token is a password
    to your account's reports: never paste it into a chat, an issue or a
    command line.
 4. For an IRA account, its number in its own file, the same shape as
-   `accounts/boost.env`: fill in `IBKR_ACCOUNT_TRAD_IRA=` in
-   `/etc/trend-investing/accounts/trad-ira.env`, or `IBKR_ACCOUNT_ROTH_IRA=`
-   in `roth-ira.env` (`sudo -e`). The provisioner creates both, root-owned,
-   mode 0600, with the line named only, so an IRA reader started before you
+   `accounts/boost.env`: fill in `IBKR_ACCOUNT_TRAD_IRA=` with
+   `sudo ti-secrets edit accounts/trad-ira.env`, or `IBKR_ACCOUNT_ROTH_IRA=`
+   with `sudo ti-secrets edit accounts/roth-ira.env`. The provisioner creates
+   both, encrypted, with the line named only, so an IRA reader started before you
    fill it in fails saying which line is empty (`systemctl status
    ti-flex@trad-ira` shows the reader's message). Do not delete the file: a
    missing one fails the unit before the reader runs, with only systemd's
@@ -732,7 +732,7 @@ reading has checked everything, so a stopped reading leaves it as it was.
 | The daily summary shows `cash drift` and `unexplained cash` | Information only: the drift since the previous close and that drift added up since the cash was last explained (an explained reconciliation, else the starting book). The program does not act on it, and the post-close reading is stamped at its read time instead of the close when the drift exceeds 1% of net liquidation (the session is then withheld). | A small posting day (interest, a dividend) is expected; a figure that keeps growing is a cash movement to find at IBKR before approving anything. |
 | Margin interest on the joint account | Not compared: Boost's book states no cash, so the result says cash is not compared. Nothing is seen. | Check the interest on IBKR's monthly statement yourself. |
 | A $12.30 fee and a $12.30 credit, both unrecorded | Not detected: cash is compared as one net total, and the two cancel. | The statement is the only check. |
-| `ti-flex@<instance>` failed; its status file says IBKR's Flex Web Service **rejected the token or the query** (error 1012 the token expired, 1015 the token is invalid, 1014 the query is invalid, 1011, 1013 or 1016 the service, its IP address or the account is not allowed; these codes are from IBKR's documentation, not yet verified against a live statement) | The Flex reader is set aside for this reading: no request for the statement is made, nothing is written to the ledger, and the token is never printed. Trading is unaffected. It tries again at the next firing | In Client Portal, check the Flex Web Service is on and the token not expired (generate a new one if it is), and the query ID; correct `TI_IBKR_FLEX_TOKEN` or `TI_IBKR_FLEX_QUERY_ID` with `sudo -e /etc/trend-investing/secrets.env`, then `sudo systemctl start ti-flex@<instance>` and check `journalctl -u ti-flex@<instance>` says it read |
+| `ti-flex@<instance>` failed; its status file says IBKR's Flex Web Service **rejected the token or the query** (error 1012 the token expired, 1015 the token is invalid, 1014 the query is invalid, 1011, 1013 or 1016 the service, its IP address or the account is not allowed; these codes are from IBKR's documentation, not yet verified against a live statement) | The Flex reader is set aside for this reading: no request for the statement is made, nothing is written to the ledger, and the token is never printed. Trading is unaffected. It tries again at the next firing | In Client Portal, check the Flex Web Service is on and the token not expired (generate a new one if it is), and the query ID; correct `TI_IBKR_FLEX_TOKEN` or `TI_IBKR_FLEX_QUERY_ID` with `sudo ti-secrets edit secrets.env`, then `sudo systemctl start ti-flex@<instance>` and check `journalctl -u ti-flex@<instance>` says it read |
 | `ti-flex@<instance>` failed; its status file says the Flex Web Service **gave no statement** (busy, error 1009 or 1018; not ready, 1003 to 1008; still generating after 30 tries 10 seconds apart, 1019; the codes from IBKR's documentation, not yet verified against a live statement; or IBKR could not be reached, or answered with a redirect, which the reader never follows since the token would go with it) | Set aside for this reading, nothing written; the next firing asks again | Nothing, if the next evening reads. If it keeps failing, check the server's network, and IBKR's system status |
 | `ti-flex@<instance>` failed; its status file says the Flex statement **is for another account**, or a row is | The whole statement is refused and nothing of it is written; neither account number is printed | Make the Flex query cover this account (Client Portal, the query's account selection); for one query covering several accounts this account must be among them |
 | `ti-flex@<instance>` failed; its status file says the statement **has no Cash Transactions section** | Refused: without the section the reader cannot tell "nothing moved" from "not asked for" | Edit the Flex query in Client Portal and tick **Cash Transactions** (above, "What you set up once") |

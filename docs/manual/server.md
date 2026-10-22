@@ -89,25 +89,46 @@ then refuses to start in paper, which is safe, but your edits are gone.
 
 ## Where the secrets live
 
+Every secret file is kept on the disk **only encrypted**, as
+`/etc/trend-investing/<name>.gpg` (root only, mode 0600), with a passphrase
+you chose. The named files on the disk cannot be read without it: not by
+someone who gets a copy of the disk or a Lightsail snapshot, and not by the
+server itself. That holds for copies taken after the move to encrypted files,
+provided swap stays off ("Swap must stay off", below) and no secret is written to the disk
+in plain text by hand; on a server that once kept them in plain text, read
+"Shredding is not a guarantee" below.
+After every boot you type the passphrase once (`sudo ti-unlock`, below), and
+the files are decrypted into memory, in `/run/trend-investing/secrets/`
+(root only, a separate in-memory file system, gone at the next boot); the
+programs are handed their private copies from there.
+
+Why a passphrase, not something automatic: Lightsail has no hardware key
+store (TPM), so any key the server could use by itself would have to sit on
+the same disk as the files, and a snapshot would carry both.
+
 | File | What it holds | Who reads it |
 | --- | --- | --- |
-| `/etc/trend-investing/ibkr-login.env` (root only, mode 0600) | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
-| `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY`, `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
-| `/etc/trend-investing/accounts/boost.env` (root only, mode 0600, in a root-only folder, mode 0700) | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter only (`ti-adapter-boost.service`) |
+| `ibkr-login.env` | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
+| `secrets.env` | `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `TI_NTFY_TOPIC`, `TI_NTFY_SERVER`, `TI_PAGERDUTY_ROUTING_KEY`, `TI_GITHUB_ISSUES_TOKEN`, `TI_GITHUB_ISSUES_REPO`, `TI_HEARTBEAT_URL` | handed as a private credential file (`LoadCredential`) to the data job, the engines and the reporter; the dashboard is given none |
+| `accounts/boost.env` | `IBKR_ACCOUNT_BOOST`: the Boost account's number, alone | handed as a private copy to the Boost adapter (`ti-adapter-boost.service`) and to the Boost account's Flex reader (`ti-flex@boost.service`) |
+| `accounts/trad-ira.env` | `IBKR_ACCOUNT_TRAD_IRA`: the Traditional IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@trad-ira.service`) |
+| `accounts/roth-ira.env` | `IBKR_ACCOUNT_ROTH_IRA`: the Roth IRA's number, alone | handed as a private copy to that account's Flex reader only (`ti-flex@roth-ira.service`) |
 
 What each program actually reads today:
 
 - `ti-data` reads **only** `MASSIVE_API_KEY` from that file.
-- **No program reads** `IBKR_ACCOUNT_TRAD_IRA` or `IBKR_ACCOUNT_ROTH_IRA` yet.
-  The Boost adapter reads `IBKR_ACCOUNT_BOOST` from its own file and from no
-  other. The account an engine trades is the `account_id` in its
-  configuration file.
+- Each account's Flex reader reads that account's number from its own
+  account file (`accounts/<account>.env`), and no other account's. No
+  program reads the `IBKR_ACCOUNT_TRAD_IRA` or `IBKR_ACCOUNT_ROTH_IRA` lines
+  of `secrets.env`. The Boost adapter reads `IBKR_ACCOUNT_BOOST` from its own
+  file and from no other. The account an engine trades is the `account_id`
+  in its configuration file.
 - The reporter reads `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` (your own server's
   URL, which `provision.sh ntfy` prints; empty means the public ntfy.sh relay,
   which never gets the daily summary) and `TI_PAGERDUTY_ROUTING_KEY` from that file
   (`-secrets-file`), through its unit's credential. It refuses to run, and
   its unit fails, while the topic or the routing key is empty: fill them in
-  with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses
+  with `sudo ti-secrets edit secrets.env`; the next firing uses
   them. It also reads `TI_HEARTBEAT_URL`, the address of your check at the
   outside heartbeat service; that one is optional for the run, but without
   it nothing outside the server notices the server dying
@@ -121,7 +142,140 @@ What each program actually reads today:
   [alerts and dashboard](alerts-and-dashboard.md), "Alerts as GitHub Issues".
 
 Never paste a secret into an issue, a pull request, a chat with an agent or
-a command line. Edit these files with `sudo -e`.
+a command line.
+
+**Editing a file:** `sudo ti-secrets edit secrets.env` (or `ibkr-login.env`,
+`accounts/boost.env`, `accounts/trad-ira.env`, `accounts/roth-ira.env`). It
+asks for the passphrase, decrypts the file into memory, opens it in the
+editor, and when you save and quit encrypts it again (the old encrypted file
+is replaced only once the new one is checked), updates the unlocked copy if
+the secrets are unlocked, and removes the plain text. Each unit reads the new
+value at its next start: the reporter at its next firing, the Gateway after
+`sudo systemctl restart ti-gateway`. A wrong passphrase writes nothing, and
+quitting without a change writes nothing either (except that an unlocked
+copy that is not the encrypted file is made again from it). `sudo ti-secrets
+status` lists each file as encrypted or not and unlocked or locked, and shows
+no secret.
+
+The editor is `$SUDO_EDITOR`, `$VISUAL` or `$EDITOR` if you set one, else
+Ubuntu's `editor` (nano, unless you chose another), `nano` or `vi`. It runs
+with its home and temporary folder in the in-memory folder, so the swap,
+backup and history files an editor keeps are in memory and removed with the
+plain text. vim (and vi, nvim) is also given `-n` (no swap file), no viminfo,
+and that folder as its `directory`, `backupdir` and `undodir`; nano keeps no
+backup unless told to (`-B`, or `set backup` in a nanorc file), so it is given
+`--ignorercfiles`, which keeps any nanorc from turning backups or history on.
+Another editor is safe only if it keeps its files in its home
+folder, its temporary folder or beside the file: do not point it at a folder
+of your own for backups. Core dumps are off for the command and the editor.
+
+If an edit is cut short after the new encrypted file is written (a crash, a
+lost connection), the file's unlocked copy is missing, never the old value:
+its units refuse to start until `sudo ti-unlock`, or the same edit quit
+without a change, makes it again. If a command is killed before it cleans
+up, it can leave an encrypted temporary file beside the file, named
+`.<name>.gpg.tmp.` and six characters (for example
+`/etc/trend-investing/.secrets.env.gpg.tmp.Ab12Cd`): the next `ti-secrets`
+or `ti-unlock` removes it and names it, and `sudo ti-secrets passphrase`
+refuses while one is still there, so no copy under an old passphrase
+outlives a change. Only one `ti-secrets` or `ti-unlock` runs
+at a time; a second says "another ti-secrets or ti-unlock is running" and
+changes nothing (an edit holds that lock until you quit the editor).
+
+## Unlocking the secrets after a boot
+
+**After every reboot, run `sudo ti-unlock` and type the passphrase.** It
+decrypts every secret file into memory and then starts the Gateway, which
+sends its IBKR Mobile prompt: approve it on your phone. A wrong passphrase
+unlocks nothing and changes nothing; just run it again.
+
+**If you forget to unlock:** every unit that needs a secret refuses to start:
+`sudo systemctl start <unit>` says "Assertion failed on job for <unit>", and
+`journalctl -u <unit>` says "Starting requested but asserts failed" (the
+unit asserts its decrypted file, `AssertPathExists=/run/trend-investing/secrets/...`,
+which `systemctl cat <unit>` shows). The Gateway stays down; the engines and the adapter cannot be
+started; the data job and the Flex reader skip their firings. The reporter
+cannot run either, so it cannot page you itself, but its pings to the outside
+heartbeat stop, and about 20 minutes after the boot Healthchecks pages you
+through PagerDuty ("The outside heartbeat", below). Unlock, and the next
+firing of each timer runs normally; the data job's next firing catches up
+every session it missed.
+
+**Changing the passphrase:** `sudo ti-secrets passphrase`. It asks for the
+current one, then the new one twice (at least 12 characters). It writes a new
+copy of every file under the new passphrase and checks each by decrypting
+it, and only then renames them over the old files, one after another. The
+old passphrase then opens nothing. A journal,
+`/etc/trend-investing/.passphrase-change` (file names only, no secret),
+records each step.
+
+**If a passphrase change is cut short** (a crash or a lost connection during
+the renames), some files are under the old passphrase and some under the
+new. `ti-unlock`, `edit` and `migrate` then refuse, and `status` says so. Run
+`sudo ti-secrets passphrase --resume`: it asks for the old passphrase, then
+the new one twice, opens each file with whichever it is under, and finishes
+the change, so every file is under the new one. A change that stops with an
+error while the new copies are being written and checked has renamed no file
+and removes its journal. From the moment the renames begin the journal
+stays, even before the first file is renamed; and a change stopped abruptly
+(a crash, a power loss, the command killed) can leave the journal at any
+point, before any rename included. Whenever the journal is there, run
+`--resume`.
+
+**Never lose the passphrase.** It is stored nowhere, on the server or
+anywhere else, and there is no recovery: without it the encrypted files can
+never be read, and you would have to fill every secret in again (the IBKR
+login, the account numbers, the Massive key, the alert keys, the Flex token).
+Keep it in your password manager, and never put it in a file, a command line,
+an issue or a chat.
+
+`sudo ti-secrets lock` removes the decrypted copies without a reboot; a
+program already running keeps the copy it was handed until it stops.
+
+**Moving from the earlier plain-text files.** `sudo deploy/provision.sh
+services` finds any secret file still in plain text, encrypts it, checks the
+encrypted copy decrypts to the same text, and only then shreds the plain
+text. The first time, it asks you to choose the passphrase. If a plain-text
+file and its encrypted copy are both there and differ (a migration cut
+short, or a file put back by hand), it stops and changes nothing: `sudo
+ti-secrets diff <name>` shows how they differ, then keep the right one as
+the message says and run it again. It prints both, secrets included, so it
+refuses unless its output is the terminal (not redirected to a file and not
+piped). It exits as `diff` does: 0 when they are the same, 1 when they
+differ, and 2 or more when the comparison itself failed, which it says.
+
+**Shredding is not a guarantee.** On a journaling file system (Ubuntu's
+ext4) on a cloud volume, which is SSD and copy-on-write storage underneath,
+`shred` may overwrite new blocks while the old ones, holding the plain text,
+stay on the volume, and so in every later snapshot of it. The real
+protection is that, after the migration, plain text never touches the disk
+again: it lives only in memory. So, **on a server provisioned before the
+secrets were encrypted** (one whose secret files were once on its disk in
+plain text), delete every Lightsail snapshot taken before the migration,
+since they hold the plain text, and rotate the secrets that were on the disk
+in plain text (the IBKR password, the Massive key, the PagerDuty routing
+key, the GitHub token, the Flex token), since anyone who later gets the
+volume or a snapshot of it may read the old values. A server provisioned
+after this change never had them in plain text and needs neither step.
+
+**Swap must stay off.** The in-memory folder is mounted `noswap` (Ubuntu
+24.04's kernel has it), so the decrypted files are never paged to disk; if
+that mount fails, nothing is decrypted. But the passphrase and the plain
+text also pass through the memory of `ti-secrets`, gpg and the editor, which
+the kernel can page to a swap file or partition on the disk. So while any
+swap is on, `ti-unlock` and `ti-secrets unlock`, `edit`, `passphrase`,
+`migrate` and `diff` refuse before they ask for the passphrase, name the
+swap and change nothing (`status` and `lock` still run). A Lightsail Ubuntu
+instance has no swap unless you add some.
+
+To check: `swapon --show` prints nothing when swap is off (or `cat
+/proc/swaps` lists only its heading line). To turn it off: `sudo swapoff
+-a`, then remove the swap line from `/etc/fstab` (on Ubuntu often
+`/swap.img none swap sw 0 0`) so it stays off after a reboot, and remove the
+file (`sudo rm /swap.img`), which can hold pages from before. If
+`/proc/swaps` cannot be read, the same commands refuse too.
+
+
 
 ## Your own ntfy server
 
@@ -143,7 +297,7 @@ when `ntfy` is in the reporter's channels.
    signed in yet it installs the program, says it is waiting, and writes
    nothing else: sign in (`sudo tailscale up --ssh`) and run it again.
 2. It prints the line for the secrets file, `TI_NTFY_SERVER=http://100.x.y.z:2586`.
-   Put that line in `/etc/trend-investing/secrets.env` (`sudo -e`), with an
+   Put that line in `secrets.env` (`sudo ti-secrets edit secrets.env`), with an
    unguessable `TI_NTFY_TOPIC=` beside it. The topic is the only secret the
    server uses: the server asks for no sign-in, because nothing but your own
    tailnet reaches it.
@@ -220,7 +374,7 @@ failed for 20 minutes also takes the check down.
    the check is down 20 minutes after the last ping, on the fourth missed
    firing, and one slow firing does not page you.
 3. Copy the check's ping address (`https://hc-ping.com/<uuid>`) and put it on the
-   server: `sudo -e /etc/trend-investing/secrets.env`, as the line
+   server: `sudo ti-secrets edit secrets.env`, as the line
    `TI_HEARTBEAT_URL=<the address>`. The next firing uses it.
 4. In Healthchecks, under Integrations, add **PagerDuty** (it asks you to
    sign in to PagerDuty and pick the same service your reporter pages) and
@@ -356,6 +510,8 @@ by hand is how you confirm the fix.
   ([paper trading](paper-trading.md), "Starting the adapter").
 - **Once per Boost run:** the data job's warm-up, after the engine has
   started once ([market data](market-data.md), "The one-time warm-up").
+- **After every boot:** `sudo ti-unlock`, then approve the Gateway's phone
+  prompt ("Unlocking the secrets after a boot").
 - **Every Sunday:** approve the Gateway's phone prompt.
 - **Installing a build:** build on the Mac with `deploy/build-engine.sh`
   (and `deploy/build-data.sh`), copy `dist/` beside `deploy/`, `sudo install`
@@ -369,9 +525,11 @@ by hand is how you confirm the fix.
 
 ## After a reboot
 
-The Gateway starts by itself and sends a phone prompt: approve it. The data
-job's and the reporter's timers catch up any firing they missed, and the
-dashboard starts. **Every engine and the adapter stay stopped.**
+Run `sudo ti-unlock` and type the passphrase: until then nothing that needs
+a secret starts ("Unlocking the secrets after a boot"). It starts the
+Gateway, which sends a phone prompt: approve it. The dashboard starts by
+itself; the data job's and the reporter's timers run at their next firing
+after the unlock. **Every engine and the adapter stay stopped.**
 A reboot is not a crash, so each engine's next start is a fresh run you
 approve ([restart](restart.md)). Schedule reboots for a Sunday, after the
 cold re-login, so one phone prompt serves both.
@@ -470,9 +628,15 @@ stop, not after two sessions of silence.
 
 | What you see | What the program does | What you do |
 | --- | --- | --- |
-| The server has rebooted | The Gateway starts and sends a phone prompt; the timers catch up; the dashboard starts; every engine and the adapter stay stopped | Approve the prompt; start each engine as a fresh run you approve, then the adapter ([restart](restart.md)) |
+| The server has rebooted | The secrets are locked: every unit that needs one refuses to start; the dashboard starts; every engine and the adapter stay stopped | `sudo ti-unlock`; approve the Gateway's phone prompt; start each engine as a fresh run you approve, then the adapter ([restart](restart.md)) |
+| `sudo systemctl start <unit>` says "Assertion failed on job for <unit>", or its journal says "Starting requested but asserts failed"; or Healthchecks pages that the reporter's check is down soon after a boot | The secrets have not been unlocked since the boot. systemd refuses to start the Gateway, the engines, the adapter, the data job, the reporter, the Flex reader and the failed-unit page; the timers keep firing and are refused each time; nothing reaches IBKR | `sudo ti-unlock` ("Unlocking the secrets after a boot"); then start what you start by hand |
+| `ti-unlock` (or `ti-secrets`) says "the passphrase is wrong, or ... is damaged; nothing changed" | Nothing is unlocked or changed | Type it again from your password manager. If the right one is refused, the file is damaged: restore it from a snapshot taken after the move to encrypted files |
+| `ti-unlock` (or `ti-secrets`) says "swap is on (...)" or "cannot read /proc/swaps" | Nothing is read, decrypted or changed | Turn swap off and keep it off ("Swap must stay off", in "Unlocking the secrets after a boot"), then run it again |
+| `ti-secrets passphrase` says "an encrypted temporary file left by a command cut short is still there" | Nothing is changed | Remove the file it names (`sudo rm -r <file>`), then run it again |
+| The passphrase is lost | The encrypted files can never be read; there is no recovery | Fill every secret in again: remove the `.gpg` files (`sudo rm /etc/trend-investing/*.gpg /etc/trend-investing/accounts/*.gpg`), run `sudo deploy/provision.sh services`, which asks for a new passphrase, then enter each secret with `sudo ti-secrets edit` |
+| `provision.sh services` stops with "verification failed, nothing replaced and no plain text removed", or with "both exist and differ" | The plain-text file is kept and no encrypted copy replaces anything | For the first, run it again; if it keeps failing, see `journalctl` and the disk space. For the second, keep the right one as the message says, then run it again |
 | The Sunday phone prompt is missed | IBC exits, the unit starts it again after 30 seconds, and a new prompt arrives each time; nothing reaches IBKR meanwhile | Approve the next prompt (`docs/runbooks/gateway-login.md`) |
-| `ti-gateway` failed and stays down; `journalctl -u ti-gateway` names the login file | The login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). The unit does not restart on these, because none fixes itself | Fill it in or correct it with `sudo -e /etc/trend-investing/ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`) |
+| `ti-gateway` failed and stays down; `journalctl -u ti-gateway` names the login file | The login file is empty, or holds an unknown key or value (for example a trading mode other than `paper` or `live`). The unit does not restart on these, because none fixes itself | Fill it in or correct it with `sudo ti-secrets edit ibkr-login.env`, then `sudo systemctl start ti-gateway` (`docs/runbooks/gateway-login.md`) |
 | The IBKR password is wrong | That check does not catch it: if IBC exits, the unit starts it again every 30 seconds, and repeated failed logins can make IBKR lock the login | Stop the Gateway at once (`sudo systemctl stop ti-gateway`), correct the file, start it again (`docs/runbooks/gateway-login.md`) |
 | `ti-data` or `ti-reporter@boost` failed: ".../engines/boost/run.env is missing or empty: start the Boost engine once first ..." | That unit does not run. The data job writes nothing; the reporter sends nothing | Start the Boost engine once (`docs/runbooks/durable-log.md`, "Restarting an engine") |
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |

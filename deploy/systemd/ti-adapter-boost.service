@@ -14,6 +14,12 @@ ConditionFileIsExecutable=/opt/trend-investing/adapter-venv/bin/python3
 ConditionPathExists=/opt/trend-investing/twsapi/INSTALLED
 ConditionPathExists=/opt/trend-investing/adapter/adapter/ibkr/cli.py
 ConditionPathExists=/etc/trend-investing/adapters/boost.json
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (ADR 0028; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/accounts/boost.env
 
 [Service]
 Type=simple
@@ -39,7 +45,7 @@ EnvironmentFile=/var/lib/trend-investing/engines/boost/run.env
 # its journalled deposits and withdrawals are subtracted from the cash since
 # the previous close before the 1% drift bound (ADR 0019, amended
 # 2026-10-21).
-LoadCredential=account:/etc/trend-investing/accounts/boost.env
+LoadCredential=account:/run/trend-investing/secrets/accounts/boost.env
 WorkingDirectory=/opt/trend-investing/adapter
 ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --streams /var/lib/trend-investing/data/streams/boost --cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
 # Never restarted by systemd: every stop is for a person to read (the reason

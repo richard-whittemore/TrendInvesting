@@ -15,6 +15,12 @@ Description=Page the owner that %i failed
 # 0019, "Alerting"; docs/manual/server.md, "A failed unit"). No Condition: a
 # missing binary fails this unit with a message, so the owner sees a failed
 # unit, never a silent skip.
+# The secrets rest on disk only encrypted; ti-unlock decrypts them after
+# each boot into a root-only tmpfs, and this unit loads its credential
+# from there. Until then systemd refuses to start it ("Assertion failed")
+# (ADR 0028; docs/manual/server.md, "Unlocking the
+# secrets after a boot").
+AssertPathExists=/run/trend-investing/secrets/secrets.env
 
 [Service]
 Type=oneshot
@@ -29,7 +35,7 @@ SupplementaryGroups=systemd-journal
 Environment=TZ=America/New_York
 # TI_NTFY_TOPIC, TI_NTFY_SERVER and TI_PAGERDUTY_ROUTING_KEY from %d/secrets,
 # never printed; the same credential file the reporter reads.
-LoadCredential=secrets:/etc/trend-investing/secrets.env
+LoadCredential=secrets:/run/trend-investing/secrets/secrets.env
 # The record of failed-unit pages is the host's, beside the reporters' state
 # files: the reporter's firings read it to resolve a page and to skip a unit
 # already paged.

@@ -1271,8 +1271,13 @@ class DeploymentTests(unittest.TestCase):
         self.assertRegex(self.timer, r"(?m)^Persistent=true$")
 
     def test_the_service_reads_the_flex_secrets_and_the_instances_account_file(self):
-        self.assertIn("LoadCredential=secrets:/etc/trend-investing/secrets.env", self.service)
-        self.assertIn("LoadCredential=account:/etc/trend-investing/accounts/%i.env", self.service)
+        # Both from the copies ti-unlock decrypts into a root-only tmpfs after
+        # each boot, each asserted, so a locked server refuses the reading
+        # and names the file (ADR 0028).
+        for source in ("/run/trend-investing/secrets/secrets.env", "/run/trend-investing/secrets/accounts/%i.env"):
+            self.assertRegex(self.service, r"(?m)^AssertPathExists={}$".format(re.escape(source)))
+        self.assertIn("LoadCredential=secrets:/run/trend-investing/secrets/secrets.env", self.service)
+        self.assertIn("LoadCredential=account:/run/trend-investing/secrets/accounts/%i.env", self.service)
         self.assertRegex(self.service, r"(?m)^ExecStart=.* -m adapter\.ibkr flex --secrets %d/secrets "
                                        r"--account-secrets %d/account --instance %i ")
         self.assertIn("--engine-log /var/lib/trend-investing/engines/%i/${TI_RUN}.log", self.service)

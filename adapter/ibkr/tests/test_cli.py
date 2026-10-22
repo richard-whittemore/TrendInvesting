@@ -319,7 +319,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(args.streams, "/var/lib/trend-investing/data/streams/boost")
         self.assertEqual(args.cash_ledger, "/var/lib/trend-investing/flex/boost/cash-movements.jsonl")
         self.assertIn("-/var/lib/trend-investing/flex/boost", unit)
-        self.assertIn("LoadCredential=account:/etc/trend-investing/accounts/boost.env", unit)
+        self.assertIn("LoadCredential=account:/run/trend-investing/secrets/accounts/boost.env", unit)
         self.assertEqual(args.secrets, "/run/credentials/ti-adapter-boost.service/account")
         self.assertIn("Restart=no", unit)
         self.assertNotRegex(unit, r"\bD?U[0-9]{5,}", "no account number in the unit")
@@ -352,7 +352,12 @@ class DeployTests(unittest.TestCase):
         # sees another account's number or the alert URLs.
         unit = (repo / "deploy" / "systemd" / "ti-adapter-boost.service").read_text()
         loads = [line for line in unit.splitlines() if line.startswith("LoadCredential=")]
-        self.assertEqual(loads, ["LoadCredential=account:/etc/trend-investing/accounts/boost.env"])
+        # Loaded from the copy ti-unlock decrypts into a root-only tmpfs after
+        # each boot; until then systemd refuses to start the adapter, naming
+        # the file (ADR 0028: the account file rests on disk
+        # only encrypted).
+        self.assertEqual(loads, ["LoadCredential=account:/run/trend-investing/secrets/accounts/boost.env"])
+        self.assertRegex(unit, r"(?m)^AssertPathExists=/run/trend-investing/secrets/accounts/boost\.env$")
         self.assertNotIn("secrets.env", "\n".join(l for l in unit.splitlines() if not l.startswith("#")))
         example = (repo / "deploy" / "etc" / "accounts" / "boost.env.example").read_text()
         keys = [l.split("=", 1)[0] for l in example.splitlines() if l and not l.startswith("#")]

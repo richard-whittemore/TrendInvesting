@@ -111,7 +111,7 @@ Your IBKR paper account has its own username and password, separate from your
 live ones (IBKR sends them when the paper account is opened; they are shown
 in Account Management).
 
-- **Server.** `sudo -e /etc/trend-investing/ibkr-login.env`, fill in
+- **Server.** `sudo ti-secrets edit ibkr-login.env`, fill in
   `TWS_USERID` and `TWS_PASSWORD` with the **paper** username and password,
   leave `TWS_TRADING_MODE=paper`. Save. Start the Gateway:
   `sudo systemctl start ti-gateway`, and approve the IBKR Mobile prompt on
@@ -165,7 +165,7 @@ files never contain it, because the repository is public.
 
 | Where | What | Why |
 | --- | --- | --- |
-| `/etc/trend-investing/accounts/boost.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo -e`; root-only, mode 0600) | your paper account (DU…), with no quotes and no spaces | The shipped file holds the name only. It is the only file the Boost adapter is given: no other account's number and no alert URL. Do not put the account in `/etc/trend-investing/secrets.env`: no program reads an `IBKR_ACCOUNT_*` line from that file (the IRA lines there are names kept for later engines), so a number there is used by nothing |
+| `/etc/trend-investing/accounts/boost.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo ti-secrets edit accounts/boost.env`; stored encrypted) | your paper account (DU…), with no quotes and no spaces | The shipped file holds the name only. It is the only file the Boost adapter is given: no other account's number and no alert URL. Do not put the account in `/etc/trend-investing/secrets.env`: no program reads an `IBKR_ACCOUNT_*` line from that file (the IRA lines there are names kept for later engines), so a number there is used by nothing |
 | The Boost engine's paper configuration, `/etc/trend-investing/engines/boost.config`: a copy of the shipped dry-run file with `"mode": "paper"`, `"account_id"` set to your paper account (DU…), and `"warm_up_start": "2025-01-02"` | the mode, the account and the warm-up start | The engine refuses to start if the mode in this file is not the mode you start it with, or if a paper configuration names an account not beginning `DU`. The file is hashed into the run (ADR 0016), so a change is a new run. `warm_up_start` must lie within Massive's two-year window, or the data job's warm-up cannot fetch the history: the shipped 2024-01-02 is outside it. 2025-01-02 is the recommended value (your choice: any session inside the window with at least 200 sessions before the first paper day); it stays inside the window until 2 January 2027. It changes the paper configuration's hash only (`docs/manual/market-data.md`, "The one-time warm-up") |
 | `/etc/trend-investing/engines/boost.env`: set `TI_MODE=paper` | the engine's start mode | It must equal the mode in the configuration |
 | The adapter's configuration, `/etc/trend-investing/adapters/boost.json`: `"mode": "paper"`, `"paper_sending_enabled": true`, `host` 127.0.0.1, `port` 4002, the engine's `client_id` (Boost is 11), the timing values and `con_ids` with SPY's IBKR contract number. No `account_id`: the account comes from `accounts/boost.env` only, and naming it in both places is refused | the adapter's side of the binding | See B2 |
@@ -189,7 +189,7 @@ adapter are pointed at them.
 ### A6. Put the Massive key on the machine [NOW]
 
 The daily data job fetches SPY's prices from Massive with your own key. On
-the server, `sudo -e /etc/trend-investing/secrets.env` and fill in the line
+the server, `sudo ti-secrets edit secrets.env` and fill in the line
 `MASSIVE_API_KEY=` (add the line if the file predates it). Like the account
 number, it is never committed, pasted into an issue or typed on a command
 line.
@@ -278,7 +278,7 @@ Order of starting, each on the server, each an explicit step of yours:
 
 1. The Gateway is running and logged in (A3).
 2. **Turn the Read-Only API off, now, and not before.** On the server:
-   `sudo -e /etc/trend-investing/ibkr-login.env`, set
+   `sudo ti-secrets edit ibkr-login.env`, set
    `TWS_READONLY_API=no`, then `sudo systemctl restart ti-gateway` and
    approve the phone prompt if it comes; wait until the check in A4 shows
    port 4002 listening again. On the Mac: untick Read-Only API in
