@@ -1330,6 +1330,77 @@ class LoopTests(unittest.TestCase):
                 loop.close()
                 self.assertEqual([e["type"] for e in second.received], ["operator.run.approved"])
 
+    def test_run_ended_refuses_a_malformed_or_unsupported_queued_retirement_and_changes_nothing(self):
+        # A queued retirement is struck only once it reads as one the relay
+        # writes (retire_order): its version, one of the two reasons with
+        # who retired it fitting the reason and its detail, a client order
+        # ID, and an entry ID named after that order or after the order and
+        # an input. Anything else is not a record the relay wrote, so the
+        # whole settlement is refused naming the entry, with nothing struck
+        # and nothing recorded, never struck as an earlier run's unread
+        # (fail closed, AGENTS.md; ADR 0026, amended 2026-10-22, "The
+        # adapter").
+        def owner_by_adapter(e):
+            e["payload"].update(reason="owner retired", retired_by="adapter")
+
+        def unnamed_owner(e):
+            e["payload"].update(reason="owner retired", retired_by=" ")
+
+        def session_over_by_owner(e):
+            e["payload"]["retired_by"] = "richard"
+
+        def unknown_reason(e):
+            e["payload"]["reason"] = "cancelled"
+
+        def no_detail(e):
+            e["payload"]["detail"] = ""
+
+        def no_client_order_id(e):
+            e["payload"]["client_order_id"] = None
+
+        def unsupported_version(e):
+            e["schema_version"] = 2
+
+        def another_orders_id(e):
+            e["id"] = "order-retired:tw-paper-9"
+
+        def empty_input_id(e):
+            e["id"] = "order-retired:tw-paper-1:"
+
+        def unrecognised_id(e):
+            e["id"] = "retired-tw-paper-1"
+
+        def retirement_id_of_another_type(e):
+            e["event_type"] = "execution.order.cancelled"
+
+        for damage in (owner_by_adapter, unnamed_owner, session_over_by_owner, unknown_reason, no_detail,
+                       no_client_order_id, unsupported_version, another_orders_id, empty_input_id, unrecognised_id,
+                       retirement_id_of_another_type):
+            with self.subTest(damage.__name__):
+                self.setUp()
+                second = self.left_waiting_by_the_first_run("session:1", commits=True)
+                pending = PendingInput(self.pending)
+                order = json.loads((TESTDATA / "paper_released.json").read_text())
+                retire_order(pending, order, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+                outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+                entries = outbox.load()
+                [entry] = [e for e in entries if e["id"] == "order-retired:tw-paper-1"]
+                damage(entry)
+                outbox._write(entries)
+                before = [outbox.load(), pending.load(), pending.run_ended(), pending.decisions()]
+                with self.assertRaises(HandoverRecordInvalid) as refused:
+                    relay_module.resolve_run_ended(pending, "session:1", "a fresh run after a reboot",
+                                                   str(second.path), today=SESSION)
+                self.assertIn(entry["id"], str(refused.exception), "the refusal names the outbox entry")
+                printed = io.StringIO()
+                with contextlib.redirect_stderr(printed):
+                    self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                                 str(second.path), "--reason", "a fresh run after a reboot"]), 1)
+                self.assertIn(entry["id"], printed.getvalue())
+                self.assertEqual([outbox.load(), pending.load(), pending.run_ended(), pending.decisions()], before,
+                                 "nothing is struck and nothing is recorded")
+
     def committed_report(self, event_type, version, payload, input_id=None):
         """A report input engine.log commits after the waiting input, as the ended run's engine read it."""
         raw = json.dumps(payload, separators=(",", ":"))

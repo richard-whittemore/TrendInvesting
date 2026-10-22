@@ -1726,10 +1726,7 @@ def _recorded_retirement(pending, d):
     AGENTS.md).
     """
     reason, detail, by = d.get("retired"), d.get("reason"), d.get("retired_by")
-    named = isinstance(by, str) and bool(by.strip())
-    fits = (reason == RETIRED_SESSION_OVER and by == RETIRED_BY_ADAPTER
-            or reason == RETIRED_BY_OWNER and named and by != RETIRED_BY_ADAPTER)
-    if not fits or not isinstance(detail, str) or not detail.strip():
+    if not _is_retirement(reason, detail, by):
         raise HandoverRecordInvalid(
             "{} records order {}'s retirement, with no input, as {!r} by {!r} because {!r}: not a retirement as the "
             "relay records one ({!r} by {!r}, or {!r} by the owner named, with its reason), so it is not sent to the "
@@ -1737,6 +1734,72 @@ def _recorded_retirement(pending, d):
                 pending.decisions_path, d.get("client_order_id"), reason, by, detail, RETIRED_SESSION_OVER,
                 RETIRED_BY_ADAPTER, RETIRED_BY_OWNER))
     return reason, detail, by
+
+
+def _is_retirement(reason, detail, by):
+    """Whether reason, detail and by are a retirement as retire_order records one.
+
+    One of the two reasons, a detail, and who retired it fitting the reason
+    (the adapter for the session over, a named owner, never the adapter, for
+    the owner's), as the engine's retirement input requires (internal/event
+    OrderRetiredPayload.Validate).
+    """
+    named = isinstance(by, str) and bool(by.strip())
+    fits = (reason == RETIRED_SESSION_OVER and by == RETIRED_BY_ADAPTER
+            or reason == RETIRED_BY_OWNER and named and by != RETIRED_BY_ADAPTER)
+    return fits and isinstance(detail, str) and bool(detail.strip())
+
+
+def _is_queued_retirement(entry):
+    """Whether outbox entry entry is a retirement as retire_order queues one.
+
+    The input's type and version (internal/event OrderRetiredPayload,
+    schema version RETIRED_VERSION), the payload's fields and no others, a
+    client order ID, a retirement as the relay records one (_is_retirement),
+    the whole-second time the adapter stamps it with, and an entry ID named
+    after that order (RETIRED_ID and the client order ID) or after the order
+    and a non-empty input ID (_finish_retirement).
+    """
+    if tuple(sorted(entry)) != OUTBOX_FIELDS or entry["event_type"] != RETIRED_TYPE:
+        return False
+    if isinstance(entry["schema_version"], bool) or entry["schema_version"] != RETIRED_VERSION:
+        return False
+    p = entry["payload"]
+    if tuple(sorted(p)) != NEVER_SENT_RETIREMENT_FIELDS or not _is_text(p["client_order_id"]):
+        return False
+    if not _is_retirement(p["reason"], p["detail"], p["retired_by"]):
+        return False
+    if not isinstance(p["retired_at"], str) or WHOLE_SECOND.fullmatch(p["retired_at"]) is None:
+        return False
+    named = RETIRED_ID + p["client_order_id"]
+    return entry["id"] == named or (entry["id"].startswith(named + ":") and len(entry["id"]) > len(named) + 1)
+
+
+def _queued_retirements(path, entries):
+    """The retirements among entries, the outbox at path, each as retire_order queues one, else HandoverRecordInvalid.
+
+    An entry of the retirement's type, or named as a retirement (RETIRED_ID),
+    is a queued retirement; one that is not as retire_order queues it
+    (_is_queued_retirement) is not a record the relay wrote, so it raises
+    HandoverRecordInvalid naming it, and no retirement is struck or recorded
+    on a record that cannot say whose it is (fail closed, AGENTS.md).
+    """
+    queued = []
+    for e in entries:
+        if e["event_type"] != RETIRED_TYPE and not e["id"].startswith(RETIRED_ID):
+            continue
+        if not _is_queued_retirement(e):
+            raise HandoverRecordInvalid(
+                "{} holds entry {} as a retirement of order {!r}, {!r} by {!r} because {!r} (type {!r} version {!r}): "
+                "not a retirement as the relay queues one ({!r} by {!r}, or {!r} by the owner named, with its reason, "
+                "under {!r} and the order's client order ID, or that and an input ID), so nothing is settled, struck "
+                "or recorded; restore the outbox from your backup, never edit it by hand, then settle again "
+                "(docs/manual/redelivery.md)".format(
+                    path, e["id"], e["payload"].get("client_order_id"), e["payload"].get("reason"),
+                    e["payload"].get("retired_by"), e["payload"].get("detail"), e["event_type"], e["schema_version"],
+                    RETIRED_SESSION_OVER, RETIRED_BY_ADAPTER, RETIRED_BY_OWNER, RETIRED_ID))
+        queued.append(e)
+    return queued
 
 
 def _effective_user():
@@ -1963,7 +2026,11 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
     awaiting, an input of the run whose durable log is engine_log_path
     (earlier_run: that run is asked for its reply again, never settled),
     and an input with no record of the run it was sent to (the settlement
-    would name no run, which run_ended refuses).
+    would name no run, which run_ended refuses). A queued retirement that
+    is not as retire_order queues one (_queued_retirements) raises
+    HandoverRecordInvalid naming its outbox entry, with nothing struck or
+    recorded, so no retirement is struck on a record the relay did not write
+    (fail closed, AGENTS.md).
     today defaults to today in New York.
     """
     if not reason or not reason.strip():
@@ -2017,12 +2084,17 @@ def resolve_run_ended(pending, input_id, reason, engine_log_path, today=None):
         # adapter"; fail closed, AGENTS.md). So a log older than the
         # session-bounded walk (run_logs) is never read here, and archiving
         # one never blocks the settlement.
+        # Each queued retirement is read as retire_order queues one before
+        # any is struck: one that is not refuses the whole settlement, with
+        # nothing struck or recorded (_queued_retirements; fail closed,
+        # AGENTS.md).
+        queued = outbox.load()
+        retiring = {e["id"] for e in _queued_retirements(outbox.path, queued)}
         own = released_client_order_ids(engine_log_path) - at_broker
-        behind = [e for e in outbox.load() if e["id"] != input_id and e["id"] not in recorded
+        behind = [e for e in queued if e["id"] != input_id and e["id"] not in recorded
                   and ((e["event_type"] in (LIFECYCLE_TYPE, FILL_TYPE)
                         and e["payload"].get("client_order_id") in earlier)
-                       or (e["event_type"] == RETIRED_TYPE and _is_text(e["payload"].get("client_order_id"))
-                           and e["payload"]["client_order_id"] not in own))]
+                       or (e["id"] in retiring and e["payload"]["client_order_id"] not in own))]
         if input_id not in recorded or behind:
             pending.record_run_ended({
                 "input": waiting, "refused": RUN_ENDED, "reason": reason, "run": ended.run,
