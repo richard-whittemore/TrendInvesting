@@ -282,6 +282,7 @@ func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
 	// the build cannot read and another account's.
 	second.released(1, "tw-dry", 10)
 	second.send(1, "tw-7")
+	second.send(1, "tw-9")
 	second.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm", day(1),
 		event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:alarm", Tag: "alarm:u", ClientOrderID: "alarm-1",
 			InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures})
@@ -311,7 +312,11 @@ func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
 	// the page still names the two orders and the count of 2.
 	second.inARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}, {ClientOrderID: "tw-7", VenueOrderID: "ib-tw-7"}}
 	second.undecided, second.before = nil, 0
-	second.decide(3, "tw-9")
+	// tw-9 was released before the stop (above) and is reported after it; a
+	// stopped engine releases no buy, so the decision that records the stop
+	// lists it as awaiting the venue's word and releases nothing.
+	second.undecided = []string{"tw-9"}
+	second.decide(3)
 	second.report(4, "tw-9", event.OrderLifecycleStatusInvalid)
 	a, ok = stateAtStart(t, second.stream)
 	if !ok || !strings.Contains(a.Body, "rejected 2 orders") || !strings.Contains(a.Body, "tw-6") || !strings.Contains(a.Body, "tw-7") || strings.Contains(a.Body, "tw-9") {
@@ -502,5 +507,33 @@ func TestARefusedClearanceIsNamedNotFatalInTheStanding(t *testing.T) {
 	a, ok := stateAtStart(t, l.stream)
 	if !ok || !strings.Contains(a.Body, "cleared:twice") {
 		t.Errorf("a refused clearance must be named on the page: %+v, %v", a, ok)
+	}
+}
+
+// TestAMomentumClearanceIsNeverARefusedBoostClearance: a momentum account has
+// no Boost orders, and the momentum engine applies a clearance through its
+// own order reports, so a valid clearance there names no refusal and pages
+// nothing (ADR 0026, point 2, "Boost", amended 2026-10-18).
+func TestAMomentumClearanceIsNeverARefusedBoostClearance(t *testing.T) {
+	s := &stream{t: t}
+	s.add(event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", day(0).Add(-time.Hour), momentumConfiguration())
+	s.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:m", day(2), event.RebalanceClearedPayload{
+		AccountID: "ira-traditional", AsOf: day(2), DecisionID: "targets:1", ClientOrderIDs: []string{"tw-1"}, Operator: "owner", Detail: "never sent"})
+	if a, ok, err := report.StateAtStartAlert(s.out, nil); err != nil || ok {
+		t.Errorf("a momentum clearance paged: %+v, %v, %v", a, ok, err)
+	}
+}
+
+// TestAnUnreadableClearanceIsCountedAsAnUnreadableRecordInTheStanding: the
+// engine refuses a clearance it cannot decode or validate, so on a Boost
+// account the page counts it as an unreadable record (ADR 0026, point 2,
+// "Boost", amended 2026-10-18).
+func TestAnUnreadableClearanceIsCountedAsAnUnreadableRecordInTheStanding(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0)
+	l.add(event.RebalanceClearedEventType, 99, "cleared:bad", day(1), map[string]string{})
+	a, ok := stateAtStart(t, l.stream)
+	if !ok || !strings.Contains(a.Body, "cleared:bad") || !strings.Contains(a.Body, "cannot be read") {
+		t.Errorf("an unreadable clearance must be counted as an unreadable record: %+v, %v", a, ok)
 	}
 }

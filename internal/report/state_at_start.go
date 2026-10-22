@@ -42,7 +42,7 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 	if err != nil {
 		return Alert{}, false, err
 	}
-	var state, stopped, unreadable, refused, killed, pending, alarm []string // each the private line, then the public one
+	var state, stopped, unreadable, refused, unreadClearances, killed, pending, alarm []string // each the private line, then the public one
 	headline := "Normal"
 	rej := newBoostRejections(account)
 	var lastBoost event.Envelope
@@ -165,7 +165,11 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 		line := fmt.Sprintf("The clearance record(s) %s cannot be applied (the engine refuses them): check which Boost orders were never sent.", strings.Join(rej.refused, ", "))
 		refused = []string{line, line}
 	}
-	for _, l := range [][]string{state, stopped, unreadable, refused, killed, pending, alarm} {
+	if len(rej.unread) > 0 {
+		line := fmt.Sprintf("The clearance record(s) %s cannot be read (the engine refuses a clearance it cannot read): check which Boost orders were never sent.", strings.Join(rej.unread, ", "))
+		unreadClearances = []string{line, line}
+	}
+	for _, l := range [][]string{state, stopped, unreadable, refused, unreadClearances, killed, pending, alarm} {
 		if l != nil {
 			body, public = append(body, l[0]), append(public, l[1])
 		}
@@ -203,6 +207,7 @@ type boostRejections struct {
 	released   map[string]event.OrderReleasedPayload // each order's first release
 	fills      *boostFills
 	refused    []string // clearances the engine refuses, named on the page
+	unread     []string // clearances the reporter cannot read or validate, counted as unreadable records
 }
 
 func newBoostRejections(account string) *boostRejections {
@@ -212,7 +217,7 @@ func newBoostRejections(account string) *boostRejections {
 // freshRun starts the count a fresh run starts with: none (ADR 0026, point
 // 2, "Boost", amended 2026-10-18; ADR 0027).
 func (r *boostRejections) freshRun() {
-	r.verdicts, r.boostTags, r.refused = targetweight.BoostVerdicts{}, map[string]bool{}, nil
+	r.verdicts, r.boostTags, r.refused, r.unread = targetweight.BoostVerdicts{}, map[string]bool{}, nil, nil
 }
 
 // decided takes a Boost decision's recorded count as the count in force.
@@ -259,8 +264,16 @@ func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
 		// An execution shows the venue accepted the order.
 		return r.verdicts.Observe(p.ClientOrderID, false)
 	case event.RebalanceClearedEventType:
+		// Only a Boost account's clearance runs through the Boost count:
+		// the momentum engine applies it through its own order reports.
+		if len(r.boostTags) == 0 {
+			return targetweight.VerdictNone
+		}
 		var p event.RebalanceClearedPayload
-		if read(e, clearedVersions, &p) == nil && p.AccountID == r.account {
+		if read(e, clearedVersions, &p) != nil {
+			// The engine refuses a clearance it cannot decode or validate.
+			r.unread = append(r.unread, e.ID)
+		} else if p.AccountID == r.account {
 			sideOf := func(id string) string { return r.released[id].Side }
 			if err := r.verdicts.ClearNeverSent(e.ID, p, r.instrument, sideOf); err != nil {
 				// The engine refuses it as a whole; the reporter names the

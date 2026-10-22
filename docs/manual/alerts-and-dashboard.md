@@ -319,8 +319,13 @@ The delivery rules:
   is not enough: IBKR's PreSubmitted maps to it and can still be followed
   by a rejection); a fill the rule refuses, a report that does not describe
   the order as released, and a report on an order cleared as never sent
-  count for nothing, as the engine refuses them; a clearance record the
-  engine refuses is named on the page; a decision record the reporter cannot
+  count for nothing, as the engine refuses them; on a Boost account, a
+  clearance the engine's Boost rule refuses (it names an order twice, or an
+  order this run never released) is named on the page, and a clearance
+  record the reporter cannot read or validate, which the engine also
+  refuses, is counted as an unreadable record and its record ID is shown
+  with "cannot be read"; a momentum account's clearances are never read
+  this way, since that engine applies them through its own order reports; a decision record the reporter cannot
   read is named "cannot be read: treat the buy stop as possibly in force"
   beside any stop already known, and on a momentum account, which has no
   Boost stop, only as a record that cannot be read), the kill
