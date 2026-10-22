@@ -342,10 +342,13 @@ still unfilled are counted as being sold, and the sale is not tried a
 second time while it works. A retirement of it frees the attempt, so the
 sale is tried again, only while IBKR has never named it; once IBKR has,
 the retirement is refused, as in a run that never restarted. One gap is
-left: a sale that had already ended when the decision was recorded is
-recorded as spent, without its order, so if IBKR reports a late fill of
-it after its cancel, a run restarted from that decision refuses the fill
-and stops for you to reconcile the account with IBKR. A sale an earlier run released that
+left: a sale that had already ended when the decision was recorded
+(cancelled, expired or filled in full) is recorded as spent, without its
+order, so a run restarted from that decision refuses every report IBKR
+sends on it afterwards: a late fill after its cancel, a fill of a sale
+filled in full that IBKR sends again, or any later status report. Each
+stops the run for you to reconcile the account with IBKR. Closing that gap
+is tracked as a follow-up issue (#561). A sale an earlier run released that
 the adapter never sent before that run ended is retired for the fresh run
 too, though that run's engine can no longer be told: before you approve
 the fresh run, `relay.py settle-ended-run` writes the adapter's

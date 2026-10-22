@@ -1490,10 +1490,13 @@ has named or part filled, below, is 1.24.0.
   had filled, and is read as written; one carrying a field of version 8 is
   refused. An attempt withheld for a person, or one that ended, stays
   spent. Stated limit: a sale that ended (canceled, expired or filled in
-  full) is recorded as spent, without its order, so a venue's execution of
-  it reported after a restart from such a decision, after its cancel, is
-  refused, where the full run reads it (ADR 0022), and the run stops for a
-  person to reconcile.
+  full) is recorded as spent, without its order, so after a restart from
+  such a decision every venue report on it is refused, where the full run
+  reads it: an execution reported after its cancel (ADR 0022), an
+  execution of a sale filled in full sent again, which the full run reads
+  as a redelivery, or any later lifecycle report on it. The run stops for a
+  person to reconcile; recording an ended sale so that such reports are
+  read is the follow-up, #561.
   A retirement frees only an attempt this run, or the run whose decision
   it was restarted from, made: never one the approval restored as an
   earlier run's. Stated limit: a recovered decision states only the

@@ -1176,6 +1176,20 @@ func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
 			t.Errorf("decision schema version %d is refused", version)
 		}
 	}
+	// Version 8 records the live sale's side and attempt, so a version 8
+	// record read without either is refused, as one written now is.
+	for name, drop := range map[string]func(*event.BoostRestoredSaleOrder){
+		"no side":    func(o *event.BoostRestoredSaleOrder) { o.Side = "" },
+		"no attempt": func(o *event.BoostRestoredSaleOrder) { o.Attempt = 0 },
+	} {
+		p := validTargetsDecided()
+		o := namedSaleOrder()
+		drop(o)
+		p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: o}
+		if err := p.ValidateSchema(event.TargetsDecidedSchemaVersion); err == nil || !strings.Contains(err.Error(), "side") {
+			t.Errorf("a version 8 live sale with %s is read: %v, want it refused", name, err)
+		}
+	}
 }
 
 // TestBoostRestoredSaleEqual: two records of a sale attempt are equal when

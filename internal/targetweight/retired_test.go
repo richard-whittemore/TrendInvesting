@@ -1283,3 +1283,230 @@ func TestARecoveryReadsADecisionRecordedAtVersion7(t *testing.T) {
 		t.Errorf("a version 7 decision recording the sale's attempt was read as %v, want it refused", err)
 	}
 }
+
+// TestARefusedRecoveryRestoresNothing: a recovered decision whose live sale
+// back to 98% is recorded under another attempt than the one that follows
+// every retired sale is refused before anything of it is restored, so the
+// run holds no part of it: the decision recorded with the right attempt is
+// then recovered, and the run decides and sells after it as the run that
+// never restarted (ADR 0026, point 2, "Order identity", and point 5:
+// recovered, never recomputed; fail closed, AGENTS.md).
+func TestARefusedRecoveryRestoresNothing(t *testing.T) {
+	state := haltedState(t)
+	urgent := map[int]func(*event.BrokerSnapshotPayload){23: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	full := restartAt17(t, simulate(t, options{brokers: true}), options{prelude: []event.Envelope{state}, brokerMutate: urgent})
+	rel := released(t, full.decisions)
+	if len(rel) != 1 {
+		t.Fatalf("setup: released %+v, want the incident's first sale", rel)
+	}
+	var decision event.Envelope
+	for _, e := range ofType(full.decisions, event.TargetsDecidedEventType) {
+		if e.EventTime.Equal(sessionEnd(20)) {
+			decision = e
+		}
+	}
+	var d event.TargetsDecidedPayload
+	decode(t, decision, &d)
+	if o := d.Boost.RestoredSale.Order; o == nil || o.Attempt != 1 {
+		t.Fatalf("setup: session 20's decision records the live sale %+v, want the first attempt", o)
+	}
+	rewrite := func(change func(*event.BoostRestoredSaleOrder)) event.Envelope {
+		p := d
+		sale := *p.Boost.RestoredSale
+		order := *sale.Order
+		change(&order)
+		sale.Order = &order
+		p.Boost.RestoredSale = &sale
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := decision
+		e.Payload, e.PayloadHash = raw, event.HashPayload(raw)
+		return e
+	}
+	cases := map[string]event.Envelope{
+		"recorded as attempt 2": rewrite(func(o *event.BoostRestoredSaleOrder) { o.Attempt = 2 }),
+		"under attempt 2's client order ID": rewrite(func(o *event.BoostRestoredSaleOrder) {
+			o.ClientOrderID, o.Attempt = orderplan.SaleAttemptClientOrderID(d.Boost.RestoredSale.IncidentID, "SPY", 1), 2
+		}),
+	}
+	for name, bad := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := simulate(t, options{refusedRecovery: []event.Envelope{bad}, recovery: &decision, snapshots: full.inputs, brokers: true,
+				prelude: []event.Envelope{state}, working: map[int][]event.OrderReleasedPayload{21: {rel[0]}}, brokerMutate: urgent})
+			if err := r.refusals[0]; err == nil || !strings.Contains(err.Error(), "attempt") {
+				t.Errorf("the decision %s was read as %v, want it refused", name, err)
+			}
+			after := func(run run) []event.TargetsDecidedPayload {
+				var out []event.TargetsDecidedPayload
+				for _, e := range ofType(run.decisions, event.TargetsDecidedEventType) {
+					if e.EventTime.After(sessionEnd(20)) {
+						var p event.TargetsDecidedPayload
+						decode(t, e, &p)
+						out = append(out, p)
+					}
+				}
+				return out
+			}
+			if want, got := after(full), after(r); len(want) == 0 || !reflect.DeepEqual(got, want) {
+				t.Errorf("the run recovered after the refusal decides %+v after session 20, want the full run's %+v", got, want)
+			}
+			late := slices.DeleteFunc(slices.Clone(full.decisions), func(e event.Envelope) bool { return !e.EventTime.After(sessionEnd(20)) })
+			if w, g := sales(t, late), sales(t, r.decisions); !reflect.DeepEqual(g, w) {
+				t.Errorf("the run recovered after the refusal sells %+v, want the full run's %+v", g, w)
+			}
+		})
+	}
+}
+
+// TestAVenueReportGivingAnotherOrderTheRecoveredSalesVenueIDIsRefused: the
+// incident's sale, acknowledged under venue order ib-<its ID> and working
+// when session 21 decides beside an accepted buy, is restored named, under
+// that venue order ID, by a run restarted from the decision. A lifecycle
+// report or a broker snapshot's listing that gives the buy the sale's venue
+// order ID is refused when it arrives, never found when the next decision
+// is written, as a venue order ID names one order (ADR 0026, point 5,
+// amended 2026-10-18; fail closed, AGENTS.md).
+func TestAVenueReportGivingAnotherOrderTheRecoveredSalesVenueIDIsRefused(t *testing.T) {
+	state := haltedState(t)
+	first := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0)
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	full := restartAt17(t, simulate(t, options{brokers: true}), options{prelude: []event.Envelope{state}, brokerMutate: urgent, hold: map[int]bool{21: true, 22: true}})
+	var decision event.Envelope
+	for _, e := range ofType(full.decisions, event.TargetsDecidedEventType) {
+		if e.EventTime.Equal(sessionEnd(21)) {
+			decision = e
+		}
+	}
+	var d event.TargetsDecidedPayload
+	decode(t, decision, &d)
+	sale := d.Boost.RestoredSale
+	if sale == nil || sale.Order == nil || sale.Order.ClientOrderID != first || sale.Order.VenueOrderID != "ib-"+first {
+		t.Fatalf("setup: session 21's decision records the restored sale %+v, want %s live under venue order ib-%s", sale, first, first)
+	}
+	// An accepted buy working beside the sale, under a venue order ID of
+	// its own.
+	buy := event.BoostWatchedOrder{ClientOrderID: "tw-buy", Side: event.OrderSideBuy, Released: 3, LimitPrice: 100, VenueOrderID: "ib-buy"}
+	d.Boost.WorkingOrders = append(d.Boost.WorkingOrders, buy)
+	d.Boost.NamedOrders = append(d.Boost.NamedOrders, buy.ClientOrderID)
+	slices.Sort(d.Boost.NamedOrders)
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision.Payload, decision.PayloadHash = raw, event.HashPayload(raw)
+	at := sessionEnd(21).Add(time.Hour)
+	recovered := func() run {
+		return simulate(t, options{recovery: &decision, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state},
+			closes: syntheticCloses()[:22], brokerMutate: urgent})
+	}
+	ack := event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: buy.ClientOrderID, OrderID: sale.Order.VenueOrderID, InstrumentID: "SPY",
+		Side: buy.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: buy.Released, LimitPrice: buy.LimitPrice, OccurredAt: at}
+	if err := applyAfter(t, recovered(), event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:reused", at, ack); err == nil ||
+		!strings.Contains(err.Error(), "venue order ID names one order") {
+		t.Errorf("a lifecycle report giving the buy the recovered sale's venue order ID was read as %v, want it refused on arrival", err)
+	}
+	broker := (&account{cash: 4000}).broker(at, syntheticCloses()[21])
+	broker.OpenOrders = []event.BrokerOrder{{BrokerOrderID: sale.Order.VenueOrderID, ClientOrderID: buy.ClientOrderID, InstrumentID: "SPY", Side: buy.Side,
+		Status: event.BrokerOrderWorking, RemainingQuantity: buy.Released}}
+	if err := applyAfter(t, recovered(), event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:reused", at, broker); err == nil ||
+		!strings.Contains(err.Error(), "venue order ID names one order") {
+		t.Errorf("a broker snapshot listing the buy under the recovered sale's venue order ID was read as %v, want it refused on arrival", err)
+	}
+}
+
+// TestARecoveredPartFilledSaleCountsEachExecutionOnce: the incident's sale
+// executes in two parts, each with a commission, one before session 21's
+// decision and the rest after it, and IBKR may send the first part again
+// after the restart. A run restarted from session 21's decision holds the
+// first part as filled already, so a redelivery of it counts nothing: the
+// position each close-snapshot check expects, and the executions and
+// commissions each later decision records, are the full run's, the first
+// part and its commission recorded once (ADR 0019, "Explained means", and
+// amended 2026-10-15 and 2026-10-21; ADR 0026, point 5: recovered, never
+// recomputed).
+func TestARecoveredPartFilledSaleCountsEachExecutionOnce(t *testing.T) {
+	for _, again := range []bool{false, true} {
+		name := "not sent again"
+		if again {
+			name = "sent again after the restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			state := haltedState(t)
+			urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+			base := simulate(t, options{brokers: true})
+			opts := options{prelude: []event.Envelope{state}, brokerMutate: urgent, hold: map[int]bool{}}
+			for n := 20; n < len(syntheticCloses()); n++ {
+				opts.hold[n] = true
+			}
+			rel := released(t, restartAt17(t, base, opts).decisions)
+			if len(rel) != 1 || rel[0].Quantity < 2 {
+				t.Fatalf("setup: released %+v, want one sale of at least two shares", rel)
+			}
+			sale := rel[0]
+			part := func(id string, shares int64, n int) event.TargetWeightFillPayload {
+				return event.TargetWeightFillPayload{AccountID: sale.AccountID, ClientOrderID: sale.ClientOrderID, FillID: id, InstrumentID: sale.InstrumentID,
+					Side: sale.Side, Quantity: shares, Price: sale.LimitPrice, Commission: 1.25, FilledAt: sessionEnd(n).Add(-2 * time.Hour)}
+			}
+			one, two := part("fill-1:"+sale.ClientOrderID, sale.Quantity/2, 21), part("fill-2:"+sale.ClientOrderID, sale.Quantity-sale.Quantity/2, 23)
+			opts.fills = map[int][]event.TargetWeightFillPayload{21: {one}, 23: {two}}
+			if again {
+				opts.fills[22] = []event.TargetWeightFillPayload{one}
+			}
+			full := restartAt17(t, base, opts)
+			var decision event.Envelope
+			for _, e := range ofType(full.decisions, event.TargetsDecidedEventType) {
+				if e.EventTime.Equal(sessionEnd(21)) {
+					decision = e
+				}
+			}
+			var d event.TargetsDecidedPayload
+			decode(t, decision, &d)
+			if s := d.Boost.RestoredSale; s == nil || s.Order == nil || s.Order.Filled != one.Quantity || len(s.Order.Fills) != 1 || s.Order.Fills[0].Commission != one.Commission {
+				t.Fatalf("setup: session 21's decision records the live sale %+v, want its first part filled with its commission", s)
+			}
+			r := simulate(t, options{recovery: &decision, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state},
+				reports: venueReports(full.inputs, 21), brokerMutate: urgent})
+			after := func(es []event.Envelope, typ string) []event.Envelope {
+				var out []event.Envelope
+				for _, e := range ofType(es, typ) {
+					if e.EventTime.After(sessionEnd(21)) {
+						out = append(out, e)
+					}
+				}
+				return out
+			}
+			decided := func(es []event.Envelope) []event.TargetsDecidedPayload {
+				var out []event.TargetsDecidedPayload
+				for _, e := range after(es, event.TargetsDecidedEventType) {
+					var p event.TargetsDecidedPayload
+					decode(t, e, &p)
+					out = append(out, p)
+				}
+				return out
+			}
+			checks := func(es []event.Envelope) []event.ReconciliationResultPayload {
+				var out []event.ReconciliationResultPayload
+				for _, e := range after(es, event.ReconciliationResultEventType) {
+					var p event.ReconciliationResultPayload
+					decode(t, e, &p)
+					out = append(out, p)
+				}
+				return out
+			}
+			if want, got := decided(full.decisions), decided(r.decisions); len(want) == 0 || !reflect.DeepEqual(got, want) {
+				t.Errorf("the restarted run's decisions after session 21 are %+v, want the full run's %+v", got, want)
+			}
+			if want, got := checks(full.decisions), checks(r.decisions); len(want) == 0 || !reflect.DeepEqual(got, want) {
+				t.Errorf("the restarted run's close-snapshot checks after session 21 are %+v, want the full run's %+v", got, want)
+			}
+			// Session 22's decision, after the redelivery, still records the first
+			// part once, with its one commission.
+			if ds := decided(r.decisions); len(ds) == 0 || ds[0].Boost.RestoredSale == nil || ds[0].Boost.RestoredSale.Order == nil ||
+				ds[0].Boost.RestoredSale.Order.Filled != one.Quantity || len(ds[0].Boost.RestoredSale.Order.Fills) != 1 {
+				t.Errorf("the restarted run's first decision after the redelivery records the sale as %+v, want its first part once", ds)
+			}
+		})
+	}
+}

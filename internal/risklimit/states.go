@@ -640,30 +640,7 @@ func (g *Gate) OwnLiveSale(tag, instrumentID string) (OwnSale, bool) {
 // checked. Anything else is refused, and nothing is restored (fail closed,
 // AGENTS.md).
 func (g *Gate) RestoreOwnSale(o event.OrderReleasedPayload, trigger string, attempt int, fills []event.TargetWeightFillPayload, venueOrderID string) error {
-	a := g.attempts[o.Tag]
-	switch {
-	case o.Tag == "" || o.Tag != g.restored || a == nil || a.earlier:
-		return fmt.Errorf("risklimit: restored sale %s is under %q, not the incident whose attempt was restored as not spent by an earlier run", o.ClientOrderID, o.Tag)
-	case a.instruments[o.InstrumentID]:
-		return fmt.Errorf("risklimit: incident %q's sale of %s is attempted already; its order %s is restored once", o.Tag, o.InstrumentID, o.ClientOrderID)
-	case o.Side != event.OrderSideSell:
-		return fmt.Errorf("risklimit: restored sale %s is a %s; a sale back to 98%% is a sell", o.ClientOrderID, o.Side)
-	case trigger != event.SaleTriggerExit && trigger != event.SaleTriggerMarginUrgent:
-		return fmt.Errorf("risklimit: restored sale %s was fired by %q, not exit or margin-urgent", o.ClientOrderID, trigger)
-	}
-	next := g.restoredRetired(o.Tag) + g.retiredSales[saleKey(o.Tag, o.InstrumentID)]
-	if want := orderplan.SaleAttemptClientOrderID(o.Tag, o.InstrumentID, next); o.ClientOrderID != want {
-		return fmt.Errorf("risklimit: restored sale %s is not the next attempt of incident %q's sale, whose client order ID is %s", o.ClientOrderID, o.Tag, want)
-	}
-	if attempt != 0 && attempt != next+1 {
-		return fmt.Errorf("risklimit: restored sale %s is recorded as attempt %d of incident %q's sale; the next attempt is %d", o.ClientOrderID, attempt, o.Tag, next+1)
-	}
-	if err := g.RestoreReleased(o, fills, time.Time{}, venueOrderID); err != nil {
-		return err
-	}
-	g.orders[o.ClientOrderID].planned.Sale = event.SaleFigures{Kind: event.SaleKindIncident, Trigger: trigger}
-	g.recordAttempt(o.Tag, o.InstrumentID)
-	return nil
+	return g.RestoreRecovery(Recovery{OwnSale: &RestoredOwnSale{RestoredOrder: RestoredOrder{Order: o, Fills: fills, VenueOrderID: venueOrderID}, Trigger: trigger, Attempt: attempt}})
 }
 
 // recordAttempt adds instrumentID's sale under tag to the tag's one attempt

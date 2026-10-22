@@ -643,6 +643,18 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	if in.ConfigurationHash != h.hash || p.AccountID != h.cfg.AccountID || p.Boost.InstrumentID != h.cfg.Boost.InstrumentID {
 		return fmt.Errorf("targetweight: recovered decision %s belongs to another configuration or account", in.ID)
 	}
+	// Every part of the decision the gate restores is checked before any of
+	// it is restored, and the gate restores all of it or none of it, so a
+	// refused decision leaves the run as it was (risklimit.Gate.
+	// RestoreRecovery; ADR 0026, point 5: recovered, never recomputed; fail
+	// closed, AGENTS.md). Nothing below it can be refused.
+	rec, err := h.recovery(p)
+	if err != nil {
+		return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+	}
+	if err := h.gate.RestoreRecovery(rec); err != nil {
+		return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
+	}
 	h.recovered = true
 	h.latched = p.Boost.LatchedAfter
 	h.inForce, h.inForceSet = p.Boost.TargetInForce, p.Boost.TargetInForceSet
@@ -674,157 +686,34 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	default:
 		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
 	}
-	// The order the earlier run watched is watched still, from the
-	// executions reported before the restart and its end, and the venue's
-	// reports on it are read as on an order this run released: an execution
-	// the decision holds, sent again, counts once, and a sell is netted as
-	// any working sell (ADR 0026, points 2 and 5, amended 2026-10-18; ADR
-	// 0019, amended 2026-10-15). It joins the orders this run released, which
-	// keep any a broker snapshot read before the recovery released.
+	// Every order the gate restored joins the orders this run released, which
+	// keep any a broker snapshot read before the recovery released, so the
+	// venue's reports on it are read as on an order this run released.
+	for _, o := range rec.Released {
+		h.release(o.Order)
+	}
+	if s := rec.OwnSale; s != nil {
+		h.release(s.Order)
+	}
+	for _, o := range rec.Working {
+		h.release(o.Order)
+	}
 	if w := p.Boost.Watched; !w.IsZero() {
-		o := event.OrderReleasedPayload{
-			AccountID: h.cfg.AccountID, ClientOrderID: w.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
-			Side: w.Side, Quantity: w.Released, LimitPrice: w.LimitPrice,
-		}
-		fills := make([]event.TargetWeightFillPayload, len(w.Fills))
-		for i, f := range w.Fills {
-			fills[i] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
-		}
-		if err := h.gate.RestoreReleased(o, fills, w.EndedAt, w.VenueOrderID); err != nil {
-			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-		}
-		h.release(o)
-		h.watch = &watched{order: o, status: w.Status, endedAt: w.EndedAt, afterRejection: w.AfterRejection, venueID: w.VenueOrderID}
+		h.watch = &watched{order: rec.Released[0].Order, status: w.Status, endedAt: w.EndedAt, afterRejection: w.AfterRejection, venueID: w.VenueOrderID}
 	}
-	// An undecided order but the watched one is restored as released,
-	// latest first, so the gate keeps release order: the venue's reports on
-	// it are read, and a sell is netted, as on an order this run released.
-	for i := len(p.Boost.UndecidedOrders) - 1; i >= 0; i-- {
-		r := p.Boost.UndecidedOrders[i]
-		if r.ClientOrderID == p.Boost.Watched.ClientOrderID {
-			continue
-		}
-		o := event.OrderReleasedPayload{
-			AccountID: h.cfg.AccountID, ClientOrderID: r.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
-			Side: r.Side, Quantity: r.Released, LimitPrice: r.LimitPrice,
-		}
-		if err := h.gate.RestoreReleased(o, nil, time.Time{}, r.VenueOrderID); err != nil {
-			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-		}
-		h.release(o)
-	}
-	// A cleared order stays released, the oldest the gate knows of, so a
-	// sell never sent is still counted as sold. The watched one is restored
-	// above.
-	for _, r := range p.Boost.ClearedOrders {
-		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
-			o := event.OrderReleasedPayload{
-				AccountID: h.cfg.AccountID, ClientOrderID: r.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
-				Side: r.Side, Quantity: r.Released, LimitPrice: r.LimitPrice,
-			}
-			if err := h.gate.RestoreReleased(o, nil, time.Time{}, ""); err != nil {
-				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-			}
-			h.release(o)
-		}
-		h.cleared = append(h.cleared, r.ClientOrderID)
-	}
-	// The sale attempt the approved run's approval restored is restored as
-	// that run held it, before the sales it retired, so the next attempt's
-	// client order ID follows every retired one (ADR 0026, point 2, "Order
-	// identity", and point 5: recovered, never recomputed). A sale the run
-	// attempted itself and released, still live, is restored as that run's
-	// own attempt, below, never as one an earlier run spent, so its
-	// retirement frees it as in the full run.
-	if r := p.Boost.RestoredSale; r != nil {
-		if err := h.gate.RestoreSaleAttempt(r.IncidentID, r.Attempted && r.Order == nil, r.RetiredAttempts); err != nil {
-			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-		}
-	}
-	// A retired order is restored as released and ended at its retirement,
-	// so a venue report on it is refused after a restart as in the full run
-	// (ADR 0026, point 5: recovered, never recomputed). The watched one is
-	// restored above, ended.
-	for _, r := range p.Boost.RetiredOrders {
-		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
-			o := event.OrderReleasedPayload{
-				AccountID: h.cfg.AccountID, ClientOrderID: r.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
-				Side: r.Side, Quantity: r.Released, LimitPrice: r.LimitPrice,
-			}
-			if err := h.gate.RestoreReleased(o, nil, r.RetiredAt, ""); err != nil {
-				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-			}
-			h.release(o)
-		}
-		// A retired sale back to 98% counts among its tag's retired
-		// attempts, so the next has an ID of its own; one whose ID is not
-		// the attempt's it records is refused (ADR 0026, point 2, "Order
-		// identity"; fail closed, AGENTS.md).
-		if r.SaleTag != "" {
-			if want := orderplan.SaleAttemptClientOrderID(r.SaleTag, h.cfg.Boost.InstrumentID, r.SaleAttempt-1); want != r.ClientOrderID {
-				return fmt.Errorf("targetweight: recovered decision %s: retired order %s is recorded as attempt %d of %s's sale, whose client order ID is %s", in.ID, r.ClientOrderID, r.SaleAttempt, r.SaleTag, want)
-			}
-			if err := h.gate.RestoreRetiredSale(r.SaleTag, h.cfg.Boost.InstrumentID, r.SaleAttempt); err != nil {
-				return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-			}
-		}
-		h.retired = append(h.retired, r)
-	}
-	// The run's own live sale is restored after every retired one, so its
-	// client order ID and attempt are checked against the attempt that
-	// follows them (ADR 0026, point 2, "Order identity"). It is restored
-	// released, with the executions reported before the decision and its
-	// venue order ID, and named when a venue had named it, so the venue's
-	// next acknowledgement, listing, execution, cancel or expiry of it is
-	// read, and its retirement refused or read, as in the full run, and no
-	// second attempt is made while it works (ADR 0019, "Explained means",
-	// and amended 2026-10-15: one attempt; ADR 0026, point 5: recovered,
-	// never recomputed). A decision recorded at version 7 states none of
-	// these: it recorded the sale only while no venue had named it and
-	// nothing had filled.
-	if r := p.Boost.RestoredSale; r != nil && r.Order != nil {
-		o := event.OrderReleasedPayload{
-			AccountID: h.cfg.AccountID, Tag: r.IncidentID, ClientOrderID: r.Order.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
-			Side: event.OrderSideSell, Quantity: r.Order.Released, LimitPrice: r.Order.LimitPrice, Mode: h.cfg.Mode,
-		}
-		w := r.Order.Watched()
-		w.Side = event.OrderSideSell
-		fills := make([]event.TargetWeightFillPayload, len(w.Fills))
-		for i, f := range w.Fills {
-			fills[i] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
-		}
-		if err := h.gate.RestoreOwnSale(o, r.Order.Trigger, r.Order.Attempt, fills, r.Order.VenueOrderID); err != nil {
-			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-		}
-		h.release(o)
-		if r.Order.Named {
-			h.name(o.ClientOrderID)
-		}
+	h.cleared = append(h.cleared, clearedIDs(p.Boost.ClearedOrders)...)
+	h.retired = append(h.retired, p.Boost.RetiredOrders...)
+	// The run's own live sale is named when a venue had named it, so its
+	// retirement is refused as in the full run (ADR 0026, point 2, "Boost",
+	// and point 5, amended 2026-10-22).
+	if r := p.Boost.RestoredSale; r != nil && r.Order != nil && r.Order.Named {
+		h.name(r.Order.ClientOrderID)
 	}
 	// An order a venue named before the decision reached IBKR, so the
 	// restarted run refuses its retirement as the full run does (ADR 0026,
 	// point 2, "Boost", and point 5, amended 2026-10-22).
 	for _, id := range p.Boost.NamedOrders {
 		h.name(id)
-	}
-	// An accepted order still working beside the watched one is restored
-	// with its executions, latest first so the gate keeps release order,
-	// and the venue's later reports on it are read as on an order this run
-	// released.
-	for i := len(p.Boost.WorkingOrders) - 1; i >= 0; i-- {
-		w := p.Boost.WorkingOrders[i]
-		o := event.OrderReleasedPayload{
-			AccountID: h.cfg.AccountID, ClientOrderID: w.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
-			Side: w.Side, Quantity: w.Released, LimitPrice: w.LimitPrice,
-		}
-		fills := make([]event.TargetWeightFillPayload, len(w.Fills))
-		for j, f := range w.Fills {
-			fills[j] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
-		}
-		if err := h.gate.RestoreReleased(o, fills, time.Time{}, w.VenueOrderID); err != nil {
-			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
-		}
-		h.release(o)
 	}
 	for _, w := range p.Boost.WorkingOrders {
 		h.working = append(h.working, undecidedOrder{id: w.ClientOrderID, venueID: w.VenueOrderID})
@@ -841,6 +730,123 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
+}
+
+// clearedIDs is the client order IDs of cleared, in the order cleared.
+func clearedIDs(cleared []event.BoostUndecidedOrder) []string {
+	ids := make([]string, len(cleared))
+	for i, r := range cleared {
+		ids[i] = r.ClientOrderID
+	}
+	return ids
+}
+
+// recovery is what the recovered decision p restores into the gate, in the
+// order restored (risklimit.Recovery), every part of it checked against p
+// before the gate checks it against itself: a retired sale back to 98%'s
+// client order ID must be the attempt's it records (ADR 0026, point 2,
+// "Order identity"; fail closed, AGENTS.md).
+func (h *Handler) recovery(p event.TargetsDecidedPayload) (risklimit.Recovery, error) {
+	var rec risklimit.Recovery
+	order := func(id, tag, side string, released int64, limit float64) event.OrderReleasedPayload {
+		return event.OrderReleasedPayload{AccountID: h.cfg.AccountID, Tag: tag, ClientOrderID: id, InstrumentID: h.cfg.Boost.InstrumentID,
+			Side: side, Quantity: released, LimitPrice: limit}
+	}
+	// The order the earlier run watched is watched still, from the
+	// executions reported before the restart and its end, and the venue's
+	// reports on it are read as on an order this run released: an execution
+	// the decision holds, sent again, counts once, and a sell is netted as
+	// any working sell (ADR 0026, points 2 and 5, amended 2026-10-18; ADR
+	// 0019, amended 2026-10-15). It is restored first.
+	if w := p.Boost.Watched; !w.IsZero() {
+		fills := make([]event.TargetWeightFillPayload, len(w.Fills))
+		for i, f := range w.Fills {
+			fills[i] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
+		}
+		rec.Released = append(rec.Released, risklimit.RestoredOrder{Order: order(w.ClientOrderID, "", w.Side, w.Released, w.LimitPrice),
+			Fills: fills, Ended: w.EndedAt, VenueOrderID: w.VenueOrderID})
+	}
+	// An undecided order but the watched one is restored as released,
+	// latest first, so the gate keeps release order: the venue's reports on
+	// it are read, and a sell is netted, as on an order this run released.
+	for i := len(p.Boost.UndecidedOrders) - 1; i >= 0; i-- {
+		r := p.Boost.UndecidedOrders[i]
+		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
+			rec.Released = append(rec.Released, risklimit.RestoredOrder{Order: order(r.ClientOrderID, "", r.Side, r.Released, r.LimitPrice), VenueOrderID: r.VenueOrderID})
+		}
+	}
+	// A cleared order stays released, the oldest the gate knows of, so a
+	// sell never sent is still counted as sold. The watched one is restored
+	// above.
+	for _, r := range p.Boost.ClearedOrders {
+		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
+			rec.Released = append(rec.Released, risklimit.RestoredOrder{Order: order(r.ClientOrderID, "", r.Side, r.Released, r.LimitPrice)})
+		}
+	}
+	// A retired order is restored as released and ended at its retirement,
+	// so a venue report on it is refused after a restart as in the full run
+	// (ADR 0026, point 5: recovered, never recomputed). The watched one is
+	// restored above, ended. A retired sale back to 98% counts among its
+	// tag's retired attempts, so the next has an ID of its own; one whose ID
+	// is not the attempt's it records is refused (ADR 0026, point 2, "Order
+	// identity"; fail closed, AGENTS.md).
+	for _, r := range p.Boost.RetiredOrders {
+		if r.ClientOrderID != p.Boost.Watched.ClientOrderID {
+			rec.Released = append(rec.Released, risklimit.RestoredOrder{Order: order(r.ClientOrderID, "", r.Side, r.Released, r.LimitPrice), Ended: r.RetiredAt})
+		}
+		if r.SaleTag != "" {
+			if want := orderplan.SaleAttemptClientOrderID(r.SaleTag, h.cfg.Boost.InstrumentID, r.SaleAttempt-1); want != r.ClientOrderID {
+				return rec, fmt.Errorf("retired order %s is recorded as attempt %d of %s's sale, whose client order ID is %s", r.ClientOrderID, r.SaleAttempt, r.SaleTag, want)
+			}
+			rec.RetiredSales = append(rec.RetiredSales, risklimit.RetiredSaleAttempt{Tag: r.SaleTag, InstrumentID: h.cfg.Boost.InstrumentID, Attempt: r.SaleAttempt})
+		}
+	}
+	// The sale attempt the approved run's approval restored is restored as
+	// that run held it, before the sales it retired, so the next attempt's
+	// client order ID follows every retired one (ADR 0026, point 2, "Order
+	// identity", and point 5: recovered, never recomputed). A sale the run
+	// attempted itself and released, still live, is restored as that run's
+	// own attempt, after every retired one, so its client order ID and
+	// attempt are checked against the attempt that follows them, never as
+	// one an earlier run spent, so its retirement frees it as in the full
+	// run. It is restored released, with the executions reported before the
+	// decision and its venue order ID, so the venue's next acknowledgement,
+	// listing, execution, cancel or expiry of it is read, and its
+	// retirement refused or read, as in the full run, and no second attempt
+	// is made while it works (ADR 0019, "Explained means", and amended
+	// 2026-10-15: one attempt; ADR 0026, point 5: recovered, never
+	// recomputed). A decision recorded at version 7 states none of these: it
+	// recorded the sale only while no venue had named it and nothing had
+	// filled.
+	if r := p.Boost.RestoredSale; r != nil {
+		rec.SaleAttempt = &risklimit.RestoredSaleAttempt{IncidentID: r.IncidentID, Attempted: r.Attempted && r.Order == nil, Retired: r.RetiredAttempts}
+		if r.Order != nil {
+			o := order(r.Order.ClientOrderID, r.IncidentID, event.OrderSideSell, r.Order.Released, r.Order.LimitPrice)
+			o.Mode = h.cfg.Mode
+			w := r.Order.Watched()
+			w.Side = event.OrderSideSell
+			fills := make([]event.TargetWeightFillPayload, len(w.Fills))
+			for i, f := range w.Fills {
+				fills[i] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
+			}
+			rec.OwnSale = &risklimit.RestoredOwnSale{RestoredOrder: risklimit.RestoredOrder{Order: o, Fills: fills, VenueOrderID: r.Order.VenueOrderID},
+				Trigger: r.Order.Trigger, Attempt: r.Order.Attempt}
+		}
+	}
+	// An accepted order still working beside the watched one is restored
+	// with its executions, latest first so the gate keeps release order,
+	// and the venue's later reports on it are read as on an order this run
+	// released.
+	for i := len(p.Boost.WorkingOrders) - 1; i >= 0; i-- {
+		w := p.Boost.WorkingOrders[i]
+		fills := make([]event.TargetWeightFillPayload, len(w.Fills))
+		for j, f := range w.Fills {
+			fills[j] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
+		}
+		rec.Working = append(rec.Working, risklimit.RestoredOrder{Order: order(w.ClientOrderID, "", w.Side, w.Released, w.LimitPrice),
+			Fills: fills, VenueOrderID: w.VenueOrderID})
+	}
+	return rec, nil
 }
 
 // applyApproval starts a fresh run from the owner's approval: Boost's latch
@@ -1389,7 +1395,8 @@ func (h *Handler) learnVenueID(id, venueID string) {
 
 // refuseVenue refuses record in when it would give order id the venue order
 // ID venueID that another order the run lists (the watched order, those
-// awaiting the venue's verdict and the working ones) already carries: a
+// awaiting the venue's verdict, the working ones and the run's own live sale
+// back to 98%, as the next decision records each) already carries: a
 // venue order ID names one order, and the failure is the input's, refused
 // when it arrives rather than found when the decision is written (ADR 0026,
 // point 5, amended 2026-10-18; fail closed, AGENTS.md). venueID is never
@@ -1414,6 +1421,9 @@ func (h *Handler) refuseVenue(in event.Envelope, id, venueID string) error {
 				return err
 			}
 		}
+	}
+	if r := h.restoredSale(); r != nil && r.Order != nil {
+		return carried(r.Order.ClientOrderID, r.Order.VenueOrderID)
 	}
 	return nil
 }

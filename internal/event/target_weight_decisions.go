@@ -1032,8 +1032,8 @@ func (p TargetsDecidedPayload) ValidateWritten() error {
 	errs := []error{p.Validate()}
 	// A live sale written now states its side and its attempt (version 8);
 	// Validate reads a version 7 record, which states neither.
-	if r := p.Boost.RestoredSale; r != nil && r.Order != nil && (r.Order.Side != OrderSideSell || r.Order.Attempt < 1) {
-		errs = append(errs, fmt.Errorf("a restored sale's order written now records its side, a sell, and its attempt, the first being 1; got %q and %d", r.Order.Side, r.Order.Attempt))
+	if err := p.Boost.RestoredSale.versioned(); err != nil {
+		errs = append(errs, err)
 	}
 	for _, n := range p.Momentum.Names {
 		if n.Status == MomentumStatusGap && len(n.GapSessions) == 0 {
@@ -1043,20 +1043,38 @@ func (p TargetsDecidedPayload) ValidateWritten() error {
 	return errors.Join(errs...)
 }
 
-// ValidateSchema checks p as recorded at version: Validate, and, below
-// version 8, no field of the live sale that only version 8 records, so a
-// record carrying a later version's field is refused (ADR 0015). A version
-// above the current one, or none, is refused.
+// ValidateSchema checks p as recorded at version: Validate; at version 8, a
+// live sale back to 98% that states its side, a sell, and its attempt, the
+// first being 1, which version 8 records; and, below version 8, no field of
+// the live sale that only version 8 records, so a record carrying a later
+// version's field is refused (ADR 0015; ADR 0026, point 2, "Order
+// identity"). A version above the current one, or none, is refused.
 func (p TargetsDecidedPayload) ValidateSchema(version uint32) error {
+	r := p.Boost.RestoredSale
 	switch {
 	case version == 0 || version > TargetsDecidedSchemaVersion:
 		return fmt.Errorf("targets decided schema version %d is not between 1 and %d", version, TargetsDecidedSchemaVersion)
 	case version < TargetsDecidedSchemaVersion:
-		if r := p.Boost.RestoredSale; r != nil && r.Order != nil && r.Order.recordsVersion8() {
+		if r != nil && r.Order != nil && r.Order.recordsVersion8() {
 			return fmt.Errorf("a version %d decision's restored sale records its side, attempt, naming, venue order ID or executions, which only version 8 records", version)
+		}
+	default:
+		if err := r.versioned(); err != nil {
+			return errors.Join(p.Validate(), err)
 		}
 	}
 	return p.Validate()
+}
+
+// versioned refuses a live sale back to 98% that does not state its side, a
+// sell, and its attempt, the first being 1, as every version 8 record does
+// (ADR 0026, point 2, "Order identity"). A record with no live sale states
+// neither, and passes.
+func (s *BoostRestoredSale) versioned() error {
+	if s == nil || s.Order == nil || s.Order.Side == OrderSideSell && s.Order.Attempt >= 1 {
+		return nil
+	}
+	return fmt.Errorf("a restored sale's order at version 8 records its side, a sell, and its attempt, the first being 1; got %q and %d", s.Order.Side, s.Order.Attempt)
 }
 
 // validateGaps checks a name's gap sessions: dates, strictly ascending, on
