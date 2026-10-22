@@ -158,7 +158,18 @@ if test -n "\${FAKE_MV_FAIL:-}" && test "\$last" = "\$FAKE_MV_FAIL" && test "\$(
 fi
 exec "$real_mv" "\$@"
 STUB
-chmod +x "$work/stub/systemctl" "$work/stub/gh" "$work/path/curl" "$work/path/mv"
+real_rm=$(command -v rm)
+cat >"$work/path/rm" <<STUB
+#!/bin/bash
+for a in "\$@"; do
+  if test -n "\${FAKE_RM_FAIL:-}" && [[ "\$a" == \$FAKE_RM_FAIL ]]; then
+    echo "rm: cannot remove: Operation not permitted" >&2
+    exit 1
+  fi
+done
+exec "$real_rm" "\$@"
+STUB
+chmod +x "$work/stub/systemctl" "$work/stub/gh" "$work/path/curl" "$work/path/mv" "$work/path/rm"
 export PATH="$work/path:$PATH"
 
 # fresh_server: a prefix with an earlier hand-installed build, like a server
@@ -380,6 +391,23 @@ rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
 expect "the tag installs when asked again" 0 "$(run v1.0.0)"
 all_are "the tag after a failed save" v1.0.0
 
+# A save that fails, with the kept build moved back: the TAG note beside it is
+# removed from its new place, and a failing removal never decides the outcome.
+fresh_server
+expect "v1.0.0 installs for the TAG case" 0 "$(run v1.0.0)"
+expect "v1.1.0 installs for the TAG case" 0 "$(run v1.1.0)"
+expect "a failed save is nonzero (TAG removed)" nonzero "$(nonzero "$(FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run v1.0.0)")"
+test -f "$TI_PREFIX/releases/v1.0.0/checksums.txt" || fail "the kept build was not moved back"
+test ! -e "$TI_PREFIX/releases/v1.0.0/TAG" || fail "a stray TAG is left in the moved-back build"
+rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
+fresh_server
+expect "v1.0.0 installs for the TAG rm case" 0 "$(run v1.0.0)"
+expect "v1.1.0 installs for the TAG rm case" 0 "$(run v1.1.0)"
+expect "a failed save with a failing TAG removal is nonzero" nonzero "$(nonzero "$(FAKE_RM_FAIL="$TI_PREFIX/releases/*/TAG" FAKE_MV_FAIL=$TI_PREFIX/releases/v1.0.0 run v1.0.0)")"
+test -f "$TI_PREFIX/releases/v1.0.0/checksums.txt" || fail "a failing TAG removal lost the only copy of the build: $(cat "$work/out")"
+test ! -e "$TI_PREFIX/releases/.replaced" || fail "the build is still at .replaced after a successful move back"
+rm -f "$TI_PREFIX/releases/v1.0.0.failed-once"
+
 # The save fails and the kept build cannot be moved back either (the folder of
 # the tag being released again held the previous build): that build is kept
 # under a .rescue name, an ALERT names it, and the exit is non-zero.
@@ -436,8 +464,35 @@ grep -q "\.replaced: kept build v1.0.0" "$work/out" || fail "--status does not r
 mkdir -p "$TI_PREFIX/releases/.rescue-v9.9.9"
 expect "--status succeeds with a rescue" 0 "$(run --status)"
 grep -q "\.rescue-v9.9.9" "$work/out" || fail "--status does not list the rescue folder: $(cat "$work/out")"
+mkdir -p "$TI_PREFIX/releases/.aside-v9.9.8"
+expect "--status succeeds with a parked copy" 0 "$(run --status)"
+grep -q "\.aside-v9.9.8" "$work/out" || fail "--status does not list the parked copy: $(cat "$work/out")"
+rmdir "$TI_PREFIX/releases/.aside-v9.9.8"
+mkdir "$TI_PREFIX/releases/.lock"
+echo 999999 >"$TI_PREFIX/releases/.lock/pid"
+expect "--status with a lock held" 0 "$(run --status)"
+grep -q "lock: held at $TI_PREFIX/releases/.lock" "$work/out" || fail "--status does not report the lock: $(cat "$work/out")"
+grep -q "pid 999999" "$work/out" || fail "--status does not name the lock's pid: $(cat "$work/out")"
+grep -q "not running" "$work/out" || fail "--status does not say the lock is stale: $(cat "$work/out")"
+grep -q "belongs to the running release" "$work/out" || fail "--status does not say .replaced may belong to a running release: $(cat "$work/out")"
+rm -rf "$TI_PREFIX/releases/.lock"
+expect "--status with no lock" 0 "$(run --status)"
+grep -q "lock: none" "$work/out" || fail "--status does not say the lock is clear: $(cat "$work/out")"
 expect "--status refuses extra arguments" nonzero "$(nonzero "$(run --status v1.0.0)")"
 test ! -e "$TI_PREFIX/releases/.lock" || fail "--status left a lock"
+
+# A .replaced without its TAG note (the run died between the rename and the
+# write): the tag is worked out as the previous build whose folder is missing.
+mv "$TI_PREFIX/releases/.replaced" "$TI_PREFIX/releases/aside"
+mkdir -p "$TI_PREFIX/releases/.replaced"
+echo "v1.0.0" >"$TI_PREFIX/releases/previous"
+rm -rf "$TI_PREFIX/releases/v1.0.0"
+expect "a release refuses over a .replaced with no TAG" nonzero "$(nonzero "$(run v1.3.0)")"
+grep -q "probably v1.0.0, whose folder is missing" "$work/out" || fail "the refusal does not name the probable tag: $(cat "$work/out")"
+expect "--status with a .replaced with no TAG" 0 "$(run --status)"
+grep -q "probably v1.0.0, whose folder is missing" "$work/out" || fail "--status does not name the probable tag: $(cat "$work/out")"
+rmdir "$TI_PREFIX/releases/.replaced"
+mv "$TI_PREFIX/releases/aside" "$TI_PREFIX/releases/.replaced"
 
 # A rescue folder never blocks a run; only .replaced does.
 mv "$TI_PREFIX/releases/.replaced" "$TI_PREFIX/releases/aside"

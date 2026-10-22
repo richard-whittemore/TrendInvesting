@@ -113,12 +113,47 @@ case ${1:-} in
     ;;
 esac
 
+# kept_tag: the tag of the build kept at .replaced: the TAG note beside it, or,
+# when the note is missing, the previous build, whose folder is then the one
+# that is missing (only the current and previous folders survive a prune).
+kept_tag() {
+  local t prev
+  t=$(cat "$releases/.replaced/TAG" 2>/dev/null || true)
+  if test -n "$t"; then printf '%s' "$t"; return; fi
+  prev=$(cat "$releases/previous" 2>/dev/null || true)
+  if test -n "$prev" && test ! -d "$releases/$prev"; then
+    printf 'probably %s, whose folder is missing' "$prev"
+  else
+    printf 'not recorded'
+  fi
+}
+
 if test "$mode" = status; then
   st() { cat "$releases/$1" 2>/dev/null || true; }
   echo "current: $(st current)"
   echo "previous: $(st previous)"
+  if test -d "$releases/.lock"; then
+    lpid=$(cat "$releases/.lock/pid" 2>/dev/null || true)
+    lmod=$(stat -c %Y "$releases/.lock" 2>/dev/null || stat -f %m "$releases/.lock" 2>/dev/null || echo "")
+    lage=unknown
+    if test -n "$lmod"; then lage="$(($(date +%s) - lmod))s"; fi
+    if test -z "$lpid"; then
+      lstate="pid unknown"
+    elif kill -0 "$lpid" 2>/dev/null; then
+      lstate="pid $lpid is running"
+    else
+      lstate="pid $lpid is not running: a stale lock; remove it after checking no ti-release is running"
+    fi
+    echo "lock: held at $releases/.lock (age $lage, $lstate)"
+  else
+    echo "lock: none"
+  fi
   if test -e "$releases/.replaced"; then
-    echo ".replaced: kept build $(cat "$releases/.replaced/TAG" 2>/dev/null || echo '(tag not recorded)') at $releases/.replaced (blocks the next run until moved)"
+    if test -d "$releases/.lock"; then
+      echo ".replaced: kept build $(kept_tag) at $releases/.replaced; while the lock is held it belongs to the running release and must not be touched"
+    else
+      echo ".replaced: kept build $(kept_tag) at $releases/.replaced (blocks the next run until moved)"
+    fi
   else
     echo ".replaced: none"
   fi
@@ -129,6 +164,13 @@ if test "$mode" = status; then
     found=1
   done
   test "$found" = 1 || echo "rescue: none"
+  found=0
+  for d in "$releases"/.aside-*; do
+    test -e "$d" || continue
+    echo "aside: $d (a copy parked by hand; never blocks a run)"
+    found=1
+  done
+  test "$found" = 1 || echo "aside: none"
   exit 0
 fi
 
@@ -169,14 +211,15 @@ refuse_if_engine_busy
 install -d -m 0755 "$releases"
 lock=$releases/.lock
 mkdir "$lock" 2>/dev/null || die "another ti-release is running (or died: remove $lock)"
-trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true' EXIT
+printf '%s\n' "$$" >"$lock/pid" || true
 # A build kept at .replaced by an earlier failed save is the only copy: refuse,
 # before the full exit trap (which clears .replaced) exists, until it is moved.
 if test -e "$releases/.replaced"; then
-  die "ALERT: a kept build (tag $(cat "$releases/.replaced/TAG" 2>/dev/null || echo 'not recorded; see ti-release --status')) was left at $releases/.replaced by an earlier failed save; move it to $releases/<that tag> (or to a dot-prefixed name such as $releases/.aside-<that tag>) by hand first; nothing installed"
+  die "ALERT: a kept build (tag $(kept_tag)) was left at $releases/.replaced by an earlier failed save; move it to $releases/<that tag> (or to a dot-prefixed name such as $releases/.aside-<that tag>) by hand first; nothing installed"
 fi
 keep_replaced=0
-trap 'rmdir "$lock" 2>/dev/null || true; rm -rf "$releases/.staging"; test "$keep_replaced" = 1 || rm -rf "$releases/.replaced"' EXIT
+trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true; rm -rf "$releases/.staging"; test "$keep_replaced" = 1 || rm -rf "$releases/.replaced"' EXIT
 
 read_state() { cat "$releases/$1" 2>/dev/null || true; }
 write_state() { printf '%s\n' "$2" >"$releases/$1.new" && mv "$releases/$1.new" "$releases/$1"; }
@@ -432,7 +475,7 @@ if test "$mode" = release; then
   fi
   if test "$kept" = 1 && ! mv "$stage" "$releases/$tag"; then
     kept=0
-    if test -d "$releases/.replaced" && rm -f "$releases/.replaced/TAG" && ! mv "$releases/.replaced" "$releases/$tag"; then
+    if test -d "$releases/.replaced" && ! mv "$releases/.replaced" "$releases/$tag"; then
       printf '%s\n' "$tag" >"$releases/.replaced/TAG" || true
       # The kept build could not be moved back: it is the only copy, so the
       # exit trap must not delete it.
@@ -443,6 +486,9 @@ if test "$mode" = release; then
       while test -e "$rescue"; do n=$((n + 1)); rescue=$releases/.rescue-$tag.$n; done
       if mv "$releases/.replaced" "$rescue"; then kept_at=$rescue; keep_replaced=0; fi
       log "ALERT: the kept build $tag could not be moved back; its only copy is $kept_at (state still names it as previous); move it to $releases/$tag by hand"
+    else
+      # Moved back: the note is stale there; a failed removal changes nothing.
+      rm -f "$releases/$tag/TAG" || true
     fi
   fi
   if test "$kept" = 0; then
