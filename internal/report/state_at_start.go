@@ -44,7 +44,7 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 	}
 	var state, stopped, unreadable, refused, unreadClearances, killed, pending, alarm []string // each the private line, then the public one
 	headline := "Normal"
-	rej := newBoostRejections(account)
+	rej := newBoostRejections(account, strategy)
 	var lastBoost event.Envelope
 	var lastFigures event.BoostFigures
 	for _, e := range envelopes {
@@ -201,17 +201,18 @@ func StateAtStartAlert(envelopes []event.Envelope, alerts []Alert) (Alert, bool,
 // a clearance the engine applies.
 type boostRejections struct {
 	account    string
+	strategy   string // the account's, from its configuration
 	verdicts   targetweight.BoostVerdicts
 	instrument string                                // the Boost decision's instrument, for a clearance
 	boostTags  map[string]bool                       // IDs of the Boost decisions seen
 	released   map[string]event.OrderReleasedPayload // each order's first release
 	fills      *boostFills
 	refused    []string // clearances the engine refuses, named on the page
-	unread     []string // clearances the reporter cannot read or validate, counted as unreadable records
+	unread     []string // clearances the reporter cannot read or validate, named on the page (the reporter also pages each as an unread record)
 }
 
-func newBoostRejections(account string) *boostRejections {
-	return &boostRejections{account: account, boostTags: map[string]bool{}, released: map[string]event.OrderReleasedPayload{}, fills: newBoostFills()}
+func newBoostRejections(account, strategy string) *boostRejections {
+	return &boostRejections{account: account, strategy: strategy, boostTags: map[string]bool{}, released: map[string]event.OrderReleasedPayload{}, fills: newBoostFills()}
 }
 
 // freshRun starts the count a fresh run starts with: none (ADR 0026, point
@@ -264,9 +265,10 @@ func (r *boostRejections) venue(e event.Envelope) targetweight.Verdict {
 		// An execution shows the venue accepted the order.
 		return r.verdicts.Observe(p.ClientOrderID, false)
 	case event.RebalanceClearedEventType:
-		// Only a Boost account's clearance runs through the Boost count:
-		// the momentum engine applies it through its own order reports.
-		if len(r.boostTags) == 0 {
+		// Only a Boost account's clearance runs through the Boost count,
+		// whatever the run has decided so far: the momentum engine applies
+		// it through its own order reports.
+		if r.strategy != event.TargetWeightStrategyBoost {
 			return targetweight.VerdictNone
 		}
 		var p event.RebalanceClearedPayload

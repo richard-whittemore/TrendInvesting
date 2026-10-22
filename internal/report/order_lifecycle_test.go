@@ -503,3 +503,23 @@ func TestASyntheticReportAcknowledgesNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestAnUnreadableBoostClearanceIsAnUnreadRecordTheReporterPages: the Boost
+// engine refuses a clearance it cannot read, and the reporter pages it with
+// the unread records, one incident per input, as it pages an unread venue
+// report; a momentum account's clearance is not read this way (ADR 0019,
+// "Alerting"; ADR 0026, point 2, "Boost", amended 2026-10-18).
+func TestAnUnreadableBoostClearanceIsAnUnreadRecordTheReporterPages(t *testing.T) {
+	for strategy, want := range map[string]int{event.TargetWeightStrategyBoost: 1, event.TargetWeightStrategyMomentum: 0} {
+		run := &logRun{t: t}
+		run.session(0)
+		run.add(journal.KindInput, event.RebalanceClearedEventType, 99, "cleared:bad", day(1), map[string]string{})
+		_, unread, err := report.OrderLifecycles(run.out, strategy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unread) != want || (want == 1 && (unread[0].InputID != "cleared:bad" || unread[0].Type != event.RebalanceClearedEventType)) {
+			t.Errorf("%s: unread %+v, want %d", strategy, unread, want)
+		}
+	}
+}

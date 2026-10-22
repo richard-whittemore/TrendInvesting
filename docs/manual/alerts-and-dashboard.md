@@ -323,8 +323,12 @@ The delivery rules:
   clearance the engine's Boost rule refuses (it names an order twice, or an
   order this run never released) is named on the page, and a clearance
   record the reporter cannot read or validate, which the engine also
-  refuses, is counted as an unreadable record and its record ID is shown
-  with "cannot be read"; a momentum account's clearances are never read
+  refuses, is paged with the unreadable records, one urgent alert for each
+  (the same alert as a venue report the engine did not read), and its
+  record ID is also shown on the page with "cannot be read"; a Boost
+  account is the one whose configuration names Boost, so a clearance
+  journalled after a fresh run's approval and before its first decision is
+  judged the same way; a momentum account's clearances are never read
   this way, since that engine applies them through its own order reports; a decision record the reporter cannot
   read is named "cannot be read: treat the buy stop as possibly in force"
   beside any stop already known, and on a momentum account, which has no

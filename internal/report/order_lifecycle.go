@@ -115,6 +115,14 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 				applyClearance(e, reports)
 				continue
 			}
+			if e.Type == event.RebalanceClearedEventType {
+				// The Boost engine refuses a clearance it cannot read.
+				var p event.RebalanceClearedPayload
+				if err := read(e, clearedVersions, &p); err != nil {
+					unread = append(unread, UnreadReport{InputID: e.ID, Type: e.Type, Reason: err.Error(), At: e.RecordedAt})
+				}
+				continue
+			}
 			if u := acknowledge(e, strategyID, byID, reports, fills); u != nil {
 				unread = append(unread, *u)
 			}

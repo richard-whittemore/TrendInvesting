@@ -267,22 +267,23 @@ func (l *boostLog) filled(n int, id string) {
 // rule from the decision's recorded count (ADR 0026, point 2, "Boost",
 // amended 2026-10-18; point 5).
 func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
-	one := func() *boostLog {
+	one := func(released ...string) *boostLog {
 		l := newBoostLog(t)
 		l.decide(0, "tw-6", "tw-7")
 		l.report(1, "tw-6", event.OrderLifecycleStatusInvalid)
 		l.inARow, l.undecided, l.before = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}}, []string{"tw-7"}, 0
-		l.decide(1)
+		l.decide(1, released...)
 		return l
 	}
-	second := one()
+	// tw-9 is released by the decision of session 1, which lists it among
+	// its undecided orders as the engine's journal does.
+	second := one("tw-9")
 	// None of these is a rejection the engine counts: a dry-run release, a
 	// release made twice, a sale back to 98% (no Boost decision's order), a
 	// report on an order no decision released, an acknowledgement, a report
 	// the build cannot read and another account's.
 	second.released(1, "tw-dry", 10)
 	second.send(1, "tw-7")
-	second.send(1, "tw-9")
 	second.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm", day(1),
 		event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:alarm", Tag: "alarm:u", ClientOrderID: "alarm-1",
 			InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures})
@@ -312,7 +313,7 @@ func TestTheSecondRejectionStopsBuysAtOnceInTheStanding(t *testing.T) {
 	// the page still names the two orders and the count of 2.
 	second.inARow = []event.BoostRejectedOrder{{ClientOrderID: "tw-6", VenueOrderID: "ib-tw-6"}, {ClientOrderID: "tw-7", VenueOrderID: "ib-tw-7"}}
 	second.undecided, second.before = nil, 0
-	// tw-9 was released before the stop (above) and is reported after it; a
+	// tw-9 was released before the stop (session 1) and is reported after it; a
 	// stopped engine releases no buy, so the decision that records the stop
 	// lists it as awaiting the venue's word and releases nothing.
 	second.undecided = []string{"tw-9"}
@@ -535,5 +536,32 @@ func TestAnUnreadableClearanceIsCountedAsAnUnreadableRecordInTheStanding(t *test
 	a, ok := stateAtStart(t, l.stream)
 	if !ok || !strings.Contains(a.Body, "cleared:bad") || !strings.Contains(a.Body, "cannot be read") {
 		t.Errorf("an unreadable clearance must be counted as an unreadable record: %+v, %v", a, ok)
+	}
+}
+
+// TestAClearanceAfterAFreshRunsApprovalIsJudgedBeforeItsFirstDecision: a
+// Boost account is the one whose configuration names the Boost strategy,
+// not the one that has journalled a decision since the last fresh run, so a
+// clearance journalled after a fresh run's approval and before its first
+// decision is judged as the engine judges it: refused (ADR 0026, point 2,
+// "Boost", amended 2026-10-18; ADR 0027).
+func TestAClearanceAfterAFreshRunsApprovalIsJudgedBeforeItsFirstDecision(t *testing.T) {
+	for name, clearance := range map[string]func(*boostLog){
+		"unreadable": func(l *boostLog) {
+			l.add(event.RebalanceClearedEventType, 99, "cleared:bad", day(2), map[string]string{})
+		},
+		"refused": func(l *boostLog) {
+			l.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:bad", day(2), event.RebalanceClearedPayload{
+				AccountID: "joint", AsOf: day(2), DecisionID: "targets:1", ClientOrderIDs: []string{"tw-7"}, Operator: "owner", Detail: "never sent"})
+		},
+	} {
+		l := newBoostLog(t)
+		l.decide(0, "tw-7")
+		l.add(event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approved:2", day(2), *approvalOf("", ""))
+		clearance(l)
+		a, ok := stateAtStart(t, l.stream)
+		if !ok || !strings.Contains(a.Body, "cleared:bad") {
+			t.Errorf("%s clearance before the fresh run's first decision must be named: %+v, %v", name, a, ok)
+		}
 	}
 }
