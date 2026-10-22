@@ -14,6 +14,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 )
 
 // laterAsOf is a fresh run's start after a first run at boostAsOf: a fresh
@@ -1063,6 +1064,106 @@ func TestAStatedHandSaleKeepsTheFreshRunFromMakingTheIncidentsSale(t *testing.T)
 		if sold != c.want {
 			t.Errorf("%s: the fresh run planned %d incident sale(s), want %d", c.name, sold, c.want)
 		}
+	}
+}
+
+// TestAFreshRunApprovedAfterASettledNeverSentSaleSellsUnderTheNextAttemptsID:
+// the previous run ended Halted with the incident's sale back to 98%
+// released and never sent, and the adapter settled it so once the run had
+// ended. The approval carries that settlement, states the sale not
+// attempted and one of the incident's sales retired; the engine checks the
+// settlement against the previous log by its own retirement rule, starts,
+// and, fed a broker snapshot above 98% exposure, sells under the second
+// attempt's client order ID, never the retired one's (ADR 0019, amended
+// 2026-10-17, reading 4, as the owner's decision of 2026-10-22 reads it;
+// ADR 0026, point 2, "Order identity"). Without the settlement the same
+// approval is refused, since the log records the attempt.
+func TestAFreshRunApprovedAfterASettledNeverSentSaleSellsUnderTheNextAttemptsID(t *testing.T) {
+	const incident = "engine-state:joint:1"
+	dir := t.TempDir()
+	comp, err := compose(boostConfigPath, "test-build", boostSession(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(p any) json.RawMessage {
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	first := orderplan.SaleClientOrderID(incident, "SPY")
+	halted := event.Envelope{ID: incident, Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encode(event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})}
+	sale := event.Envelope{ID: "order-planned:" + first, Type: event.OrderPlannedEventType, SchemaVersion: event.OrderPlannedSafetyVersion,
+		Payload: encode(event.OrderPlannedPayload{AccountID: "joint", Tag: incident, ClientOrderID: first, InstrumentID: "SPY",
+			Side: event.OrderSideSell, Phase: event.OrderSideSell, OrderType: event.OrderTypeLimit, Quantity: 1, LimitPrice: 99,
+			NetLiquidation: 4000, HeldQuantity: 10, ReferencePrice: 100, PriceBand: 0.05,
+			Sale: event.SaleFigures{Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit}})}
+	released := event.Envelope{ID: "order-released:" + first, Type: event.OrderReleasedEventType, SchemaVersion: event.OrderReleasedSchemaVersion,
+		Payload: encode(event.OrderReleasedPayload{AccountID: "joint", ClientOrderID: first, InstrumentID: "SPY", Side: event.OrderSideSell,
+			Quantity: 1, LimitPrice: 99, Mode: event.TradingModePaper, Send: true})}
+	previous := craftedLog(t, filepath.Join(dir, "run-1.log"), comp, halted, sale, released)
+
+	settlement := event.NeverSentSettlement{
+		Log: "run-1.log", Run: "config@" + boostSession(0).Format(time.RFC3339), InputID: "session:1", Evidence: event.NeverSentUnmarked,
+		Retirement: event.OrderRetiredPayload{AccountID: "joint", ClientOrderID: first, InstrumentID: "SPY", Side: event.OrderSideSell,
+			Quantity: 1, LimitPrice: 99, Reason: event.OrderRetiredByOwnerReason, Detail: "the run ended before the adapter sent it",
+			RetiredBy: "owner", RetiredAt: time.Date(2026, time.October, 17, 12, 0, 0, 0, time.UTC)},
+	}
+	approval := func(settlements ...event.NeverSentSettlement) string {
+		path := filepath.Join(t.TempDir(), "approval.json")
+		raw := encode(event.OperatorRunApprovedPayload{
+			AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: previous.FinalRecordHash,
+			ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+			Boost: event.BoostStateInForce{Latched: new(false)},
+			IncidentInForce: &event.IncidentInForce{IncidentID: incident, State: event.EngineStateHalted, SaleAttempted: new(false),
+				SaleRetiredAttempts: len(settlements), SaleSettlements: settlements},
+		})
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath, fresh.asOf = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal"), laterAsOf
+	fresh.approvalPath = approval()
+	refuse(t, "the sale stated not attempted with no settlement", fresh, "records an attempt")
+
+	fresh.approvalPath = approval(settlement)
+	stop := startEngine(t, fresh)
+	feed := newBoostFeed(t, fresh.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 3)
+	// Boosted by hand: 15 shares at about 400 against 4,000 of net liquidation.
+	feed.held, feed.cash = 15, 4000-float64(15*boostClose(3))
+	feed.beforeClose = func(i int) {
+		at, price := boostSession(i), boostClose(i)
+		netLiq := feed.cash + float64(float64(feed.held)*price)
+		feed.send(event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("broker:%d", i), at, event.BrokerSnapshotPayload{
+			AccountID: feed.account, AsOf: at, MarketOpen: true, NetLiquidation: netLiq, ExcessLiquidity: netLiq - float64(0.25*float64(float64(feed.held)*price)),
+			Positions:  []event.BrokerPosition{{InstrumentID: "SPY", Quantity: feed.held, Mark: price, MarkSet: true}},
+			OpenOrders: []event.BrokerOrder{},
+		})
+	}
+	feed.sessions(3, 4)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the approved run: %v", err)
+	}
+	var sold []string
+	for _, e := range recoverFile(t, fresh.logPath).Entries {
+		if e.Kind != journal.KindDecision || e.Envelope.Type != event.OrderPlannedEventType {
+			continue
+		}
+		var p event.OrderPlannedPayload
+		if err := json.Unmarshal(e.Envelope.Payload, &p); err != nil {
+			t.Fatalf("decode %s: %v", e.Envelope.ID, err)
+		}
+		if p.Sale.Kind == event.SaleKindIncident {
+			sold = append(sold, p.ClientOrderID)
+		}
+	}
+	if want := orderplan.SaleAttemptClientOrderID(incident, "SPY", 1); len(sold) != 1 || sold[0] != want {
+		t.Errorf("the fresh run's incident sales %v, want one under %s, the second attempt's ID, not the retired %s", sold, want, first)
 	}
 }
 

@@ -1521,10 +1521,13 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   nothing under the order's tag, and only from a record that reads as a
   retirement the adapter writes: one of the two reasons, a detail, and who
   retired it fitting the reason; anything else stops the adapter. IBKR
-  showing the order's tag wins on every path: every retirement of the
-  order still queued in the outbox, under either name, is struck off, the
-  order is marked never sent, and the adapter stops for `resolve --sent`,
-  so no retirement of an order IBKR shows ever reaches the engine. Stated
+  showing the order's tag wins on every path: the adapter records it at
+  the broker (`at-broker`, the decision and then the mark) first, and only
+  then strikes off every retirement of the order still queued in the
+  outbox, under either name, and stops for `resolve --sent`; a stop part
+  way leaves the order at the broker, and the next start, or the owner's
+  `--sent`, strikes off whatever is still queued first, so no retirement
+  of an order IBKR shows ever reaches the engine. Stated
   limit: an entry named after the order alone that already reached the
   engine is struck from the outbox, so the adapter cannot tell whether the
   engine applied it to this order; it tells the engine of this input's

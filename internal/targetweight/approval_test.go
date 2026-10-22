@@ -41,7 +41,7 @@ func TestApprovalInputRules(t *testing.T) {
 	at := sessionEnd(0)
 	h, s := configured(t)
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 1, "x", at, approval(false)), "schema version")
-	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, 5, "x", at, approval(false)), "schema version")
+	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion+1, "x", at, approval(false)), "schema version")
 	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "x", at, event.OperatorRunApprovedPayload{}), "invalid")
 	other := approval(false)
 	other.AccountID = "ira"

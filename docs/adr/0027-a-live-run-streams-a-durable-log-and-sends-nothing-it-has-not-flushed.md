@@ -421,6 +421,17 @@ stated by the owner instead:
   takes the next one (ADR 0026, point 2, "Order identity"). It is left out
   when none; the engine refuses an approval stating fewer than the log
   records. Versions 1 to 3 stay readable and state none.
+- **`operator.run.approved` schema version 5** (ADR 0019's refinement of
+  2026-10-22, "A sale an ended run never sent") adds
+  `incident_in_force.sale_settlements`: the IBKR adapter's settlement of
+  each of the incident's sales back to 98% the approved log released and
+  the adapter never sent, written once that run ended (the log by file
+  name, the run, the releasing input, the adapter's evidence, and the
+  owner's retirement it amounts to). Each is counted in
+  `sale_retired_attempts`; the engine applies each to the approved log by
+  its own retirement rule before the fresh run starts and refuses the
+  approval for one the log does not bear out. It is left out when none.
+  Versions 1 to 4 stay readable and carry none.
 - **A first run's approval.** It names no previous log and no final hash,
   states the starting book, and states the boost not latched and no
   incident, since no earlier run had either. Its input ID is

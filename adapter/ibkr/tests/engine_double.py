@@ -93,8 +93,9 @@ class LoggedEngine:
 
     def __init__(self, log_path, decisions=None, configuration_hash=CONFIGURATION_HASH,
                  strategy_version=STRATEGY_VERSION, started_at=STARTED_AT, configuration=None, snapshot_age=None,
-                 approval=None):
+                 approval=None, approval_version=3):
         self.path = Path(log_path)
+        self.approval_version = approval_version
         self.decisions = decisions or {}
         self.snapshot_age = snapshot_age
         self.withheld = {}
@@ -109,6 +110,11 @@ class LoggedEngine:
         self.connects = 0
         self.records = 0
         self.next_sequence = 1
+        # The instance lock every engine creates in its state folder before
+        # its log and holds while it runs (cmd/engine lockInstance); the
+        # double creates it and never holds it, as an engine that has ended.
+        if self.path.parent.is_dir():
+            (self.path.parent / "engine.lock").touch(exist_ok=True)
         if self.path.exists():
             lines = self.path.read_text(encoding="utf-8").splitlines()[1:]
             self.records = sum(1 for line in lines if line.startswith('{"record"'))
@@ -138,13 +144,14 @@ class LoggedEngine:
 
         Named, as cmd/engine names it, by the previous log's final hash, or,
         for a first run's (no previous log, the starting book stated), by the
-        run's start and its own payload's hash (schema version 3).
+        run's start and its own payload's hash (schema version 3, or the
+        approval_version the double was made with).
         """
         raw = json.dumps(payload, separators=COMPACT)
         digest = hashlib.sha256(raw.encode()).hexdigest()
         ident = ("operator-run-approved:first-run:{}:{}".format(started_at, digest) if not payload["previous_log"]
                  else "operator-run-approved:" + payload["previous_log_final_hash"])
-        head = {"id": ident, "type": RUN_APPROVED, "envelope_version": 1, "schema_version": 3,
+        head = {"id": ident, "type": RUN_APPROVED, "envelope_version": 1, "schema_version": self.approval_version,
                 "event_time": started_at, "recorded_at": started_at, "sequence": 2, "source": "engine",
                 "strategy_version": self.strategy_version, "configuration_hash": self.configuration_hash,
                 "payload_hash": digest}

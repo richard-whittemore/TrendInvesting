@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -379,6 +380,186 @@ func TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog(t *testing.T) {
 	_ = file.Close()
 	if _, err := os.Stat(filepath.Join(root, "other", "run.log")); err != nil {
 		t.Fatalf("the log is not in the link target's parent: %v", err)
+	}
+}
+
+// instanceLockShared tries a shared lock on the instance lock in dir, as the
+// IBKR adapter's settle-ended-run takes it.
+func instanceLockShared(t *testing.T, dir string) error {
+	t.Helper()
+	file, err := os.Open(filepath.Join(dir, "engine.lock")) // #nosec G304 -- the test's own folder.
+	if err != nil {
+		t.Fatalf("open the instance lock: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+	return syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+}
+
+// TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites pins the
+// proof the IBKR adapter's settle-ended-run reads that a run has ended (ADR
+// 0019, amended 2026-10-22): the engine holds an exclusive lock on one file
+// in its state folder, the folder of -log, for as long as it runs, so a
+// resume that continues the run in a new log holds the same lock as the
+// process it continues.
+func TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+	firstLog := filepath.Join(dir, "first.log")
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	if err := instanceLockShared(t, dir); !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Fatalf("a shared lock on the running engine's instance lock = %v, want EWOULDBLOCK: the engine holds it", err)
+	}
+	driveSessions(t, socketPath, firstLog, 0, 2)
+	if err := stop(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	if err := instanceLockShared(t, dir); err != nil {
+		t.Fatalf("a shared lock on the stopped engine's instance lock = %v, want it granted", err)
+	}
+	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "second.jsonl"), logPath: filepath.Join(dir, "second.log"), resumePath: firstLog, build: "test-build"})
+	if err := instanceLockShared(t, dir); !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Fatalf("a shared lock on the resumed engine's instance lock = %v, want EWOULDBLOCK: a resume continues the run, so it holds the lock", err)
+	}
+	if err := report.stop(); err != nil {
+		t.Fatalf("the resumed run: %v", err)
+	}
+	if err := instanceLockShared(t, dir); err != nil {
+		t.Fatalf("a shared lock on the stopped resumed engine's instance lock = %v, want it granted", err)
+	}
+}
+
+// TestTheEngineRefusesToStartWhileItsInstanceLockIsHeld: a second engine of
+// the same instance never runs beside the first, and its refusal leaves no
+// log behind (ADR 0019, amended 2026-10-22; fail closed, AGENTS.md).
+func TestTheEngineRefusesToStartWhileItsInstanceLockIsHeld(t *testing.T) {
+	dir := t.TempDir()
+	held, err := os.OpenFile(filepath.Join(dir, "engine.lock"), os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- the test's own folder.
+	if err != nil {
+		t.Fatalf("create the instance lock: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("hold the instance lock: %v", err)
+	}
+	logPath := filepath.Join(dir, "run.log")
+	// Bounded, so a start that is not refused stops rather than serving.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = run(ctx, options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "run.jsonl"), logPath: logPath, build: "test-build"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "engine.lock") || !strings.Contains(err.Error(), "another engine") {
+		t.Fatalf("run = %v, want a refusal naming the instance lock another engine holds", err)
+	}
+	if _, err := os.Stat(logPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the refused start left %s behind (%v): a refused start leaves nothing new", logPath, err)
+	}
+}
+
+// TestASecondEngineRefusesAtTheInstanceLockBeforeItReadsTheApprovalOrTheRuns:
+// the instance lock is taken before the approval is read or validated and
+// before the folder's run history is read, so the approval an engine
+// validates is checked against a run history no other engine of the
+// instance can change while it runs (ADR 0019, amended 2026-10-22; ADR
+// 0027; fail closed, AGENTS.md). Here the lock is held: the start is
+// refused for the lock, never for the missing approval or the unreadable
+// earlier log, which it never reaches.
+func TestASecondEngineRefusesAtTheInstanceLockBeforeItReadsTheApprovalOrTheRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, dir string)
+	}{
+		{"an approval file that does not exist", func(*testing.T, string) {}},
+		{"an earlier log that cannot be recovered", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "run-0.log"), []byte("not a durable log\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.prepare(t, dir)
+			held, err := os.OpenFile(filepath.Join(dir, "engine.lock"), os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- the test's own folder.
+			if err != nil {
+				t.Fatalf("create the instance lock: %v", err)
+			}
+			defer func() { _ = held.Close() }()
+			if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+				t.Fatalf("hold the instance lock: %v", err)
+			}
+			opts := boostOptions(t, dir)
+			opts.approvalPath = filepath.Join(t.TempDir(), "approval.json")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err = run(ctx, opts, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "another engine") {
+				t.Fatalf("run = %v, want the refusal for the instance lock another engine holds", err)
+			}
+			if strings.Contains(err.Error(), "read the approval") || strings.Contains(err.Error(), "run-0.log") {
+				t.Fatalf("run = %v: the refused start read the approval or the run history before the instance lock", err)
+			}
+			if _, err := os.Stat(opts.logPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the refused start left %s behind (%v)", opts.logPath, err)
+			}
+		})
+	}
+}
+
+// TestTheJournalAndTheDurableLogNeverNameTheInstanceLock: the instance lock
+// is a fixed name in the folder of -log, so a -out or a -log naming it is
+// refused before the lock is taken or anything is run, never accepted to
+// fail when the journal cannot be installed at the end of the run (ADR
+// 0018; ADR 0019, amended 2026-10-22; fail closed, AGENTS.md).
+func TestTheJournalAndTheDurableLogNeverNameTheInstanceLock(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		log, out string
+	}{
+		{"-out names the instance lock", "run.log", "engine.lock"},
+		{"-out names the instance lock in another case", "run.log", "Engine.Lock"},
+		{"-log names the instance lock", "engine.lock", "run.jsonl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, tc.out), logPath: filepath.Join(dir, tc.log), build: "test-build"}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := run(ctx, opts, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "instance lock") {
+				t.Fatalf("run = %v, want a refusal naming the instance lock", err)
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("the refused start left %v in %s: it is refused before the lock or the log is created", entries, dir)
+			}
+		})
+	}
+}
+
+// TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog: on
+// a filesystem without flock (ENOLCK, ENOTSUP) the engine cannot hold the
+// proof that its run has not ended, so it does not start, says why, and
+// leaves no empty log a later start would refuse as already existing (ADR
+// 0018; ADR 0019, amended 2026-10-22; fail closed, AGENTS.md).
+func TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog(t *testing.T) {
+	for _, fault := range []error{syscall.ENOLCK, syscall.ENOTSUP} {
+		t.Run(fault.Error(), func(t *testing.T) {
+			saved := instanceFlock
+			instanceFlock = func(int, int) error { return fault }
+			t.Cleanup(func() { instanceFlock = saved })
+			dir := t.TempDir()
+			logPath := filepath.Join(dir, "run.log")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := run(ctx, options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "engine.sock"), configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "run.jsonl"), logPath: logPath, build: "test-build"}, io.Discard)
+			if !errors.Is(err, fault) || !strings.Contains(err.Error(), "instance lock") {
+				t.Fatalf("run = %v, want a refusal naming the instance lock and %v", err, fault)
+			}
+			if _, err := os.Stat(logPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the refused start left %s behind (%v): every later start would refuse it as already existing", logPath, err)
+			}
+		})
 	}
 }
 

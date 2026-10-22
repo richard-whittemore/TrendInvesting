@@ -335,14 +335,19 @@ ended, nothing filled, and no report from IBKR has named it to the
 program) is recorded with its order, so a run restarted from that
 decision holds it as its own: a retirement of it frees the attempt and
 the sale is tried again, and a fill or cancel IBKR reports on it is read,
-as in a run that never restarted. The adapter has no path that retires
-an earlier run's never-sent sale for a fresh run: `resolve --run-ended`
-records the earlier run's unsent orders as refused and tells the engine
-nothing, so that run's log still records the sale as attempted,
-`operator approve` carries it attempted into the fresh run's approval, and
-the fresh run never tries it again. If the alarm still needs the sale,
-you make it by hand, as "Selling by hand safely" below says. A
-retirement frees only an attempt the program made in this run or the run
+as in a run that never restarted. A sale an earlier run released that
+the adapter never sent before that run ended is retired for the fresh run
+too, though that run's engine can no longer be told: before you approve
+the fresh run, `relay.py settle-ended-run` writes the adapter's
+settlement of it, and `operator approve -never-sent` reads it, checks it
+against the log by the engine's own retirement rule, and states the sale
+not attempted, with one more retired (`sale_retired_attempts`) and the
+settlement as its evidence (`sale_settlements`); the engine checks it
+again before it starts, and the fresh run tries the sale again under the
+next attempt's client order ID ([re-delivery](redelivery.md), "An order
+an ended run left unsent"). A sale the adapter may have sent (marked about
+to be sent, sent or allowed to be sent again, or one IBKR reported on) is
+never settled so, and stays attempted. A retirement frees only an attempt the program made in this run or the run
 it restarted from: an attempt the approval says an earlier run made stays
 attempted.
 

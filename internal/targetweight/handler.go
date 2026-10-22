@@ -826,9 +826,12 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 		return errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
 	}
 	// Version 3 adds the starting book, which the IBKR adapter reads (ADR
-	// 0027, amended 2026-10-18), and version 4 the incident's retired sale
-	// attempts; a version 2 or 3 approval still replays.
-	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, 3, event.OperatorRunApprovedSchemaVersion})
+	// 0027, amended 2026-10-18), version 4 the incident's retired sale
+	// attempts, and version 5 the adapter's settlements of its never-sent
+	// sales, checked against the previous log before the run starts
+	// (restart.CheckSaleAttempt) and counted in the retired attempts read
+	// here; a version 2, 3 or 4 approval still replays.
+	p, err := decodeVersions[event.OperatorRunApprovedPayload](in, []uint32{2, 3, 4, event.OperatorRunApprovedSchemaVersion})
 	if err != nil {
 		return err
 	}

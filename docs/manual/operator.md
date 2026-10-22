@@ -467,6 +467,27 @@ normal, not with `-clear-incident` (that leaves no incident in force), not
 with `-first-run`, and not when the log already records the attempt (the
 approval then carries it attempted, so leave the flag out).
 
+**A sale the ended run released and the adapter never sent.** If the run
+ended while the adapter still held such an order, settle it first with
+`relay.py settle-ended-run` ([re-delivery](redelivery.md), "An order an
+ended run left unsent"), then add `-never-sent PENDING_FILE.never-sent`.
+Settle with the engine stopped: the command refuses while the engine
+holds its instance lock (`engine.lock` in its state folder, held for as
+long as it runs, a resume included). A sale whose only evidence is a
+decision an earlier build recorded with no input or no run is never
+settled: it stays attempted, so sell it by hand if it is still needed.
+The tool checks each settlement in the file against the log by the
+engine's own retirement rule, and a sale back to 98% it settles is stated
+not attempted, with one more of the incident's sales retired and the
+settlement carried as its evidence; it prints "settled by the adapter as
+never sent" for each. Beside `-sale-attempted` (you sold by hand) the
+order is still retired, but the sale stays attempted as you state, and
+the tool prints that the fresh run makes no sale. Settlements of another log in the file are left
+out. A settlement the log does not bear out (the order was reported on or
+executed, so it was sent; another input released it; it does not describe
+the order as released) refuses the approval, naming the order, and
+nothing is written.
+
 **An account's first run** is approved too, with the book it starts from,
 since there is no previous log to read. Check the paper account's holdings
 and total cash (`TotalCashValue`) in IBKR, then:
@@ -567,6 +588,7 @@ When the tool refuses, it writes nothing; run it again once fixed.
 | `restart: -sale-attempted states the sale of an incident left in force, and -clear-incident leaves none in force: use one or the other`, `restart: <log> records no incident, so there is no sale to state as attempted: it ended normal`, or `restart: <log> already records an attempt of incident <id>'s one sale back to 98%, so the approval carries it attempted without -sale-attempted` (`approve`) | Nothing written: no incident is left in force whose sale the log lacks | Leave `-sale-attempted` out (the tool then carries a recorded attempt itself), or drop `-clear-incident` |
 | `restart: <log> ends with a cash difference pending a reading of IBKR's statement and not yet decided: reconciliation <id> (input <input>) found <amount> USD; ...` (`approve`) | Nothing written: a fresh run starts with no pending cash difference, so the one the log holds would be forgotten (ADR 0019, amended 2026-10-21). The engine refuses such an approval at its start too | Wait until the reconciliation settles it (usually the next evening after the Flex reader has covered the day), or check the account in IBKR after the transfer and approve again with `-positions`, `-cash` and `-currency`: the book you state replaces the pending difference ([reconciliation](reconciliation.md)) |
 | `restart: the approval is refused` followed, on the next line, by `invalid operator run approved payload: account id is required` (or `approved by is required`, one line each when both are missing); for a first run, one line: `operator: invalid operator run approved payload: account id is required` (or `approved by is required`) (`approve`) | Nothing written: `-account` or `-by` missing | Add `-account` or `-by` |
+| `restart: the adapter's settlement of order <id> as never sent is refused: <log> does not bear it out: ...`, `restart: the adapter's settlement of order <id> as never sent names input <input>, but in <log> input <other> released it ...`, or `restart: <file> line <n> is not a settlement as the adapter writes one: ...` (`approve -never-sent`) | Nothing written: a settlement retires a sale only when the log bears it out, since a sale that was sent must never be tried again | Do not edit the file. Check IBKR for the order named: if IBKR shows it, it was sent, so, with the adapter stopped, mark it sent (`relay.py resolve PENDING_FILE ID --sent --reason "what IBKR shows"`) and run `settle-ended-run` again, which withdraws its line; otherwise check that `-log` is the run `settle-ended-run` was given, and run that command again. A file with a torn last line is repaired by running `settle-ended-run` again ([re-delivery](redelivery.md)) |
 | `engine: decode <id> in <log>: ...` (`approve`) | Nothing written: a record the approval depends on cannot be read | Treat the log as damaged: `docs/runbooks/durable-log.md` |
 | `operator: <file> already exists; an approval is evidence and is never overwritten (ADR 0018)` | Nothing written | Choose a new `-out` name |
 | The approval prints `the kill switch was engaged when it ended; a fresh run starts with it released ...` | The approval is written; the fresh run will start with the switch off | Record `operator kill-switch -state engaged` before starting the engine |
@@ -632,6 +654,8 @@ Tests: `TestTheKillSwitchIsRecordedInTheInbox`,
 `TestTheAcknowledgementIsRecordedInTheInbox`,
 `TestAnInputTheToolCannotRecordIsRefused`,
 `TestTheApprovalStatesWhatThePreviousLogEndsIn`,
+`TestTheApprovalReadsTheAdaptersSettlementOfANeverSentSale`,
+`TestTheAdaptersSettlementLineIsOneTheApprovalReads`,
 `TestTheApprovalWarnsOfAKillSwitchLeftEngaged`,
 `TestTheApprovalWarnsOfTheSwitchThisAccountLeftEngaged`,
 `TestTheInboxAndApprovalDirectoriesAreFlushed`,

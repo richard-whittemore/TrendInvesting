@@ -13,6 +13,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/operator"
+	"github.com/richard-whittemore/TrendInvesting/internal/restart"
 )
 
 const at = "2026-10-17T14:30:05Z"
@@ -757,5 +758,131 @@ func TestSaleAttemptedIsRefusedWhenThereIsNoSaleToState(t *testing.T) {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s: an approval was written (%v)", name, err)
 		}
+	}
+}
+
+// TestTheApprovalReadsTheAdaptersSettlementOfANeverSentSale: the previous
+// run ended Halted with the incident's sale released and never sent, and
+// the adapter's settle-ended-run command settled it in the file beside its
+// pending file. Named with -never-sent, the settlement is checked against
+// the log by the engine's own retirement rule and the approval states the
+// sale not attempted, one sale retired, carrying the settlement; without it
+// the sale stays attempted; a settlement the log does not bear out, or a
+// file that cannot be read, refuses and writes nothing (ADR 0019, amended
+// 2026-10-17, reading 4, as the owner's decision of 2026-10-22 reads it;
+// fail closed, AGENTS.md).
+func TestTheApprovalReadsTheAdaptersSettlementOfANeverSentSale(t *testing.T) {
+	dir := t.TempDir()
+	halted := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encoded(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "test"})}
+	sale := event.Envelope{ID: "order-planned:joint-sale-1", Type: event.OrderPlannedEventType, SchemaVersion: event.OrderPlannedSafetyVersion,
+		Payload: encoded(t, event.OrderPlannedPayload{AccountID: "joint", Tag: "engine-state:joint:1", ClientOrderID: "joint-sale-1", InstrumentID: "SPY",
+			Side: event.OrderSideSell, Quantity: 5, LimitPrice: 90, Sale: event.SaleFigures{Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit}})}
+	released := event.Envelope{ID: "order-released:joint-sale-1", Type: event.OrderReleasedEventType, SchemaVersion: event.OrderReleasedSchemaVersion,
+		Payload: encoded(t, event.OrderReleasedPayload{AccountID: "joint", ClientOrderID: "joint-sale-1", InstrumentID: "SPY", Side: event.OrderSideSell,
+			Quantity: 5, LimitPrice: 90, Mode: event.TradingModePaper, Send: true})}
+	logPath := filepath.Join(dir, "run-1.log")
+	previousLog(t, logPath, halted, sale, released)
+	settlement := event.NeverSentSettlement{
+		Log: "run-1.log", Run: "configuration@2026-10-16T20:00:00Z", InputID: "session:1", Evidence: event.NeverSentUnmarked,
+		Retirement: event.OrderRetiredPayload{AccountID: "joint", ClientOrderID: "joint-sale-1", InstrumentID: "SPY", Side: event.OrderSideSell,
+			Quantity: 5, LimitPrice: 90, Reason: event.OrderRetiredByOwnerReason, Detail: "the run ended before the adapter sent it",
+			RetiredBy: "owner", RetiredAt: time.Date(2026, time.October, 16, 21, 0, 0, 0, time.UTC)},
+	}
+	writeSettlements := func(name string, lines ...string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	settled := writeSettlements("pending.json.never-sent", string(encoded(t, settlement)))
+
+	approval := filepath.Join(dir, "settled.json")
+	out, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", approval, "-never-sent", settled, "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		t.Fatalf("the engine would refuse the approval: %v", err)
+	}
+	if in := p.IncidentInForce; in == nil || *in.SaleAttempted || in.SaleRetiredAttempts != 1 || len(in.SaleSettlements) != 1 {
+		t.Errorf("approval %+v, want the sale not attempted and one retired, with its settlement", p.IncidentInForce)
+	}
+	for _, want := range []string{"attempted false", "joint-sale-1", "never sent"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed %q, want it to say %q", out, want)
+		}
+	}
+
+	// Beside -sale-attempted (the owner sold by hand), the settlement still
+	// retires the never-sent order, but the fresh run makes no sale, and the
+	// description never says it tries one.
+	byHand := filepath.Join(dir, "by-hand.json")
+	out, err = invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", byHand, "-never-sent", settled,
+		"-sale-attempted", "-positions", "SPY=9", "-cash", "100", "-currency", "USD", "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "tries the sale again") || !strings.Contains(out, "stays attempted as -sale-attempted states") {
+		t.Errorf("printed %q, want the sale to stay attempted as -sale-attempted states, never tried again", out)
+	}
+
+	plain := filepath.Join(dir, "plain.json")
+	if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", plain, "-at", at); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(plain)
+	if p, err = event.DecodeOperatorRunApproved(raw); err != nil || !*p.IncidentInForce.SaleAttempted {
+		t.Errorf("without -never-sent the log's attempt stands: %+v %v", p, err)
+	}
+
+	mismatched := settlement
+	mismatched.Retirement.Quantity = 6
+	for name, c := range map[string]struct {
+		file, want string
+	}{
+		"a settlement the log does not bear out": {writeSettlements("mismatched.never-sent", string(encoded(t, mismatched))), "joint-sale-1"},
+		"a line that is not a settlement":        {writeSettlements("broken.never-sent", "not json"), "line 1"},
+		"a missing file":                         {filepath.Join(dir, "absent.never-sent"), "absent.never-sent"},
+	} {
+		target := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+		if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", target, "-never-sent", c.file, "-at", at); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: run = %v, want a refusal saying %q", name, err, c.want)
+		}
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Errorf("%s: the refused approval was written", name)
+		}
+	}
+}
+
+// TestTheAdaptersSettlementLineIsOneTheApprovalReads: the line the relay's
+// settle-ended-run command writes (adapter/ibkr/tests/testdata, which the
+// adapter's own test compares its output with byte for byte) is read by
+// the approval tool's strict reader as a valid settlement.
+func TestTheAdaptersSettlementLineIsOneTheApprovalReads(t *testing.T) {
+	const path = "../../adapter/ibkr/tests/testdata/never_sent.jsonl"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlements, err := restart.ReadSettlements(raw, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settlements) != 1 {
+		t.Fatalf("read %d settlements, want the one line", len(settlements))
+	}
+	s := settlements[0]
+	if err := s.Validate(); err != nil {
+		t.Errorf("the adapter's settlement is invalid: %v", err)
+	}
+	if s.Log != "engine.log" || s.InputID != "session:1" || s.Evidence != event.NeverSentUnmarked || s.Retirement.ClientOrderID != "tw-paper-1" || s.Retirement.Quantity != 9 {
+		t.Errorf("read %+v", s)
 	}
 }
