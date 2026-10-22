@@ -21,6 +21,9 @@ type Filter struct {
 	// from is the first instant kept and until the first instant dropped; a
 	// zero value leaves that end open.
 	from, until time.Time
+	// AllowTrailingFills lets reconcile pass over fills recorded after an
+	// account's last snapshot, which no snapshot has checked yet.
+	AllowTrailingFills bool
 }
 
 // NewFilter builds a Filter. from and to are UTC dates (YYYY-MM-DD), both

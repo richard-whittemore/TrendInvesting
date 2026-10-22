@@ -36,6 +36,10 @@ type Journal struct {
 	// so a reader that needs the log's final record hash does not recover
 	// the log a second time.
 	Recovery *journal.Recovery
+	// Verification is what journal.Verify reported about an end-of-run
+	// journal (stop, completeness, final record hash); nil for a durable
+	// log, whose Recovery holds the equivalent.
+	Verification *journal.Verification
 }
 
 // Load verifies data as a journal and returns it. The chain is checked before
@@ -45,7 +49,8 @@ func Load(name string, data []byte) (Journal, error) {
 	if isDurableLog(data) {
 		return loadDurableLog(name, data)
 	}
-	if _, err := journal.Verify(bytes.NewReader(data)); err != nil {
+	verification, err := journal.Verify(bytes.NewReader(data))
+	if err != nil {
 		var broken *journal.ChainBrokenError
 		if errors.As(err, &broken) {
 			return Journal{}, fmt.Errorf("%s: refused, the hash chain does not verify: %w", name, err)
@@ -54,7 +59,7 @@ func Load(name string, data []byte) (Journal, error) {
 	}
 	// Verify has just parsed these same bytes, so Read cannot fail on them.
 	header, records, _ := journal.Read(bytes.NewReader(data))
-	return Journal{Name: name, Header: header, Records: records}, nil
+	return Journal{Name: name, Header: header, Records: records, Verification: &verification}, nil
 }
 
 // distinct refuses journals that hold one run's history twice, which a
@@ -122,4 +127,75 @@ func sameHistory(a, b Journal) bool {
 		shared = true
 	}
 	return shared
+}
+
+// FinalRecordHash is the hash of an end-of-run journal's last record, or empty
+// for a journal that holds no record and for a durable log. Only an end-of-run
+// journal's final hash is what a run registry anchors (ADR 0017); a durable
+// log's chain is its own (ADR 0027).
+func (j Journal) FinalRecordHash() string {
+	if j.Verification != nil {
+		return j.Verification.FinalRecordHash
+	}
+	return ""
+}
+
+// CheckFinalHash compares an end-of-run journal's final record hash with the
+// one a run registry recorded, and refuses a durable log, whose chain the
+// registry never anchors (ADR 0017, ADR 0027). A journal that has lost records from its end still
+// verifies by chain alone, so this comparison is what detects it (ADR 0017).
+func (j Journal) CheckFinalHash(want string) error {
+	if want == "" {
+		return fmt.Errorf("%s: no anchor given: an absent registry entry is not agreement with a final record hash", j.Name)
+	}
+	if j.Verification == nil {
+		return fmt.Errorf("%s: the registry anchors the end-of-run journal's final record hash; this file is a durable log", j.Name)
+	}
+	if got := j.FinalRecordHash(); got != want {
+		return fmt.Errorf("%s: the end-of-run journal's final record hash is %q but the registry recorded %q, so this is not the registered run's complete end-of-run journal", j.Name, got, want)
+	}
+	return nil
+}
+
+// Incomplete says in words why the journal cannot stand as the whole of a
+// run, or returns "" when nothing shows it cut short: a journal or log that
+// holds no committed record, a durable log whose uncommitted tail a crash
+// or a read in mid-write left behind (ADR 0027), or input recorded after the
+// adapter stopped the run (ADR 0012).
+func (j Journal) Incomplete() string {
+	if len(j.Records) == 0 {
+		return fmt.Sprintf("%s holds no committed record", j.Name)
+	}
+	if j.Recovery != nil && j.Recovery.Torn != nil {
+		return fmt.Sprintf("%s ends after record %d (byte %d), followed by %d bytes not committed (yet): if the engine is still writing, read it again once it has finished; otherwise the log was cut short", j.Name, len(j.Records), j.Recovery.Torn.Offset, j.Recovery.Torn.Length)
+	}
+	if after := j.inputAfterStop(); after != "" {
+		return fmt.Sprintf("%s records input (%s) after the run was stopped, so it is not one run's complete history", j.Name, after)
+	}
+	return ""
+}
+
+// inputAfterStop names the first input recorded after the adapter stopped the
+// run, other than the one run-completed record the reducer allows (ADR 0012),
+// or returns "". An end-of-run journal's verification states it; a durable
+// log has no verification, so its records are read the same way.
+func (j Journal) inputAfterStop() string {
+	if j.Verification != nil {
+		return j.Verification.InputAfterStop
+	}
+	stopped, completed := false, false
+	for _, r := range j.Records {
+		if r.Kind != journal.KindInput {
+			continue
+		}
+		switch {
+		case stopped && r.Envelope.Type == event.RunCompletedEventType && !completed:
+			completed = true
+		case stopped:
+			return r.Envelope.Type
+		case r.Envelope.Type == event.AdapterRunStoppedEventType:
+			stopped = true
+		}
+	}
+	return ""
 }
