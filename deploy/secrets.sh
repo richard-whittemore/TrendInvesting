@@ -48,12 +48,20 @@
 #                                  the secrets that were on it (ADR 0028)
 #   sudo ti-secrets diff NAME      show how NAME's plain-text file and its
 #                                  encrypted copy differ, when migrate finds
-#                                  both (it prints both to the terminal)
+#                                  both: it prints both, so it refuses unless
+#                                  its output is a terminal; it exits as diff
+#                                  does (0 the same, 1 different, 2 or more
+#                                  the comparison failed)
 #
 # Every command takes one exclusive lock (flock on
 # /run/trend-investing/ti-secrets.lock, outside the secrets tmpfs) for its
 # whole run, cleanup included; a second command refuses while one runs.
-# Temporary files are made with mktemp beside the file they replace.
+# Encrypted temporary files are made with mktemp beside the file they
+# replace, under one fixed name, .NAME.gpg.tmp.XXXXXX. A command killed
+# before its cleanup can leave one, under whatever passphrase it was written
+# with: every command, once it holds the lock (so no other command's file
+# can be there), removes any it finds and names it, and passphrase refuses
+# while one remains, so no copy under an old passphrase outlives a change.
 #
 # NAME is a file's place under /etc/trend-investing: secrets.env,
 # ibkr-login.env or accounts/<account>.env. Its encrypted copy is NAME.gpg
@@ -74,16 +82,21 @@
 # throwaway home in the tmpfs, starts no agent and caches nothing. The editor
 # runs with its home and temporary folder in the tmpfs too, so its swap,
 # backup and history files are removed with the plain text; vim is also given
-# -n (no swap file) and the tmpfs as its directory and backupdir, nano
-# --nobackup. Core dumps are off (ulimit -c 0) and tracing is off (set +x)
+# -n (no swap file) and the tmpfs as its directory and backupdir; nano, whose
+# backups are off unless -B or a nanorc's "set backup" turns them on, is
+# given --ignorercfiles, so no nanorc turns on backups or history. Core dumps are off (ulimit -c 0) and tracing is off (set +x)
 # for this script and everything it runs, so no passphrase or plain text is
 # written to a core file or a trace.
 #
 # The tmpfs is mounted noswap (Linux 6.4 and later; Ubuntu 24.04 runs 6.8),
-# nosuid, nodev, noexec, mode 0700 and 4 MiB at most; if that mount fails,
-# or a tmpfs already there lacks one of these, nothing is decrypted. Swap
-# that is on is named in a warning: gpg, the editor and this shell can still
-# be paged to it.
+# nosuid, nodev, noexec, mode 0700 and capped at exactly 4 MiB; if that mount
+# fails, or a tmpfs already there lacks one of these or has another cap,
+# nothing is decrypted. noswap covers the tmpfs only: the passphrase and the
+# plain text also pass through the memory of this shell, gpg and the editor,
+# which the kernel may page to swap on the disk. So while any swap is on
+# (/proc/swaps lists one), or /proc/swaps cannot be read, every command that
+# reads the passphrase or decrypts (unlock, edit, passphrase, migrate, diff)
+# refuses before it reads anything (ADR 0028: no plain text on the disk).
 #
 # TI_PASSPHRASE_FD=N reads the passphrase lines from descriptor N instead of
 # the terminal: the rehearsal's only, honoured where TI_REHEARSAL=1 and
@@ -135,7 +148,8 @@ fi
 
 # Folders made in the tmpfs for one run (the staging of decrypted files, gpg's
 # home, an edit), and temporary encrypted files beside the real ones: all
-# removed when the script ends, however it ends.
+# removed when the script ends, unless it is killed (then the next command
+# removes the encrypted ones: sweep_stale_temps).
 # A passphrase change that stops before its first rename has changed no
 # file, so its journal goes too (drop_journal=1); from the first rename on,
 # the journal stays for --resume.
@@ -204,6 +218,37 @@ plain_names() {
   done
 }
 
+# stale_temps: the encrypted temporary files beside the secret files, by
+# their fixed name (encrypt_checked), one per line.
+stale_temps() {
+  local f
+  for f in "$etc"/.*.gpg.tmp.* "$etc"/accounts/.*.gpg.tmp.*; do
+    if test -e "$f" || test -L "$f"; then printf '%s\n' "$f"; fi
+  done
+}
+
+# sweep_stale_temps: every encrypted temporary file left by a command killed
+# before its cleanup removed, and named. Run under the lock, so none is
+# another running command's.
+sweep_stale_temps() {
+  local f
+  while IFS= read -r f; do
+    if rm -f -- "$f" 2>/dev/null && ! test -e "$f" && ! test -L "$f"; then
+      warn "removed $f, an encrypted temporary file left by a ti-secrets command that was cut short"
+    else
+      warn "could not remove $f, an encrypted temporary file left by a ti-secrets command that was cut short: remove it (sudo rm -r $f)"
+    fi
+  done < <(stale_temps)
+}
+
+# refuse_stale_temps: a passphrase change refuses while any remains, since
+# it would outlive the change under the old passphrase.
+refuse_stale_temps() {
+  local left
+  left=$(stale_temps | tr '\n' ' ')
+  test -z "$left" || die "an encrypted temporary file left by a command cut short is still there: $left- it may be under the current passphrase and would outlive the change; remove it (sudo rm -r), then run this again; nothing changed"
+}
+
 # noswap_supported: this kernel's tmpfs takes the noswap option (Linux 6.4
 # and later).
 noswap_supported() {
@@ -216,24 +261,37 @@ noswap_supported() {
   test "$major" -gt 6 || { test "$major" -eq 6 && test "$minor" -ge 4; }
 }
 
-# active_swap: the swap files and partitions that are on, space-separated.
-active_swap() { awk 'NR > 1 && NF {printf "%s ", $1}' "$swaps" 2>/dev/null || true; }
+# active_swap: the swap files and partitions that are on, space-separated;
+# the status is not 0 when the list cannot be read.
+active_swap() {
+  test -r "$swaps" || return 1
+  awk 'NR > 1 && NF {printf "%s ", $1}' "$swaps"
+}
 
-# ensure_tmpfs: $run, a tmpfs of its own, root:root 0700, mounted noswap
-# (where the kernel has it), nosuid, nodev, noexec and size-capped. A mount
-# that fails, or a tmpfs already there without these, is refused, so nothing
-# is decrypted onto a disk or into swap. Swap that is on is named.
+# refuse_swap: nothing that reads the passphrase or decrypts runs while any
+# swap is on, or when the swap list cannot be read (ADR 0028).
+refuse_swap() {
+  local swap
+  swap=$(active_swap) || die "cannot read $swaps to check that swap is off (the passphrase and the decrypted secrets could be paged to the disk); nothing read or decrypted"
+  test -z "$swap" || die "swap is on (${swap% }): the passphrase and the decrypted secrets pass through this command's, gpg's and the editor's memory, which can be paged to it on the disk. Turn it off (sudo swapoff -a, then remove its line from /etc/fstab so it stays off; swapon --show then prints nothing) and run this again; nothing read or decrypted"
+}
+
+# ensure_tmpfs: no swap on (refuse_swap), and $run a tmpfs of its own,
+# root:root 0700, mounted noswap (where the kernel has it), nosuid, nodev,
+# noexec and capped at exactly 4 MiB. A mount that fails, or a tmpfs already
+# there without these, is refused, so nothing is decrypted onto a disk or
+# into swap.
 ensure_tmpfs() {
-  local opts=mode=0700,uid=0,gid=0,nosuid,nodev,noexec,size=4m need=(nosuid nodev noexec) have o swap
+  local opts=mode=0700,uid=0,gid=0,nosuid,nodev,noexec,size=4m need=(nosuid nodev noexec size=4096k) have o
+  refuse_swap
   test ! -L "$run" || die "$run is a link; nothing decrypted"
   install -d -o root -g root -m 0755 /run/trend-investing
   if ! test -d "$run"; then install -d -o root -g root -m 0700 "$run"; fi
-  swap=$(active_swap)
+  # Without noswap (a kernel before 6.4) the tmpfs is still kept out of swap,
+  # since refuse_swap has found none on.
   if noswap_supported; then
     opts=$opts,noswap
     need+=(noswap)
-  elif test -n "$swap"; then
-    die "this kernel ($(uname -r)) cannot keep a tmpfs out of swap (noswap), and swap is on (${swap% }): turn it off (sudo swapoff -a, and remove it from /etc/fstab) or run Linux 6.4 or later; nothing decrypted"
   fi
   if ! mountpoint -q "$run"; then
     mount -t tmpfs -o "$opts" ti-secrets "$run" 2>/dev/null ||
@@ -244,15 +302,11 @@ ensure_tmpfs() {
   for o in "${need[@]}"; do
     case ",$have," in
       *",$o,"*) ;;
-      *) die "$run is mounted without $o ($have): unmount it (sudo ti-secrets lock) and run this again, so it is mounted with $opts; nothing decrypted" ;;
+      *) die "$run is mounted without $o ($have; size=4096k is the 4 MiB cap): unmount it (sudo ti-secrets lock) and run this again, so it is mounted with $opts; nothing decrypted" ;;
     esac
   done
-  case ",$have," in *,size=*) ;; *) die "$run is mounted with no size cap ($have): unmount it (sudo ti-secrets lock) and run this again; nothing decrypted" ;; esac
   chown root:root "$run"
   chmod 0700 "$run"
-  if test -n "$swap"; then
-    warn "swap is on (${swap% }): the secrets' tmpfs is kept out of it (noswap), but gpg, the editor and this command's memory can still be paged there; turn it off with sudo swapoff -a and remove it from /etc/fstab"
-  fi
 }
 
 # new_work VAR: a fresh folder in the tmpfs, named in VAR and removed at the
@@ -321,8 +375,9 @@ decrypt_to() {
 }
 
 # encrypt_checked VAR PASSPHRASE PLAIN NAME: a temporary file of this
-# command's own (mktemp, .NAME.gpg.tmp.XXXXXX beside the encrypted file),
-# named in VAR (not "written", its own local), root:root 0600, synced to disk, kept only if decrypting it
+# command's own (mktemp, under the fixed name .NAME.gpg.tmp.XXXXXX beside the
+# encrypted file, which stale_temps finds), named in VAR (not "written", its
+# own local), root:root 0600, synced to disk, kept only if decrypting it
 # gives PLAIN back byte for byte; nothing is replaced yet (commit does that).
 encrypt_checked() {
   local var=$1 phrase=$2 plain=$3 name=$4 written check
@@ -448,15 +503,17 @@ cmd_status() {
 
 # set_editor_args WORK: the arguments that keep the editor's swap and
 # backup files in WORK, for the editors that take them: vim (and vi, nvim)
-# no swap file (-n), no viminfo, its directory and backupdir in WORK; nano no
-# backup. Any other editor relies on HOME and TMPDIR being WORK.
+# no swap file (-n), no viminfo (-i NONE), its directory, backupdir and
+# undodir in WORK and no undo file; nano no nanorc (--ignorercfiles), so its
+# defaults hold: no backup (only -B or "set backup" makes one) and no
+# history. Any other editor relies on HOME and TMPDIR being WORK.
 editor_args=()
 set_editor_args() {
   local first=${editor%% *} real
   real=$(readlink -f -- "$(command -v -- "$first" 2>/dev/null || printf '%s' "$first")" 2>/dev/null || printf '%s' "$first")
   case $(basename -- "$real") in
     vi | vim | vim.* | nvim | view) editor_args=(-n -i NONE --cmd "set directory=$1 backupdir=$1 undodir=$1 noundofile") ;;
-    nano) editor_args=(--nobackup) ;;
+    nano) editor_args=(--ignorercfiles) ;;
     *) editor_args=() ;;
   esac
 }
@@ -521,10 +578,14 @@ cmd_edit() {
 # cmd_diff NAME: how the plain-text NAME and its encrypted copy differ, when
 # both are on disk (a migration finds them and stops): the encrypted copy is
 # decrypted into the tmpfs and compared, and the difference printed to the
-# terminal, secrets included. Nothing is changed.
+# terminal, secrets included, so it refuses unless its output is a terminal
+# (never to a file, a pipe or a log). It exits as diff does: 0 the same, 1
+# different, 2 or more the comparison failed, which is reported. Nothing is
+# changed.
 cmd_diff() {
-  local name=$1 phrase work
+  local name=$1 phrase work status=0
   valid_name "$name" || die "'$name' is not one of the secret files (secrets.env, ibkr-login.env, accounts/<account>.env)"
+  test -t 1 || die "diff prints the secrets: run it with its output on the terminal, not redirected to a file or piped; nothing read"
   test -f "$etc/$name.gpg" || die "there is no $etc/$name.gpg (sudo ti-secrets status lists the files)"
   test -f "$etc/$name" || die "$etc/$name is not on disk in plain text: there is nothing to compare (sudo ti-secrets edit $name opens the encrypted one)"
   ensure_tmpfs
@@ -532,9 +593,16 @@ cmd_diff() {
   new_work work
   decrypt_to "$phrase" "$etc/$name.gpg" "$work/encrypted" ||
     die "the passphrase is wrong, or $etc/$name.gpg is damaged ($(gpg_said)); nothing changed"
-  if diff -u --label "$etc/$name.gpg (decrypted)" --label "$etc/$name (plain text)" "$work/encrypted" "$etc/$name"; then
-    log "$etc/$name and $etc/$name.gpg hold the same text: sudo ti-secrets migrate removes the plain text"
-  fi
+  diff -u --label "$etc/$name.gpg (decrypted)" --label "$etc/$name (plain text)" "$work/encrypted" "$etc/$name" || status=$?
+  case $status in
+    0) log "$etc/$name and $etc/$name.gpg hold the same text: sudo ti-secrets migrate removes the plain text" ;;
+    1) ;;
+    *)
+      printf '%s: %s\n' "$prog" "the comparison failed (diff exited $status): what is shown above is not the whole difference; nothing changed" >&2
+      exit "$status"
+      ;;
+  esac
+  exit "$status"
 }
 
 # journal_add LINE: one line appended to the journal and synced to disk.
@@ -556,6 +624,7 @@ cmd_passphrase() {
   mapfile -t names < <(encrypted_names)
   test "${#names[@]}" -gt 0 || die "no encrypted secret file in $etc: run sudo deploy/provision.sh services"
   refuse_plain_text
+  refuse_stale_temps
   if test "$resume" = 1; then
     test -f "$journal" || die "no passphrase change was cut short ($journal is not there): to change the passphrase run sudo ti-secrets passphrase; nothing changed"
   else
@@ -645,12 +714,13 @@ cmd_migrate() {
     fi
     shred -u -- "$etc/$n" || die "could not shred $etc/$n; its encrypted copy is in place: remove it with sudo shred -u $etc/$n"
     test ! -e "$etc/$n" || die "$etc/$n is still there after shredding it"
-    log "encrypted $n into $etc/$n.gpg, checked it decrypts to the same text, and shredded the plain text (best effort: on this storage the old blocks may survive; delete older snapshots and rotate what it held)"
+    log "encrypted $n into $etc/$n.gpg, checked it decrypts to the same text, and shredded the plain text (best effort: on this storage the old blocks may survive; if it held real secrets, delete the snapshots taken before now and rotate what it held)"
   done
 }
 
 need_root
 take_lock
+sweep_stale_temps
 case $prog in
   ti-unlock)
     test $# -eq 0 || usage

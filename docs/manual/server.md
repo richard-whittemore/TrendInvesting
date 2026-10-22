@@ -91,8 +91,12 @@ then refuses to start in paper, which is safe, but your edits are gone.
 
 Every secret file is kept on the disk **only encrypted**, as
 `/etc/trend-investing/<name>.gpg` (root only, mode 0600), with a passphrase
-you chose. Nothing on the disk can be read without it: not by someone who
-gets a copy of the disk or a Lightsail snapshot, and not by the server itself.
+you chose. The named files on the disk cannot be read without it: not by
+someone who gets a copy of the disk or a Lightsail snapshot, and not by the
+server itself. That holds for copies taken after the move to encrypted files,
+provided swap stays off ("Swap must stay off", below) and no secret is written to the disk
+in plain text by hand; on a server that once kept them in plain text, read
+"Shredding is not a guarantee" below.
 After every boot you type the passphrase once (`sudo ti-unlock`, below), and
 the files are decrypted into memory, in `/run/trend-investing/secrets/`
 (root only, a separate in-memory file system, gone at the next boot); the
@@ -158,15 +162,23 @@ Ubuntu's `editor` (nano, unless you chose another), `nano` or `vi`. It runs
 with its home and temporary folder in the in-memory folder, so the swap,
 backup and history files an editor keeps are in memory and removed with the
 plain text. vim (and vi, nvim) is also given `-n` (no swap file), no viminfo,
-and that folder as its `directory` and `backupdir`; nano is given
-`--nobackup`. Another editor is safe only if it keeps its files in its home
+and that folder as its `directory`, `backupdir` and `undodir`; nano keeps no
+backup unless told to (`-B`, or `set backup` in a nanorc file), so it is given
+`--ignorercfiles`, which keeps any nanorc from turning backups or history on.
+Another editor is safe only if it keeps its files in its home
 folder, its temporary folder or beside the file: do not point it at a folder
 of your own for backups. Core dumps are off for the command and the editor.
 
 If an edit is cut short after the new encrypted file is written (a crash, a
 lost connection), the file's unlocked copy is missing, never the old value:
 its units refuse to start until `sudo ti-unlock`, or the same edit quit
-without a change, makes it again. Only one `ti-secrets` or `ti-unlock` runs
+without a change, makes it again. If a command is killed before it cleans
+up, it can leave an encrypted temporary file beside the file, named
+`.<name>.gpg.tmp.` and six characters (for example
+`/etc/trend-investing/.secrets.env.gpg.tmp.Ab12Cd`): the next `ti-secrets`
+or `ti-unlock` removes it and names it, and `sudo ti-secrets passphrase`
+refuses while one is still there, so no copy under an old passphrase
+outlives a change. Only one `ti-secrets` or `ti-unlock` runs
 at a time; a second says "another ti-secrets or ti-unlock is running" and
 changes nothing (an edit holds that lock until you quit the editor).
 
@@ -202,8 +214,13 @@ the renames), some files are under the old passphrase and some under the
 new. `ti-unlock`, `edit` and `migrate` then refuse, and `status` says so. Run
 `sudo ti-secrets passphrase --resume`: it asks for the old passphrase, then
 the new one twice, opens each file with whichever it is under, and finishes
-the change, so every file is under the new one. Cut short before the first
-rename, nothing changed and no journal is left.
+the change, so every file is under the new one. A change that stops with an
+error while the new copies are being written and checked has renamed no file
+and removes its journal. From the moment the renames begin the journal
+stays, even before the first file is renamed; and a change stopped abruptly
+(a crash, a power loss, the command killed) can leave the journal at any
+point, before any rename included. Whenever the journal is there, run
+`--resume`.
 
 **Never lose the passphrase.** It is stored nowhere, on the server or
 anywhere else, and there is no recovery: without it the encrypted files can
@@ -221,26 +238,42 @@ encrypted copy decrypts to the same text, and only then shreds the plain
 text. The first time, it asks you to choose the passphrase. If a plain-text
 file and its encrypted copy are both there and differ (a migration cut
 short, or a file put back by hand), it stops and changes nothing: `sudo
-ti-secrets diff <name>` shows how they differ (it prints both to the
-terminal), then keep the right one as the message says and run it again.
+ti-secrets diff <name>` shows how they differ, then keep the right one as
+the message says and run it again. It prints both, secrets included, so it
+refuses unless its output is the terminal (not redirected to a file and not
+piped). It exits as `diff` does: 0 when they are the same, 1 when they
+differ, and 2 or more when the comparison itself failed, which it says.
 
 **Shredding is not a guarantee.** On a journaling file system (Ubuntu's
 ext4) on a cloud volume, which is SSD and copy-on-write storage underneath,
 `shred` may overwrite new blocks while the old ones, holding the plain text,
-stay on the volume. The real protection is that, after the migration, plain
-text never touches the disk again: it lives only in memory. So delete every
-Lightsail snapshot taken before the migration, since they hold the plain
-text, and rotate the secrets that were on the disk in plain text (the IBKR
-password, the Massive key, the PagerDuty routing key, the GitHub token, the
-Flex token), since anyone who later gets the old volume or a snapshot of it
-may read them.
+stay on the volume, and so in every later snapshot of it. The real
+protection is that, after the migration, plain text never touches the disk
+again: it lives only in memory. So, **on a server provisioned before the
+secrets were encrypted** (one whose secret files were once on its disk in
+plain text), delete every Lightsail snapshot taken before the migration,
+since they hold the plain text, and rotate the secrets that were on the disk
+in plain text (the IBKR password, the Massive key, the PagerDuty routing
+key, the GitHub token, the Flex token), since anyone who later gets the
+volume or a snapshot of it may read the old values. A server provisioned
+after this change never had them in plain text and needs neither step.
 
-**Swap.** The in-memory folder is mounted `noswap` (Ubuntu 24.04's kernel
-has it), so the decrypted files are never paged to disk; if that mount
-fails, nothing is decrypted. A Lightsail Ubuntu instance has no swap unless
-you add some; if swap is on, `ti-unlock` and `ti-secrets` warn and name it,
-since gpg, the editor and the command itself could still be paged there.
-Keep swap off (`sudo swapoff -a`, and remove it from `/etc/fstab`).
+**Swap must stay off.** The in-memory folder is mounted `noswap` (Ubuntu
+24.04's kernel has it), so the decrypted files are never paged to disk; if
+that mount fails, nothing is decrypted. But the passphrase and the plain
+text also pass through the memory of `ti-secrets`, gpg and the editor, which
+the kernel can page to a swap file or partition on the disk. So while any
+swap is on, `ti-unlock` and `ti-secrets unlock`, `edit`, `passphrase`,
+`migrate` and `diff` refuse before they ask for the passphrase, name the
+swap and change nothing (`status` and `lock` still run). A Lightsail Ubuntu
+instance has no swap unless you add some.
+
+To check: `swapon --show` prints nothing when swap is off (or `cat
+/proc/swaps` lists only its heading line). To turn it off: `sudo swapoff
+-a`, then remove the swap line from `/etc/fstab` (on Ubuntu often
+`/swap.img none swap sw 0 0`) so it stays off after a reboot, and remove the
+file (`sudo rm /swap.img`), which can hold pages from before. If
+`/proc/swaps` cannot be read, the same commands refuse too.
 
 
 
@@ -598,6 +631,8 @@ stop, not after two sessions of silence.
 | The server has rebooted | The secrets are locked: every unit that needs one refuses to start; the dashboard starts; every engine and the adapter stay stopped | `sudo ti-unlock`; approve the Gateway's phone prompt; start each engine as a fresh run you approve, then the adapter ([restart](restart.md)) |
 | `sudo systemctl start <unit>` says "Assertion failed on job for <unit>", or its journal says "Starting requested but asserts failed"; or Healthchecks pages that the reporter's check is down soon after a boot | The secrets have not been unlocked since the boot. systemd refuses to start the Gateway, the engines, the adapter, the data job, the reporter, the Flex reader and the failed-unit page; the timers keep firing and are refused each time; nothing reaches IBKR | `sudo ti-unlock` ("Unlocking the secrets after a boot"); then start what you start by hand |
 | `ti-unlock` (or `ti-secrets`) says "the passphrase is wrong, or ... is damaged; nothing changed" | Nothing is unlocked or changed | Type it again from your password manager. If the right one is refused, the file is damaged: restore it from a snapshot taken after the move to encrypted files |
+| `ti-unlock` (or `ti-secrets`) says "swap is on (...)" or "cannot read /proc/swaps" | Nothing is read, decrypted or changed | Turn swap off and keep it off ("Swap must stay off", in "Unlocking the secrets after a boot"), then run it again |
+| `ti-secrets passphrase` says "an encrypted temporary file left by a command cut short is still there" | Nothing is changed | Remove the file it names (`sudo rm -r <file>`), then run it again |
 | The passphrase is lost | The encrypted files can never be read; there is no recovery | Fill every secret in again: remove the `.gpg` files (`sudo rm /etc/trend-investing/*.gpg /etc/trend-investing/accounts/*.gpg`), run `sudo deploy/provision.sh services`, which asks for a new passphrase, then enter each secret with `sudo ti-secrets edit` |
 | `provision.sh services` stops with "verification failed, nothing replaced and no plain text removed", or with "both exist and differ" | The plain-text file is kept and no encrypted copy replaces anything | For the first, run it again; if it keeps failing, see `journalctl` and the disk space. For the second, keep the right one as the message says, then run it again |
 | The Sunday phone prompt is missed | IBC exits, the unit starts it again after 30 seconds, and a new prompt arrives each time; nothing reaches IBKR meanwhile | Approve the next prompt (`docs/runbooks/gateway-login.md`) |

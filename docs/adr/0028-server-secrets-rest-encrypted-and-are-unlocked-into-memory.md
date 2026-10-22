@@ -33,7 +33,11 @@ a snapshot would carry both.
 2. After each boot the owner unlocks the files into a root-only tmpfs under
    `/run/trend-investing/secrets`, mounted `noswap` (with nosuid, nodev,
    noexec and a size cap) so the plain text is never written to the disk or
-   to swap. If that mount cannot be made, nothing is decrypted.
+   to swap. If that mount cannot be made, nothing is decrypted. `noswap`
+   covers the tmpfs only: the passphrase and the plain text also pass
+   through the memory of the tool, gpg and the editor, which the kernel can
+   page to swap on the disk. So nothing reads the passphrase or decrypts
+   while any swap is on, or while the list of active swap cannot be read.
 3. Every unit that loads a secret loads it from that tmpfs and asserts the
    file exists, so systemd refuses to start it while the secrets are locked.
    The reporter therefore cannot run while locked; its outside heartbeat stops

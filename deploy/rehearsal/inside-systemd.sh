@@ -48,7 +48,10 @@ install -d -m 0700 /etc/trend-investing/accounts
 install -m 0755 /deploy/secrets.sh /usr/local/sbin/ti-secrets
 ln -sfn ti-secrets /usr/local/sbin/ti-unlock
 passphrase="rehearsal passphrase $(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-with_pass() { TI_REHEARSAL=1 TI_PASSPHRASE_FD=7 "$@" 7< <(yes "$passphrase"); }
+# ti-secrets refuses to run while any swap is on, and Docker's virtual
+# machine has some: the swap list it reads is a stand-in with none.
+printf 'Filename\tType\tSize\tUsed\tPriority\n' >/root/ti-no-swaps
+with_pass() { TI_REHEARSAL=1 TI_PROC_SWAPS=/root/ti-no-swaps TI_PASSPHRASE_FD=7 "$@" 7< <(yes "$passphrase"); }
 marker=marker-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
 on_disk() { find / -xdev -type f -print0 2>/dev/null | xargs -0 grep -lF -- "$1" 2>/dev/null || true; }
 unlocked=/run/trend-investing/secrets
@@ -127,7 +130,7 @@ grep -q 'asserts failed' <<<"$(journalctl -u ti-probe-locked.service --no-pager 
 test "$(systemctl show -p ActiveState --value ti-probe-locked.timer)" = active || fail "the stand-in timer stopped after a refused firing"
 
 # A wrong passphrase unlocks nothing.
-if TI_REHEARSAL=1 TI_PASSPHRASE_FD=7 ti-unlock >/dev/null 2>&1 7< <(yes "not the passphrase"); then fail "ti-unlock accepted a wrong passphrase"; fi
+if TI_REHEARSAL=1 TI_PROC_SWAPS=/root/ti-no-swaps TI_PASSPHRASE_FD=7 ti-unlock >/dev/null 2>&1 7< <(yes "not the passphrase"); then fail "ti-unlock accepted a wrong passphrase"; fi
 test -z "$(find "$unlocked" -mindepth 1 2>/dev/null)" || fail "a wrong passphrase decrypted something"
 
 # --- The unlock: the files decrypted into a root-only tmpfs; the next timer

@@ -21,6 +21,11 @@ p=/root/deploy/provision.sh
 # The owner types the passphrase; here it comes on a test-only descriptor,
 # which ti-secrets honours only where TI_REHEARSAL=1, as this container sets.
 test "${TI_REHEARSAL:-}" = 1 || fail "the rehearsal container does not set TI_REHEARSAL"
+# ti-secrets refuses to run while any swap is on, and Docker's virtual
+# machine has some: the swap list it reads is a stand-in with none
+# (TI_PROC_SWAPS, also honoured only where TI_REHEARSAL=1).
+printf 'Filename\tType\tSize\tUsed\tPriority\n' >/root/ti-no-swaps
+export TI_PROC_SWAPS=/root/ti-no-swaps
 passphrase="rehearsal passphrase $(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 with_pass() { TI_PASSPHRASE_FD=7 "$@" 7< <(yes "$passphrase"); }
 # A server provisioned before the secrets were encrypted: its secrets.env is
