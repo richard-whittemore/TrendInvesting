@@ -154,7 +154,17 @@ if test "$mode" = status; then
       # release: a program that merely names the script is not.
       a0=""
       a1=""
-      { IFS= read -r -d '' a0 && IFS= read -r -d '' a1; } <"$proc/$lpid/cmdline" 2>/dev/null || true
+      {
+        IFS= read -r -d '' a0 && IFS= read -r -d '' a1
+        # Shell options (bash -x, bash -e) come before the script: skip them.
+        case ${a0##*/} in
+          bash | sh | dash)
+            while case $a1 in -*) true ;; *) false ;; esac; do
+              IFS= read -r -d '' a1 || { a1=""; break; }
+            done
+            ;;
+        esac
+      } <"$proc/$lpid/cmdline" 2>/dev/null || true
       if test -z "$a0"; then
         lstate="pid $lpid is running (its command line cannot be read)"
       else

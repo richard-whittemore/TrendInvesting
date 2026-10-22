@@ -505,6 +505,17 @@ done
 printf '/bin/bash\0deploy/release.sh\0v1.2.3\0' >"$TI_PROC/999999/cmdline"
 expect "--status with the script as argv[1]" 0 "$(run --status)"
 grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash release.sh: $(cat "$work/out")"
+# A shell option before the script (bash -x) does not hide the release.
+printf '/bin/bash\0-x\0/usr/local/sbin/ti-release\0v1.2.3\0' >"$TI_PROC/999999/cmdline"
+expect "--status with a shell option before the script" 0 "$(run --status)"
+grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash -x ti-release: $(cat "$work/out")"
+printf '/bin/bash\0-e\0-x\0deploy/release.sh\0v1.2.3\0' >"$TI_PROC/999999/cmdline"
+expect "--status with two shell options before the script" 0 "$(run --status)"
+grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash -e -x release.sh: $(cat "$work/out")"
+# A shell running some other script is another program, not the release.
+printf '/bin/bash\0/tmp/other.sh\0' >"$TI_PROC/999999/cmdline"
+expect "--status with a shell running another script" 0 "$(run --status)"
+grep -q "pid reused; the lock is stale" "$work/out" || fail "--status takes a shell running another script for the release: $(cat "$work/out")"
 # An empty command line (not readable under hidepid) is a running lock.
 : >"$TI_PROC/999999/cmdline"
 expect "--status with an unreadable command line" 0 "$(run --status)"
