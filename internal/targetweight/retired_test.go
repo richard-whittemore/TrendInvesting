@@ -527,3 +527,122 @@ func TestARunRecoveredFromAnApprovedRunsDecisionKeepsItsRetiredSales(t *testing.
 		t.Fatalf("sales %+v, want one under %s, the second attempt's ID, not the retired %s", sold, want, orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0))
 	}
 }
+
+// TestASnapshotBeforeTheRecoveryNeverFiresTheRecordedIncidentsSale: an
+// earlier run's recorded engine state puts the gate in its incident, whose
+// sale attempts only the recovered decision or the owner's approval states;
+// a broker snapshot read before either that would fire the incident's sale
+// is refused, so no attempt is planned without the restored record (ADR
+// 0026, point 5: recovered, never recomputed; fail closed, AGENTS.md). One
+// that fires nothing is read, as before.
+func TestASnapshotBeforeTheRecoveryNeverFiresTheRecordedIncidentsSale(t *testing.T) {
+	h, s := configured(t)
+	mustApply(t, h, haltedState(t))
+	at := sessionEnd(0)
+	b := (&account{cash: -2000, held: 60}).broker(at, 100)
+	mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k0", at, b))
+	at = at.Add(time.Minute)
+	b = (&account{cash: -2000, held: 60}).broker(at, 100)
+	b.ExcessLiquidity = 0.1 * b.NetLiquidation
+	out, err := h.Apply(context.Background(), s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k1", at, b))
+	if err == nil || !strings.Contains(err.Error(), "recovered decision") {
+		t.Fatalf("an urgent snapshot before the recovery: %v, sales %+v; want it refused before any sale", err, sales(t, out))
+	}
+	// A recorded incident Degraded on another instrument tags no sale of
+	// SPY: the urgent sale carries the alarm's tag, this run's own, and goes.
+	h, s = configured(t)
+	mustApply(t, h, recordedState(t, "engine-state:joint:recorded", event.EngineStatePayload{
+		State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached,
+		Detail: "recorded: IEF quantity in dispute", ScopeInstrumentIDs: []string{"IEF"},
+	}, event.EngineStateScopedVersion))
+	if sold := sales(t, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k1", at, b))); len(sold) != 1 || sold[0].Tag == "engine-state:joint:recorded" {
+		t.Fatalf("an urgent snapshot under a recorded incident on another instrument planned %+v, want the alarm's one sale", sold)
+	}
+}
+
+// TestARecoveredSaleAttemptTheRunAlreadyHoldsIsRefused: a sale fired by a
+// broker snapshot before the recovery writes its tag's attempt record, so a
+// recovered decision restoring an attempt under that tag is refused rather
+// than overwrite it (ADR 0019, amended 2026-10-15: one attempt; fail
+// closed, AGENTS.md).
+func TestARecoveredSaleAttemptTheRunAlreadyHoldsIsRefused(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[17]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	h, s := configured(t)
+	at := sessionEnd(0)
+	b := (&account{cash: -2000, held: 60}).broker(at, 100)
+	b.ExcessLiquidity = 0.1 * b.NetLiquidation
+	out := mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k0", at, b))
+	alarms := ofType(out, event.MarginAlarmEventType)
+	if len(alarms) != 1 || len(sales(t, out)) != 1 {
+		t.Fatalf("setup: the urgent snapshot emitted %+v, want an alarm and its sale", out)
+	}
+	p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: alarms[0].ID}
+	_, err := h.Apply(context.Background(), s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, recovery.EventTime, p))
+	if err == nil || !strings.Contains(err.Error(), "restored once") {
+		t.Errorf("a recovered sale attempt the run already holds: %v, want the recovery refused", err)
+	}
+}
+
+// TestADecisionRecordsTheSaleAttemptAsTheRunHoldsIt: a fresh run whose
+// approval restored the incident's sale as not attempted, with one retired,
+// attempts it itself; each later decision records the attempt as the run
+// then holds it, so a run restarted from one never attempts the sale again
+// under the live attempt's client order ID (ADR 0019, amended 2026-10-15:
+// one attempt; ADR 0026, point 2, "Order identity", and point 5: recovered,
+// never recomputed).
+func TestADecisionRecordsTheSaleAttemptAsTheRunHoldsIt(t *testing.T) {
+	state := haltedState(t)
+	p := approval(false)
+	p.IncidentInForce = &event.IncidentInForce{IncidentID: state.ID, State: event.EngineStateHalted, SaleAttempted: new(false), SaleRetiredAttempts: 1}
+	s := &stream{hash: event.TargetWeightConfigurationHash(testConfiguration())}
+	urgentAt := func(n int) map[int]func(*event.BrokerSnapshotPayload) {
+		return map[int]func(*event.BrokerSnapshotPayload){n: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	}
+	full := simulate(t, options{brokers: true})
+	approved := simulate(t, options{brokers: true, recorded: []event.Envelope{s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", sessionEnd(0), p)},
+		closes: syntheticCloses()[:18], snapshots: full.inputs, brokerMutate: urgentAt(16)})
+	live := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 1)
+	if sold := sales(t, approved.decisions); len(sold) != 1 || sold[0].ClientOrderID != live {
+		t.Fatalf("setup: the approved run's sales %+v, want one under %s", sold, live)
+	}
+	decisions := ofType(approved.decisions, event.TargetsDecidedEventType)
+	recovery := decisions[len(decisions)-1]
+	var d event.TargetsDecidedPayload
+	decode(t, recovery, &d)
+	if want := (event.BoostRestoredSale{IncidentID: state.ID, Attempted: true, RetiredAttempts: 1}); d.Boost.RestoredSale == nil || *d.Boost.RestoredSale != want {
+		t.Fatalf("the decision after the sale records the restored sale as %+v, want %+v", d.Boost.RestoredSale, want)
+	}
+	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state}, brokerMutate: urgentAt(22)})
+	if sold := sales(t, r.decisions); len(sold) != 0 {
+		t.Fatalf("the restarted run sold %+v, want nothing: the sale under %s was attempted", sold, live)
+	}
+}
+
+// TestARecoveryRestoresTheApprovalsRetiredSalesBeforeTheRunsOwn: a decision
+// records both the approval's retired attempt and this run's own retired
+// second attempt; the recovery restores the approval's count first, so the
+// run's own retirement is counted once and the next attempt has the third
+// attempt's client order ID, skipping none (ADR 0026, point 2, "Order
+// identity", and point 5: recovered, never recomputed).
+func TestARecoveryRestoresTheApprovalsRetiredSalesBeforeTheRunsOwn(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	state := haltedState(t)
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[17]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: state.ID, RetiredAttempts: 1}
+	p.Boost.RetiredOrders = append(p.Boost.RetiredOrders, event.BoostRetiredOrder{ClientOrderID: orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 1),
+		Side: event.OrderSideSell, Released: 5, LimitPrice: 99, RetiredAt: sessionEnd(17), SaleTag: state.ID, SaleAttempt: 2})
+	s := &stream{hash: event.TargetWeightConfigurationHash(testConfiguration())}
+	edited := s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, recovery.EventTime, p)
+	edited.Source = recovery.Source
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	r := simulate(t, options{recovery: &edited, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state}, brokerMutate: urgent})
+	sold := sales(t, r.decisions)
+	if want := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 2); len(sold) != 1 || sold[0].ClientOrderID != want {
+		t.Fatalf("sales %+v, want one under %s, the third attempt's ID", sold, want)
+	}
+}

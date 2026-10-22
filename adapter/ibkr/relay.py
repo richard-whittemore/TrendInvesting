@@ -1094,7 +1094,7 @@ class Relay:
                 continue
             if broker is None:
                 broker = _tags(self._broker_orders())
-            if mark is None and _finish_retirement(self._pending, cid, envelope.get("id"), self._today()):
+            if mark is None and _finish_retirement(self._pending, order, envelope.get("id"), self._now(), self._today()):
                 # A retirement a stop left unmarked is finished before the
                 # order could be judged sendable again: the engine is told it
                 # was never sent, so it never is.
@@ -1360,7 +1360,7 @@ def _utc_now():
     return datetime.now(timezone.utc)
 
 
-def retire_order(pending, order, reason, detail, by, at, today, input_id):
+def retire_order(pending, order, reason, detail, by, at, today, input_id, entry_id=None):
     """Retire a released order that never left the adapter: journal the refusal, record it, and mark it never sent.
 
     The owner's decision of 2026-10-22. In that order: the refusal is
@@ -1375,7 +1375,8 @@ def retire_order(pending, order, reason, detail, by, at, today, input_id):
     named); detail what refused it or why the owner retired it; at when;
     today the session it was judged in; input_id the input awaiting its
     reply that released it, recorded with the retirement so that only that
-    input's settlement reads it as begun (_finish_retirement).
+    input's settlement reads it as begun (_finish_retirement); entry_id the
+    outbox entry's ID, named after the order unless given.
     """
     order = _plain(order)
     cid = order["client_order_id"]
@@ -1385,7 +1386,7 @@ def retire_order(pending, order, reason, detail, by, at, today, input_id):
                "quantity": order.get("quantity"), "limit_price": order.get("limit_price"), "reason": reason,
                "detail": detail, "retired_by": by, "retired_at": stamp}
     Outbox(pending.path + OUTBOX_SUFFIX).append_once({
-        "id": RETIRED_ID + cid, "event_type": RETIRED_TYPE, "schema_version": RETIRED_VERSION,
+        "id": entry_id or RETIRED_ID + cid, "event_type": RETIRED_TYPE, "schema_version": RETIRED_VERSION,
         "event_time": stamp, "payload": payload})
     pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": detail,
                              "retired": reason, "retired_by": by, "at": stamp, "session_date": today.isoformat(),
@@ -1393,7 +1394,7 @@ def retire_order(pending, order, reason, detail, by, at, today, input_id):
     pending.mark(cid, NEVER_SENT)
 
 
-def _finish_retirement(pending, cid, input_id, today):
+def _finish_retirement(pending, order, input_id, now, today):
     """Finish a retirement of cid that a stop left unmarked, and say whether one was begun.
 
     retire_order records the retirement for the engine first (the outbox),
@@ -1410,15 +1411,29 @@ def _finish_retirement(pending, cid, input_id, today):
     hand) is unknown, not another input's: it is read as this order's unless
     a later retirement recorded for another input follows it, so the order
     is never sent on a record that cannot say whose it is (fail closed on
-    missing, AGENTS.md).
+    missing, AGENTS.md). When such a record's outbox entry has already
+    reached the engine, the engine is told of this input's release (order,
+    at now) under an entry named after the order and the input, and the
+    retirement is recorded for input_id, as retire_order does, so the engine
+    ends the order and the record says whose it was; the entry's ID finds it
+    again after a stop before the mark (ADR 0026, amended 2026-10-22, "The
+    adapter").
     """
+    cid = order["client_order_id"]
     retired = [d for d in pending.decisions()
                if d.get("client_order_id") == cid and d.get("decision") == DECIDE_RETIRED]
-    begun = (any(d.get("input_id") == input_id for d in retired)
-             or bool(retired) and not retired[-1].get("input_id"))
-    entry = next((e for e in Outbox(pending.path + OUTBOX_SUFFIX).load() if e["id"] == RETIRED_ID + cid), None)
+    own = any(d.get("input_id") == input_id for d in retired)
+    unknown = not own and bool(retired) and not retired[-1].get("input_id")
+    begun = own or unknown
+    entries = Outbox(pending.path + OUTBOX_SUFFIX).load()
+    entry = next((e for e in entries if e["id"] == RETIRED_ID + cid), None)
     if not begun and entry is None:
         return False
+    if unknown and entry is None:
+        d = retired[-1]
+        retire_order(pending, order, d.get("retired"), d.get("reason"), d.get("retired_by"), now, today, input_id,
+                     entry_id=RETIRED_ID + cid + ":" + input_id)
+        return True
     if not begun:
         p = entry["payload"]
         pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": p.get("detail"),

@@ -321,18 +321,20 @@ func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool, retired int
 	return nil
 }
 
-// RestoredSaleAttempt is the sale attempt RestoreSaleAttempt restored, as it
-// was restored: its incident, whether an earlier run attempted it and how
+// RestoredSaleAttempt is the sale attempt RestoreSaleAttempt restored, as
+// this run now holds it for instrumentID: its incident, whether its sale was
+// attempted, by an earlier run or by this one and not since retired, and how
 // many of its attempts earlier runs retired, so a decision records it and a
-// run restarted from the decision restores it as this run holds it (ADR
-// 0026, point 2, "Order identity", and point 5: recovered, never
-// recomputed). ok is false when none was restored.
-func (g *Gate) RestoredSaleAttempt() (incidentID string, attempted bool, retired int, ok bool) {
+// run restarted from the decision restores it as this run holds it, never
+// attempting again under a live attempt's client order ID; this run's own
+// retirements the decision records with the retired orders (ADR 0019,
+// amended 2026-10-15: one attempt; ADR 0026, point 2, "Order identity", and
+// point 5: recovered, never recomputed). ok is false when none was restored.
+func (g *Gate) RestoredSaleAttempt(instrumentID string) (incidentID string, attempted bool, retired int, ok bool) {
 	if g.restored == "" {
 		return "", false, 0, false
 	}
-	a := g.attempts[g.restored]
-	return g.restored, a.earlier, a.retired, true
+	return g.restored, g.saleAttemptedFor(g.restored, instrumentID), g.attempts[g.restored].retired, true
 }
 
 // RestoreRetiredSale records, from a recovered decision, that the attempt

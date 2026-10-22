@@ -1461,8 +1461,17 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   retirements the engine applied, by the engine's one rule for applying a
   retirement, which the reporter and the restart reading call too, so its
   next attempt follows them too; each of the fresh run's decisions records
-  the sale attempt its approval restored (`restored_sale`), so a run
-  restarted from one restores it as the approved run held it. A
+  the sale attempt its approval restored as the run holds it at the
+  decision (`restored_sale`): attempted once the approval or the run itself
+  attempted it and no retirement has since freed it, with the approval's
+  retired count, the run's own retirements being recorded among the
+  retired orders, so a run restarted from one restores it as the approved
+  run held it and never attempts the sale again under a live attempt's
+  client order ID. A recovered decision comes before any broker snapshot
+  that would fire the sale of an incident an earlier run's recorded engine
+  state restored: such a snapshot read before the recovered decision, the
+  approval or the run's first bar or session is refused, since only the
+  decision or the approval states that incident's attempts. A
   retired urgent sale is attempted again while the alarm stays urgent
   whatever its tag: one fired while Halted, Degraded on the instrument or
   under the kill switch carries the incident's or the engagement's tag. A
@@ -1472,8 +1481,14 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   engine nothing, is refused for it. A retirement the adapter or the command
   began and a stop left unfinished is finished when the adapter starts
   again, before the order is judged sendable, so an order the engine is
-  told was never sent is never sent. Only a retirement recorded for the
-  input awaiting its reply counts as begun: one recorded for another input
-  under the same client order ID is not this order's.
+  told was never sent is never sent. A retirement recorded for the input
+  awaiting its reply counts as begun: one recorded for another input under
+  the same client order ID is not this order's. A retirement recorded with
+  no input is read as this order's unless a later one for another input
+  follows it, so an order is never sent on a record that cannot say whose
+  it is; when that record's entry has already reached the engine, the
+  engine is told again of this input's release, under an entry named after
+  the order and the input, and the retirement is recorded for this input,
+  so the engine ends the order and the record says whose it was.
 - **Replay.** Rules version 1.22.0 refused the input, so a journal holding
   a retirement decides differently and does not replay across the two.

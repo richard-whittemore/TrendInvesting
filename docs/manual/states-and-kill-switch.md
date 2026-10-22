@@ -323,9 +323,13 @@ engagement's tag. The new order's ID survives a restart: each decision
 records the retired sale and its attempt number, `operator approve`
 writes how many of the incident's sales were retired into the fresh run's
 approval (`sale_retired_attempts`), and each decision of that fresh run
-records the count its approval carried (`restored_sale`), so a run
+records the count its approval carried and whether the sale has been
+attempted, by an earlier run or this one (`restored_sale`), so a run
 restarted from any of them, or a later fresh run, never gives an attempt
-a retired order's ID.
+a retired order's ID, nor attempts again a sale already attempted. A
+restart from a decision reads that decision before any IBKR reading that
+would fire the incident's sale; a reading that arrives first is refused,
+and the run stops rather than guess.
 
 **When it does not go.** It is *withheld*, and recorded as
 `risk.sale.withheld`, when:

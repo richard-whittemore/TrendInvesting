@@ -557,14 +557,17 @@ func TestARestoredSaleAttemptIsReportedAsRestored(t *testing.T) {
 	if _, ok := requestSale(t, g, event.SaleTriggerExit); !ok {
 		t.Fatal("setup: no sale")
 	}
-	if id, _, _, ok := g.RestoredSaleAttempt(); ok {
+	if id, _, _, ok := g.RestoredSaleAttempt("SPY"); ok {
 		t.Errorf("a gate that restored no attempt reports %q restored", id)
+	}
+	if tag := g.SaleTag(event.SaleTriggerExit, "SPY"); tag != g.Incident() {
+		t.Errorf("a Halted gate names sale tag %q, want the incident's %q", tag, g.Incident())
 	}
 	restored := gate(t, limits(), event.TradingModeDryRun)
 	if err := restored.RestoreSaleAttempt("incident-1", true, 2); err != nil {
 		t.Fatal(err)
 	}
-	if id, attempted, retired, ok := restored.RestoredSaleAttempt(); !ok || id != "incident-1" || !attempted || retired != 2 {
+	if id, attempted, retired, ok := restored.RestoredSaleAttempt("SPY"); !ok || id != "incident-1" || !attempted || retired != 2 {
 		t.Errorf("restored attempt %q %v %d %v, want incident-1, attempted, 2 retired", id, attempted, retired, ok)
 	}
 }

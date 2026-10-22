@@ -387,15 +387,8 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	if g.ira {
 		return orderplan.Sale{}, false, nil
 	}
-	var tag, kind string
-	switch {
-	case g.state == StateHalted || g.state == StateDegraded && slices.Contains(g.scope, instrumentID):
-		tag, kind = g.incident, event.SaleKindIncident
-	case g.killEngaged:
-		tag, kind = g.killID, event.SaleKindIncident
-	case trigger == event.SaleTriggerMarginUrgent && g.alarmLevel == event.MarginAlarmUrgent:
-		tag, kind = g.alarmID, event.SaleKindUrgent
-	default:
+	tag, kind := g.saleTag(trigger, instrumentID)
+	if tag == "" {
 		return orderplan.Sale{}, false, nil
 	}
 	retired := g.restoredRetired(tag) + g.retiredSales[saleKey(tag, instrumentID)]
@@ -493,6 +486,33 @@ func (g *Gate) RetireSale(clientOrderID string) (tag string, attempt int, ok boo
 		}
 	}
 	return tag, attempt, true
+}
+
+// SaleTag is the tag a sale back to 98% for instrumentID fired by trigger
+// would carry now, as Sale picks it, or "" when Sale would plan none: the
+// incident's while Halted or Degraded on the instrument, the kill switch
+// engagement's while it is engaged, and the urgent alarm's for an urgent
+// sale. A caller reads it to refuse a sale whose attempts it cannot yet
+// state (ADR 0019, amended 2026-10-15: one attempt per incident).
+func (g *Gate) SaleTag(trigger, instrumentID string) string {
+	if g.ira {
+		return ""
+	}
+	tag, _ := g.saleTag(trigger, instrumentID)
+	return tag
+}
+
+// saleTag is the tag and kind Sale plans a sale under (SaleTag).
+func (g *Gate) saleTag(trigger, instrumentID string) (tag, kind string) {
+	switch {
+	case g.state == StateHalted || g.state == StateDegraded && slices.Contains(g.scope, instrumentID):
+		return g.incident, event.SaleKindIncident
+	case g.killEngaged:
+		return g.killID, event.SaleKindIncident
+	case trigger == event.SaleTriggerMarginUrgent && g.alarmLevel == event.MarginAlarmUrgent:
+		return g.alarmID, event.SaleKindUrgent
+	}
+	return "", ""
 }
 
 // saleKey keys a sale back to 98% by its tag and instrument.

@@ -1469,20 +1469,33 @@ class RetireTests(unittest.TestCase):
         # A retirement recorded with no input_id (by a relay before the field,
         # or edited by hand) that no later input's record follows is unknown,
         # not another input's: it is read as this order's, so the order is
-        # never sent (fail closed on missing, AGENTS.md).
+        # never sent (fail closed on missing, AGENTS.md). Its outbox entry
+        # has already reached the engine, so the engine is told again, of
+        # this input's release, under an ID naming the input, and the
+        # retirement is recorded for this input: the engine ends the order
+        # and the record says whose it was (ADR 0026, amended 2026-10-22,
+        # "The adapter").
         for missing in ({}, {"input_id": None}, {"input_id": ""}):
             with self.subTest(missing=missing):
                 self.pending.clear()
                 Path(self.pending.decisions_path).unlink(missing_ok=True)
+                Path(self.outbox.path).unlink(missing_ok=True)
                 del self.sent[:]
                 self.pending.record_decision(dict({"client_order_id": "tw-1", "decision": "retired", "reason": "session over",
                                                    "retired": "session over", "retired_by": "adapter",
                                                    "at": "2026-10-16T13:30:00Z", "session_date": "2026-10-16"}, **missing))
-                relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}))
-                relay.exchange(envelope(0))
-                relay.close()
-                self.assertEqual(self.sent, [])
-                self.assertEqual(self.retired_entries(), [])
+                for attempt in ("first", "again"):
+                    relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}))
+                    relay.exchange(envelope(0))
+                    relay.close()
+                    self.assertEqual(self.sent, [])
+                    [entry] = self.retired_entries()
+                    self.assertEqual(entry["id"], "order-retired:tw-1:session:0", attempt)
+                    p = entry["payload"]
+                    self.assertEqual((p["client_order_id"], p["reason"], p["detail"], p["retired_by"], p["quantity"]),
+                                     ("tw-1", "session over", "session over", "adapter", 9), attempt)
+                    mine = [d for d in self.pending.decisions() if d.get("input_id") == "session:0"]
+                    self.assertEqual([(d["client_order_id"], d["decision"]) for d in mine], [("tw-1", "retired")], attempt)
 
     def test_an_order_whose_session_is_over_that_ibkr_shows_is_never_retired(self):
         # Checked at IBKR first, as every order is: one IBKR shows under its

@@ -366,9 +366,12 @@ type Handler struct {
 	started    bool // a bar or session has been applied
 	recovered  bool
 	approved   bool
-	awaiting   bool      // a fresh run: nothing but the approval is read until it is recorded
-	prelude    bool      // an input other than the configuration and an approval has been read
-	quietUntil time.Time // sessions at or before it only feed the indicators
+	awaiting   bool // a fresh run: nothing but the approval is read until it is recorded
+	prelude    bool // an input other than the configuration and an approval has been read
+	// recordedIncident is the incident an earlier run's recorded engine
+	// state restored, "" when none did (refuseUnstatedSale).
+	recordedIncident string
+	quietUntil       time.Time // sessions at or before it only feed the indicators
 
 	indicators *boost.Indicators
 	latched    bool
@@ -851,6 +854,7 @@ func (h *Handler) applyRecordedState(in event.Envelope) error {
 	if err := h.gate.RestoreState(in.ID, p, in.SchemaVersion); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	h.recordedIncident = h.gate.Incident()
 	return nil
 }
 
@@ -1245,13 +1249,38 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	for _, l := range obs.Lapsed {
 		b.lapsed(l)
 	}
-	if obs.Urgent {
-		b.sale(event.SaleTriggerMarginUrgent)
-	}
-	if obs.RetryExit {
-		b.sale(event.SaleTriggerExit)
+	for _, trigger := range []struct {
+		fired bool
+		name  string
+	}{{obs.Urgent, event.SaleTriggerMarginUrgent}, {obs.RetryExit, event.SaleTriggerExit}} {
+		if !trigger.fired {
+			continue
+		}
+		if err := h.refuseUnstatedSale(in, trigger.name); err != nil {
+			return nil, err
+		}
+		b.sale(trigger.name)
 	}
 	return b.result()
+}
+
+// refuseUnstatedSale refuses a broker snapshot read before the recovered
+// decision or the owner's approval, and before the run began, that would
+// fire the sale back to 98% of an incident an earlier run's recorded engine
+// state restored: the incident's attempts, attempted or retired, are the
+// earlier run's, which only the recovered decision or the approval states,
+// so the sale is never planned without them under an attempt's client order
+// ID that may be working at IBKR (ADR 0019, amended 2026-10-15: one attempt
+// per incident; ADR 0026, point 5: recovered, never recomputed; fail closed,
+// AGENTS.md).
+func (h *Handler) refuseUnstatedSale(in event.Envelope, trigger string) error {
+	if h.recordedIncident == "" || h.recovered || h.approved || h.started {
+		return nil
+	}
+	if h.gate.SaleTag(trigger, h.cfg.Boost.InstrumentID) != h.recordedIncident {
+		return nil
+	}
+	return fmt.Errorf("targetweight: %s %s would fire recorded incident %s's sale before the recovered decision states its attempts; the recovered decision comes before such a snapshot", in.Type, in.ID, h.recordedIncident)
 }
 
 // learnListings reads the open orders IBKR lists: one listed under the
@@ -1694,7 +1723,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		UndecidedBeforeRejection: h.verdicts.olderThanRejection, RejectionsWhileStopped: h.verdicts.whileStopped, NoVenue: h.noVenue(),
 	}
 	b.NamedOrders = h.namedFigures(b)
-	if incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(); ok {
+	if incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(h.cfg.Boost.InstrumentID); ok {
 		b.RestoredSale = &event.BoostRestoredSale{IncidentID: incident, Attempted: attempted, RetiredAttempts: retired}
 	}
 	return b
