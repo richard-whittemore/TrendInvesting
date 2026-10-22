@@ -787,7 +787,11 @@ func assertByteIdenticalAndReplays(t *testing.T, opts options) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := targetweight.New(strategyVersion, testConfiguration(), targetweight.Options{DecideFrom: sessionEnd(0)})
+	cfg := testConfiguration()
+	if opts.mutate != nil {
+		opts.mutate(&cfg)
+	}
+	handler, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: sessionEnd(0)})
 	if err != nil {
 		t.Fatal(err)
 	}

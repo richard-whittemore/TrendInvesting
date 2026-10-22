@@ -270,6 +270,10 @@ type options struct {
 	// sends: the venue is told of none, so none is acknowledged and none
 	// executes. Every session in clear is one.
 	unsent []int
+	// startHeld is the SPY the account holds before the first session,
+	// bought on margin at the first close, so its net liquidation is still
+	// $4,000.
+	startHeld int64
 }
 
 // neverReaches reports whether the adapter never sends the order released
@@ -395,7 +399,7 @@ func simulate(t *testing.T, opts options) run {
 	rec := journal.NewRecorder(handler)
 	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
 	r := run{recorder: rec, hash: s.hash}
-	acct := &account{cash: 4000}
+	acct := &account{cash: float64(4000 - float64(float64(opts.startHeld)*opts.closes[0])), held: opts.startHeld}
 	apply := func(in event.Envelope) []event.Envelope {
 		t.Helper()
 		out, err := rec.Apply(context.Background(), in)
