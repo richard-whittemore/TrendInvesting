@@ -1,6 +1,8 @@
 package targetweight_test
 
 import (
+	"bytes"
+	"context"
 	"math"
 	"reflect"
 	"strings"
@@ -8,7 +10,10 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 // boostDryRunOptions is a dry-run Boost run as a dry-run adapter sees it: no
@@ -196,6 +201,71 @@ func TestADryRunBoostRefusesAVenueReportOnAnOrderItCanceled(t *testing.T) {
 	if want, have := released(t, base.decisions), released(t, got.decisions); !reflect.DeepEqual(want, have) {
 		t.Errorf("the orders released with the refused reports are %+v, want the run's without them, %+v", have, want)
 	}
+	// Each refused input holds its own sequence number: the journalled
+	// inputs are contiguous across the refusals and the real input after.
+	var last uint64
+	seen := map[string]bool{}
+	for _, e := range got.entries {
+		if e.Kind != journal.KindInput {
+			continue
+		}
+		if last != 0 && e.Envelope.Sequence != last+1 {
+			t.Fatalf("input %s has sequence %d after %d, want them contiguous", e.Envelope.ID, e.Envelope.Sequence, last)
+		}
+		last = e.Envelope.Sequence
+		seen[e.Envelope.ID] = true
+	}
+	for _, in := range inputs {
+		if !seen[in.id] {
+			t.Errorf("refused input %s is not in the journal's inputs", in.id)
+		}
+	}
+	// The journal holding the refusals replays, refusals included, to the
+	// same decision log, and a rerun writes the same bytes.
+	var logged, inputs2 []event.Envelope
+	for _, e := range got.entries {
+		if e.Kind == journal.KindInput {
+			inputs2 = append(inputs2, e.Envelope)
+		} else {
+			logged = append(logged, e.Envelope)
+		}
+	}
+	cfg := testConfiguration()
+	opts.mutate(&cfg)
+	handler, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: sessionEnd(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := replay.New(handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayed []event.Envelope
+	for _, in := range inputs2 {
+		// A refusal is part of the run: the engine spends its sequence and
+		// goes on, as the recorder committed it.
+		out, _ := engine.Apply(context.Background(), in)
+		replayed = append(replayed, out...)
+	}
+	if d := replay.Equivalent(logged, replayed); d != nil {
+		t.Errorf("replaying the journal with the refusals diverged: %+v", d)
+	}
+	if !bytes.Equal(journalBytes(t, got), journalBytes(t, simulate(t, opts))) {
+		t.Error("rerunning the same inputs, refusals included, must write a byte-identical journal")
+	}
+}
+
+func journalBytes(t *testing.T, r run) []byte {
+	t.Helper()
+	header, err := r.recorder.Header(r.hash, strategyVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := journal.Write(&buf, header, r.entries); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 // TestADryRunBoostSaleBackTo98IsCanceledAndSizedWithNothingNetted: Boost's
