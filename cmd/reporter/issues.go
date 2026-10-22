@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -647,14 +648,41 @@ func githubIssuesFrom(getenv func(string) string, client *http.Client) (sender, 
 	if api == "" {
 		api = defaultGitHubAPIURL
 	}
-	if u, err := url.Parse(api); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return nil, errors.New("reporter: TI_GITHUB_API_URL must be an absolute URL such as https://api.github.com")
+	if err := checkAPIURL(api, getenv("TI_GITHUB_API_ALLOW_HOST")); err != nil {
+		return nil, err
 	}
 	return &issuesSender{
 		tracker:  &githubTracker{api: strings.TrimRight(api, "/"), base: strings.TrimRight(api, "/") + "/repos/" + owner + "/" + name, token: token, client: client},
 		redactor: report.NewRedactor(append([]string{token}, hostLiterals()...)),
 		timeout:  client.Timeout,
 	}, nil
+}
+
+// checkAPIURL accepts the address the token is sent to: GitHub's API over
+// https, or the one host the operator names in TI_GITHUB_API_ALLOW_HOST
+// (over https, or http on a loopback address). The address's text is never
+// in the error.
+func checkAPIURL(api, allow string) error {
+	refuse := errors.New("reporter: TI_GITHUB_API_URL must be https://api.github.com, or an https address whose host TI_GITHUB_API_ALLOW_HOST names (http is allowed only for a loopback host)")
+	u, err := url.Parse(api)
+	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return refuse
+	}
+	if u.Host == "api.github.com" {
+		if u.Scheme != "https" {
+			return refuse
+		}
+		return nil
+	}
+	if allow == "" || !strings.EqualFold(allow, u.Host) {
+		return refuse
+	}
+	if u.Scheme == "http" {
+		if ip := net.ParseIP(u.Hostname()); u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return refuse
+		}
+	}
+	return nil
 }
 
 // githubTracker is one repository's issues over GitHub's REST API
@@ -666,6 +694,7 @@ func githubIssuesFrom(getenv func(string) string, client *http.Client) (sender, 
 type githubTracker struct {
 	api, base, token string
 	client           *http.Client
+	maxAnswer        int64 // 0: maxAnswerBytes
 
 	mu     sync.Mutex
 	loaded bool
@@ -756,10 +785,18 @@ func (g *githubTracker) callURL(ctx context.Context, method, target string, in, 
 		return nil, fmt.Errorf("request failed (%w)", errUnavailable)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	answer, err := io.ReadAll(io.LimitReader(resp.Body, 1<<22))
+	limit := g.maxAnswer
+	if limit <= 0 {
+		limit = maxAnswerBytes
+	}
+	answer, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		// An answer that stops on the way is a timeout like any other.
 		return nil, fmt.Errorf("GitHub's answer did not arrive whole (%w)", errUnavailable)
+	}
+	if int64(len(answer)) > limit {
+		// A prefix is never parsed as the whole answer.
+		return nil, fmt.Errorf("GitHub's answer is larger than %d bytes (%w)", limit, errUnavailable)
 	}
 	if resp.StatusCode/100 != 2 {
 		// A limit GitHub applies, or a fault of its own, is the channel's
@@ -1036,9 +1073,20 @@ func withIssueEvidence(senders []sender, journalPath string) {
 // left out, and every figure left is removed), since the issue is public. A
 // journal that cannot be read is said so; the alert still opens its issue.
 func issueEvidence(path string, r report.Redactor) string {
-	raw, err := os.ReadFile(path)
+	if info, err := os.Stat(path); err == nil && info.Size() > maxEvidenceJournal {
+		return "The journal is too large to show here; it is on the server."
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return "The journal could not be read for this issue."
+	}
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(f, maxEvidenceJournal+1))
+	if err != nil {
+		return "The journal could not be read for this issue."
+	}
+	if len(raw) > maxEvidenceJournal {
+		return "The journal is too large to show here; it is on the server."
 	}
 	_, envelopes, err := report.Load(raw)
 	if err != nil {
@@ -1047,7 +1095,7 @@ func issueEvidence(path string, r report.Redactor) string {
 	var b strings.Builder
 	b.WriteString("### Last journal records (redacted)\n\n```text\n")
 	for _, e := range envelopes[max(0, len(envelopes)-issueEvidenceRows):] {
-		b.WriteString(r.Record(e) + "\n")
+		b.WriteString(boundedLine(r.Record(e)) + "\n")
 	}
 	b.WriteString("```\n")
 	loaded, err := journalquery.Load("journal", raw)
@@ -1098,7 +1146,7 @@ func redactedTable(t journalquery.Table, r report.Redactor) journalquery.Table {
 	for _, row := range rows {
 		cells := make([]string, 0, len(keep))
 		for _, i := range keep {
-			cells = append(cells, r.Text(row[i]))
+			cells = append(cells, boundedLine(r.Text(row[i])))
 		}
 		out.Rows = append(out.Rows, cells)
 	}
@@ -1125,4 +1173,30 @@ func withRedaction(senders []sender, secrets []string) {
 			is.redactor = report.NewRedactor(append(slices.Clone(secrets), hostLiterals()...))
 		}
 	}
+}
+
+const (
+	// maxAnswerBytes is the most one GitHub answer is read to: a listing page
+	// of 100 issues, each of up to maxIssueText characters of up to 4 bytes.
+	maxAnswerBytes = 4 * 100 * maxIssueText
+	// maxEvidenceJournal is the largest journal read into memory for an
+	// issue's evidence.
+	maxEvidenceJournal = 64 << 20
+	// maxEvidenceLine is the most bytes one rendered record takes in the
+	// evidence.
+	maxEvidenceLine = 4096
+	evidenceLineCut = " [cut]"
+)
+
+// boundedLine is s cut to maxEvidenceLine bytes at a whole character, and
+// said so.
+func boundedLine(s string) string {
+	if len(s) <= maxEvidenceLine {
+		return s
+	}
+	cut := s[:maxEvidenceLine]
+	for !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + evidenceLineCut
 }

@@ -298,6 +298,9 @@ func TestTheSecretsExampleNamesWhatTheReporterReads(t *testing.T) {
 		if strings.HasSuffix(k, "_SERVER") || strings.HasSuffix(k, "_URL") {
 			return "https://example.org"
 		}
+		if strings.HasSuffix(k, "_ALLOW_HOST") {
+			return "example.org"
+		}
 		if strings.HasSuffix(k, "_REPO") {
 			return "owner/repo"
 		}

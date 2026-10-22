@@ -17,6 +17,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // The github-issues channel against GitHub's REST API, in memory: what one
@@ -163,17 +164,19 @@ func TestAnAnswerWithNoIssueNumberIsNotADelivery(t *testing.T) {
 
 // A body or comment longer than GitHub takes is cut, keeping the alert's text
 // and the hidden key line, and saying so: it is never refused every firing.
+// The delivery is unbounded in time here: what is pinned is the cut, not the
+// clock (the send timeout has its own test below).
 func TestABodyOverGitHubsLimitIsCutNotRefused(t *testing.T) {
 	gh := &fakeGitHub{}
 	url := fakeGitHubServer(t, gh)
-	s := githubChannel(t, url, time.Second)
+	s := githubChannel(t, url, 0)
 	s.evidence = func() string { return strings.Repeat("evidence line\n", 10000) }
 	a := haltAlert()
 	a.Body = "The engine halted: risk limit breached. " + strings.Repeat("é", 30000)
 	if err := s.send(a, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := githubChannel(t, url, time.Second).send(a, 1); err != nil {
+	if err := githubChannel(t, url, 0).send(a, 1); err != nil {
 		t.Fatal(err)
 	}
 	issues := gh.snapshot()
@@ -382,5 +385,98 @@ func TestAnEscapedSecretNeverReachesAnIssue(t *testing.T) {
 		if strings.Contains(body, leak) {
 			t.Errorf("the issue holds %q:\n%s", leak, body)
 		}
+	}
+}
+
+// The token goes only to GitHub's API over https, or to the one host the
+// operator names (ADR 0019, "Alerting"; docs/live-trading/plan.md section 7).
+func TestTheTokenGoesOnlyToGitHubOverHTTPS(t *testing.T) {
+	base := map[string]string{"TI_GITHUB_ISSUES_TOKEN": issuesToken, "TI_GITHUB_ISSUES_REPO": "owner/repo"}
+	with := func(kv ...string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	for name, c := range map[string]struct {
+		env map[string]string
+		ok  bool
+	}{
+		"default":                  {with(), true},
+		"github over https":        {with("TI_GITHUB_API_URL", "https://api.github.com"), true},
+		"github over http":         {with("TI_GITHUB_API_URL", "http://api.github.com"), false},
+		"other host unlisted":      {with("TI_GITHUB_API_URL", "https://evil.example"), false},
+		"other host listed":        {with("TI_GITHUB_API_URL", "https://ghe.example", "TI_GITHUB_API_ALLOW_HOST", "ghe.example"), true},
+		"other host, another name": {with("TI_GITHUB_API_URL", "https://evil.example", "TI_GITHUB_API_ALLOW_HOST", "ghe.example"), false},
+		"listed host over http":    {with("TI_GITHUB_API_URL", "http://ghe.example", "TI_GITHUB_API_ALLOW_HOST", "ghe.example"), false},
+		"loopback http listed":     {with("TI_GITHUB_API_URL", "http://127.0.0.1:8080", "TI_GITHUB_API_ALLOW_HOST", "127.0.0.1:8080"), true},
+		"loopback http unlisted":   {with("TI_GITHUB_API_URL", "http://127.0.0.1:8080"), false},
+		"userinfo trick":           {with("TI_GITHUB_API_URL", "https://api.github.com@evil.example"), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := githubIssuesFrom(env(c.env), http.DefaultClient)
+			if (err == nil) != c.ok {
+				t.Fatalf("accepted=%v, want %v (%v)", err == nil, c.ok, err)
+			}
+			if err != nil {
+				for _, leak := range []string{"evil.example", "ghe.example", "127.0.0.1", issuesToken} {
+					if strings.Contains(err.Error(), leak) {
+						t.Fatalf("the message names %q: %v", leak, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+// An answer larger than the channel reads is an error, never a prefix handed
+// to the parser.
+func TestAnAnswerOverTheReadLimitIsAnError(t *testing.T) {
+	gh := &fakeGitHub{}
+	a := haltAlert()
+	gh.issues = append(gh.issues, &fakeIssue{number: 1, body: strings.Repeat("x", 4096) + "\n\n" + issueMarker(a.Key), labels: []string{"alert"}, open: true})
+	url := fakeGitHubServer(t, gh)
+	s := githubChannel(t, url, 0)
+	s.tracker.(*githubTracker).maxAnswer = 1024
+	err := s.send(a, 0)
+	if err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("an oversized answer was not refused as such: %v", err)
+	}
+	if issues := gh.snapshot(); len(issues) != 1 || commentsOf(issues) != 0 {
+		t.Fatalf("an oversized answer wrote: %d issues", len(issues))
+	}
+}
+
+// A journal too large to hold in memory is not read for the issue's evidence.
+func TestAJournalOverTheEvidenceLimitIsNotRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxEvidenceJournal + 1); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	got := issueEvidence(path, report.NewRedactor(nil))
+	if !strings.Contains(got, "too large") {
+		t.Fatalf("evidence of an oversized journal: %q", got)
+	}
+}
+
+// A record's line in the evidence is cut to a bounded length, at a whole
+// character.
+func TestAnEvidenceLineIsBounded(t *testing.T) {
+	line := strings.Repeat("é", maxEvidenceLine)
+	got := boundedLine(line)
+	if len(got) > maxEvidenceLine+len(evidenceLineCut) || !utf8.ValidString(got) || !strings.HasSuffix(got, evidenceLineCut) {
+		t.Fatalf("line of %d bytes", len(got))
+	}
+	if short := "short"; boundedLine(short) != short {
+		t.Fatal("a short line was changed")
 	}
 }

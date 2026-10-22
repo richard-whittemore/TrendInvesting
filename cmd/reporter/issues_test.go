@@ -554,7 +554,7 @@ func (g *fakeGitHub) snapshot() []fakeIssue {
 const issuesToken = "github_pat_11TESTTOKEN0123456789_abcdefghijklmnopqrstuvwxyz"
 
 func issuesEnv(url string) map[string]string {
-	return map[string]string{"TI_GITHUB_ISSUES_TOKEN": issuesToken, "TI_GITHUB_ISSUES_REPO": "owner/repo", "TI_GITHUB_API_URL": url}
+	return map[string]string{"TI_GITHUB_ISSUES_TOKEN": issuesToken, "TI_GITHUB_ISSUES_REPO": "owner/repo", "TI_GITHUB_API_URL": url, "TI_GITHUB_API_ALLOW_HOST": strings.TrimPrefix(strings.TrimPrefix(url, "https://"), "http://")}
 }
 
 // A journal whose refusal names an IBKR account and a figure, so the issue's
