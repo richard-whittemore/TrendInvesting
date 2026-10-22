@@ -83,7 +83,29 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     owner's approval restored, so the restarted run restores it as the
 //     approved run holds it. Each is omitted when none, so a decision with
 //     no retired or named order and no restored sale has version 6's bytes.
-const TargetsDecidedSchemaVersion uint32 = 7
+//   - Version 8 records the run's own live sale back to 98%
+//     (BoostRestoredSale.Order) whether or not a venue has named it and
+//     whether or not part of it has filled, with its side, the attempt it
+//     is, whether a venue has named it, its venue order ID and its
+//     executions so far, so a run restarted from the decision holds it as
+//     released, named as it was and filled as far as it was, and reads the
+//     venue's later reports on it as the full run does (ADR 0026, point 2,
+//     "Boost", and point 5, amended 2026-10-22). Version 7 recorded the sale
+//     only while no venue had named it and nothing had filled, with its
+//     client order ID, shares, limit and trigger; a version 7 record is
+//     read as it was written (TargetsDecidedVersions, ValidateSchema).
+const TargetsDecidedSchemaVersion uint32 = 8
+
+// TargetsDecidedRetiredVersion is version 7, the last version before the
+// live sale's side, attempt, naming and executions were recorded; a reader
+// reads it beside the current version (ADR 0015).
+const TargetsDecidedRetiredVersion uint32 = 7
+
+// TargetsDecidedVersions are the schema versions a reader of the log reads
+// a decision at: version 7, which earlier builds wrote, and the current one.
+func TargetsDecidedVersions() []uint32 {
+	return []uint32{TargetsDecidedRetiredVersion, TargetsDecidedSchemaVersion}
+}
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -372,24 +394,65 @@ type BoostRestoredSale struct {
 	Attempted       bool   `json:"attempted"`
 	RetiredAttempts int    `json:"retired_attempts"`
 	// Order is the sale this run attempted itself and released, while it is
-	// still retirable: not ended, nothing filled and named by no venue. A run
-	// restarted from the decision restores it as this run's own attempt,
-	// released, never as one an earlier run spent, so its retirement as
-	// never sent frees the attempt as in the full run (ADR 0019, amended
-	// 2026-10-17, reading 4; ADR 0026, point 2, "Boost", and point 5:
-	// recovered, never recomputed). Omitted otherwise: an attempt that was
-	// withheld for a person, or reached IBKR, stays spent.
+	// still live: not ended and not filled in full, whether or not a venue
+	// has named it and whether or not part of it has filled. A run restarted
+	// from the decision restores it as this run's own attempt, released,
+	// never as one an earlier run spent, with the executions reported so
+	// far and named as it was, so the venue's later reports on it are read,
+	// and its retirement as never sent frees the attempt only while no venue
+	// has named it, as in the full run (ADR 0019, amended 2026-10-17,
+	// reading 4; ADR 0026, point 2, "Boost", and point 5: recovered, never
+	// recomputed). Omitted otherwise: an attempt that was withheld for a
+	// person, or that ended, stays spent.
 	Order *BoostRestoredSaleOrder `json:"order,omitempty"`
 }
 
 // BoostRestoredSaleOrder is the sell a restored sale attempt released
-// (BoostRestoredSale.Order): its client order ID, shares, limit and what
-// fired it, so a retirement of it re-arms the sale by its own trigger.
+// (BoostRestoredSale.Order): its client order ID, side, shares, limit and
+// what fired it, so a retirement of it re-arms the sale by its own trigger;
+// the attempt it is, the first being 1, whose client order ID follows every
+// retired attempt's (ADR 0026, point 2, "Order identity"); whether a venue
+// has named it (a lifecycle report, an execution or a broker snapshot's
+// open-order listing), so its retirement is refused after a restart as in
+// the full run; its venue order ID once one is known, by which IBKR's
+// listing of it with no client order ID echoed is matched; and the shares
+// its fill reports executed so far with each execution, so a restarted run
+// nets the sell by them and reads an execution sent again as a redelivery
+// (ADR 0019, "Explained means", and amended 2026-10-15). Version 7 recorded
+// the first four fields only; Side and Attempt are omitted in such a
+// record, and every field after Attempt is omitted when unset.
 type BoostRestoredSaleOrder struct {
-	ClientOrderID string  `json:"client_order_id"`
-	Released      int64   `json:"released"`
-	LimitPrice    float64 `json:"limit_price"`
-	Trigger       string  `json:"trigger"`
+	ClientOrderID string             `json:"client_order_id"`
+	Side          string             `json:"side,omitempty"`
+	Released      int64              `json:"released"`
+	LimitPrice    float64            `json:"limit_price"`
+	Trigger       string             `json:"trigger"`
+	Attempt       int                `json:"attempt,omitempty"`
+	Named         bool               `json:"named,omitempty"`
+	VenueOrderID  string             `json:"venue_order_id,omitempty"`
+	Filled        int64              `json:"filled,omitempty"`
+	Fills         []BoostWatchedFill `json:"fills,omitempty"`
+}
+
+// recordsVersion8 reports whether o records any field only version 8
+// records.
+func (o BoostRestoredSaleOrder) recordsVersion8() bool {
+	return o.Side != "" || o.Attempt != 0 || o.Named || o.VenueOrderID != "" || o.Filled != 0 || len(o.Fills) > 0
+}
+
+// Watched is o as a watched order records the same sell, with its
+// executions and its venue order ID and no end: the rule its release and
+// executions are checked by, and the form a restarted run restores them
+// from (BoostWatchedOrder.Fill).
+func (o BoostRestoredSaleOrder) Watched() BoostWatchedOrder {
+	return BoostWatchedOrder{ClientOrderID: o.ClientOrderID, Side: o.Side, Released: o.Released, LimitPrice: o.LimitPrice,
+		Filled: o.Filled, Fills: o.Fills, VenueOrderID: o.VenueOrderID}
+}
+
+// Equal reports whether o and other record the same sell, each execution's
+// instant the same however its UTC offset is written.
+func (o BoostRestoredSaleOrder) Equal(other BoostRestoredSaleOrder) bool {
+	return o.Trigger == other.Trigger && o.Attempt == other.Attempt && o.Named == other.Named && o.Watched().Equal(other.Watched())
 }
 
 // Equal reports whether s and o record the same sale attempt.
@@ -400,7 +463,7 @@ func (s *BoostRestoredSale) Equal(o *BoostRestoredSale) bool {
 	if s.IncidentID != o.IncidentID || s.Attempted != o.Attempted || s.RetiredAttempts != o.RetiredAttempts || (s.Order == nil) != (o.Order == nil) {
 		return false
 	}
-	return s.Order == nil || *s.Order == *o.Order
+	return s.Order == nil || s.Order.Equal(*o.Order)
 }
 
 // carriesRelease reports whether o records any of the order as released.
@@ -961,17 +1024,39 @@ func (n MomentumName) validateHoldingFigures(netLiquidation float64) []error {
 }
 
 // ValidateWritten is the check on a decision being written now: Validate,
-// and a momentum name left out for a gap names the sessions it is missing
-// (ADR 0026 point 5, amended 2026-10-18). Validate, which readers use, does
+// a live sale back to 98% states its side and attempt (version 8), and a
+// momentum name left out for a gap names the sessions it is missing (ADR
+// 0026 point 5, amended 2026-10-18). Validate, which readers use, does
 // not require it, so a record written before gap sessions existed is read.
 func (p TargetsDecidedPayload) ValidateWritten() error {
 	errs := []error{p.Validate()}
+	// A live sale written now states its side and its attempt (version 8);
+	// Validate reads a version 7 record, which states neither.
+	if r := p.Boost.RestoredSale; r != nil && r.Order != nil && (r.Order.Side != OrderSideSell || r.Order.Attempt < 1) {
+		errs = append(errs, fmt.Errorf("a restored sale's order written now records its side, a sell, and its attempt, the first being 1; got %q and %d", r.Order.Side, r.Order.Attempt))
+	}
 	for _, n := range p.Momentum.Names {
 		if n.Status == MomentumStatusGap && len(n.GapSessions) == 0 {
 			errs = append(errs, fmt.Errorf("momentum name %s: a gap name names its missing sessions", n.InstrumentID))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// ValidateSchema checks p as recorded at version: Validate, and, below
+// version 8, no field of the live sale that only version 8 records, so a
+// record carrying a later version's field is refused (ADR 0015). A version
+// above the current one, or none, is refused.
+func (p TargetsDecidedPayload) ValidateSchema(version uint32) error {
+	switch {
+	case version == 0 || version > TargetsDecidedSchemaVersion:
+		return fmt.Errorf("targets decided schema version %d is not between 1 and %d", version, TargetsDecidedSchemaVersion)
+	case version < TargetsDecidedSchemaVersion:
+		if r := p.Boost.RestoredSale; r != nil && r.Order != nil && r.Order.recordsVersion8() {
+			return fmt.Errorf("a version %d decision's restored sale records its side, attempt, naming, venue order ID or executions, which only version 8 records", version)
+		}
+	}
+	return p.Validate()
 }
 
 // validateGaps checks a name's gap sessions: dates, strictly ascending, on
@@ -1158,6 +1243,21 @@ func (b BoostFigures) validateRejections() []error {
 			errs = append(errs, fmt.Errorf("a restored sale's order names its client order ID, shares released and limit; got %q, %d, %v", o.ClientOrderID, o.Released, o.LimitPrice))
 		case o.Trigger != SaleTriggerExit && o.Trigger != SaleTriggerMarginUrgent:
 			errs = append(errs, fmt.Errorf("a restored sale's order was fired by exit or margin-urgent, not %q", o.Trigger))
+		case o.Side != "" && o.Side != OrderSideSell:
+			errs = append(errs, fmt.Errorf("a restored sale's order is a sell, not a %q", o.Side))
+		case o.Attempt < 0:
+			errs = append(errs, fmt.Errorf("a restored sale's order is attempt %d; the first attempt is 1", o.Attempt))
+		case (o.Filled > 0 || o.VenueOrderID != "") && !o.Named:
+			errs = append(errs, fmt.Errorf("a restored sale's order with %d filled and venue order %q is named: only a venue's report or listing gives either", o.Filled, o.VenueOrderID))
+		default:
+			// Its release and executions by the watched order's rule: fewer
+			// filled than released, the fills summing to the filled shares.
+			// A version 7 record states no side; it is a sell all the same.
+			w := o.Watched()
+			w.Side = OrderSideSell
+			for _, err := range w.validate() {
+				errs = append(errs, fmt.Errorf("a restored sale's order: %w", err))
+			}
 		}
 	}
 	// A retired order is one retired as never sent: named once, in no list
@@ -1256,6 +1356,21 @@ func (b BoostFigures) validateRejections() []error {
 		named(o.ClientOrderID, o.VenueOrderID)
 	}
 	for _, o := range b.WorkingOrders {
+		named(o.ClientOrderID, o.VenueOrderID)
+	}
+	// The run's own live sale is recorded once, as the restored sale's
+	// order, and in no other list; no execution or venue order ID of it is
+	// another order's.
+	if r := b.RestoredSale; r != nil && r.Order != nil && r.Order.ClientOrderID != "" {
+		o := r.Order
+		if id := o.ClientOrderID; id == b.Watched.ClientOrderID || seen[id] || cleared[id] || rejected[id] || retired[id] || working[id] {
+			errs = append(errs, fmt.Errorf("restored sale %s is also the watched, an undecided, a cleared, a rejected, a retired or a working order; the run's own live sale is recorded once", id))
+		}
+		for _, f := range o.Fills {
+			if other, ok := fillOf[f.FillID]; ok && other != o.ClientOrderID {
+				errs = append(errs, fmt.Errorf("boost records fill id %s on two orders, %s and %s", f.FillID, other, o.ClientOrderID))
+			}
+		}
 		named(o.ClientOrderID, o.VenueOrderID)
 	}
 	// An order a venue named is one the decision restores as released: the

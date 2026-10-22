@@ -303,7 +303,7 @@ it sells again, sized from the 14 shares held.
   `TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog`.
 - The synthetic report: ADR 0026, point 3, "Mode" (amended 2026-10-17);
   introduced for momentum in target-weight rules version 1.11.0 and for
-  Boost in 1.22.0 (ADR 0016; the rules are at 1.23.0 now, which also reads a retired order: [order lifecycle](order-lifecycle.md)), so a dry-run
+  Boost in 1.22.0 (ADR 0016; the rules are at 1.24.0 now: 1.23.0 also reads a retired order, [order lifecycle](order-lifecycle.md), and 1.24.0 keeps a sale back to 98% IBKR has named across a restart, [states and the kill switch](states-and-kill-switch.md)), so a dry-run
   journal written under an earlier rules version does not replay.
 - Tests of the withheld sessions, in `internal/targetweight`:
   `TestAMissingBarIsSkippedAndBoostDecidesAcrossTheGap`,

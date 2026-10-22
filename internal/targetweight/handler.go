@@ -255,7 +255,18 @@ import (
 //     a retired order is refused. A dry-run refuses every retirement.
 //     1.22.0 refused the input, so a journal holding one decides
 //     differently.
-const RulesVersion = "1.23.0"
+//   - 1.24.0 records the run's own live sale back to 98% in each Boost
+//     decision whether or not a venue has named it and whether or not part
+//     of it has filled, with its side, attempt, naming, venue order ID and
+//     executions so far (decision schema 8), and a run restarted from the
+//     decision restores it released, filled as far as it was and named as
+//     it was, so the venue's later acknowledgement, listing, execution,
+//     cancel or expiry of it is read as in the full run (ADR 0026, point 2,
+//     "Boost", and point 5, amended 2026-10-22). 1.23.0 recorded the sale
+//     only while no venue had named it and nothing had filled, and a run
+//     restarted after one refused the venue's reports on it, so a journal
+//     holding one decides differently.
+const RulesVersion = "1.24.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -567,7 +578,8 @@ func decodeInput[T interface{ Validate() error }](in event.Envelope, version uin
 
 // decodeVersions is decodeInput for an input read at any of versions: the
 // broker snapshot and the mark, which the IBKR adapter writes at version 2
-// (the owner's decision of 2026-10-18) and earlier journals hold at 1.
+// (the owner's decision of 2026-10-18) and earlier journals hold at 1, and
+// a recovered decision, read at version 7 or the current version.
 func decodeVersions[T interface{ Validate() error }](in event.Envelope, versions []uint32) (T, error) {
 	if !slices.Contains(versions, in.SchemaVersion) {
 		var p T
@@ -622,7 +634,9 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	if h.recovered || h.approved || h.started {
 		return errors.New("targetweight: a recovered decision comes once, straight after the configuration, never after an approval or a bar")
 	}
-	p, err := decodeInput[event.TargetsDecidedPayload](in, event.TargetsDecidedSchemaVersion)
+	// Read at version 7, which earlier builds wrote, as written, or at the
+	// current version (event.TargetsDecidedVersions; ADR 0015).
+	p, err := decodeVersions[event.TargetsDecidedPayload](in, event.TargetsDecidedVersions())
 	if err != nil {
 		return err
 	}
@@ -757,17 +771,35 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		h.retired = append(h.retired, r)
 	}
 	// The run's own live sale is restored after every retired one, so its
-	// client order ID is checked against the attempt that follows them (ADR
-	// 0026, point 2, "Order identity").
+	// client order ID and attempt are checked against the attempt that
+	// follows them (ADR 0026, point 2, "Order identity"). It is restored
+	// released, with the executions reported before the decision and its
+	// venue order ID, and named when a venue had named it, so the venue's
+	// next acknowledgement, listing, execution, cancel or expiry of it is
+	// read, and its retirement refused or read, as in the full run, and no
+	// second attempt is made while it works (ADR 0019, "Explained means",
+	// and amended 2026-10-15: one attempt; ADR 0026, point 5: recovered,
+	// never recomputed). A decision recorded at version 7 states none of
+	// these: it recorded the sale only while no venue had named it and
+	// nothing had filled.
 	if r := p.Boost.RestoredSale; r != nil && r.Order != nil {
 		o := event.OrderReleasedPayload{
 			AccountID: h.cfg.AccountID, Tag: r.IncidentID, ClientOrderID: r.Order.ClientOrderID, InstrumentID: h.cfg.Boost.InstrumentID,
 			Side: event.OrderSideSell, Quantity: r.Order.Released, LimitPrice: r.Order.LimitPrice, Mode: h.cfg.Mode,
 		}
-		if err := h.gate.RestoreOwnSale(o, r.Order.Trigger); err != nil {
+		w := r.Order.Watched()
+		w.Side = event.OrderSideSell
+		fills := make([]event.TargetWeightFillPayload, len(w.Fills))
+		for i, f := range w.Fills {
+			fills[i] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
+		}
+		if err := h.gate.RestoreOwnSale(o, r.Order.Trigger, r.Order.Attempt, fills, r.Order.VenueOrderID); err != nil {
 			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
 		}
 		h.release(o)
+		if r.Order.Named {
+			h.name(o.ClientOrderID)
+		}
 	}
 	// An order a venue named before the decision reached IBKR, so the
 	// restarted run refuses its retirement as the full run does (ADR 0026,
@@ -1766,18 +1798,28 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 // (BoostFigures.RestoredSale), read when the decision is recorded, after the
 // session's own orders and the sale they fire, so it states an attempt this
 // session made (ADR 0019, amended 2026-10-15: one attempt). A sale this run
-// released that is still live and that no venue has named is recorded with
-// its order, so a run restarted from the decision holds it as this run's
-// own and its retirement frees it (ADR 0026, point 5: recovered, never
-// recomputed); one a venue named reached IBKR, and stays spent.
+// released that is still live, neither ended nor filled in full, is
+// recorded with its order whether or not a venue has named it and whether
+// or not part of it has filled: its attempt, whether a venue named it, its
+// venue order ID and its executions so far, so a run restarted from the
+// decision holds it as this run's own, released, filled and named as it
+// was, reads the venue's later reports on it as this run does, and frees it
+// on a retirement only while no venue has named it (ADR 0026, point 2,
+// "Boost", and point 5, amended 2026-10-22: recovered, never recomputed).
 func (h *Handler) restoredSale() *event.BoostRestoredSale {
 	incident, attempted, retired, ok := h.gate.RestoredSaleAttempt(h.cfg.Boost.InstrumentID)
 	if !ok {
 		return nil
 	}
 	r := &event.BoostRestoredSale{IncidentID: incident, Attempted: attempted, RetiredAttempts: retired}
-	if o, live := h.gate.OwnLiveSale(incident, h.cfg.Boost.InstrumentID); attempted && live && !h.named[o.ClientOrderID] {
-		r.Order = &event.BoostRestoredSaleOrder{ClientOrderID: o.ClientOrderID, Released: o.Quantity, LimitPrice: o.LimitPrice, Trigger: o.Sale.Trigger}
+	if s, live := h.gate.OwnLiveSale(incident, h.cfg.Boost.InstrumentID); attempted && live {
+		o := s.Order
+		r.Order = &event.BoostRestoredSaleOrder{ClientOrderID: o.ClientOrderID, Side: o.Side, Released: o.Quantity, LimitPrice: o.LimitPrice,
+			Trigger: o.Sale.Trigger, Attempt: s.Attempt, Named: h.named[o.ClientOrderID], VenueOrderID: s.VenueOrderID}
+		for _, f := range s.Fills {
+			r.Order.Filled += f.Quantity
+			r.Order.Fills = append(r.Order.Fills, event.BoostWatchedFill{FillID: f.FillID, Quantity: f.Quantity, Price: f.Price, Commission: f.Commission, FilledAt: f.FilledAt.UTC()})
+		}
 	}
 	return r
 }

@@ -331,11 +331,21 @@ a retired order's ID, nor attempts again a sale already attempted. The
 decision records the sale as it stands once the session's own orders are
 done, so a sale its own session fired is recorded as attempted. A sale
 the program placed that is still live when the decision is recorded (not
-ended, nothing filled, and no report from IBKR has named it to the
-program) is recorded with its order, so a run restarted from that
-decision holds it as its own: a retirement of it frees the attempt and
-the sale is tried again, and a fill or cancel IBKR reports on it is read,
-as in a run that never restarted. A sale an earlier run released that
+cancelled or expired, and not filled in full) is recorded with its order,
+whether or not IBKR has acknowledged it, listed it or filled part of it:
+its attempt number, whether IBKR has named it to the program, IBKR's own
+ID for it, and every execution so far. A run restarted from that decision
+holds it as its own, filled as far as it was: IBKR's next acknowledgement,
+listing, fill, cancel or expiry of it is read as in a run that never
+restarted, an execution IBKR sends again counts once, only the shares
+still unfilled are counted as being sold, and the sale is not tried a
+second time while it works. A retirement of it frees the attempt, so the
+sale is tried again, only while IBKR has never named it; once IBKR has,
+the retirement is refused, as in a run that never restarted. One gap is
+left: a sale that had already ended when the decision was recorded is
+recorded as spent, without its order, so if IBKR reports a late fill of
+it after its cancel, a run restarted from that decision refuses the fill
+and stops for you to reconcile the account with IBKR. A sale an earlier run released that
 the adapter never sent before that run ended is retired for the fresh run
 too, though that run's engine can no longer be told: before you approve
 the fresh run, `relay.py settle-ended-run` writes the adapter's

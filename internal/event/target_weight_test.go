@@ -86,6 +86,15 @@ func validTargetsDecidedWatching() event.TargetsDecidedPayload {
 	return p
 }
 
+// validTargetsDecidedSaleWorking is a decision beside the watched and
+// working orders that records the run's own live sale, named and part
+// filled.
+func validTargetsDecidedSaleWorking() event.TargetsDecidedPayload {
+	p := validTargetsDecidedWatching()
+	p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, RetiredAttempts: 1, Order: namedSaleOrder()}
+	return p
+}
+
 func validTargetsWithheld() event.TargetsDecidedPayload {
 	p := validTargetsDecided()
 	p.Outcome = event.TargetsOutcomeWithheld
@@ -1039,20 +1048,27 @@ func TestBoostRestoredSaleValidate(t *testing.T) {
 
 // TestBoostRestoredSaleOrderValidate: a restored sale attempt that records
 // the run's own live sale is attempted, and the order names its client order
-// ID, shares, limit and a sale's trigger, so a run restarted from the
-// decision holds it as that run's own (ADR 0026, point 5: recovered, never
-// recomputed).
+// ID, side, shares, limit, a sale's trigger and its attempt, whether a venue
+// has named it, its venue order ID and its executions so far, so a run
+// restarted from the decision holds it as that run's own (ADR 0026, point 5:
+// recovered, never recomputed).
 func TestBoostRestoredSaleOrderValidate(t *testing.T) {
 	order := func() *event.BoostRestoredSaleOrder {
-		return &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit}
+		return &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Side: event.OrderSideSell, Released: 17, LimitPrice: 143.45,
+			Trigger: event.SaleTriggerExit, Attempt: 1}
 	}
 	sale := func(o *event.BoostRestoredSaleOrder) *event.BoostRestoredSale {
 		return &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: o}
 	}
 	v := validTargetsDecided()
 	v.Boost.RestoredSale = sale(order())
-	if err := v.Validate(); err != nil {
+	if err := v.ValidateWritten(); err != nil {
 		t.Fatalf("a restored sale with its own order is valid: %v", err)
+	}
+	named := v
+	named.Boost.RestoredSale = sale(namedSaleOrder())
+	if err := named.ValidateWritten(); err != nil {
+		t.Fatalf("a restored sale a venue named and part filled is valid: %v", err)
 	}
 	type P = event.TargetsDecidedPayload
 	expectInvalid(t, "not attempted", v, func(p *P) { p.Boost.RestoredSale = sale(order()); p.Boost.RestoredSale.Attempted = false }, "attempted")
@@ -1064,18 +1080,120 @@ func TestBoostRestoredSaleOrderValidate(t *testing.T) {
 		expectInvalid(t, name, v, func(p *P) { o := order(); bad(o); p.Boost.RestoredSale = sale(o) }, "restored sale's order")
 	}
 	expectInvalid(t, "another trigger", v, func(p *P) { o := order(); o.Trigger = "manual"; p.Boost.RestoredSale = sale(o) }, "exit or margin-urgent")
+	for name, c := range map[string]struct {
+		bad  func(*event.BoostRestoredSaleOrder)
+		want string
+	}{
+		"a buy":                     {func(o *event.BoostRestoredSaleOrder) { o.Side = event.OrderSideBuy }, "sell"},
+		"a negative attempt":        {func(o *event.BoostRestoredSaleOrder) { o.Attempt = -1 }, "attempt"},
+		"fills short of the filled": {func(o *event.BoostRestoredSaleOrder) { o.Filled = 6 }, "fills sum"},
+		"filled in full":            {func(o *event.BoostRestoredSaleOrder) { o.Filled, o.Fills[0].Quantity = 17, 17 }, "fewer filled"},
+		"filled but not named":      {func(o *event.BoostRestoredSaleOrder) { o.Named, o.VenueOrderID = false, "" }, "named"},
+		"a venue ID but not named":  {func(o *event.BoostRestoredSaleOrder) { o.Named, o.Filled, o.Fills = false, 0, nil }, "named"},
+	} {
+		expectInvalid(t, name, v, func(p *P) { o := namedSaleOrder(); c.bad(o); p.Boost.RestoredSale = sale(o) }, c.want)
+	}
+	// The live sale is no other order the decision lists, and shares no
+	// fill id or venue order ID with one (ADR 0019, "Explained means"; ADR
+	// 0026, point 5, amended 2026-10-18).
+	w := validTargetsDecidedWatching()
+	w.Boost.RestoredSale = sale(namedSaleOrder())
+	if err := w.ValidateWritten(); err != nil {
+		t.Fatalf("a live sale beside a watched, a working and a retired order is valid: %v", err)
+	}
+	for name, c := range map[string]struct {
+		bad  func(*event.BoostRestoredSaleOrder)
+		want string
+	}{
+		"the watched order":  {func(o *event.BoostRestoredSaleOrder) { o.ClientOrderID = "tw-1" }, "restored sale"},
+		"a working order":    {func(o *event.BoostRestoredSaleOrder) { o.ClientOrderID = "tw-0" }, "restored sale"},
+		"a retired order":    {func(o *event.BoostRestoredSaleOrder) { o.ClientOrderID = "tw-r" }, "restored sale"},
+		"another's fill id":  {func(o *event.BoostRestoredSaleOrder) { o.Fills[0].FillID = "f0" }, "two orders"},
+		"another's venue ID": {func(o *event.BoostRestoredSaleOrder) { o.VenueOrderID = "ib-0" }, "venue order"},
+	} {
+		expectInvalid(t, name, w, func(p *P) {
+			p.Boost.WorkingOrders = slices.Clone(p.Boost.WorkingOrders)
+			p.Boost.WorkingOrders[0].VenueOrderID = "ib-0"
+			o := namedSaleOrder()
+			c.bad(o)
+			p.Boost.RestoredSale = sale(o)
+		}, c.want)
+	}
+}
+
+// namedSaleOrder is the run's own live sale as a decision records it once a
+// venue acknowledged it and executed 5 of its 17 shares.
+func namedSaleOrder() *event.BoostRestoredSaleOrder {
+	return &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Side: event.OrderSideSell, Released: 17, LimitPrice: 143.45,
+		Trigger: event.SaleTriggerMarginUrgent, Attempt: 2, Named: true, VenueOrderID: "ib-sale", Filled: 5,
+		Fills: []event.BoostWatchedFill{{FillID: "f-sale", Quantity: 5, Price: 143.5, Commission: 1, FilledAt: twSession.Add(-2 * time.Hour)}}}
+}
+
+// TestBoostRestoredSaleOrderAtVersion7: decision schema version 7 recorded
+// the live sale's client order ID, shares, limit and trigger only, for a
+// sale no venue had named and nothing had filled. A version 7 record is read
+// as it was written, and refused if it carries a field of version 8; a
+// record written now states the sale's side and attempt (ADR 0015).
+func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
+	if got, want := event.TargetsDecidedVersions(), []uint32{event.TargetsDecidedRetiredVersion, event.TargetsDecidedSchemaVersion}; !slices.Equal(got, want) {
+		t.Fatalf("decision versions read are %v, want %v", got, want)
+	}
+	if event.TargetsDecidedRetiredVersion != 7 || event.TargetsDecidedSchemaVersion != 8 {
+		t.Fatalf("decision versions are %d and %d, want 7 and 8", event.TargetsDecidedRetiredVersion, event.TargetsDecidedSchemaVersion)
+	}
+	old := validTargetsDecided()
+	old.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true,
+		Order: &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit}}
+	if err := old.ValidateSchema(event.TargetsDecidedRetiredVersion); err != nil {
+		t.Errorf("a version 7 live sale is read: %v", err)
+	}
+	if err := old.Validate(); err != nil {
+		t.Errorf("a version 7 live sale validates: %v", err)
+	}
+	if err := old.ValidateWritten(); err == nil || !strings.Contains(err.Error(), "side") {
+		t.Errorf("a live sale written now with no side or attempt is refused; got %v", err)
+	}
+	named := validTargetsDecided()
+	named.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: namedSaleOrder()}
+	if err := named.ValidateSchema(event.TargetsDecidedSchemaVersion); err != nil {
+		t.Errorf("a version 8 live sale is read: %v", err)
+	}
+	for name, o := range map[string]event.BoostRestoredSaleOrder{
+		"its side":    {ClientOrderID: "tw-sale", Side: event.OrderSideSell, Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit},
+		"its attempt": {ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit, Attempt: 1},
+		"named":       {ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit, Named: true},
+		"a venue ID":  {ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit, Named: true, VenueOrderID: "ib-sale"},
+		"its fills":   *namedSaleOrder(),
+	} {
+		p := validTargetsDecided()
+		p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: &o}
+		if err := p.ValidateSchema(event.TargetsDecidedRetiredVersion); err == nil || !strings.Contains(err.Error(), "version 8") {
+			t.Errorf("a version 7 live sale recording %s is refused as a version 8 field; got %v", name, err)
+		}
+	}
+	for _, version := range []uint32{0, event.TargetsDecidedSchemaVersion + 1} {
+		if err := old.ValidateSchema(version); err == nil {
+			t.Errorf("decision schema version %d is refused", version)
+		}
+	}
 }
 
 // TestBoostRestoredSaleEqual: two records of a sale attempt are equal when
 // they state the same incident, attempt, retired attempts and own order.
 func TestBoostRestoredSaleEqual(t *testing.T) {
 	a := &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true,
-		Order: &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit}}
+		Order: &event.BoostRestoredSaleOrder{ClientOrderID: "tw-sale", Side: event.OrderSideSell, Released: 17, LimitPrice: 143.45, Trigger: event.SaleTriggerExit, Attempt: 1}}
 	same := *a
 	order := *a.Order
 	same.Order = &order
 	if !a.Equal(&same) {
 		t.Error("the same record is not equal")
+	}
+	b, c := &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: namedSaleOrder()},
+		&event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: namedSaleOrder()}
+	c.Order.Fills[0].FilledAt = c.Order.Fills[0].FilledAt.In(time.FixedZone("EDT", -4*3600))
+	if !b.Equal(c) {
+		t.Error("the same executions written in another zone are not equal")
 	}
 	var none *event.BoostRestoredSale
 	if !none.Equal(nil) || none.Equal(a) || a.Equal(nil) {
@@ -1087,6 +1205,14 @@ func TestBoostRestoredSaleEqual(t *testing.T) {
 		"one retired":      func(r *event.BoostRestoredSale) { r.RetiredAttempts = 1 },
 		"no order":         func(r *event.BoostRestoredSale) { r.Order = nil },
 		"another order":    func(r *event.BoostRestoredSale) { o := *r.Order; o.Released = 16; r.Order = &o },
+		"named":            func(r *event.BoostRestoredSale) { o := *r.Order; o.Named = true; r.Order = &o },
+		"another attempt":  func(r *event.BoostRestoredSale) { o := *r.Order; o.Attempt = 2; r.Order = &o },
+		"a venue ID":       func(r *event.BoostRestoredSale) { o := *r.Order; o.VenueOrderID = "ib-sale"; r.Order = &o },
+		"part filled": func(r *event.BoostRestoredSale) {
+			o := *r.Order
+			o.Filled, o.Fills = 5, []event.BoostWatchedFill{{FillID: "f-sale", Quantity: 5, Price: 143.5, FilledAt: twSession}}
+			r.Order = &o
+		},
 	} {
 		other := *a
 		change(&other)
