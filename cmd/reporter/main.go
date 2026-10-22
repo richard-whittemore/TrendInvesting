@@ -101,7 +101,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
-	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed run is paged once if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a run that is over is resolved")
+	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed unit is paged once per failure episode if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a unit no longer failed is resolved")
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
@@ -279,8 +279,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 	}
 	// A failed trading unit is paged by the OnFailure hook at the moment it
-	// fails; this firing pages a failed run the hook missed and resolves the
-	// page of a run that was over at the sample. A systemctl that could not
+	// fails; this firing pages a failure episode the hook missed and resolves
+	// the page of a unit not failed at the sample. A systemctl that could not
 	// be run checked nothing, so no page is resolved on its word.
 	if unitsErr == nil && len(tradingUnits) > 0 {
 		if err := unitStep(unitStatePath, tradingUnits, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {

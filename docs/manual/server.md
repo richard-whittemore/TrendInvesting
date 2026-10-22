@@ -213,9 +213,18 @@ failed for 20 minutes also takes the check down.
 
 How to tell it from an engine alert: a heartbeat page comes from
 Healthchecks, names your check, and says nothing about an account or an
-engine. It means the reporter has not finished a clean firing for 20 minutes:
-the server is down or unreachable, the timer is stopped, or every firing is
-failing. Every page the reporter itself sends names an account or a unit.
+engine. It means the reporter has not finished a clean firing for 20 minutes,
+for one of four reasons: the server is down or unreachable, the timer is
+stopped, every firing is failing, or the engine or the adapter has been failed
+for 20 minutes (a firing that finds a trading unit failed sends no ping, even
+when it delivered everything). The last is the likeliest: one stopped engine
+gives you two pages for one fault, first `<host>: <unit> failed` from the
+reporter, then, 20 minutes later, this one from Healthchecks. Act on the unit
+page ("A failed unit" below); the Healthchecks page clears by itself at the
+first clean firing after the unit is running again. If you have no unit page,
+check the server, the timer and the reporter's firings (`journalctl -u
+ti-reporter@boost`). Every page the reporter itself sends names an account or a
+unit.
 
 ## Where the records live
 
@@ -427,8 +436,10 @@ stop, not after two sessions of silence.
   at that firing (unless its failure was already paged), and the
   state-at-start page names every failed trading unit, so a reporter
   restarted after the failure still tells you. The page of a unit that was not
-  failed at the firing's start is resolved; a page sent after the firing
-  started is left for the next firing.
+  failed at the firing's start is resolved; a page sent, or a failed run of
+  the same failure recorded, after the firing started is left for the next
+  firing, so a unit that fails again while a firing runs keeps its incident
+  open.
 - A failure of the reporter itself is paged by the hook too, once, however
   many firings fail after it (with the hourly reminder), and resolved by the
   next firing that finishes without a fault.

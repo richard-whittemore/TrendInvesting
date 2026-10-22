@@ -4,8 +4,11 @@ Description=Page the owner that %i failed
 # failed unit's name as the instance (for the engine,
 # ti-unit-failed@ti-engine@boost.service.service, whose %i is
 # ti-engine@boost.service; the rehearsal starts it under systemd). systemd
-# hands it the failed run's invocation ID (MONITOR_INVOCATION_ID), which keys
-# the page, so every failed run pages once. It sends one urgent page through
+# hands it the failed run's invocation ID (MONITOR_INVOCATION_ID); the page is
+# keyed by the run that began the failure episode, so one failure pages once,
+# a later failed run before the unit is seen well only counts toward an
+# hourly reminder, and the episode's incident is resolved when a firing of
+# the reporter sees the unit well. It sends one urgent page through
 # the reporter's channels (PagerDuty and the owner's own ntfy) naming the
 # unit, the failed run's last journal line and the manual row to read; a
 # firing of the reporter pages a failure this unit could not deliver (ADR

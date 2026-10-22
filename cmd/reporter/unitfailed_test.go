@@ -811,3 +811,146 @@ func TestEveryUnitNameIsCheckedBeforeSystemctlOrJournalctlRuns(t *testing.T) {
 		}
 	}
 }
+
+// TestAFailedRunThatJoinsAnEpisodeDuringAFiringIsNotResolvedByIt: the firing
+// samples the unit well, then, before it reaches the unit-failure record, the
+// unit fails again within the open episode and the hook records that run. The
+// firing ends no episode with a failed run recorded at or after its sample,
+// the same rule as for a page, so the incident stays open while the unit is
+// failed (ADR 0019, "Alerting").
+func TestAFailedRunThatJoinsAnEpisodeDuringAFiringIsNotResolvedByIt(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	const unit = "ti-engine@boost.service"
+	start := t0.Add(time.Hour)
+	if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start, unit); err != nil {
+		t.Fatal(err)
+	}
+	systemd.fail() // the owner restarted it: the firing samples it well
+	m := &midFiring{relay: r, then: func() {
+		systemd.invoke(secondRun)
+		systemd.fail(unit)
+		if err := notifyAt(t, r, dir, systemd, monitored(unit, secondRun), start.Add(5*time.Minute), unit); err != nil {
+			t.Error(err)
+		}
+	}}
+	if err := firing(t, m, dir, systemd, start.Add(5*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(pdEvents(r), "resolve"); n != 0 {
+		t.Errorf("the firing resolved an episode a run joined after its sample: %v", pdEvents(r))
+	}
+	if err := firing(t, r, dir, systemd, start.Add(10*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, unit); n != 1 {
+			t.Errorf("%s took %d pages for one episode, want 1", host, n)
+		}
+	}
+	if n := count(pdEvents(r), "resolve"); n != 0 {
+		t.Errorf("the episode's incident was resolved within it: %v", pdEvents(r))
+	}
+}
+
+// TestAnUnnamedFailedRunIsOneEpisode: a failed unit systemd names no
+// invocation for, found failed by every firing, is one episode: one page,
+// then a reminder an hour, never resolved and paged again, even after an
+// earlier episode whose resolve failed (ADR 0019, "Alerting": each incident
+// once).
+func TestAnUnnamedFailedRunIsOneEpisode(t *testing.T) {
+	flaky := &flakyRelay{relay: &relay{sent: map[string][]string{}}, failHost: pdHost, healed: true}
+	systemd := newStandInSystemd(t)
+	systemd.invoke("")
+	const unit = "ti-engine@boost.service"
+	dir := t.TempDir()
+	start := t0.Add(time.Hour)
+	systemd.fail(unit)
+	if err := firing(t, flaky, dir, systemd, start, unit); err != nil {
+		t.Fatal(err)
+	}
+	flaky.setFailing(true)
+	systemd.fail()
+	_ = firing(t, flaky, dir, systemd, start.Add(5*time.Minute), unit) // the resolve fails
+	flaky.setFailing(false)
+	systemd.fail(unit)
+	second := start.Add(10 * time.Minute)
+	for i := 0; i < 14; i++ { // 65 minutes of firings that find it failed
+		_ = firing(t, flaky, dir, systemd, second.Add(time.Duration(i)*5*time.Minute), unit)
+	}
+	if n := pagesFor(flaky.relay, ntfyHost, unit); n != 2 {
+		t.Errorf("ntfy took %d pages across two episodes, want 2", n)
+	}
+	var events []string
+	for _, e := range pdEvents(flaky.relay) {
+		if strings.Contains(e, report.UnitFailedKeyPrefix(unit)) {
+			events = append(events, e)
+		}
+	}
+	if count(events, "trigger") != 3 || count(events, "resolve") != 1 { // two pages and one reminder
+		t.Errorf("PagerDuty events %v: want the old incident resolved once and the new one never", events)
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		reminders := 0
+		for _, m := range flaky.to(host) {
+			if strings.Contains(m, unit+" still failing") {
+				reminders++
+				if !strings.Contains(m, "since "+second.UTC().Format(time.RFC3339)) {
+					t.Errorf("%s: the reminder does not name the episode's start:\n%s", host, m)
+				}
+			}
+		}
+		if reminders != 1 {
+			t.Errorf("%s took %d reminders in 65 minutes, want 1", host, reminders)
+		}
+	}
+}
+
+// TestAnEpisodesBookkeepingIsBoundedAndGoneWhenItEnds: an episode of many
+// failed runs keeps a bounded record, and once it ends (even through a
+// resolve that failed first) nothing of it is left in the record.
+func TestAnEpisodesBookkeepingIsBoundedAndGoneWhenItEnds(t *testing.T) {
+	flaky := &flakyRelay{relay: &relay{sent: map[string][]string{}}, failHost: pdHost, healed: true}
+	systemd := newStandInSystemd(t)
+	systemd.fail()
+	dir := t.TempDir()
+	const self = "ti-reporter@boost.service"
+	start := t0.Add(time.Hour)
+	record := func() int {
+		t.Helper()
+		seen, sent, repeats, _, err := loadState(filepath.Join(dir, "unit-failures.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for k := range seen {
+			n += strings.Count(k, report.UnitFailedKeyPrefix(self))
+		}
+		for k := range sent {
+			n += strings.Count(k, report.UnitFailedKeyPrefix(self))
+		}
+		for k := range repeats {
+			n += strings.Count(k, report.UnitFailedKeyPrefix(self))
+		}
+		return n
+	}
+	for i := 0; i < 15; i++ { // past the first reminder
+
+		_ = notifyAt(t, flaky, dir, systemd, monitored(self, fmt.Sprintf("%032x", i+1)), start.Add(time.Duration(i)*5*time.Minute), self)
+	}
+	before := record()
+	for i := 15; i < 50; i++ {
+		_ = notifyAt(t, flaky, dir, systemd, monitored(self, fmt.Sprintf("%032x", i+1)), start.Add(time.Duration(i)*5*time.Minute), self)
+	}
+	if n := record(); n > before {
+		t.Errorf("the record grew from %d to %d entries over 35 more failed runs of one episode", before, n)
+	}
+	flaky.setFailing(true)
+	_ = firing(t, flaky, dir, systemd, start.Add(5*time.Hour), "ti-engine@boost.service", "-self-unit", self)
+	flaky.setFailing(false)
+	_ = firing(t, flaky, dir, systemd, start.Add(5*time.Hour+5*time.Minute), "ti-engine@boost.service", "-self-unit", self)
+	if n := record(); n != 0 {
+		t.Errorf("the ended episode left %d entries in the record", n)
+	}
+}

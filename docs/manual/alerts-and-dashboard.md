@@ -134,7 +134,11 @@ own machine cannot catch that machine dying, so every firing that finishes
 without a fault also pings an outside service (Healthchecks), which pages you
 through PagerDuty when the pings stop: that page comes from Healthchecks, not
 from the reporter, names your check and no account, and means no clean firing
-for 20 minutes ([server](server.md), "The outside heartbeat"). A trading unit
+for 20 minutes: the server, the timer or the reporter's firings, or, most
+likely, an engine or adapter left failed for 20 minutes, which first paged you
+`<host>: <unit> failed`; act on that page, and this one clears at the first
+clean firing after the unit runs again ([server](server.md), "The outside
+heartbeat"). A trading unit
 that stops (the engine, the adapter, the reporter) pages you at once through
 the reporter's own channels ("The reporter itself", below, the row
 `<host>: <unit> failed`).

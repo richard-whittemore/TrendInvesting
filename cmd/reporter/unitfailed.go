@@ -176,7 +176,10 @@ func failedInvocation(getenv func(string) string, systemctl, unit string, at tim
 // triggered again, and each channel is reminded at most once an
 // unitReminderInterval (ADR 0019, "Alerting": each incident once). An episode
 // seen well whose incident a channel could not resolve is over: it is
-// resolved again and the run pages afresh.
+// resolved again and the run pages afresh. A run systemd named no invocation
+// for (unnamedRun) joins the open episode uncounted, since it may be the same
+// run, or else begins one under a name of its own, so no two episodes share a
+// key.
 func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
 	var errs []error
 	episode, opened := "", time.Time{}
@@ -190,6 +193,13 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 			episode, opened = invocation, recorded
 		}
 	}
+	if run == unnamedRun {
+		if episode == "" {
+			run = unnamedRun + "-" + at.UTC().Format("20060102T150405.000000000Z")
+		} else {
+			run = ""
+		}
+	}
 	if episode == "" || episode == run {
 		return errors.Join(append(errs, pageRun(u, unit, run, journalctl, secrets, senders, at, every))...)
 	}
@@ -198,33 +208,53 @@ func failedRun(u *unitState, unit, run, journalctl string, secrets []string, sen
 	return errors.Join(append(errs, remindRun(u, unit, episode, run, senders, at))...)
 }
 
+// unnamedRun is what a firing names a failed unit systemd gave no invocation
+// for.
+const unnamedRun = "unnamed"
+
 // recoveredKey marks an episode whose unit was seen well while a channel kept
 // its record because the resolve failed there: the episode is over.
 func recoveredKey(key string) string { return channelKey("recovered", key) }
 
-// failedRunKey records run as a later failed run of the episode keyed key,
-// so its reminder counts the runs.
+// failedRunKey records run as the latest later failed run of the episode
+// keyed key, at the time it was recorded; only the latest is kept, and
+// runsKey counts them, so the record stays bounded however long the episode.
 func failedRunKey(run, key string) string { return channelKey("run:"+run, key) }
+
+// runsKey counts the later failed runs of the episode keyed key.
+func runsKey(key string) string { return channelKey("runs", key) }
+
+// latestRun is when the episode keyed key last recorded a later failed run.
+func latestRun(u *unitState, key string) time.Time {
+	var latest time.Time
+	for k, at := range u.sent {
+		if strings.HasPrefix(k, "run:") && strings.HasSuffix(k, channelKey("", key)) && at.After(latest) {
+			latest = at
+		}
+	}
+	return latest
+}
 
 // remindedKey is when channel was last reminded of the episode keyed key.
 func remindedKey(channel, key string) string { return channelKey("reminded:"+channel, key) }
 
-// remindRun counts run, a later failed run of the episode begun by episode,
-// and reminds each channel that took the episode's page an
+// remindRun counts run, a later failed run of the episode begun by episode
+// (none when run is empty), and reminds each channel that took the episode's page an
 // unitReminderInterval or more since its page or its last reminder: "still
 // failing since <time>, N failed runs", under the episode's key. A channel
 // whose reminder fails is reminded at the next failed run.
 func remindRun(u *unitState, unit, episode, run string, senders []sender, at time.Time) error {
 	key := report.UnitFailedKey(unit, episode)
-	if u.sent[failedRunKey(run, key)].IsZero() {
-		u.sent[failedRunKey(run, key)] = at
-	}
-	runs, since := 1, time.Time{}
-	for k := range u.sent {
-		if strings.HasPrefix(k, "run:") && strings.HasSuffix(k, channelKey("", key)) {
-			runs++
+	if run != "" && u.sent[failedRunKey(run, key)].IsZero() {
+		for k := range u.sent {
+			if strings.HasPrefix(k, "run:") && strings.HasSuffix(k, channelKey("", key)) {
+				delete(u.sent, k)
+			}
 		}
+		u.sent[failedRunKey(run, key)] = at
+		u.repeats[runsKey(key)]++
 	}
+	runs, since := 1+u.repeats[runsKey(key)], time.Time{}
 	var due, echoes []sender
 	for _, s := range senders {
 		if _, echo := s.(echoOnly); echo {
@@ -400,9 +430,9 @@ func splitUnits(list string) []string {
 // and a start refused while the unit was already failed, which systemd does
 // not hand to OnFailure=) unless its episode was paged (failedRun), and
 // resolves the episode of every unit seen not failed. samples are systemd's
-// answers at the start of the firing, sampledAt their time: a page recorded
-// since then is of a run newer than the sample, so it is never resolved on the
-// sample's word. Both reporters and the hook share the record under a lock.
+// answers at the start of the firing, sampledAt their time: an episode whose
+// page or latest failed run was recorded since then has a run newer than the
+// sample, so it is never ended on the sample's word. Both reporters and the hook share the record under a lock.
 func unitStep(path string, units []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
 	return withUnitState(path, func(u *unitState) error {
 		var failures []error
@@ -410,7 +440,7 @@ func unitStep(path string, units []string, samples map[string]unitSample, sample
 			sample := samples[unit]
 			if sample.failed {
 				if sample.invocation == "" {
-					sample.invocation = "unnamed"
+					sample.invocation = unnamedRun
 				}
 				if err := failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, every); err != nil {
 					failures = append(failures, err)
@@ -418,10 +448,11 @@ func unitStep(path string, units []string, samples map[string]unitSample, sample
 				continue
 			}
 			for invocation, recorded := range unitRecords(u, unit) {
-				if !recorded.Before(sampledAt) {
+				key := report.UnitFailedKey(unit, invocation)
+				if !recorded.Before(sampledAt) || !latestRun(u, key).Before(sampledAt) {
 					continue
 				}
-				if err := resolveKey(u, report.UnitFailedKey(unit, invocation), senders, setAside); err != nil {
+				if err := resolveKey(u, key, senders, setAside); err != nil {
 					failures = append(failures, err)
 				}
 			}
@@ -483,7 +514,9 @@ func clearUnit(path, unit, current string, senders []sender, setAside []channelF
 // under its key, then forgets it on every channel; a PagerDuty channel set
 // aside, or whose resolve failed, keeps its record until a run in which it
 // works (as clockStep does), marked over (recoveredKey) so the next failed
-// run begins a new episode.
+// run begins a new episode. Forgetting drops the episode's own bookkeeping
+// too (its runs, reminders and over marker), so an ended episode leaves
+// only the one marker, set afresh, while a channel keeps its record.
 func resolveKey(u *unitState, key string, senders []sender, setAside []channelFault) error {
 	failedNames, resolveErr := resolveAll(senders, key, u.seen)
 	keep := map[string]bool{}

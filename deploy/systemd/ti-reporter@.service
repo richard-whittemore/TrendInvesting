@@ -49,8 +49,8 @@ LoadCredential=secrets:/etc/trend-investing/secrets.env
 # -units: the instance's engine and adapter, asked of systemd (systemctl
 # show: state and invocation) once at the start of every firing: a failed one
 # is named in the state-at-start page, its failed run is paged if the
-# OnFailure hook did not page it, and the page of a run that is over is
-# resolved. The reporter reads the failed run's journal lines, so it is in the
+# OnFailure hook did not page it (once per failure episode), and the page of a
+# unit no longer failed is resolved. The reporter reads the failed run's journal lines, so it is in the
 # journal group. -self-unit: a clean firing resolves the page of an earlier
 # failed one.
 SupplementaryGroups=systemd-journal

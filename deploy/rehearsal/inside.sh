@@ -328,8 +328,8 @@ pass "the reporter runs as its unit runs it, as ti-trader, delivers to both chan
 # failure, as ti-trader against the same stand-in channels, with the failed
 # run's name in MONITOR_UNIT and MONITOR_INVOCATION_ID as systemd hands it (no
 # systemd runs here; deploy/rehearsal/inside-systemd.sh starts the hook under
-# a real one). It pages both channels once and sends nothing on a second run
-# for the same failed run; the record sits beside the reporter's state.
+# a real one). It pages both channels once for the failure episode and sends
+# nothing on a second run for the same failed run; the record sits beside the reporter's state.
 hook=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-unit-failed@.service)
 hook=${hook//%i/ti-engine@boost.service}
 hook=${hook//%d/$rep/creds}
@@ -349,7 +349,7 @@ test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook paged ag
 for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service; do
   grep -qx 'OnFailure=ti-unit-failed@%n.service' "/etc/systemd/system/$unit" || fail "$unit does not hand its failure to the hook"
 done
-pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once per failed run and not again, and the three trading units name it in OnFailure="
+pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once per failure episode and not again, and the three trading units name it in OnFailure="
 
 # The clock check. The reporter ran the installed check as ti-trader above:
 # the host clock state must hold what the check said, not that it could not
