@@ -270,7 +270,9 @@ func lifecycleIn(t *testing.T, path, clientID string) report.OrderState {
 // a paper engine releases is committed in the log once its group is
 // flushed, released once the adapter's next input shows it holds the reply,
 // and acknowledged once the venue's report is recorded (ADR 0027, section
-// 4; ADR 0022).
+// 4; ADR 0022). The stand-in venue's fill is itself a report the gate
+// accepts, so the order is released only until the first session after it
+// begins, and the fill, not a lifecycle report, acknowledges it.
 func TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged(t *testing.T) {
 	dir := t.TempDir()
 	opts, cfg := paperBoostOptions(t, dir)
@@ -283,8 +285,8 @@ func TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged(t *testing.T)
 		t.Fatalf("after its release: %s, want %s", got, report.LifecycleCommitted)
 	}
 	feed.sessions(session+1, session+2)
-	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleReleased {
-		t.Fatalf("after the adapter's next input: %s, want %s", got, report.LifecycleReleased)
+	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleAcknowledged {
+		t.Fatalf("after the venue's fill, which the gate accepts: %s, want %s", got, report.LifecycleAcknowledged)
 	}
 	at := boostSession(session + 1).Add(time.Minute)
 	feed.send(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+order.ClientOrderID, at, lifecycle(order, event.OrderLifecycleStatusSubmitted, at))

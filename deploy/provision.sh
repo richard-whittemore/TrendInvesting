@@ -12,6 +12,9 @@
 #   sudo deploy/provision.sh adapter    the IBKR adapter's code and pin file (not part of all)
 #   sudo deploy/provision.sh services   systemd units, directories, config stubs
 #   sudo deploy/provision.sh firewall   close everything except Tailscale
+#   sudo deploy/provision.sh ntfy       the owner's own ntfy server (pinned, checksummed), listening
+#                                       on the Tailscale address only; run after Tailscale is
+#                                       signed in (not part of all)
 #   sudo deploy/provision.sh all        base, clock, gateway, services, then firewall
 #                                       if Tailscale is already signed in
 #
@@ -727,6 +730,61 @@ step_firewall() {
   log "also close port 22 in the Lightsail firewall tab (owner step)"
 }
 
+# The owner's own ntfy server, which takes the daily summary (it carries
+# balances, so it never goes to the public ntfy.sh relay or to PagerDuty). It
+# listens on this machine's Tailscale address and nowhere else: the address
+# is read from Tailscale, or given as TI_NTFY_ADDRESS (the rehearsal), and
+# must be a Tailscale one (100.64.0.0/10), so the server cannot be made to
+# listen on a public interface by a mistake here. The server needs no
+# secret: the topic the reporter publishes to is in secrets.env
+# (TI_NTFY_TOPIC), and the server's URL is TI_NTFY_SERVER, which this step
+# prints and does not write. The Mac mini has none: paper trading runs on the
+# Lightsail box.
+step_ntfy() {
+  if mac_mini; then
+    log "Mac mini: no ntfy server (the owner's server runs on the Lightsail box)"
+    return 0
+  fi
+  log "ntfy ${NTFY_VERSION}"
+  local tgz="$dl_cache/ntfy_${NTFY_VERSION}_linux_amd64.tar.gz" tmp addr
+  fetch "$NTFY_URL" "$NTFY_SHA256" "$tgz"
+  tmp=$(mktemp -d)
+  tar -xzf "$tgz" -C "$tmp" --strip-components=1
+  install -m 0755 "$tmp/ntfy" /usr/local/bin/ntfy
+  rm -rf "$tmp"
+  addr=${TI_NTFY_ADDRESS:-}
+  if test -z "$addr" && command -v tailscale >/dev/null 2>&1; then
+    addr=$(tailscale ip -4 2>/dev/null | head -n 1) || addr=
+  fi
+  if test -z "$addr"; then
+    log "SKIPPED the ntfy server's configuration: Tailscale is not signed in yet (owner step: sudo tailscale up --ssh). Re-run 'provision.sh ntfy' after."
+    return 0
+  fi
+  # 100.64.0.0/10: 100.64.x.x to 100.127.x.x.
+  if ! [[ $addr =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    die "'$addr' is not a Tailscale address (100.64.0.0/10); the ntfy server listens on the tailnet only, so it is not configured"
+  fi
+  ensure_user ti-ntfy /var/lib/ntfy
+  install -d -m 0755 /etc/ntfy
+  install -m 0644 /dev/stdin /etc/ntfy/server.yml <<CONF
+# Written by provision.sh ntfy; rewritten at each run. Listens on the
+# Tailscale address only. No sign-in is needed: only your own devices on the
+# tailnet reach it, and the topic is the secret.
+base-url: "http://${addr}:2586"
+listen-http: "${addr}:2586"
+cache-file: "/var/lib/ntfy/cache.db"
+cache-duration: "12h"
+auth-default-access: "read-write"
+CONF
+  install -m 0644 "$here/systemd/ti-ntfy.service" "$unit_dir/"
+  if test "$rehearsal" != 1; then
+    systemctl daemon-reload
+    systemctl enable ti-ntfy.service
+    systemctl restart ti-ntfy.service
+  fi
+  log "ntfy listens on http://${addr}:2586 (the tailnet only). Owner step: in /etc/trend-investing/secrets.env set TI_NTFY_SERVER=http://${addr}:2586 and an unguessable TI_NTFY_TOPIC, and subscribe to that topic on that server in the ntfy app on a phone that is on the tailnet."
+}
+
 # reown NAME OLD_UID [OLD_GID] [--force-id] (the Mac mini only): after a container
 # provisioned before the service users had fixed IDs is re-created, its
 # volumes' files still carry the old numbers. Each file in the volumes owned
@@ -825,9 +883,10 @@ main() {
     adapter) step_adapter ;;
     services) step_services ;;
     firewall) step_firewall ;;
+    ntfy) step_ntfy ;;
     reown) shift; step_reown "$@" ;;
     all) step_base; step_clock; step_gateway; step_services; step_firewall ;;
-    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|all, or reown NAME OLD_UID [OLD_GID] [--force-id] on the Mac mini" ;;
+    *) die "usage: provision.sh base|clock|gateway|twsapi|adapter|services|firewall|ntfy|all, or reown NAME OLD_UID [OLD_GID] [--force-id] on the Mac mini" ;;
   esac
   log "done: ${1}"
 }

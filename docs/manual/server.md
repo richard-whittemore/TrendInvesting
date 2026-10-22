@@ -27,9 +27,10 @@ dying: that needs an outside watcher, which is not built (below).
 | User | Runs | Can see |
 | --- | --- | --- |
 | `ti-gateway` | IB Gateway and IBC | the IBKR login, handed to it alone |
+| `ti-ntfy` | your own ntfy server (below) | its own cache folder, `/var/lib/ntfy`, and nothing else |
 | `ti-trader` | the data step, the engines, the Boost adapter, the reporter, the dashboard, and the `operator` and `journal-query` tools when you run them | the market data, the engines' logs; a private copy of the secrets file (the data step, the engines, the reporter) or of the Boost account's file (the Boost adapter), each handed only to the units that need it; never the IBKR login |
 
-Both are system users with no login shell. You log in as `ubuntu` and use
+All are system users with no login shell. You log in as `ubuntu` and use
 `sudo`.
 
 ## The units and timers
@@ -43,6 +44,7 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. The IRA instances are skipped: they have no configuration file |
 | `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; only Boost's timer is enabled, since the IRA engines have no configuration yet | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, and fails, with a message, until the engine has been started once and the `secrets.env` entries below are filled in |
 | `ti-dashboard.service` | The read-only dashboard, on loopback port 8088 | Starts at boot (enabled) | Built and installed by `provision.sh services`; it finds the Boost engine's current run, the newest link of its chain of runs, on every request and follows the chain of runs back to the first, so a restart or an upgrade of the engine needs no dashboard restart. It shows a message, not a figure, until the engine has run once |
+| `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
 
 `ti-adapter-boost.service` carries the IBKR adapter ([IBKR adapter](ibkr-adapter.md)): never started at boot or restarted by systemd (`Restart=no`), every start is yours, after the engine ([paper trading](paper-trading.md), "Starting the adapter"). It reads the same `run.env` as the engine, reads the engine's log, talks to the engine over its socket, and delivers the data job's stream for the run, so it refuses to start without the engine's log or that run's stream folder, which the data job's warm-up writes ([market data](market-data.md), "The one-time warm-up"). It is skipped, not failed, until `provision.sh twsapi` and `provision.sh adapter` have installed `ibapi` and the adapter's code, and `provision.sh services` has created its configuration (`/etc/trend-investing/adapters/boost.json`, created once and never overwritten, in dry-run with paper sending off). Its reason for stopping is in `journalctl -u ti-adapter-boost`.
@@ -86,8 +88,9 @@ What each program actually reads today:
   The Boost adapter reads `IBKR_ACCOUNT_BOOST` from its own file and from no
   other. The account an engine trades is the `account_id` in its
   configuration file.
-- The reporter reads `TI_NTFY_TOPIC` (and optionally `TI_NTFY_SERVER`, empty
-  for the public ntfy.sh relay) and `TI_PAGERDUTY_ROUTING_KEY` from that file
+- The reporter reads `TI_NTFY_TOPIC`, `TI_NTFY_SERVER` (your own server's
+  URL, which `provision.sh ntfy` prints; empty means the public ntfy.sh relay,
+  which never gets the daily summary) and `TI_PAGERDUTY_ROUTING_KEY` from that file
   (`-secrets-file`), through its unit's credential. It refuses to run, and
   its unit fails, while the topic or the routing key is empty: fill them in
   with `sudo -e /etc/trend-investing/secrets.env`; the next firing uses
@@ -95,6 +98,48 @@ What each program actually reads today:
 
 Never paste a secret into an issue, a pull request, a chat with an agent or
 a command line. Edit these files with `sudo -e`.
+
+## Your own ntfy server
+
+The daily summary carries your balances, so it goes to a push server that
+only you can reach: ntfy, running on the Lightsail box, listening only on the
+server's Tailscale address. PagerDuty never gets the summary (a page means an
+incident), and the public ntfy.sh relay never does either, because anyone who
+learns a topic name can read it there. Incident alerts also go to this server
+when `ntfy` is in the reporter's channels.
+
+**Setting it up (once, after Tailscale works):**
+
+1. On the server: `sudo deploy/provision.sh ntfy`. It downloads the pinned
+   ntfy release, checks its SHA-256 and stops on a mismatch, installs it,
+   makes the `ti-ntfy` user, writes `/etc/ntfy/server.yml` so the server
+   listens on this machine's Tailscale address only (it refuses any address
+   outside Tailscale's `100.64.0.0/10`, so a slip cannot open it to the
+   internet), then enables and starts `ti-ntfy.service`. If Tailscale is not
+   signed in yet it installs the program, says it is waiting, and writes
+   nothing else: sign in (`sudo tailscale up --ssh`) and run it again.
+2. It prints the line for the secrets file, `TI_NTFY_SERVER=http://100.x.y.z:2586`.
+   Put that line in `/etc/trend-investing/secrets.env` (`sudo -e`), with an
+   unguessable `TI_NTFY_TOPIC=` beside it. The topic is the only secret the
+   server uses: the server asks for no sign-in, because nothing but your own
+   tailnet reaches it.
+3. On your phone, which must be signed in to Tailscale: in the ntfy app,
+   subscribe to that topic on that server (the app's "use another server"
+   option, with the same URL). Then ntfy delivers to you exactly when the
+   phone is on the tailnet.
+4. The next reporter firing (within 5 minutes) sends the day's summary once
+   the log records that day's session closed. If the phone is off the
+   tailnet the summary waits on the server, not on a public service.
+
+Checking it: `systemctl status ti-ntfy`, and `journalctl -u ti-ntfy`. The
+server keeps messages for 12 hours, so a phone that was off the tailnet for a
+night still receives what it missed when it returns. It keeps nothing else
+and holds no account.
+
+**Without it** the daily summary is not sent, and the reporter says so once in
+its output; incident alerts are unaffected. Read the summary on the dashboard
+meanwhile ([alerts and dashboard](alerts-and-dashboard.md), "Where alerts
+go").
 
 ## Where the records live
 
@@ -281,6 +326,9 @@ already at IBKR in IBKR's own app.
 | A unit failed because its program is missing from `/opt/trend-investing/bin/` (`provision.sh services` printed "no .../dist/...: ... is not installed") | Nothing of that program runs | Build it on the Mac (`deploy/build-engine.sh`, `deploy/build-data.sh`), copy `dist/` beside `deploy/`, run `sudo deploy/provision.sh services` again |
 | `ti-engine@<instance>` or `ti-adapter-boost` was skipped, not failed (`systemctl status` says its start condition was not met) | It did not start: the engine has no binary, `.env` or `.config` for that account (the IRA engines have no configuration yet); the adapter's `ibapi`, code or configuration is not installed | Install what is missing (`provision.sh twsapi`, `provision.sh adapter`, `provision.sh services`) before starting it |
 | The data job fails | The unit shows failed; `journalctl -u ti-data` says why; no file is written for the session | Fix the cause and `sudo systemctl start ti-data` ([market data](market-data.md)) |
+| `ti-ntfy` fails, or the summary stops reaching your phone while PagerDuty pages still do; `journalctl -u ti-ntfy` names it | Your own ntfy server is down or has no Tailscale address yet. The unit tries again every 10 seconds; the reporter retries the summary at every firing and the run ends with an error naming `ntfy:`. Incident pages go to PagerDuty as well and are not held back | `sudo systemctl status ti-ntfy`; if Tailscale was signed out, `sudo tailscale up --ssh` and `sudo systemctl restart ti-ntfy`; if the configuration is missing, `sudo deploy/provision.sh ntfy` |
+| `provision.sh ntfy` printed "SKIPPED the ntfy server's configuration: Tailscale is not signed in yet" | The program is installed; the server is not configured or started | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh ntfy` again |
+| `provision.sh ntfy` stopped with "is not a Tailscale address" | The address it was given is outside `100.64.0.0/10`; it configures nothing, so the server cannot be exposed | Do not set `TI_NTFY_ADDRESS` by hand on the server; sign in to Tailscale and run it again |
 | The reporter fails every firing | Nothing reaches your phone; the error is in `journalctl -u ti-reporter@boost` | [alerts and dashboard](alerts-and-dashboard.md), "What can go wrong" |
 | The machine dies, or the reporter never runs | **Nothing outside the server tells you.** The outside heartbeat (Healthchecks.io in plan section 7) is not built, and nothing reads a `HEALTHCHECK_URL` line. A reporter on the machine cannot notice the machine dying | Check the dashboard or the server yourself until it exists (tracked in the issue "External heartbeat and a recorded clock input for the margin alarm's 30-minute rule") |
 | `provision.sh firewall` printed "SKIPPED firewall: Tailscale is not signed in yet" | The firewall is not changed, so the public door is still open | `sudo tailscale up --ssh`, then `sudo deploy/provision.sh firewall` again |
@@ -300,6 +348,7 @@ Every download is fixed in `deploy/versions.env` by version and SHA-256, and pro
 | TWS API 10.51.01 | IBKR's Python client, `ibapi` | `provision.sh twsapi`, into the adapter's own environment |
 | protobuf 5.29.5 | The Python package `ibapi` needs (PyPI's pure-Python wheel, one file for both machine types). **Proposed to the owner 2026-10-20 as a new runtime dependency (`docs/dependency-policy.md`); not final until ratified.** | `provision.sh twsapi`, before `ibapi`, offline |
 | Tailscale 1.104.1 | The private network | `provision.sh base` |
+| ntfy 2.29.0 | Your own push server for the daily summary (Linux amd64 release, checked against the SHA-256 in the release's `checksums.txt`) | `provision.sh ntfy` |
 
 ## What backs this
 

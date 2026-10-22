@@ -1,0 +1,36 @@
+[Unit]
+Description=The owner's own ntfy server (listens on the Tailscale address only)
+After=network-online.target tailscaled.service
+# No Condition: a missing binary or configuration fails the unit with a
+# message, so the owner sees a failed unit, never a silent skip. The
+# configuration (/etc/ntfy/server.yml) is written by `provision.sh ntfy`,
+# which binds the server to this machine's Tailscale address and no other.
+
+[Service]
+Type=simple
+User=ti-ntfy
+Group=ti-ntfy
+ExecStartPre=/bin/sh -c 'test -s /etc/ntfy/server.yml || { echo "ti-ntfy: /etc/ntfy/server.yml is missing: run provision.sh ntfy after joining Tailscale" >&2; exit 1; }'
+ExecStart=/usr/local/bin/ntfy serve --config /etc/ntfy/server.yml --no-log-dates
+# The address belongs to the tailnet interface, which may come up after this
+# unit starts: a failed bind is tried again.
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ntfy
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LimitNOFILE=10000
+
+[Install]
+WantedBy=multi-user.target

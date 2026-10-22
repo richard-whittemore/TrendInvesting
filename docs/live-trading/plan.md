@@ -527,7 +527,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
 ## 7. Operations
 
 - Daily: data refresh after the close, decisions, a summary to the phone
-  (PagerDuty or a private ntfy server, never the public relay), heartbeat
+  (the owner's own ntfy server over Tailscale; never PagerDuty, never the
+  public relay; owner decision 2026-10-22), heartbeat
   to Healthchecks.io; an alert if the heartbeat is missed (*the outside
   heartbeat is not built yet; nothing reads `HEALTHCHECK_URL`*).
 - Alert channels (owner decision, 2026-10-17): ntfy plus PagerDuty as the
@@ -535,7 +536,9 @@ Lightsail VM (Ubuntu, $12/month, US East)
   reads the acknowledgement back). An alert is delivered only when every real
   channel has taken it, a failure on one channel never counts as delivered,
   and `stdout` is a terminal echo, never a channel. The daily summary carries
-  balances and never goes through a public relay such as ntfy.sh. See
+  balances: it goes to the owner's own ntfy server only (owner decision
+  2026-10-22), opens no PagerDuty incident, and is not sent without that
+  server. See
   `docs/manual/alerts-and-dashboard.md`.
 - Weekly: approve IBC's 2FA prompt on the phone (Sunday).
 - Monthly: momentum rebalance on the first session; report against SPY.

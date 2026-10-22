@@ -48,6 +48,33 @@ grep -q sentinel /etc/trend-investing/ibkr-login.env || fail "re-run overwrote t
 pass "second pass idempotent, owner stub preserved"
 sed -i '/sentinel/d' /etc/trend-investing/ibkr-login.env
 
+# The owner's own ntfy server (provision.sh ntfy): the pinned binary is
+# fetched and verified, installed, and configured to listen on the Tailscale
+# address only. An address that is not a tailnet one is refused with nothing
+# written, so the server can never be made to listen on a public interface; a
+# download that does not match its pin is refused and nothing installed.
+cache=${TI_DOWNLOAD_CACHE:-/var/cache/trend-investing}
+cp -a /root/deploy /root/deploy-badntfy
+sed -i 's/^NTFY_SHA256=.*/NTFY_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' /root/deploy-badntfy/versions.env
+grep -q '^NTFY_SHA256=0\{64\}$' /root/deploy-badntfy/versions.env || fail "could not break the ntfy pin"
+rm -f "$cache"/ntfy_*.tar.gz
+if TI_NTFY_ADDRESS=100.64.0.7 /root/deploy-badntfy/provision.sh ntfy >/dev/null 2>&1; then fail "an ntfy download that does not match its pin was accepted"; fi
+test ! -e /usr/local/bin/ntfy || fail "a mismatched ntfy download was installed"
+for bad in 0.0.0.0 127.0.0.1 203.0.113.5 100.128.0.1 100.63.255.255 "100.64.0.1; x"; do
+  if TI_NTFY_ADDRESS=$bad "$p" ntfy >/dev/null 2>&1; then fail "the ntfy step accepted the address '$bad'"; fi
+done
+test ! -e /etc/ntfy/server.yml || fail "an address that is not Tailscale's left a configuration"
+TI_NTFY_ADDRESS=100.64.0.7 "$p" ntfy
+test -x /usr/local/bin/ntfy || fail "ntfy not installed"
+grep -qx 'listen-http: "100.64.0.7:2586"' /etc/ntfy/server.yml || fail "the ntfy server does not listen on the Tailscale address: $(cat /etc/ntfy/server.yml)"
+grep -qx 'base-url: "http://100.64.0.7:2586"' /etc/ntfy/server.yml || fail "the ntfy server's base URL is not the Tailscale address"
+test "$(grep -c '^listen-http:' /etc/ntfy/server.yml)" = 1 || fail "more than one listen address"
+id ti-ntfy >/dev/null || fail "no ti-ntfy user"
+test "$(getent passwd ti-ntfy | cut -d: -f7)" = /usr/sbin/nologin || fail "ti-ntfy has a login shell"
+test -f /etc/systemd/system/ti-ntfy.service || fail "the ntfy unit is not installed"
+TI_NTFY_ADDRESS=100.64.0.7 "$p" ntfy
+pass "the ntfy server is fetched against its pin (a mismatch is refused), listens on the Tailscale address only, and runs as its own user"
+
 # Users and permissions.
 for u in ti-gateway ti-trader; do
   id "$u" >/dev/null || fail "missing user $u"
@@ -215,6 +242,11 @@ pass "reporter, dashboard, operator and journal-query installed; the tools run u
 rep=$(mktemp -d)
 mkdir -p "$rep/engines/boost" "$rep/reports" "$rep/creds"
 cp /root/dist/boost-fixture.log "$rep/engines/boost/run-rehearsal.log"
+# A channel with no record starts at the run's own time and is sent none of
+# the log's earlier alerts, and this fixture log is old: so the state file
+# begins with both channels recorded long before it, as on a server whose
+# reporter has run since before the log's events.
+printf '{"keys":[],"baselines":{"ntfy":"2000-01-01T00:00:00Z","pagerduty":"2000-01-01T00:00:00Z"}}' >"$rep/reports/boost.reporter.json"
 chown -R ti-trader:ti-trader "$rep"
 chmod 0750 "$rep/engines" "$rep/engines/boost" "$rep/reports"
 python3 - "$rep/posts" <<'PY' &
@@ -343,7 +375,7 @@ verify_log=$(mktemp)
 verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service ti-adapter-boost.service \
+  ti-reporter@boost.service ti-reporter@boost.timer ti-dashboard.service ti-adapter-boost.service ti-ntfy.service \
   ti-flex@boost.service ti-flex@boost.timer ti-flex@trad-ira.service ti-flex@trad-ira.timer \
   ti-flex@roth-ira.service ti-flex@roth-ira.timer >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"

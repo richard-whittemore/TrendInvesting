@@ -7,6 +7,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
 )
 
 // OrderState is where a released order stands, as the log records it.
@@ -84,15 +85,19 @@ type Order struct {
 // order it cleared is refused as on a terminal order.
 // A dry-run momentum run's synthetic report on an order it never sent, a
 // decision, ends the order by the same rule and acknowledges nothing
-// (endSynthetic). A fill in a Boost run, readable or not, changes nothing and raises no
-// alert: the Boost engine reads fills by the risk gate's check
-// (risklimit.Gate.ObserveFill), not by event.OrderReports, so this reader
-// does not count them.
+// (endSynthetic). A fill in a Boost run is read as the Boost engine reads it,
+// by the risk gate's check (risklimit.Gate.ObserveFill), not by
+// event.OrderReports: the gate accepts a fill its order's release describes
+// whatever the lifecycle reports before it said, a late fill after a
+// cancellation included, so such a fill acknowledges the order (ADR 0022).
+// A fill the gate refuses, or one that cannot be read, changes nothing and
+// raises no alert: the order then alerts as unacknowledged.
 func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
 	var unread []UnreadReport
 	byID := map[string]*Order{}
 	reports := event.NewOrderReports()
+	fills := newBoostFills()
 	var group string // the input whose group the current record belongs to
 	for _, entry := range entries {
 		e := entry.Envelope
@@ -107,7 +112,7 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 				applyClearance(e, reports)
 				continue
 			}
-			if u := acknowledge(e, strategyID, byID, reports); u != nil {
+			if u := acknowledge(e, strategyID, byID, reports, fills); u != nil {
 				unread = append(unread, *u)
 			}
 			continue
@@ -136,6 +141,7 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 		orders = append(orders, o)
 		byID[p.ClientOrderID] = o
 		reports.Release(p)
+		fills.release(p)
 	}
 	out := make([]Order, len(orders))
 	for i, o := range orders {
@@ -191,7 +197,7 @@ func UnreadReportAlerts(account string, unread []UnreadReport) []Alert {
 // first report only, when the engine reads the report (see OrderLifecycles),
 // and returns the report as unread when the engine refuses it. reports
 // holds the run's releases for the momentum run's rule.
-func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports) *UnreadReport {
+func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports, fills *boostFills) *UnreadReport {
 	unread := func(clientID, reason string) *UnreadReport {
 		return &UnreadReport{InputID: e.ID, Type: e.Type, ClientOrderID: clientID, Reason: reason, At: e.RecordedAt}
 	}
@@ -219,8 +225,14 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		}
 		client, status, at = p.ClientOrderID, "fill", p.FilledAt
 		_, _, refused = reports.Fill(p)
+	case e.Type == event.FillEventType:
+		var p event.TargetWeightFillPayload
+		if read(e, targetWeightFillVersions, &p) != nil || !fills.accept(p) {
+			return nil // a fill the Boost engine's gate does not accept acknowledges nothing
+		}
+		client, status, at = p.ClientOrderID, "fill", p.FilledAt
 	default:
-		return nil // not a venue report, or a fill in a Boost run, which this reader does not count
+		return nil // not a venue report
 	}
 	o, ok := byID[client]
 	switch {
@@ -233,6 +245,37 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		o.State, o.AcknowledgedAt, o.Acknowledgement = LifecycleAcknowledged, at, status
 	}
 	return nil
+}
+
+// boostFills reads a Boost run's fills by the rule the Boost engine applies,
+// the risk gate's own (risklimit.Gate.ObserveFill), so the reporter and the
+// engine cannot disagree about which fill counts. One gate stands for each
+// account whose orders the log released; it is used only for that rule, so
+// its limits (which no fill is checked against) are placeholders.
+type boostFills struct{ gates map[string]*risklimit.Gate }
+
+func newBoostFills() *boostFills { return &boostFills{gates: map[string]*risklimit.Gate{}} }
+
+// release tells the account's gate of a released order, as the engine's gate
+// learns of one. A gate that cannot be made accepts no fill, so the order
+// alerts rather than going unwatched.
+func (b *boostFills) release(p event.OrderReleasedPayload) {
+	g, ok := b.gates[p.AccountID]
+	if !ok {
+		limits := event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05}
+		g, _ = risklimit.NewIRAGate(p.AccountID, limits, event.TradingModeDryRun, 0, time.Minute)
+		b.gates[p.AccountID] = g
+	}
+	if g != nil {
+		_ = g.RestoreReleased(p, nil, time.Time{}, "")
+	}
+}
+
+// accept reports whether the gate accepts fill p: it is applied, or it is a
+// redelivery of an execution already applied.
+func (b *boostFills) accept(p event.TargetWeightFillPayload) bool {
+	g := b.gates[p.AccountID]
+	return g != nil && g.ObserveFill(p) == nil
 }
 
 // applyClearance applies the owner's clearance as the momentum engine

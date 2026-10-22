@@ -71,25 +71,25 @@ func TestOneChannelsBadSecretNeverSilencesTheOther(t *testing.T) {
 		dir := t.TempDir()
 		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-summary"}
 		environment := env(map[string]string{"TI_NTFY_TOPIC": "", "TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": server.URL})
-		err := run(args, environment, now, &bytes.Buffer{}, server.Client())
+		var out bytes.Buffer
+		err := run(args, environment, now, &out, server.Client())
 		if err == nil || !strings.Contains(err.Error(), "ntfy") || !strings.Contains(err.Error(), "TI_NTFY_TOPIC") {
 			t.Fatalf("err = %v, want one naming the ntfy channel and its secret", err)
 		}
-		summaries, details := pagerDutySummaries(pd)
+		summaries, _ := pagerDutySummaries(pd)
 		if !anyContains(summaries, "engine halted") || !anyContains(summaries, "order refused") {
 			t.Errorf("PagerDuty did not take the journal's alerts: %v", summaries)
 		}
 		if !anyContains(summaries, "the reporter cannot deliver to ntfy") {
 			t.Errorf("no alert names the channel set aside: %v", summaries)
 		}
-		summary := ""
-		for i, s := range summaries {
-			if strings.Contains(s, "daily summary") {
-				summary = details[i]
-			}
+		// With the one channel that takes the summary set aside, the summary
+		// goes nowhere, and PagerDuty never takes it.
+		if anyContains(summaries, "daily summary") {
+			t.Errorf("the daily summary opened a PagerDuty incident: %v", summaries)
 		}
-		if !strings.Contains(summary, "Channels not delivering: ntfy") {
-			t.Errorf("the daily summary does not name the channel set aside:\n%s", summary)
+		if !strings.Contains(out.String(), "the daily summary is not sent") {
+			t.Errorf("the reporter did not say the summary is not sent:\n%s", out.String())
 		}
 	})
 	for name, environment := range map[string]map[string]string{

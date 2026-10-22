@@ -677,13 +677,13 @@ func TestTheDailySummaryShowsTheLastClockCheckTimeAndResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			var summary string
-			for _, m := range r.to("events.pagerduty.test") {
+			for _, m := range r.to("ntfy.private.test") {
 				if strings.Contains(m, "daily summary") && strings.Contains(m, "Clock check") {
 					summary = m
 				}
 			}
 			if summary == "" {
-				t.Fatalf("no summary with a clock line: %v", r.to("events.pagerduty.test"))
+				t.Fatalf("no summary with a clock line: %v", r.to("ntfy.private.test"))
 			}
 			for _, w := range append(c.want, at.UTC().Format("2006-01-02 15:04Z")) {
 				if !strings.Contains(summary, w) {
@@ -776,11 +776,11 @@ func TestAReporterThatFindsTheClockBeingCheckedSkipsTheCheckAndShowsTheLastOne(t
 		t.Errorf("the check ran %d times while another instance held it, want 1", check.runs())
 	}
 	found := false
-	for _, m := range r.to("events.pagerduty.test") {
+	for _, m := range r.to("ntfy.private.test") {
 		found = found || strings.Contains(m, "Clock check: ok at "+at.UTC().Format("2006-01-02 15:04Z"))
 	}
 	if !found {
-		t.Errorf("the summary does not show the last recorded check: %v", r.to("events.pagerduty.test"))
+		t.Errorf("the summary does not show the last recorded check: %v", r.to("ntfy.private.test"))
 	}
 }
 

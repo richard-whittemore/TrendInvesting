@@ -59,13 +59,23 @@ func main() {
 }
 
 // delivered is the reporter's state file: the incident keys already sent,
-// per channel, when each channel last took each, which times a repeat, and
-// how many repeats each channel has taken, which names each repeat.
+// per channel, when each channel last took each, which times a repeat, how
+// many repeats each channel has taken, which names each repeat, and when each
+// channel was first seen with no record, before which it is sent no alert
+// (see channelBaseline).
 type delivered struct {
-	Keys    []string             `json:"keys"`
-	Sent    map[string]time.Time `json:"sent,omitempty"`
-	Repeats map[string]int       `json:"repeats,omitempty"`
+	Keys      []string             `json:"keys"`
+	Sent      map[string]time.Time `json:"sent,omitempty"`
+	Repeats   map[string]int       `json:"repeats,omitempty"`
+	Baselines map[string]time.Time `json:"baselines,omitempty"`
 }
+
+// channelBaseline is the time before which a channel with no record is sent
+// no alert, given the start of the run that first sees it. A new or lost
+// state file, or a newly named channel, begins at the start of the run, so
+// the log's earlier history is not replayed to it: only events after it are
+// sent (ADR 0019, "Alerting": each incident once). A test replaces it.
+var channelBaseline = func(start time.Time) time.Time { return start }
 
 func run(args []string, getenv func(string) string, now func() time.Time, out io.Writer, client *http.Client) error {
 	flags := flag.NewFlagSet("reporter", flag.ContinueOnError)
@@ -126,10 +136,12 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	for _, f := range setAside {
 		failures = append(failures, f.err)
 	}
-	seen, sent, repeats, err := loadState(*statePath)
+	seen, sent, repeats, baselines, err := loadState(*statePath)
 	if err != nil {
 		return errors.Join(append(failures, err)...)
 	}
+	start := now()
+	baseline(baselines, seen, senders, setAside, channelBaseline(start))
 	label := *accountName
 	if label == "" {
 		label = filepath.Base(*journalPath)
@@ -198,9 +210,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// "Alerting"). The state is saved once more at the end, so the
 	// file exists after a run that delivered nothing.
 	at := now()
-	record := func() error { return saveState(*statePath, seen, sent, repeats) }
+	record := func() error { return saveState(*statePath, seen, sent, repeats, baselines) }
 	for _, a := range report.Fresh(alerts, nil) {
-		if err := deliver(senders, a, seen, sent, repeats, at, *repeat, record); err != nil {
+		if err := deliver(sendersFor(senders, a, baselines), a, seen, sent, repeats, at, *repeat, record); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -222,6 +234,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
+	if *summary {
+		saySummaryRoute(senders, seen, out)
+	}
 	if *summary && refused == nil {
 		// The ledger is taken only from the account's own flex/<instance>
 		// folder, the instance of the engine directory the journal is in
@@ -238,10 +253,81 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 			}
 		}
 	}
-	if err := saveState(*statePath, seen, sent, repeats); err != nil {
+	if err := saveState(*statePath, seen, sent, repeats, baselines); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
+}
+
+// baseline gives every delivery channel with no record in the state file the
+// baseline time: a channel that has no baseline yet and has taken nothing,
+// whether the state file is new or the channel was just named. A channel set
+// aside is baselined too, so what it missed while set aside reaches it once
+// it works. A channel already in the state file keeps what it has.
+func baseline(baselines map[string]time.Time, seen map[string]bool, senders []sender, setAside []channelFault, at time.Time) {
+	names := make([]string, 0, len(senders)+len(setAside))
+	for _, s := range senders {
+		if _, echo := s.(echoOnly); !echo {
+			names = append(names, s.name())
+		}
+	}
+	for _, f := range setAside {
+		names = append(names, f.channel)
+	}
+	for _, name := range names {
+		if _, ok := baselines[name]; ok || hasKeys(seen, name) {
+			continue
+		}
+		baselines[name] = at
+	}
+}
+
+// hasKeys reports whether the channel has taken any alert.
+func hasKeys(seen map[string]bool, channel string) bool {
+	for k := range seen {
+		if strings.HasPrefix(k, channel+"|") {
+			return true
+		}
+	}
+	return false
+}
+
+// sendersFor returns the senders alert a may go to now: not a channel whose
+// baseline is after the event the alert reports, which is history to it. An
+// alert with no event time is current.
+func sendersFor(senders []sender, a report.Alert, baselines map[string]time.Time) []sender {
+	out := make([]sender, 0, len(senders))
+	for _, s := range senders {
+		if _, echo := s.(echoOnly); !echo {
+			if b, ok := baselines[s.name()]; ok && !a.At.IsZero() && a.At.Before(b) {
+				continue
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// summaryNotSentKey is the state-file key recording that the reporter has
+// said the daily summary has nowhere to go.
+var summaryNotSentKey = channelKey("reporter", "summary-not-sent")
+
+// saySummaryRoute tells the owner, once, that the daily summary is not sent
+// because no channel takes it: it carries balances, which go only to the
+// owner's own ntfy server. Naming such a server clears the record, so the
+// notice returns if the server is later left out.
+func saySummaryRoute(senders []sender, seen map[string]bool, out io.Writer) {
+	for _, s := range senders {
+		if t, ok := s.(summaryTaker); ok && t.takesSummary() {
+			delete(seen, summaryNotSentKey)
+			return
+		}
+	}
+	if seen[summaryNotSentKey] {
+		return
+	}
+	seen[summaryNotSentKey] = true
+	_, _ = fmt.Fprintln(out, "reporter: the daily summary is not sent. It carries your balances, which go only to your own ntfy server (TI_NTFY_SERVER), never to PagerDuty or the public ntfy.sh relay, and no such server is named. Incident alerts are unaffected. This is said once.")
 }
 
 // readJournal reads and verifies the journal and returns the history of the
@@ -414,18 +500,18 @@ func notDelivering(setAside []channelFault) string {
 // how many repeats each has taken. A key with no send time (a state file
 // written before repeats) is due for its repeat at once, if it repeats; a key
 // with no count has taken no repeat.
-func loadState(path string) (seen map[string]bool, sent map[string]time.Time, repeats map[string]int, err error) {
-	seen, sent, repeats = map[string]bool{}, map[string]time.Time{}, map[string]int{}
+func loadState(path string) (seen map[string]bool, sent map[string]time.Time, repeats map[string]int, baselines map[string]time.Time, err error) {
+	seen, sent, repeats, baselines = map[string]bool{}, map[string]time.Time{}, map[string]int{}, map[string]time.Time{}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return seen, sent, repeats, nil
+		return seen, sent, repeats, baselines, nil
 	}
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("reporter: read state: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("reporter: read state: %w", err)
 	}
 	var d delivered
 	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, nil, nil, fmt.Errorf("reporter: the state file is unreadable and is not reset, since a reset resends every alert: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("reporter: the state file is unreadable and is not reset, since a new file forgets which alerts are open: %w", err)
 	}
 	for _, k := range d.Keys {
 		seen[k] = true
@@ -436,7 +522,10 @@ func loadState(path string) (seen map[string]bool, sent map[string]time.Time, re
 	for k, n := range d.Repeats {
 		repeats[k] = n
 	}
-	return seen, sent, repeats, nil
+	for k, at := range d.Baselines {
+		baselines[k] = at
+	}
+	return seen, sent, repeats, baselines, nil
 }
 
 // syncFile flushes a file to disk; a test replaces it to see a failure.
@@ -446,8 +535,8 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // is on disk before the rename, and the rename before it returns. Without
 // that, a power cut can leave an empty state file, which loadState refuses,
 // and every later run then fails.
-func saveState(path string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
-	raw, err := json.Marshal(deliveredOf(seen, sent, repeats))
+func saveState(path string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, baselines map[string]time.Time) error {
+	raw, err := json.Marshal(deliveredOf(seen, sent, repeats, baselines))
 	if err != nil {
 		return err
 	}
@@ -455,9 +544,9 @@ func saveState(path string, seen map[string]bool, sent map[string]time.Time, rep
 }
 
 // deliveredOf is the state file's form of the delivered keys, their send
-// times and repeat counts.
-func deliveredOf(seen map[string]bool, sent map[string]time.Time, repeats map[string]int) delivered {
-	d := delivered{Keys: make([]string, 0, len(seen)), Sent: sent, Repeats: repeats}
+// times, repeat counts and channel baselines.
+func deliveredOf(seen map[string]bool, sent map[string]time.Time, repeats map[string]int, baselines map[string]time.Time) delivered {
+	d := delivered{Keys: make([]string, 0, len(seen)), Sent: sent, Repeats: repeats, Baselines: baselines}
 	for k := range seen {
 		d.Keys = append(d.Keys, k)
 	}

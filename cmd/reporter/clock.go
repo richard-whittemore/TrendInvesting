@@ -159,7 +159,7 @@ func clockStep(path, command, host string, senders []sender, setAside []channelF
 		repeats[k] = n
 	}
 	record := func() error {
-		d := deliveredOf(seen, sent, repeats)
+		d := deliveredOf(seen, sent, repeats, nil)
 		raw, err := json.Marshal(hostClock{delivered: d, Last: h.Last, Failures: h.Failures})
 		if err != nil {
 			return err

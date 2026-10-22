@@ -30,11 +30,13 @@ type sender interface {
 // terminal and reaches no one else, so it never counts as a delivery.
 type echoOnly interface{ echo() }
 
-// relayed marks a sender whose messages pass through a public relay, which
-// anyone who learns the topic can read. The daily summary, which carries the
-// account's balances, is never sent through one (owner decision 2026-10-17,
-// docs/live-trading/plan.md section 7).
-type relayed interface{ publicRelay() bool }
+// summaryTaker marks a sender that may be given the daily summary, which
+// carries the account's balances. Only the owner's own ntfy server is one: a
+// public relay can be read by anyone who learns the topic (owner decision
+// 2026-10-17, docs/live-trading/plan.md section 7), and the summary is a
+// routine message that never opens a PagerDuty incident (owner decision
+// 2026-10-22; ADR 0019, "Alerting": a page means an incident).
+type summaryTaker interface{ takesSummary() bool }
 
 // kindSummary is the daily summary's kind: a routine message, not an
 // incident, and the one message that carries balances.
@@ -187,28 +189,23 @@ func channelKey(channel, alertKey string) string { return channel + "|" + alertK
 // An alert counts as delivered only when every delivery channel has taken it:
 // a failure on one channel is never covered by another's success, and only
 // the channel that failed is tried again. The terminal echo shows an alert
-// while any channel still lacks it and never counts. The daily summary skips
-// a channel on a public relay, and is an error when no other delivery channel
-// was named. Each repeat a channel takes is counted in repeats, so the
+// while any channel still lacks it and never counts. The daily summary goes
+// only to a channel that takes it (summaryTaker), and is not sent when there
+// is none: the caller says so (summaryRoute). Each repeat a channel takes is counted in repeats, so the
 // channel can tell a repeat from the first delivery. After each success,
 // record saves the state, so a run stopped midway has saved every delivery
 // it made. The error joins every channel failure and every failed save.
 func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, repeats map[string]int, now time.Time, every time.Duration, record func() error) error {
 	var pending []sender
-	private := false
 	for _, s := range senders {
 		_, echo := s.(echoOnly)
-		if r, ok := s.(relayed); ok && r.publicRelay() && a.Kind == kindSummary {
+		if t, ok := s.(summaryTaker); !echo && a.Kind == kindSummary && (!ok || !t.takesSummary()) {
 			continue
 		}
-		private = private || !echo
 		key := channelKey(s.name(), a.Key)
 		if echo || report.Due(a, seen[key], sent[key], now, every) {
 			pending = append(pending, s)
 		}
-	}
-	if !private {
-		return errors.New("the daily summary carries balances and never goes through a public relay such as ntfy.sh; name pagerduty or your own ntfy server (TI_NTFY_SERVER) to receive it")
 	}
 	reaching := 0
 	for _, s := range pending {
@@ -269,7 +266,9 @@ type ntfySender struct {
 
 func (ntfySender) name() string { return "ntfy" }
 
-func (n ntfySender) publicRelay() bool { return n.public }
+// takesSummary is true only for the owner's own server: the summary's
+// balances never go to a public relay.
+func (n ntfySender) takesSummary() bool { return !n.public }
 
 // send posts the alert's text; through a public relay it posts the alert's
 // public text when it has one, which carries no balance (owner decision

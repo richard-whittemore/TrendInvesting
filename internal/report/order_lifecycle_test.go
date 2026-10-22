@@ -175,8 +175,9 @@ func TestAFillAcknowledgesAnOrder(t *testing.T) {
 // so the reporter reads a venue's report as the engine does. A lifecycle
 // report acknowledges an order only when it describes the order as
 // released, its limit within half a cent (event.LimitOrderLifecyclePayload's
-// Describes); one that does not is unread. A Boost run reads no fill, so a
-// fill acknowledges nothing there (ADR 0022; ADR 0019, "Alerting").
+// Describes); one that does not is unread. A Boost run reads a fill by the
+// risk gate's check, so a fill the gate refuses acknowledges nothing there
+// (ADR 0022; ADR 0019, "Alerting").
 func TestOnlyAReportTheEngineReadsAcknowledgesAnOrder(t *testing.T) {
 	order := releasedOrder("tw-1", event.TradingModePaper)
 	at := day(0).Add(time.Minute)
@@ -227,11 +228,11 @@ func TestOnlyAReportTheEngineReadsAcknowledgesAnOrder(t *testing.T) {
 	}
 
 	got, unread = stateAfter(event.TargetWeightStrategyBoost, func(r *logRun) {
-		r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at,
-			event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 9, Price: 100, FilledAt: at})
+		r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:big", at,
+			event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, Price: 100, FilledAt: at})
 	})
 	if got.State == report.LifecycleAcknowledged || len(unread) != 0 {
-		t.Errorf("a fill in a Boost run, which reads none: %+v, unread %+v; want nothing acknowledged", got, unread)
+		t.Errorf("a fill larger than the order in a Boost run, which the gate refuses: %+v, unread %+v; want nothing acknowledged", got, unread)
 	}
 
 	got, _ = stateAfter(event.TargetWeightStrategyMomentum, func(r *logRun) {
