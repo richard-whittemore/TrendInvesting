@@ -145,6 +145,13 @@ Re-delivery closes that gap:
   command; do not edit the file. Each decision it records is written the
   same way, whole or not at all.
 
+  `--sent` is only for an order IBKR actually shows, and it cannot be
+  undone: it strikes off the order's queued retirement, so the engine is
+  never told the order was not sent, and the engine keeps the sale as
+  working. Check IBKR first (open orders, cancelled orders and trade
+  history, for the order reference that is the client order ID) and run
+  it only once you have found the order there.
+
   If you find an order it settled at IBKR (open, cancelled or traded), it
   was sent: with the adapter stopped, mark it sent with `python3
   adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent
@@ -155,7 +162,8 @@ Re-delivery closes that gap:
   every start, removing any retirement of it still queued), then records
   your finding, strikes off any retirement of the order still queued, and
   marks it sent last; if it stops part way (it prints a refusal or an
-  error), run the same `--sent` again before anything else.
+  error), run the same `--sent` again before anything else: it finishes
+  what the stop left and records your finding only once.
   Then
   approve with `operator approve ... -never-sent PENDING_FILE.never-sent`
   (or without `-never-sent` when the command says no order is settled): the
@@ -331,6 +339,9 @@ and after a crash.
     `test_marking_sent_a_never_sent_order_stopped_after_any_step_delivers_no_retirement_on_restart`,
     `test_run_ended_strikes_a_queued_retirement_of_an_order_the_relay_found_at_ibkr`,
     `test_run_ended_strikes_a_queued_retirement_of_any_order_an_earlier_run_of_the_chain_released`,
+    `test_run_ended_reads_no_log_older_than_the_bounded_walk_and_refuses_a_missing_log_the_walk_reads`,
+    `test_run_ended_keeps_a_queued_retirement_of_an_order_the_fresh_run_released_and_it_is_delivered`,
+    `test_an_order_marked_at_the_broker_is_never_read_as_settled_never_sent_whatever_its_last_decision_says`,
     `test_a_newline_terminated_damaged_settlement_line_is_refused_never_dropped_as_torn`,
     `test_a_decision_cut_short_mid_write_leaves_the_decisions_readable_and_settle_ended_run_runs_again`,
     `test_settle_ended_run_is_refused_for_a_log_that_is_not_the_run_the_input_was_sent_to`,

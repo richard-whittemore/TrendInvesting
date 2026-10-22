@@ -716,22 +716,29 @@ class LoopTests(unittest.TestCase):
                 self.assertNotIn(ACCOUNT, str(caught.exception))
                 self.assertEqual(fake.placed, [])
 
-    def fresh_run(self, previous_log, name):
-        """A fresh run's engine in the same directory, its Run approval naming previous_log committed first."""
-        engine = LoggedEngine(str(Path(self.dir.name) / name))
+    def fresh_run(self, previous_log, name, at=None):
+        """A fresh run's engine in the same directory, its Run approval naming previous_log committed first.
+
+        at, when given, is when the run started and was approved.
+        """
+        engine = LoggedEngine(str(Path(self.dir.name) / name), **({"started_at": at} if at else {}))
+        self.approve_run(engine, previous_log, at or "2026-10-17T14:00:00Z")
+        return engine
+
+    def approve_run(self, engine, previous_log, at):
+        """Commit to engine, at at, a Run approval naming previous_log, the run before it in the same directory."""
         payload = {"account_id": ACCOUNT, "previous_log": previous_log,
                    "previous_log_final_hash": self.final_hash(previous_log),
-                   "incident_id": "", "approved_by": "owner", "approved_at": "2026-10-17T14:00:00Z",
+                   "incident_id": "", "approved_by": "owner", "approved_at": at,
                    "boost": {"latched": False}, "incident_in_force": None}
         raw = json.dumps(payload, separators=(",", ":"))
         engine.decide({"id": "operator-run-approved:" + payload["previous_log_final_hash"],
                        "type": "operator.run.approved", "envelope_version": 1, "schema_version": 2,
-                       "event_time": "2026-10-17T14:00:00Z", "recorded_at": "2026-10-17T14:00:00Z",
+                       "event_time": at, "recorded_at": at,
                        "sequence": engine.next_sequence,
                        "source": "engine", "configuration_hash": CONFIGURATION_HASH,
                        "strategy_version": STRATEGY_VERSION, "payload": payload,
                        "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
-        return engine
 
     def final_hash(self, name):
         """The record hash of the last commit in the log called name beside the others, as the engine approves it."""
@@ -1132,6 +1139,123 @@ class LoopTests(unittest.TestCase):
                                              "IBKR shows it working"]), 0)
                 self.assertEqual(pending.handovers(), {"tw-paper-1": "sent"})
                 self.assertEqual(self.queued_retirements(), [])
+                # Running --sent again finishes the stop without recording the
+                # owner's finding twice, and the restart between records no
+                # finding of its own over the owner's (fail closed, AGENTS.md).
+                self.assertEqual([d["decision"] for d in pending.decisions()], {
+                    "at-broker mark": ["retired", "at-broker", "sent"],
+                    "decision": ["retired", "sent"],
+                    "strike": ["retired", "sent"]}[step])
+
+    def test_an_order_marked_at_the_broker_is_never_read_as_settled_never_sent_whatever_its_last_decision_says(self):
+        # --sent marks the order at the broker before it records the owner's
+        # finding, so a stop between the two leaves the last decision still
+        # reading never sent or retired; the mark wins for every reader of
+        # the adapter's records: the order is not one the records settle
+        # (settled_orders, which bounds the walk back through the runs), an
+        # earlier run's input counts it sent, and settle-ended-run refuses
+        # it (fail closed, AGENTS.md; ADR 0026, amended 2026-10-22, "The
+        # adapter": an order IBKR shows is never retired).
+        for settled_as in ("retired", "never-sent"):
+            with self.subTest(settled_as=settled_as):
+                self.setUp()
+                second = self.left_waiting_by_the_first_run("session:1", commits=True)
+                pending = PendingInput(self.pending)
+                if settled_as == "retired":
+                    order = json.loads((TESTDATA / "paper_released.json").read_text())
+                    retire_order(pending, order, "session over", "its session is over", "adapter",
+                                 datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+                else:
+                    pending.record_refusal("session:1", "tw-paper-1", "no contract ID")
+                    resolve(pending, "tw-paper-1", "never-sent", "IBKR shows nothing", today=SESSION)
+                self.assertIn("tw-paper-1", pending.settled_orders().ended)
+                real = PendingInput.mark
+
+                def stopped(target, cid, state):
+                    real(target, cid, state)
+                    if state == "at-broker":
+                        raise OSError("stopped after the at-broker mark")
+                with mock.patch.object(PendingInput, "mark", stopped):
+                    with self.assertRaises(OSError):
+                        resolve(pending, "tw-paper-1", "sent", "IBKR shows it working", today=SESSION)
+                self.assertEqual(pending.handovers(), {"tw-paper-1": "at-broker"})
+                self.assertEqual(pending.decisions()[-1]["decision"], settled_as)
+                self.assertNotIn("tw-paper-1", pending.settled_orders().ended)
+                self.assertEqual(relay_module.earlier_run(pending, str(second.path)).unsent, ())
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(self.settle_ended_run(), 0)
+                self.assertEqual(pending.never_sent(), [])
+                self.assertIn("order tw-paper-1 not settled", printed.getvalue())
+
+    def test_run_ended_reads_no_log_older_than_the_bounded_walk_and_refuses_a_missing_log_the_walk_reads(self):
+        # A queued retirement is struck by what the outbox itself holds: a
+        # retirement of an order the fresh run never released is an earlier
+        # run's, however old, so only the fresh run's log is read for it, and
+        # an archived log older than the session-bounded walk (run_logs)
+        # never blocks the settlement. A log the bounded walk reads that is
+        # missing refuses it, with nothing changed (fail closed, AGENTS.md;
+        # ADR 0026, amended 2026-10-22, "The adapter").
+        for missing in ("ancient.log", "old.log"):
+            with self.subTest(missing=missing):
+                self.setUp()
+                # ancient.log -> old.log (an earlier day, nothing open) ->
+                # engine.log (the run that ended) -> run-2.log (the fresh run).
+                self.fresh_run("ancient.log", "old.log", at="2026-10-09T14:00:00Z")
+                self.approve_run(self.engine, "old.log", "2026-10-16T13:45:00Z")
+                second = self.left_waiting_by_the_first_run("session:1", commits=True)
+                pending = PendingInput(self.pending)
+                order = json.loads((TESTDATA / "paper_released.json").read_text())
+                retire_order(pending, order, "session over", "its session is over", "adapter",
+                             datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+                self.assertFalse((Path(self.dir.name) / "ancient.log").exists())
+                if missing == "old.log":
+                    (Path(self.dir.name) / "old.log").unlink()
+                before = [Outbox(self.pending + OUTBOX_SUFFIX).load(), pending.load(), pending.run_ended()]
+                code = relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                   str(second.path), "--reason", "a fresh run after a reboot"])
+                if missing == "ancient.log":
+                    self.assertEqual(code, 0)
+                    self.assertEqual(self.queued_retirements(), [])
+                    [settled] = pending.run_ended()
+                    self.assertEqual([e["id"] for e in settled["outbox"]], ["order-retired:tw-paper-1"])
+                else:
+                    self.assertEqual(code, 1)
+                    self.assertEqual([Outbox(self.pending + OUTBOX_SUFFIX).load(), pending.load(),
+                                      pending.run_ended()], before, "nothing is changed")
+
+    def test_run_ended_keeps_a_queued_retirement_of_an_order_the_fresh_run_released_and_it_is_delivered(self):
+        # A retirement of an order the fresh run's own log released is the
+        # fresh run's, so it stays in the outbox and reaches the fresh run's
+        # engine; only an earlier run's are settled with the input (fail
+        # closed, AGENTS.md rule 5; ADR 0026, amended 2026-10-22, "The
+        # adapter").
+        second = self.left_waiting_by_the_first_run("session:1", commits=True)
+        own = json.loads((TESTDATA / "paper_released.json").read_text())
+        own["client_order_id"] = "tw-paper-2"
+        second.decisions["fresh:1"] = [{"type": RELEASED, "payload": own}]
+        raw = json.dumps({"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]}, separators=(",", ":"))
+        second.decide({"id": "fresh:1", "type": "market.session.closed", "envelope_version": 1,
+                       "schema_version": 1, "event_time": SESSION_CLOSED, "recorded_at": "2026-10-17T14:05:00Z",
+                       "sequence": second.next_sequence, "source": SOURCE, "configuration_hash": CONFIGURATION_HASH,
+                       "strategy_version": STRATEGY_VERSION,
+                       "payload": json.loads(raw), "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+        pending = PendingInput(self.pending)
+        order = json.loads((TESTDATA / "paper_released.json").read_text())
+        at = datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc)
+        retire_order(pending, order, "session over", "its session is over", "adapter", at, SESSION, "session:1")
+        retire_order(pending, own, "session over", "its session is over", "adapter", at, SESSION, "fresh:1")
+        self.assertEqual(relay_main(["resolve", "--run-ended", self.pending, "session:1", "--journal",
+                                     str(second.path), "--reason", "a fresh run after a reboot"]), 0)
+        self.assertEqual([e["id"] for e in self.queued_retirements()], ["order-retired:tw-paper-2"])
+        [settled] = pending.run_ended()
+        self.assertEqual([e["id"] for e in settled["outbox"]], ["order-retired:tw-paper-1"])
+        loop = self.loop(engine=second, engine_log=second.path)
+        loop.start()
+        self.settle(loop)
+        loop.close()
+        self.assertEqual([(e["type"], e["payload"].get("client_order_id")) for e in second.received
+                          if e["type"] == "execution.order.retired"], [("execution.order.retired", "tw-paper-2")])
 
     def test_run_ended_strikes_a_queued_retirement_of_an_order_the_relay_found_at_ibkr(self):
         # A stop after the at-broker decision or mark, before the strike,
