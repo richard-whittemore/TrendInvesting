@@ -282,6 +282,8 @@ func (g *githubTracker) labelIssues(ctx context.Context, label, state string, si
 				return nil, fmt.Errorf("GitHub's listing of %s issues named one whose state is %q", state, it.State)
 			case state == "closed" && (it.ClosedAt == nil || it.ClosedAt.IsZero() || it.UpdatedAt.IsZero()):
 				return nil, errors.New("GitHub's listing named a closed issue without its closing time or its last update")
+			case state == "closed" && it.UpdatedAt.Before(*it.ClosedAt):
+				return nil, errors.New("GitHub's listing named a closed issue whose last update is before its closing")
 			}
 			if state == "open" && it.CreatedAt.Before(since) {
 				return out, nil

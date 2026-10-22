@@ -848,7 +848,7 @@ func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
 		{Number: 32, Body: alertBody, Author: "owner", Created: start.Add(3 * day), Closed: pollTime.Add(-29 * day)},
 	}
 	if err := saveState(w.job.statePath, &state{Since: start, Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{
-		"30": {Done: true}, "31": {Invoked: true, Pending: "kept\n\n" + analysisMarker}, "32": {Done: true},
+		"30": {Done: true, Closed: pollTime.Add(-31 * day)}, "31": {Invoked: true, Pending: "kept\n\n" + analysisMarker}, "32": {Done: true, Closed: pollTime.Add(-29 * day)},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -867,6 +867,54 @@ func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
 	w.poll(t)
 	if w.tracker.ownReads != 0 || len(w.analyst.requests) != 1 {
 		t.Fatalf("the next poll read %d issues and made %d calls; want none read and only #41's call", w.tracker.ownReads, len(w.analyst.requests))
+	}
+}
+
+// TestADoneRecordSurvivesAListingThatOmitsItsIssue: a listing GitHub
+// answers without an issue (relabelled while it was read) never deletes the
+// issue's done record; only the record's own closing time, older than
+// retention, does. A record with no closing time (never seen closed) stays.
+func TestADoneRecordSurvivesAListingThatOmitsItsIssue(t *testing.T) {
+	w := newWorld(t)
+	day := 24 * time.Hour
+	start := pollTime.Add(-90 * day)
+	if err := saveState(w.job.statePath, &state{Since: start, Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{
+		"60": {Done: true},
+		"61": {Done: true, Closed: pollTime.Add(-5 * day)},
+		"62": {Done: true, Closed: pollTime.Add(-31 * day)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(t)
+	st, err := loadState(w.job.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, k60 := st.Issues["60"]
+	_, k61 := st.Issues["61"]
+	_, k62 := st.Issues["62"]
+	if !k60 || !k61 || k62 {
+		t.Fatalf("records %+v; want #60 (no closing time) and #61 (closed 5 days ago) kept, #62 (closed 31 days ago) dropped", st.Issues)
+	}
+}
+
+// TestAListedClosedIssueRecordsWhenItClosed: a done issue seen closed has
+// its closing time written to its record, so a later omission can be judged.
+func TestAListedClosedIssueRecordsWhenItClosed(t *testing.T) {
+	w := newWorld(t)
+	day := 24 * time.Hour
+	closed := pollTime.Add(-3 * day)
+	w.tracker.issues[resolvedLabel] = []issue{{Number: 70, Body: alertBody, Author: "owner", Created: pollTime.Add(-10 * day), Closed: closed}}
+	if err := saveState(w.job.statePath, &state{Since: pollTime.Add(-90 * day), Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{"70": {Done: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(t)
+	st, err := loadState(w.job.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Issues["70"].Done || !st.Issues["70"].Closed.Equal(closed) {
+		t.Fatalf("record %+v; want done with closing time %v", st.Issues["70"], closed)
 	}
 }
 

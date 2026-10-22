@@ -202,6 +202,7 @@ func TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls(t *testing
 	f.addIssue(5, resolvedLabel, "owner", since.Add(90*time.Minute), alertBody)
 	f.issues[len(f.issues)-1]["state"] = "closed"
 	f.issues[len(f.issues)-1]["closed_at"] = since.Add(100 * time.Minute).Format(time.RFC3339)
+	f.issues[len(f.issues)-1]["updated_at"] = since.Add(100 * time.Minute).Format(time.RFC3339)
 	f.issues = append(f.issues, map[string]any{"number": 4, "pull_request": map[string]any{"url": "x"}, "labels": []map[string]any{{"name": alertLabel}}, "created_at": since.Add(time.Hour).Format(time.RFC3339), "user": map[string]any{"login": "owner"}})
 	f.addIssue(2, alertLabel, "owner", since.Add(-time.Hour), alertBody)
 	f.addIssue(1, alertLabel, "owner", since.Add(-2*time.Hour), alertBody)
@@ -577,5 +578,20 @@ func TestAnIssueWithoutAKnownStateIsAnError(t *testing.T) {
 				t.Fatalf("err = %v, want the issue's state named", err)
 			}
 		})
+	}
+}
+
+// TestAClosedIssueUpdatedBeforeItClosedFailsTheListing: a closed issue
+// whose last update precedes its closing is contradictory, so its update
+// time is not proof that the listing is complete: the listing fails whole.
+func TestAClosedIssueUpdatedBeforeItClosedFailsTheListing(t *testing.T) {
+	f, srv := newFakeGitHub(t)
+	since := time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)
+	window := time.Date(2026, time.September, 22, 0, 0, 0, 0, time.UTC)
+	f.addIssue(5, resolvedLabel, "owner", window.Add(24*time.Hour), alertBody)
+	f.closeIssue(5, window.Add(48*time.Hour))
+	f.issues[0]["updated_at"] = window.Add(-48 * time.Hour).Format(time.RFC3339)
+	if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since, window); err == nil || !strings.Contains(err.Error(), "update") {
+		t.Fatalf("err = %v, want the contradictory times refused", err)
 	}
 }

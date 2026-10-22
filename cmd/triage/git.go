@@ -57,9 +57,19 @@ func (r execRunner) Run(ctx context.Context, dir string, env []string, name stri
 	cmd.WaitDelay = waitDelay
 	out := &tailBuffer{}
 	cmd.Stdout, cmd.Stderr = out, out
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return "", &errNotStarted{err: err}
+	}
+	err := cmd.Wait()
 	return out.String(), err
 }
+
+// errNotStarted is a command whose process was never created (exec failed
+// before the start, or ctx had already ended).
+type errNotStarted struct{ err error }
+
+func (e *errNotStarted) Error() string { return e.err.Error() }
+func (e *errNotStarted) Unwrap() error { return e.err }
 
 // disqualifiers are what go test prints for a package that failed to build
 // or set up, or a test run out of time: each fails a run whatever the tests

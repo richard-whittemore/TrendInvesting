@@ -343,6 +343,12 @@ func (g *gateBox) Run(ctx context.Context, runDir, wd string, argv []string) (st
 	if serr := g.stopAll(); serr != nil {
 		return out, gateStep(fmt.Errorf("%w (%w)", errProcessesLeft, serr))
 	}
+	var unstarted *errNotStarted
+	if errors.As(err, &unstarted) && ctx.Err() != nil {
+		// The launcher process was never started and the session was
+		// already stopped: an interruption, nothing of the gate's failed.
+		return out, ctx.Err()
+	}
 	if unlaunched != nil {
 		return out, gateStep(fmt.Errorf("sudo, sandbox-exec or env could not start %s", filepath.Base(argv[0])))
 	}

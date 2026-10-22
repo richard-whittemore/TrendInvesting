@@ -202,6 +202,9 @@ type issueRecord struct {
 	GateFailed  bool   `json:"gate_failed,omitempty"`
 	Pending     string `json:"pending,omitempty"`
 	Done        bool   `json:"done,omitempty"`
+	// Closed is when the issue was last seen closed; a done record is
+	// dropped only once this is older than retention.
+	Closed time.Time `json:"closed,omitempty"`
 }
 
 // poll is one run of the job: every alert issue with no triage comment yet
@@ -267,8 +270,9 @@ func (j *job) today(st *state) {
 // leaves the alert label"): the open ones, and the closed ones that closed
 // within retention. Every poll lists them all, so one a listing missed
 // (relabelled while it was read) is reached by the next. The done record
-// of an issue not listed (closed for longer than retention) is dropped
-// from st: should the issue be listed again, its own comment marks it done
+// of an issue not listed is dropped from st only when the record itself
+// shows it closed for longer than retention (a listing that merely missed
+// the issue keeps it): should the issue be listed again, its own comment marks it done
 // before anything is spent. An issue the reporter did not open (another
 // author, or no hidden key line) is never read further: its words are not
 // the reporter's.
@@ -285,13 +289,17 @@ func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue
 		}
 		seen[is.Number] = true
 		rec := st.Issues[strconv.Itoa(is.Number)]
+		if rec.Done && !rec.Closed.Equal(is.Closed) {
+			rec.Closed = is.Closed
+			st.Issues[strconv.Itoa(is.Number)] = rec
+		}
 		if rec.Done || !strings.EqualFold(is.Author, author) || !strings.Contains(is.Body, alertKeyLine) {
 			continue
 		}
 		out = append(out, is)
 	}
 	for key, rec := range st.Issues {
-		if n, err := strconv.Atoi(key); err == nil && rec.Done && !seen[n] {
+		if n, err := strconv.Atoi(key); err == nil && rec.Done && !seen[n] && !rec.Closed.IsZero() && rec.Closed.Before(j.now().Add(-retention)) {
 			delete(st.Issues, key)
 		}
 	}

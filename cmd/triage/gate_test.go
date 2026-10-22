@@ -292,3 +292,35 @@ func TestPkillGateUserEndsOnlyTheGateUsersOwn(t *testing.T) {
 		t.Fatalf("sudo was asked %q, want the rule, pkill, and pkill once more %q", raw, want)
 	}
 }
+
+// cancelThenRun cancels the session just before the real runner starts the
+// command, as a stop landing between the gate's check and the start.
+type cancelThenRun struct {
+	inner  runner
+	cancel context.CancelFunc
+}
+
+func (c cancelThenRun) Run(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
+	c.cancel()
+	return c.inner.Run(ctx, dir, env, name, args...)
+}
+
+// TestACancelBeforeTheLauncherStartsIsAnInterruptionNotAGateOutage: a
+// session stopped before the launcher process has been started (nothing
+// ran, no launch mark) is an interruption; only a command that started and
+// left no mark is the gate's failure.
+func TestACancelBeforeTheLauncherStartsIsAnInterruptionNotAGateOutage(t *testing.T) {
+	g := standInGate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDir, done, err := g.newRun(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	g.run = cancelThenRun{inner: execRunner{}, cancel: cancel}
+	_, err = g.Run(ctx, runDir, "", []string{"/usr/bin/true"})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, errGateUnavailable) {
+		t.Fatalf("err = %v, want the cancellation, not a gate outage", err)
+	}
+}
