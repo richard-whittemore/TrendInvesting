@@ -103,9 +103,10 @@ func TestTheHookAsItsUnitRunsItPagesOnceThroughTheChannels(t *testing.T) {
 	// The server's journalctl is not on this machine: a stand-in.
 	systemd := newStandInSystemd(t)
 	args = append([]string{args[1]}, append([]string{"-journalctl", systemd.journalctl()}, args[2:]...)...)
-	noEnv := func(string) string { return "" }
+	// systemd hands the hook the failed unit and its invocation.
+	monitor := env(map[string]string{"MONITOR_UNIT": "ti-engine@boost.service", "MONITOR_INVOCATION_ID": firstRun})
 	for i := 0; i < 2; i++ {
-		if err := run(args, noEnv, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, http.DefaultClient); err != nil {
+		if err := run(args, monitor, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, http.DefaultClient); err != nil {
 			t.Fatalf("the hook as the unit runs it: %v", err)
 		}
 	}

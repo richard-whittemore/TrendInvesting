@@ -4,8 +4,8 @@ Description=Reporter for account %i: alerts, their repeats and the daily summary
 # the unit with a message, so the owner sees a failed unit, never a silent
 # skip (docs/manual/alerts-and-dashboard.md, "What can go wrong").
 # When this unit fails, ti-unit-failed@%n sends one urgent page through the
-# reporter's channels naming it, its last journal line and the manual row to
-# read (ADR 0019, "Alerting"; docs/manual/alerts-and-dashboard.md, "A failed
+# reporter's channels naming it, the failed run's last journal line and the
+# manual row to read (ADR 0019, "Alerting"; docs/manual/server.md, "A failed
 # unit").
 OnFailure=ti-unit-failed@%n.service
 
@@ -46,12 +46,13 @@ LoadCredential=secrets:/etc/trend-investing/secrets.env
 # The Flex reader's ledger of the account's deposits and withdrawals
 # (ti-flex@%i) is read for the daily summary's SPY shadow account; until the
 # reader has written it the summary says the comparison assumes none.
-# -units: the instance's engine and adapter, checked with systemctl is-failed
-# at every firing: a failed one is named in the state-at-start page, paged if
-# the OnFailure hook did not, and its page is resolved when it is no longer
-# failed. The reporter reads the journal's last line of a failed unit, so it
-# is in the journal group. -self-unit: a clean firing resolves the page of an
-# earlier failed one.
+# -units: the instance's engine and adapter, asked of systemd (systemctl
+# show: state and invocation) once at the start of every firing: a failed one
+# is named in the state-at-start page, its failed run is paged if the
+# OnFailure hook did not page it, and the page of a run that is over is
+# resolved. The reporter reads the failed run's journal lines, so it is in the
+# journal group. -self-unit: a clean firing resolves the page of an earlier
+# failed one.
 SupplementaryGroups=systemd-journal
 ExecStart=/opt/trend-investing/bin/ti-reporter -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl -units ti-engine@%i.service,ti-adapter-%i.service -self-unit ti-reporter@%i.service
 NoNewPrivileges=true

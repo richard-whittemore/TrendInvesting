@@ -101,7 +101,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	clockCheck := flags.String("clock-check", "", "command that checks the server's clock (deploy/libexec/clock-check.sh): run after the incident alerts at every firing, a failure two checks in a row pages once for the host, a passing check resolves it, and the daily summary shows the last check")
 	clockState := flags.String("clock-state", "", "the host's clock state, shared by every reporter instance on the host (default: host-clock.json beside -state)")
 	cashLedger := flags.String("cash-ledger", "", "the Flex reader's ledger of the account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the daily summary's SPY shadow account mirrors, and beside which the reader's costs.jsonl gives the summary its costs line, accepted only from the flex/<instance> folder of the engine directory the journal is in; without it, or before the reader has written it, the summary says the comparison assumes none")
-	units := flags.String("units", "", "comma-separated trading units to check with systemctl is-failed (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed one is paged once if the OnFailure hook has not, named in the state-at-start page, and its page is resolved when it is no longer failed")
+	units := flags.String("units", "", "comma-separated trading units to check with systemctl show at the start of every firing (ti-engine@<instance>.service,ti-adapter-<instance>.service): a failed run is paged once if the OnFailure hook has not, a failed unit is named in the state-at-start page, and the page of a run that is over is resolved")
 	selfUnit := flags.String("self-unit", "", "this reporter's own unit (ti-reporter@<instance>.service): its failure page is resolved by the next firing that finishes without a fault")
 	unitState := flags.String("unit-state", "", "the host's record of failed-unit pages, shared with the OnFailure hook (default: unit-failures.json beside -state)")
 	systemctl := flags.String("systemctl", "systemctl", "the systemctl that answers -units")
@@ -125,6 +125,15 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if *repeat <= 0 {
 		return errors.New("reporter: -repeat-interval must be positive: an alert repeated on every run would page without pause")
 	}
+	tradingUnits := splitUnits(*units)
+	if err := checkTradingUnits("-units", tradingUnits); err != nil {
+		return err
+	}
+	if *selfUnit != "" {
+		if err := checkTradingUnits("-self-unit", []string{*selfUnit}); err != nil {
+			return err
+		}
+	}
 	// Every send is bounded, so a stalled channel fails as that channel's
 	// failure, is retried next run, and never holds back the other alerts or
 	// the state file.
@@ -146,6 +155,19 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 	for _, f := range setAside {
 		failures = append(failures, f.err)
+	}
+	// systemd is asked once, at the start of the firing, before anything is
+	// delivered: a unit that fails while the firing runs is paged by its
+	// hook, and its page is newer than this sample, so it is never resolved
+	// on the sample's word (ADR 0019, "Alerting").
+	sampledAt := now()
+	unitSamples, unitsErr := sampleUnits(*systemctl, tradingUnits)
+	if unitsErr != nil {
+		failures = append(failures, unitsErr)
+	}
+	failedNow := map[string]bool{}
+	for unit, sample := range unitSamples {
+		failedNow[unit] = sample.failed
 	}
 	seen, sent, repeats, baselines, err := loadState(*statePath)
 	if err != nil {
@@ -234,14 +256,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// file exists after a run that delivered nothing.
 	at := now()
 	record := func() error { return saveState(*statePath, seen, sent, repeats, baselines) }
-	tradingUnits := splitUnits(*units)
 	unitStatePath := *unitState
 	if unitStatePath == "" {
 		unitStatePath = filepath.Join(filepath.Dir(*statePath), "unit-failures.json")
-	}
-	failedNow, unitsErr := failedUnits(*systemctl, tradingUnits)
-	if unitsErr != nil {
-		failures = append(failures, unitsErr)
 	}
 	if refused == nil {
 		if err := tellStateAtStart(senders, envelopes, alerts, baselines, seen, sent, repeats, at, *repeat, sortedUnits(tradingUnits, failedNow), record); err != nil {
@@ -262,11 +279,11 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 	}
 	// A failed trading unit is paged by the OnFailure hook at the moment it
-	// fails; this firing pages one the hook missed and resolves the page of
-	// one that is no longer failed. A systemctl that could not be run checked
-	// nothing, so no page is resolved on its word.
+	// fails; this firing pages a failed run the hook missed and resolves the
+	// page of a run that was over at the sample. A systemctl that could not
+	// be run checked nothing, so no page is resolved on its word.
 	if unitsErr == nil && len(tradingUnits) > 0 {
-		if err := unitStep(unitStatePath, tradingUnits, failedNow, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {
+		if err := unitStep(unitStatePath, tradingUnits, unitSamples, sampledAt, *journalctl, secretValues(getenv, *secretsFile), senders, setAside, now(), *repeat); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -319,7 +336,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	// A firing that finished without a fault resolves this reporter's own
 	// failure page (the OnFailure hook sent it when an earlier firing failed).
 	if *selfUnit != "" && len(failures) == 0 {
-		if err := clearUnit(unitStatePath, *selfUnit, senders, setAside); err != nil {
+		if err := clearUnit(unitStatePath, *selfUnit, getenv("INVOCATION_ID"), senders, setAside); err != nil {
 			failures = append(failures, err)
 		}
 	}

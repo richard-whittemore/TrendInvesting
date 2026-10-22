@@ -1,13 +1,17 @@
 [Unit]
 Description=Page the owner that %i failed
 # Started by OnFailure= on the engine, the adapter and the reporter, with the
-# failed unit's name as the instance. It sends one urgent page through the
-# reporter's channels (PagerDuty and the owner's own ntfy) naming the unit, its
-# last journal line and the manual row to read; the page is not sent again
-# while the unit stays failed, and a firing of the reporter pages a failure
-# this unit could not deliver (ADR 0019, "Alerting"; docs/manual/alerts-and-dashboard.md,
-# "The reporter itself", the row "A trading unit failed"). No Condition: a missing binary fails this unit with a
-# message, so the owner sees a failed unit, never a silent skip.
+# failed unit's name as the instance (for the engine,
+# ti-unit-failed@ti-engine@boost.service.service, whose %i is
+# ti-engine@boost.service; the rehearsal starts it under systemd). systemd
+# hands it the failed run's invocation ID (MONITOR_INVOCATION_ID), which keys
+# the page, so every failed run pages once. It sends one urgent page through
+# the reporter's channels (PagerDuty and the owner's own ntfy) naming the
+# unit, the failed run's last journal line and the manual row to read; a
+# firing of the reporter pages a failure this unit could not deliver (ADR
+# 0019, "Alerting"; docs/manual/server.md, "A failed unit"). No Condition: a
+# missing binary fails this unit with a message, so the owner sees a failed
+# unit, never a silent skip.
 
 [Service]
 Type=oneshot
@@ -16,7 +20,8 @@ Type=oneshot
 TimeoutStartSec=2min
 User=ti-trader
 Group=ti-trader
-# The failed unit's last journal line is the page's reason.
+# The failed run's last journal line, or systemd's line about it, is the
+# page's reason.
 SupplementaryGroups=systemd-journal
 Environment=TZ=America/New_York
 # TI_NTFY_TOPIC, TI_NTFY_SERVER and TI_PAGERDUTY_ROUTING_KEY from %d/secrets,

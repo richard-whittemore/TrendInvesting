@@ -49,9 +49,27 @@ for tool in reporter:ti-reporter dashboard:ti-dashboard operator:operator journa
   (cd "$repo" && GOOS=linux GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local go build -o "$dist/${tool#*:}" "./cmd/${tool%%:*}")
 done
 id=$(docker "${args[@]}" ubuntu:24.04 bash /deploy/rehearsal/inside.sh)
-trap 'docker rm -f "$id" >/dev/null 2>&1 || true; rm -rf "$dist"' EXIT
+sd=""
+trap 'docker rm -f "$id" ${sd:+"$sd"} >/dev/null 2>&1 || true; rm -rf "$dist"' EXIT
 docker cp "$repo/deploy" "$id:/deploy"
 docker cp "$dist" "$id:/dist"
 # The adapter's pin check, run inside the container against the real install.
 docker cp "$repo/adapter/ibkr/ibapi_pin.py" "$id:/ibapi_pin.py"
 docker start -a "$id"
+
+# A second container in which systemd is PID 1 (privileged, so it can run its
+# own cgroups): the failed-unit hook as systemd itself names and starts it on
+# a templated unit's failure (deploy/rehearsal/inside-systemd.sh).
+sd=$(docker create --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock --platform "$platform" ubuntu:24.04 \
+  bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends systemd dbus python3 >/dev/null && exec /lib/systemd/systemd')
+docker cp "$repo/deploy" "$sd:/deploy"
+docker cp "$dist" "$sd:/dist"
+docker start "$sd" >/dev/null
+booted=""
+for _ in $(seq 120); do
+  state=$(docker exec "$sd" systemctl is-system-running 2>/dev/null || true)
+  case $state in running | degraded) booted=1 && break ;; esac
+  sleep 2
+done
+test -n "$booted" || { echo "REHEARSAL FAIL: systemd did not boot in the second container" >&2; exit 1; }
+docker exec "$sd" bash /deploy/rehearsal/inside-systemd.sh

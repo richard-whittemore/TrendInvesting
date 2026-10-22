@@ -293,8 +293,24 @@ line=${line//"\${TI_STATE_DIR}"/$rep/engines/boost}
 line=${line//"\${TI_REPORTS_DIR}"/$rep/reports}
 line=${line//"\${TI_RUN}"/run-rehearsal}
 case $line in *'$'* | *%*) fail "the reporter's ExecStart has a variable the rehearsal does not expand: $line" ;; esac
+# No systemd runs here, so the reporter's systemctl (asked for each -units
+# unit's state and invocation) is a stand-in that answers every unit active
+# and records what it was asked; a systemctl that cannot answer fails the
+# firing, so the stand-in is first on PATH.
+sysd=$(mktemp -d)
+chmod 0755 "$sysd"
+install -m 0666 /dev/null "$sysd/calls"
+cat >"$sysd/systemctl" <<SH
+#!/bin/sh
+echo "\$*" >>$sysd/calls
+echo ActiveState=active
+echo InvocationID=0123456789abcdef0123456789abcdef
+SH
+chmod 0755 "$sysd/systemctl"
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
+sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
+{ grep -qx 'show -p ActiveState -p InvocationID ti-engine@boost.service' "$sysd/calls" && grep -qx 'show -p ActiveState -p InvocationID ti-adapter-boost.service' "$sysd/calls"; } ||
+  fail "the reporter did not ask systemd for the engine's and the adapter's state: $(cat "$sysd/calls")"
 test -s "$rep/reports/boost.reporter.json" || fail "the reporter wrote no state file"
 test "$(stat -c %U "$rep/reports/boost.reporter.json")" = ti-trader || fail "the reporter's state file is not ti-trader's"
 grep -q '^/rehearsal$' "$rep/posts" || fail "the reporter reached no ntfy topic"
@@ -303,33 +319,37 @@ grep -q '^/v2/enqueue$' "$rep/posts" || fail "the reporter reached no PagerDuty 
 alerts_sent() { { grep -v '^/hb$' "$rep/posts" || true; } | wc -l; }
 sent=$(alerts_sent)
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter's second run failed"
+sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $line >/dev/null || fail "the reporter's second run failed"
 test "$(alerts_sent)" = "$sent" || fail "the reporter's second run sent its alerts again"
 test "$(grep -c '^/hb$' "$rep/posts")" = 2 || fail "the reporter did not ping the outside heartbeat once per clean firing (stand-in endpoint saw $(grep -c '^/hb$' "$rep/posts"))"
 pass "the reporter runs as its unit runs it, as ti-trader, delivers to both channels once, keeps its state, and pings the outside heartbeat once per firing"
 
 # The failed-unit page: the hook unit's own command line, for the engine's
-# failure, as ti-trader against the same stand-in channels. It pages both
-# channels once and sends nothing on a second run; the record sits beside the
-# reporter's state.
+# failure, as ti-trader against the same stand-in channels, with the failed
+# run's name in MONITOR_UNIT and MONITOR_INVOCATION_ID as systemd hands it (no
+# systemd runs here; deploy/rehearsal/inside-systemd.sh starts the hook under
+# a real one). It pages both channels once and sends nothing on a second run
+# for the same failed run; the record sits beside the reporter's state.
 hook=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-unit-failed@.service)
 hook=${hook//%i/ti-engine@boost.service}
 hook=${hook//%d/$rep/creds}
 hook=${hook//\/var\/lib\/trend-investing\/reports/$rep/reports}
 case $hook in *'$'* | *%*) fail "the hook's ExecStart has a variable the rehearsal does not expand: $hook" ;; esac
 before=$(alerts_sent)
+failed_run=(MONITOR_UNIT=ti-engine@boost.service MONITOR_INVOCATION_ID=0123456789abcdef0123456789abcdef)
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH=/usr/bin:/bin $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
+sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook, run as its unit runs it (as ti-trader), failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook did not page both channels once"
 grep -q 'ti-engine@boost.service failed' "$rep/posts.bodies" || fail "the hook's page does not name the failed unit"
 test -s "$rep/reports/unit-failures.json" || fail "the hook wrote no record of the page"
+grep -q 'unit-failed:ti-engine@boost.service/0123456789abcdef0123456789abcdef' "$rep/reports/unit-failures.json" || fail "the hook's record is not keyed by the failed run"
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH=/usr/bin:/bin $hook >/dev/null || fail "the failed-unit hook's second run failed"
+sudo -u ti-trader env -i PATH=/usr/bin:/bin "${failed_run[@]}" $hook >/dev/null || fail "the failed-unit hook's second run failed"
 test "$(alerts_sent)" = "$((before + 2))" || fail "the failed-unit hook paged again for the same failure"
 for unit in ti-engine@.service ti-adapter-boost.service ti-reporter@.service; do
   grep -qx 'OnFailure=ti-unit-failed@%n.service' "/etc/systemd/system/$unit" || fail "$unit does not hand its failure to the hook"
 done
-pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once and not again, and the three trading units name it in OnFailure="
+pass "the failed-unit hook runs as its unit runs it, as ti-trader, pages both channels once per failed run and not again, and the three trading units name it in OnFailure="
 
 # The clock check. The reporter ran the installed check as ti-trader above:
 # the host clock state must hold what the check said, not that it could not
@@ -365,7 +385,7 @@ touch "$stand/fail"
 for n in 1 2; do
   test ! -e "$clock_state" || age_check
   # shellcheck disable=SC2086
-  sudo -u ti-trader env -i PATH=/usr/bin:/bin $stand_line >/dev/null || fail "the reporter with a failing stand-in clock check failed to run"
+  sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $stand_line >/dev/null || fail "the reporter with a failing stand-in clock check failed to run"
   if test "$n" = 1 && test "$(clock_pages)" != 0; then fail "one failing clock check paged"; fi
 done
 test "$(clock_pages)" = 1 || fail "two failing clock checks in a row did not page once on PagerDuty"
@@ -373,7 +393,7 @@ grep -q -- '-42s' "$rep/posts.bodies" || fail "the clock page lacks the measured
 rm "$stand/fail"
 age_check
 # shellcheck disable=SC2086
-sudo -u ti-trader env -i PATH=/usr/bin:/bin $stand_line >/dev/null || fail "the reporter with a passing stand-in clock check failed"
+sudo -u ti-trader env -i PATH="$sysd:/usr/bin:/bin" $stand_line >/dev/null || fail "the reporter with a passing stand-in clock check failed"
 trigger_key=$(python3 - "$rep/posts.bodies" <<'PY'
 import json, sys
 for line in open(sys.argv[1]):
@@ -404,7 +424,9 @@ verify_log=$(mktemp)
 verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter@boost.service ti-reporter@boost.timer ti-unit-failed@ti-engine@boost.service ti-dashboard.service ti-adapter-boost.service ti-ntfy.service \
+  ti-reporter@boost.service ti-reporter@boost.timer \
+  ti-unit-failed@ti-engine@boost.service.service ti-unit-failed@ti-adapter-boost.service.service ti-unit-failed@ti-reporter@boost.service.service \
+  ti-dashboard.service ti-adapter-boost.service ti-ntfy.service \
   ti-flex@boost.service ti-flex@boost.timer ti-flex@trad-ira.service ti-flex@trad-ira.timer \
   ti-flex@roth-ira.service ti-flex@roth-ira.timer >"$verify_log" 2>&1 || verify_status=$?
 cat "$verify_log"

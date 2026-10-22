@@ -44,7 +44,7 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 | `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 17:05, retried at 18:05 and 20:05. A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. It fails, with a message, until the Boost engine has been started once |
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. The IRA instances are skipped: they have no configuration file |
 | `ti-reporter@boost.timer` and `ti-reporter@boost.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)). One instance per account; only Boost's timer is enabled, since the IRA engines have no configuration yet | **Every 5 minutes, around the clock, seven days a week**, so an alert reaches you within 5 minutes, overnight and at weekends too. A firing missed while the server was down runs at boot. A run is stopped after 4 minutes | Built and installed by `provision.sh services`. It reads the log named by the Boost engine's `run.env` at every firing, and fails, with a message, until the engine has been started once and the `secrets.env` entries below are filled in |
-| `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter and the reporter each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit, the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, its last journal line and the manual row to read ("A failed unit", below) | Only when one of those three units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
+| `ti-unit-failed@.service` | The page that a unit failed: the engine, the adapter and the reporter each name it in `OnFailure=`, so systemd starts one instance, named after the failed unit (for the engine, `ti-unit-failed@ti-engine@boost.service.service`), the moment that unit fails. It sends one urgent page through the reporter's channels naming the unit, the failed run's last journal line and the manual row to read ("A failed unit", below) | Only when one of those three units fails; never by itself otherwise | Installed by `provision.sh services` with the other units |
 | `ti-dashboard.service` | The read-only dashboard, on loopback port 8088 | Starts at boot (enabled) | Built and installed by `provision.sh services`; it finds the Boost engine's current run, the newest link of its chain of runs, on every request and follows the chain of runs back to the first, so a restart or an upgrade of the engine needs no dashboard restart. It shows a message, not a figure, until the engine has run once |
 | `ti-ntfy.service` | Your own ntfy server: the only place the daily summary goes ("Your own ntfy server", below). Listens on the server's Tailscale address, port 2586, and nowhere else | Starts at boot once `provision.sh ntfy` has enabled it; tried again every 10 seconds if the Tailscale address is not up yet | Installed by `provision.sh ntfy`, which you run after joining Tailscale. Not part of `provision.sh all` |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
@@ -196,7 +196,8 @@ quiet and is noticed from outside.
 1. Sign up at healthchecks.io. The free plan is enough for one check.
 2. Add a check named `trend-investing-reporter` with a **period of 5
    minutes** (the reporter's timer) and a **grace time of 15 minutes**, so
-   three missed firings in a row page you and one slow firing does not.
+   the check is down 20 minutes after the last ping, on the fourth missed
+   firing, and one slow firing does not page you.
 3. Copy the check's ping address (`https://hc-ping.com/<uuid>`) and put it on the
    server: `sudo -e /etc/trend-investing/secrets.env`, as the line
    `TI_HEARTBEAT_URL=<the address>`. The next firing uses it.
@@ -390,27 +391,38 @@ already at IBKR in IBKR's own app.
 ## A failed unit
 
 The engine, the adapter and the reporter each name `ti-unit-failed@%n.service`
-in `OnFailure=`. When one fails, systemd starts that unit, which runs
-`ti-reporter notify-unit-failed <unit>`: one urgent page on PagerDuty and your
-own ntfy server naming the unit, the unit's own last journal line as the
-reason (cleaned of addresses, account numbers and secrets), and the manual row
-to read. You are paged within a minute of the stop, not after two sessions of
-silence.
+in `OnFailure=`. When one fails, systemd starts that unit under the failed
+unit's name (for the engine, `ti-unit-failed@ti-engine@boost.service.service`;
+the rehearsal starts it under a real systemd), which runs `ti-reporter
+notify-unit-failed <unit>`: one urgent page on PagerDuty and your own ntfy
+server naming the unit, the reason (cleaned of addresses, account numbers and
+secrets) and the manual row to read. You are paged within a minute of the
+stop, not after two sessions of silence.
 
-- One page per unit per failure. It is not sent again while the unit stays
-  failed. When the unit is no longer failed (you started it, or ran `systemctl
-  reset-failed`), the next reporter firing resolves the PagerDuty incident, so
-  the next failure pages again. The record is `unit-failures.json` in
-  `/var/lib/trend-investing/reports/`.
-- The reporter's every firing checks the engine and the adapter with
-  `systemctl is-failed`. A failed one that the hook did not page (the hook
-  could not reach a channel, or the unit failed before the hook was installed)
-  is paged at that firing, and the state-at-start page names every failed
-  trading unit, so a reporter restarted after the failure still tells you.
+- One page per failed run. Every start of a unit is a new run with its own
+  invocation ID (`systemctl show -p InvocationID --value <unit>`), which
+  systemd hands the hook, and the page is keyed by it. A unit you restart that
+  fails again pages again, even within the same 5 minutes, and the first
+  run's PagerDuty incident is resolved first. The same run is not paged twice.
+  The record is `unit-failures.json` in `/var/lib/trend-investing/reports/`.
+- The reason is the failed run's own last journal line. A run that wrote
+  nothing (a start systemd refused, such as a missing `run.env`) is explained
+  by systemd's own line about that run, such as "Failed to load environment
+  files: No such file or directory"; it is never a line from an earlier run.
+- The reporter's every firing asks systemd once, at its start, for the engine's
+  and the adapter's state and run (`systemctl show`). A failed run that the hook
+  did not page (the hook could not reach a channel, the unit failed before the
+  hook was installed, or you started a unit that was already failed and
+  systemd refused the start, which systemd does not hand to the hook) is paged
+  at that firing, and the state-at-start page names every failed trading
+  unit, so a reporter restarted after the failure still tells you. The page of
+  a run that is over (the unit was running at the firing's start under a later
+  run, or was no longer failed) is resolved; a page sent after the firing
+  started is left for the next firing.
 - A failure of the reporter itself is paged by the hook too, and resolved by
   the next firing that finishes without a fault.
-- If the hook itself fails (`systemctl status ti-unit-failed@<unit>`), no
-  channel took the page; the reporter's next firing tries again.
+- If the hook itself fails (`systemctl status ti-unit-failed@<unit>.service`),
+  no channel took the page; the reporter's next firing tries again.
 
 ## What can go wrong, and what happens then
 

@@ -16,14 +16,18 @@ func TestAFailedUnitPagesUrgentlyWithTheUnitTheReasonAndTheManualRow(t *testing.
 	for unit, row := range map[string]string{
 		"ti-adapter-boost.service":  `docs/manual/ibkr-adapter.md, "What can go wrong", the row "The adapter's unit failed"`,
 		"ti-engine@boost.service":   `docs/manual/engine.md, "While it runs", the row "The engine's unit failed"`,
-		"ti-reporter@boost.service": `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "A trading unit failed"`,
+		"ti-reporter@boost.service": `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "<host>: <unit> failed"`,
 	} {
-		a := report.UnitFailedAlert("lightsail", unit, "reconcile incomplete: open orders unread", at)
+		const run = "0123456789abcdef0123456789abcdef"
+		a := report.UnitFailedAlert("lightsail", unit, run, "reconcile incomplete: open orders unread", at)
 		if a.Severity != report.Urgent || a.Kind != report.KindUnitFailed || a.Repeat {
 			t.Errorf("%s: severity %v kind %v repeat %v, want urgent, unit-failed, once", unit, a.Severity, a.Kind, a.Repeat)
 		}
-		if a.Key != report.UnitFailedKey(unit) || !strings.Contains(a.Key, unit) {
-			t.Errorf("%s: key %q does not name the unit", unit, a.Key)
+		if a.Key != report.UnitFailedKey(unit, run) || !strings.HasPrefix(a.Key, report.UnitFailedKeyPrefix(unit)) || !strings.Contains(a.Key, run) {
+			t.Errorf("%s: key %q does not name the unit and its failed run", unit, a.Key)
+		}
+		if other := report.UnitFailedKey(unit, "fedcba9876543210fedcba9876543210"); other == a.Key {
+			t.Errorf("%s: two failed runs share the key %q", unit, a.Key)
 		}
 		if a.Title != "lightsail: "+unit+" failed" {
 			t.Errorf("%s: title %q", unit, a.Title)

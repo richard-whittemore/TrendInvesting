@@ -13,10 +13,15 @@ import (
 // is how the owner learns of it within minutes (ADR 0019, "Alerting").
 const KindUnitFailed Kind = "unit-failed"
 
-// UnitFailedKey is the alert key of a failed unit: one page per unit until
-// the unit is no longer failed, when the caller resolves and forgets it so the
-// next failure pages anew.
-func UnitFailedKey(unit string) string { return "unit-failed:" + unit }
+// UnitFailedKey is the alert key of one failed run of a unit: the unit and
+// systemd's invocation ID of the run that failed, so every failed run is its
+// own incident, even one that follows another with no reporter firing between
+// (ADR 0019, "Alerting": each incident reaches a person). The caller resolves
+// and forgets the page when that run is over.
+func UnitFailedKey(unit, invocation string) string { return UnitFailedKeyPrefix(unit) + invocation }
+
+// UnitFailedKeyPrefix begins the key of every failed run of unit.
+func UnitFailedKeyPrefix(unit string) string { return "unit-failed:" + unit + "/" }
 
 // UnitManualRows names, by unit-name prefix, the manual row the owner reads.
 var UnitManualRows = []struct{ prefix, row string }{
@@ -32,19 +37,20 @@ func UnitManualRow(unit string) string {
 			return r.row
 		}
 	}
-	return `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "A trading unit failed"`
+	return `docs/manual/alerts-and-dashboard.md, "The reporter itself", the row "<host>: <unit> failed"`
 }
 
-// UnitFailedAlert is the urgent page for a failed unit: its name, the last
-// line it wrote (reason, already cleaned by UnitFailedReason) and the manual
-// row to read. It carries no account number, balance or secret.
-func UnitFailedAlert(host, unit, reason string, at time.Time) Alert {
+// UnitFailedAlert is the urgent page for a failed run of a unit: its name,
+// the reason (the failed run's own last line, or systemd's line about it,
+// already cleaned by UnitFailedReason) and the manual row to read. It carries
+// no account number, balance or secret.
+func UnitFailedAlert(host, unit, invocation, reason string, at time.Time) Alert {
 	return Alert{
-		Key: UnitFailedKey(unit), Kind: KindUnitFailed, Severity: Urgent, AccountID: host, At: at,
+		Key: UnitFailedKey(unit, invocation), Kind: KindUnitFailed, Severity: Urgent, AccountID: host, At: at,
 		Title: fmt.Sprintf("%s: %s failed", host, unit),
-		Body: fmt.Sprintf("The unit %s is failed as of %s. Its last journal line: %s\n"+
+		Body: fmt.Sprintf("The unit %s is failed as of %s. The failed run's last journal line: %s\n"+
 			"systemd does not restart the engine or the adapter: every stop is for you to read and every start is yours. Read %s, then `journalctl -u %s` on the server. "+
-			"You are told once for this failure; the incident is resolved when the unit is no longer failed, and the next failure is told again.",
+			"You are told once for this failed run; its incident is resolved when the run is over, and the next failed run is told again.",
 			unit, at.UTC().Format(time.RFC3339), reason, UnitManualRow(unit), unit),
 	}
 }
