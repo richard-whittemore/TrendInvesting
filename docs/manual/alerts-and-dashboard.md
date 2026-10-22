@@ -7,8 +7,8 @@ you about it, so you do not have to go looking.
 
 - `reporter` reads one account's log and sends your phone an alert whenever
   something needs your attention, and optionally a daily summary: what you
-  hold, what the strategy wanted, the orders and fills, and how your equity
-  compares with SPY.
+  hold, what the strategy wanted, the orders and fills, and whether your
+  account is beating SPY.
 - `dashboard` shows the same summary as a web page, one section per account,
   with a chart of your equity against SPY and a light or dark colour choice.
   It is read-only: you cannot click anything that changes the system. It shows
@@ -54,10 +54,16 @@ account.
   than the last snapshot taken. A skipped input moves no figure, and the
   summary and the dashboard say "Inputs not read: N" when there are any.
 - Bars are read in both forms the engines record: the Turtle engine's, and
-  the Boost and momentum engines', which also carry a dividend-adjusted
-  price. The comparison with SPY uses SPY's split-adjusted close from either.
-  The dividend-adjusted price is for the strategies' signals only and never
-  moves an equity figure.
+  the Boost and momentum engines', which also carry a split- and
+  dividend-adjusted price. The SPY side of the comparison grows by that
+  adjusted price where the bars carry it, which is SPY with its dividends
+  reinvested, and by the split-adjusted close where they do not (the older
+  form), which leaves dividends out; the page and the summary say which.
+  Your own account's figures never come from the adjusted price.
+- The owner's deposits and withdrawals are read from the Flex reader's
+  ledger (`-cash-ledger`, below; [reconciliation](reconciliation.md),
+  "Deposits and withdrawals, read from IBKR"), not from the engine's log, so
+  a transfer is counted once however it is also recorded.
 
 ## What triggers an alert
 
@@ -289,7 +295,8 @@ with:
 /opt/trend-investing/bin/ti-reporter \
   -journal /var/lib/trend-investing/engines/boost/${TI_RUN}.log \
   -state /var/lib/trend-investing/reports/boost.reporter.json \
-  -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account boost
+  -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account boost \
+  -cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl
 ```
 
 `TI_RUN` comes from the engine's `run.env`, which systemd reads again at
@@ -321,7 +328,13 @@ alerts when the log cannot name its account; default the log file's name);
 minutes; how often an unacknowledged Degraded, Halted or reconciliation alert
 is sent again; must be positive); `-ack-within` (default 10 minutes: how long
 an order to be sent may go unacknowledged by IBKR, from its commit, before an
-alert; it must be positive).
+alert; it must be positive); `-cash-ledger` (the Flex reader's ledger of the
+account's deposits and withdrawals, `/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl`,
+the same file the reader writes; without it, or until the reader has written
+it, the summary says the comparison assumes no transfer. It is accepted only
+from the account's own folder, `flex/<instance>`, where `<instance>` is the
+name of the engine folder the `-journal` is in; any other is not read, and
+the summary says "ledger not accepted: it belongs to <x>, not <y>").
 
 If it exits with an error, read it: it names the channel that failed or the
 file it refused. Nothing is lost; the next run tries again.
@@ -332,7 +345,9 @@ On the server it runs as `ti-dashboard.service`:
 
 ```
 /opt/trend-investing/bin/ti-dashboard \
-  -engine-dir /var/lib/trend-investing/engines/boost -addr 127.0.0.1:8088
+  -engine-dir /var/lib/trend-investing/engines/boost \
+  -cash-ledger /var/lib/trend-investing/flex/boost/cash-movements.jsonl \
+  -addr 127.0.0.1:8088
 ```
 
 Port 8088 is the program's default, the unit's, and the one the Lightsail
@@ -347,6 +362,21 @@ already shows the new run. You never restart the dashboard to follow
 the engine. (Restart it only to run a new build of the dashboard itself:
 `provision.sh services` does that for you at the upgrade step of the Lightsail
 runbook, which is why that step already ends with a dashboard restart.)
+
+`-cash-ledger` names the Flex reader's ledger of the account's deposits and
+withdrawals, read afresh on every request like the log. With one
+`-engine-dir` the path alone is enough; with several, or with any
+`-journal`, write each as `SOURCE=PATH`, where SOURCE is exactly the
+`-engine-dir` or `-journal` it belongs to, for example
+`-cash-ledger /var/lib/trend-investing/engines/trad-ira=/var/lib/trend-investing/flex/trad-ira/cash-movements.jsonl`.
+A ledger that names no account given, or a second ledger for one account, is
+refused at start: a deposit mirrored on the wrong account would misstate
+both. A ledger is also accepted only from the account's own folder,
+`flex/<instance>`, where `<instance>` is the name of the `-engine-dir` (for
+a `-journal`, of the engine folder it is in), the layout the server keeps;
+a ledger from another folder is not read, and the card says "ledger not
+accepted: it belongs to <x>, not <y>". An account given no ledger is
+compared assuming no transfer, and its card says so.
 
 ### The history across restarts
 
@@ -416,7 +446,7 @@ intact run of the current mode, when the intact runs also cross a change of
 mode). The reporter still sends every alert and the daily summary, whose
 equity section gives that line and then the comparison over the intact runs,
 "Equity vs SPY, from <log>, the first intact run it includes, <date> to
-<date>: ...", the same figures the card shows,
+<date>, time-weighted: ...", the same figures the card shows,
 and tells you of the break once, in a routine alert, "<account>: the history
 of earlier runs is unavailable".
 
@@ -536,29 +566,48 @@ around the page, to the two data pages, or switch the colours. From the top:
   appears when the program left out an input that failed its checks. The
   account's alerts close the section.
 
-**The equity card** compares your account with the benchmark (SPY) over every
-date on which the program has both your account's value and SPY's close. It
-shows the whole-period and the latest-day changes in words, then:
+**The equity card** compares your account with SPY over every date on which
+the program has both your account's value and SPY's close (a *paired day*).
+How the SPY side is built is in "How the comparison with SPY works", below.
+From the top:
 
-- A line chart. Both lines start at 100 on the first of those dates, so the
-  chart shows how a starting balance would have grown in each. Your account is
-  the solid line with circles, SPY the dashed line with squares, so the two
-  can be told apart without colour. The figures at the right-hand end are
-  where each line stands on the latest paired day, which can be older than
-  today when today's snapshot or close is missing; the dates under the chart
-  are its first and last paired dates. The chart spaces paired dates evenly,
-  by paired point and not by calendar, so a missing day leaves no gap.
-- The number of paired points, the first and last dates, and the first,
-  previous and latest points with their values.
-- What the same starting balance would be worth had it been held in SPY.
-- One sentence saying what the comparison assumes. Today it counts price
-  return only: SPY's dividends are left out, and money you deposit or withdraw
-  is not taken out of the account's result, so a deposit can look like
-  outperformance.
+- **The verdict**, one line in words: "Beating SPY by 1.3 points since
+  2027-03-01", "Behind SPY by 0.8 points since 2027-03-01" ("1.0 point"
+  when it is exactly that), or "Level with SPY since 2027-03-01" when the
+  two returns are less than 0.1 point apart.
+  The date is the first paired day. It is green with an up arrow when you are
+  ahead, red with a down arrow when behind, and plain with "=" when level, so
+  colour is never the only cue. Beside it, the **dollar gap**: your net
+  liquidation less the SPY shadow account's value on the latest paired day.
+  When your recorded withdrawals took the SPY shadow account to zero, the
+  verdict stays (it does not depend on the shadow's dollars) but the dollar
+  gap and the dollar line are replaced by a sentence saying so (below).
+- Your net liquidation and when it was read.
+- The three chips: your time-weighted return, SPY's, and the difference
+  between them in points (the number the verdict rounds).
+- **The dollar line**: "Account 16000.00 · SPY shadow account 16000.00 · gap
+  +0.00 on 2027-03-04", what each is worth in dollars on the latest paired
+  day.
+- The whole-period and the latest-day changes in words. The day's change is
+  from the paired day before to the latest, with any transfer that day taken
+  out.
+- A line chart of the two time-weighted growth lines, each the growth of the
+  starting balance, rebased to 100 on the first paired day, so a deposit or a
+  withdrawal does not bend either line. Your account is the solid line with
+  circles, SPY the dashed line with squares, so the two can be told apart
+  without colour. The figures at the right-hand end are where each line
+  stands on the latest paired day, which can be older than today when
+  today's snapshot or close is missing; the dates under the chart are its
+  first and last paired dates. The chart spaces paired dates evenly, by
+  paired point and not by calendar, so a missing day leaves no gap.
+- The number of paired points, the first and last dates, then one sentence
+  saying exactly what is counted (below).
+- The first, previous and latest points with your net liquidation and SPY's
+  close (the price as quoted), and what the SPY shadow account is worth.
 
 **The change-between-paired-points card** draws, for each pair of consecutive
 paired dates, a pair of bars: your account's change on the left and SPY's on
-the right. A bar is the change from one paired date to the next, which can
+the right, each time-weighted, so a deposit is not drawn as a rise. A bar is the change from one paired date to the next, which can
 span several sessions when a snapshot or close is missing, so it is not always
 one day's move. Like the line chart, it spaces paired dates evenly, by paired
 point and not by calendar. It shows at most the most recent 120 changes (121
@@ -575,6 +624,120 @@ If there are fewer than two paired dates, for example early in a run, a chart
 cannot be drawn. The card says "The chart needs two paired points" instead of
 drawing something misleading.
 
+### How the comparison with SPY works
+
+The question the card answers is: **would the same money have done better
+in SPY?** "The same money" means the balance you started with and every
+deposit and withdrawal you made since, each at the moment you made it.
+
+**The SPY shadow account.** On the first paired day the program imagines a
+second account holding your whole net liquidation in SPY at that day's
+closing price. From then on:
+
+- each deposit you make buys SPY in the shadow account for the same amount,
+  and each withdrawal sells SPY for the same amount, at the official close of
+  the New York day the transfer is dated (IBKR usually dates a transfer by
+  its day alone; that day's close is used). A transfer dated on a weekend or
+  holiday is mirrored at the next session's close. A transfer on or before
+  the first paired day is already in the starting balance;
+- SPY's dividends are reinvested in SPY on their ex-date. This comes from
+  the split- and dividend-adjusted price the market-data job records
+  ([market data](market-data.md), "Adjusting"): its day-to-day ratios are
+  exactly SPY held with each dividend bought back in SPY.
+
+Fees, commissions and interest are not mirrored: they are part of running
+the strategy, so they stay in your account's own result.
+
+The shadow account cannot sell SPY it does not hold. If a withdrawal is
+larger than the shadow account is worth that day (your account did much
+better than SPY, then you took most of it out), the shadow account stops at
+zero on that day. A withdrawal of exactly its value does the same. The
+verdict and the time-weighted returns are still shown, because they do not
+depend on the shadow's dollars, but the dollar gap and the dollar line are
+withheld and replaced by "the recorded withdrawals reached or exceeded the SPY shadow's
+value on <date>; dollar figures are not meaningful after that day". The
+shadow account restarts at the next deposit you make: that deposit buys SPY
+at that day's close, the dollar figures return from that day, and the
+sentence becomes "the recorded withdrawals reached or exceeded the SPY shadow's value
+on <date>; dollar figures restart from <date of the deposit>". The restarted
+shadow holds only what you deposited since, so its dollars stand for that
+money, not for the original starting balance.
+
+**Time-weighted returns.** Both percentages are time-weighted: each stretch
+between paired days counts only the market's move, with the money you added
+or took out that day removed, and the stretches are multiplied together.
+That way a deposit is never a gain, a withdrawal never a loss, and the two
+returns compare fairly whatever the size or timing of your transfers. The
+dollar line shows the other view, what each account is actually worth; the
+two can disagree in sign when a large deposit came just before a fall or a
+rise, which is why both are shown.
+
+**What the sentence says.** It states exactly what is counted:
+
+- "SPY with dividends reinvested" when every day-to-day step of the period
+  uses the adjusted price; "SPY price return only for <from>–<to>; dividends
+  reinvested for the rest" when some steps do not, naming each stretch that
+  is price only (more than one is listed, "a–b and c–d"): a stretch of bars
+  of the older form, or the one step where the adjusted price's base
+  changes, at a fresh run with another warm-up start, since levels on two
+  bases cannot be compared; and "SPY price return only: dividends not
+  counted" when no step uses it;
+- "SPY close on <date> is not positive: that session is left out" for a
+  close that cannot be a price; the step runs from the session before it to
+  the one after;
+- "your deposits and withdrawals mirrored as recorded by the Flex reader (N
+  in this period: X in, Y out)" when the ledger was read, followed by how far
+  the reader has recorded: "transfers recorded through <day>", the
+  `covered_to` of its status file beside the ledger
+  ([reconciliation](reconciliation.md), "The status file"). The reader runs
+  at 21:30 New York, after the close's summary is sent, and IBKR may post a
+  day's transfer only the next evening, so when the summary's day is later
+  than that it adds "deposits or withdrawals from the last two trading
+  sessions may not be recorded yet; a transfer appears in the summary two
+  trading sessions after it posts (a Friday transfer on Tuesday's)". A
+  transfer posted on day D is first in the statement the reader reads on the
+  evening of the next session, after that day's summary is sent, so the
+  summary two sessions after D is the first to include it. A session is a
+  New York Stock Exchange trading day: weekends and exchange holidays are not
+  sessions and are skipped, so a Friday (or weekend) transfer is in Tuesday's
+  summary, a Thursday one in Monday's, and one posted before a holiday waits
+  for the extra session. When the status file gives no
+  `covered_to` (no reading yet, or the last one running or set aside) it
+  says "how far the Flex reader has recorded is not known; deposits or
+  withdrawals from the last two trading sessions may not be recorded yet". A
+  reading that found no transfer writes no ledger; its status file still
+  counts, and the ledger is taken as read and empty;
+- "ledger not accepted: it belongs to <x>, not <y>; the comparison assumes
+  none ..." when the ledger named is in another account's folder;
+- "deposits and withdrawals not yet recorded: the comparison assumes none,
+  so money you add or take out counts as the account's own gain or loss"
+  when no ledger is given or the reader has not written one yet, and
+  "deposits and withdrawals not readable (<why>): the comparison assumes
+  none ..." when it exists but cannot be read. A transfer then shows as the
+  account's own gain or loss until the ledger is read: the comparison never
+  silently assumes none.
+
+**A worked example** (made-up numbers). You start on Monday 2027-03-01 with
+10,000.00, all in SPY at a close of 100.00, so the shadow account holds 100
+shares.
+
+| Day | What happens | SPY close | Your account | Shadow account | Your return | SPY's return | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Mon 03-01 | Start | 100.00 | 10,000.00 | 100 shares, 10,000.00 | | | |
+| Tue 03-02 | SPY rises 10% | 110.00 | 11,000.00 | 100 shares, 11,000.00 | +10.00% | +10.00% | Level |
+| Wed 03-03 | You deposit 5,000.00 | 110.00 | 16,000.00 | buys 45.4545 shares: 145.4545 shares, 16,000.00 | +10.00% | +10.00% | Level |
+| Thu 03-04 | SPY goes ex-dividend, paying 1.00 a share | 109.00 | 16,000.00 | the 145.45 paid buys 1.3344 shares: 146.7889 shares, 16,000.00 | +10.00% | +10.00% | Level with SPY since 2027-03-01, gap +0.00 |
+
+On Wednesday your account jumped from 11,000.00 to 16,000.00, but 5,000.00
+of that is your own money: the time-weighted return takes it out, (16,000 −
+5,000) / 11,000, no change that day, so you are still +10.00%. Had the deposit
+been counted as a gain, the card would have said you were up 60% and beating
+SPY by 50 points. On Thursday SPY's price fell by the dividend it paid, 110.00
+to 109.00; your account, holding SPY, received the cash, so its value did not
+move. Counted as price only, SPY would show +9.00% and the card would say you
+were beating SPY by 1.0 point; with the dividend reinvested SPY's holder is
+level too, and the verdict says so.
+
 ## What the summary shows, and its limits
 
 - Holdings come from the broker's account snapshot.
@@ -583,12 +746,18 @@ drawing something misleading.
   possibly sent; the summary does not yet say a broker confirmed it. A dry-run
   releases orders without sending them.
 - Equity against SPY pairs the snapshot's net liquidation with SPY's closing
-  price on the same day. It is price return only (no dividends) and needs two
-  paired points before it shows a comparison. The comparison names the dates
-  it runs between; the last date can be earlier than the summary's day when
-  that day has no paired snapshot and close.
+  price on the same day, and needs two paired points before it shows a
+  comparison. The summary then opens with the same verdict line as the card,
+  with the dollar gap and both accounts' values beside it ("Beating SPY by
+  1.3 points since 2027-03-01; dollar gap +130.00 (account 13130.00, SPY
+  shadow 13000.00)"). The returns are time-weighted, against the SPY shadow
+  account ("How the comparison with SPY works", above), and the sentence of
+  what is counted follows them. The comparison names the dates it runs
+  between; the last date can be earlier than the summary's day when that day
+  has no paired snapshot and close.
 - The day's change compares the summary's day with the paired point before
-  it, and names both dates, so a gap of missing days shows as a longer span.
+  it, with that day's transfers taken out, and names both dates, so a gap of
+  missing days shows as a longer span.
   When the summary's day has no paired point it says "Day: not available"
   rather than showing an earlier day's change as today's.
 - Fills are read in both forms the engines record: the Turtle engine's and
@@ -746,6 +915,13 @@ passes `-clock-check`.
 | The equity card says "the run is starting; no history yet" | The current log holds only its configuration: a dry run still starting, such as its first run waiting for its first input. No other log names it, so it is no break, and nothing is alerted | Nothing: the line goes once the run records its next input. If it stays, check the engine and the adapter are running (`systemctl status`) |
 | The equity card says "the run started but recorded no approval; if the engine is not running, resume it with its approval (see the manual's "Restarting an engine" chapter, docs/manual/restart.md)" | In paper or live the engine records the run's approval itself, straight after its configuration, so a log that stays at its configuration is a start that crashed before its approval was recorded. Nothing is alerted for it | Check the engine (`systemctl status`). If it is not running, resume it with `-resume` and the `-approval` it was started with ([restart](restart.md)) |
 | The page shows a previous run after a restart | It should not: the page finds the current run, the newest link of the chain, on every request. If it does, the dashboard is an older build that still reads `TI_RUN` at start | Install the current build and restart the dashboard once (`sudo systemctl restart ti-dashboard`); after that no restart is needed |
+| The equity card or the summary says "deposits and withdrawals not yet recorded: the comparison assumes none ..." | No ledger was given (`-cash-ledger`), or the Flex reader has not written one yet. The comparison runs, but a deposit or withdrawal counts as the account's own gain or loss | If you have moved no money since the first paired day, nothing. Otherwise turn the Flex reader on ([reconciliation](reconciliation.md), "Deposits and withdrawals, read from IBKR") and check the unit passes `-cash-ledger` with the reader's path |
+| The equity card or the summary says "deposits and withdrawals not readable (<why>): the comparison assumes none ..." | The ledger exists but cannot be read (not readable by `ti-trader`), or a line of it is not a cash movement as the Flex reader writes it, or does not end with a whole line. Nothing of it is used, never a part | The Flex reader stops on the same ledger: follow its status file ([reconciliation](reconciliation.md), "What can go wrong"). Never edit the ledger by hand |
+| The equity card or the summary says "SPY price return only: dividends not counted" (or "price return only for <from>–<to>") | Some or all of SPY's bars in the period are of the older form, which carries no dividend-adjusted price, or the adjusted price's base changed between two runs on that step, so the SPY side leaves those dividends out | Nothing to do for a period already recorded; bars from the current market-data job carry the adjusted price. If new days still say so, check the data job ([market data](market-data.md)) |
+| The equity card or the summary says "ledger not accepted: it belongs to <x>, not <y>" | The `-cash-ledger` named is in another account's `flex/<instance>` folder than the engine folder it is paired with. Nothing of it is read, and the comparison assumes no transfer | Correct the unit's `-cash-ledger` to the account's own `/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl` ("Running the dashboard", above) |
+| The equity card or the summary says "deposits or withdrawals from the last two trading sessions may not be recorded yet; a transfer appears in the summary two trading sessions after it posts (a Friday transfer on Tuesday's)" (or "how far the Flex reader has recorded is not known ...") | The Flex reader has not yet read the summary's day: it runs at 21:30 New York, after the close's summary, and IBKR may post a day's transfer only the next evening. A transfer from the last two trading sessions is not in the comparison yet; it is in the summary two trading sessions after it posts (a Friday transfer on Tuesday's) | Nothing, if a later line says the day is recorded. If "not known" stays, check the reader's status file ([reconciliation](reconciliation.md), "What can go wrong") |
+| The equity card or the summary says "the recorded withdrawals reached or exceeded the SPY shadow's value on <date>; dollar figures are not meaningful after that day" (or "... dollar figures restart from <date>") | Your recorded withdrawals took the SPY shadow account to zero that day, so its dollar figures (the gap and the dollar line) mean nothing until your next deposit restarts it; the verdict, which is time-weighted, stays | Nothing to fix: it is a true statement of the record. If the withdrawal was not yours, check the ledger's transfers against IBKR's activity ([reconciliation](reconciliation.md)) |
+| It will not start: "dashboard: -cash-ledger ... must be SOURCE=PATH ...", "... names ..., which is no -journal or -engine-dir", "... is given twice for ..." or "... names no ledger file" | It refuses to guess which account a ledger belongs to; a `-journal`'s ledger is always named | Name each ledger as `SOURCE=PATH` with SOURCE exactly the `-engine-dir` or `-journal` it belongs to ("Running the dashboard", above) |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 
 ## What backs this
@@ -767,7 +943,14 @@ passes `-clock-check`.
   `TestANonPositiveWithheldSalePagesSellByHand`,
   `TestASaleRefusedAsBrokerHoldingPagesSellByHand`,
   `TestAChannelTheReporterCannotUseIsAnUrgentAlertOnTheOthers` and
-  `TestTheSummaryListsTheDaysSkippedTrades`.
+  `TestTheSummaryListsTheDaysSkippedTrades`; for the SPY comparison,
+  `TestADepositMidSeriesIsNotOutperformance`,
+  `TestAWithdrawalMidSeriesIsNotUnderperformance`,
+  `TestADividendExDateLiftsTheBenchmarkSide`,
+  `TestTheVerdictSaysWhetherTheAccountIsBeatingSPY`,
+  `TestTheAssumptionNamesALedgerThatIsAbsentOrUnreadable`,
+  `TestAVersion1SeriesSaysDividendsAreNotCounted` and
+  `TestATransferIsMirroredAtTheCloseOfItsNewYorkDayOrTheNextSession`.
 - Tests in `cmd/reporter`, among them
   `TestAJournalTheReporterCannotReadStillAlertsAndChecksTheHeartbeat`,
   `TestAFailureOnOneChannelIsNeverADeliveryAndOnlyThatChannelIsRetried`,
@@ -776,12 +959,17 @@ passes `-clock-check`.
   `TestTheSecretsFileSuppliesTheChannelSecrets`,
   `TestOneChannelsBadSecretNeverSilencesTheOther`,
   `TestAMalformedSecretsLineSetsAsideOnlyWhatItLeavesUnset`,
-  `TestTheServiceFileRunsTheReporterOnTheEnginesLog` and
+  `TestTheServiceFileRunsTheReporterOnTheEnginesLog`,
+  `TestTheDailySummaryGivesTheVerdictWithTheFlexLedgersTransfersMirrored` and
   `TestTheTimerMakesTheRepeatAndAcknowledgementBoundsTrue`.
 - Tests in `cmd/dashboard`, among them `TestEveryRouteRefusesEveryWritingMethod`,
   `TestDashboardShowsTheDaysSkippedTrades`,
   `TestDashboardRefusesAJournalThatDoesNotVerify`,
-  `TestListenAddressMustBeLoopbackOrThisHostsTailscaleAddress` and
+  `TestListenAddressMustBeLoopbackOrThisHostsTailscaleAddress`,
+  `TestTheEquityCardOpensWithTheVerdictInWordsAndColour`,
+  `TestTheChartDrawsGrowthSoADepositDoesNotBendIt`,
+  `TestTheDashboardReadsTheFlexLedgerForEachEngineDirectory`,
+  `TestTheCashLedgerFlagNamesTheAccountItBelongsTo` and
   `TestTheServiceFileServesTheBoostLogOnTheOnePort`.
 - `deploy/rehearse.sh`, which installs the programs in a clean Ubuntu
   container and runs the reporter with its unit's own command line.

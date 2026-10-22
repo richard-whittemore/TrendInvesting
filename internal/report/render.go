@@ -17,6 +17,11 @@ func RenderText(s Summary) string {
 	} else {
 		b.WriteString("No account snapshot recorded.\n")
 	}
+	// The verdict comes first, so whether the account is beating the
+	// benchmark is read at a glance; the figures it rests on follow below.
+	if s.Equity.Available {
+		b.WriteString(VerdictLine(s.Equity, s.Benchmark) + "\n")
+	}
 	if s.CashChecked {
 		fmt.Fprintf(&b, "Cash drift since the previous close %.2f; unexplained cash since the cash was last explained (a reconciliation the engine explained, else the starting book, always Boost's as its book carries no cash; the day's drift when the run's chain holds neither) %.2f\n", s.CashDrift, s.UnexplainedCash)
 	} else if s.CashUnchecked {
@@ -93,13 +98,14 @@ func RenderText(s Summary) string {
 	switch {
 	case s.Equity.Available:
 		e := s.Equity
-		fmt.Fprintf(&b, "Equity vs %s,%s %s to %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",
+		fmt.Fprintf(&b, "Equity vs %s,%s %s to %s, time-weighted: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",
 			s.Benchmark, from, e.StartDate, e.EndDate, e.AccountReturn*100, s.Benchmark, e.BenchmarkReturn*100, e.Excess*100)
 		if e.DayAvailable {
 			fmt.Fprintf(&b, "Day, %s to %s: account %+.2f%%, %s %+.2f%%\n", e.DayStartDate, e.EndDate, e.DayAccountReturn*100, s.Benchmark, e.DayBenchmarkReturn*100)
 		} else {
 			fmt.Fprintf(&b, "Day: not available (no paired snapshot and %s close on %s)\n", s.Benchmark, s.Date)
 		}
+		b.WriteString(e.Assumption + "\n")
 	default:
 		fmt.Fprintf(&b, "Equity vs %s: not enough paired snapshots and bars yet.\n", s.Benchmark)
 	}

@@ -35,7 +35,10 @@ LoadCredential=secrets:/etc/trend-investing/secrets.env
 # host-clock.json in the reports directory, under a lock.
 # The state file of delivered alerts is per account, so it outlives a run:
 # an alert already delivered is not sent again from a later run's log.
-ExecStart=/opt/trend-investing/bin/ti-reporter -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json
+# The Flex reader's ledger of the account's deposits and withdrawals
+# (ti-flex@%i) is read for the daily summary's SPY shadow account; until the
+# reader has written it the summary says the comparison assumes none.
+ExecStart=/opt/trend-investing/bin/ti-reporter -journal ${TI_STATE_DIR}/${TI_RUN}.log -state ${TI_REPORTS_DIR}/%i.reporter.json -secrets-file %d/secrets -channel ntfy,pagerduty -summary -account %i -clock-check /usr/local/libexec/trend-investing/clock-check.sh -clock-state ${TI_REPORTS_DIR}/host-clock.json -cash-ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

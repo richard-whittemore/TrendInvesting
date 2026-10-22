@@ -117,7 +117,7 @@ func TestABrokenChainNamesBothLogsInTheEquityComparison(t *testing.T) {
 	// with the break named above it.
 	text := report.RenderText(got)
 	broke := strings.Index(text, "Equity vs SPY: history unavailable: the chain of runs is broken between run2.log and run1.log\n")
-	over := strings.Index(text, "Equity vs SPY, from run2.log, the first intact run it includes, "+day(3).Format("2006-01-02")+" to "+day(4).Format("2006-01-02")+": account ")
+	over := strings.Index(text, "Equity vs SPY, from run2.log, the first intact run it includes, "+day(3).Format("2006-01-02")+" to "+day(4).Format("2006-01-02")+", time-weighted: account ")
 	if broke < 0 || over < broke || !strings.Contains(text, "Day, "+day(3).Format("2006-01-02")) {
 		t.Fatalf("text:\n%s", text)
 	}

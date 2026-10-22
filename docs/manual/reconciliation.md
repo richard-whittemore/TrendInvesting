@@ -468,6 +468,18 @@ needs only each transfer's amount and date, which are exact.
   start. A record can explain cash; it cannot place an order. The adapter's
   cash-drift check subtracts the recorded transfers before applying its 1%
   bound; a transfer the reader missed still shows as drift.
+- **The SPY comparison reads it too.** The daily summary and the dashboard
+  read the ledger directly (their `-cash-ledger` flag) and mirror each deposit
+  and withdrawal in the SPY shadow account, so a transfer is never counted as
+  a gain or a loss of the strategy (alerts and dashboard chapter, "How the
+  comparison with SPY works"). Until the reader has written the ledger, or
+  recorded a reading in its status file, they say the comparison assumes no
+  transfer. They also read the status file's `covered_to` and say
+  "transfers recorded through <day>", adding that deposits or
+  withdrawals from the last two trading sessions may not be recorded yet when
+  the summary's day is later (a transfer is in the summary two trading
+  sessions after it posts: a Friday transfer in Tuesday's), and they take a
+  ledger only from the account's own `flex/<instance>` folder.
 
 **When.** `ti-flex@<instance>.timer` (one per account: `ti-flex@boost`,
 `ti-flex@trad-ira`, `ti-flex@roth-ira`) runs it on weekdays at 9:30 p.m. New
@@ -637,10 +649,10 @@ reading has checked everything, so a stopped reading leaves it as it was.
   the comparison of open orders; the joint account's cash; matching each cash
   activity to IBKR's activity rows rather than comparing one net total; and
   the outside heartbeat monitor. These are tracked as follow-up issues.
-- The engine and the adapter read the Flex reader's ledger, but the reporter
-  does not page when the reader is set aside (you see a failed unit only, and
-  after two sessions a pending cash read becomes Degraded), the
-  dashboard's comparison does not yet use the deposits and withdrawals, and
-  the dividends, interest and fees it reads are not yet recorded. An IRA's
-  reader runs only once that IRA's engine runs (its `run.env`) and you fill
-  in its account file.
+- Built: the engine's reconciliation, the daily summary and the dashboard all
+  read the ledger's deposits and withdrawals (see the sections above).
+  Not built: a page from the reporter when the Flex reader itself is set aside
+  (today you see a failed unit only, and after two sessions a pending cash read
+  becomes Degraded); and the dividends, interest and fees the reader parses are
+  not yet recorded (a follow-up issue). An IRA's reader runs only once
+  that IRA's engine runs (its `run.env`) and you fill in its account file.

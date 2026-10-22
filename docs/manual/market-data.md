@@ -75,7 +75,11 @@ a vendor's own adjusted series:
 - **Split- and dividend-adjusted**: also corrected for cash paid out, so a
   dividend is not a false drop. Boost's RSI(2) and momentum's scores,
   volatility and trend read this view. Orders are still priced from the raw
-  close.
+  close. The daily summary and the dashboard also read SPY's in this view,
+  for the SPY side of the equity comparison only: its day-to-day ratios are
+  SPY held with its dividends reinvested (alerts and dashboard chapter, "How
+  the comparison with SPY works"). Your own account's figures never come
+  from it.
 
 The rule (stated in `adjust.py`) is the one QuantConnect uses: a split
 multiplies by its ratio, and the cash dividends sharing one ex-date are one

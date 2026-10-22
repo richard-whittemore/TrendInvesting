@@ -38,9 +38,10 @@ func markerAt(x, y float64) marker {
 	return marker{CX: f(x), CY: f(y), SX: f(x - 4), SY: f(y - 4)}
 }
 
-// equityView is the equity chart: each series as the growth of its first
-// paired point rebased to 100, one path per series with one vertex per paired
-// point. Drawn is false when there are fewer than two paired points, and the
+// equityView is the equity chart: each side's time-weighted growth since the
+// first paired point, rebased to 100 there (report.EquityPoint), one path per
+// series with one vertex per paired point, so a deposit or withdrawal bends
+// neither line. Drawn is false when there are fewer than two paired points, and the
 // page then says so instead of drawing.
 type equityView struct {
 	Drawn                            bool
@@ -64,7 +65,7 @@ func equityChart(s report.Summary) equityView {
 	acct, bench := make([]float64, len(pts)), make([]float64, len(pts))
 	lo, hi := 100.0, 100.0
 	for i, p := range pts {
-		acct[i], bench[i] = 100*p.Net/pts[0].Net, 100*p.Benchmark/pts[0].Benchmark
+		acct[i], bench[i] = p.AccountGrowth, p.BenchmarkGrowth
 		lo, hi = math.Min(lo, math.Min(acct[i], bench[i])), math.Max(hi, math.Max(acct[i], bench[i]))
 	}
 	if hi-lo < 0.01 {
@@ -95,7 +96,7 @@ func equityChart(s report.Summary) equityView {
 		AccountEnd: fmt.Sprintf("%.2f", acct[last]), BenchmarkEnd: fmt.Sprintf("%.2f", bench[last]),
 		AccountEndY: f(y(acct[last]) + 4), BenchmarkEndY: f(y(bench[last]) + 4),
 		StartDate: pts[0].Date, EndDate: pts[last].Date,
-		Label: fmt.Sprintf("%s, equity against %s, both rebased to 100.00 on %s. On %s the account stands at %.2f and %s at %.2f.",
+		Label: fmt.Sprintf("%s, time-weighted growth against %s's shadow account, both rebased to 100.00 on %s, so deposits and withdrawals do not move either line. On %s the account stands at %.2f and %s at %.2f.",
 			s.AccountID, s.Benchmark, pts[0].Date, pts[last].Date, acct[last], s.Benchmark, bench[last]),
 	}
 	for i := 0; i < 4; i++ {
@@ -109,7 +110,8 @@ func equityChart(s report.Summary) equityView {
 type bar struct{ AX, AY, AH, BX, BY, BH string }
 
 // stripView is the strip of changes between paired points: for each pair of
-// consecutive paired points (at most the most recent stripCap), the account's change and the benchmark's as a pair of bars
+// consecutive paired points (at most the most recent stripCap), the account's
+// time-weighted change and the benchmark's, with transfers left out, as a pair of bars
 // about a zero line, above it for a rise and below for a fall, on one scale.
 type stripView struct {
 	Drawn                             bool
@@ -136,7 +138,7 @@ func dailyChangeStrip(s report.Summary) stripView {
 	acct, bench := make([]float64, days), make([]float64, days)
 	maxAbs := 0.0
 	for i := 1; i < len(pts); i++ {
-		acct[i-1], bench[i-1] = pts[i].Net/pts[i-1].Net-1, pts[i].Benchmark/pts[i-1].Benchmark-1
+		acct[i-1], bench[i-1] = pts[i].AccountGrowth/pts[i-1].AccountGrowth-1, pts[i].BenchmarkGrowth/pts[i-1].BenchmarkGrowth-1
 		maxAbs = math.Max(maxAbs, math.Max(math.Abs(acct[i-1]), math.Abs(bench[i-1])))
 	}
 	if maxAbs == 0 {
@@ -160,7 +162,7 @@ func dailyChangeStrip(s report.Summary) stripView {
 		LabelX: f(chartLeft - 8), TopText: f(chartTop + 4), MidText: f(mid + 4), BotText: f(chartBottom + 4),
 		TopLabel: fmt.Sprintf("+%.2f%%", maxAbs*100), BottomLabel: fmt.Sprintf("−%.2f%%", maxAbs*100),
 		StartDate: pts[0].Date, EndDate: pts[days].Date,
-		Label: fmt.Sprintf("%s, change between paired points from %s to %s, %d changes: the account's change as one bar and %s's as the next, above the zero line for a rise and below for a fall, on a scale of plus or minus %.2f percent.",
+		Label: fmt.Sprintf("%s, change between paired points from %s to %s, %d changes: the account's time-weighted change, deposits and withdrawals left out, as one bar and %s's as the next, above the zero line for a rise and below for a fall, on a scale of plus or minus %.2f percent.",
 			s.AccountID, pts[0].Date, pts[days].Date, days, s.Benchmark, maxAbs*100),
 	}
 	for i := 0; i < days; i++ {
