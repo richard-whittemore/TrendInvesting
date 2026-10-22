@@ -334,3 +334,21 @@ func TestRulesVersionDeclaresTheRetiredOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheNamedLiveSale pins ADR 0016's
+// same-rules-version replay guarantee for the run's own live sale back to
+// 98% (ADR 0026, point 2, "Boost", and point 5, amended 2026-10-22): each
+// Boost decision records it, at decision schema version 8, whether or not a
+// venue has named it and whether or not part of it has filled, and a run
+// restarted from the decision reads the venue's later reports on it, where
+// 1.23.0 recorded no such sale and refused those reports. A journal holding
+// one decides differently, so the build must not claim 1.23.0 or earlier.
+func TestRulesVersionDeclaresTheNamedLiveSale(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0", "1.12.0", "1.13.0", "1.14.0", "1.15.0", "1.16.0", "1.17.0", "1.18.0", "1.19.0", "1.20.0", "1.21.0", "1.22.0", "1.23.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.23.0 once a decision records a live sale a venue named", targetweight.RulesVersion)
+		}
+	}
+}

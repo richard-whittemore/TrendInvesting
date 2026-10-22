@@ -203,6 +203,11 @@ type options struct {
 	noSnap   map[int]bool // sessions with no account snapshot
 	noMark   map[int]bool // sessions with no mark
 	recovery *event.Envelope
+	// refusedRecovery are recovered decisions the handler is expected to
+	// refuse, fed straight before recovery, each committed, refused or not,
+	// under its own next sequence number; run.refusals holds what each
+	// returned.
+	refusedRecovery []event.Envelope
 	// recorded are an earlier run's journalled records, fed after the
 	// configuration and before the recovered decision.
 	recorded []event.Envelope
@@ -411,6 +416,8 @@ type run struct {
 	entries   []journal.Entry
 	recorder  *journal.Recorder
 	hash      string
+	// refusals are what each of options.refusedRecovery returned, in order.
+	refusals []error
 }
 
 // simulate feeds the synthetic series session by session through a journal
@@ -468,6 +475,13 @@ func simulate(t *testing.T, opts options) run {
 		e.Sequence = s.sequence
 		e.CausationID, e.CorrelationID = "", ""
 		apply(e)
+	}
+	for _, e := range opts.refusedRecovery {
+		s.sequence++
+		e.Sequence = s.sequence
+		e.CausationID, e.CorrelationID = "", ""
+		_, err := rec.Apply(context.Background(), e)
+		r.refusals = append(r.refusals, err)
 	}
 	if opts.recovery != nil {
 		recovered := *opts.recovery
