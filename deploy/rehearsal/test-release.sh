@@ -517,6 +517,17 @@ grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release r
 printf '/bin/bash\0-o\0pipefail\0/usr/local/sbin/ti-release\0v1\0' >"$TI_PROC/999999/cmdline"
 expect "--status with a shell option that takes an argument" 0 "$(run --status)"
 grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as bash -o pipefail ti-release: $(cat "$work/out")"
+# A short-option cluster ending in o or O, and the +o/+O forms, take the next
+# word as their argument exactly as bare -o/-O do; a cluster not ending in o
+# does not.
+for words in '/bin/bash\0-euo\0pipefail\0/usr/local/sbin/ti-release\0v1\0' \
+  '/bin/bash\0+o\0errexit\0/usr/local/sbin/ti-release\0' \
+  '/bin/bash\0-xO\0extglob\0/usr/local/sbin/ti-release\0' \
+  '/bin/bash\0-eu\0/usr/local/sbin/ti-release\0'; do
+  printf '%b' "$words" >"$TI_PROC/999999/cmdline"
+  expect "--status with an option cluster before the script" 0 "$(run --status)"
+  grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release run as a shell with options ($words): $(cat "$work/out")"
+done
 # A shell with only options and no script is another program; the option-only
 # command line must not trip set -u.
 printf '/bin/bash\0-x\0' >"$TI_PROC/999999/cmdline"

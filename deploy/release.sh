@@ -151,8 +151,9 @@ if test "$mode" = status; then
       # would fail): look at the process table instead, and at what the pid
       # runs, since a dead release's pid may have been given to another program.
       # argv[0] names the release, or, when it is a shell, the first word after
-      # the shell's options does: -o, -O, --rcfile and --init-file take the
-      # next word as their argument, -c runs a command string (no script), and
+      # the shell's options does: -o, -O (also +o, +O, and a short-option
+      # cluster ending in o or O such as -euo), --rcfile and --init-file take
+      # the next word as their argument, -c runs a command string (no script), and
       # a later word never counts, so a script that merely names ti-release
       # in its arguments is not the release.
       a0=""
@@ -167,7 +168,8 @@ if test "$mode" = status; then
             while IFS= read -r -d '' w || [ -n "$w" ]; do
               if test "$skip" = 1; then skip=0; w=""; continue; fi
               case $w in
-                -o | -O | --rcfile | --init-file) skip=1 ;;
+                --rcfile | --init-file) skip=1 ;;
+                [-+]*[oO]) case ${w#?} in *[!A-Za-z]*) ;; *) skip=1 ;; esac ;;
                 -c | -[a-zA-Z]*c) break ;;
                 -*) ;;
                 *)
