@@ -233,12 +233,13 @@ class ReadOnceTests(unittest.TestCase):
         self.chain("2027-01-12T14:00:00Z", (("s1", "2027-01-13T21:00:00Z", 8530.0),
                                             ("s2", "2027-01-14T21:00:00Z", 11030.0)))
 
-    def chain(self, approved_at, snapshots, approved=True):
+    def chain(self, approved_at, snapshots, approved=True, approval_version=3):
         """A first run approved at approved_at (its starting book stated), holding snapshots (ID, as of, value)."""
         self.log = self.dir / "run-{}.log".format(len(list(self.dir.glob("run-*.log"))) + 1)
         approval = run_approval(ACCOUNT, starting_book=({}, 8000.0))
         approval["approved_at"] = approved_at
-        self.engine = LoggedEngine(str(self.log), approval=approval if approved else None)
+        self.engine = LoggedEngine(str(self.log), approval=approval if approved else None,
+                                   approval_version=approval_version)
         for ident, as_of, value in snapshots:
             snapshot(self.engine, ident, as_of, value)
 
@@ -352,6 +353,16 @@ class ReadOnceTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in self.records()], ["ibkr-flex:900000102"])
         self.assertIn("900000101", self.out.getvalue())
         self.assertEqual(self.status()["in_first_book"], 1)
+
+    def test_a_first_run_approved_at_each_version_stating_the_book_has_its_time_read(self):
+        # Versions 3 to 5 of operator.run.approved state the starting book;
+        # cmd/engine records the current one (internal/event).
+        for version in (3, 4, 5):
+            with self.subTest(version=version):
+                self.chain("2027-01-15T14:00:00Z", (("s1", "2027-01-15T21:00:00Z", 11030.0),),
+                           approval_version=version)
+                self.assertTrue(self.read(FakeFlex()))
+                self.assertEqual(self.status()["in_first_book"], 1)
 
     def test_a_transfer_on_the_first_snapshots_day_after_the_approval_is_written(self):
         # Approved 08:00 New York, a deposit at 14:00, the first close snapshot at 16:00, which already holds it.

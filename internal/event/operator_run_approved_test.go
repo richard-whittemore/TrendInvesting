@@ -239,7 +239,7 @@ func TestAnApprovalCarriesTheIncidentsCashScope(t *testing.T) {
 	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 2); err != nil {
 		t.Errorf("a version 2 approval: %v", err)
 	}
-	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 5); err == nil || !strings.Contains(err.Error(), "schema version 5") {
+	if _, err := event.DecodeRecordedOperatorRunApproved([]byte(cashOnly), 6); err == nil || !strings.Contains(err.Error(), "schema version 6") {
 		t.Errorf("an approval at an unknown schema version: %v", err)
 	}
 }
@@ -266,7 +266,7 @@ func TestOperatorRunApprovedValidateSchema(t *testing.T) {
 	if err := withCash.ValidateSchema(1); err == nil || !strings.Contains(err.Error(), "cash") {
 		t.Errorf("version 1 naming a cash scope: %v", err)
 	}
-	for _, v := range []uint32{0, 5} {
+	for _, v := range []uint32{0, 6} {
 		if err := plain.ValidateSchema(v); err == nil || !strings.Contains(err.Error(), "schema version") {
 			t.Errorf("version %d: %v", v, err)
 		}
@@ -392,8 +392,8 @@ func TestAFirstRunsApprovalStatesTheStartingBook(t *testing.T) {
 // approval may leave it out, as none (ADR 0026, point 2, "Order identity";
 // ADR 0015).
 func TestAnApprovalCarriesTheIncidentsRetiredSaleAttempts(t *testing.T) {
-	if event.OperatorRunApprovedSchemaVersion != 4 {
-		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 4 once an approval states the retired sale attempts", event.OperatorRunApprovedSchemaVersion)
+	if event.OperatorRunApprovedSchemaVersion < 4 {
+		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want at least 4 once an approval states the retired sale attempts", event.OperatorRunApprovedSchemaVersion)
 	}
 	p := validOperatorRunApprovedInIncident()
 	p.IncidentInForce.SaleRetiredAttempts = 2
@@ -419,5 +419,102 @@ func TestAnApprovalCarriesTheIncidentsRetiredSaleAttempts(t *testing.T) {
 	}
 	if _, err := event.DecodeRecordedOperatorRunApproved(raw, 4); err != nil {
 		t.Errorf("a version 4 approval leaving the retired attempts out: %v", err)
+	}
+}
+
+// validOperatorRunApprovedSettled is an approval carrying an incident in
+// force whose sale the adapter settled as never sent.
+func validOperatorRunApprovedSettled() event.OperatorRunApprovedPayload {
+	p := validOperatorRunApprovedInIncident()
+	p.AccountID, p.PreviousLog = "joint", "run-1.log"
+	p.IncidentInForce.SaleAttempted, p.IncidentInForce.SaleClientOrderID = new(false), ""
+	p.IncidentInForce.SaleRetiredAttempts = 1
+	p.IncidentInForce.SaleSettlements = []event.NeverSentSettlement{settledSale()}
+	return p
+}
+
+// settledSale is the adapter's settlement of the in-incident approval's
+// sale, joint-sale-1, as never sent by the run it names.
+func settledSale() event.NeverSentSettlement {
+	return event.NeverSentSettlement{
+		Log: "run-1.log", Run: "operator-run-approved:run-0.log", InputID: "session:1", Evidence: event.NeverSentUnmarked,
+		Retirement: event.OrderRetiredPayload{
+			AccountID: "joint", ClientOrderID: "joint-sale-1", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 5, LimitPrice: 90,
+			Reason: event.OrderRetiredByOwnerReason, Detail: "the run ended before the adapter sent it", RetiredBy: "owner",
+			RetiredAt: time.Date(2026, time.October, 17, 21, 0, 0, 0, time.UTC),
+		},
+	}
+}
+
+// TestAnApprovalCarriesTheAdaptersSettlementsOfNeverSentSales: from schema
+// version 5 an incident in force carries the adapter's settlement of each
+// of its sales the previous run released and the adapter never sent, the
+// evidence the engine checks against the approved log before it counts the
+// sale retired (ADR 0019, amended 2026-10-17, reading 4, as the owner's
+// decision of 2026-10-22 reads it). Each must be valid, name the approved
+// log and the approval's account, be counted among the retired attempts and
+// name its order once; an earlier version cannot state one, and none is left
+// out (ADR 0015).
+func TestAnApprovalCarriesTheAdaptersSettlementsOfNeverSentSales(t *testing.T) {
+	if event.OperatorRunApprovedSchemaVersion != 5 {
+		t.Fatalf("OperatorRunApprovedSchemaVersion = %d, want 5 once an approval carries the adapter's settlements", event.OperatorRunApprovedSchemaVersion)
+	}
+	p := validOperatorRunApprovedInIncident()
+	p.AccountID, p.PreviousLog = "joint", "run-1.log"
+	p.IncidentInForce.SaleAttempted, p.IncidentInForce.SaleClientOrderID = new(false), ""
+	p.IncidentInForce.SaleRetiredAttempts = 1
+	p.IncidentInForce.SaleSettlements = []event.NeverSentSettlement{settledSale()}
+	if err := p.ValidateSchema(5); err != nil {
+		t.Fatalf("version 5 carrying a settlement: %v", err)
+	}
+	if err := p.ValidateSchema(4); err == nil || !strings.Contains(err.Error(), "sale_settlements") {
+		t.Errorf("version 4 carrying a settlement: %v", err)
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := event.DecodeOperatorRunApproved(raw); err != nil {
+		t.Errorf("decode a version 5 approval carrying a settlement: %v", err)
+	}
+	for name, c := range map[string]struct {
+		change func(*event.OperatorRunApprovedPayload)
+		want   string
+	}{
+		"another log": {func(p *event.OperatorRunApprovedPayload) { p.IncidentInForce.SaleSettlements[0].Log = "run-0.log" }, "run-0.log"},
+		"another account": {func(p *event.OperatorRunApprovedPayload) {
+			p.IncidentInForce.SaleSettlements[0].Retirement.AccountID = "ira"
+		}, "ira"},
+		"uncounted": {func(p *event.OperatorRunApprovedPayload) { p.IncidentInForce.SaleRetiredAttempts = 0 }, "retired attempts"},
+		"named twice": {func(p *event.OperatorRunApprovedPayload) {
+			p.IncidentInForce.SaleSettlements = append(p.IncidentInForce.SaleSettlements, settledSale())
+			p.IncidentInForce.SaleRetiredAttempts = 2
+		}, "twice"},
+		"no evidence": {func(p *event.OperatorRunApprovedPayload) { p.IncidentInForce.SaleSettlements[0].Evidence = "" }, "evidence"},
+		"an invalid order": {func(p *event.OperatorRunApprovedPayload) {
+			p.IncidentInForce.SaleSettlements[0].Retirement.Quantity = 0
+		}, "quantity"},
+		"not the owner's": {func(p *event.OperatorRunApprovedPayload) {
+			s := &p.IncidentInForce.SaleSettlements[0].Retirement
+			s.Reason, s.RetiredBy = event.OrderRetiredSessionOver, event.OrderRetiredByAdapter
+		}, "owner"},
+		"no releasing input": {func(p *event.OperatorRunApprovedPayload) { p.IncidentInForce.SaleSettlements[0].InputID = "" }, "input"},
+	} {
+		q := p
+		in := *p.IncidentInForce
+		in.SaleSettlements = []event.NeverSentSettlement{settledSale()}
+		q.IncidentInForce = &in
+		c.change(&q)
+		if err := q.Validate(); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: Validate = %v, want a refusal saying %q", name, err, c.want)
+		}
+	}
+	p.IncidentInForce.SaleSettlements = nil
+	raw, err = json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sale_settlements") {
+		t.Errorf("no settlement is left out: %s", raw)
 	}
 }

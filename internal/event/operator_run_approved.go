@@ -32,10 +32,12 @@ const OperatorRunApprovedEventType = "operator.run.approved"
 // state; version 3 adds the starting book (StartingBook), and with it a
 // first run's approval, which names no previous log; version 4 adds the
 // incident in force's retired sale attempts
-// (IncidentInForce.SaleRetiredAttempts), omitted when none;
+// (IncidentInForce.SaleRetiredAttempts), omitted when none; version 5 adds
+// the adapter's settlements of the incident's never-sent sales
+// (IncidentInForce.SaleSettlements), omitted when none;
 // DecodeRecordedOperatorRunApproved reads each (ADR 0015: a payload's shape
 // is versioned).
-const OperatorRunApprovedSchemaVersion uint32 = 4
+const OperatorRunApprovedSchemaVersion uint32 = 5
 
 // recordHashPattern is a journal record hash as the chain writes it (ADR
 // 0017): "sha256:" and 64 lower-case hex digits.
@@ -159,6 +161,15 @@ type IncidentInForce struct {
 	// a retired order's (orderplan.SaleAttemptClientOrderID; ADR 0026, point
 	// 2, "Order identity"). Schema version 4; omitted when none.
 	SaleRetiredAttempts int `json:"sale_retired_attempts,omitempty"`
+	// SaleSettlements are the adapter's settlements of the incident's sales
+	// the previous run released and the adapter never sent, written after
+	// that run ended (NeverSentSettlement): the evidence on which the
+	// approval counts each among SaleRetiredAttempts and states the sale not
+	// attempted, which the engine checks against the previous log by its own
+	// retirement rule before the fresh run starts (ADR 0019, amended
+	// 2026-10-17, reading 4, as the owner's decision of 2026-10-22 reads
+	// it). Schema version 5; omitted when none.
+	SaleSettlements []NeverSentSettlement `json:"sale_settlements,omitempty"`
 }
 
 // Validate checks the account, the previous log's name and hash, who
@@ -223,11 +234,41 @@ func (p OperatorRunApprovedPayload) Validate() error {
 		if in.SaleRetiredAttempts < 0 {
 			errs = append(errs, fmt.Errorf("incident in force: sale retired attempts %d is fewer than none", in.SaleRetiredAttempts))
 		}
+		errs = append(errs, p.settlementErrors()...)
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid operator run approved payload: %w", err)
 	}
 	return nil
+}
+
+// settlementErrors checks the incident in force's settlements of never-sent
+// sales: each valid, of the approved log and the approval's account, naming
+// its order once, and every one counted among the retired attempts.
+func (p OperatorRunApprovedPayload) settlementErrors() []error {
+	in := p.IncidentInForce
+	var errs []error
+	seen := map[string]bool{}
+	for _, s := range in.SaleSettlements {
+		id := s.Retirement.ClientOrderID
+		if err := s.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("incident in force: %w", err))
+		}
+		if s.Log != p.PreviousLog {
+			errs = append(errs, fmt.Errorf("incident in force: the settlement of order %q names log %q, not the approved previous log %q", id, s.Log, p.PreviousLog))
+		}
+		if s.Retirement.AccountID != p.AccountID {
+			errs = append(errs, fmt.Errorf("incident in force: the settlement of order %q is for account %q; the approval is for %q", id, s.Retirement.AccountID, p.AccountID))
+		}
+		if seen[id] {
+			errs = append(errs, fmt.Errorf("incident in force: order %q is settled twice; a settlement names each order once", id))
+		}
+		seen[id] = true
+	}
+	if len(in.SaleSettlements) > in.SaleRetiredAttempts {
+		errs = append(errs, fmt.Errorf("incident in force: %d sales settled as never sent, but sale retired attempts is %d: each settled sale is a retired attempt", len(in.SaleSettlements), in.SaleRetiredAttempts))
+	}
+	return errs
 }
 
 // firstRunErrors checks a first run's approval: no earlier run, so no final
@@ -253,7 +294,8 @@ func (p OperatorRunApprovedPayload) firstRunErrors() []error {
 // read, in DecodeRecordedOperatorRunApproved); versions 1 and 2 cannot state
 // a starting book, which version 3 may (ADR 0027, amended 2026-10-18);
 // versions 1 to 3 cannot state an incident's retired sale attempts, which
-// version 4 may; any other version is refused.
+// version 4 may; versions 1 to 4 cannot carry an incident's settlements of
+// never-sent sales, which version 5 may; any other version is refused.
 func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 	if version < 1 || version > OperatorRunApprovedSchemaVersion {
 		return fmt.Errorf("the approval's schema version %d is not one this build reads (1 to %d; ADR 0015)", version, OperatorRunApprovedSchemaVersion)
@@ -266,16 +308,19 @@ func (p OperatorRunApprovedPayload) ValidateSchema(version uint32) error {
 		return fmt.Errorf("a schema version %d approval cannot state a starting book; version %d states it", version, startingBookVersion)
 	case version < retiredAttemptsVersion && in != nil && in.SaleRetiredAttempts != 0:
 		return fmt.Errorf("a schema version %d approval cannot state incident_in_force.sale_retired_attempts; version %d states it", version, retiredAttemptsVersion)
+	case version < settlementsVersion && in != nil && len(in.SaleSettlements) > 0:
+		return fmt.Errorf("a schema version %d approval cannot state incident_in_force.sale_settlements; version %d states them", version, settlementsVersion)
 	}
 	return p.Validate()
 }
 
-// startingBookVersion and retiredAttemptsVersion are the approval schema
-// versions that add the starting book and an incident's retired sale
-// attempts.
+// startingBookVersion, retiredAttemptsVersion and settlementsVersion are
+// the approval schema versions that add the starting book, an incident's
+// retired sale attempts and its settlements of never-sent sales.
 const (
 	startingBookVersion    uint32 = 3
 	retiredAttemptsVersion uint32 = 4
+	settlementsVersion     uint32 = 5
 )
 
 // approvalKeys are the keys an approval file must state, null included: a
@@ -315,9 +360,10 @@ func DecodeOperatorRunApproved(raw []byte) (OperatorRunApprovedPayload, error) {
 // not name one; versions 2 to 4 must state it; versions 3 and 4 must also
 // state the starting_book key, null when the approval states no book, and a
 // book it states must state its positions, total_cash and currency, none
-// null, while versions 1 and 2 may not state the key; only version 4 may
-// state an incident's sale_retired_attempts, which it may leave out as none
-// (ValidateSchema); any other version is refused (ADR 0015).
+// null, while versions 1 and 2 may not state the key; only versions 4 and 5
+// may state an incident's sale_retired_attempts, and only version 5 its
+// sale_settlements, each of which may be left out as none (ValidateSchema);
+// any other version is refused (ADR 0015).
 func DecodeRecordedOperatorRunApproved(raw []byte, schemaVersion uint32) (OperatorRunApprovedPayload, error) {
 	if schemaVersion < 1 || schemaVersion > OperatorRunApprovedSchemaVersion {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval's schema version %d is not one this build reads (1 to %d; ADR 0015)", schemaVersion, OperatorRunApprovedSchemaVersion)

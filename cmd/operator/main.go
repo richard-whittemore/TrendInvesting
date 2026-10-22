@@ -319,6 +319,7 @@ func approve(args []string, out io.Writer) error {
 	positions := flags.String("positions", "", "the starting book's holdings checked in IBKR, SYM=shares,...; empty when none")
 	cash := flags.String("cash", "", "the starting book's total cash (IBKR's TotalCashValue)")
 	currency := flags.String("currency", "", "the starting book's cash currency, such as USD")
+	neverSent := flags.String("never-sent", "", "the adapter's settlements of the orders the previous run released and it never sent, its PENDING_FILE.never-sent file, written by `relay.py settle-ended-run` once that run ended: a sale back to 98% settled there is stated not attempted, so the fresh run tries it again (ADR 0019)")
 	atFlag := flags.String("at", "", "when, as an RFC 3339 time; now when omitted")
 	if err := parse(flags, args); err != nil {
 		return err
@@ -330,6 +331,8 @@ func approve(args []string, out io.Writer) error {
 		return errors.New("operator: -first-run approves an account's first run, which has no previous log: leave out -log")
 	case *firstRun && set["clear-incident"]:
 		return errors.New("operator: -first-run approves an account's first run, which has no incident to clear: leave out -clear-incident")
+	case *firstRun && *neverSent != "":
+		return errors.New("operator: -first-run approves an account's first run, which no earlier run left an order for: leave out -never-sent")
 	case *firstRun && *saleAttempted:
 		return errors.New("operator: -first-run approves an account's first run, which has no incident whose sale to state: leave out -sale-attempted")
 	case *saleAttempted && (!set["positions"] || !set["cash"] || !set["currency"]):
@@ -383,7 +386,17 @@ func approve(args []string, out io.Writer) error {
 	if restart.CutShort(recovery) {
 		return fmt.Errorf("operator: %s holds nothing past its configuration: its start was cut short, so resume it with the engine's -resume, and the approval it was started with if it had one (docs/runbooks/durable-log.md)", name)
 	}
-	end, err := restart.ReadEndState(recovery.Entries, *account, name)
+	var settlements []event.NeverSentSettlement
+	if *neverSent != "" {
+		raw, err := os.ReadFile(*neverSent)
+		if err != nil {
+			return fmt.Errorf("operator: read the adapter's settlements: %w", err)
+		}
+		if settlements, err = restart.ReadSettlements(raw, *neverSent); err != nil {
+			return err
+		}
+	}
+	end, err := restart.ReadEndState(recovery.Entries, *account, name, settlements...)
 	if err != nil {
 		return err
 	}
@@ -514,6 +527,17 @@ func describe(out io.Writer, name string, end restart.EndState, approval event.O
 		fmt.Fprintf(&b, ", its one sale back to 98%% attempted %t", *approval.IncidentInForce.SaleAttempted)
 		if !end.SaleAttempted && *approval.IncidentInForce.SaleAttempted {
 			b.WriteString(" (stated by -sale-attempted: the log records no attempt)")
+		}
+		// A sale stated attempted (-sale-attempted: the owner sold by hand)
+		// stays attempted whatever is settled, so the fresh run makes no sale
+		// (ADR 0019, amended 2026-10-17, reading 4).
+		for _, s := range approval.IncidentInForce.SaleSettlements {
+			fmt.Fprintf(&b, "; sale %s settled by the adapter as never sent (%s), so it is retired", s.Retirement.ClientOrderID, s.Evidence)
+			if *approval.IncidentInForce.SaleAttempted {
+				b.WriteString(", and the sale stays attempted as -sale-attempted states: the fresh run makes no sale")
+			} else {
+				b.WriteString(" and the fresh run tries the sale again under a new client order ID")
+			}
 		}
 	default:
 		b.WriteString("; it ended normal")

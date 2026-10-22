@@ -62,6 +62,122 @@ Re-delivery closes that gap:
   order: an order IBKR shows under its tag is never retired. See [paper
   trading](paper-trading.md), "What can go wrong", and
   [operator](operator.md), "Retiring an order the adapter can never send".
+- **An order an ended run left unsent is settled for the fresh run, so a
+  sale back to 98% is tried again.** When an engine run ends (you stop it
+  to leave Halted, to upgrade, after a reboot) while the adapter is still
+  waiting on an input whose reply released orders it never sent, that
+  run's engine can no longer be told they were never sent, so its log
+  still counts the incident's one sale back to 98% as attempted. Before you
+  approve the fresh run, with the adapter and the engine stopped, settle
+  them (the owner's decision of 2026-10-22):
+
+  ```
+  python3 adapter/ibkr/relay.py settle-ended-run PENDING_FILE --journal ENDED_LOG --by "your name" --reason "why the run ended"
+  ```
+
+  `ENDED_LOG` is the durable log of the run that ended (its `-log` file),
+  the run the adapter sent the waiting input to, if one is waiting. It
+  reads every input that log commits, not only the waiting one: an order
+  you settled `--never-sent` or `--not-handed-over` at an earlier input,
+  or that the adapter retired, is covered too. A decision counts only
+  when it names the input and the run it was made in: one an earlier
+  build recorded without its input or its run is never evidence, so its
+  order is listed not settled with that reason and its sale stays
+  attempted (check IBKR and sell by hand if the sale is still needed). A retirement of it still queued for the ended run's engine
+  does not stop it being settled: it is struck off. For each order a committed
+  reply released to be sent that the adapter's records show never sent, it
+  writes one settlement line to `PENDING_FILE.never-sent`: the log, the
+  run, the input that released it, the adapter's evidence (`unmarked`,
+  `refused` or `never-sent`) and the retirement it amounts to, retired by
+  you with your reason. It then marks the order never sent, so no adapter
+  ever sends it, and strikes off any retirement of it still queued for the
+  ended run's engine, which the fresh run's engine would refuse. It never
+  settles an order that may have reached IBKR. It prints "order ID not
+  settled" with the reason only for an order you must act on: one marked
+  about to be sent or allowed to be sent again; one the adapter found IBKR
+  showing (when the adapter stops with "settled as never sent, but IBKR
+  shows" it records the order `at-broker` first, before it strikes any
+  retirement of it, so a stop part way still leaves it `at-broker`); one
+  the ended log released more than once, since one release may have been
+  sent; one whose last recorded decision was made in another run; one IBKR
+  reported on (the ended log or the outbox holds a venue's report) though
+  the adapter's records show it never sent; a never-sent mark no recorded
+  decision backs; a never-sent decision recorded for another input, or
+  with no input or no run; and one whose last decision records a run
+  that is not a run's identifier (a damaged file: check it). When any is listed it then prints "N order(s) not settled above:
+  each one's sale stays attempted in the fresh run until you act on it as
+  its line says". An order simply sent (marked sent, reported on by IBKR,
+  or already retired in the ended log) needs nothing of you: it is not
+  listed, only counted in one line, "N order(s) the ended run sent or its
+  log already retires: nothing to settle". The last line gives the count
+  settled and says whether to approve with `-never-sent`. Running it again
+  settles nothing twice. It refuses while the adapter runs, for a waiting
+  input sent to another run, while the engine of `ENDED_LOG`'s run still
+  runs (stop it first), with no input waiting for a log that is not the
+  run that ended (the run the adapter's decisions last record: give
+  `--journal` the log of the run the message names), with no input
+  waiting and no decision that records its run (the message says so:
+  which run ended, and which of its orders were never sent, cannot be
+  proved, so nothing is settled; each sale stays attempted, so check IBKR
+  for every order that run released, sell by hand any sale still needed,
+  and approve without `-never-sent`), as root or as any user but the one
+  that owns the adapter's files (as `retire`), and without your name and
+  a reason. A damaged line in the decisions file refuses it naming the
+  line; do not edit the file.
+
+  That the run has ended is proved by the engine's instance lock,
+  `engine.lock` in the engine's state folder (the folder of its `-log`,
+  `/var/lib/trend-investing/engines/<instance>/` on the server): the
+  engine creates it and holds it locked for as long as it runs, whatever
+  log it writes, so an engine that resumed the run into a newer log still
+  holds it. The command refuses while it is held ("still runs"), and
+  refuses a folder with no `engine.lock` at all, since then no engine of
+  this build wrote it and the run's end cannot be proved. Never delete
+  `engine.lock`.
+
+  The command writes the file whole each time (a temporary file renamed
+  over it), so a stop never leaves half a line. A file left with a torn
+  last line (a write cut short, by a power loss under an earlier build) is
+  repaired by running the command again: it drops that line, prints
+  "dropped a torn last line", and writes the file whole from the adapter's
+  records. Only a last line with no line end after it is torn: any other
+  line it cannot read, a whole damaged last line included, refuses the
+  command; do not edit the file. Each decision it records is written the
+  same way, whole or not at all.
+
+  `--sent` is only for an order IBKR actually shows, and it cannot be
+  undone: it strikes off the order's queued retirement, so the engine is
+  never told the order was not sent, and the engine keeps the sale as
+  working. Check IBKR first (open orders, cancelled orders and trade
+  history, for the order reference that is the client order ID) and run
+  it only once you have found the order there.
+
+  If you find an order it settled at IBKR (open, cancelled or traded), it
+  was sent: with the adapter stopped, mark it sent with `python3
+  adapter/ibkr/relay.py resolve PENDING_FILE CLIENT_ORDER_ID --sent
+  --reason "what IBKR shows"`, then run `settle-ended-run` again, which
+  now refuses that order and withdraws its line (it prints "settlement
+  withdrawn"); a line is never applied for an order marked sent. `--sent`
+  marks the order `at-broker` first (the mark the adapter stops at on
+  every start, removing any retirement of it still queued), then records
+  your finding, strikes off any retirement of the order still queued, and
+  marks it sent last; if it stops part way (it prints a refusal or an
+  error), run the same `--sent` again before anything else: it finishes
+  what the stop left and records your finding only once.
+  Then
+  approve with `operator approve ... -never-sent PENDING_FILE.never-sent`
+  (or without `-never-sent` when the command says no order is settled): the
+  tool checks each line against the log by the engine's own retirement
+  rule and the input that released the order, refuses the approval
+  naming any line it does not bear out, and states each settled sale back
+  to 98% not attempted, with one more of the incident's sales retired and
+  the line carried as its evidence (`sale_settlements`). The engine checks
+  the same lines against the log again before it starts, and the fresh run
+  tries the sale again under the next attempt's client order ID. At the
+  fresh run's start, settle the waiting input with `resolve --run-ended`
+  as before; nothing of it is sent, and a retirement still queued of an
+  order of it the adapter found at IBKR (`at-broker`) is struck off with
+  it, so it never reaches the fresh run's engine.
 - **A changed input never replaces the one waiting for its reply.** If the
   adapter is asked to send an input under the ID of the one it is still
   waiting on, but with different content, it first finishes the original
@@ -196,6 +312,67 @@ and after a crash.
     resume"), so what the crashed run committed is never sent again and the
     rest goes once; `test_a_fresh_run_drops_the_earlier_runs_batch_and_needs_its_own_warm_up_folder`:
     a fresh run never takes the earlier run's batch or folder.
+  - `adapter/ibkr/tests/test_loop.py`,
+    `test_settle_ended_run_records_each_order_the_ended_run_released_and_the_adapter_never_sent`:
+    the ended run's unsent order is settled once, with its evidence, in the
+    line `operator approve -never-sent` reads (`cmd/operator`,
+    `TestTheAdaptersSettlementLineIsOneTheApprovalReads`), marked never
+    sent, and never sent by the fresh run;
+    `test_settle_ended_run_never_settles_an_order_the_adapter_may_have_sent`,
+    `test_settle_ended_run_names_the_order_the_adapter_recorded_it_refused`,
+    `test_settle_ended_run_never_settles_an_order_the_ended_log_shows_retired_or_reported`,
+    `test_settle_ended_run_never_settles_an_order_the_relay_found_at_ibkr`,
+    `test_a_stop_after_any_write_of_the_at_broker_record_leaves_the_order_refused_by_settle_ended_run`,
+    `test_marking_sent_an_order_stopped_at_the_broker_strikes_any_retirement_of_it_still_queued`,
+    `test_settle_ended_run_never_settles_a_client_order_id_released_twice_or_decided_in_another_run`,
+    `test_settle_ended_run_prints_only_the_orders_the_owner_must_act_on_and_counts_the_sent_ones`,
+    `test_settle_ended_run_with_no_input_waiting_is_refused_for_a_log_that_is_not_the_run_that_ended`,
+    `test_settle_ended_run_is_refused_while_the_ended_runs_engine_still_holds_its_instance_lock`
+    (`cmd/engine`,
+    `TestTheEngineHoldsItsInstanceLockWhileItRunsWhateverLogItWrites`,
+    `TestTheEngineRefusesToStartWhileItsInstanceLockIsHeld` and
+    `TestAnInstanceLockTheFilesystemCannotTakeRefusesTheStartAndLeavesNoLog`),
+    `test_settle_ended_run_never_settles_on_a_decision_recorded_with_no_input_or_no_run`,
+    `test_settle_ended_run_refuses_an_order_whose_last_decision_records_a_malformed_run`,
+    `test_settle_ended_run_with_no_input_waiting_refuses_damaged_decisions_naming_the_line`,
+    `test_marking_sent_a_never_sent_order_records_the_decision_before_it_strikes_any_queued_retirement`,
+    `test_marking_sent_a_never_sent_order_stopped_after_any_step_delivers_no_retirement_on_restart`,
+    `test_run_ended_strikes_a_queued_retirement_of_an_order_the_relay_found_at_ibkr`,
+    `test_run_ended_strikes_a_queued_retirement_of_any_order_an_earlier_run_of_the_chain_released`,
+    `test_run_ended_reads_no_log_older_than_the_bounded_walk_and_refuses_a_missing_log_the_walk_reads`,
+    `test_run_ended_keeps_a_queued_retirement_of_an_order_the_fresh_run_released_and_it_is_delivered`,
+    `test_an_order_marked_at_the_broker_is_never_read_as_settled_never_sent_whatever_its_last_decision_says`,
+    `test_a_newline_terminated_damaged_settlement_line_is_refused_never_dropped_as_torn`,
+    `test_a_decision_cut_short_mid_write_leaves_the_decisions_readable_and_settle_ended_run_runs_again`,
+    `test_settle_ended_run_is_refused_for_a_log_that_is_not_the_run_the_input_was_sent_to`,
+    `test_settle_ended_run_is_refused_as_root_or_any_user_but_the_owner_of_the_adapters_files`
+    and `test_settle_ended_run_is_refused_without_a_person_and_a_reason_and_while_the_adapter_runs`:
+    an order that may have reached IBKR, or that the log already ends, is
+    never settled, and the command changes nothing when refused;
+    `test_settle_ended_run_settles_a_never_sent_sale_an_earlier_input_of_the_run_released`:
+    every input of the run is covered;
+    `test_settle_ended_run_strikes_every_retirement_queued_for_the_ended_run`:
+    no queued retirement reaches the fresh run;
+    `test_settle_ended_run_repairs_a_torn_last_line`: the file is written
+    whole and a torn tail repaired;
+    `test_a_settled_order_found_at_ibkr_is_marked_sent_and_its_settlement_withdrawn`:
+    marking it sent withdraws its line. `adapter/ibkr/tests/test_relay.py`,
+    `test_a_never_sent_order_ibkr_shows_open_or_executed_stops_for_a_person`
+    and `test_a_retired_order_ibkr_shows_is_marked_at_broker_and_its_queued_retirement_struck_off`:
+    the relay records the order `at-broker` before it stops;
+    `test_a_damaged_decision_line_stops_the_relay_as_an_invalid_record_naming_it`:
+    a damaged decisions line stops the relay naming it.
+    `cmd/operator`, `TestTheApprovalReadsTheAdaptersSettlementOfANeverSentSale`,
+    and `internal/restart`,
+    `TestASaleTheAdapterNeverSentIsNotAttemptedOnceSettled`,
+    `TestASaleTheAdapterSentStaysAttempted`,
+    `TestASettlementThatDoesNotMatchTheLogIsRefused` and
+    `TestTheEngineChecksTheApprovalsSettlements`: the approval states a
+    settled sale not attempted, a sale that was sent stays attempted, and a
+    settlement the log does not bear out is refused, by the operator tool
+    and the engine alike; `cmd/engine`,
+    `TestAFreshRunApprovedAfterASettledNeverSentSaleSellsUnderTheNextAttemptsID`:
+    the fresh run sells under the next attempt's client order ID.
   - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
     a changed copy under the waiting input's ID is refused; the original's
     reply is asked for and its order sent once.
@@ -211,7 +388,7 @@ The adapter's pending file, hand-over and outbox are in the [glossary](glossary.
 | The adapter stops naming the `.handover.decisions` file with "retirement, with no input, as" and "not a retirement as the relay records one" | A retirement in that file was recorded by an older adapter, with no input named, or edited by hand, and its reason, its detail or who retired it is not one the adapter writes (`session over` by `adapter`, or `owner retired` by the owner named, each with its reason). The adapter would have to tell the engine of that retirement again for the order now waiting, and it never sends the engine a retirement it would refuse, so it stops with nothing sent, queued or marked. | Do not guess. Restore the line from your backup; if no backup holds it, correct it to what the adapter wrote (the reason, the detail and who retired it, as the adapter's earlier stop message or the engine's log of that retirement shows), then start the adapter. If IBKR shows the order under its tag, the adapter instead marks it never sent and stops with "was settled as never sent, but IBKR shows" (the row above): settle it with `--sent`; nothing is told to the engine, and any retirement of that order still waiting in the outbox is removed first, so `--sent` never lets one through. |
 | The engine refuses a retirement of an order it has retired already, just after the adapter started again | A known limit. An older adapter queued the retirement under the order's ID alone; it reached the engine, and the adapter stopped before it marked the order. On restart the adapter cannot tell whether that retirement was this order's, so it tells the engine of it again, and the engine, which already ended the order, refuses the second one rather than end an order twice. Nothing is sent to IBKR. | Read the refusal as the [engine](engine.md) chapter's row for an input refused with a message starting `targetweight:` says. Then check two things: the engine's log holds the order's first retirement, and IBKR shows nothing under the order's tag. If both hold, the order is retired once, as it should be. If IBKR shows the order, it is working at IBKR: settle it as the row "was settled as never sent, but IBKR shows" says, and reconcile the account. Do not edit the engine's log or the outbox. |
 | The adapter stops naming the `.handover` file with "which is none of", "not an object of marks" or "is not JSON" | The `.handover` file holds something other than the adapter's own marks, most likely after a hand edit. The adapter stops and sends nothing while it is so. | Do not guess which orders it covered. Restore the file to a JSON object from client order ID to `"handing-over"`, `"sent"`, `"never-sent"` or `"resend:"` and a date written exactly `YYYY-MM-DD` as the adapter wrote it (any other date form, such as `20261016`, is refused), then settle each `"handing-over"` order with the resolve command above. |
-| The adapter, or the resolve command, stops naming the `.handover.decisions` file with "line N is not JSON" or "is not a decision as relay.py resolve writes one" | The file of your resolve decisions holds a line the adapter did not write, most likely after a hand edit, or a last line cut short by a stop while the command was writing it. N is the line's number in the file, blank lines counted. The adapter reads every decision strictly, at every start, reconnect and resolve command, because a later decision can undo an earlier one (`--sent` after `--never-sent`), so it sends nothing while any line is unreadable. | Do not delete lines to make it start. Restore the file from your backup. If the only damage is the last line, cut short, remove that one line: the command writes the decision before it changes the order's mark, so the decision it was writing never took effect. Then run the same resolve command again for that order (it refuses one already settled), and start the adapter. |
+| The adapter, or the resolve command, stops naming the `.handover.decisions` file with "line N is not JSON" or "is not a decision as relay.py resolve writes one" | The file of your resolve decisions holds a line the adapter did not write: a hand edit, a disk fault, or a last line cut short by an adapter build from before each decision was written whole. N is the line's number in the file, blank lines counted. Each decision is now written whole (a temporary file renamed over the file), so a stop never cuts one short. The adapter reads every decision strictly, at every start, reconnect, resolve and settle-ended-run command, because a later decision can undo an earlier one (`--sent` after `--never-sent`), so it sends nothing while any line is unreadable. | Do not delete or edit lines to make it start. Restore the file from your backup, then start the adapter. If no backup holds it, leave the adapter stopped and check every order the file names at IBKR before deciding anything: a damaged line may be a decision that took effect, so it is never simply removed. |
 | The adapter stops at start with "has no occurred_at that can be read" or "has no filled_at that can be read" | A report on an order (a status or a fill) in one of the adapter's own records, the engine's log of a run, the outbox, the file of inputs settled as left by an earlier run, or the pending file, has no time in the form the adapter writes. The adapter reads IBKR's reports from these records to know each order's latest status, and will not take one it did not write as it writes one. The message names the report and where it is (the file, or the run whose log holds it). | Do not edit the file to make it start. The record was changed outside the adapter: restore the file named from your backup, check the order named against IBKR, and start the adapter again. Never edit the engine's log; if the message names it, follow `docs/runbooks/durable-log.md`. |
 | The adapter stops at start naming the `.run-ended` file with "with no recorded run", or `resolve --run-ended` refuses with "has no record of the run it was sent to" | A settlement of an input left by an earlier run must name that run, so the adapter knows where its reports fall among the runs and which status of each order is the latest. The adapter records the run an input is sent to (the `.run` file) before it saves the input, so a settlement with no run, or a waiting input with no `.run` record of its own, is not something the adapter wrote: the file was edited, or written by another tool. The adapter will not guess where it belongs; it sends nothing. | Do not edit the file to make it start. Restore the `.run-ended` or `.run` file named (and the pending file beside it) from your backup, check the orders the input names against IBKR, and start the adapter again. If no backup holds the record, leave the adapter stopped and investigate before anything is sent. |
 | The adapter, or the resolve command, refuses with "is held by another adapter or by relay.py resolve" or "stop it first" | Another process still has the pending file open: an adapter that is still running (perhaps hung) or a resolve command still at work. Only one may edit the hand-over record at a time. | Find that process and stop it, then try again. Never delete the file ending `.lock` beside the pending file: it stays on disk after every stop by design and is not a stale lock. Deleting it while a process still holds it lets a second one lock a new file, and two of them then edit the record at once. |

@@ -59,7 +59,7 @@ are what this build runs):
 | IBKR broker snapshot (`account.broker.snapshot`) and mark (`market.mark.recorded`) the adapter writes | 2 |
 | Target-weight configuration schema | 7 |
 | Decision record (`strategy.targets.decided`) | 6 |
-| Fresh-run approval (`operator.run.approved`); version 3 states the starting book | 3 |
+| Fresh-run approval (`operator.run.approved`); version 3 states the starting book, version 4 the incident's retired sale attempts, version 5 the adapter's settlements of its never-sent sales | 5 |
 | Cash movement (`account.cash-movement`) the Flex reader writes; version 2 carries IBKR's transaction ID | 2 |
 | IB Gateway, pinned | 10.50.1f |
 | IBKR TWS API (`ibapi`), pinned | 10.51.01 |

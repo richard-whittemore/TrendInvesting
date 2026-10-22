@@ -164,6 +164,14 @@ The engine reads its settings from
    it) records as retired as never sent; each had a client order ID of its
    own, so the new run's next attempt takes the next one. `operator
    approve` fills it in, and the engine refuses fewer than the log records.
+   If the run ended while the adapter held a sale it released and never
+   sent, settle it first with `relay.py settle-ended-run` and approve with
+   `-never-sent PENDING_FILE.never-sent`
+   ([re-delivery](../manual/redelivery.md), "An order an ended run left
+   unsent"): the approval then states the sale not attempted, counts it in
+   `sale_retired_attempts` and carries the adapter's settlement in
+   `"sale_settlements": [...]`, which the engine checks against the log
+   before it starts. Never write a settlement by hand.
    If the previous log ended
    degraded or halted, the approval must either clear that incident
    (`incident_id`) or carry it in force, under that incident's ID, at least
