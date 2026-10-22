@@ -836,6 +836,70 @@ func TestTheClosedChecksRotateSoNoRecordStarves(t *testing.T) {
 	}
 }
 
+// The closed walk wraps: a cursor naming the last record in sort order hands
+// the next firing's checks to the first record (ADR 0019, "Alerting": no
+// record left unchecked). Records 1-5 are closed, so each check deletes its
+// record; records 6 and 7 stay open and are never reached in this firing.
+func TestTheClosedWalkWrapsPastTheLastRecord(t *testing.T) {
+	key := forgottenAlert().Key
+	tr, repeats := &fakeTracker{}, map[string]int{}
+	for i := 1; i <= 7; i++ {
+		tr.issues = append(tr.issues, &fakeIssue{number: i, body: issueMarker(key), open: i > 5})
+		repeats[unclosedKey(key, i)] = 1
+	}
+	tr.issues = append(tr.issues, &fakeIssue{number: 8, body: issueMarker(key), labels: []string{alertLabel}, open: true})
+	repeats[closedCursorKey(unclosedKey(key, 7))] = 1
+	s := newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if tr.closedCalls != maxClosedChecks {
+		t.Fatalf("closed checks=%d, want %d: the walk must wrap to the first record", tr.closedCalls, maxClosedChecks)
+	}
+	for i := 1; i <= 7; i++ {
+		_, kept := repeats[unclosedKey(key, i)]
+		if kept != (i > 5) {
+			t.Fatalf("record %d kept=%v, want %v: repeats=%v", i, kept, i > 5, repeats)
+		}
+	}
+}
+
+// A cursor naming a record that is no longer in the state (removed, or
+// pruned) hands the walk to the next record in sort order, not to the first
+// (ADR 0019, "Alerting": no record left unchecked). Record 3 is absent; the
+// cursor names it. Records 4-8 are closed and are checked and deleted; 1 and 2
+// are open and must be left alone.
+func TestTheClosedWalkStartsAtTheNextKeyWhenTheCursorIsGone(t *testing.T) {
+	key := forgottenAlert().Key
+	tr, repeats := &fakeTracker{}, map[string]int{}
+	for i := 1; i <= 8; i++ {
+		tr.issues = append(tr.issues, &fakeIssue{number: i, body: issueMarker(key), open: i <= 3})
+		if i != 3 {
+			repeats[unclosedKey(key, i)] = 1
+		}
+	}
+	tr.issues = append(tr.issues, &fakeIssue{number: 9, body: issueMarker(key), labels: []string{alertLabel}, open: true})
+	repeats[closedCursorKey(unclosedKey(key, 3))] = 1
+	s := newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if tr.closedCalls != maxClosedChecks {
+		t.Fatalf("closed checks=%d, want %d", tr.closedCalls, maxClosedChecks)
+	}
+	for i := 1; i <= 8; i++ {
+		if i == 3 {
+			continue
+		}
+		_, kept := repeats[unclosedKey(key, i)]
+		if kept != (i <= 3) {
+			t.Fatalf("record %d kept=%v, want %v: repeats=%v", i, kept, i <= 3, repeats)
+		}
+	}
+}
+
 // unlistedRecords is a tracker with n abandoned issues of one alert key, each
 // closed with its label off (so unlisted), a record for each, and a newer open
 // issue of the key that replaced them.
