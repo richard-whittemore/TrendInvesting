@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,9 @@ type issueTracker interface {
 	// Latest returns the newest issue, open or closed, whose body holds
 	// marker.
 	Latest(ctx context.Context, marker string) (issue trackedIssue, found bool, err error)
+	// Listed returns the numbers of the issues in the alert listing, the
+	// same listing Latest reads.
+	Listed(ctx context.Context) (map[int]bool, error)
 	// Create opens an issue and returns its number.
 	Create(ctx context.Context, title, body string, labels []string) (int, error)
 	// OwnComments returns the bodies of every comment on the issue written
@@ -137,6 +141,11 @@ type issuesSender struct {
 	// closing is, for each key resolve has read the issue of in this firing,
 	// that issue's number.
 	closing map[string]int
+	pruned  bool
+	// asked is, for each key resolve has sent a write to GitHub for in this
+	// firing (a comment, the close or the label swap), true: a close that
+	// failed before any write was never asked of GitHub.
+	asked map[string]bool
 }
 
 func (*issuesSender) name() string { return issuesChannel }
@@ -263,7 +272,7 @@ func (s *issuesSender) addComment(a report.Alert, id, heading string) error {
 		return err
 	}
 	defer cancel()
-	issue, found, err := s.tracker.Latest(ctx, issueMarker(a.Key))
+	issue, found, err := s.latest(ctx, issueMarker(a.Key))
 	if err != nil {
 		return s.note(err, true)
 	}
@@ -275,6 +284,35 @@ func (s *issuesSender) addComment(a report.Alert, id, heading string) error {
 		return s.note(err, false)
 	}
 	return s.note(s.tracker.Comment(ctx, issue.Number, fitIssueText(heading+"\n\n"+s.text(a), "", "\n\n"+id)), false)
+}
+
+// latest is the tracker's newest issue holding marker, and, the first time in
+// a firing the listing is read, prunes the records of issues left open
+// (unclosedKey) whose issue has left the listing, so a record stays only
+// until its issue leaves it.
+func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue, bool, error) {
+	issue, found, err := s.tracker.Latest(ctx, marker)
+	if err != nil || s.pruned {
+		return issue, found, err
+	}
+	listed, listErr := s.tracker.Listed(ctx)
+	if listErr != nil {
+		// The records are kept: a listing not read whole proves no issue gone.
+		return issue, found, err
+	}
+	s.pruned = true
+	prefix := channelKey(issuesChannel, "unclosed:")
+	for k := range s.records {
+		rest, ok := strings.CutPrefix(k, prefix)
+		if !ok {
+			continue
+		}
+		numText, _, _ := strings.Cut(rest, ":")
+		if n, err := strconv.Atoi(numText); err == nil && !listed[n] {
+			delete(s.records, k)
+		}
+	}
+	return issue, found, nil
 }
 
 // unclosedKey is the record (issuesSender.records) that issue number n of an
@@ -305,7 +343,7 @@ func (s *issuesSender) open(a report.Alert) error {
 	}
 	defer cancel()
 	marker := issueMarker(a.Key)
-	issue, found, err := s.tracker.Latest(ctx, marker)
+	issue, found, err := s.latest(ctx, marker)
 	if err != nil {
 		return s.note(err, true)
 	}
@@ -356,7 +394,7 @@ func (s *issuesSender) resolve(key string) error {
 		return err
 	}
 	defer cancel()
-	issue, found, err := s.tracker.Latest(ctx, issueMarker(key))
+	issue, found, err := s.latest(ctx, issueMarker(key))
 	if err != nil {
 		return s.note(err, true)
 	}
@@ -373,6 +411,12 @@ func (s *issuesSender) resolve(key string) error {
 	if err != nil && !overflow {
 		return s.note(err, false)
 	}
+	// From here the close is asked of GitHub: a comment, the close or the
+	// label swap is written, and a refusal of any is a try.
+	if s.asked == nil {
+		s.asked = map[string]bool{}
+	}
+	s.asked[key] = true
 	// An issue whose comments are too many to read closes with no closing
 	// comment, so a close tried again posts nothing more: closed, it is
 	// taken as closed by overflow (open), which needs no comment.
@@ -486,13 +530,16 @@ func closeForgotten(senders []sender, prefixes []string, seen map[string]bool, s
 				}
 			}
 			delete(r.closing, key)
+			delete(r.asked, key)
 			if err := r.resolve(key); err != nil {
-				// A close counts as a try only when it was made: not when
-				// the tracker was not asked (it failed earlier in the
-				// firing, or the firing's time was spent) or was
+				// A close counts as a try only when a close request was sent
+				// to GitHub and refused: not when it failed before any
+				// request was sent (the listing, the comments or the
+				// identity could not be read, the tracker failed earlier in
+				// the firing, or the firing's time was spent) or was
 				// unavailable (a rate limit, a server error, a timeout).
-				number, read := r.closing[key]
-				if !read || errors.Is(err, errUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errFiringOver) {
+				number := r.closing[key]
+				if !r.asked[key] || errors.Is(err, errUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errFiringOver) {
 					// The close stays due at the next firing, with no try spent.
 					if _, ok := repeats[closeTriesKey(key)]; !ok {
 						repeats[closeTriesKey(key)] = 0
@@ -562,6 +609,7 @@ type githubTracker struct {
 	mu     sync.Mutex
 	loaded bool
 	latest map[string]trackedIssue // marker -> the newest issue holding it
+	listed map[int]bool            // the number of every issue in the listing
 	self   int64                   // the token's user id, once asked
 	// selfErr is the failed lookup of the token's user, remembered for the
 	// firing so it is asked once.
@@ -689,7 +737,7 @@ func (g *githubTracker) load(ctx context.Context) error {
 	if g.loaded {
 		return nil
 	}
-	latest := map[string]trackedIssue{}
+	latest, listed := map[string]trackedIssue{}, map[int]bool{}
 	for page := 1; ; page++ {
 		if page > maxIssuePages {
 			return fmt.Errorf("more than %d issues carry the %s label, so the list of alert issues is incomplete and none is written; remove the label from old closed issues whose incident is over (resolved, or acknowledged and no longer repeating)", maxIssuePages*100, alertLabel)
@@ -708,6 +756,7 @@ func (g *githubTracker) load(ctx context.Context) error {
 			if i.Number <= 0 || (i.State != "open" && i.State != "closed") || i.Comments < 0 {
 				return errors.New("GitHub's listing named an issue without its number or its state")
 			}
+			listed[i.Number] = true
 			if m := markerIn(i.Body); m != "" {
 				if _, newer := latest[m]; !newer {
 					latest[m] = trackedIssue{Number: i.Number, Open: i.State == "open", Comments: i.Comments}
@@ -718,7 +767,7 @@ func (g *githubTracker) load(ctx context.Context) error {
 			break
 		}
 	}
-	g.latest, g.loaded = latest, true
+	g.latest, g.listed, g.loaded = latest, listed, true
 	return nil
 }
 
@@ -746,6 +795,16 @@ func (g *githubTracker) Latest(ctx context.Context, marker string) (trackedIssue
 	return i, ok, nil
 }
 
+// Listed returns the numbers of the issues in the alert listing.
+func (g *githubTracker) Listed(ctx context.Context) (map[int]bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err := g.load(ctx); err != nil {
+		return nil, err
+	}
+	return maps.Clone(g.listed), nil
+}
+
 // Create opens an issue. Only an answer that names the new issue is a
 // delivery.
 func (g *githubTracker) Create(ctx context.Context, title, body string, labels []string) (int, error) {
@@ -760,6 +819,7 @@ func (g *githubTracker) Create(ctx context.Context, title, body string, labels [
 	}
 	if g.loaded {
 		g.latest[markerIn(body)] = trackedIssue{Number: out.Number, Open: true}
+		g.listed[out.Number] = true
 	}
 	return out.Number, nil
 }

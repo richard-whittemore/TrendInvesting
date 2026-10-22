@@ -498,8 +498,9 @@ issues. The same step takes them out of every view, saved search or job that
 selects issues by the label `alert`: any job that needs to find resolved
 incidents (a triage job, say) must poll by `alert-resolved`, or by the hidden
 key line and the issue's state, never by `alert` alone. An issue you close
-by hand keeps the `alert` label and counts toward the 1,000 until you remove
-it yourself.
+by hand keeps the `alert` label, and counts toward the 1,000, until its alert
+resolves, when the reporter swaps the label for `alert-resolved`; the issue of
+a single-event alert keeps it until you remove it yourself.
 
 An alert that reports a single event, such as one refused order, has nothing
 that resolves it: its issue stays open until you close it yourself in the app

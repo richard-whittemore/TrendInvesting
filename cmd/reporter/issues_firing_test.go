@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -661,5 +662,95 @@ func TestAnUntriedCloseIsNotCounted(t *testing.T) {
 				t.Fatalf("err=%v open=%v: the close must still be made", err, tr.issues[0].open)
 			}
 		})
+	}
+}
+
+// A close counts as a try only when a close request was sent to GitHub and
+// refused: a failed read of the comments or of the identity, or a listing
+// GitHub refused, asked for no close, so it spends no try.
+func TestOnlyARefusedCloseRequestIsCounted(t *testing.T) {
+	refused := fmt.Errorf("GitHub answered 403")
+	for name, c := range map[string]struct {
+		fail    func(tr *fakeTracker)
+		counted bool
+	}{
+		"comments unreadable": {func(tr *fakeTracker) { tr.commentsFailing = refused }, false},
+		"identity unusable":   {func(tr *fakeTracker) { tr.commentsFailing = errors.New("GitHub did not name the token's user") }, false},
+		"listing refused":     {func(tr *fakeTracker) { tr.failing = refused }, false},
+		"close refused":       {func(tr *fakeTracker) { tr.closeFailing = refused }, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr := &fakeTracker{}
+			s := newIssues(tr)
+			prefix := report.HistoryUnavailableKeyPrefix("joint")
+			a := forgottenAlert()
+			seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
+			s.records = repeats
+			if err := deliver([]sender{s}, a, seen, sent, repeats, t0, time.Minute, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			forget(prefix, seen, sent, repeats)
+			c.fail(tr)
+			for n := range maxCloseTries - 1 {
+				s := newIssues(tr)
+				s.records = repeats
+				if err := closeForgotten([]sender{s}, []string{prefix}, seen, sent, repeats); err == nil {
+					t.Fatalf("firing %d: a failed close is not an error", n)
+				}
+			}
+			want := 0
+			if c.counted {
+				want = maxCloseTries - 1
+			}
+			if got := repeats[closeTriesKey(a.Key)]; got != want || !seen[channelKey(issuesChannel, a.Key)] {
+				t.Fatalf("tries=%d (want %d) seen=%v: only a refused close request is counted", got, want, seen)
+			}
+		})
+	}
+}
+
+// The record of an issue left open stays only until that issue leaves the
+// alert listing; it is pruned at the next listing.
+func TestAnUnclosedRecordLeavesWithItsIssue(t *testing.T) {
+	tr := &fakeTracker{}
+	s := newIssues(tr)
+	prefix := report.HistoryUnavailableKeyPrefix("joint")
+	a := forgottenAlert()
+	seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
+	s.records = repeats
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0, time.Minute, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	forget(prefix, seen, sent, repeats)
+	tr.closeFailing = fmt.Errorf("GitHub answered 422")
+	for n := range maxCloseTries {
+		s := newIssues(tr)
+		s.records = repeats
+		if err := closeForgotten([]sender{s}, []string{prefix}, seen, sent, repeats); err == nil {
+			t.Fatalf("firing %d: a failed close is not an error", n)
+		}
+	}
+	if repeats[unclosedKey(a.Key, 1)] != 1 {
+		t.Fatalf("repeats=%v: the abandoned issue must be recorded", repeats)
+	}
+	// Still listed: the record stays through a listing.
+	s = newIssues(tr)
+	s.records = repeats
+	other := haltAlert()
+	if err := s.send(other, 0); err != nil {
+		t.Fatal(err)
+	}
+	if repeats[unclosedKey(a.Key, 1)] != 1 {
+		t.Fatalf("repeats=%v: the record of a listed issue must stay", repeats)
+	}
+	// The owner closes it by hand and takes its label off: it leaves the listing.
+	tr.issues[0].open, tr.issues[0].labels = false, nil
+	s = newIssues(tr)
+	s.records = repeats
+	if err := s.send(other, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := repeats[unclosedKey(a.Key, 1)]; kept {
+		t.Fatalf("repeats=%v: the record of an issue gone from the listing must be pruned", repeats)
 	}
 }

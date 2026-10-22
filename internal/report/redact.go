@@ -195,7 +195,7 @@ func isTokenEdge(c byte) bool {
 	return strings.IndexByte(" \t\n\r\f\v()[]{}<>\"'`;=|*", c) >= 0
 }
 
-// removeFigures replaces every number in s, of digits of any script, that is
+// removeFigures replaces every number in s, of Unicode category N (digits of any script, letter numbers, other numbers), that is
 // not a token on the allow-list (keptToken): a quantity, a price, a share
 // count, an identifier's number, a duration or any other figure, signed,
 // grouped, decimal, in exponent form or a percentage, is removed rather than
@@ -268,7 +268,7 @@ func tokenWithoutFigures(s string, i, j int) string {
 	return string(b)
 }
 
-// isAlnumRune reports whether c is a letter or a digit of any script, or '_'.
+// isAlnumRune reports whether c is a letter, a number of Unicode category N (digits of any script, letter numbers, other numbers), or '_'.
 func isAlnumRune(c rune) bool { return unicode.IsLetter(c) || unicode.IsNumber(c) || c == '_' }
 
 // Record renders one journal record on one line: its type and event time,

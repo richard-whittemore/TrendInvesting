@@ -29,7 +29,10 @@ type fakeTracker struct {
 	failing error
 	// closeFailing, when set, is the answer to every close.
 	closeFailing error
-	writes       int
+	// commentsFailing, when set, is the answer to every read of an issue's
+	// comments (the comments, or the identity that tells the channel's own).
+	commentsFailing error
+	writes          int
 	// delay is how long each call takes, unless its deadline comes first.
 	delay time.Duration
 	// onCall, when set, is told of each call.
@@ -94,9 +97,25 @@ func (f *fakeTracker) Create(ctx context.Context, title, body string, labels []s
 	return len(f.issues), nil
 }
 
+func (f *fakeTracker) Listed(ctx context.Context) (map[int]bool, error) {
+	if err := f.call(ctx); err != nil {
+		return nil, err
+	}
+	listed := map[int]bool{}
+	for _, i := range f.issues {
+		if i.labelled() {
+			listed[i.number] = true
+		}
+	}
+	return listed, nil
+}
+
 func (f *fakeTracker) OwnComments(ctx context.Context, number int) ([]string, error) {
 	if err := f.call(ctx); err != nil {
 		return nil, err
+	}
+	if f.commentsFailing != nil {
+		return nil, f.commentsFailing
 	}
 	var own []string
 	for n, c := range f.issues[number-1].comments {
