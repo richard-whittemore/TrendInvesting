@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0; a live sale a venue has named survives a restart, rules version 1.24.0))
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0; a live sale a venue has named survives a restart, rules version 1.24.0; a sale that had ended survives a restart, rules version 1.25.0))
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -1395,7 +1395,8 @@ The owner's decision of 2026-10-22, part of the Boost-to-paper plan. It
 amends point 2, "Boost" (the re-plan of the watched order), and point 5
 (a rebalance in progress), and is target-weight rules version 1.23.0 (ADR
 0016); a decision's record of the run's own live sale back to 98% a venue
-has named or part filled, below, is 1.24.0.
+has named or part filled, below, is 1.24.0, and its record of that sale
+once it has ended or filled in full is 1.25.0.
 
 - **Before.** A released order the IBKR adapter's paper sender refused
   before any write-ahead mark, for good, stopped the adapter at that order
@@ -1488,15 +1489,39 @@ has named or part filled, below, is 1.24.0.
   made while it works (rules version 1.24.0). A decision recorded at
   version 7 recorded the sale only while no venue had named it and nothing
   had filled, and is read as written; one carrying a field of version 8 is
-  refused. An attempt withheld for a person, or one that ended, stays
-  spent. Stated limit: a sale that ended (canceled, expired or filled in
-  full) is recorded as spent, without its order, so after a restart from
-  such a decision every venue report on it is refused, where the full run
-  reads it: an execution reported after its cancel (ADR 0022), an
-  execution of a sale filled in full sent again, which the full run reads
-  as a redelivery, or any later lifecycle report on it. The run stops for a
-  person to reconcile; recording an ended sale so that such reports are
-  read is a later change, which will let a restarted run read such a report.
+  refused. An attempt withheld for a person stays spent. A sale the run
+  attempted itself and released that has ended (canceled, expired or
+  invalid, part filled or not) or filled in full is recorded with its
+  order too (`strategy.targets.decided` version 9, rules version 1.25.0)
+  once a venue order ID is known for it: its client order ID, side,
+  shares, limit, trigger, attempt, naming, venue order ID, its executions
+  (fill IDs, shares, prices, commissions and times), and, when a venue
+  ended it, how (`status`, canceled or invalid) and the second of the
+  earliest such report (`ended_at`), as the gate holds it. A run restarted
+  from the decision restores it as that run's own spent attempt, released
+  and ended as it was, never attempted again, so every later report on it
+  is read as in the full run: an execution reported after its cancel (ADR
+  0022) counts once, an execution sent again, of a part-filled sale or one
+  filled in full, is a redelivery by its fill ID (ADR 0019, "Explained
+  means"), a later lifecycle report is read, and an execution taking the
+  sale past its released shares, or reusing a fill ID for another
+  execution, is refused as in the full run, with the full run's words. The
+  full run reads such reports for as long as the gate holds the order,
+  which is the rest of the run, and the decision records the sale for as
+  long as it records the incident's sale attempt, which is the rest of the
+  run too (an incident is never left within a run: ADR 0019, "Leaving
+  Degraded or Halted is never automatic"): ADR 0022 sets no shorter window for a fill after a cancel,
+  so none is invented here. The record is bounded all the same: an attempt
+  that ended is spent, so a decision carries at most one such sale, the
+  incident's. A report giving another order that sale's venue order ID is
+  refused on arrival, as for a live sale. A decision recorded at version 8
+  recorded the sale only while it was live and is read as written; one
+  carrying an ended sale is refused. Stated limit: a sale that ended with
+  no venue order ID known (in practice, one filled in full by executions
+  alone, never acknowledged or listed) is still recorded as spent, without
+  its order, so after a restart from such a decision a later report on it
+  is refused, where the full run reads it, and the run stops for a person
+  to reconcile.
   A retirement frees only an attempt this run, or the run whose decision
   it was restarted from, made: never one the approval restored as an
   earlier run's. Stated limit: a recovered decision states only the

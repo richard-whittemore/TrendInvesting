@@ -1084,12 +1084,27 @@ func TestBoostRestoredSaleOrderValidate(t *testing.T) {
 		bad  func(*event.BoostRestoredSaleOrder)
 		want string
 	}{
-		"a buy":                     {func(o *event.BoostRestoredSaleOrder) { o.Side = event.OrderSideBuy }, "sell"},
-		"a negative attempt":        {func(o *event.BoostRestoredSaleOrder) { o.Attempt = -1 }, "attempt"},
-		"fills short of the filled": {func(o *event.BoostRestoredSaleOrder) { o.Filled = 6 }, "fills sum"},
-		"filled in full":            {func(o *event.BoostRestoredSaleOrder) { o.Filled, o.Fills[0].Quantity = 17, 17 }, "fewer filled"},
-		"filled but not named":      {func(o *event.BoostRestoredSaleOrder) { o.Named, o.VenueOrderID = false, "" }, "named"},
-		"a venue ID but not named":  {func(o *event.BoostRestoredSaleOrder) { o.Named, o.Filled, o.Fills = false, 0, nil }, "named"},
+		"a buy":                       {func(o *event.BoostRestoredSaleOrder) { o.Side = event.OrderSideBuy }, "sell"},
+		"a negative attempt":          {func(o *event.BoostRestoredSaleOrder) { o.Attempt = -1 }, "attempt"},
+		"fills short of the filled":   {func(o *event.BoostRestoredSaleOrder) { o.Filled = 6 }, "fills sum"},
+		"filled past its shares":      {func(o *event.BoostRestoredSaleOrder) { o.Filled, o.Fills[0].Quantity = 18, 18 }, "more shares than released"},
+		"filled in full, no venue ID": {func(o *event.BoostRestoredSaleOrder) { o.Filled, o.Fills[0].Quantity, o.VenueOrderID = 17, 17, "" }, "venue order ID"},
+		"ended, no venue ID": {func(o *event.BoostRestoredSaleOrder) {
+			o.Status, o.EndedAt, o.VenueOrderID = event.OrderLifecycleStatusCanceled, twSession.Add(-time.Hour), ""
+		}, "venue order ID"},
+		"ended with no time": {func(o *event.BoostRestoredSaleOrder) { o.Status = event.OrderLifecycleStatusCanceled }, "ended_at"},
+		"a time with no end": {func(o *event.BoostRestoredSaleOrder) { o.EndedAt = twSession.Add(-time.Hour) }, "ended_at"},
+		"ended at a fraction of a second": {func(o *event.BoostRestoredSaleOrder) {
+			o.Status, o.EndedAt = event.OrderLifecycleStatusCanceled, twSession.Add(-time.Hour+500*time.Millisecond)
+		}, "whole second"},
+		"ended half a second past the zero time": {func(o *event.BoostRestoredSaleOrder) {
+			o.Status, o.EndedAt = event.OrderLifecycleStatusCanceled, time.Time{}.Add(500*time.Millisecond)
+		}, "whole second"},
+		"ended as submitted": {func(o *event.BoostRestoredSaleOrder) {
+			o.Status, o.EndedAt = event.OrderLifecycleStatusSubmitted, twSession.Add(-time.Hour)
+		}, "status"},
+		"filled but not named":     {func(o *event.BoostRestoredSaleOrder) { o.Named, o.VenueOrderID = false, "" }, "named"},
+		"a venue ID but not named": {func(o *event.BoostRestoredSaleOrder) { o.Named, o.Filled, o.Fills = false, 0, nil }, "named"},
 	} {
 		expectInvalid(t, name, v, func(p *P) { o := namedSaleOrder(); c.bad(o); p.Boost.RestoredSale = sale(o) }, c.want)
 	}
@@ -1135,11 +1150,11 @@ func namedSaleOrder() *event.BoostRestoredSaleOrder {
 // as it was written, and refused if it carries a field of version 8; a
 // record written now states the sale's side and attempt (ADR 0015).
 func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
-	if got, want := event.TargetsDecidedVersions(), []uint32{event.TargetsDecidedRetiredVersion, event.TargetsDecidedSchemaVersion}; !slices.Equal(got, want) {
+	if got, want := event.TargetsDecidedVersions(), []uint32{event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedSchemaVersion}; !slices.Equal(got, want) {
 		t.Fatalf("decision versions read are %v, want %v", got, want)
 	}
-	if event.TargetsDecidedRetiredVersion != 7 || event.TargetsDecidedSchemaVersion != 8 {
-		t.Fatalf("decision versions are %d and %d, want 7 and 8", event.TargetsDecidedRetiredVersion, event.TargetsDecidedSchemaVersion)
+	if event.TargetsDecidedRetiredVersion != 7 || event.TargetsDecidedLiveSaleVersion != 8 || event.TargetsDecidedSchemaVersion != 9 {
+		t.Fatalf("decision versions are %d, %d and %d, want 7, 8 and 9", event.TargetsDecidedRetiredVersion, event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedSchemaVersion)
 	}
 	old := validTargetsDecided()
 	old.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true,
@@ -1155,7 +1170,7 @@ func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
 	}
 	named := validTargetsDecided()
 	named.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: namedSaleOrder()}
-	if err := named.ValidateSchema(event.TargetsDecidedSchemaVersion); err != nil {
+	if err := named.ValidateSchema(event.TargetsDecidedLiveSaleVersion); err != nil {
 		t.Errorf("a version 8 live sale is read: %v", err)
 	}
 	for name, o := range map[string]event.BoostRestoredSaleOrder{
@@ -1186,9 +1201,68 @@ func TestBoostRestoredSaleOrderAtVersion7(t *testing.T) {
 		o := namedSaleOrder()
 		drop(o)
 		p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: o}
-		if err := p.ValidateSchema(event.TargetsDecidedSchemaVersion); err == nil || !strings.Contains(err.Error(), "side") {
-			t.Errorf("a version 8 live sale with %s is read: %v, want it refused", name, err)
+		for _, version := range []uint32{event.TargetsDecidedLiveSaleVersion, event.TargetsDecidedSchemaVersion} {
+			if err := p.ValidateSchema(version); err == nil || !strings.Contains(err.Error(), "side") {
+				t.Errorf("a version %d live sale with %s is read: %v, want it refused", version, name, err)
+			}
 		}
+	}
+}
+
+// endedSaleOrders are the run's own sale back to 98% once it is no longer
+// live, as version 9 records it: canceled after a part fill, rejected, and
+// filled in full, each under its venue order ID.
+func endedSaleOrders() map[string]*event.BoostRestoredSaleOrder {
+	canceled, invalid, filled := namedSaleOrder(), namedSaleOrder(), namedSaleOrder()
+	canceled.Status, canceled.EndedAt = event.OrderLifecycleStatusCanceled, twSession.Add(-time.Hour)
+	invalid.Status, invalid.EndedAt = event.OrderLifecycleStatusInvalid, twSession.Add(-time.Hour)
+	filled.Filled, filled.Fills[0].Quantity = 17, 17
+	return map[string]*event.BoostRestoredSaleOrder{"canceled": canceled, "invalid": invalid, "filled in full": filled}
+}
+
+// TestBoostRestoredSaleOrderAtVersion9: decision schema version 9 records
+// the run's own sale once it has ended or filled in full, with its end and
+// executions, under the venue order ID a venue gave it, so a restart reads
+// a late fill after its cancel as the full run does (ADR 0022; ADR 0026,
+// point 5). Version 8 recorded the sale only while it was live, so a
+// version 8 record of an ended sale is refused, and a live one is still
+// read (ADR 0015).
+func TestBoostRestoredSaleOrderAtVersion9(t *testing.T) {
+	for name, o := range endedSaleOrders() {
+		p := validTargetsDecided()
+		p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: o}
+		if err := p.ValidateWritten(); err != nil {
+			t.Errorf("a sale %s is written at version 9: %v", name, err)
+		}
+		if err := p.ValidateSchema(event.TargetsDecidedSchemaVersion); err != nil {
+			t.Errorf("a version 9 sale %s is read: %v", name, err)
+		}
+		if err := p.ValidateSchema(event.TargetsDecidedLiveSaleVersion); err == nil || !strings.Contains(err.Error(), "version 9") {
+			t.Errorf("a version 8 record of a sale %s is refused as a version 9 field; got %v", name, err)
+		}
+		if err := p.ValidateSchema(event.TargetsDecidedRetiredVersion); err == nil || !strings.Contains(err.Error(), "version 8") {
+			t.Errorf("a version 7 record of a sale %s is refused; got %v", name, err)
+		}
+		if o.Live() {
+			t.Errorf("a sale %s is reported live", name)
+		}
+	}
+	if !namedSaleOrder().Live() {
+		t.Error("a part-filled sale with no end is reported not live")
+	}
+	live := validTargetsDecided()
+	live.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: "engine-state:joint:1", Attempted: true, Order: namedSaleOrder()}
+	if err := live.ValidateSchema(event.TargetsDecidedSchemaVersion); err != nil {
+		t.Errorf("a version 9 live sale is read: %v", err)
+	}
+	a, b := endedSaleOrders()["canceled"], endedSaleOrders()["canceled"]
+	b.EndedAt = b.EndedAt.Add(time.Second)
+	if a.Equal(*b) {
+		t.Error("two records of a sale ended at different times are equal")
+	}
+	b.EndedAt, b.Status = a.EndedAt, event.OrderLifecycleStatusInvalid
+	if a.Equal(*b) {
+		t.Error("two records of a sale ended differently are equal")
 	}
 }
 
