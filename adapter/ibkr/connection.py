@@ -241,11 +241,12 @@ class Connection:
         if it does not come drops the link and raises NotConnected, since no
         later list on the link could be told from it (ADR 0019: a list not
         read in full is unread). Gateway's volunteered list was taken by
-        connect. After an end with no list outstanding, a list that ended
-        before any row of its own (the shape of a list ended by an end not
-        its own), or a connect that saw no volunteered end, the link is
-        pumped quiet first (resync_open_orders), so a link one list behind
-        is brought level before it is read again. The request is noted in the Inbox just before it is sent:
+        connect. After a row or end with no list outstanding, or a connect
+        that saw no volunteered end, the link is pumped quiet first
+        (resync_open_orders), so a link one list behind is brought level
+        before it is read again; a list that merely ended with no row of
+        its own (as every list does with no open order at IBKR) costs the
+        next read no wait. The request is noted in the Inbox just before it is sent:
         every callback queued ahead of the note arrived before the request
         left and is no part of its answer, and an end taken with no list
         outstanding ends nothing. NotConnected while the link is down.
@@ -282,8 +283,9 @@ class Connection:
         (open_order_strays), and the next list is answered by its own end
         (ADR 0025 point 5: matched in full before anything is sent). A link
         never quiet within VOLUNTEER_MAX seconds is dropped (ADR 0019: a
-        list not read in full is unread). NotConnected while the link is
-        down or once dropped.
+        list not read in full is unread), even when the cap cuts the last
+        quiet window short. NotConnected while the link is down or once
+        dropped.
         """
         self.require_connected()
         if self._list_ends < self._lists_requested:
@@ -295,13 +297,21 @@ class Connection:
             now = self._monotonic()
             if now >= quiet_until:
                 break
+            # A wait the VOLUNTEER_MAX cap cuts short is no quiet: a link
+            # silent for less than the quiet window at the cap is dropped.
+            capped = until < quiet_until
             if now >= until:
-                self.drop("open-orders-never-quiet")
-                raise NotConnected("IBKR's open orders never stopped arriving, so no list on this link can be read")
-            event = self.pump(min(until, quiet_until) - now)
+                capped = True
+                event = None
+            else:
+                event = self.pump(min(until, quiet_until) - now)
             if not self.connected:
                 raise NotConnected("IB Gateway link is down")
             if event is None:
+                if capped:
+                    self.drop("open-orders-never-quiet")
+                    raise NotConnected("IBKR's open orders never stopped arriving, so no list on this link can be "
+                                       "read")
                 break
             if event.name in LIST_MESSAGES:
                 quiet_until = self._monotonic() + quiet
@@ -384,12 +394,15 @@ class Connection:
             self._abandon()
             raise ConnectFailed("Gateway closed the connection during the handshake")
         if event.name == "error":
-            code = event.args[1]
+            req_id, code = event.args[0], event.args[1]
             if code == CODE_CLIENT_ID_IN_USE:
                 self._abandon()
                 self._report("refused", "client-id-in-use", ibkr_code=code)
                 raise ClientIdInUse("client_id {} is already connected".format(self.config.client_id))
-            if code < FIRST_NOTICE_CODE:
+            # Only a code under no order (IBKR's -1) ends a connect: IBKR
+            # answers an order's message under its order ID, 0 for an order
+            # placed by hand, and that is kept for pump().
+            if code < FIRST_NOTICE_CODE and (req_id is None or req_id < 0):
                 self._abandon()
                 raise ConnectFailed("IBKR code {} during the handshake".format(code))
 
@@ -550,9 +563,11 @@ class Connection:
                 self.open_order_strays += 1
         elif event.name == "open_order_end":
             if self._list_ends < self._lists_noted:
+                # A list that ends before any row of its own is no signal on
+                # its own: with no open order at IBKR every list has that
+                # shape. An end not its own that ended it leaves its own end
+                # to arrive later as a stray, which brings the link level.
                 self._list_ends += 1
-                if not self._rows_in_list:
-                    self._resync_due = True
             else:
                 self.open_order_strays += 1
                 self._resync_due = True

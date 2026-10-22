@@ -21,15 +21,20 @@ reconnect's is read only once every trade IBKR replayed has its commission
 and its fill has reached the engine. Before the engine holds any account
 snapshot there is no book to compare, so the adapter sends none at a start
 or reconnect then. At a start or reconnect the adapter also reads IBKR's
-open-order list, each time to its end, until two reads in a row agree with
-each other and with the account read's own list, before it compares anything
-or sends any order: an order still working at IBKR is matched to the engine's
-order, never reported missing because one read was cut short. After each of
-these reads the adapter waits until IBKR has sent no open-order message for
-2 seconds; a read after which an order or an end-of-list mark arrived that
-no list was waiting for may have been cut short, so it counts as no read and
-the list is read again. After three disagreements in a row the link is not
-reconciled and nothing is sent. The engine compares them with its own book and decides one of four
+open-order list, each time to its end, until two reads in a row agree, and
+then the account, whose own list must show the same working orders (if an
+order filled, was cancelled or was placed meanwhile, both are read again, up
+to four account reads), before it compares anything or sends any order: an
+order still working at IBKR is matched to the engine's order, never reported
+missing because one read was cut short. After each of these reads the
+adapter waits until IBKR has sent no open-order message for 2 seconds; a
+read during or after which an order or an end-of-list mark arrived that no
+list was waiting for may have been cut short, so it counts as no read and
+the list is read again. Messages that never pause for 2 seconds within 10
+drop the link, which is made again and matched again. After three
+disagreements in a row, or four account reads that never agree, the adapter
+stops (`ReconcileIncomplete`) and nothing is sent; start it again once
+nothing is being placed, filled or cancelled at IBKR. The engine compares them with its own book and decides one of four
 things:
 
 | Result | What it means | What happens |

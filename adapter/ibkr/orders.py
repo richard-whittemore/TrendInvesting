@@ -411,13 +411,11 @@ def collect_broker_orders(conn):
         executions=tuple(executions[k] for k in sorted(executions)))
 
 
-def collect_settled_broker_orders(conn, account_orders, disagreements=OPEN_ORDER_DISAGREEMENTS):
-    """collect_broker_orders until two clean reads in a row agree, with each other and with the account read; the later.
+def collect_settled_broker_orders(conn, disagreements=OPEN_ORDER_DISAGREEMENTS):
+    """collect_broker_orders until two clean reads in a row agree; the later.
 
-    account_orders is the account read's own open-order list (the rows
-    snapshot.read_account lists). Two reads agree when they show the same
-    open orders (ids and IBKR states) and the same working orders as the
-    account read. After each read the link is pumped quiet
+    Two reads agree when they show the same open orders (ids and IBKR
+    states). After each read the link is pumped quiet
     (Connection.resync_open_orders); a read during which, or after which,
     a row or end arrived with no list outstanding (Connection.open_order_strays)
     may have been ended by an end not its own, so it is no read at all: it
@@ -426,10 +424,12 @@ def collect_settled_broker_orders(conn, account_orders, disagreements=OPEN_ORDER
     agree (ADR 0025 point 5: matched in full before anything is sent).
     After disagreements disagreements in a row (a read that is no read
     counts as one), OpenOrdersUnsettled: the link is not reconciled (ADR
-    0019: a list not read in full is unread). BrokerOrdersIncomplete and
-    NotConnected as collect_broker_orders raises them.
+    0019: a list not read in full is unread). The account read is compared
+    with the settled pair after it (agrees_with_account), so a book that
+    changes between the reads is read again, not taken as unsettled.
+    BrokerOrdersIncomplete and NotConnected as collect_broker_orders raises
+    them.
     """
-    account = frozenset(row["broker_order_id"] for row in account_orders)
     previous = None
     for _ in range(disagreements + 1):
         strays = conn.open_order_strays
@@ -439,12 +439,16 @@ def collect_settled_broker_orders(conn, account_orders, disagreements=OPEN_ORDER
             previous = None
             continue
         states = _order_states(current)
-        if previous == states and _working(current) == account:
+        if previous == states:
             return current
         previous = states
     raise OpenOrdersUnsettled(
-        "IBKR's open orders did not agree in two clean reads in a row, and with the account read, in {} "
-        "reads".format(disagreements + 1))
+        "IBKR's open orders did not agree in two clean reads in a row in {} reads".format(disagreements + 1))
+
+
+def agrees_with_account(broker, account_orders):
+    """Whether broker's working orders are the ones an account read lists (the rows snapshot.read_account gives)."""
+    return _working(broker) == frozenset(row["broker_order_id"] for row in account_orders)
 
 
 def _order_states(broker):

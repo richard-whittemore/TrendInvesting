@@ -162,6 +162,20 @@ class ConnectTests(unittest.TestCase):
         self.assertFalse(h.conn.connected)
         self.assertNotIn("connected", h.states())
 
+    def test_an_order_level_code_while_connect_takes_the_volunteered_list_is_kept_and_the_connect_stands(self):
+        # IBKR answers an order's message under its order ID (0 for an order
+        # placed by hand); only a code under no order (-1) ends a connect.
+        h = Harness()
+        seen = []
+        h.conn.subscribe(lambda event: seen.append(event))
+        self.volunteering_then(h, lambda: h.fake.callbacks.error(0, 202, "Order Canceled - reason:"))
+        h.conn.connect()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(h.states(), ["connected"])
+        while h.conn.pump(0) is not None:
+            pass
+        self.assertIn(("error", 202), [(e.name, e.args[1]) for e in seen if e.name == "error"])
+
     def test_a_close_while_connect_takes_the_volunteered_list_is_retried_with_backoff(self):
         h = Harness()
         self.volunteering_then(h, h.fake.drop)

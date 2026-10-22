@@ -16,7 +16,6 @@ from connection import REQUEST_ID_BASE, NotConnected
 from orders import (BrokerOrdersIncomplete, OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionReport,
                     CommissionReport, OpenOrdersUnsettled, UnrecognisedOrderReport, collect_broker_orders,
                     collect_settled_broker_orders, match_on_reconnect, parse_execution_time)
-from snapshot import read_account
 
 STATE = SimpleNamespace(status="Submitted")
 
@@ -472,14 +471,6 @@ class ReconnectMatchTests(unittest.TestCase):
         self.assertTrue(match.clean)
 
 
-def account_orders(rows):
-    """The open orders an account read of IBKR's list rows shows, read on a link of its own."""
-    h = Harness()
-    h.fake.open_orders = rows
-    h.conn.connect()
-    return read_account(h.conn).open_orders
-
-
 class EndsEachListOnAnotherEnd(FakeTWS):
     """Each list asked for ends at once on an end that is not its own, and its rows follow that end.
 
@@ -620,6 +611,51 @@ class WholeOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         self.assertEqual(collect_broker_orders(h.conn).open_orders, ())
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 2)
 
+    def test_open_orders_still_arriving_at_ten_seconds_drop_the_link_however_short_the_last_gap(self):
+        # A stray end every 1.5 seconds for 9 seconds: at 10 seconds the
+        # link has been silent for 1 second, not the 2 a quiet link needs.
+        h = Harness(request_timeout=5.0)
+        h.fake.volunteer_open_orders = True
+        h.conn.connect()
+        start = h.clock.now
+        strays = [start + 1.5 * n for n in range(1, 7)]
+        inbox = h.conn.inbox
+        waiting = inbox.get
+
+        def get(timeout):
+            if not inbox._queue.empty():
+                return waiting(0)
+            if strays and strays[0] <= h.clock.now + timeout:
+                h.clock.now = max(h.clock.now, strays.pop(0))
+                inbox.open_order_end()
+                return waiting(0)
+            h.clock.now += timeout
+            return None
+        inbox.get = get
+        with self.assertRaises(NotConnected):
+            h.conn.resync_open_orders()
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(h.statuses[-1].reason, "open-orders-never-quiet")
+        self.assertLessEqual(h.clock.now - start, 10.0 + 1e-9)
+
+    def test_the_relays_read_after_an_empty_list_that_ended_cleanly_does_not_wait_for_quiet(self):
+        # No open order at IBKR: every list ends before any row. With no
+        # stray since, the link is level and the next read is asked at once.
+        h = Harness()
+        h.fake.volunteer_open_orders = True
+        h.conn.connect()
+        self.assertEqual(collect_broker_orders(h.conn).open_orders, ())
+        quiet_pumps = []
+        resync = h.conn.resync_open_orders
+        h.conn.resync_open_orders = lambda: (quiet_pumps.append(True), resync())[1]
+        self.assertEqual(collect_broker_orders(h.conn).open_orders, ())
+        self.assertEqual(quiet_pumps, [], "the read waited for a quiet link it already had")
+        # A stray since the last list still makes the next read wait.
+        h.fake.callbacks.open_order_end()
+        h.conn.pump(0)
+        collect_broker_orders(h.conn)
+        self.assertEqual(quiet_pumps, [True])
+
     def test_a_list_whose_end_never_comes_drops_the_link_before_another_is_asked(self):
         h = Harness()
         h.conn.connect()
@@ -643,13 +679,13 @@ class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         h.fake.volunteer_open_orders = True
         h.fake.volunteer_after_request = True
         h.conn.connect()
-        self.assert_whole(collect_settled_broker_orders(h.conn, account_orders(self.working())))
+        self.assert_whole(collect_settled_broker_orders(h.conn))
 
     def test_two_reads_that_disagree_are_read_again_until_two_agree(self):
         h = Harness()
         h.conn.connect()
         h.fake.open_order_answers = [[], self.working(), self.working()]
-        self.assert_whole(collect_settled_broker_orders(h.conn, account_orders(self.working())))
+        self.assert_whole(collect_settled_broker_orders(h.conn))
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
 
     def test_an_order_whose_state_changed_between_reads_is_read_again(self):
@@ -657,7 +693,7 @@ class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         h.conn.connect()
         pending = [(7, contract(), order(order_ref="tag-1"), SimpleNamespace(status="PreSubmitted"))]
         h.fake.open_order_answers = [pending, self.working()[:1], self.working()[:1]]
-        broker = collect_settled_broker_orders(h.conn, account_orders(self.working()[:1]))
+        broker = collect_settled_broker_orders(h.conn)
         self.assertEqual([o.ibkr_status for o in broker.open_orders], ["Submitted"])
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
 
@@ -667,9 +703,8 @@ class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         h.conn.api = h.fake
         h.fake.open_orders = self.working()
         h.conn.connect()
-        # The account read was cut short the same way: it too shows no order.
         with self.assertRaises(OpenOrdersUnsettled):
-            collect_settled_broker_orders(h.conn, [])
+            collect_settled_broker_orders(h.conn)
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
 
     def test_a_link_one_list_behind_is_resynced_and_the_next_read_is_current(self):
@@ -684,23 +719,15 @@ class SettledOpenOrderListTests(OpenOrderLists, unittest.TestCase):
         h.fake.open_order_batch = 1
         h.fake.open_order_answers = [self.working()[:1], self.working(), self.working()]
         h.conn.connect()
-        self.assert_whole(collect_settled_broker_orders(h.conn, account_orders(self.working())))
+        self.assert_whole(collect_settled_broker_orders(h.conn))
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 3)
-
-    def test_two_reads_that_agree_but_not_with_the_account_read_do_not_settle(self):
-        h = Harness()
-        h.conn.connect()
-        h.fake.open_orders = self.working()
-        with self.assertRaises(OpenOrdersUnsettled):
-            collect_settled_broker_orders(h.conn, account_orders(self.working()[:1]))
-        self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
 
     def test_three_disagreements_in_a_row_leave_the_list_unsettled(self):
         h = Harness()
         h.conn.connect()
         h.fake.open_order_answers = [[], self.working(), [], self.working(), []]
         with self.assertRaises(OpenOrdersUnsettled):
-            collect_settled_broker_orders(h.conn, account_orders(self.working()))
+            collect_settled_broker_orders(h.conn)
         self.assertEqual(len(h.fake.called("req_all_open_orders")), 4)
 
 
