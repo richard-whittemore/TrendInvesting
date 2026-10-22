@@ -1496,7 +1496,7 @@ has named or part filled, below, is 1.24.0.
   execution of a sale filled in full sent again, which the full run reads
   as a redelivery, or any later lifecycle report on it. The run stops for a
   person to reconcile; recording an ended sale so that such reports are
-  read is the follow-up, #561.
+  read is a later change, which will let a restarted run read such a report.
   A retirement frees only an attempt this run, or the run whose decision
   it was restarted from, made: never one the approval restored as an
   earlier run's. Stated limit: a recovered decision states only the

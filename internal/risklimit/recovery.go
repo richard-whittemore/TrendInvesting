@@ -40,9 +40,10 @@ type RetiredSaleAttempt struct {
 }
 
 // RestoredOwnSale is the run's own live sale back to 98% as RestoreOwnSale
-// restores it: the order released, with its executions and venue order ID
-// and no end, what fired it, and the attempt it is, the first being 1
-// (0 for a decision recorded at version 7, which states none).
+// restores it: the order released, with its executions and venue order ID,
+// what fired it, and the attempt it is, the first being 1 (0 for a decision
+// recorded at version 7, which states none). The embedded Ended must be
+// zero: a live sale cannot be ended, so RestoreOwnSale refuses one that is.
 type RestoredOwnSale struct {
 	RestoredOrder
 	Trigger string
@@ -198,6 +199,8 @@ func (g *Gate) checkOwnSale(s RestoredOwnSale, st *recoveryStage) error {
 		return fmt.Errorf("risklimit: restored sale %s is a %s; a sale back to 98%% is a sell", o.ClientOrderID, o.Side)
 	case s.Trigger != event.SaleTriggerExit && s.Trigger != event.SaleTriggerMarginUrgent:
 		return fmt.Errorf("risklimit: restored sale %s was fired by %q, not exit or margin-urgent", o.ClientOrderID, s.Trigger)
+	case !s.Ended.IsZero():
+		return fmt.Errorf("risklimit: restored sale %s is ended; a live sale cannot be ended", o.ClientOrderID)
 	}
 	next := st.restoredRetired(g, o.Tag) + st.retired(g, o.Tag, o.InstrumentID)
 	if want := orderplan.SaleAttemptClientOrderID(o.Tag, o.InstrumentID, next); o.ClientOrderID != want {

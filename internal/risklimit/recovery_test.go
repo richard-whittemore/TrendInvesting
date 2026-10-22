@@ -70,3 +70,28 @@ func TestARecoveryIsRestoredWholeOrNotAtAll(t *testing.T) {
 		t.Errorf("the recovered gate counts %d shares being sold, want %d: the watched, own and working sells", got, want)
 	}
 }
+
+// TestARestoredOwnSaleThatEndedIsRefused: a run's own live sale is still
+// live, so a recovered decision whose own sale states an end is refused
+// whole, and no part of it is restored (ADR 0026, point 2, "Order identity",
+// and point 5: recovered, never recomputed; fail closed, AGENTS.md).
+func TestARestoredOwnSaleThatEndedIsRefused(t *testing.T) {
+	const incident = "engine-state:joint:1"
+	own := risklimit.RestoredOwnSale{RestoredOrder: risklimit.RestoredOrder{Order: event.OrderReleasedPayload{AccountID: "joint", Tag: incident,
+		ClientOrderID: orderplan.SaleAttemptClientOrderID(incident, "SPY", 0), InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 5, LimitPrice: 98},
+		VenueOrderID: "ib-own", Ended: at}, Trigger: event.SaleTriggerMarginUrgent, Attempt: 1}
+	g := gate(t, limits(), event.TradingModePaper)
+	err := g.RestoreRecovery(risklimit.Recovery{
+		SaleAttempt: &risklimit.RestoredSaleAttempt{IncidentID: incident},
+		OwnSale:     &own,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ended") {
+		t.Fatalf("a recovery whose own live sale has an end was restored: %v", err)
+	}
+	if got := g.RestoredIncident(); got != "" {
+		t.Errorf("the recovery refused for an ended own sale restored incident %q's sale attempt", got)
+	}
+	if _, ok := g.OwnLiveSale(incident, "SPY"); ok {
+		t.Errorf("the recovery refused for an ended own sale restored it as a live sale")
+	}
+}

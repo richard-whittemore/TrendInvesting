@@ -348,7 +348,7 @@ order, so a run restarted from that decision refuses every report IBKR
 sends on it afterwards: a late fill after its cancel, a fill of a sale
 filled in full that IBKR sends again, or any later status report. Each
 stops the run for you to reconcile the account with IBKR. Closing that gap
-is tracked as a follow-up issue (#561). A sale an earlier run released that
+is a later change, which will let a restarted run read such a report. A sale an earlier run released that
 the adapter never sent before that run ended is retired for the fresh run
 too, though that run's engine can no longer be told: before you approve
 the fresh run, `relay.py settle-ended-run` writes the adapter's
