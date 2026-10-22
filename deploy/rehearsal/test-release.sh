@@ -530,6 +530,11 @@ grep -q "pid 999999 is running" "$work/out" || fail "--status misses a release r
 printf '/bin/bash\0/tmp/other.sh\0' >"$TI_PROC/999999/cmdline"
 expect "--status with a shell running another script" 0 "$(run --status)"
 grep -q "pid reused; the lock is stale" "$work/out" || fail "--status takes a shell running another script for the release: $(cat "$work/out")"
+# A command line whose last word has no trailing NUL (a process that rewrote
+# its argv) still names the release: the final word is read, not dropped.
+printf '/bin/bash\0/usr/local/sbin/ti-release' >"$TI_PROC/999999/cmdline"
+expect "--status with a final word that has no trailing NUL" 0 "$(run --status)"
+grep -q "pid 999999 is running" "$work/out" || fail "--status drops a final cmdline word with no trailing NUL: $(cat "$work/out")"
 # An empty command line (not readable under hidepid) is a running lock.
 : >"$TI_PROC/999999/cmdline"
 expect "--status with an unreadable command line" 0 "$(run --status)"

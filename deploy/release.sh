@@ -161,7 +161,8 @@ if test "$mode" = status; then
         case ${a0##*/} in
           ti-release | release.sh) rel=1 ;;
           bash | sh | dash)
-            while IFS= read -r -d '' w; do
+            w=""
+            while IFS= read -r -d '' w || [ -n "$w" ]; do
               case ${w##*/} in ti-release | release.sh) rel=1; break ;; esac
             done
             ;;
