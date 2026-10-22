@@ -341,10 +341,17 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 	}
 	// The outside heartbeat is last, and only for a firing that finished
-	// without a fault: a ping means every step ran. A ping that fails is
-	// logged by pingHeartbeat and never fails the run.
+	// without a fault and found no trading unit failed: a ping means every
+	// step ran and the engine and the reporter are healthy (ADR 0019,
+	// "Alerting": the outside heartbeat). A ping that fails is logged by
+	// pingHeartbeat and never fails the run.
 	if err := errors.Join(failures...); err != nil {
 		return err
+	}
+	for _, failed := range failedNow {
+		if failed {
+			return nil
+		}
 	}
 	pingHeartbeat(getenv, &bounded, out)
 	return nil

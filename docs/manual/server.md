@@ -189,7 +189,9 @@ printed or logged. A ping that fails never fails the reporter's run: the
 reporter logs one line ("the heartbeat ping was not sent: ...", without the
 address) and pings again at the next firing. No ping is sent for a firing that
 failed, so a reporter that cannot deliver, or cannot read the log, also goes
-quiet and is noticed from outside.
+quiet and is noticed from outside; nor for a firing that found the engine or
+the adapter failed, even when its page was delivered, so a trading unit left
+failed for 20 minutes also takes the check down.
 
 **Set it up (once) [OWNER]:**
 
@@ -399,12 +401,20 @@ server naming the unit, the reason (cleaned of addresses, account numbers and
 secrets) and the manual row to read. You are paged within a minute of the
 stop, not after two sessions of silence.
 
-- One page per failed run. Every start of a unit is a new run with its own
-  invocation ID (`systemctl show -p InvocationID --value <unit>`), which
-  systemd hands the hook, and the page is keyed by it. A unit you restart that
-  fails again pages again, even within the same 5 minutes, and the first
-  run's PagerDuty incident is resolved first. The same run is not paged twice.
-  The record is `unit-failures.json` in `/var/lib/trend-investing/reports/`.
+- One page per failure, not per failed run. Every start of a unit is a new
+  run with its own invocation ID (`systemctl show -p InvocationID --value
+  <unit>`), which systemd hands the hook, and the page is keyed by the run
+  that began the failure. A failure lasts until the unit is seen well: a
+  reporter firing finds the engine or the adapter not failed, or, for the
+  reporter itself, a firing finishes without a fault. Every run that fails
+  before that (a unit you restart that fails again, a reporter that fails on
+  each 5-minute firing) is the same failure: it is not paged again and its
+  PagerDuty incident is neither resolved nor triggered anew. While it goes
+  on, at most once an hour, the next failed run sends a reminder,
+  `<host>: <unit> still failing`, saying since when and how many runs failed,
+  under the same incident. A failure after the unit was seen well pages
+  again. The record is `unit-failures.json` in
+  `/var/lib/trend-investing/reports/`.
 - The reason is the failed run's own last journal line. A run that wrote
   nothing (a start systemd refused, such as a missing `run.env`) is explained
   by systemd's own line about that run, such as "Failed to load environment
@@ -414,13 +424,14 @@ stop, not after two sessions of silence.
   did not page (the hook could not reach a channel, the unit failed before the
   hook was installed, or you started a unit that was already failed and
   systemd refused the start, which systemd does not hand to the hook) is paged
-  at that firing, and the state-at-start page names every failed trading
-  unit, so a reporter restarted after the failure still tells you. The page of
-  a run that is over (the unit was running at the firing's start under a later
-  run, or was no longer failed) is resolved; a page sent after the firing
+  at that firing (unless its failure was already paged), and the
+  state-at-start page names every failed trading unit, so a reporter
+  restarted after the failure still tells you. The page of a unit that was not
+  failed at the firing's start is resolved; a page sent after the firing
   started is left for the next firing.
-- A failure of the reporter itself is paged by the hook too, and resolved by
-  the next firing that finishes without a fault.
+- A failure of the reporter itself is paged by the hook too, once, however
+  many firings fail after it (with the hourly reminder), and resolved by the
+  next firing that finishes without a fault.
 - If the hook itself fails (`systemctl status ti-unit-failed@<unit>.service`),
   no channel took the page; the reporter's next firing tries again.
 

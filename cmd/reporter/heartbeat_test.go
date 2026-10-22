@@ -233,3 +233,34 @@ func writeFileT(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestAFiringThatFindsATradingUnitFailedSendsNoPing: a ping means the engine
+// and the reporter are healthy, so a firing that finds the engine or the
+// adapter failed pings nothing even when its page was delivered; the next
+// firing that finds every unit well pings again (ADR 0019, "Alerting": the
+// outside heartbeat).
+func TestAFiringThatFindsATradingUnitFailedSendsNoPing(t *testing.T) {
+	e, server := newStandInEndpoint(t)
+	systemd := newStandInSystemd(t)
+	systemd.fail("ti-engine@boost.service")
+	dir := t.TempDir()
+	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL, "TI_HEARTBEAT_URL": server.URL + heartbeatPath})
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy",
+		"-units", "ti-engine@boost.service,ti-adapter-boost.service", "-systemctl", systemd.systemctl(), "-journalctl", systemd.journalctl()}
+	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, server.Client()); err != nil {
+		t.Fatal(err)
+	}
+	if e.count("ntfy") == 0 {
+		t.Fatalf("the failed engine was not paged: %v", e.events)
+	}
+	if e.count("ping") != 0 {
+		t.Errorf("a firing that found the engine failed pinged: %v", e.events)
+	}
+	systemd.fail()
+	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour + 5*time.Minute) }, &bytes.Buffer{}, server.Client()); err != nil {
+		t.Fatal(err)
+	}
+	if e.count("ping") != 1 {
+		t.Errorf("the firing after the engine was well again did not ping: %v", e.events)
+	}
+}

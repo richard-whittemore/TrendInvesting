@@ -23,6 +23,11 @@ import (
 // never holds back a page.
 const unitCommandTimeout = 15 * time.Second
 
+// unitReminderInterval is the shortest time between two reminders of one
+// failure episode on one channel (ADR 0019, "Alerting": each incident once,
+// and a fault that persists is not left silent).
+const unitReminderInterval = time.Hour
+
 // tradingUnit is the shape of every unit name the reporter hands systemctl or
 // journalctl (-units, -self-unit and the hook's argument): the engine, the
 // adapter or the reporter of one account, nothing else, so no value can be
@@ -97,11 +102,10 @@ func withUnitState(path string, fn func(*unitState) error) error {
 // notifyUnitFailed is `reporter notify-unit-failed <unit>`, run by the
 // OnFailure hook (deploy/systemd/ti-unit-failed@.service) when a trading unit
 // fails: one urgent page through the reporter's channels, naming the unit, the
-// failed run's reason and the manual row, keyed by the failed run. A run
-// already paged is not paged again; the page of an earlier run of the unit is
-// resolved first. A channel that fails fails the command, so the
-// hook unit shows failed, and only that channel is tried again by the next
-// reporter firing (ADR 0019, "Alerting").
+// failed run's reason and the manual row, once per failure episode
+// (failedRun). A channel that fails fails the command, so the hook unit shows
+// failed, and only that channel is tried again by the next reporter firing
+// (ADR 0019, "Alerting").
 func notifyUnitFailed(args []string, getenv func(string) string, now func() time.Time, out io.Writer, client *http.Client) error {
 	flags := flag.NewFlagSet("reporter notify-unit-failed", flag.ContinueOnError)
 	flags.SetOutput(out)
@@ -142,16 +146,7 @@ func notifyUnitFailed(args []string, getenv func(string) string, now func() time
 	at := now()
 	run := failedInvocation(getenv, *systemctl, unit, at)
 	err = withUnitState(*statePath, func(u *unitState) error {
-		// A new failed run means every earlier run of the unit is over: its
-		// incident is resolved before the new one is paged.
-		var errs []error
-		for invocation := range unitRecords(u, unit) {
-			if invocation != run {
-				errs = append(errs, resolveKey(u, report.UnitFailedKey(unit, invocation), senders, setAside))
-			}
-		}
-		errs = append(errs, pageRun(u, unit, run, *journalctl, secrets, senders, at, *repeat))
-		return errors.Join(errs...)
+		return failedRun(u, unit, run, *journalctl, secrets, senders, setAside, at, *repeat)
 	})
 	return errors.Join(append(failures, err)...)
 }
@@ -170,6 +165,102 @@ func failedInvocation(getenv func(string) string, systemctl, unit string, at tim
 		return samples[unit].invocation
 	}
 	return "unnamed-" + at.UTC().Format("20060102T150405.000000000Z")
+}
+
+// failedRun pages run, a failed run of unit, unless it belongs to a failure
+// episode already paged. An episode begins with a page and lasts until the
+// unit is seen well (a reporter firing that samples it not failed, or, for the
+// reporter itself, a firing that finishes without a fault): every failed run
+// before that, such as each timer firing of a reporter that keeps failing, is
+// the same episode, so its incident is neither paged again nor resolved and
+// triggered again, and each channel is reminded at most once an
+// unitReminderInterval (ADR 0019, "Alerting": each incident once). An episode
+// seen well whose incident a channel could not resolve is over: it is
+// resolved again and the run pages afresh.
+func failedRun(u *unitState, unit, run, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
+	var errs []error
+	episode, opened := "", time.Time{}
+	for invocation, recorded := range unitRecords(u, unit) {
+		key := report.UnitFailedKey(unit, invocation)
+		if u.repeats[recoveredKey(key)] > 0 {
+			errs = append(errs, resolveKey(u, key, senders, setAside))
+			continue
+		}
+		if episode == "" || recorded.Before(opened) || (recorded.Equal(opened) && invocation < episode) {
+			episode, opened = invocation, recorded
+		}
+	}
+	if episode == "" || episode == run {
+		return errors.Join(append(errs, pageRun(u, unit, run, journalctl, secrets, senders, at, every))...)
+	}
+	// A channel that has not yet taken the episode's page is sent it first.
+	errs = append(errs, pageRun(u, unit, episode, journalctl, secrets, senders, at, every))
+	return errors.Join(append(errs, remindRun(u, unit, episode, run, senders, at))...)
+}
+
+// recoveredKey marks an episode whose unit was seen well while a channel kept
+// its record because the resolve failed there: the episode is over.
+func recoveredKey(key string) string { return channelKey("recovered", key) }
+
+// failedRunKey records run as a later failed run of the episode keyed key,
+// so its reminder counts the runs.
+func failedRunKey(run, key string) string { return channelKey("run:"+run, key) }
+
+// remindedKey is when channel was last reminded of the episode keyed key.
+func remindedKey(channel, key string) string { return channelKey("reminded:"+channel, key) }
+
+// remindRun counts run, a later failed run of the episode begun by episode,
+// and reminds each channel that took the episode's page an
+// unitReminderInterval or more since its page or its last reminder: "still
+// failing since <time>, N failed runs", under the episode's key. A channel
+// whose reminder fails is reminded at the next failed run.
+func remindRun(u *unitState, unit, episode, run string, senders []sender, at time.Time) error {
+	key := report.UnitFailedKey(unit, episode)
+	if u.sent[failedRunKey(run, key)].IsZero() {
+		u.sent[failedRunKey(run, key)] = at
+	}
+	runs, since := 1, time.Time{}
+	for k := range u.sent {
+		if strings.HasPrefix(k, "run:") && strings.HasSuffix(k, channelKey("", key)) {
+			runs++
+		}
+	}
+	var due, echoes []sender
+	for _, s := range senders {
+		if _, echo := s.(echoOnly); echo {
+			echoes = append(echoes, s)
+			continue
+		}
+		took := u.sent[channelKey(s.name(), key)]
+		if !u.seen[channelKey(s.name(), key)] || took.IsZero() {
+			continue
+		}
+		if since.IsZero() || took.Before(since) {
+			since = took
+		}
+		last := u.sent[remindedKey(s.name(), key)]
+		if last.IsZero() {
+			last = took
+		}
+		if at.Sub(last) >= unitReminderInterval {
+			due = append(due, s)
+		}
+	}
+	var errs []error
+	if len(due) > 0 {
+		a := report.UnitStillFailedAlert(hostName(), unit, episode, since, runs, at)
+		for _, s := range echoes {
+			_ = s.send(a, 0)
+		}
+		for _, s := range due {
+			if err := s.send(a, 0); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", s.name(), err))
+				continue
+			}
+			u.sent[remindedKey(s.name(), key)] = at
+		}
+	}
+	return errors.Join(append(errs, u.record())...)
 }
 
 // pageRun pages the failed run of unit on each channel that has not taken it.
@@ -197,28 +288,42 @@ func pageRun(u *unitState, unit, invocation, journalctl string, secrets []string
 // (_SYSTEMD_INVOCATION_ID), cleaned for a page. A run that wrote nothing (a
 // start systemd refused, such as a missing EnvironmentFile) is explained by
 // systemd's own first "Failed" line about that run (UNIT= and INVOCATION_ID=
-// from PID 1). It is never a line from an earlier run.
+// from PID 1). It is never a line from an earlier run, nor journalctl's own
+// notice that it found nothing ("-- No entries --"): it is run with -q, and a
+// line it prints beginning "-- " is not the run's.
 func unitReason(journalctl, unit, invocation string, secrets []string) string {
 	if !invocationShape.MatchString(invocation) {
 		return "(systemd named no invocation for the failed run, so its journal lines were not read)"
 	}
-	own, err := unitCommand(journalctl, "_SYSTEMD_UNIT="+unit, "_SYSTEMD_INVOCATION_ID="+invocation, "-n", "1", "-o", "cat", "--no-pager")
+	own, err := unitCommand(journalctl, "-q", "_SYSTEMD_UNIT="+unit, "_SYSTEMD_INVOCATION_ID="+invocation, "-n", "1", "-o", "cat", "--no-pager")
 	if err != nil {
 		return "(the unit's journal could not be read)"
 	}
-	if strings.TrimSpace(own) != "" {
-		return report.UnitFailedReason(own, secrets)
+	if lines := journalLines(own); len(lines) > 0 {
+		return report.UnitFailedReason(lines[0], secrets)
 	}
-	systemd, err := unitCommand(journalctl, "_PID=1", "UNIT="+unit, "INVOCATION_ID="+invocation, "-n", "50", "-o", "cat", "--no-pager")
+	systemd, err := unitCommand(journalctl, "-q", "_PID=1", "UNIT="+unit, "INVOCATION_ID="+invocation, "-n", "50", "-o", "cat", "--no-pager")
 	if err != nil {
 		return "(the unit's journal could not be read)"
 	}
-	for _, line := range strings.Split(systemd, "\n") {
+	for _, line := range journalLines(systemd) {
 		if strings.Contains(line, "Failed") {
 			return report.UnitFailedReason(line, secrets)
 		}
 	}
 	return report.UnitFailedReason("", secrets)
+}
+
+// journalLines are the non-blank lines journalctl printed, without its own
+// notices, which begin "-- " ("-- No entries --").
+func journalLines(out string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(strings.TrimSpace(line), "-- ") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 // secretValues are the values of the secrets the reporter holds, so that a
@@ -293,29 +398,30 @@ func splitUnits(list string) []string {
 // paged (the hook does this at the moment of failure; this catches a hook
 // that could not deliver, a unit that failed before the hook was installed,
 // and a start refused while the unit was already failed, which systemd does
-// not hand to OnFailure=) and resolves the page of every run that is over.
-// samples are systemd's answers at the start of the firing, sampledAt their
-// time: a page recorded since then is of a run newer than the sample, so it is
-// never resolved on the sample's word. Both reporters and the hook share the
-// record under a lock.
+// not hand to OnFailure=) unless its episode was paged (failedRun), and
+// resolves the episode of every unit seen not failed. samples are systemd's
+// answers at the start of the firing, sampledAt their time: a page recorded
+// since then is of a run newer than the sample, so it is never resolved on the
+// sample's word. Both reporters and the hook share the record under a lock.
 func unitStep(path string, units []string, samples map[string]unitSample, sampledAt time.Time, journalctl string, secrets []string, senders []sender, setAside []channelFault, at time.Time, every time.Duration) error {
 	return withUnitState(path, func(u *unitState) error {
 		var failures []error
 		for _, unit := range units {
 			sample := samples[unit]
-			if sample.failed && sample.invocation == "" {
-				sample.invocation = "unnamed"
+			if sample.failed {
+				if sample.invocation == "" {
+					sample.invocation = "unnamed"
+				}
+				if err := failedRun(u, unit, sample.invocation, journalctl, secrets, senders, setAside, at, every); err != nil {
+					failures = append(failures, err)
+				}
+				continue
 			}
 			for invocation, recorded := range unitRecords(u, unit) {
-				if (sample.failed && invocation == sample.invocation) || !recorded.Before(sampledAt) {
+				if !recorded.Before(sampledAt) {
 					continue
 				}
 				if err := resolveKey(u, report.UnitFailedKey(unit, invocation), senders, setAside); err != nil {
-					failures = append(failures, err)
-				}
-			}
-			if sample.failed {
-				if err := pageRun(u, unit, sample.invocation, journalctl, secrets, senders, at, every); err != nil {
 					failures = append(failures, err)
 				}
 			}
@@ -372,11 +478,12 @@ func clearUnit(path, unit, current string, senders []sender, setAside []channelF
 	})
 }
 
-// resolveKey closes a failed run's incident on each working PagerDuty channel
-// that took it, since PagerDuty folds a trigger into an open incident under
-// its key, then forgets it on every channel; a PagerDuty channel set aside,
-// or whose resolve failed, keeps its record until a run in which it works (as
-// clockStep does).
+// resolveKey closes a failure episode's incident on each working PagerDuty
+// channel that took it, since PagerDuty folds a trigger into an open incident
+// under its key, then forgets it on every channel; a PagerDuty channel set
+// aside, or whose resolve failed, keeps its record until a run in which it
+// works (as clockStep does), marked over (recoveredKey) so the next failed
+// run begins a new episode.
 func resolveKey(u *unitState, key string, senders []sender, setAside []channelFault) error {
 	failedNames, resolveErr := resolveAll(senders, key, u.seen)
 	keep := map[string]bool{}
@@ -387,5 +494,8 @@ func resolveKey(u *unitState, key string, senders []sender, setAside []channelFa
 		keep[name] = true
 	}
 	forgetAlert(key, keep, u.seen, u.sent, u.repeats)
+	if deliveredAnywhere(u.seen, key) {
+		u.repeats[recoveredKey(key)] = 1
+	}
 	return errors.Join(resolveErr, u.record())
 }

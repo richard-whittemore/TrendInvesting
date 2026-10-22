@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -32,8 +33,10 @@ const (
 // the test sets (`systemctl show -p ActiveState -p InvocationID <unit>`), and
 // a journalctl that prints, for an invocation, the lines the unit wrote
 // (_SYSTEMD_INVOCATION_ID=) or systemd's own lines about it (INVOCATION_ID=),
-// and for a query with neither, a line from an earlier run. Both record how
-// they were called.
+// and for a query with neither, a line from an earlier run. Like the real
+// tool, the journalctl notes "-- No entries --" for a query that matched
+// nothing unless it is given -q, and a noisy one notes it even then. Both
+// record how they were called.
 type standInSystemd struct{ dir string }
 
 // firstRun is the stand-in's invocation until a test starts another.
@@ -47,9 +50,9 @@ func newStandInSystemd(t *testing.T) standInSystemd {
 		"case $1 in show) ;; *) exit 2 ;; esac\n" +
 		"if grep -qx \"$unit\" " + d + "/failed; then echo ActiveState=failed; else echo ActiveState=active; fi\n" +
 		"echo InvocationID=$(cat " + d + "/invocation)\n"
-	journalctl := "#!/bin/sh\necho \"$@\" >>" + d + "/journalctl-calls\nf=unit-wide\n" +
-		"for a; do case $a in _SYSTEMD_INVOCATION_ID=*) f=own-${a#*=} ;; INVOCATION_ID=*) f=systemd-${a#*=} ;; esac; done\n" +
-		"cat " + d + "/$f 2>/dev/null\nexit 0\n"
+	journalctl := "#!/bin/sh\necho \"$@\" >>" + d + "/journalctl-calls\nf=unit-wide\nq=\n" +
+		"for a; do case $a in -q) q=1 ;; _SYSTEMD_INVOCATION_ID=*) f=own-${a#*=} ;; INVOCATION_ID=*) f=systemd-${a#*=} ;; esac; done\n" +
+		"if test -e " + d + "/$f; then cat " + d + "/$f\nelif test -z \"$q\" || test -e " + d + "/noisy; then echo '-- No entries --'; fi\nexit 0\n"
 	for name, script := range map[string]string{"systemctl": systemctl, "journalctl": journalctl} {
 		if err := os.WriteFile(filepath.Join(s.dir, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
@@ -88,6 +91,10 @@ func (s standInSystemd) systemdSays(lines ...string) {
 func (s standInSystemd) earlierRunSaid(line string) {
 	_ = os.WriteFile(filepath.Join(s.dir, "unit-wide"), []byte(line+"\n"), 0o600)
 }
+
+// noisy makes the journalctl note "-- No entries --" even when given -q.
+func (s standInSystemd) noisy() { _ = os.WriteFile(filepath.Join(s.dir, "noisy"), nil, 0o600) }
+
 func (s standInSystemd) fail(units ...string) {
 	_ = os.WriteFile(filepath.Join(s.dir, "failed"), []byte(strings.Join(units, "\n")+"\n"), 0o600)
 }
@@ -105,9 +112,28 @@ func pagesFor(r *relay, host, unit string) int { return count(r.to(host), unit+"
 
 func notify(t *testing.T, transport http.RoundTripper, dir string, systemd standInSystemd, getenv func(string) string, unit string, extra ...string) error {
 	t.Helper()
+	return notifyAt(t, transport, dir, systemd, getenv, t0.Add(time.Hour), unit, extra...)
+}
+
+func notifyAt(t *testing.T, transport http.RoundTripper, dir string, systemd standInSystemd, getenv func(string) string, at time.Time, unit string, extra ...string) error {
+	t.Helper()
 	args := append([]string{"notify-unit-failed", "-state", filepath.Join(dir, "unit-failures.json"), "-channel", "ntfy,pagerduty", "-journalctl", systemd.journalctl(), "-systemctl", systemd.systemctl()}, extra...)
 	args = append(args, unit)
-	return run(args, getenv, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: transport})
+	return run(args, getenv, func() time.Time { return at }, &bytes.Buffer{}, &http.Client{Transport: transport})
+}
+
+// monitored is the hook's environment as systemd gives it for the failed run
+// invocation of unit (MONITOR_UNIT, MONITOR_INVOCATION_ID).
+func monitored(unit, invocation string) func(string) string {
+	return func(k string) string {
+		switch k {
+		case "MONITOR_UNIT":
+			return unit
+		case "MONITOR_INVOCATION_ID":
+			return invocation
+		}
+		return twoChannels()(k)
+	}
 }
 
 func TestTheHookPagesBothChannelsOnceWithTheUnitTheReasonAndTheManualRow(t *testing.T) {
@@ -448,12 +474,11 @@ func pdEvents(r *relay) []string {
 	return out
 }
 
-// TestAUnitThatFailsAgainBeforeAnyFiringIsPagedAgain: the page is keyed by
-// the failed run (systemd's invocation), not the unit alone, so a unit
-// restarted and failed again before a reporter firing saw it running pages
-// again, and the earlier incident is resolved first (ADR 0019, "Alerting":
-// each incident reaches a person).
-func TestAUnitThatFailsAgainBeforeAnyFiringIsPagedAgain(t *testing.T) {
+// TestAUnitThatFailsAgainWithinOneEpisodeIsNotPagedAgain: a unit restarted
+// that fails again before any reporter firing saw it well is the same failure
+// episode, so it is not paged again and its incident is not resolved and
+// triggered again (ADR 0019, "Alerting": each incident once).
+func TestAUnitThatFailsAgainWithinOneEpisodeIsNotPagedAgain(t *testing.T) {
 	t.Run("the hook reads the failed run from systemctl", func(t *testing.T) {
 		r := &relay{sent: map[string][]string{}}
 		systemd := newStandInSystemd(t)
@@ -467,40 +492,29 @@ func TestAUnitThatFailsAgainBeforeAnyFiringIsPagedAgain(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, host := range []string{ntfyHost, pdHost} {
-			if n := pagesFor(r, host, unit); n != 2 {
-				t.Errorf("%s took %d pages for two failed runs, want 2", host, n)
+			if n := pagesFor(r, host, unit); n != 1 {
+				t.Errorf("%s took %d pages for one episode, want 1", host, n)
 			}
 		}
-		events := pdEvents(r)
-		want := []string{"trigger " + report.UnitFailedKey(unit, firstRun), "resolve " + report.UnitFailedKey(unit, firstRun), "trigger " + report.UnitFailedKey(unit, secondRun)}
-		if strings.Join(events, "\n") != strings.Join(want, "\n") {
-			t.Errorf("PagerDuty events:\n%s\nwant:\n%s", strings.Join(events, "\n"), strings.Join(want, "\n"))
+		if got := pdEvents(r); strings.Join(got, "\n") != "trigger "+report.UnitFailedKey(unit, firstRun) {
+			t.Errorf("PagerDuty events %v, want the one trigger of the episode's first run", got)
 		}
 	})
 	t.Run("the hook takes the failed run systemd hands it", func(t *testing.T) {
 		r := &relay{sent: map[string][]string{}}
 		systemd := newStandInSystemd(t)
 		systemd.invoke(secondRun) // already restarted when the hook reads systemctl
-		monitor := func(k string) string {
-			switch k {
-			case "MONITOR_UNIT":
-				return "ti-engine@boost.service"
-			case "MONITOR_INVOCATION_ID":
-				return firstRun
-			}
-			return twoChannels()(k)
-		}
-		if err := notify(t, r, t.TempDir(), systemd, monitor, "ti-engine@boost.service"); err != nil {
+		if err := notify(t, r, t.TempDir(), systemd, monitored("ti-engine@boost.service", firstRun), "ti-engine@boost.service"); err != nil {
 			t.Fatal(err)
 		}
 		if got := pdEvents(r); len(got) != 1 || got[0] != "trigger "+report.UnitFailedKey("ti-engine@boost.service", firstRun) {
 			t.Errorf("PagerDuty events %v, want one trigger keyed by the run systemd named", got)
 		}
 	})
-	t.Run("a firing pages a failed run the hook never saw", func(t *testing.T) {
+	t.Run("a firing that finds a new failed run of a paged unit", func(t *testing.T) {
 		// A start refused while the unit is already failed does not start
 		// the OnFailure= hook (systemd 255), so the unit stays failed under a
-		// new invocation and only the firing can tell.
+		// new invocation: still the same episode.
 		r := &relay{sent: map[string][]string{}}
 		systemd := newStandInSystemd(t)
 		systemd.fail("ti-adapter-boost.service")
@@ -513,12 +527,150 @@ func TestAUnitThatFailsAgainBeforeAnyFiringIsPagedAgain(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, host := range []string{ntfyHost, pdHost} {
-			if n := pagesFor(r, host, "ti-adapter-boost.service"); n != 2 {
-				t.Errorf("%s took %d pages for two failed runs, want 2", host, n)
+			if n := pagesFor(r, host, "ti-adapter-boost.service"); n != 1 {
+				t.Errorf("%s took %d pages for one episode, want 1", host, n)
 			}
 		}
-		if n := count(pdEvents(r), "resolve "+report.UnitFailedKey("ti-adapter-boost.service", firstRun)); n != 1 {
-			t.Errorf("the first run's incident was resolved %d times, want 1: %v", n, pdEvents(r))
+		if n := count(pdEvents(r), "resolve"); n != 0 {
+			t.Errorf("the episode's incident was resolved within it: %v", pdEvents(r))
+		}
+	})
+}
+
+// TestAnEpisodeSeenWellIsOverEvenWhenItsResolveFailed: a unit seen well ends
+// its episode though PagerDuty could not be told, so the next failed run pages
+// afresh and the old incident is resolved again (ADR 0019, "Alerting").
+func TestAnEpisodeSeenWellIsOverEvenWhenItsResolveFailed(t *testing.T) {
+	flaky := &flakyRelay{relay: &relay{sent: map[string][]string{}}, failHost: pdHost, healed: true}
+	systemd := newStandInSystemd(t)
+	dir := t.TempDir()
+	const unit = "ti-engine@boost.service"
+	start := t0.Add(time.Hour)
+	if err := notifyAt(t, flaky, dir, systemd, monitored(unit, firstRun), start, unit); err != nil {
+		t.Fatal(err)
+	}
+	flaky.setFailing(true)
+	systemd.fail()
+	if err := firing(t, flaky, dir, systemd, start.Add(5*time.Minute), unit); err == nil {
+		t.Fatal("a resolve PagerDuty refused must fail the firing")
+	}
+	flaky.setFailing(false)
+	systemd.invoke(secondRun)
+	systemd.fail(unit)
+	if err := notifyAt(t, flaky, dir, systemd, monitored(unit, secondRun), start.Add(10*time.Minute), unit); err != nil {
+		t.Fatal(err)
+	}
+	if n := pagesFor(flaky.relay, ntfyHost, unit); n != 2 {
+		t.Errorf("ntfy took %d pages across two episodes, want 2", n)
+	}
+	if n := count(pdEvents(flaky.relay), "trigger "+report.UnitFailedKey(unit, secondRun)); n != 1 {
+		t.Errorf("PagerDuty was not paged for the new episode: %v", pdEvents(flaky.relay))
+	}
+	if n := count(pdEvents(flaky.relay), "resolve "+report.UnitFailedKey(unit, firstRun)); n != 1 {
+		t.Errorf("the old incident was not resolved once it could be: %v", pdEvents(flaky.relay))
+	}
+}
+
+// TestAReporterThatFailsEveryFiringPagesOnceAndRemindsHourly: every timer
+// firing is a new systemd run, so a reporter that fails on every firing (an
+// engine not yet started, a channel set aside, a channel down) is one
+// failure episode: one page, then at most one reminder an hour naming when
+// it began and how many runs failed, never a page per firing (ADR 0019,
+// "Alerting": each incident once).
+func TestAReporterThatFailsEveryFiringPagesOnceAndRemindsHourly(t *testing.T) {
+	r := &relay{sent: map[string][]string{}}
+	systemd := newStandInSystemd(t)
+	systemd.fail()
+	dir := t.TempDir()
+	const self = "ti-reporter@boost.service"
+	start := t0.Add(time.Hour)
+	first := fmt.Sprintf("%032x", 1)
+	for i := 0; i < 14; i++ { // 65 minutes of firings, each one failing
+		if err := notifyAt(t, r, dir, systemd, monitored(self, fmt.Sprintf("%032x", i+1)), start.Add(time.Duration(i)*5*time.Minute), self); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{ntfyHost, pdHost} {
+		if n := pagesFor(r, host, self); n != 1 {
+			t.Errorf("%s took %d pages for one episode, want 1", host, n)
+		}
+		reminders := 0
+		for _, m := range r.to(host) {
+			if strings.Contains(m, self+" still failing") {
+				reminders++
+				for _, want := range []string{"since " + start.UTC().Format(time.RFC3339), "13 failed runs"} {
+					if !strings.Contains(m, want) {
+						t.Errorf("%s: the reminder lacks %q:\n%s", host, want, m)
+					}
+				}
+			}
+		}
+		if reminders != 1 {
+			t.Errorf("%s took %d reminders in 65 minutes, want 1", host, reminders)
+		}
+	}
+	for _, e := range pdEvents(r) {
+		if e != "trigger "+report.UnitFailedKey(self, first) {
+			t.Errorf("PagerDuty event %q: the episode's incident must be the only one, never resolved within it (%v)", e, pdEvents(r))
+		}
+	}
+}
+
+// TestAFailureAfterTheUnitWasSeenWellPagesAgain: an episode ends when a
+// firing sees the unit well (for the reporter, a firing that finishes without
+// a fault), so the next failure is a new incident and pages again.
+func TestAFailureAfterTheUnitWasSeenWellPagesAgain(t *testing.T) {
+	start := t0.Add(time.Hour)
+	t.Run("the engine", func(t *testing.T) {
+		r := &relay{sent: map[string][]string{}}
+		systemd := newStandInSystemd(t)
+		dir := t.TempDir()
+		const unit = "ti-engine@boost.service"
+		if err := notifyAt(t, r, dir, systemd, monitored(unit, firstRun), start, unit); err != nil {
+			t.Fatal(err)
+		}
+		systemd.fail()
+		if err := firing(t, r, dir, systemd, start.Add(5*time.Minute), unit); err != nil {
+			t.Fatal(err)
+		}
+		systemd.invoke(secondRun)
+		systemd.fail(unit)
+		if err := notifyAt(t, r, dir, systemd, monitored(unit, secondRun), start.Add(10*time.Minute), unit); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"trigger " + report.UnitFailedKey(unit, firstRun), "resolve " + report.UnitFailedKey(unit, firstRun), "trigger " + report.UnitFailedKey(unit, secondRun)}
+		var got []string
+		for _, e := range pdEvents(r) {
+			if strings.Contains(e, report.UnitFailedKeyPrefix(unit)) {
+				got = append(got, e)
+			}
+		}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("PagerDuty events:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		if n := pagesFor(r, ntfyHost, unit); n != 2 {
+			t.Errorf("ntfy took %d pages across two episodes, want 2", n)
+		}
+	})
+	t.Run("the reporter", func(t *testing.T) {
+		r := &relay{sent: map[string][]string{}}
+		systemd := newStandInSystemd(t)
+		systemd.fail()
+		dir := t.TempDir()
+		const self = "ti-reporter@boost.service"
+		if err := notifyAt(t, r, dir, systemd, monitored(self, firstRun), start, self); err != nil {
+			t.Fatal(err)
+		}
+		if err := firing(t, r, dir, systemd, start.Add(5*time.Minute), "ti-engine@boost.service", "-self-unit", self); err != nil {
+			t.Fatal(err)
+		}
+		if err := notifyAt(t, r, dir, systemd, monitored(self, secondRun), start.Add(10*time.Minute), self); err != nil {
+			t.Fatal(err)
+		}
+		for _, host := range []string{ntfyHost, pdHost} {
+			if n := pagesFor(r, host, self); n != 2 {
+				t.Errorf("%s took %d reporter pages across two episodes, want 2", host, n)
+			}
 		}
 	})
 }
@@ -610,6 +762,16 @@ func TestTheReasonIsTheFailedRunsNeverAnEarlierOnes(t *testing.T) {
 		got := reasonOf(t, systemd)
 		if !strings.Contains(got, "Failed to load environment files") || strings.Contains(got, stale) {
 			t.Errorf("the page's reason is not systemd's line about the failed run:\n%s", got)
+		}
+	})
+	t.Run("a journalctl that notes it found no entries", func(t *testing.T) {
+		systemd := newStandInSystemd(t)
+		systemd.noisy()
+		systemd.invoke(secondRun)
+		systemd.systemdSays("ti-engine@boost.service: Failed with result 'exit-code'.")
+		got := reasonOf(t, systemd)
+		if strings.Contains(got, "No entries") || !strings.Contains(got, "Failed with result 'exit-code'") {
+			t.Errorf("journalctl's own notice was taken for the run's line:\n%s", got)
 		}
 	})
 	t.Run("nothing at all about the run", func(t *testing.T) {

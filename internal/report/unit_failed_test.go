@@ -40,6 +40,41 @@ func TestAFailedUnitPagesUrgentlyWithTheUnitTheReasonAndTheManualRow(t *testing.
 	}
 }
 
+// TestAPublicRelayIsSentTheFailedUnitPageWithoutTheJournalLine: a public
+// ntfy relay is sent the page's public text, which names the unit and the
+// manual row but not the journal line, which stays on the private channels.
+func TestAPublicRelayIsSentTheFailedUnitPageWithoutTheJournalLine(t *testing.T) {
+	a := report.UnitFailedAlert("lightsail", "ti-engine@boost.service", "0123456789abcdef0123456789abcdef", "reconcile incomplete: open orders unread", time.Date(2026, 10, 22, 15, 4, 0, 0, time.UTC))
+	if a.PublicBody == "" || strings.Contains(a.PublicBody, "reconcile incomplete") {
+		t.Errorf("public text %q: want one without the journal line", a.PublicBody)
+	}
+	for _, want := range []string{"ti-engine@boost.service", "docs/manual/engine.md", "journalctl -u ti-engine@boost.service"} {
+		if !strings.Contains(a.PublicBody, want) {
+			t.Errorf("public text lacks %q:\n%s", want, a.PublicBody)
+		}
+	}
+}
+
+// TestTheReminderNamesWhenTheFailureBeganAndHowManyRunsFailed: a failure
+// episode that goes on is reminded under the episode's own key, saying since
+// when and how many runs failed, with no journal line (ADR 0019, "Alerting").
+func TestTheReminderNamesWhenTheFailureBeganAndHowManyRunsFailed(t *testing.T) {
+	since := time.Date(2026, 10, 22, 15, 4, 0, 0, time.UTC)
+	const run = "0123456789abcdef0123456789abcdef"
+	a := report.UnitStillFailedAlert("lightsail", "ti-reporter@boost.service", run, since, 13, since.Add(time.Hour))
+	if a.Key != report.UnitFailedKey("ti-reporter@boost.service", run) || a.Severity != report.Urgent || a.Kind != report.KindUnitFailed {
+		t.Errorf("key %q severity %v kind %v: want the episode's key, urgent, unit-failed", a.Key, a.Severity, a.Kind)
+	}
+	if a.Title != "lightsail: ti-reporter@boost.service still failing" {
+		t.Errorf("title %q", a.Title)
+	}
+	for _, want := range []string{"since 2026-10-22T15:04:00Z", "13 failed runs", "docs/manual/alerts-and-dashboard.md"} {
+		if !strings.Contains(a.Body, want) || !strings.Contains(a.PublicBody, want) {
+			t.Errorf("reminder lacks %q:\n%s", want, a.Body)
+		}
+	}
+}
+
 // TestTheReasonCarriesNeitherASecretNorAnAccountNorAnAddress: the journal's
 // last line is the owner's to read on the server, not on the channels, which
 // are given no secret, account number or address.

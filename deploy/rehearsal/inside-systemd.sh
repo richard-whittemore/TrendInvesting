@@ -131,30 +131,48 @@ answer=$(runuser -u ti-trader -- systemctl show -p ActiveState -p InvocationID "
 pass "systemd accepts $hook, starts it on the engine's failure with %i = $engine and the failed run's invocation, and it pages both channels with the run's own line"
 
 # Run 2: restarted from failed, it fails again writing nothing, before any
-# reporter firing: a second page, the first incident resolved first, and the
-# reason systemd's line about this run, not the first run's.
+# reporter firing saw it well: the same failure episode, so no second page and
+# no resolve of the first incident (ADR 0019, "Alerting": each incident once).
 touch "$probe/silent"
 fail_engine
 wait_hook 2
 run2=$(run_of)
 test "$run2" != "$run1" || fail "the restarted engine kept its invocation"
 test "$(sed -n 2p "$reports/hook-instances")" = "$engine $run2" || fail "the second hook run was given '$(sed -n 2p "$reports/hook-instances")'"
-{ test "$(ntfy_pages)" = 2 && test "$(pd_events trigger)" = 2 && test "$(pd_events resolve)" = 1; } ||
-  fail "the second failed run did not page again with the first incident resolved (ntfy $(ntfy_pages), triggers $(pd_events trigger), resolves $(pd_events resolve))"
+test "$(systemctl show -p Result --value "$hook")" = success || fail "$hook did not succeed on the second failed run"
+{ test "$(ntfy_pages)" = 1 && test "$(pd_events trigger)" = 1 && test "$(pd_events resolve)" = 0; } ||
+  fail "a second failed run of one episode paged or resolved (ntfy $(ntfy_pages), triggers $(pd_events trigger), resolves $(pd_events resolve))"
+pass "a unit that fails again before any firing saw it well is one episode: no second page, its incident left open"
+
+# A reporter firing that samples the engine not failed ends the episode
+# (cmd/reporter's TestAFailureAfterTheUnitWasSeenWellPagesAgain); no engine log
+# runs here, so the record is cleared in its place before each new episode.
+new_episode() {
+  systemctl reset-failed "$engine"
+  rm -f "$reports/unit-failures.json"
+}
+
+# Run 3: a new episode, a run that writes nothing: the reason is systemd's
+# line about this run, not the first run's.
+new_episode
+fail_engine
+wait_hook 3
+{ test "$(ntfy_pages)" = 2 && test "$(pd_events trigger)" = 2; } || fail "a failure after the episode ended did not page again"
 second=$(grep '"event_action": *"trigger"' "$probe/posts.bodies" | tail -1)
 case $second in
   *marker-A*) fail "the second page's reason is the first run's line" ;;
+  *"No entries"*) fail "the second page's reason is journalctl's own notice: $second" ;;
   *"Failed with result 'exit-code'"*) ;;
   *) fail "the second page's reason is not systemd's line about its run: $second" ;;
 esac
-pass "a unit that fails again before any firing pages again, keyed by its new run, with systemd's line about that run as the reason"
+pass "a failure after the episode ended pages again, keyed by its new run, with systemd's line about that run as the reason"
 
-# Run 3: after reset-failed, a start refused for a missing EnvironmentFile
-# (the engine's run.env): the run writes nothing at all.
-systemctl reset-failed "$engine"
+# Run 4: a new episode, a start refused for a missing EnvironmentFile (the
+# engine's run.env): the run writes nothing at all.
+new_episode
 rm -f "$probe/silent" "$probe/engine.env"
 fail_engine
-wait_hook 3
+wait_hook 4
 third=$(grep '"event_action": *"trigger"' "$probe/posts.bodies" | tail -1)
 case $third in
   *"Failed to load environment files"*) ;;
@@ -166,7 +184,7 @@ pass "a start refused for a missing environment file pages with systemd's own re
 # sends nothing again.
 pages=$(wc -l <"$probe/posts")
 systemctl start "$hook" || fail "systemctl start $hook failed"
-test "$(sed -n 4p "$reports/hook-instances" | cut -d' ' -f1)" = "$engine" || fail "the hook started by name was not given $engine"
+test "$(sed -n 5p "$reports/hook-instances" | cut -d' ' -f1)" = "$engine" || fail "the hook started by name was not given $engine"
 test "$(wc -l <"$probe/posts")" = "$pages" || fail "the hook started again for the same failed run paged again"
 pass "systemctl start $hook runs with %i = $engine and pages nothing new for a run already paged"
 
