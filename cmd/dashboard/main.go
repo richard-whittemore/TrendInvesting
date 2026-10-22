@@ -59,7 +59,7 @@ func run(args []string, log io.Writer) error {
 	addr := flags.String("addr", defaultAddr, "listen address: loopback or a Tailscale address")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	var cashLedgers stringList
-	flags.Var(&cashLedgers, "cash-ledger", "the Flex reader's ledger of an account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the equity comparison's shadow account mirrors: the path alone when one -engine-dir is given, else SOURCE=PATH naming its -journal or -engine-dir, always for a -journal; accepted only from the account's own flex/<instance> folder; repeat for each account")
+	flags.Var(&cashLedgers, "cash-ledger", "the Flex reader's ledger of an account's deposits and withdrawals (/var/lib/trend-investing/flex/<instance>/cash-movements.jsonl), which the equity comparison's shadow account mirrors, and beside which the reader's costs.jsonl gives the costs card: the path alone when one -engine-dir is given, else SOURCE=PATH naming its -journal or -engine-dir, always for a -journal; accepted only from the account's own flex/<instance> folder; repeat for each account")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -385,8 +385,8 @@ func load(src source, benchmark string, logs *logCache) ([]account, error) {
 }
 
 // loadOne reads, verifies and views the log at path, with the cash ledger at
-// ledger ("" for none) when it is instance's, read afresh on every request
-// as the log is.
+// ledger ("" for none), and the costs ledger beside it, when they are
+// instance's, read afresh on every request as the log is.
 func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) (account, error) {
 	if path == "" {
 		return account{}, nil
@@ -403,7 +403,7 @@ func loadOne(path, warning, ledger, instance, benchmark string, logs *logCache) 
 	if recovery != nil {
 		history = report.EarlierRunsOfRecovery(path, *recovery, logs.earlier)
 	}
-	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), envelopes, benchmark)
+	a, err := view(history, report.LoadCashLedgerFor(ledger, instance, logs.readFile), report.LoadCostLedgerFor(ledger, instance, logs.readFile), envelopes, benchmark)
 	if err != nil {
 		return account{}, err
 	}
@@ -649,12 +649,12 @@ func (c *logCache) held(path string) bool {
 	return start || earlier || tied
 }
 
-func view(history report.History, ledger report.CashLedger, envelopes []event.Envelope, benchmark string) (account, error) {
+func view(history report.History, ledger report.CashLedger, costs report.CostLedger, envelopes []event.Envelope, benchmark string) (account, error) {
 	date, err := report.LastDate(envelopes)
 	if err != nil {
 		return account{}, err
 	}
-	summary, err := report.SummarizeWithCash(history, ledger, envelopes, date, benchmark)
+	summary, err := report.SummarizeWithCosts(history, ledger, costs, envelopes, date, benchmark)
 	if err != nil {
 		return account{}, err
 	}

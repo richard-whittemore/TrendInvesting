@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -299,7 +300,7 @@ class ReadOnceTests(unittest.TestCase):
              "event_time": "2027-01-15T15:15:00Z", "source": "ibkr-flex",
              "payload": {"as_of": "2027-01-15T15:15:00Z", "amount": -400.5, "equity_before": 11030.0,
                          "currency": "USD", "transaction_id": "900000102"}},
-        ], "dividends, interest, commissions and fees are not journalled yet")
+        ], "dividends and interest are costs-ledger business, not cash movements")
         status = self.status()
         self.assertEqual((status["state"], status["written"], status["checked_at"]),
                          ("read", 2, "2027-01-16T02:30:00Z"))
@@ -899,6 +900,258 @@ class ReadOnceTests(unittest.TestCase):
         self.assertEqual(self.ledger.read_text(), '{"id": "something else"}\n')
         self.assertIn("ledger", self.status()["reason"])
 
+    def costs(self):
+        return [json.loads(line) for line in self.costs_ledger.read_text().splitlines()]
+
+    @property
+    def costs_ledger(self):
+        return self.dir / "costs.jsonl"
+
+    def test_each_commission_fee_and_interest_posting_is_one_cost_record_beside_the_cash_ledger(self):
+        self.assertTrue(self.read(FakeFlex()))
+        self.assertEqual(self.costs(), [
+            {"id": "ibkr-flex:900000104", "type": "account.cost", "schema_version": 1,
+             "event_time": "2027-01-13T05:00:00Z", "source": "ibkr-flex",
+             "payload": {"kind": "interest-paid", "amount": -3.21, "currency": "USD",
+                         "as_of": "2027-01-13T05:00:00Z", "transaction_id": "900000104"}},
+            {"id": "ibkr-flex:900000105", "type": "account.cost", "schema_version": 1,
+             "event_time": "2027-01-13T05:00:00Z", "source": "ibkr-flex",
+             "payload": {"kind": "interest-received", "amount": 0.42, "currency": "USD",
+                         "as_of": "2027-01-13T05:00:00Z", "transaction_id": "900000105"}},
+            {"id": "ibkr-flex:900000106", "type": "account.cost", "schema_version": 1,
+             "event_time": "2027-01-13T05:00:00Z", "source": "ibkr-flex",
+             "payload": {"kind": "commission", "amount": -1.0, "currency": "USD",
+                         "as_of": "2027-01-13T05:00:00Z", "transaction_id": "900000106"}},
+            {"id": "ibkr-flex:900000107", "type": "account.cost", "schema_version": 1,
+             "event_time": "2027-01-13T05:00:00Z", "source": "ibkr-flex",
+             "payload": {"kind": "fee", "amount": -10.0, "currency": "USD",
+                         "as_of": "2027-01-13T05:00:00Z", "transaction_id": "900000107"}},
+        ], "dividends are not costs; the transfers stay in the cash ledger")
+        self.assertEqual(self.costs_status()["costs_written"], 4)
+
+    def test_the_cost_payload_is_the_one_the_engine_decodes(self):
+        # internal/event's TestTheIBKRAdapterPayloadsDecodeAndValidate reads this file at version 1.
+        self.read(FakeFlex())
+        self.assertEqual(self.costs()[2]["payload"], json.loads((TESTDATA / "cost.json").read_text()))
+
+    def test_a_second_reading_writes_no_cost_twice(self):
+        self.read(FakeFlex())
+        first = self.costs_ledger.read_bytes()
+        self.assertTrue(self.read(FakeFlex()))
+        self.assertEqual(self.costs_ledger.read_bytes(), first)
+        self.assertEqual(self.costs_status()["costs_written"], 0)
+
+    def test_a_later_statement_adds_only_the_new_cost(self):
+        self.read(FakeFlex())
+        later = fixture("statement.xml").replace(
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees"',
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees" dateTime="20270115" '
+            b'amount="-2.50" transactionID="900000120" levelOfDetail="DETAIL"/>\n'
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees"')
+        self.read(FakeFlex(statements=(later,)))
+        self.assertEqual([r["id"] for r in self.costs()][-1], "ibkr-flex:900000120")
+        self.assertEqual(len(self.costs()), 5)
+
+    def costs_status(self):
+        return json.loads(Path(str(self.costs_ledger) + flex.STATUS_SUFFIX).read_text())
+
+    def assert_costs_set_aside(self, statement, *said, state="set-aside"):
+        """A reading of statement sets aside the costs alone: the cash reading is read and its transfers written."""
+        before = self.costs_ledger.read_bytes() if self.costs_ledger.exists() else None
+        self.assertFalse(self.read(FakeFlex(statements=(statement,))), "a costs reading set aside fails the unit")
+        self.assertEqual(self.costs_ledger.read_bytes() if self.costs_ledger.exists() else None, before,
+                         "the costs ledger is untouched")
+        self.assertEqual(self.status()["state"], "read", "the costs never stop the cash reading")
+        status = self.costs_status()
+        self.assertEqual(status["state"], state)
+        for text in said:
+            self.assertIn(text, status["reason"])
+        return status
+
+    def restated_statement(self, amount="-11"):
+        """The fixture statement with cost 900000107 stated at amount, and a new deposit beside it."""
+        changed = fixture("statement.xml").replace(b'amount="-10" transactionID',
+                                                   'amount="{}" transactionID'.format(amount).encode())
+        return changed.replace(
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Dividends"',
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Deposits/Withdrawals" '
+            b'dateTime="20270115;120000" amount="100" transactionID="900000130" levelOfDetail="DETAIL"/>\n'
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Dividends"')
+
+    def test_a_known_cost_restated_is_recorded_and_the_same_reading_reads_on(self):
+        self.read(FakeFlex())
+        before = self.costs()
+        changed = self.restated_statement()
+        later = changed.replace(
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees"',
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees" dateTime="20270115" '
+            b'amount="-2.50" transactionID="900000120" levelOfDetail="DETAIL"/>\n'
+            b'<CashTransaction accountId="DU0000001" currency="USD" type="Other Fees"')
+        self.assertTrue(self.read(FakeFlex(statements=(later,))), "a restatement does not fail the reading")
+        self.assertEqual(self.status()["state"], "read")
+        self.assertIn("ibkr-flex:900000130", [r["id"] for r in self.records()], "the new deposit is still recorded")
+        status = self.costs_status()
+        self.assertEqual(status["state"], "read", "the same reading reads on")
+        self.assertEqual(status["covered_to"], "20270114", "and advances the period")
+        self.assertEqual(status["costs_written"], 1, "the other new cost is written in the same reading")
+        self.assertEqual(status["restated"], 1)
+        self.assertIn("900000107", self.out.getvalue(), "the restatement is said once as a notice")
+        self.assertEqual(self.costs()[:len(before)], before, "a record once written is never changed")
+        self.assertEqual(self.costs()[len(before):], [
+            {"id": "ibkr-flex:900000107:restated:1", "type": "account.cost", "schema_version": 1,
+             "event_time": "2027-01-13T05:00:00Z", "source": "ibkr-flex",
+             "payload": {"kind": "fee", "amount": -11.0, "currency": "USD",
+                         "as_of": "2027-01-13T05:00:00Z", "transaction_id": "900000107"},
+             "note": "restated: was fee -10.0 USD on 2027-01-13T05:00:00Z, now fee -11.0 USD on 2027-01-13T05:00:00Z"},
+            self.costs()[-1],
+        ], "the restatement names the old and the new value; the latest counts")
+        self.assertEqual(self.costs()[-1]["id"], "ibkr-flex:900000120")
+        self.assertTrue(self.read(FakeFlex(statements=(later,))), "the next reading reads on")
+        self.assertEqual(self.costs_status().get("restated", 0), 0, "and says nothing more of it")
+        self.assertEqual(len(self.costs()), len(before) + 2, "the restated value is now the ledger's")
+        again = later.replace(b'amount="-11" transactionID', b'amount="-12" transactionID')
+        self.assertTrue(self.read(FakeFlex(statements=(again,))))
+        self.assertIn("ibkr-flex:900000107:restated:2", [r["id"] for r in self.costs()])
+
+    def test_a_cost_restated_to_zero_is_a_reversal_both_readers_accept(self):
+        self.read(FakeFlex())
+        before = self.costs()
+        self.assertTrue(self.read(FakeFlex(statements=(self.restated_statement("0"),))), "a reversal does not fail")
+        status = self.costs_status()
+        self.assertEqual((status["state"], status["restated"]), ("read", 1))
+        reversal = self.costs()[len(before)]
+        self.assertEqual((reversal["id"], reversal["payload"]["amount"]), ("ibkr-flex:900000107:restated:1", 0.0))
+        self.assertTrue(self.read(FakeFlex(statements=(self.restated_statement("0"),))), "the next reading reads it")
+        self.assertEqual(self.costs_status().get("restated", 0), 0, "and does not record it again")
+        self.assertEqual(len(self.costs()), len(before) + 1)
+        self.assertTrue(self.read(FakeFlex(statements=(self.restated_statement("-12"),))), "and can be restated again")
+        self.assertIn("ibkr-flex:900000107:restated:2", [r["id"] for r in self.costs()])
+
+    def test_a_new_cost_of_zero_is_never_read_as_written(self):
+        self.read(FakeFlex())
+        lines = self.costs_ledger.read_text().splitlines()
+        zero = json.loads(lines[0])
+        zero["payload"]["amount"] = 0.0
+        self.costs_ledger.write_text("".join(json.dumps(r) + "\n" for r in [zero] + [json.loads(x) for x in lines[1:]]))
+        self.assert_costs_set_aside(fixture("statement.xml"), "not a cost as this reader writes it")
+
+    def test_a_cost_restated_past_a_float_sets_the_costs_aside_writing_nothing(self):
+        self.read(FakeFlex())
+        status = self.assert_costs_set_aside(self.restated_statement("1e999"), "900000107")
+        self.assertNotIn("not a cost as this reader writes it", status["reason"])
+        self.assertTrue(self.read(FakeFlex()), "the ledger is still one both readers accept")
+
+    def test_a_cost_that_does_not_round_trip_through_a_float_is_not_restated_every_reading(self):
+        long = "-1234567890.12345678901"
+        statement = fixture("statement.xml").replace(b'amount="-10" transactionID', 'amount="{}" transactionID'.format(long).encode())
+        self.assertTrue(self.read(FakeFlex(statements=(statement,))))
+        first = self.costs_ledger.read_bytes()
+        for _ in range(2):
+            self.assertTrue(self.read(FakeFlex(statements=(statement,))))
+            self.assertEqual(self.costs_ledger.read_bytes(), first, "the same statement adds nothing")
+            self.assertEqual(self.costs_status().get("restated", 0), 0)
+
+    def test_a_restatement_line_not_as_the_reader_writes_it_sets_the_costs_aside(self):
+        self.read(FakeFlex())
+        good = self.costs_ledger.read_text()
+        restated = json.loads(good.splitlines()[3])
+        restated["id"] += ":restated:1"
+        restated["note"] = "restated: was fee -10.0 USD on 2027-01-13T05:00:00Z, now fee -10.0 USD on 2027-01-13T05:00:00Z"
+        for name, change in (("a second restatement numbered 1", lambda r: r),
+                             ("a note that is not a restatement", lambda r: dict(r, note="edited")),
+                             ("a restatement of a cost never recorded",
+                              lambda r: dict(r, id="ibkr-flex:900000199:restated:1",
+                                             payload=dict(r["payload"], transaction_id="900000199")))):
+            with self.subTest(name):
+                lines = [restated, change(dict(restated))] if name.startswith("a second") else [change(dict(restated))]
+                self.costs_ledger.write_text(good + "".join(json.dumps(r) + "\n" for r in lines))
+                self.assert_costs_set_aside(fixture("statement.xml"), "not a cost as this reader writes it")
+
+    def test_an_unwritable_costs_status_never_stops_the_transfers_being_recorded(self):
+        Path(str(self.costs_ledger) + flex.STATUS_SUFFIX).mkdir()
+        self.assertFalse(self.read(FakeFlex()), "the costs not recorded fail the unit")
+        self.assertEqual(self.status()["state"], "read")
+        self.assertEqual([r["id"] for r in self.records()], ["ibkr-flex:900000101", "ibkr-flex:900000102"])
+        self.assertIn("costs", self.out.getvalue())
+
+    def test_a_torn_costs_line_sets_aside_only_the_costs_and_the_transfers_are_still_written(self):
+        self.costs_ledger.write_text('{"id": "something else"}\n')
+        self.assert_costs_set_aside(fixture("statement.xml"), "costs")
+        self.assertEqual([r["id"] for r in self.records()], ["ibkr-flex:900000101", "ibkr-flex:900000102"])
+
+    def test_a_costs_ledger_not_utf8_sets_aside_only_the_costs_with_its_reason(self):
+        self.costs_ledger.write_bytes(b"\xff\xfe\n")
+        self.assert_costs_set_aside(fixture("statement.xml"), "UTF-8")
+
+    def test_the_costs_status_says_running_once_the_cash_reading_is_final(self):
+        # A costs step stopped part way leaves "running" in the costs status, never the previous "read"; it is
+        # written only after the cash ledger, its period and its status, so it can never stop them.
+        self.read(FakeFlex())
+        seen = []
+        read_costs = flex.read_costs
+
+        def spy(path):
+            seen.append((self.costs_status(), self.status()))
+            return read_costs(path)
+        with unittest.mock.patch.object(flex, "read_costs", spy):
+            self.read(FakeFlex(), now=datetime(2027, 1, 17, 2, 30, tzinfo=timezone.utc))
+        costs, cash = seen[0]
+        self.assertEqual((costs["state"], costs["checked_at"]), ("running", "2027-01-17T02:30:00Z"))
+        self.assertEqual((cash["state"], cash["checked_at"]), ("read", "2027-01-17T02:30:00Z"))
+        self.assertEqual(self.costs_status()["state"], "read")
+
+    def test_a_reading_set_aside_before_its_statement_sets_aside_the_costs_too(self):
+        self.assertFalse(self.read(FakeFlex(send="send_expired.xml")))
+        self.assertEqual(self.costs_status()["state"], "set-aside")
+        self.assertIn("no statement", self.costs_status()["reason"])
+
+    def test_costs_first_read_after_cash_coverage_must_reach_back_to_the_approval_day(self):
+        # An installation whose cash ledger was read before the costs were: the costs keep their own period, so
+        # their first reading must reach back to the first run's approval day as the cash ledger's first did.
+        Path(str(self.ledger) + flex.COVERAGE_SUFFIX).write_text(
+            json.dumps({"from_date": "20270112", "covered_to": "20270114"}) + "\n")
+        status = self.assert_costs_set_aside(self.statement(period=("20270115", "20270118")), "20270112",
+                                             state="coverage-gap")
+        self.assertNotIn("covered_to", status)
+        self.assertFalse(self.costs_ledger.exists())
+
+    def test_a_cost_dated_before_the_first_runs_approval_day_is_not_written(self):
+        xml = fixture("statement.xml").replace(b'dateTime="20270113" amount="-3.21"',
+                                               b'dateTime="20270111" amount="-3.21"')
+        self.assertTrue(self.read(FakeFlex(statements=(xml,))))
+        self.assertNotIn("ibkr-flex:900000104", [r["id"] for r in self.costs()])
+        self.assertEqual(len(self.costs()), 3)
+
+    def test_a_cost_of_nothing_is_not_written(self):
+        xml = fixture("statement.xml").replace(b'amount="-10" transactionID', b'amount="0" transactionID')
+        self.assertTrue(self.read(FakeFlex(statements=(xml,))))
+        self.assertEqual(len(self.costs()), 3)
+
+    def test_a_costs_ledger_not_as_the_reader_writes_it_is_never_appended_to(self):
+        self.costs_ledger.write_text('{"id": "something else"}\n')
+        self.assert_costs_set_aside(fixture("statement.xml"), "costs")
+        self.assertEqual(self.costs_ledger.read_text(), '{"id": "something else"}\n')
+
+    def test_a_torn_costs_ledger_is_never_appended_to(self):
+        self.read(FakeFlex())
+        self.costs_ledger.write_bytes(self.costs_ledger.read_bytes()[:-5])
+        self.assert_costs_set_aside(fixture("statement.xml"), "whole line")
+
+    def test_a_cost_ledger_value_not_as_the_reader_writes_it_sets_the_costs_aside(self):
+        self.read(FakeFlex())
+        good = self.costs_ledger.read_text().splitlines()
+        for field, value in (("amount", "1"), ("amount", 0), ("kind", "dividend"), ("currency", "usd")):
+            with self.subTest(field=field, value=value):
+                record = json.loads(good[1])
+                record["payload"][field] = value
+                self.costs_ledger.write_text(good[0] + "\n" + json.dumps(record) + "\n")
+                self.assert_costs_set_aside(fixture("statement.xml"), "line 2")
+
+    def test_the_cost_status_file_says_how_far_the_costs_are_recorded(self):
+        self.read(FakeFlex())
+        status = json.loads(Path(str(self.costs_ledger) + flex.STATUS_SUFFIX).read_text())
+        self.assertEqual((status["state"], status["covered_to"]), ("read", "20270114"))
+
     def test_a_reading_after_a_set_aside_clears_it(self):
         self.read(FakeFlex(send="send_expired.xml"))
         self.assertTrue(self.read(FakeFlex()))
@@ -1013,6 +1266,7 @@ class DeploymentTests(unittest.TestCase):
                                        r"--account-secrets %d/account --instance %i ")
         self.assertIn("--engine-log /var/lib/trend-investing/engines/%i/${TI_RUN}.log", self.service)
         self.assertIn("--ledger /var/lib/trend-investing/flex/%i/cash-movements.jsonl", self.service)
+        self.assertIn("costs ledger", self.service, "the costs ledger sits beside the cash ledger, in the same folder")
         self.assertRegex(self.service, r"(?m)^ReadWritePaths=/var/lib/trend-investing/flex/%i$")
         self.assertRegex(self.service, r"(?m)^ReadOnlyPaths=/var/lib/trend-investing/engines/%i$")
 

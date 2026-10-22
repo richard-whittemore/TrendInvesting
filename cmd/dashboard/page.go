@@ -67,6 +67,7 @@ var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	"shares":       event.FormatSkippedShares,
 	"pct":          func(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) },
 	"money":        func(v float64) string { return fmt.Sprintf("%.2f", v) },
+	"share":        func(v float64) string { return fmt.Sprintf("%.2f%%", v*100) },
 	"signed":       report.SignedMoney,
 	"verdictClass": verdictClass,
 	"verdictMark":  verdictMark,
