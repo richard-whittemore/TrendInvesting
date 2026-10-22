@@ -35,12 +35,19 @@ engine does, and only a report the engine would accept counts:
 The engine and the reporter share this rule in one place, so the reporter
 cannot count a report the engine refused.
 
-A dry-run momentum engine records its own **synthetic** report on each order
-it releases, since it never sends one (`execution.order.lifecycle` version 3,
-see [the engine](engine.md)). It is the engine's decision, not IBKR's report,
-so it acknowledges nothing and counts no fill. It does end the order, as it
-did in the engine, so a report from IBKR on that order afterwards is one the
-engine refused, and it is "not read".
+A dry-run engine, momentum or Boost, records its own **synthetic** report on
+each order it releases, since it never sends one (`execution.order.lifecycle`
+version 3, status canceled, see [the engine](engine.md)). It is the engine's
+decision, not IBKR's report, so it acknowledges nothing and counts no fill.
+It does end the order, as it did in the engine, so a report from IBKR on
+that order afterwards is one the engine refused, and it is "not read".
+
+A **cancelled unsent release** means exactly this: the order was written
+down with `send` false, never left the engine, and is over. It is not an
+order IBKR cancelled, and nothing about it can still fill. For Boost it also
+means the order no longer counts as shares being sold, so the next exit is
+sized from the holding alone, as paper would size it ([boost](boost.md),
+"In dry-run: how an exit is sized").
 
 A Boost engine now records IBKR's report about an order it released and
 decides nothing from it (ADR 0022), beyond what the risk gate's pending-sell

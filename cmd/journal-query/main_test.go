@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -309,24 +310,41 @@ func TestNoQueryChangesAJournalByAByte(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, report := range []string{"orders", "fills", "refusals", "totals", "positions", "reconcile"} {
+	// assertUnchanged compares every fixture's bytes with the bytes read
+	// before any query. It runs after each call, before that call's error is
+	// judged, so a write made on the way to a refusal is still caught.
+	assertUnchanged := func(call string) {
+		t.Helper()
+		for i, p := range paths {
+			after, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before[i], after) {
+				t.Errorf("%s changed after %s", p, call)
+			}
+		}
+	}
+	for _, report := range []string{"orders", "fills", "refusals", "totals", "positions"} {
 		for _, format := range []string{"text", "csv", "json"} {
-			// reconcile exits non-zero on the disagreement in positionsJournal.
 			args := append([]string{report, "-format", format}, paths...)
 			_, err := query(t, args...)
-			var disagreement *journalquery.DisagreementError
-			if err != nil && (report != "reconcile" || !errors.As(err, &disagreement)) {
+			assertUnchanged(report + " " + format)
+			if err != nil {
 				t.Fatalf("%s %s: %v", report, format, err)
 			}
 		}
 	}
-	for i, p := range paths {
-		after, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(before[i], after) {
-			t.Errorf("%s changed after querying it", p)
+	// reconcile runs on positionsJournal alone. It holds snapshots, so the
+	// rebuild and the table are reached, and its disagreement on 2026-01-20 is
+	// refused with the table printed. Given all three paths, reconcile stops at
+	// tradingJournal (no snapshot, so nothing compared) before either.
+	for _, format := range []string{"text", "csv", "json"} {
+		out, err := query(t, "reconcile", "-format", format, paths[2])
+		assertUnchanged("reconcile " + format)
+		var dis *journalquery.DisagreementError
+		if !errors.As(err, &dis) || out == "" {
+			t.Fatalf("reconcile %s: want the table and a DisagreementError, got %q, %v", format, out, err)
 		}
 	}
 }
@@ -420,5 +438,103 @@ func TestTheOperatorReportShowsTheKillSwitch(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestReconcileOfAnEmptyLogExitsWithAMessageInWords(t *testing.T) {
+	var buf syncBuffer
+	if _, err := journal.CreateLog(&buf, journal.NewLogHeader("sha256:synthetic", "synthetic/1")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "empty.log")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "holds no committed record") || out != "" {
+		t.Fatalf("want a refusal in words and no table, got %q, %v", out, err)
+	}
+}
+
+func TestReconcileOfATornTailLogExitsWithAMessageInWords(t *testing.T) {
+	var buf syncBuffer
+	log, err := journal.CreateLog(&buf, journal.NewLogHeader("sha256:synthetic", "synthetic/1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		raw := []byte(`{"n":1}`)
+		entry := journal.Entry{Kind: journal.KindInput, Envelope: event.Envelope{
+			ID: fmt.Sprintf("e%d", i), Type: "synthetic.input", EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: 1,
+			EventTime: time.Date(2026, 1, i, 21, 0, 0, 0, time.UTC), RecordedAt: time.Date(2026, 1, i, 21, 0, 0, 0, time.UTC),
+			Sequence: uint64(i), Source: "fixture", StrategyVersion: "s", ConfigurationHash: "h", PayloadHash: event.HashPayload(raw), Payload: raw,
+		}}
+		if err := log.Append([]journal.Entry{entry}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Drop the final commit line: the last group is then an uncommitted tail.
+	trimmed := bytes.TrimRight(buf.Bytes(), "\n")
+	data := trimmed[:bytes.LastIndexByte(trimmed, '\n')+1]
+	path := filepath.Join(t.TempDir(), "torn.log")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "cut short") || out != "" {
+		t.Fatalf("want a cut-short refusal and no table, got %q, %v", out, err)
+	}
+}
+
+func TestReconcileThatComparedNothingExitsNonZero(t *testing.T) {
+	path := writeJournal(t, "nosnap.jsonl", fill(event.FillKindEntry, "AAA", 5, 10, 0, day(2026, 1, 5)))
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "compared nothing") || out != "" {
+		t.Fatalf("want a compared-nothing refusal and no table, got %q, %v", out, err)
+	}
+}
+
+func TestReconcileWithFillsAfterTheLastSnapshotFailsUnlessAllowed(t *testing.T) {
+	path := writeJournal(t, "trailing.jsonl",
+		snapshot("A1", day(2026, 1, 2), pos("AAA", 100)),
+		fill(event.FillKindEntry, "AAA", 50, 10, 0, day(2026, 1, 5)),
+		snapshot("A1", day(2026, 1, 10), pos("AAA", 150)),
+		fill(event.FillKindEntry, "AAA", 5, 10, 0, day(2026, 1, 12)),
+	)
+	out, err := query(t, "reconcile", path)
+	if err == nil || !strings.Contains(err.Error(), "1 fills not yet covered by a snapshot") || !strings.Contains(out, "ok") {
+		t.Fatalf("want the table and the trailing-fill error, got %q, %v", out, err)
+	}
+	if _, err := query(t, "reconcile", "-allow-trailing-fills", path); err != nil {
+		t.Fatalf("the trailing fill was allowed: %v", err)
+	}
+}
+
+func TestReconcileWithTheRegistryAnchorChecksTheFinalRecordHash(t *testing.T) {
+	path := writeJournal(t, "anchored.jsonl",
+		snapshot("A1", day(2026, 1, 2)),
+		fill(event.FillKindEntry, "AAA", 5, 10, 0, day(2026, 1, 5)),
+		snapshot("A1", day(2026, 1, 6), pos("AAA", 5)),
+	)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := journalquery.Load(path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := query(t, "reconcile", "-final-hash", j.FinalRecordHash(), path); err != nil {
+		t.Fatalf("the recorded anchor matches: %v", err)
+	}
+	out, err := query(t, "reconcile", "-final-hash", "sha256:deadbeef", path)
+	if err == nil || !strings.Contains(err.Error(), "not the registered run's complete end-of-run journal") || out != "" {
+		t.Fatalf("want a mismatch refusal and no table, got %q, %v", out, err)
+	}
+	if _, err := query(t, "reconcile", "-final-hash", "", path); err == nil {
+		t.Fatal("an empty anchor is not agreement")
+	}
+	if _, err := query(t, "reconcile", "-final-hash", j.FinalRecordHash(), path, path); err == nil {
+		t.Fatal("one anchor names one journal: several journals with it are refused")
 	}
 }

@@ -222,7 +222,19 @@ import (
 //     liquidation, is unchanged. A journal holding a cash difference with a
 //     reader's status, or a transfer, decides differently under 1.20.0,
 //     which refuses both inputs.
-const RulesVersion = "1.21.0"
+//   - 1.22.0 records, in a dry-run Boost run, the synthetic terminal report
+//     a dry-run momentum run has recorded since 1.11.0, for each order it
+//     releases, the sale back to 98% included, and ends the order in the
+//     gate at its release, so a later exit, the broker-holding check and the
+//     sale back to 98% are sized from the account with no unsent sell
+//     netted, as paper sizes them (ADR 0026, point 3, "Mode", amended
+//     2026-10-22). No dry-run order is watched, since none can execute, so
+//     its end re-plans nothing, and a venue's fill or lifecycle report on
+//     one is refused, since no venue received it. Where 1.21.0 counted every
+//     unsent sell as still being sold and read such reports, a dry-run Boost
+//     journal decides differently, so one written under 1.21.0 does not
+//     replay. Paper and live decisions are unchanged.
+const RulesVersion = "1.22.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -352,7 +364,9 @@ type Handler struct {
 	// it has filled in full, or has ended and a decided session has planned
 	// after its end; nil when there is none. Only a later decided session's
 	// released order replaces it, since that order was sized from the
-	// account as it stood (settleWatch).
+	// account as it stood (settleWatch). A dry-run's orders, which nothing
+	// can execute, are never watched (applySession's mode guard); their
+	// synthetic report is endUnsent's.
 	watch *watched
 	// verdicts counts the venue's rejections of the orders decided sessions
 	// released, in a row, and holds the orders it has not yet ruled on
@@ -988,15 +1002,15 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	default:
 		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
 	}
-	if outcome.Released != nil {
+	// No venue receives a dry-run's order, so none will ever rule on it or
+	// execute it: its synthetic report ended it at its release (endUnsent),
+	// it is never watched, so its end re-plans nothing, and never listed as
+	// awaiting a verdict, and the decision records why (BoostFigures.NoVenue;
+	// ADR 0026, point 3, "Mode").
+	if outcome.Released != nil && h.cfg.Mode != event.TradingModeDryRun {
 		h.unwatch()
 		h.watch = &watched{order: *outcome.Released, afterRejection: afterRejection}
-		// No venue receives a dry-run's order, so none will ever rule on it:
-		// it is never listed as awaiting a verdict, and the decision records
-		// why (BoostFigures.NoVenue; ADR 0026, point 3, "Mode").
-		if h.cfg.Mode != event.TradingModeDryRun {
-			h.verdicts.Release(outcome.Released.ClientOrderID)
-		}
+		h.verdicts.Release(outcome.Released.ClientOrderID)
 	}
 	if order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
@@ -1021,6 +1035,9 @@ func (h *Handler) applyKillSwitch(in event.Envelope) error {
 func (h *Handler) applyFill(in event.Envelope) error {
 	p, err := decodeInput[event.TargetWeightFillPayload](in, event.FillTargetWeightVersion)
 	if err != nil {
+		return err
+	}
+	if err := h.refuseDryRunReport(in, p.ClientOrderID); err != nil {
 		return err
 	}
 	if slices.Contains(h.cleared, p.ClientOrderID) {
@@ -1243,6 +1260,9 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err != nil {
 		return err
 	}
+	if err := h.refuseDryRunReport(in, p.ClientOrderID); err != nil {
+		return err
+	}
 	o, ok := h.released[p.ClientOrderID]
 	if !ok {
 		return fmt.Errorf("targetweight: lifecycle %s reports order %s, which this run did not release", in.ID, p.ClientOrderID)
@@ -1276,6 +1296,22 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 		h.working = slices.DeleteFunc(h.working, func(o undecidedOrder) bool { return o.id == p.ClientOrderID })
 	}
 	return nil
+}
+
+// refuseDryRunReport refuses, in a dry-run, a venue's fill or lifecycle
+// report on order id, before anything is read from it. A dry-run sends no
+// order and ends each it releases with its own synthetic cancel
+// (endUnsent), so no venue can report on one: the report is a defect, and
+// reading it would count an execution no account holds (ADR 0026, point 3,
+// "Mode", amended 2026-10-22; fail closed, AGENTS.md).
+func (h *Handler) refuseDryRunReport(in event.Envelope, id string) error {
+	if h.cfg.Mode != event.TradingModeDryRun {
+		return nil
+	}
+	if _, ok := h.released[id]; ok {
+		return fmt.Errorf("targetweight: %s %s reports order %s, which this dry-run released with send false and ended with its synthetic cancel; no venue received it, so a venue report on it is a defect: find what fed it before going on", in.Type, in.ID, id)
+	}
+	return fmt.Errorf("targetweight: %s %s reports order %s in a dry-run, which sends no order, so no venue can report on one: find what fed it before going on", in.Type, in.ID, id)
 }
 
 // contradictsClearance refuses a venue report on an order the owner
@@ -1658,6 +1694,7 @@ func (b *emissions) order(o risklimit.Order, book risklimit.Book) risklimit.Outc
 	if out.Released != nil {
 		b.h.release(*out.Released)
 		b.add("risk-order-released:"+o.Planned.ClientOrderID, event.OrderReleasedEventType, out.Released.SchemaVersion(), *out.Released)
+		b.endUnsent(*out.Released)
 	} else if out.Refused != nil {
 		b.add("risk-order-refused:"+o.Planned.ClientOrderID, event.OrderRefusedEventType, out.Refused.SchemaVersion(), *out.Refused)
 	}
@@ -1665,6 +1702,32 @@ func (b *emissions) order(o risklimit.Order, book risklimit.Book) risklimit.Outc
 		b.add(out.StateID, event.EngineStateEventType, out.StateSchemaVersion, *out.State)
 	}
 	return out
+}
+
+// endUnsent records, in a dry-run only, a synthetic terminal report on the
+// Boost order o just released, which no venue receives, and ends it as a
+// venue's cancellation would: the gate no longer counts a sell as pending,
+// so a later exit, the broker-holding check and the sale back to 98% are
+// sized from the account with no sell of the run's working, as paper sizes
+// them once its earlier orders have ended (ADR 0026, point 3, "Mode",
+// amended 2026-10-22; ADR 0019, amended 2026-10-15, "net of every working
+// sell"). The report is marked synthetic and names no venue order, so no
+// reader can take it for a venue's report or an execution
+// (LimitOrderLifecyclePayload.Synthetic); it fills nothing.
+func (b *emissions) endUnsent(o event.OrderReleasedPayload) {
+	if b.h.cfg.Mode != event.TradingModeDryRun {
+		return
+	}
+	p := event.LimitOrderLifecyclePayload{
+		AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID, Side: o.Side,
+		Status: event.OrderLifecycleStatusCanceled, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
+		OccurredAt: b.at, Synthetic: true,
+		Message: "dry-run: journalled with send false and never sent; synthetic terminal report, nothing executed",
+	}
+	b.add("synthetic-lifecycle:"+o.ClientOrderID, event.OrderLifecycleEventType, p.SchemaVersion(), p)
+	// The gate released this order from these very figures, so it cannot
+	// refuse the report: an error is a defect.
+	b.fail(b.h.gate.ObserveLifecycle(p))
 }
 
 // release adds o to the orders this run released, by client order ID.

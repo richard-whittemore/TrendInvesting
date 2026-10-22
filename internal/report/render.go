@@ -81,6 +81,12 @@ func RenderText(s Summary) string {
 	for _, k := range s.Skipped {
 		fmt.Fprintf(&b, "  %s %s %s %s shares: %s\n", k.ClientOrderID, k.Side, k.InstrumentID, event.FormatSkippedShares(k.Shares), k.Reason)
 	}
+	c := s.Costs
+	fmt.Fprintf(&b, "Costs this month: commissions %.2f, fees %.2f, interest %.2f", c.Month.Commissions, c.Month.Fees, c.Month.Interest())
+	if c.Incomplete != "" {
+		fmt.Fprintf(&b, " (%s)", c.Incomplete)
+	}
+	b.WriteString("\n")
 	// A broken chain is named above the comparison, which then runs over
 	// the intact runs, as the dashboard's card shows it; a history of one
 	// mode says where it starts.

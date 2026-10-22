@@ -192,6 +192,9 @@ type Summary struct {
 	Skipped        []SkippedLine
 	EngineState    string
 	Equity         Equity
+	// Costs is what the account has paid in commissions, fees and broker
+	// interest (Costs).
+	Costs Costs
 	// CashChecked is set when the latest broker snapshot is the IBKR
 	// adapter's reading as of a close (version 2): CashDrift is then the
 	// cash drift since the previous close it accepted, within its daily
@@ -252,6 +255,14 @@ func SummarizeWithHistory(history History, envelopes []event.Envelope, date, ben
 // journal, so a transfer is counted once whether or not the engine also
 // journalled it.
 func SummarizeWithCash(history History, ledger CashLedger, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	return SummarizeWithCosts(history, ledger, CostLedger{}, envelopes, date, benchmark)
+}
+
+// SummarizeWithCosts is SummarizeWithCash with the Flex reader's costs ledger,
+// which only the costs block reads: the account's commissions on fills,
+// from this run and the earlier ones, and the ledger's commissions, fees and
+// broker interest, totalled by Costs.
+func SummarizeWithCosts(history History, ledger CashLedger, costs CostLedger, envelopes []event.Envelope, date, benchmark string) (Summary, error) {
 	earlier := history.Earlier
 	end, err := time.Parse(time.DateOnly, date)
 	if err != nil {
@@ -389,6 +400,7 @@ func SummarizeWithCash(history History, ledger CashLedger, envelopes []event.Env
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
 	s.Equity = equityOf(points, closes, ledger, benchmark, date)
+	s.Costs = costsOf(earlier, envelopes, end, date, costs, netBy)
 	if history.Broken != nil {
 		s.Equity.HistoryUnavailable, s.Equity.HistoryStartsAt = HistoryUnavailable(history.Broken), historyStartsAt(history)
 	}
@@ -433,7 +445,9 @@ func pairEarlier(earlier []event.Envelope, end time.Time, account, benchmark str
 // reads: its header and final record hash, its first two records (its
 // configuration and approval, ADR 0027), every configuration and approval
 // input after them (FollowChain refuses a second approval), every account
-// snapshot and every bar of benchmark (pairEarlier). A log holding nothing
+// snapshot, of every fill only its ID, commission, time and version, which
+// the costs block counts (earlierFillOf), and every bar of benchmark
+// (pairEarlier). A log holding nothing
 // past its configuration keeps that one record, so restart.CutShort reads it
 // as it reads the whole log.
 func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
@@ -446,6 +460,8 @@ func ForHistory(recovery journal.Recovery, benchmark string) journal.Recovery {
 		case e.Kind != journal.KindInput:
 		case env.Type == event.TargetWeightConfigurationEventType, env.Type == event.OperatorRunApprovedEventType, env.Type == event.AccountSnapshotEventType:
 			keep = true
+		case env.Type == event.FillEventType:
+			e.Envelope, keep = earlierFillOf(env), true
 		case env.Type == event.CompletedBarEventType:
 			if p, _, err := readBar(env); err == nil && p.InstrumentID == benchmark {
 				keep = true

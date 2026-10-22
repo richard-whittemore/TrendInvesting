@@ -111,14 +111,19 @@ type account struct {
 	all     []event.OrderReleasedPayload // every order released, in release order
 }
 
-// take queues every order released among out to fill at the next close.
+// take queues every order released among out to fill at the next close,
+// except one released with send false: no venue receives it, so none
+// acknowledges, fills or ends it (ADR 0026, point 3, "Mode"). Every order
+// released is kept in all.
 func (a *account) take(t *testing.T, out []event.Envelope) {
 	t.Helper()
 	for _, d := range out {
 		if d.Type == event.OrderReleasedEventType {
 			var p event.OrderReleasedPayload
 			decode(t, d, &p)
-			a.pending = append(a.pending, p)
+			if p.Send {
+				a.pending = append(a.pending, p)
+			}
 			a.all = append(a.all, p)
 		}
 	}
@@ -190,8 +195,9 @@ func (a *account) snapshot(at time.Time, price float64) event.AccountPositionsSn
 type options struct {
 	closes []float64
 	// intrude, by session, feeds the run inputs the handler is expected to
-	// refuse, before that session's own: each is applied, and the run's
-	// sequence does not move for a refused one.
+	// refuse, before that session's own: each is applied and, refused or
+	// not, committed under its own next sequence number, as the handler
+	// commits a refused input in paper mode.
 	intrude  map[int]func(apply func(typ string, version uint32, id string, at time.Time, payload any) error)
 	skip     map[int]bool // sessions whose bar is missing
 	noSnap   map[int]bool // sessions with no account snapshot
@@ -270,6 +276,10 @@ type options struct {
 	// sends: the venue is told of none, so none is acknowledged and none
 	// executes. Every session in clear is one.
 	unsent []int
+	// startHeld is the SPY the account holds before the first session,
+	// bought on margin at the first close, so its net liquidation is still
+	// $4,000.
+	startHeld int64
 }
 
 // neverReaches reports whether the adapter never sends the order released
@@ -395,7 +405,7 @@ func simulate(t *testing.T, opts options) run {
 	rec := journal.NewRecorder(handler)
 	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
 	r := run{recorder: rec, hash: s.hash}
-	acct := &account{cash: 4000}
+	acct := &account{cash: float64(4000 - float64(float64(opts.startHeld)*opts.closes[0])), held: opts.startHeld}
 	apply := func(in event.Envelope) []event.Envelope {
 		t.Helper()
 		out, err := rec.Apply(context.Background(), in)
@@ -440,11 +450,7 @@ func simulate(t *testing.T, opts options) run {
 		price := opts.closes[i]
 		if in := opts.intrude[i]; in != nil {
 			in(func(typ string, version uint32, id string, when time.Time, payload any) error {
-				before := s.sequence
 				_, err := rec.Apply(context.Background(), s.envelope(t, typ, version, id, when, payload))
-				if err != nil {
-					s.sequence = before
-				}
 				return err
 			})
 		}

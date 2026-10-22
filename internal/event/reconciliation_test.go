@@ -292,4 +292,11 @@ func TestTheIBKRAdapterPayloadsDecodeAndValidate(t *testing.T) {
 	if approximated.EquityBefore != 6530 || approximated.EquityBeforeBasis != event.EquityBeforeNextSnapshotLessAmount {
 		t.Errorf("approximated cash movement %+v", approximated)
 	}
+	// The same reader writes each commission, fee and interest posting to
+	// its costs ledger at version 1.
+	var cost event.CostPayload
+	read("cost.json", event.CostSchemaVersion, &cost)
+	if cost.Kind != event.CostCommission || cost.Amount != -1 || cost.TransactionID != "900000106" || cost.Currency != "USD" {
+		t.Errorf("cost %+v", cost)
+	}
 }

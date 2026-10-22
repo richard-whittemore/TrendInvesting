@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -61,9 +64,14 @@ func startEngine(t *testing.T) (socket, log string, stop func()) {
 
 // TestTheDemoDrivesTheRealEngineInDryRun: the demo plays the adapter for the
 // one engine binary, over its socket, and prints the decision log from the
-// engine's replies: the first session buys 98% of $4,000 at $400 (9.8
-// shares, so 9) with send false, and the synthetic series enters a boost
-// (0.98 x 1.5 = 1.47) and exits it.
+// engine's replies. The simulated account starts holding 14 SPY on margin
+// at $400 (net liquidation $4,000, 140%), and a dry-run sends nothing, so
+// nothing ever fills and it holds 14 throughout: the first session sells
+// down to 98% (9.8 shares, so 4 to sell) with send false, and the synthetic
+// series enters a boost (0.98 x 1.5 = 1.47) and exits it, each exit sized
+// from the 14 held, never net of an earlier sell that was never sent. Every
+// release is followed by the engine's synthetic cancel of it (ADR 0026,
+// point 3, "Mode", amended 2026-10-17 and 2026-10-22).
 func TestTheDemoDrivesTheRealEngineInDryRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the engine binary")
@@ -79,11 +87,43 @@ func TestTheDemoDrivesTheRealEngineInDryRun(t *testing.T) {
 	if got := strings.Count(text, "decided"); got != 320 {
 		t.Errorf("%d decided sessions, want 320", got)
 	}
-	if !strings.Contains(lines[0], "target 0.98") || !strings.Contains(lines[0], "buy 9 ") || !strings.Contains(lines[0], "released (send false)") {
-		t.Errorf("the first line should buy 9 SPY, 98%% from cash, released with send false: %q", lines[0])
+	if !strings.Contains(lines[0], "target 0.98") || !strings.Contains(lines[0], "sell 4 ") || !strings.Contains(lines[0], "released (send false) canceled (synthetic, never sent)") {
+		t.Errorf("the first line should sell 4 SPY down to 98%%, released with send false and canceled as never sent: %q", lines[0])
 	}
-	if !strings.Contains(text, "target 1.47") || !strings.Contains(text, "sell") {
-		t.Error("the synthetic series should enter and exit a boost")
+	if !strings.Contains(text, "target 1.47") {
+		t.Error("the synthetic series should enter a boost")
+	}
+	if got, want := strings.Count(text, "canceled (synthetic, never sent)"), strings.Count(text, "released (send false)"); got != want || want == 0 {
+		t.Errorf("%d synthetic cancels for %d releases; every unsent release must end canceled", got, want)
+	}
+	// Nothing fills, so every sale down to 98% is sized from the 14 held:
+	// 14 less 0.98 x (14 x close - $1,600 borrowed) / close, toward zero. A
+	// fill reaching the simulated account would change the holding, and so
+	// the size of every later sale.
+	sale := regexp.MustCompile(`close ([0-9.]+) .* target 0\.98 \| sell (\d+) @`)
+	exits := 0
+	for i, line := range lines {
+		m := sale.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		closed, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sold, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := int64(math.Trunc(14 - 0.98*(float64(14*closed)-1600)/closed)); sold != want {
+			t.Errorf("line %d sells %d, want %d from the 14 held: %q", i, sold, want, line)
+		}
+		if i > 0 {
+			exits++
+		}
+	}
+	if exits < 2 {
+		t.Errorf("%d boost exits sell, want every exit after the first to sell too, sized from the holding", exits)
 	}
 	if strings.Contains(text, "send true") {
 		t.Error("a dry-run released an order to send")

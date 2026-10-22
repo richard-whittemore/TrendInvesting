@@ -429,11 +429,23 @@ Check in this order, and compare the three: they must agree.
    go run ./cmd/journal-query fills   <durable log>   # each fill: quantity, price, commission
    go run ./cmd/journal-query refusals <durable log>  # nothing expected
    go run ./cmd/journal-query positions <durable log> # holding rebuilt from the fills
+   go run ./cmd/journal-query reconcile <durable log> # fills against the account snapshots; it fails on an empty log or a torn (uncommitted) tail
    ```
+
+   A paper run is not registered, so it has no registry anchor and there is no
+   `-final-hash` here: the flag checks the end-of-run journal of a registered
+   backtest against `artefacts.final_record_hash` in its registry entry, and
+   refuses a durable log (`docs/manual/journal-query.md`).
 
    The order's quantity and limit match IBKR's; the fills add up to the
    quantity IBKR shows executed; the commission on each fill is IBKR's own
-   figure; `refusals` shows nothing for this order.
+   figure; `refusals` shows nothing for this order. Before the first account snapshot
+   after the order, `journal-query reconcile` fails with "compared nothing"
+   (or "fills not yet covered by a snapshot"): that is the expected result
+   then. It also fails on an empty log or on a torn (uncommitted) tail. It does
+   not detect a durable log that lost whole committed groups from its end: no
+   `journal-query` check does, so a clean reconcile does not prove the log is
+   the whole run. Treat each failure as no evidence, not as a clean result.
 3. **The reporter's alerts** (`docs/manual/alerts-and-dashboard.md`). An
    urgent alert "order … not acknowledged" means IBKR had not answered within
    the allowed time (`docs/manual/order-lifecycle.md`); one "order …

@@ -1,5 +1,5 @@
 [Unit]
-Description=Flex reader for account %i: IBKR's Cash Transactions, each new deposit or withdrawal into its ledger
+Description=Flex reader for account %i: IBKR's Cash Transactions, each new deposit or withdrawal into its cash ledger and each commission, fee and interest posting into its costs ledger
 # One instance per account: ti-flex@boost, ti-flex@trad-ira, ti-flex@roth-ira.
 # IBKR's Flex Web Service only: the reader needs the network, not IB Gateway,
 # and nothing else depends on it (the engine, the adapter and the trading
@@ -49,8 +49,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Its ledger, and beside it the status, coverage, resolutions and lock files
-# and the .tmp each whole-file write renames over its file, and nothing else.
+# Its cash ledger and its costs ledger (costs.jsonl, in the same folder), and
+# beside them the status, coverage, resolutions and lock files and the .tmp
+# each whole-file write renames over its file, and nothing else.
 ReadWritePaths=/var/lib/trend-investing/flex/%i
 ReadOnlyPaths=/var/lib/trend-investing/engines/%i
 # No instruction can come from this unit: it runs as ti-trader, the engine's

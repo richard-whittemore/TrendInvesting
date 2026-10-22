@@ -52,8 +52,9 @@ func boostOptions(t *testing.T, dir string) options {
 // boostFeed plays the adapter for a dry-run Boost engine: per session, the
 // SPY bar, the account snapshot, the mark and the session close, continuing
 // the engine's one input sequence. The account is simulated: an order the
-// engine releases fills a minute before the next session's close, and the
-// venue's report of it is sent.
+// engine releases to send fills a minute before the next session's close,
+// and the venue's report of it is sent; a dry-run releases none to send, so
+// nothing fills and the account never changes (ADR 0026, point 3, "Mode").
 type boostFeed struct {
 	t        *testing.T
 	client   *transport.Client
@@ -161,7 +162,11 @@ func (f *boostFeed) trySend(eventType string, version uint32, id string, at time
 		if err := json.Unmarshal(d.Payload, &p); err != nil {
 			f.t.Fatalf("decode %s: %v", d.ID, err)
 		}
-		f.pending = append(f.pending, p)
+		// No venue receives an order released with send false, so none
+		// fills it (ADR 0026, point 3, "Mode").
+		if p.Send {
+			f.pending = append(f.pending, p)
+		}
 		f.released = append(f.released, p)
 	}
 	return nil
