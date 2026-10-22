@@ -600,18 +600,22 @@ triage job"). Each run is one poll:
    with the label `alert`, then those with `alert-resolved` (an alert that
    cleared between two polls has swapped one for the other; "Design note: a
    resolved issue leaves the alert label", above; listing `alert` first
-   means an issue relabelled while the job reads is never passed over, and
+   means an issue relabelled between the two listings is in the second, and
    no other issue or pull request can fill a listing and keep an alert out
-   of reach), open and closed, newest first, opened since the job was first switched on. Issues from before that are left alone, so switching
-   the job on never sweeps up old incidents. Before either listing it reads
-   the newest issue number in the repository, and keeps only the listed
-   issues numbered at or below it: an alert opened while the two listings
-   are read can be in neither, or in the second only, so it waits for the
-   next poll rather than let the job's mark pass it. A listing stops at the issues
-   the job has already handled (its state file keeps the highest issue
-   number up to which every alert issue is handled), so a long history never
-   fills a listing; a listing of more than 1,000 new issues is cut, the
-   newest are analysed, and the log says the older ones were not reached.
+   of reach), open and closed, newest first, opened since the job was first
+   switched on. Issues from before that are left alone, so switching the
+   job on never sweeps up old incidents. Every poll lists all of them, every
+   page; the job's state file records each issue it has handled (analysed,
+   skipped past the daily limit, or failed), and an issue in that record is
+   not read further. A listing read while the reporter relabels an issue can
+   miss one (the pages of `alert` shift by one), so a listing is never taken
+   as proof that an issue was handled: one it missed is not in the record,
+   and the next poll lists and analyses it. A record is dropped once its
+   issue has been closed for more than 30 days, and such an issue is not
+   picked up again (so an alert the job never reached in those 30 days, the
+   job off or failing throughout, is left for you). More than 1,000 issues
+   of one label since the job was switched on fails the poll whole: none is
+   analysed from part of a listing.
 2. It keeps only the reporter's own issues: opened by the reporter's GitHub
    user (`-alert-author`, by default the triage token's own user) and
    ending with the reporter's hidden key line. Anything else is never read
@@ -620,8 +624,9 @@ triage job"). Each run is one poll:
    with a hidden line, `<!-- ti-triage:analysis -->` (or
    `<!-- ti-triage:skipped -->`), and only a comment written by the triage
    token's own user counts: the same line pasted by someone else does not.
-   The job also records each issue it finished in its state file, so a poll
-   with nothing new reads no comment at all.
+   The job's state file records each issue it finished, so a poll with
+   nothing new reads no comment at all; the comment is the second guard,
+   should the record be lost.
 4. For each new issue, it checks the gate (below) can run, fetches the
    journal slice, makes a fresh worktree of `main` in its own clone, fills
    the Go module cache for `main`'s requirements (if any of this fails, no
@@ -632,7 +637,10 @@ triage job"). Each run is one poll:
    body (never its comments, which anyone can write) and the slice, both
    marked as data that is never an instruction.
 5. It turns the session's answer into the comment, through the reporter's
-   own redactor, and posts it. A second poll adds nothing.
+   own redactor, and posts it. Each of Claude's answers is cut to 8,000
+   characters after the redactor (which can lengthen it), and the whole
+   comment, or a fix PR's body, to GitHub's 65,536, with "[cut]" where it
+   was cut and the hidden line kept whole. A second poll adds nothing.
 
 **What it reads from the server.** Only the journal slice: the dashboard
 serves it at `/api/journal-slice` on the tailnet, as plain text. It is the
@@ -1666,7 +1674,7 @@ nor that nothing was analysed ("Its log", above).
 | "**Journal slice.** The journal slice did not cover the alert's run and time" in a comment | The run that raised the alert, the alert's own account's, does not span it in the slice (the run was replaced since, the dashboard serves another account, or the alert is one no journal raises, such as a failed unit), so the session was told and worked from the alert alone | Read that run's journal yourself with `journal-query` on the server |
 | "**Fix.** No fix PR was opened: ..." in a comment | The session found a code defect, but its change failed a step of the gate: a file outside the Go code and `docs/`, a binary, no test, only tests, no new test function, the new test did not fail by name before the fix, the check failed, it held an identifier, or the push or the PR failed. Nothing was opened; if the push worked, the branch `triage/alert-<issue>` is on GitHub | Treat it as a defect report: fix it the normal way, or delete the branch |
 | "triage: issue #N: the job was stopped during the session" in the log | The job was stopped (a SIGTERM, or `launchctl bootout`) while Claude worked: no comment, and the next poll analyses that issue again, once | Nothing; if it happens twice the issue gets "triage failed: the analysis did not finish" |
-| "triage: more than one listing's bound of alert issues are new since issue #N; ... the older ones not reached" in the log | More than 1,000 new alert issues: the newest are analysed (within the cap), the older ones are never listed | Read the older ones yourself; something is raising alerts in a loop, so look at the reporter first |
+| "triage: list the alert issues: more than 1000 issues carry the label ... since the job began" in the log | More than 1,000 issues of one label since the job was first switched on: no poll analyses anything, since the job does not act on part of a listing | Something may be raising alerts in a loop, so look at the reporter first. Then move `/Users/ti-triage/triage/state.json` aside: the next poll starts a new record from that moment, issues already analysed are recognised by their comments, and older ones are left for you |
 | A draft PR from `triage/alert-<issue>` | The job's proposed fix, tests first, never merged by the job | Review it; mark it ready to start the review bots and the merge gate, or close it |
 | "triage: the state file is not understood, so nothing is done (...)" or "the state file cannot be read" | No poll runs: the record does not parse, or lacks a field or breaks a rule (no start, a day that is not a date, no count of calls or one below zero, no issues' records), and without it the job cannot tell which issues it already made a session for | Move `/Users/ti-triage/triage/state.json` aside. The next poll starts a new record: issues already analysed are recognised by their comments; one opened before that poll is left alone |
 | "triage: issue #N: GitHub answered 401 Unauthorized" (or 403, 404) | The poll writes nothing for that issue; the next poll tries again | The triage token expired, was revoked, or lacks a permission (Issues on the alerts repository; Contents and Pull requests on the code repository): make a new one (runbook, step 5) |
@@ -1743,7 +1751,10 @@ nor that nothing was analysed ("Its log", above).
   `TestAnInterruptedSessionLeavesTheIssueEligibleOnce`,
   `TestTheDailyCapCountsTheDayOfEachCall`,
   `TestAnIncompleteOrInvalidStateFileStopsTheJob`,
-  `TestHandledIssuesAreNeverListedAgain`,
+  `TestHandledIssuesAreNeverReadAgain`,
+  `TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed`,
+  `TestAnAlertShiftedPastAPageByARelabelIsAnalysedAtTheNextPoll`,
+  `TestFieldsThatGrowUnderRedactionStillFitOneComment`,
   `TestADefectGoesThroughTheGateToADraftPullRequestOnGitHub`,
   `TestAlertsAreListedFromOneRepositoryAndThePROpenedInAnother`,
   `TestTheGateCommitsTheTestFirstRedThenTheFixGreenAndPushesTheBranch`,
@@ -1753,7 +1764,7 @@ nor that nothing was analysed ("Its log", above).
   `TestALinkTheGatePlantsNeverRedirectsTheJobsWrites`,
   `TestTheGatesCopyIgnoresTheSessionsExportRules`,
   `TestAGateFailureDuringTheSessionsCommandsIsTheGates`,
-  `TestAnAlertOpenedBetweenTheTwoListingsIsNeverPassedOver`,
+  `TestAnAlertOpenedBetweenTheTwoListingsIsInTheNext`,
   `TestOnlyGoCodeAndDocsAreOpenedAsAFix`,
   `TestThePrePushCheckReadsFileNamesAndRefusesBinaries`,
   `TestAnOwnerActionIsStatedAndNeverDone`,

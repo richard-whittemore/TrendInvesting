@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -185,35 +187,39 @@ func TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls(t *testing
 	f.addIssue(7, alertLabel, "owner", since.Add(3*time.Hour), alertBody)
 	f.addIssue(6, alertLabel, "owner", since.Add(2*time.Hour), alertBody)
 	f.addIssue(5, resolvedLabel, "owner", since.Add(90*time.Minute), alertBody)
+	f.issues[len(f.issues)-1]["state"] = "closed"
+	f.issues[len(f.issues)-1]["closed_at"] = since.Add(100 * time.Minute).Format(time.RFC3339)
 	f.issues = append(f.issues, map[string]any{"number": 4, "pull_request": map[string]any{"url": "x"}, "labels": []map[string]any{{"name": alertLabel}}, "created_at": since.Add(time.Hour).Format(time.RFC3339), "user": map[string]any{"login": "owner"}})
 	f.addIssue(2, alertLabel, "owner", since.Add(-time.Hour), alertBody)
 	f.addIssue(1, alertLabel, "owner", since.Add(-2*time.Hour), alertBody)
-	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
-	if err != nil || cut {
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 3 || got[0].Number != 7 || got[1].Number != 6 || got[2].Number != 5 || got[0].Author != "owner" || got[0].Body != alertBody {
 		t.Fatalf("listed %+v", got)
 	}
-	if n := len(f.sent()); n != 4 {
-		t.Errorf("%d requests; want the newest issue's number, then each listing stopping at the page holding an issue older than the start", n)
+	if !got[0].Closed.IsZero() || !got[2].Closed.Equal(since.Add(100*time.Minute)) {
+		t.Errorf("closing times %v and %v; want none for the open issue and the closed one's own", got[0].Closed, got[2].Closed)
+	}
+	if n := len(f.sent()); n != 3 {
+		t.Errorf("%d requests; want each listing stopping at the page holding an issue older than the start", n)
 	}
 	var labels []string
 	for _, q := range f.listQueries {
 		v, _ := url.ParseQuery(q)
 		labels = append(labels, v.Get("labels"))
 	}
-	if len(labels) != 4 || labels[0] != "" || labels[1] != alertLabel || labels[2] != alertLabel || labels[3] != resolvedLabel {
-		t.Errorf("listings by label %q, want the newest issue of any label, then alert's pages, then alert-resolved's", labels)
+	if len(labels) != 3 || labels[0] != alertLabel || labels[1] != alertLabel || labels[2] != resolvedLabel {
+		t.Errorf("listings by label %q, want alert's pages, then alert-resolved's", labels)
 	}
 }
 
-// TestAnAlertOpenedBetweenTheTwoListingsIsNeverPassedOver: an alert opened
-// after the alert listing was read, and one opened and resolved before the
-// alert-resolved listing, are in neither listing or only the second: the
-// listing never returns an issue numbered above one it missed, so the
-// handled-through mark (advance) never passes an alert it was not shown.
-func TestAnAlertOpenedBetweenTheTwoListingsIsNeverPassedOver(t *testing.T) {
+// TestAnAlertOpenedBetweenTheTwoListingsIsInTheNext: an alert opened after
+// the alert listing was read, and one opened and resolved before the
+// alert-resolved listing, may be missing from this listing, never from the
+// next: each listing reads every alert issue since the start.
+func TestAnAlertOpenedBetweenTheTwoListingsIsInTheNext(t *testing.T) {
 	f, srv := newFakeGitHub(t)
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
 	f.addIssue(100, alertLabel, "owner", since.Add(time.Hour), alertBody)
@@ -228,28 +234,17 @@ func TestAnAlertOpenedBetweenTheTwoListingsIsNeverPassedOver(t *testing.T) {
 		f.addIssue(101, alertLabel, "owner", since.Add(2*time.Hour), alertBody)
 		f.issues = append(f.issues, older...)
 	}
-	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
-	if err != nil || cut {
-		t.Fatal(err, cut)
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	if err != nil || !slices.ContainsFunc(got, func(is issue) bool { return is.Number == 100 }) {
+		t.Fatalf("listed %+v, %v; want the alert open before either listing", got, err)
 	}
+	got, err = trackerFor(t, srv).AlertIssues(context.Background(), since)
 	listed := map[int]bool{}
 	for _, is := range got {
 		listed[is.Number] = true
 	}
-	for _, is := range got {
-		for n := 100; n < is.Number; n++ {
-			if !listed[n] {
-				t.Fatalf("listed #%d but not the alert #%d below it: the mark would pass #%d (listed %v)", is.Number, n, n, listed)
-			}
-		}
-	}
-	if !listed[100] {
-		t.Fatalf("the alert open before either listing was not listed: %v", listed)
-	}
-	// The next listing, with nothing opened between, reaches both.
-	got, _, err = trackerFor(t, srv).AlertIssues(context.Background(), since, 100)
-	if err != nil || len(got) != 2 {
-		t.Fatalf("the next listing: %+v, %v; want #101 and #102", got, err)
+	if err != nil || len(got) != 3 || !listed[100] || !listed[101] || !listed[102] {
+		t.Fatalf("the next listing: %+v, %v; want #100, #101 and #102", got, err)
 	}
 }
 
@@ -269,30 +264,25 @@ func TestUnrelatedIssuesAndPullsNeverHideAnOlderAlert(t *testing.T) {
 		f.issues = append(f.issues, item)
 	}
 	f.addIssue(1, alertLabel, "owner", since.Add(time.Minute), alertBody)
-	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
-	if err != nil || cut || len(got) != 1 || got[0].Number != 1 {
-		t.Fatalf("listed %+v, cut %v, err %v; want the alert, reached, and no cut", got, cut, err)
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	if err != nil || len(got) != 1 || got[0].Number != 1 {
+		t.Fatalf("listed %+v, err %v; want the alert, reached", got, err)
 	}
 }
 
-// TestAListingLongerThanItsBoundIsCutNotFailed: past its bound the listing
-// returns the newest issues and says it was cut, so the job never stops;
-// and it stops at the issues already handled (through), never reading them.
-func TestAListingLongerThanItsBoundIsCutNotFailed(t *testing.T) {
+// TestAListingLongerThanItsBoundIsAnError: past its bound a label's
+// listing fails whole, naming the bound; it is never cut short and taken as
+// the whole list.
+func TestAListingLongerThanItsBoundIsAnError(t *testing.T) {
 	f, srv := newFakeGitHub(t)
 	f.pageSize = 1
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
 	for n := maxPages + 2; n > 0; n-- {
 		f.addIssue(n, alertLabel, "owner", since.Add(time.Duration(n)*time.Minute), alertBody)
 	}
-	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
-	if err != nil || !cut || len(got) != maxPages || got[0].Number != maxPages+2 {
-		t.Fatalf("listed %d, cut %v, err %v; want the newest %d and the cut said", len(got), cut, err, maxPages)
-	}
-	before := len(f.sent())
-	got, cut, err = trackerFor(t, srv).AlertIssues(context.Background(), since, maxPages)
-	if err != nil || cut || len(got) != 2 || len(f.sent())-before != 5 {
-		t.Fatalf("listed %v, cut %v, err %v, %d requests; want the two past through, stopping at it", got, cut, err, len(f.sent())-before)
+	got, err := trackerFor(t, srv).AlertIssues(context.Background(), since)
+	if err == nil || got != nil || !strings.Contains(err.Error(), fmt.Sprintf("more than %d issues", maxPages*pageSize)) {
+		t.Fatalf("listed %d, err %v; want the bound named and nothing listed", len(got), err)
 	}
 }
 
@@ -458,9 +448,60 @@ func TestAnIssueWithoutItsCreationTimeIsAnError(t *testing.T) {
 			}
 			f.issues = append(f.issues, bad)
 			f.addIssue(5, alertLabel, "owner", since.Add(time.Hour), alertBody)
-			if _, _, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0); err == nil || !strings.Contains(err.Error(), "creation time") {
+			if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since); err == nil || !strings.Contains(err.Error(), "creation time") {
 				t.Fatalf("err = %v, want the missing creation time named", err)
 			}
 		})
+	}
+}
+
+// TestAnAlertShiftedPastAPageByARelabelIsAnalysedAtTheNextPoll: alerts #201
+// to #1 are listed a hundred to a page; once the first page is read, #201
+// is resolved (it loses alert), so the second page begins at #100 and #101
+// is in neither listing. Nothing marks it handled: the next poll lists it
+// and it is analysed, and every alert gets exactly one comment.
+func TestAnAlertShiftedPastAPageByARelabelIsAnalysedAtTheNextPoll(t *testing.T) {
+	f, srv := newFakeGitHub(t)
+	w := newWorld(t)
+	w.job.tracker = trackerFor(t, srv)
+	w.job.dailyCap = 1000
+	saved := syncFile
+	t.Cleanup(func() { syncFile = saved })
+	syncFile = func(*os.File) error { return nil }
+	for n := 201; n >= 1; n-- {
+		f.addIssue(n, alertLabel, "owner", pollTime.Add(time.Duration(n)*time.Minute), alertBody)
+	}
+	relabelled := false
+	f.afterList = func(label string) {
+		if label != alertLabel || relabelled {
+			return
+		}
+		relabelled = true
+		f.issues[0]["labels"] = []map[string]any{{"name": resolvedLabel}}
+	}
+	if err := w.job.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(t)
+	if !slices.ContainsFunc(w.analyst.requests, func(r analysisRequest) bool { return r.Issue.Number == 101 }) {
+		t.Fatal("#101, shifted past a page by a relabel, was never analysed")
+	}
+	for n := 1; n <= 201; n++ {
+		if c := f.comments[n]; len(c) != 1 || !strings.Contains(c[0]["body"].(string), triageMarkerPrefix) {
+			t.Errorf("issue #%d has %d comments; want the job's one", n, len(c))
+		}
+	}
+}
+
+// TestAClosedIssueWithoutItsClosingTimeIsAnError: how long ago an issue
+// closed decides whether its record is kept, so a closed issue without the
+// time is a malformed answer: the listing fails whole.
+func TestAClosedIssueWithoutItsClosingTimeIsAnError(t *testing.T) {
+	f, srv := newFakeGitHub(t)
+	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
+	f.addIssue(5, alertLabel, "owner", since.Add(time.Hour), alertBody)
+	f.issues[0]["state"] = "closed"
+	if _, err := trackerFor(t, srv).AlertIssues(context.Background(), since); err == nil || !strings.Contains(err.Error(), "closing time") {
+		t.Fatalf("err = %v, want the missing closing time named", err)
 	}
 }

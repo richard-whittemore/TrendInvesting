@@ -40,11 +40,16 @@ const (
 	kindDefect = "code-defect"
 	kindData   = "data-problem"
 	kindOwner  = "owner-action"
-	// maxField bounds each of Claude's answers in a comment, so a comment
-	// stays well within GitHub's 65,536 characters.
+	// maxField bounds each of Claude's answers in a comment, after the
+	// redactor (which can lengthen it), so a comment stays well within
+	// GitHub's 65,536 characters (maxIssueText); fitted cuts the whole
+	// comment or PR body to that limit all the same.
 	maxField = 8000
 	// maxTitle bounds a PR title.
 	maxTitle = 120
+	// retention is how long after an alert issue closed the job keeps the
+	// record that it handled it.
+	retention = 30 * 24 * time.Hour
 )
 
 // kindLabels names each kind in a comment.
@@ -65,6 +70,7 @@ type issue struct {
 	Body    string
 	Author  string // the login of the user who opened it
 	Created time.Time
+	Closed  time.Time // when it was closed; zero while it is open
 }
 
 // tracker is the repository's issues and pulls (GitHub's REST API; tests use
@@ -74,10 +80,9 @@ type tracker interface {
 	Self(ctx context.Context) (string, error)
 	// AlertIssues lists the issues carrying the reporter's labels (alert,
 	// then alert-resolved), open and closed, newest first, opened at or
-	// after since and numbered above through, and none numbered above the
-	// newest issue when the listing began (so none is passed over); cut is
-	// a listing that reached its bound before either.
-	AlertIssues(ctx context.Context, since time.Time, through int) (issues []issue, cut bool, err error)
+	// after since; a listing past its bound is an error. It may miss an
+	// issue relabelled while it reads, which the next listing holds.
+	AlertIssues(ctx context.Context, since time.Time) ([]issue, error)
 	// IssueURL is an alert issue's address on GitHub.
 	IssueURL(number int) string
 	// OwnComments is the bodies of the issue's comments the token's own user
@@ -177,12 +182,10 @@ type state struct {
 	// in it; Calls is required (loadState), never taken as zero.
 	Day   string `json:"day"`
 	Calls *int   `json:"calls"`
-	// Through is the highest issue number at and below which every alert
-	// issue since Since is handled: a listing stops there, so a long history
-	// never fills its bound. A record without it is read as zero, nothing
-	// handled-through, which only lists again what is already done.
-	Through int `json:"through"`
-	// Issues is each issue's record, by number.
+	// Issues is each issue's record, by number: one Done is handled
+	// (analysed, skipped past the cap, or failed), and is never read again.
+	// A Done record is dropped once its issue has been closed for longer
+	// than retention, and such an issue is not listed as new again.
 	Issues map[string]issueRecord `json:"issues"`
 }
 
@@ -231,23 +234,18 @@ func (j *job) poll(ctx context.Context) error {
 	if author == "" {
 		author = self
 	}
-	candidates, listed, cut, err := j.candidates(ctx, st, author)
+	candidates, err := j.candidates(ctx, st, author)
 	if err != nil {
 		return err
 	}
-	if cut {
-		_, _ = fmt.Fprintf(j.log, "triage: more than one listing's bound of alert issues are new since issue #%d; the newest are analysed, the older ones not reached: read those yourself\n", st.Through)
+	// The records candidates dropped (retention) are dropped on disk too.
+	if err := saveState(j.statePath, st); err != nil {
+		return err
 	}
 	var failures []error
 	for _, is := range candidates {
 		if err := j.triage(ctx, st, is); err != nil {
 			failures = append(failures, fmt.Errorf("triage: issue #%d: %w", is.Number, err))
-		}
-	}
-	if !cut {
-		j.advance(st, listed)
-		if err := saveState(j.statePath, st); err != nil {
-			failures = append(failures, err)
 		}
 	}
 	return errors.Join(failures...)
@@ -261,53 +259,41 @@ func (j *job) today(st *state) {
 	}
 }
 
-// advance moves Through up over the listed issues, lowest first, while each
-// is handled: done, or never the reporter's (handled by being left alone).
-// An issue still owed its comment stops it, so the next listing reaches it.
-func (j *job) advance(st *state, listed map[int]bool) {
-	numbers := make([]int, 0, len(listed))
-	for n := range listed {
-		numbers = append(numbers, n)
-	}
-	slices.Sort(numbers)
-	for _, n := range numbers {
-		if listed[n] && !st.Issues[strconv.Itoa(n)].Done {
-			return
-		}
-		st.Through = n
-	}
-}
-
-// candidates are the reporter's alert issues, opened since the job began,
-// numbered above Through and not yet recorded done, oldest first, from the
-// listing of the reporter's two labels (an incident that clears swaps alert
-// for alert-resolved, docs/manual/alerts-and-dashboard.md, "Design note: a
-// resolved issue leaves the alert label"; alert is listed first, so an
-// issue relabelled while the job reads is never passed over, and no other
-// issue or pull request counts against the bound); listed is every issue the listing
-// returned, true for the reporter's (false: one it leaves alone), and cut
-// whether the listing was cut at its bound. An issue the reporter did not
-// open (another author, or no hidden key line) is never read further: its
-// words are not the reporter's.
-func (j *job) candidates(ctx context.Context, st *state, author string) (out []issue, listed map[int]bool, cut bool, err error) {
-	listed = map[int]bool{}
-	list, cut, err := j.tracker.AlertIssues(ctx, st.Since, st.Through)
+// candidates are the reporter's alert issues, opened since the job began
+// and not recorded done, oldest first, from the listing of the reporter's
+// two labels (an incident that clears swaps alert for alert-resolved,
+// docs/manual/alerts-and-dashboard.md, "Design note: a resolved issue
+// leaves the alert label"). Every poll lists them all, so one a listing
+// missed (relabelled while it was read) is reached by the next. An issue
+// closed for longer than retention is no longer a candidate unless the job
+// still owes it its comment, and its done record is dropped from st. An
+// issue the reporter did not open (another author, or no hidden key line)
+// is never read further: its words are not the reporter's.
+func (j *job) candidates(ctx context.Context, st *state, author string) ([]issue, error) {
+	list, err := j.tracker.AlertIssues(ctx, st.Since)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("triage: list the alert issues: %w", err)
+		return nil, fmt.Errorf("triage: list the alert issues: %w", err)
 	}
+	seen := map[int]bool{}
+	var out []issue
 	for _, is := range list {
-		if _, seen := listed[is.Number]; seen || is.Created.Before(st.Since) || is.Number <= st.Through {
+		if seen[is.Number] || is.Created.Before(st.Since) {
 			continue
 		}
-		ours := strings.EqualFold(is.Author, author) && strings.Contains(is.Body, alertKeyLine)
-		listed[is.Number] = ours
-		if !ours || st.Issues[strconv.Itoa(is.Number)].Done {
+		seen[is.Number] = true
+		key := strconv.Itoa(is.Number)
+		rec, recorded := st.Issues[key]
+		if !is.Closed.IsZero() && j.now().Sub(is.Closed) > retention && (!recorded || rec.Done) {
+			delete(st.Issues, key)
+			continue
+		}
+		if rec.Done || !strings.EqualFold(is.Author, author) || !strings.Contains(is.Body, alertKeyLine) {
 			continue
 		}
 		out = append(out, is)
 	}
 	slices.SortFunc(out, func(a, b issue) int { return a.Number - b.Number })
-	return out, listed, cut, nil
+	return out, nil
 }
 
 // triage brings one issue to its one comment: done if the token's user has
@@ -388,10 +374,11 @@ func (j *job) triage(ctx context.Context, st *state, is issue) error {
 // skippedComment is the comment of an issue past the day's cap.
 const skippedComment = "triage skipped: daily limit. The day's limit of analyses is reached, so this alert is not analysed; read it and its journal yourself.\n\n" + skippedMarker
 
-// post keeps rec's comment in the state file, posts it, and records the
-// issue done.
+// post keeps rec's comment, cut to GitHub's limit (fittedComment), in the
+// state file, posts it, and records the issue done.
 func (j *job) post(ctx context.Context, st *state, number int, rec issueRecord) error {
 	key := strconv.Itoa(number)
+	rec.Pending = fittedComment(rec.Pending)
 	st.Issues[key] = rec
 	if err := saveState(j.statePath, st); err != nil {
 		return err
@@ -541,7 +528,7 @@ func (j *job) openFix(ctx context.Context, is issue, dir, branch string, a analy
 	case len(fix) == 0:
 		return none + "the session changed only tests.", nil
 	}
-	title := j.clean(bounded(a.FixTitle, maxTitle))
+	title := bounded(j.clean(a.FixTitle), maxTitle)
 	if strings.TrimSpace(title) == "" {
 		title = "a fix for an alert"
 	}
@@ -571,14 +558,15 @@ func (j *job) openFix(ctx context.Context, is issue, dir, branch string, a analy
 	}
 	// The alert issue may be in a private repository: it is linked by its
 	// address, and none of its text is quoted; only Claude's words, redacted.
+	const footer = "\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 	body := "A fix the triage job proposes for the alert " + j.tracker.IssueURL(is.Number) + ".\n\n" +
 		"**What happened.** " + j.clean(a.WhatHappened) + "\n\n" +
 		"**Which rule applied.** " + j.clean(a.Rule) + "\n\n" +
 		"**The fix.** " + j.clean(a.FixSummary) + "\n\n" +
 		"**Tests first.** The first commit holds only the tests, and `go test -run` over its new tests showed one failing by name; the second holds the fix, and `" + j.checkCmd + "` passed on it. Both ran in the gate's sandbox, as its own user, with no network except loopback.\n\n" +
-		"Opened as a draft by the triage job: it is never merged by the job, which never marks a PR ready either. Review it as any other.\n\n" +
-		"🤖 Generated with [Claude Code](https://claude.com/claude-code)"
-	link, err := j.tracker.OpenDraftPull(ctx, branch, "triage: "+title, body)
+		"Opened as a draft by the triage job: it is never merged by the job, which never marks a PR ready either. Review it as any other." +
+		footer
+	link, err := j.tracker.OpenDraftPull(ctx, branch, "triage: "+title, fitted(body, footer))
 	if err != nil {
 		return none + "GitHub refused the PR (" + j.clean(err.Error()) + "); the branch is pushed.", nil
 	}
@@ -589,10 +577,39 @@ func (j *job) openFix(ctx context.Context, is issue, dir, branch string, a analy
 // something; the job asks no one.
 var mention = regexp.MustCompile(`@([A-Za-z0-9])`)
 
-// clean is text for GitHub: bounded, through the reporter's redactor, with
-// no mention left.
+// clean is text for GitHub: through the reporter's redactor, with no
+// mention left, then bounded: the bound comes last, since redaction can
+// lengthen the text.
 func (j *job) clean(s string) string {
-	return mention.ReplaceAllString(j.redactor.Text(bounded(s, maxField)), "$1")
+	return bounded(mention.ReplaceAllString(j.redactor.Text(s), "$1"), maxField)
+}
+
+// cutMark ends text bounded cuts.
+const cutMark = " [cut]"
+
+// fitted is text cut to GitHub's limit on an issue body, a comment or a PR
+// body (maxIssueText), with cutMark, keeping tail, which s ends with, whole
+// after it: a comment's hidden marker line, a PR body's closing line.
+func fitted(s, tail string) string {
+	if len(s) <= maxIssueText {
+		return s
+	}
+	head := strings.TrimSuffix(s, tail)
+	if len(head) == len(s) {
+		tail = ""
+	}
+	return bounded(head, maxIssueText-len(tail)-len(cutMark)) + tail
+}
+
+// fittedComment is a comment cut to GitHub's limit (fitted), its hidden
+// marker line, the last, kept whole: without it the job could not tell the
+// issue was done.
+func fittedComment(s string) string {
+	tail := ""
+	if i := strings.LastIndex(s, "\n\n"+triageMarkerPrefix); i >= 0 {
+		tail = s[i:]
+	}
+	return fitted(s, tail)
 }
 
 // failedComment is the issue's one comment when no analysis can be posted.
@@ -609,7 +626,7 @@ func bounded(s string, n int) string {
 	for !utf8.ValidString(s) {
 		s = s[:len(s)-1]
 	}
-	return s + " [cut]"
+	return s + cutMark
 }
 
 // codeFolders are the repository's Go code folders: the only places a fix
@@ -686,9 +703,7 @@ func loadState(p string) (*state, error) {
 // invalid says what a parsed record lacks or breaks, or "" when it is whole:
 // the job's start, the day of the count, a count (present: a missing one is
 // never taken as zero, which would allow a second day's calls) of no less
-// than zero, the
-// issues' records, each under an issue's number, and Through no less than
-// zero.
+// than zero, and the issues' records, each under an issue's number.
 func invalid(st *state) string {
 	switch {
 	case st == nil:
@@ -699,8 +714,6 @@ func invalid(st *state) string {
 		return "it names no count of calls"
 	case *st.Calls < 0:
 		return "its count of calls is below zero"
-	case st.Through < 0:
-		return "its handled-through number is below zero"
 	case st.Issues == nil:
 		return "it holds no issues' records"
 	}

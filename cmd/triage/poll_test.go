@@ -40,9 +40,10 @@ type fakeTracker struct {
 	pulls    []fakePull
 	// failComments fails every comment write.
 	failComments error
-	// bound is the most issues one listing returns before it is cut; 0 is
-	// no bound. listed counts the issues every listing returned.
-	bound, listed int
+	// listErr fails every listing; ownReads counts the reads of an issue's
+	// own comments.
+	listErr  error
+	ownReads int
 	// afterListing, when set, runs after each listing with its ordinal, as
 	// GitHub changing while the job reads it.
 	afterListing func(n int)
@@ -55,10 +56,13 @@ type fakePull struct{ head, title, body string }
 
 func (f *fakeTracker) Self(context.Context) (string, error) { return f.self, nil }
 
-func (f *fakeTracker) AlertIssues(_ context.Context, since time.Time, through int) ([]issue, bool, error) {
+func (f *fakeTracker) AlertIssues(_ context.Context, since time.Time) ([]issue, error) {
 	f.listings++
 	if f.afterListing != nil {
 		defer f.afterListing(f.listings)
+	}
+	if f.listErr != nil {
+		return nil, f.listErr
 	}
 	// One listing of every issue, whatever its label, newest first, as
 	// GitHub answers it.
@@ -73,17 +77,12 @@ func (f *fakeTracker) AlertIssues(_ context.Context, since time.Time, through in
 	slices.SortFunc(all, func(a, b issue) int { return b.Created.Compare(a.Created) })
 	var out []issue
 	for _, is := range all {
-		if is.Created.Before(since) || is.Number <= through {
+		if is.Created.Before(since) {
 			break
-		}
-		if f.bound > 0 && len(out) == f.bound {
-			f.listed += len(out)
-			return out, true, nil
 		}
 		out = append(out, is)
 	}
-	f.listed += len(out)
-	return out, false, nil
+	return out, nil
 }
 
 func (f *fakeTracker) IssueURL(number int) string {
@@ -91,6 +90,7 @@ func (f *fakeTracker) IssueURL(number int) string {
 }
 
 func (f *fakeTracker) OwnComments(_ context.Context, number int) ([]string, error) {
+	f.ownReads++
 	var own []string
 	for _, c := range f.comments[number] {
 		if c.author == f.self {
@@ -118,7 +118,12 @@ func (f *fakeTracker) OpenDraftPull(_ context.Context, head, title, body string)
 
 // ownComments is every comment the token's user wrote on the issue.
 func (f *fakeTracker) ownComments(number int) []string {
-	own, _ := f.OwnComments(context.Background(), number)
+	var own []string
+	for _, c := range f.comments[number] {
+		if c.author == f.self {
+			own = append(own, c.body)
+		}
+	}
 	return own
 }
 
@@ -790,12 +795,13 @@ func TestTheStateIsSyncedBeforeTheModelIsCalled(t *testing.T) {
 	}
 }
 
-// TestHandledIssuesAreNeverListedAgain: the listing is newest first and
-// stops at the issues already handled (state's Through), so a long history
-// of handled alerts never fills the listing's bound and never stops the
-// job; a listing cut at its bound is analysed, said in the log, and never
-// lets Through pass the issues it did not reach.
-func TestHandledIssuesAreNeverListedAgain(t *testing.T) {
+// TestHandledIssuesAreNeverReadAgain: every poll lists every alert issue
+// since the job began, and the state file's record of the issues handled
+// keeps a poll from reading any of them further: a second poll reads no
+// issue's comments and calls no model. A listing that fails (its bound
+// passed among them) fails the poll whole: nothing is analysed from part of
+// a listing.
+func TestHandledIssuesAreNeverReadAgain(t *testing.T) {
 	w := newWorld(t)
 	w.tracker.issues[alertLabel] = []issue{
 		{Number: 52, Body: alertBody, Author: "owner", Created: pollTime.Add(3 * time.Minute)},
@@ -803,31 +809,58 @@ func TestHandledIssuesAreNeverListedAgain(t *testing.T) {
 		{Number: 50, Body: alertBody, Author: "owner", Created: pollTime.Add(time.Minute)},
 	}
 	w.poll(t)
-	w.tracker.listed = 0
+	w.tracker.ownReads = 0
 	w.poll(t)
-	if w.tracker.listed != 0 {
-		t.Fatalf("a second poll listed %d handled issues again", w.tracker.listed)
+	if w.tracker.ownReads != 0 {
+		t.Fatalf("a second poll read %d handled issues' comments again", w.tracker.ownReads)
 	}
 	if len(w.analyst.requests) != 2 {
 		t.Fatalf("model calls %d", len(w.analyst.requests))
 	}
 
-	cut := newWorld(t)
-	cut.tracker.bound = 1
-	cut.tracker.issues[alertLabel] = []issue{
-		{Number: 61, Body: alertBody, Author: "owner", Created: pollTime.Add(2 * time.Minute)},
-		{Number: 60, Body: alertBody, Author: "owner", Created: pollTime.Add(time.Minute)},
+	failed := newWorld(t)
+	failed.tracker.listErr = errors.New("more than 1000 issues carry the label alert")
+	if err := failed.job.poll(context.Background()); err == nil || !strings.Contains(err.Error(), "1000 issues") {
+		t.Fatalf("err = %v, want the listing's failure", err)
 	}
-	cut.poll(t)
-	if len(cut.analyst.requests) != 1 || cut.analyst.requests[0].Issue.Number != 61 {
-		t.Fatalf("a cut listing: model calls %v; want the newest analysed", cut.analyst.requests)
+	if len(failed.analyst.requests) != 0 || failed.tracker.ownReads != 0 {
+		t.Fatalf("a failed listing analysed %d and read %d issues", len(failed.analyst.requests), failed.tracker.ownReads)
 	}
-	if !strings.Contains(cut.job.log.(*strings.Builder).String(), "not reached") {
-		t.Errorf("the cut was not said in the log: %q", cut.job.log)
+}
+
+// TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed: the record of an
+// issue handled is dropped once the issue has been closed for more than 30
+// days, and such an issue is never read again; one closed more recently is
+// kept, and one still owed its comment is finished whatever its age.
+func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
+	w := newWorld(t)
+	day := 24 * time.Hour
+	start := pollTime.Add(-90 * day)
+	w.tracker.issues[resolvedLabel] = []issue{
+		{Number: 30, Body: alertBody, Author: "owner", Created: start.Add(day), Closed: pollTime.Add(-31 * day)},
+		{Number: 31, Body: alertBody, Author: "owner", Created: start.Add(2 * day), Closed: pollTime.Add(-31 * day)},
+		{Number: 32, Body: alertBody, Author: "owner", Created: start.Add(3 * day), Closed: pollTime.Add(-29 * day)},
 	}
-	st, err := loadState(cut.job.statePath)
-	if err != nil || st.Through >= 60 {
-		t.Fatalf("Through %d past an issue never listed (err %v)", st.Through, err)
+	if err := saveState(w.job.statePath, &state{Since: start, Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{
+		"30": {Done: true}, "31": {Invoked: true, Pending: "kept\n\n" + analysisMarker}, "32": {Done: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(t)
+	st, err := loadState(w.job.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := st.Issues["30"]; kept || !st.Issues["31"].Done || !st.Issues["32"].Done || !st.Issues["41"].Done {
+		t.Fatalf("records %+v; want #30's dropped, #31 finished, #32 and #41 kept", st.Issues)
+	}
+	if len(w.tracker.ownComments(30)) != 0 || len(w.tracker.ownComments(32)) != 0 || len(w.tracker.ownComments(31)) != 1 {
+		t.Fatalf("comments #30 %v, #31 %v, #32 %v", w.tracker.ownComments(30), w.tracker.ownComments(31), w.tracker.ownComments(32))
+	}
+	w.tracker.ownReads = 0
+	w.poll(t)
+	if w.tracker.ownReads != 0 || len(w.analyst.requests) != 1 {
+		t.Fatalf("the next poll read %d issues and made %d calls; want none read and only #41's call", w.tracker.ownReads, len(w.analyst.requests))
 	}
 }
 
@@ -1039,5 +1072,47 @@ func TestASliceThatDoesNotCoverTheAlertIsSaidSo(t *testing.T) {
 				t.Errorf("the comment does not say the slice did not cover the alert: %v", own)
 			}
 		})
+	}
+}
+
+// TestFieldsThatGrowUnderRedactionStillFitOneComment: each of Claude's
+// answers is limited after the redactor, which can lengthen it (every
+// figure becomes a longer mark), and the assembled comment and PR body are
+// cut to GitHub's 65,536 characters with a cut mark, the comment's hidden
+// marker kept whole; a comment kept from before is cut the same way.
+func TestFieldsThatGrowUnderRedactionStillFitOneComment(t *testing.T) {
+	grow := strings.Repeat("1 ", maxField/2)
+	w := newWorld(t)
+	w.analyst.result = analysis{Kind: kindOwner, WhatHappened: grow, Rule: grow, OwnerAction: grow}
+	w.poll(t)
+	own := w.tracker.ownComments(41)
+	if len(own) != 1 || len(own[0]) > maxIssueText || !strings.HasSuffix(own[0], analysisMarker) {
+		t.Fatalf("comment of %d bytes (limit %d), marker kept %v", len(own[0]), maxIssueText, strings.HasSuffix(own[0], analysisMarker))
+	}
+	if strings.Count(own[0], "[cut]") != 3 || strings.Contains(own[0], " 1 ") {
+		t.Errorf("each grown field should be cut after redaction, and no figure left")
+	}
+
+	w = newWorld(t)
+	w.analyst.result = analysis{Kind: kindDefect, WhatHappened: grow, Rule: grow, FixTitle: grow, FixSummary: grow}
+	w.fixer.changed = []string{"internal/x/a.go", "internal/x/a_test.go"}
+	w.fixer.added = "+ok"
+	w.poll(t)
+	if len(w.tracker.pulls) != 1 {
+		t.Fatalf("pulls %v", w.tracker.pulls)
+	}
+	if pr := w.tracker.pulls[0]; len(pr.body) > maxIssueText || len(pr.title) > len("triage: ")+maxTitle+len(" [cut]") {
+		t.Fatalf("PR body %d bytes, title %d bytes; want within GitHub's limit and maxTitle", len(pr.body), len(pr.title))
+	}
+
+	w = newWorld(t)
+	if err := saveState(w.job.statePath, &state{Since: pollTime, Day: "2026-10-22", Calls: new(int), Issues: map[string]issueRecord{
+		"41": {Invoked: true, Pending: strings.Repeat("x", 2*maxIssueText) + "\n\n" + analysisMarker},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	w.poll(t)
+	if own := w.tracker.ownComments(41); len(own) != 1 || len(own[0]) > maxIssueText || !strings.HasSuffix(own[0], "[cut]\n\n"+analysisMarker) {
+		t.Fatalf("a kept comment was posted at %d bytes; want it cut to GitHub's limit, marker kept", len(own[0]))
 	}
 }

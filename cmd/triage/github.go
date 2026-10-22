@@ -210,77 +210,46 @@ var reporterLabels = []string{"alert", "alert-resolved"}
 
 // AlertIssues lists the alerts repository's issues that carry one of
 // reporterLabels, open and closed, newest first, label by label, each to
-// the first one opened before since or numbered at or below through
-// (already handled); no other issue or pull request counts against a
-// listing's bound. Past maxPages pages of a label it returns what it read,
-// cut, rather than fail: the job then analyses the newest.
+// the first one opened before since; no other issue or pull request counts
+// against a listing's bound. A label with more than maxPages pages of them
+// is an error, never a listing cut short.
 //
-// The listings are read one after the other, so each covers the issues
-// that existed when it began: the first covers the fewest. An issue opened
-// after that (alert while the first was read, or alert-resolved before the
-// second) can be in neither listing, or in the second alone, so only issues
-// numbered at or below the newest number before the first listing (the
-// least either listing covers) are returned; the others are the next
-// poll's. The handled-through mark (advance) never passes an issue it was
-// not shown.
-func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time, through int) ([]issue, bool, error) {
-	covered, err := g.newestNumber(ctx)
-	if err != nil {
-		return nil, false, err
-	}
+// A listing read while labels change can miss an issue (one that moves to
+// alert-resolved shifts the later pages of alert by one), so the job never
+// takes a listing as proof an issue was handled: it keeps the issues it
+// handled in its own record, and one missed now is listed by the next poll.
+func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time) ([]issue, error) {
 	var out []issue
-	var cut bool
 	for _, label := range reporterLabels {
-		listed, labelCut, err := g.labelIssues(ctx, label, since, through)
+		listed, err := g.labelIssues(ctx, label, since)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
-		for _, is := range listed {
-			if is.Number <= covered {
-				out = append(out, is)
-			}
-		}
-		cut = cut || labelCut
+		out = append(out, listed...)
 	}
-	return out, cut, nil
-}
-
-// newestNumber is the number of the alerts repository's newest issue or
-// pull request (they share numbers), 0 when it has none.
-func (g *githubTracker) newestNumber(ctx context.Context) (int, error) {
-	var items []struct {
-		Number int `json:"number"`
-	}
-	if _, err := g.call(ctx, http.MethodGet, g.alerts+"/issues?state=all&sort=created&direction=desc&per_page=1", maxPageAnswer, nil, &items); err != nil {
-		return 0, err
-	}
-	if len(items) == 0 {
-		return 0, nil
-	}
-	if items[0].Number <= 0 {
-		return 0, errors.New("GitHub's listing named an issue without its number")
-	}
-	return items[0].Number, nil
+	return out, nil
 }
 
 // labelIssues is one label's listing of AlertIssues.
-func (g *githubTracker) labelIssues(ctx context.Context, label string, since time.Time, through int) ([]issue, bool, error) {
+func (g *githubTracker) labelIssues(ctx context.Context, label string, since time.Time) ([]issue, error) {
 	var out []issue
 	for page := 1; ; page++ {
 		if page > maxPages {
-			return out, true, nil
+			return nil, fmt.Errorf("more than %d issues carry the label %s since the job began, so none is analysed until the job's record is moved aside", maxPages*pageSize, label)
 		}
 		var items []struct {
 			Number      int             `json:"number"`
 			Title       string          `json:"title"`
 			Body        string          `json:"body"`
 			User        *ghUser         `json:"user"`
+			State       string          `json:"state"`
 			CreatedAt   time.Time       `json:"created_at"`
+			ClosedAt    *time.Time      `json:"closed_at"`
 			PullRequest json.RawMessage `json:"pull_request"`
 		}
 		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?labels=%s&state=all&sort=created&direction=desc&per_page=%d&page=%d", g.alerts, url.QueryEscape(label), pageSize, page), maxPageAnswer, nil, &items)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		for _, it := range items {
 			if len(it.PullRequest) > 0 {
@@ -290,17 +259,23 @@ func (g *githubTracker) labelIssues(ctx context.Context, label string, since tim
 			// a missing creation time is a malformed answer, never the end.
 			switch {
 			case it.CreatedAt.IsZero():
-				return nil, false, errors.New("GitHub's listing named an issue without its creation time")
+				return nil, errors.New("GitHub's listing named an issue without its creation time")
 			case it.Number <= 0 || it.User == nil:
-				return nil, false, errors.New("GitHub's listing named an issue without its number or its author")
+				return nil, errors.New("GitHub's listing named an issue without its number or its author")
+			case it.State == "closed" && (it.ClosedAt == nil || it.ClosedAt.IsZero()):
+				return nil, errors.New("GitHub's listing named a closed issue without its closing time")
 			}
-			if it.CreatedAt.Before(since) || it.Number <= through {
-				return out, false, nil
+			if it.CreatedAt.Before(since) {
+				return out, nil
 			}
-			out = append(out, issue{Number: it.Number, Title: it.Title, Body: it.Body, Author: it.User.Login, Created: it.CreatedAt})
+			is := issue{Number: it.Number, Title: it.Title, Body: it.Body, Author: it.User.Login, Created: it.CreatedAt}
+			if it.State == "closed" {
+				is.Closed = *it.ClosedAt
+			}
+			out = append(out, is)
 		}
 		if !nextPage(h) {
-			return out, false, nil
+			return out, nil
 		}
 	}
 }
