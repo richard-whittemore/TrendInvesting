@@ -255,7 +255,8 @@ func remindedKey(channel, key string) string { return channelKey("reminded:"+cha
 // unitReminderInterval or more since its page or its last reminder: "still
 // failing since <time>", with ", N failed runs" once two or more runs are
 // known, under the episode's key. A channel
-// whose reminder fails is reminded at the next failed run.
+// whose reminder fails is retried at the next firing that finds the unit
+// still failed.
 func remindRun(u *unitState, unit, episode, run string, senders []sender, at time.Time) error {
 	key := report.UnitFailedKey(unit, episode)
 	if run != "" && u.sent[failedRunKey(run, key)].IsZero() {

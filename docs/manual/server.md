@@ -419,9 +419,10 @@ stop, not after two sessions of silence.
   before that (a unit you restart that fails again, a reporter that fails on
   each 5-minute firing) is the same failure: it is not paged again and its
   PagerDuty incident is neither resolved nor triggered anew. While it goes
-  on, at most once an hour, the next failed run sends a reminder,
-  `<host>: <unit> still failing`, saying since when and how many runs failed,
-  under the same incident. A failure after the unit was seen well pages
+  on, at most once an hour, a reminder `<host>: <unit> still failing` is sent
+  (by a later failed run, or by a reporter firing that finds the unit still
+  failed), saying since when and, once two or more runs have failed, how
+  many, under the same incident. A failure after the unit was seen well pages
   again. The record is `unit-failures.json` in
   `/var/lib/trend-investing/reports/`.
 - The reason is the failed run's own last journal line. A run that wrote
