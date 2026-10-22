@@ -12,7 +12,7 @@ is read from the durable log alone:
 | --- | --- | --- |
 | **committed** | The order's `risk.order.released` record is on disk. | The engine decided it and forced it to disk. It may or may not have reached the adapter yet. |
 | **released** | A later input is on disk after it. | The adapter has it. The adapter sends its next input only after it holds the reply to its last one, so a later input proves the reply arrived. |
-| **acknowledged** | IBKR's report about it is on disk and the engine read it: an `execution.order.lifecycle` (version 2) naming its client order ID that matches the order as released, or, for a momentum run, an `execution.fill` (version 5) of it. | IBKR has seen the order: accepted it, refused it, cancelled it, or filled it. |
+| **acknowledged** | IBKR's report about it is on disk and the engine read it: an `execution.order.lifecycle` (version 2) naming its client order ID that matches the order as released, or an `execution.fill` (version 5) of it that the run's rule accepts (the shared rule in a momentum run, the risk gate's rule in a Boost run, below). | IBKR has seen the order: accepted it, refused it, cancelled it, or filled it. |
 | **retired** | An `execution.order.retired` (version 1) naming it is on disk and the engine read it, and IBKR had said nothing of the order before. | The order never left the adapter, and never will. See "An order IBKR can never accept", below. |
 
 The log keeps every input, including one the engine refused, and does not
@@ -26,9 +26,10 @@ engine does, and only a report the engine would accept counts:
   by the same match from rules version 1.8.0; 1.6.0 refused a limit that was
   not identical, so a journal holding such a report does not replay across
   the two;
-- a fill counts only in a momentum run, and only on the order's account, instrument and side, when all its fills
+- in a momentum run, a fill counts only on the order's account, instrument and side, when all its fills
   together come to no more than the order's quantity, and under a fill id
   no other execution has used (the same execution sent twice counts once);
+  a Boost run judges its fills by the risk gate's rule instead (below);
 - in a momentum run, once an order is filled in full or IBKR reports it
   cancelled or invalid, nothing more about it counts.
 
@@ -57,14 +58,17 @@ being sold (see
 A report about an order the run did not release is refused, because only
 reconciliation can explain it.
 
-A Boost engine also reads IBKR's fills, for the same pending-sell count, but
-by the risk gate's own check rather than the shared rule above (it does not,
-for example, refuse a fill on an order already reported cancelled). So the
-reporter does not yet count a fill in a Boost run as an acknowledgement:
-there, only a lifecycle report acknowledges an order.
+A Boost engine also reads IBKR's fills, for the same pending-sell count, by
+the risk gate's own check (`risklimit.CheckFill`) rather than the shared rule
+above (it does not, for example, refuse a fill on an order already reported
+cancelled). The reporter reads a Boost run's fills by that same check, so a
+fill it accepts acknowledges the order, even after a cancellation, and a fill
+it refuses acknowledges nothing.
 
 IBKR's report on an order carries one of four statuses: submitted (IBKR
-accepted it and it is working), cancel-pending (a cancel was asked for and
+reports it working, which is not yet a promise: IBKR's PreSubmitted maps to it and
+can still be followed by a rejection, so Boost's count does not take it as the
+venue accepting the order), cancel-pending (a cancel was asked for and
 the order may still fill), canceled (it no longer works) or invalid (IBKR
 refused it). A fill is a separate report. The word "reported" below means
 one of these, or a fill.
@@ -83,16 +87,17 @@ log, the alert is no longer raised, and if you were already paged, one
 A report from IBKR that the engine refused acknowledges nothing, and gets
 its own **urgent** alert, "venue report … not read", once per report (it
 does not repeat). That covers any report
-the run would read (an order status report in either run, a fill in a
-momentum run) that cannot be read at all, at a version the run does not read
+the run would read (an order status report or a fill, in either run) that
+cannot be read at all, at a version the run does not read
 or one that does not validate, whatever order it names: its client order ID
 in the alert may be empty, because the report was refused before the order it
 names was known, so check IBKR for every order around the time it was
 recorded. It also covers a report about an order the run released that the
 rule above does not count. A report that can be read about an order the run
 never released raises no alert: it is reconciliation's to explain. A fill in
-a Boost run raises no alert, readable or not, because the reporter does not
-yet read a Boost run's fills by the engine's rule (above). The reporter's
+a Boost run that can be read is judged by the risk gate's own rule: one the
+rule refuses raises this alert only when its order is already acknowledged,
+since otherwise the order's "not acknowledged" alert covers it. The reporter's
 other alerts keep coming: one bad report in the log does not stop the
 reporter reading the rest of it.
 
@@ -136,7 +141,10 @@ Either way the engine reads the retirement as an order that ended with
 nothing filled. Boost no longer waits for IBKR's word on it, no longer counts
 a retired sell as shares being sold, and plans the difference to its target
 again at its next decision (recorded as a re-plan for an `unfilled` order,
-[boost](boost.md)). A momentum rebalance whose orders are all finished
+[boost](boost.md)). The reporter counts it as the engine does: a retired
+order no longer awaits IBKR's word in Boost's count of rejections in a row,
+so the state-at-start message never names it as a rejection that stops buys.
+A momentum rebalance whose orders are all finished
 completes, so the next decision decides afresh. A report from IBKR on a
 retired order afterwards proves the retirement wrong: the engine refuses it
 and the reporter raises the "venue report … not read" alert for it. A
@@ -168,8 +176,9 @@ incident reach a person; an order IBKR never acknowledged is one.
 - `internal/report`, `TestAReleasedOrderIsCommittedThenReleasedThenAcknowledged`.
 - `internal/report`, `TestAFillAcknowledgesAnOrder`.
 - `internal/report`, `TestOnlyAReportTheEngineReadsAcknowledgesAnOrder`: a
-  report with other figures, a fill in a Boost run, or a fill larger than the
-  order acknowledges nothing; a limit differing by a rounding error does.
+  report with other figures, or a fill larger than the order (in a Boost run
+  the gate refuses it), acknowledges nothing; a limit differing by a rounding
+  error does.
 - `internal/report`, `TestEveryReportTheEngineRefusesIsUnread`: a lifecycle
   report at another version, fills past the order's quantity in total, a
   reused fill id, and a report on a finished order each raise the "not read"
@@ -186,6 +195,10 @@ incident reach a person; an order IBKR never acknowledged is one.
 - `cmd/reporter`,
   `TestTheReporterAlertsOnceOnAnUnacknowledgedOrderUntilItIsAcknowledged` and
   `TestTheAcknowledgementBoundMustBePositive`.
+- `internal/report`, `TestABoostFillAcknowledgesAnOrderByTheGatesRule` and
+  `TestAnUnreadableBoostFillPagesByItsInputID`: a Boost fill that cannot be
+  read pages as not read, keyed by its input ID, even on an acknowledged
+  order.
 - `cmd/reporter`, `TestAnUnreadVenueReportDoesNotSilenceTheOtherAlerts`: an
   unreadable report raises its own alert once and the unacknowledged-order
   alert still reaches you.
@@ -193,6 +206,11 @@ incident reach a person; an order IBKR never acknowledged is one.
   retired order gets one routine notice and is never paged as
   unacknowledged; a retirement the engine refuses retires nothing; a report
   on a retired order afterwards is "not read".
+- `internal/report`, `TestARetiredOrderIsNoRejectionInTheStanding`: a
+  report on a retired order is no rejection on the state-at-start message.
+- `internal/targetweight`, `TestBoostVerdictsRetireAnOrderNeverSent`: Boost's
+  count, shared by the engine and the reporter, takes a retired order off
+  the orders awaiting IBKR's word and refuses one IBKR has named.
 - `internal/event`, `TestOrderReportsRetiresOnlyAnOrderNoVenueReceived` and
   `TestTheIBKRAdaptersRetirementIsReadByOrderReports`: the shared rule, and
   the adapter's own retirement read by it.
@@ -220,12 +238,14 @@ Alerts come from the reporter, whose urgent alerts do not repeat; see
 | Routine message `<account>: order <client order ID> acknowledged` | IBKR's report on the order is now in the log and was read by the engine. The earlier "not acknowledged" alert is cleared. It is sent once, and only if you were paged. | Nothing. |
 | Routine message `<account>: order <client order ID> retired (<reason>)`, where the reason is `session over` or `owner retired` | The order never left the adapter and was retired: by the adapter, because its day ended before it could be sent, or by you, with `relay.py retire`. The text names the order, who retired it, when, and why. The engine has read the retirement, so it re-plans at its next decision. The message is sent once, whether or not the order was paged as "not acknowledged" first, and it answers that page. | Nothing for `session over`, beyond finding out why the order could not go out on its day (usually the link to IBKR was down; see [paper trading](paper-trading.md)). For `owner retired`, nothing more. If IBKR ever shows an order under that client order ID, the retirement was wrong: the adapter stops ("was settled as never sent, but IBKR shows"), so follow [re-delivery](redelivery.md) and reconcile. |
 | Urgent alert `<account>: venue report <input> not read` | The log holds a report from IBKR that the engine refused: it is at a version the run does not read, does not validate, does not describe the order it names as it was released, takes it past its quantity, reuses a fill id, or arrives after the order finished. It acknowledges nothing. The reporter alerts once per report and goes on with its other alerts. The client order ID in the text may be empty. | Look in IBKR at the order the alert names, or at every order around the time it was recorded when the ID is empty. If that order's "not acknowledged" alert is also open, treat the order as unconfirmed and follow that alert first. |
+| Urgent alert `<account>: operator clearance <input> not read` | On a Boost account, the log holds a clearance you journalled that the engine did not apply because the record is unreadable: it is at a version the run does not read, does not decode, or does not validate (for example, it names an order twice). It clears nothing, so each order it names still counts as awaiting the venue's word. The text names the clearance's orders when they can be read. One alert per clearance on every channel. | Check which of those orders IBKR never received, then journal a corrected clearance. |
+| Urgent alert `<account>: operator clearance <input> refused` | On a Boost account, the log holds a clearance you journalled that the engine's rule refuses as a whole: it names an order this run never released (or one the named decision did not release), an order the venue has already named, or it is for another account. It clears nothing, so each order it names still counts as awaiting the venue's word. The text names the clearance's orders when they can be read. One alert per clearance on every channel. | Check which of those orders IBKR never received, then journal a corrected clearance. |
 | The engine refuses a lifecycle report naming an order "which this run did not release" | IBKR reported an order this run never released, for example one left working by the previous run. The engine applies nothing from it, and the reporter raises no alert for it. It is reconciliation's to explain. | Follow [reconciliation](reconciliation.md) and `docs/runbooks/reconciliation.md`. |
 | No alert ever fires in dry-run | Expected: dry-run orders are recorded with `send` false and never sent, so none is ever waiting for IBKR, and the engine's own synthetic report acknowledges nothing. | Nothing. |
 
 Two things the reporter does not do. A fresh run after an approval does not
 know the previous run's orders that are still working, so IBKR's report
 about one of them is refused by the engine and raises no "not read" alert.
-And the reporter does not read a Boost run's fills by the engine's rule, so
-a Boost fill neither acknowledges an order nor, when the engine refuses it,
-raises the "not read" alert.
+And a Boost run's fills are read by the risk gate's rule, which the reporter
+shares: an accepted fill acknowledges its order, and a refused one raises the
+"not read" alert only when its order is already acknowledged.

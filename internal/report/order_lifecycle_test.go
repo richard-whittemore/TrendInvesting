@@ -9,6 +9,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
@@ -175,8 +176,9 @@ func TestAFillAcknowledgesAnOrder(t *testing.T) {
 // so the reporter reads a venue's report as the engine does. A lifecycle
 // report acknowledges an order only when it describes the order as
 // released, its limit within half a cent (event.LimitOrderLifecyclePayload's
-// Describes); one that does not is unread. A Boost run reads no fill, so a
-// fill acknowledges nothing there (ADR 0022; ADR 0019, "Alerting").
+// Describes); one that does not is unread. A Boost run reads a fill by the
+// risk gate's check, so a fill the gate refuses acknowledges nothing there
+// (ADR 0022; ADR 0019, "Alerting").
 func TestOnlyAReportTheEngineReadsAcknowledgesAnOrder(t *testing.T) {
 	order := releasedOrder("tw-1", event.TradingModePaper)
 	at := day(0).Add(time.Minute)
@@ -227,11 +229,11 @@ func TestOnlyAReportTheEngineReadsAcknowledgesAnOrder(t *testing.T) {
 	}
 
 	got, unread = stateAfter(event.TargetWeightStrategyBoost, func(r *logRun) {
-		r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:1", at,
-			event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 9, Price: 100, FilledAt: at})
+		r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill:big", at,
+			event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 10, Price: 100, FilledAt: at})
 	})
 	if got.State == report.LifecycleAcknowledged || len(unread) != 0 {
-		t.Errorf("a fill in a Boost run, which reads none: %+v, unread %+v; want nothing acknowledged", got, unread)
+		t.Errorf("a fill larger than the order in a Boost run, which the gate refuses: %+v, unread %+v; want nothing acknowledged", got, unread)
 	}
 
 	got, _ = stateAfter(event.TargetWeightStrategyMomentum, func(r *logRun) {
@@ -527,6 +529,12 @@ func TestARetiredOrderIsARoutineNoticeNeverAPage(t *testing.T) {
 	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
 		t.Run(strategy, func(t *testing.T) {
 			r := &logRun{t: t}
+			if strategy == event.TargetWeightStrategyBoost {
+				// A Boost order is released by a Boost decision of the
+				// account's run, so the count holds it as awaiting the
+				// venue's word, which a retirement the engine applies needs.
+				boostDecisionOf(r, order.Tag)
+			}
 			r.session(0)
 			r.release(0, order)
 			r.session(1)
@@ -594,5 +602,187 @@ func TestARetirementAfterTheOwnersClearanceRetiresNothing(t *testing.T) {
 	}
 	if o := stateOf(t, orders, "tw-1"); o.State == report.LifecycleRetired {
 		t.Errorf("order %+v retired after the clearance ended it", o)
+	}
+}
+
+// TestAnUnreadableBoostClearanceIsAnUnreadRecordTheReporterPages: the Boost
+// engine refuses a clearance it cannot read, and the reporter pages it with
+// the unread records, one incident per input, as it pages an unread venue
+// report; a momentum account's clearance is not read this way (ADR 0019,
+// "Alerting"; ADR 0026, point 2, "Boost", amended 2026-10-18).
+func TestAnUnreadableBoostClearanceIsAnUnreadRecordTheReporterPages(t *testing.T) {
+	for strategy, want := range map[string]int{event.TargetWeightStrategyBoost: 1, event.TargetWeightStrategyMomentum: 0} {
+		run := &logRun{t: t}
+		run.session(0)
+		run.add(journal.KindInput, event.RebalanceClearedEventType, 99, "cleared:bad", day(1), map[string]string{})
+		_, unread, err := report.OrderLifecycles(run.out, strategy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unread) != want || (want == 1 && (unread[0].InputID != "cleared:bad" || unread[0].Type != event.RebalanceClearedEventType)) {
+			t.Errorf("%s: unread %+v, want %d", strategy, unread, want)
+		}
+	}
+}
+
+// entriesOf is a stream as the durable log holds it: the owner's, the
+// venue's and the run's inputs as inputs, the engine's decisions and
+// releases as decisions.
+func entriesOf(s *stream) []journal.Entry {
+	out := make([]journal.Entry, 0, len(s.out))
+	for _, e := range s.out {
+		kind := journal.KindDecision
+		switch e.Type {
+		case event.RebalanceClearedEventType, event.OrderRetiredEventType, event.OrderLifecycleEventType, event.FillEventType, event.OperatorRunApprovedEventType, event.TargetWeightConfigurationEventType:
+			kind = journal.KindInput
+		}
+		out = append(out, journal.Entry{Kind: kind, Envelope: e})
+	}
+	return out
+}
+
+// TestARefusedBoostClearanceIsAnUnreadRecordTheReporterPages: a clearance the
+// reporter can read and the Boost engine refuses as a whole (it names an
+// order twice, or one this run never released) is paged on every channel as
+// the unreadable one is, naming the clearance and its orders; a clearance the
+// engine applies pages nothing (ADR 0019, "Alerting"; ADR 0026, point 2,
+// "Boost", amended 2026-10-18).
+func TestARefusedBoostClearanceIsAnUnreadRecordTheReporterPages(t *testing.T) {
+	never := orderplan.ClientOrderID("targets:1", "SPY", event.OrderSideBuy)
+	for name, c := range map[string]struct {
+		orders  []string
+		want    int
+		verdict string
+	}{
+		"applied":    {[]string{never}, 0, ""},
+		"twice":      {[]string{never, never}, 1, "not read"},
+		"unreleased": {[]string{never, "zz-unreleased"}, 1, "refused"},
+	} {
+		l := newBoostLog(t)
+		l.decide(0)
+		l.decide(1, never)
+		l.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, "cleared:x", day(2), event.RebalanceClearedPayload{
+			AccountID: "joint", AsOf: day(2), DecisionID: "targets:1", ClientOrderIDs: c.orders, Operator: "owner", Detail: "never sent"})
+		_, unread, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unread) != c.want {
+			t.Fatalf("%s: unread %+v, want %d", name, unread, c.want)
+		}
+		if c.want == 0 {
+			continue
+		}
+		a := report.UnreadReportAlerts("joint", unread)[0]
+		if a.Severity != report.Urgent || !strings.Contains(a.Title, "operator clearance cleared:x "+c.verdict) || strings.Contains(a.Title+a.Body, "venue report") || !strings.Contains(a.Body, never) {
+			t.Errorf("%s: alert %+v must name the refused clearance and its orders", name, a)
+		}
+	}
+}
+
+// TestAnUnreadableClearanceAlertNamesTheClearanceNotAVenueReport: the alert
+// for a clearance the engine cannot read says so, not that a venue report was
+// not read, and names the orders when the payload can be partly read (ADR
+// 0019, "Alerting").
+func TestAnUnreadableClearanceAlertNamesTheClearanceNotAVenueReport(t *testing.T) {
+	run := &logRun{t: t}
+	run.add(journal.KindInput, event.RebalanceClearedEventType, 99, "cleared:bad", day(1), map[string]string{})
+	_, unread, err := report.OrderLifecycles(run.out, event.TargetWeightStrategyBoost)
+	if err != nil || len(unread) != 1 {
+		t.Fatalf("unread %+v, %v", unread, err)
+	}
+	a := report.UnreadReportAlerts("joint", unread)[0]
+	if !strings.Contains(a.Title, "operator clearance cleared:bad not read") || strings.Contains(a.Title+a.Body, "venue report") {
+		t.Errorf("alert %+v must name the operator clearance", a)
+	}
+}
+
+// TestAStrategyThatIsNeitherBoostNorMomentumReadsNoClearance: the two
+// places that classify a strategy agree that anything not Boost is not
+// Boost and anything not momentum is not momentum, so a clearance in a run of
+// an unknown strategy is neither paged as a Boost one nor applied as a
+// momentum one (fail closed for the Boost-only count).
+func TestAStrategyThatIsNeitherBoostNorMomentumReadsNoClearance(t *testing.T) {
+	run := &logRun{t: t}
+	run.add(journal.KindInput, event.RebalanceClearedEventType, 99, "cleared:bad", day(1), map[string]string{})
+	_, unread, err := report.OrderLifecycles(run.out, "mystery")
+	if err != nil || len(unread) != 0 {
+		t.Errorf("unread %+v, %v; want none", unread, err)
+	}
+}
+
+// TestAClearanceIsJudgedAgainstTheCurrentRunsCountAndOwnAccount: a fresh
+// run's approval ends the count, so a clearance of an order the last run
+// released is refused after it, and another account's clearance is no
+// business of this one's (ADR 0026, point 2, "Boost", amended 2026-10-18;
+// ADR 0027).
+func TestAClearanceIsJudgedAgainstTheCurrentRunsCountAndOwnAccount(t *testing.T) {
+	never := orderplan.ClientOrderID("targets:1", "SPY", event.OrderSideBuy)
+	clearOrder := func(l *boostLog, id, account string) {
+		l.add(event.RebalanceClearedEventType, event.RebalanceClearedSchemaVersion, id, day(3), event.RebalanceClearedPayload{
+			AccountID: account, AsOf: day(3), DecisionID: "targets:1", ClientOrderIDs: []string{never}, Operator: "owner", Detail: "never sent"})
+	}
+	for name, c := range map[string]struct {
+		approve bool
+		account string
+		want    int
+		refused bool
+	}{
+		"same run":          {false, "joint", 0, false},
+		"after a fresh run": {true, "joint", 1, true},
+		"another account":   {true, "other", 1, true},
+	} {
+		l := newBoostLog(t)
+		l.decide(0)
+		l.decide(1, never)
+		if c.approve {
+			l.add(event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approved:2", day(2), *approvalOf("", ""))
+		}
+		clearOrder(l, "cleared:x", c.account)
+		_, unread, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
+		if err != nil || len(unread) != c.want {
+			t.Errorf("%s: unread %+v, %v; want %d", name, unread, err, c.want)
+		}
+		if len(unread) == 1 && unread[0].Refused != c.refused {
+			t.Errorf("%s: refused %v, want %v: the engine refuses it, so it is paged as refused", name, unread[0].Refused, c.refused)
+		}
+	}
+}
+
+// boostDecisionOf journals a Boost account's configuration and the Boost
+// decision tag that releases its orders, as the engine journals them.
+func boostDecisionOf(r *logRun, tag string) {
+	for _, e := range newStream(r.t).out {
+		r.seq++
+		e.Sequence = r.seq
+		r.out = append(r.out, journal.Entry{Kind: journal.KindInput, Envelope: e})
+	}
+	r.add(journal.KindDecision, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, tag, day(0), event.TargetsDecidedPayload{
+		AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(0), SessionPeriodEnd: day(0),
+		Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: 0.98}},
+		Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100}})
+}
+
+// TestABoostRetirementTheCountRefusesRetiresNothing: in a Boost run the
+// engine retires only an order its count holds as awaiting the venue's word
+// (targetweight.BoostVerdicts.Retire), so a retirement of an order that
+// describes its release but that no Boost decision released, such as the
+// sale back to 98%, retires nothing on the reporter's side either (ADR 0026,
+// point 2, "Boost", amended 2026-10-22; fail closed).
+func TestABoostRetirementTheCountRefusesRetiresNothing(t *testing.T) {
+	l := newBoostLog(t)
+	l.decide(0)
+	alarm := event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:alarm", Tag: "alarm:u", ClientOrderID: "alarm-1",
+		InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95, Mode: event.TradingModePaper, Send: true, Figures: figures}
+	l.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:alarm", day(1), alarm)
+	l.add(event.OrderRetiredEventType, event.OrderRetiredSchemaVersion, "retired:alarm", day(1), event.OrderRetiredPayload{
+		AccountID: "joint", ClientOrderID: "alarm-1", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 10, LimitPrice: 95,
+		Reason: event.OrderRetiredSessionOver, Detail: "session over", RetiredBy: event.OrderRetiredByAdapter, RetiredAt: day(1)})
+	orders, _, err := report.OrderLifecycles(entriesOf(l.stream), event.TargetWeightStrategyBoost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := stateOf(t, orders, "alarm-1"); o.State == report.LifecycleRetired {
+		t.Errorf("order %+v retired, though the Boost count never held it as awaiting the venue's word", o)
 	}
 }

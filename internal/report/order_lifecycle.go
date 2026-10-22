@@ -3,10 +3,12 @@ package report
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
 )
 
 // OrderState is where a released order stands, as the log records it.
@@ -82,8 +84,8 @@ type Order struct {
 // (version 5) by event.OrderReports, the rule the engine applies: one that
 // does not describe the order, takes it past its quantity in total, reuses
 // a fill id for another execution, or arrives once the order is terminal is
-// refused. A venue report the run would read (a lifecycle report in either
-// run, a fill in a momentum run) that cannot be read at all, at a schema
+// refused. A venue report the run would read (a lifecycle report or a fill,
+// in either run) that cannot be read at all, at a schema
 // version the run does not read or not validating, is returned as unread
 // whatever order it names, and its client order ID may be unknown (empty):
 // it is refused before the order it names is known. A report that is read
@@ -94,25 +96,50 @@ type Order struct {
 // nothing and raises no alert: it is reconciliation's to explain (ADR 0019).
 // In a momentum run the owner's clearance (operator.rebalance.cleared) is
 // read by event.OrderReports too, as the engine reads it, so a report on an
-// order it cleared is refused as on a terminal order.
+// order it cleared is refused as on a terminal order. In a Boost run the
+// clearance is judged by the Boost count's rule (boostRejections), and one
+// the engine refuses, whether the reporter cannot read it or its rule refuses
+// it as a whole, is returned as unread too, with its order IDs, and alerts as
+// an operator clearance, not a venue report. Any other strategy reads no
+// clearance (isBoost, isMomentum).
 // The adapter's or the owner's retirement of an order never sent
 // (execution.order.retired) makes it retired when the engine would read it
-// (retire), and a venue's report on it after is unread, as the engine
-// refuses it.
+// (retire): in a Boost run by the Boost count's rule too, so the order also
+// leaves the orders awaiting the venue's word there. A venue's report on it
+// after is unread, as the engine refuses it.
 // A dry-run momentum run's synthetic report on an order it never sent, a
 // decision, ends the order by the same rule and acknowledges nothing
-// (endSynthetic). A fill in a Boost run, readable or not, changes nothing and raises no
-// alert: the Boost engine reads fills by the risk gate's check
-// (risklimit.Gate.ObserveFill), not by event.OrderReports, so this reader
-// does not count them.
+// (endSynthetic). A fill in a Boost run is read as the Boost engine reads it,
+// by the risk gate's fill rule (risklimit.CheckFill, which
+// risklimit.Gate.ObserveFill applies), not by event.OrderReports: the rule
+// accepts a fill its order's release describes whatever the lifecycle
+// reports before it said, a late fill after a cancellation included, so such
+// a fill acknowledges the order (ADR 0022). A fill that cannot be read is
+// unread whatever order it names, as above. A fill the rule refuses
+// acknowledges nothing: on an order not yet acknowledged the order alerts as
+// unacknowledged, and on one already acknowledged, where nothing else would
+// alert, it is a report the engine did not read, as in a momentum run.
 func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
 	var unread []UnreadReport
 	byID := map[string]*Order{}
 	reports := event.NewOrderReports()
-	var group string // the input whose group the current record belongs to
+	fills := newBoostFills()
+	var group string           // the input whose group the current record belongs to
+	var boost *boostRejections // the Boost engine's count, to judge a clearance as it does
+	if isBoost(strategyID) {
+		var envelopes []event.Envelope
+		for _, entry := range entries {
+			envelopes = append(envelopes, entry.Envelope)
+		}
+		account, _, _ := AccountOf(envelopes) // unknown: no clearance is judged by account
+		boost = newBoostRejections(account, strategyID)
+	}
 	for _, entry := range entries {
 		e := entry.Envelope
+		if boost != nil {
+			boost.observe(e, entry.Kind)
+		}
 		if entry.Kind == journal.KindInput {
 			group = e.ID
 			for _, o := range orders {
@@ -120,15 +147,24 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 					o.State = LifecycleReleased
 				}
 			}
-			if e.Type == event.RebalanceClearedEventType && strategyID == event.TargetWeightStrategyMomentum {
-				applyClearance(e, reports)
+			if e.Type == event.RebalanceClearedEventType {
+				switch {
+				case boost != nil:
+					// The Boost engine refuses a clearance it cannot read
+					// and one its rule refuses as a whole.
+					if u := boost.judgeClearance(e); u != nil {
+						unread = append(unread, *u)
+					}
+				case isMomentum(strategyID):
+					applyClearance(e, reports)
+				}
 				continue
 			}
 			if e.Type == event.OrderRetiredEventType {
-				retire(e, strategyID, byID, reports)
+				retire(e, strategyID, byID, reports, boost)
 				continue
 			}
-			if u := acknowledge(e, strategyID, byID, reports); u != nil {
+			if u := acknowledge(e, strategyID, byID, reports, fills); u != nil {
 				unread = append(unread, *u)
 			}
 			continue
@@ -157,6 +193,10 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 		orders = append(orders, o)
 		byID[p.ClientOrderID] = o
 		reports.Release(p)
+		fills.release(p)
+		if boost != nil {
+			boost.release(p)
+		}
 	}
 	out := make([]Order, len(orders))
 	for i, o := range orders {
@@ -182,22 +222,57 @@ func endSynthetic(e event.Envelope, reports *event.OrderReports) error {
 	return nil
 }
 
-// UnreadReport is a venue's report the log holds that the engine did not
-// read: InputID is the input, ClientOrderID the order it names (empty when
+// UnreadReport is a venue's report, or the owner's clearance
+// (operator.rebalance.cleared), the log holds that the engine did not read:
+// InputID is the input, ClientOrderID the order a report names (empty when
 // its payload is at a version not read or does not decode), Reason why it
-// was not read, and At when it was recorded.
+// was not read, and At when it was recorded. For a clearance, OrderIDs are
+// the orders it names, as far as its payload can be decoded, and Refused is
+// true when it was read and the engine's rule refuses it as a whole, false
+// when it could not be read at all.
 type UnreadReport struct {
 	InputID, Type, ClientOrderID, Reason string
 	At                                   time.Time
+	OrderIDs                             []string
+	Refused                              bool
 }
 
-// UnreadReportAlerts returns an urgent alert for each venue report the
-// engine did not read, one incident per input however often the reporter
+// clearanceTitle is the title of a clearance's alert.
+func clearanceTitle(account string, u UnreadReport) string {
+	if u.Refused {
+		return fmt.Sprintf("%s: operator clearance %s refused", account, u.InputID)
+	}
+	return fmt.Sprintf("%s: operator clearance %s not read", account, u.InputID)
+}
+
+// orderList names a clearance's orders, or says they are unknown.
+func orderList(ids []string) string {
+	if len(ids) == 0 {
+		return "not known"
+	}
+	return strings.Join(ids, ", ")
+}
+
+// UnreadReportAlerts returns an urgent alert for each venue report, and each
+// operator clearance, the engine did not read, one incident per input however often the reporter
 // runs (ADR 0019, "Alerting"). Such a report acknowledges nothing, so an
 // order it names stays unacknowledged and alerts in its own right.
 func UnreadReportAlerts(account string, unread []UnreadReport) []Alert {
 	out := make([]Alert, 0, len(unread))
 	for _, u := range unread {
+		if u.Type == event.RebalanceClearedEventType {
+			verdict := "not read"
+			if u.Refused {
+				verdict = "refused"
+			}
+			out = append(out, Alert{
+				Key: "venue-report-unread:" + u.InputID + "@" + account, Kind: KindVenueReportUnread, Severity: Urgent, AccountID: account, At: u.At,
+				Title: clearanceTitle(account, u),
+				Body: fmt.Sprintf("The log holds your clearance %s (orders %s), recorded at %s, which the engine did not apply (%s): %s. It clears nothing, so each order it names still counts as awaiting the venue's word. Check which Boost orders were never sent before clearing them again; the reporter's other alerts are unaffected.",
+					u.InputID, orderList(u.OrderIDs), u.At.UTC().Format(time.RFC3339), verdict, u.Reason),
+			})
+			continue
+		}
 		out = append(out, Alert{
 			Key: "venue-report-unread:" + u.InputID + "@" + account, Kind: KindVenueReportUnread, Severity: Urgent, AccountID: account, At: u.At,
 			Title: fmt.Sprintf("%s: venue report %s not read", account, u.InputID),
@@ -212,11 +287,11 @@ func UnreadReportAlerts(account string, unread []UnreadReport) []Alert {
 // first report only, when the engine reads the report (see OrderLifecycles),
 // and returns the report as unread when the engine refuses it. reports
 // holds the run's releases for the momentum run's rule.
-func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports) *UnreadReport {
+func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports, fills *boostFills) *UnreadReport {
 	unread := func(clientID, reason string) *UnreadReport {
 		return &UnreadReport{InputID: e.ID, Type: e.Type, ClientOrderID: clientID, Reason: reason, At: e.RecordedAt}
 	}
-	momentum := strategyID == event.TargetWeightStrategyMomentum
+	momentum := isMomentum(strategyID)
 	var client, status string
 	var at time.Time
 	var refused error
@@ -240,8 +315,24 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 		}
 		client, status, at = p.ClientOrderID, "fill", p.FilledAt
 		_, _, refused = reports.Fill(p)
+	case e.Type == event.FillEventType:
+		var p event.TargetWeightFillPayload
+		if err := read(e, targetWeightFillVersions, &p); err != nil {
+			// One that cannot be read is unread whatever order it names, as
+			// in a momentum run: its client order ID may be unknown, and
+			// its alert is keyed by its input's ID.
+			return unread(p.ClientOrderID, err.Error())
+		}
+		if err := fills.accept(p); err != nil {
+			// A fill the Boost engine's rule refuses acknowledges nothing.
+			if o, ok := byID[p.ClientOrderID]; ok && o.State == LifecycleAcknowledged {
+				return unread(p.ClientOrderID, err.Error())
+			}
+			return nil
+		}
+		client, status, at = p.ClientOrderID, "fill", p.FilledAt
 	default:
-		return nil // not a venue report, or a fill in a Boost run, which this reader does not count
+		return nil // not a venue report
 	}
 	o, ok := byID[client]
 	switch {
@@ -260,6 +351,48 @@ func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, re
 	return nil
 }
 
+// boostFills reads a Boost run's fills by the rule the Boost engine's gate
+// applies (risklimit.CheckFill), so the reporter and the engine cannot
+// disagree about which fill counts. The rule needs no limits, so no gate is
+// built: it holds each released order as the rule reads it and the fills
+// applied, by account and fill ID, as the gate does.
+type boostFills struct {
+	orders  map[string]*risklimit.FillOrder
+	applied map[string]map[string]event.TargetWeightFillPayload
+}
+
+func newBoostFills() *boostFills {
+	return &boostFills{orders: map[string]*risklimit.FillOrder{}, applied: map[string]map[string]event.TargetWeightFillPayload{}}
+}
+
+// release records a released order, as the engine's gate does. OrderLifecycles
+// passes each client order ID's first release only, read and validated (a
+// named order of positive shares), so every release is one the rule holds.
+func (b *boostFills) release(p event.OrderReleasedPayload) {
+	b.orders[p.ClientOrderID] = &risklimit.FillOrder{AccountID: p.AccountID, ClientOrderID: p.ClientOrderID,
+		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity}
+}
+
+// accept applies fill p when the rule accepts it, or is a redelivery of an
+// execution already applied, and returns the rule's refusal otherwise.
+func (b *boostFills) accept(p event.TargetWeightFillPayload) error {
+	o := b.orders[p.ClientOrderID]
+	account := p.AccountID
+	if o != nil {
+		account = o.AccountID
+	}
+	redelivery, err := risklimit.CheckFill(p, account, o, b.applied[account])
+	if err != nil || redelivery {
+		return err
+	}
+	o.Reported += p.Quantity
+	if b.applied[account] == nil {
+		b.applied[account] = map[string]event.TargetWeightFillPayload{}
+	}
+	b.applied[account][p.FillID] = p
+	return nil
+}
+
 // applyClearance applies the owner's clearance as the momentum engine
 // does, by event.OrderReports' Clear, so the orders it made terminal there
 // are terminal here. A clearance the engine refuses, one it cannot read
@@ -274,20 +407,27 @@ func applyClearance(e event.Envelope, reports *event.OrderReports) {
 // retire applies a retirement (execution.order.retired) as the engine reads
 // it: by event.OrderReports' Retire in a momentum run, and in a Boost run
 // when it describes a released order no venue has acknowledged and that is
-// not retired already. A retirement the engine would refuse, one that
+// not retired already, and the Boost count's rule (boostRejections'
+// retire, targetweight.BoostVerdicts.Retire) takes it off the orders
+// awaiting the venue's word. A retirement the engine would refuse, one that
 // cannot be read included, retires nothing and raises no alert of its own:
 // the order then stays unacknowledged and is paged as such.
-func retire(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports) {
+func retire(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports, boost *boostRejections) {
 	var p event.OrderRetiredPayload
-	if read(e, []uint32{event.OrderRetiredSchemaVersion}, &p) != nil {
+	if read(e, retiredVersions, &p) != nil {
 		return
 	}
 	o, ok := byID[p.ClientOrderID]
 	if !ok || !o.Send || o.State == LifecycleAcknowledged || o.State == LifecycleRetired || !p.Describes(o.released()) {
 		return
 	}
-	if strategyID == event.TargetWeightStrategyMomentum {
+	switch {
+	case isMomentum(strategyID):
 		if _, err := reports.Retire(p); err != nil {
+			return
+		}
+	case boost != nil:
+		if !boost.retire(e) {
 			return
 		}
 	}

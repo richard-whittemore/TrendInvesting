@@ -95,6 +95,8 @@ var (
 	// The owner's clearance of a momentum run's rebalance in progress (ADR
 	// 0026, point 5).
 	clearedVersions = []uint32{event.RebalanceClearedSchemaVersion}
+	// The adapter's or the owner's retirement of an order never sent.
+	retiredVersions = []uint32{event.OrderRetiredSchemaVersion}
 	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
 	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
 	// A reconciliation input, for the day a pending cash read names.
@@ -159,3 +161,10 @@ func closesSession(e event.Envelope) bool {
 	var p event.SessionClosedPayload
 	return read(e, sessionVersions, &p) == nil
 }
+
+// isBoost and isMomentum are the one classification of a run's strategy:
+// anything not Boost is not Boost (the Boost-only count fails closed), and
+// anything not momentum is not momentum.
+func isBoost(strategyID string) bool { return strategyID == event.TargetWeightStrategyBoost }
+
+func isMomentum(strategyID string) bool { return strategyID == event.TargetWeightStrategyMomentum }
