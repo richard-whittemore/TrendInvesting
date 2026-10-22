@@ -307,18 +307,7 @@ func (g *Gate) Incident() string { return g.incident }
 // adds to, so an incident is restored once, and never after this run
 // attempted its sale.
 func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool, retired int) error {
-	switch {
-	case incidentID == "":
-		return errors.New("risklimit: a restored sale attempt must name its incident")
-	case retired < 0:
-		return fmt.Errorf("risklimit: incident %q's restored retired sale attempts %d are fewer than none", incidentID, retired)
-	}
-	if _, ok := g.attempts[incidentID]; ok {
-		return fmt.Errorf("risklimit: incident %q's sale attempt is restored once, before its sale is attempted", incidentID)
-	}
-	g.attempts[incidentID] = &saleAttempt{earlier: attempted, retired: retired, instruments: make(map[string]bool)}
-	g.restored = incidentID
-	return nil
+	return g.RestoreRecovery(Recovery{SaleAttempt: &RestoredSaleAttempt{IncidentID: incidentID, Attempted: attempted, Retired: retired}})
 }
 
 // RestoredSaleAttempt is the incident's sale attempt as this run now holds
@@ -357,12 +346,7 @@ func (g *Gate) RestoredIncident() string { return g.restored }
 // order ID of its own and never a retired order's (ADR 0026, point 2,
 // "Order identity", and point 5: recovered, never recomputed).
 func (g *Gate) RestoreRetiredSale(tag, instrumentID string, attempt int) error {
-	if tag == "" || instrumentID == "" || attempt < 1 {
-		return fmt.Errorf("risklimit: a restored retired sale names its tag, its instrument and its attempt, the first being 1; got %q, %q, %d", tag, instrumentID, attempt)
-	}
-	key := saleKey(tag, instrumentID)
-	g.retiredSales[key] = max(g.retiredSales[key], attempt-g.restoredRetired(tag))
-	return nil
+	return g.RestoreRecovery(Recovery{RetiredSales: []RetiredSaleAttempt{{Tag: tag, InstrumentID: instrumentID, Attempt: attempt}}})
 }
 
 // restoredRetired is how many of tag's sales the owner's approval records

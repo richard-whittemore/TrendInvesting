@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0))
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357); amended 2026-10-17: the dry-run synthetic terminal report, point 3 "Mode"; amended 2026-10-18 by the owner: parity thresholds for Boost's indicators, point 7 item 2, and names with no sector label, point 8; amended 2026-10-18 by the owner: a held stock with a gap in its window, point 5; amended 2026-10-18 by the owner: Boost re-plans after a refusal that leaves the engine Normal, point 2 "Boost"; amended 2026-10-18 by the owner: D7-L keeps a held name one lot short, point 2 "D7-L"; amended 2026-10-18 by the owner: the remaining parity scope, points 7 item 2 and 8; amended 2026-10-18 by the owner: a sell that cannot complete, point 2 "IRA execution"; amended 2026-10-18 by the owner: three bounded IRA causes, point 8; amended 2026-10-18 by the owner: Boost skips a session with no SPY bar, point 5, and re-plans an order that ends unfilled, point 2 "Boost"; amended 2026-10-22, owner-approved Boost-to-paper plan: a dry-run Boost run records a synthetic cancel for each unsent release, point 3 "Mode" (rules version 1.22.0); amended 2026-10-22 by the owner: an order the adapter can never send is retired, point 2 "Boost" and point 5 (rules version 1.23.0; a live sale a venue has named survives a restart, rules version 1.24.0))
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
@@ -1394,7 +1394,8 @@ table), and is target-weight rules version 1.22.0 (ADR 0016).
 The owner's decision of 2026-10-22, part of the Boost-to-paper plan. It
 amends point 2, "Boost" (the re-plan of the watched order), and point 5
 (a rebalance in progress), and is target-weight rules version 1.23.0 (ADR
-0016).
+0016); a decision's record of the run's own live sale back to 98% a venue
+has named or part filled, below, is 1.24.0.
 
 - **Before.** A released order the IBKR adapter's paper sender refused
   before any write-ahead mark, for good, stopped the adapter at that order
@@ -1471,11 +1472,31 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   client order ID. It is read when the decision is recorded, after the
   session's own orders and the sale their refusal fires, so a decision
   states an attempt its own session made. A sale the run attempted itself
-  and released that is still live (not ended, nothing filled, named by no
-  venue) is recorded with its order (`restored_sale.order`), so a run
-  restarted from the decision holds it as that run's own attempt,
-  released, and a retirement of it frees the attempt as in the full run;
-  an attempt withheld for a person, or one that reached IBKR, stays spent.
+  and released that is still live (not ended and not filled in full) is
+  recorded with its order (`restored_sale.order`, `strategy.targets.decided`
+  version 8) whether or not a venue has named it and whether or not part
+  of it has filled: its client order ID, side, shares, limit, trigger and
+  attempt number, whether a venue has named it (a lifecycle report, an
+  execution or a broker snapshot's open-order listing), its venue order ID
+  once one is known, and its executions so far. A run restarted from the
+  decision holds it as that run's own attempt, released, filled as far as
+  it was, so only its remaining shares are counted as being sold and an
+  execution sent again is a redelivery, and named as it was, so the
+  venue's next acknowledgement, listing, execution, cancel or expiry of it
+  is read as in the full run, its retirement is refused once a venue has
+  named it and frees the attempt while none has, and no second attempt is
+  made while it works (rules version 1.24.0). A decision recorded at
+  version 7 recorded the sale only while no venue had named it and nothing
+  had filled, and is read as written; one carrying a field of version 8 is
+  refused. An attempt withheld for a person, or one that ended, stays
+  spent. Stated limit: a sale that ended (canceled, expired or filled in
+  full) is recorded as spent, without its order, so after a restart from
+  such a decision every venue report on it is refused, where the full run
+  reads it: an execution reported after its cancel (ADR 0022), an
+  execution of a sale filled in full sent again, which the full run reads
+  as a redelivery, or any later lifecycle report on it. The run stops for a
+  person to reconcile; recording an ended sale so that such reports are
+  read is a later change, which will let a restarted run read such a report.
   A retirement frees only an attempt this run, or the run whose decision
   it was restarted from, made: never one the approval restored as an
   earlier run's. Stated limit: a recovered decision states only the

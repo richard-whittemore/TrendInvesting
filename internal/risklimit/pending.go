@@ -674,56 +674,7 @@ func (g *Gate) Fills(clientOrderID string) []event.TargetWeightFillPayload {
 // distinct fill ids and fewer shares than released; on a refusal nothing is
 // restored.
 func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.TargetWeightFillPayload, ended time.Time, venueOrderID string) error {
-	switch _, known := g.orders[o.ClientOrderID]; {
-	case o.AccountID != g.accountID:
-		return fmt.Errorf("risklimit: restored order %s is for account %q; this gate is %q", o.ClientOrderID, o.AccountID, g.accountID)
-	case known || o.ClientOrderID == "":
-		return fmt.Errorf("risklimit: order %q is already known, or unnamed, and cannot be restored", o.ClientOrderID)
-	case o.Quantity <= 0:
-		return fmt.Errorf("risklimit: restored order %s releases %d shares", o.ClientOrderID, o.Quantity)
-	case venueOrderID != "" && o.Side == event.OrderSideSell && g.ledger.venueTaken(venueOrderID):
-		return fmt.Errorf("risklimit: restored order %s names venue order %s, which another sell carries; a venue order ID names one order", o.ClientOrderID, venueOrderID)
-	}
-	var filled int64
-	seen := map[string]bool{}
-	for _, f := range fills {
-		switch err := f.Validate(); {
-		case err != nil:
-			return fmt.Errorf("risklimit: restored order %s: %w", o.ClientOrderID, err)
-		case f.AccountID != o.AccountID || f.ClientOrderID != o.ClientOrderID || f.InstrumentID != o.InstrumentID || f.Side != o.Side:
-			return fmt.Errorf("risklimit: restored order %s is %s %s; fill %s describes %s %s of order %s", o.ClientOrderID, o.Side, o.InstrumentID, f.FillID, f.Side, f.InstrumentID, f.ClientOrderID)
-		case seen[f.FillID]:
-			return fmt.Errorf("risklimit: restored order %s states fill id %s twice", o.ClientOrderID, f.FillID)
-		}
-		if _, applied := g.fills[f.FillID]; applied {
-			return fmt.Errorf("risklimit: restored fill id %s is already applied to another order", f.FillID)
-		}
-		// Checked against the shares released before it is added, so the
-		// sum stays below them and can never wrap (fail closed, AGENTS.md).
-		if f.Quantity >= o.Quantity-filled {
-			return fmt.Errorf("risklimit: restored order %s has %d shares filled before fill %s of %d; a watched order has fewer filled than its %d released", o.ClientOrderID, filled, f.FillID, f.Quantity, o.Quantity)
-		}
-		seen[f.FillID] = true
-		filled += f.Quantity
-	}
-	g.released[o.ClientOrderID] = true
-	g.orders[o.ClientOrderID] = &releasedOrder{
-		planned: event.OrderPlannedPayload{
-			AccountID: o.AccountID, Tag: o.Tag, ClientOrderID: o.ClientOrderID, InstrumentID: o.InstrumentID,
-			Side: o.Side, Quantity: o.Quantity, LimitPrice: o.LimitPrice,
-		},
-	}
-	if o.Side == event.OrderSideSell {
-		s := g.ledger.restore(o.ClientOrderID, o.InstrumentID, o.Quantity, venueOrderID)
-		if !ended.IsZero() {
-			s.ended, s.end = true, ended.Truncate(time.Second)
-		}
-	}
-	for _, f := range fills {
-		// Checked above against the order and its shares, so it applies.
-		_ = g.ObserveFill(f)
-	}
-	return nil
+	return g.RestoreRecovery(Recovery{Released: []RestoredOrder{{Order: o, Fills: fills, Ended: ended, VenueOrderID: venueOrderID}}})
 }
 
 // ObserveLifecycle applies a recorded lifecycle report on a released order:

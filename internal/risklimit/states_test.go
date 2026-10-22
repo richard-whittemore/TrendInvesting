@@ -1649,7 +1649,7 @@ func TestARestoredRetiredSaleGivesTheNextAttemptAnIDOfItsOwn(t *testing.T) {
 
 // TestARunsOwnLiveSaleIsHeldAsItsOwnAfterARestart: the incident's sale this
 // run released is reported as its own live sale only while it is still
-// live, and a gate restored from it holds it as this run's own attempt,
+// live, not once the venue ended it, and a gate restored from it holds it as this run's own attempt,
 // never one an earlier run spent: it is not attempted again while it
 // stands, and its retirement as never sent frees it for an attempt under
 // the next client order ID (ADR 0019, amended 2026-10-15 and 2026-10-17,
@@ -1672,27 +1672,27 @@ func TestARunsOwnLiveSaleIsHeldAsItsOwnAfterARestart(t *testing.T) {
 	}
 	released(t, check(t, g, saleOrder(s.Order))[0])
 	live, ok := g.OwnLiveSale(incident, "SPY")
-	if !ok || live.ClientOrderID != s.Order.ClientOrderID || live.Sale.Trigger != event.SaleTriggerExit {
+	if !ok || live.Order.ClientOrderID != s.Order.ClientOrderID || live.Order.Sale.Trigger != event.SaleTriggerExit || live.Attempt != 1 {
 		t.Fatalf("the released sale is reported as %+v %v, want %s, fired by the exit", live, ok, s.Order.ClientOrderID)
 	}
 	if _, ok := g.OwnLiveSale("kill:1", "SPY"); ok {
 		t.Error("a tag with no attempt reports a live sale")
 	}
-	filled := gate(t, limits(), event.TradingModeDryRun)
-	observe(t, filled, "broker:0", boosted())
-	halt(t, filled)
-	fs, _ := requestSale(t, filled, event.SaleTriggerExit)
-	released(t, check(t, filled, saleOrder(fs.Order))[0])
-	if err := filled.ObserveFill(event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: fs.Order.ClientOrderID, FillID: "exec-1", InstrumentID: "SPY",
-		Side: event.OrderSideSell, Quantity: 1, Price: fs.Order.LimitPrice, FilledAt: at.Add(time.Minute)}); err != nil {
+	ended := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, ended, "broker:0", boosted())
+	halt(t, ended)
+	fs, _ := requestSale(t, ended, event.SaleTriggerExit)
+	released(t, check(t, ended, saleOrder(fs.Order))[0])
+	if err := ended.ObserveLifecycle(event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: fs.Order.ClientOrderID, OrderID: "ib-1", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled, Quantity: fs.Order.Quantity, LimitPrice: fs.Order.LimitPrice, OccurredAt: at.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := filled.OwnLiveSale(filled.Incident(), "SPY"); ok {
-		t.Error("a sale with a fill reported is reported live")
+	if _, ok := ended.OwnLiveSale(ended.Incident(), "SPY"); ok {
+		t.Error("a sale the venue ended is reported live")
 	}
 
-	o := event.OrderReleasedPayload{AccountID: "joint", Tag: incident, ClientOrderID: live.ClientOrderID, InstrumentID: "SPY",
-		Side: event.OrderSideSell, Quantity: live.Quantity, LimitPrice: live.LimitPrice}
+	o := event.OrderReleasedPayload{AccountID: "joint", Tag: incident, ClientOrderID: live.Order.ClientOrderID, InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: live.Order.Quantity, LimitPrice: live.Order.LimitPrice}
 	restoredAs := func(attempted bool) *risklimit.Gate {
 		r := gate(t, limits(), event.TradingModeDryRun)
 		if err := r.RestoreSaleAttempt(incident, attempted, 0); err != nil {
@@ -1712,28 +1712,28 @@ func TestARunsOwnLiveSaleIsHeldAsItsOwnAfterARestart(t *testing.T) {
 	} {
 		p, trigger := o, event.SaleTriggerExit
 		bad(&p, &trigger)
-		if err := restoredAs(false).RestoreOwnSale(p, trigger); err == nil {
+		if err := restoredAs(false).RestoreOwnSale(p, trigger, 1, nil, ""); err == nil {
 			t.Errorf("a restored own sale under %s was read", name)
 		}
 	}
-	if err := restoredAs(true).RestoreOwnSale(o, event.SaleTriggerExit); err == nil {
+	if err := restoredAs(true).RestoreOwnSale(o, event.SaleTriggerExit, 1, nil, ""); err == nil {
 		t.Error("an own sale was restored under an attempt an earlier run spent")
 	}
 	r := restoredAs(false)
-	if err := r.RestoreOwnSale(o, event.SaleTriggerExit); err != nil {
+	if err := r.RestoreOwnSale(o, event.SaleTriggerExit, 1, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.RestoreOwnSale(o, event.SaleTriggerExit); err == nil {
+	if err := r.RestoreOwnSale(o, event.SaleTriggerExit, 1, nil, ""); err == nil {
 		t.Error("an own sale was restored twice")
 	}
-	if got, ok := r.OwnLiveSale(incident, "SPY"); !ok || got.ClientOrderID != live.ClientOrderID {
+	if got, ok := r.OwnLiveSale(incident, "SPY"); !ok || got.Order.ClientOrderID != live.Order.ClientOrderID {
 		t.Errorf("the restored gate reports its own live sale as %+v %v", got, ok)
 	}
 	observe(t, r, "broker:1", boosted())
 	if s, ok := requestSale(t, r, event.SaleTriggerExit); ok || s.Order != nil {
 		t.Fatalf("the restored gate attempted the standing sale again: %+v", s)
 	}
-	restoredPlan := live
+	restoredPlan := live.Order
 	if !retireUnsent(t, r, &restoredPlan) {
 		t.Fatal("the restored own sale's retirement was not read as a retired sale")
 	}
@@ -1743,5 +1743,96 @@ func TestARunsOwnLiveSaleIsHeldAsItsOwnAfterARestart(t *testing.T) {
 	again, ok := requestSale(t, r, event.SaleTriggerExit)
 	if want := orderplan.SaleAttemptClientOrderID(incident, "SPY", 1); !ok || again.Order == nil || again.Order.ClientOrderID != want {
 		t.Fatalf("after the retirement the sale is %+v, want it attempted again under %s", again, want)
+	}
+}
+
+// TestARunsOwnLiveSaleAVenueNamedIsRestoredWithItsExecutions: the
+// incident's sale this run released is its own live sale until it ends or
+// fills in full, whether or not a venue has named it and whether or not part
+// of it has filled, reported with the attempt it is, its venue order ID and
+// its executions so far. A gate restored from it holds it released, with
+// those executions, so it sells no more than is left: an execution sent
+// again changes nothing, the rest of the sale is read, one past its shares
+// is refused, and it is not attempted again while it works (ADR 0019,
+// "Explained means", and amended 2026-10-15; ADR 0026, point 2, "Order
+// identity", and point 5: recovered, never recomputed). A restore under
+// another attempt is refused (fail closed, AGENTS.md).
+func TestARunsOwnLiveSaleAVenueNamedIsRestoredWithItsExecutions(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:0", boosted())
+	halt(t, g)
+	incident := g.Incident()
+	s, ok := requestSale(t, g, event.SaleTriggerExit)
+	if !ok || s.Order == nil || s.Order.Quantity < 2 {
+		t.Fatalf("setup: the incident's sale: %+v", s)
+	}
+	released(t, check(t, g, saleOrder(s.Order))[0])
+	sale := *s.Order
+	fill := func(id string, shares int64, after time.Duration) event.TargetWeightFillPayload {
+		return event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: sale.ClientOrderID, FillID: id, InstrumentID: "SPY",
+			Side: event.OrderSideSell, Quantity: shares, Price: sale.LimitPrice, FilledAt: at.Add(after)}
+	}
+	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{AccountID: "joint", ClientOrderID: sale.ClientOrderID, OrderID: "ib-1", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Status: event.OrderLifecycleStatusSubmitted, Quantity: sale.Quantity, LimitPrice: sale.LimitPrice, OccurredAt: at.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if live, ok := g.OwnLiveSale(incident, "SPY"); !ok || live.Order.ClientOrderID != sale.ClientOrderID || live.Attempt != 1 || live.VenueOrderID != "ib-1" || len(live.Fills) != 0 {
+		t.Fatalf("the acknowledged sale is reported as %+v %v, want it live, attempt 1, under venue order ib-1, nothing filled", live, ok)
+	}
+	part := fill("exec-1", 1, 2*time.Minute)
+	if err := g.ObserveFill(part); err != nil {
+		t.Fatal(err)
+	}
+	live, ok := g.OwnLiveSale(incident, "SPY")
+	if !ok || !slices.Equal(live.Fills, []event.TargetWeightFillPayload{part}) {
+		t.Fatalf("the part-filled sale is reported as %+v %v, want it live with its one execution", live, ok)
+	}
+
+	o := event.OrderReleasedPayload{AccountID: "joint", Tag: incident, ClientOrderID: sale.ClientOrderID, InstrumentID: "SPY",
+		Side: event.OrderSideSell, Quantity: sale.Quantity, LimitPrice: sale.LimitPrice}
+	restored := func() *risklimit.Gate {
+		r := gate(t, limits(), event.TradingModeDryRun)
+		if err := r.RestoreSaleAttempt(incident, false, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.RestoreIncidentState(incident, event.EngineStateHalted, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if err := restored().RestoreOwnSale(o, event.SaleTriggerExit, 2, live.Fills, live.VenueOrderID); err == nil {
+		t.Error("the first attempt's sale was restored as the second attempt")
+	}
+	// A decision recorded at version 7 states no attempt; the client order
+	// ID alone is checked.
+	if err := restored().RestoreOwnSale(o, event.SaleTriggerExit, 0, nil, ""); err != nil {
+		t.Errorf("a sale recorded with no attempt was refused: %v", err)
+	}
+	r := restored()
+	if err := r.RestoreOwnSale(o, event.SaleTriggerExit, live.Attempt, live.Fills, live.VenueOrderID); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := r.OwnLiveSale(incident, "SPY"); !ok || got.Order.ClientOrderID != sale.ClientOrderID || got.Attempt != 1 || got.VenueOrderID != "ib-1" ||
+		!slices.Equal(got.Fills, live.Fills) || got.Order.Sale.Trigger != event.SaleTriggerExit {
+		t.Errorf("the restored gate reports its own live sale as %+v %v, want the full gate's %+v", got, ok, live)
+	}
+	if got, want := r.PendingSells("SPY"), sale.Quantity-1; got != want {
+		t.Errorf("the restored gate counts %d shares still being sold, want %d: the released shares less the one filled", got, want)
+	}
+	if err := r.ObserveFill(part); err != nil || r.Filled(sale.ClientOrderID) != 1 {
+		t.Errorf("the execution sent again was read as %v with %d filled, want a redelivery leaving 1", err, r.Filled(sale.ClientOrderID))
+	}
+	observe(t, r, "broker:1", boosted())
+	if s, ok := requestSale(t, r, event.SaleTriggerExit); ok || s.Order != nil {
+		t.Fatalf("the restored gate attempted the working sale again: %+v", s)
+	}
+	if err := r.ObserveFill(fill("exec-2", sale.Quantity-1, 3*time.Minute)); err != nil {
+		t.Fatalf("the rest of the restored sale was refused: %v", err)
+	}
+	if _, ok := r.OwnLiveSale(incident, "SPY"); ok {
+		t.Error("a sale filled in full is reported live")
+	}
+	if err := r.ObserveFill(fill("exec-3", 1, 4*time.Minute)); err == nil {
+		t.Error("an execution past the restored sale's shares was read")
 	}
 }

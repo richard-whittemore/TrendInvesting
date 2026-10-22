@@ -68,7 +68,9 @@ var (
 	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion}
 	fillVersions        = []uint32{event.FillSchemaVersion}
 	engineStateVersions = []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}
-	decidedVersions     = []uint32{event.TargetsDecidedSchemaVersion}
+	// A decision is read at version 7, which earlier builds wrote, and at
+	// the current version (event.TargetsDecidedVersions).
+	decidedVersions = event.TargetsDecidedVersions()
 	// The order records are read at every version the event package holds,
 	// by the list every reader of the log shares.
 	plannedVersions  = event.OrderPlannedVersions()

@@ -243,6 +243,21 @@ incident reach a person; an order IBKR never acknowledged is one.
   `internal/restart`, `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`: a
   retired sale back to 98% spent no attempt and is tried again as a new
   order.
+- `internal/targetweight`, `TestARecoveredSaleAVenueNamedWorksOnAsInTheFullRun`
+  and `TestARecoveryReadsADecisionRecordedAtVersion7`; `internal/risklimit`,
+  `TestARunsOwnLiveSaleAVenueNamedIsRestoredWithItsExecutions`: a sale back
+  to 98% IBKR acknowledged or part filled is kept, filled as far as it was
+  and named as it was, by a run restarted from a decision, so IBKR's later
+  reports on it are read and it is not tried twice
+  ([states and the kill switch](states-and-kill-switch.md)).
+- `internal/targetweight`, `TestARecoveredPartFilledSaleCountsEachExecutionOnce`:
+  an execution of that sale IBKR sends again after the restart counts once,
+  its commission with it.
+  `TestAVenueReportGivingAnotherOrderTheRecoveredSalesVenueIDIsRefused`: a
+  report giving another order the sale's IBKR order ID is refused when it
+  arrives. `TestARefusedRecoveryRestoresNothing`, and `internal/risklimit`,
+  `TestARecoveryIsRestoredWholeOrNotAtAll`: a decision refused for any part
+  of what it restores restores none of it.
 - `internal/report`,
   `TestABoostRetirementOfAnOrderTheCountDoesNotHoldIsReadByItsOwnRule` and
   `TestARetirementOfAnOrderTheVenueNamedLeavesItsRejectionCounted`.
