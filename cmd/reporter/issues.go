@@ -58,12 +58,16 @@ const (
 	// maxDeliveryRequests bounds the requests of one delivery: the listing,
 	// the channel's own identity, every page of the issue's comments, then a
 	// write, a close, the resolved label's addition and the alert label's
-	// removal.
-	maxDeliveryRequests = maxIssuePages + 1 + maxCommentPages + 4
+	// removal, and the state checks of unlisted records (maxClosedChecks).
+	maxDeliveryRequests = maxIssuePages + 1 + maxCommentPages + 4 + maxClosedChecks
 	// maxCloseTries is how many firings try to close the issue of an alert
 	// the run forgot before its record is dropped, so that a close GitHub
 	// keeps refusing never holds back the next incident (closeForgotten).
 	maxCloseTries = 3
+	// maxClosedChecks bounds the state checks of unlisted unclosed records in
+	// one firing; the records not checked wait for the next firing, so the
+	// checks never take the requests a delivery's writes need.
+	maxClosedChecks = 5
 )
 
 // trackedIssue is the newest issue of an alert key, as the listing shows it.
@@ -308,16 +312,29 @@ func (s *issuesSender) latest(ctx context.Context, marker string) (trackedIssue,
 	}
 	s.pruned = true
 	prefix := channelKey(issuesChannel, "unclosed:")
-	for k := range s.records {
+	checks := 0
+	// Sorted, so which records a firing checks first does not depend on the
+	// map's order.
+	for _, k := range slices.Sorted(maps.Keys(s.records)) {
 		rest, ok := strings.CutPrefix(k, prefix)
 		if !ok {
 			continue
 		}
-		numText, _, _ := strings.Cut(rest, ":")
+		numText, alertKey, _ := strings.Cut(rest, ":")
 		n, err := strconv.Atoi(numText)
 		if err != nil || listed[n] {
 			continue
 		}
+		// A record with no newer issue of its key stays whatever its issue's
+		// state: a closed issue relabelled later would be the key's newest and
+		// absorb the next incident. The look is the listing's, with no request.
+		if newest, ok, err := s.tracker.Latest(ctx, issueMarker(alertKey)); err != nil || !ok || newest.Number <= n {
+			continue
+		}
+		if checks == maxClosedChecks {
+			break
+		}
+		checks++
 		// Off the listing is not gone: a label taken off an open issue leaves
 		// it unlisted, so the record goes only once GitHub says it is closed
 		// or has no such issue. A failed check keeps the record.
@@ -819,12 +836,12 @@ func (g *githubTracker) Listed(ctx context.Context) (map[int]bool, error) {
 }
 
 // Closed reads the issue itself (https://docs.github.com/en/rest/issues/issues#get-an-issue),
-// so a label taken off it does not make it look gone; GitHub's 404 is gone.
+// so a label taken off it does not make it look gone; GitHub's 404 and 410 are gone.
 func (g *githubTracker) Closed(ctx context.Context, number int) (bool, error) {
 	var issue ghIssue
 	_, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues/%d", number), nil, &issue)
 	var status *statusError
-	if errors.As(err, &status) && status.code == http.StatusNotFound {
+	if errors.As(err, &status) && (status.code == http.StatusNotFound || status.code == http.StatusGone) {
 		return true, nil
 	}
 	if err != nil {

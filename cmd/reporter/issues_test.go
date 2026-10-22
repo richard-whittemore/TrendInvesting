@@ -33,6 +33,10 @@ type fakeTracker struct {
 	// comments (the comments, or the identity that tells the channel's own).
 	commentsFailing error
 	writes          int
+	// closedCalls counts the reads of an issue's state; closedFailing, when
+	// set, is their answer.
+	closedCalls   int
+	closedFailing error
 	// delay is how long each call takes, unless its deadline comes first.
 	delay time.Duration
 	// onCall, when set, is told of each call.
@@ -98,8 +102,12 @@ func (f *fakeTracker) Create(ctx context.Context, title, body string, labels []s
 }
 
 func (f *fakeTracker) Closed(ctx context.Context, number int) (bool, error) {
+	f.closedCalls++
 	if err := f.call(ctx); err != nil {
 		return false, err
+	}
+	if f.closedFailing != nil {
+		return false, f.closedFailing
 	}
 	if number < 1 || number > len(f.issues) {
 		return true, nil

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -711,7 +713,7 @@ func TestOnlyARefusedCloseRequestIsCounted(t *testing.T) {
 
 // The record of an issue left open stays while the issue is listed, or open
 // on GitHub with its label off; it is pruned at the next listing once the
-// issue is closed.
+// issue is closed and a newer issue of its key exists.
 func TestAnUnclosedRecordLeavesWithItsIssue(t *testing.T) {
 	tr := &fakeTracker{}
 	s := newIssues(tr)
@@ -746,6 +748,7 @@ func TestAnUnclosedRecordLeavesWithItsIssue(t *testing.T) {
 	}
 	// The owner closes it by hand and takes its label off: it leaves the listing.
 	tr.issues[0].open, tr.issues[0].labels = false, nil
+	tr.issues = append(tr.issues, &fakeIssue{number: 3, body: issueMarker(a.Key), labels: []string{alertLabel}, open: true})
 	s = newIssues(tr)
 	s.records = repeats
 	if err := s.send(other, 1); err != nil {
@@ -799,5 +802,121 @@ func TestALabelRemovedAndRestoredStillLetsTheNextIncidentOpen(t *testing.T) {
 	// Issue 2 is the other alert's; the next incident of a is issue 3.
 	if len(tr.issues) != 3 || !tr.issues[2].open {
 		t.Fatalf("%d issues, want a third, open issue for the next incident", len(tr.issues))
+	}
+}
+
+// unlistedRecords is a tracker with n abandoned issues of one alert key, each
+// open with its label off (so unlisted), a record for each, and a newer open
+// issue of the key that replaced them.
+func unlistedRecords(n int) (tr *fakeTracker, repeats map[string]int) {
+	key := forgottenAlert().Key
+	tr, repeats = &fakeTracker{}, map[string]int{}
+	for i := 1; i <= n; i++ {
+		tr.issues = append(tr.issues, &fakeIssue{number: i, body: issueMarker(key), open: false})
+		repeats[unclosedKey(key, i)] = 1
+	}
+	tr.issues = append(tr.issues, &fakeIssue{number: n + 1, body: issueMarker(key), labels: []string{alertLabel}, open: true})
+	return tr, repeats
+}
+
+// The checks of unlisted records are part of the delivery's request budget
+// and are bounded: at most maxClosedChecks a firing, the rest at the next
+// (ADR 0019, "Alerting": bounded requests).
+func TestTheClosedChecksOfAFiringAreBoundedAndBudgeted(t *testing.T) {
+	if maxDeliveryRequests != maxIssuePages+1+maxCommentPages+4+maxClosedChecks {
+		t.Fatalf("maxDeliveryRequests=%d does not budget the %d closed checks", maxDeliveryRequests, maxClosedChecks)
+	}
+	n := maxClosedChecks + 3
+	tr, repeats := unlistedRecords(n)
+	s := newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if tr.closedCalls != maxClosedChecks || len(repeats) != n-maxClosedChecks {
+		t.Fatalf("closed checks=%d records left=%d, want %d checks and %d left", tr.closedCalls, len(repeats), maxClosedChecks, n-maxClosedChecks)
+	}
+	s = newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(repeats) != 0 {
+		t.Fatalf("repeats=%v: the next firing must check the rest", repeats)
+	}
+}
+
+// A closed issue the owner relabels, with no newer issue of its key, is still
+// the key's newest: its record stays until a replacement exists, so it
+// cannot absorb the next incident (ADR 0019, "Alerting": once per incident).
+func TestAClosedRecordStaysUntilAReplacementExists(t *testing.T) {
+	tr := &fakeTracker{}
+	key := forgottenAlert().Key
+	tr.issues = []*fakeIssue{{number: 1, body: issueMarker(key), open: false}}
+	repeats := map[string]int{unclosedKey(key, 1): 1}
+	s := newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if repeats[unclosedKey(key, 1)] != 1 {
+		t.Fatalf("repeats=%v: a closed issue with no replacement keeps its record", repeats)
+	}
+	tr.issues = append(tr.issues, &fakeIssue{number: 2, body: issueMarker(key), labels: []string{alertLabel}, open: true})
+	s = newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := repeats[unclosedKey(key, 1)]; kept {
+		t.Fatalf("repeats=%v: the record goes once a replacement exists", repeats)
+	}
+}
+
+// A failed check keeps the record.
+func TestAFailedClosedCheckKeepsTheRecord(t *testing.T) {
+	tr, repeats := unlistedRecords(1)
+	tr.closedFailing = errors.New("GitHub answered 403 Forbidden")
+	s := newIssues(tr)
+	s.records = repeats
+	if err := s.send(haltAlert(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if tr.closedCalls != 1 || len(repeats) != 1 {
+		t.Fatalf("checks=%d records=%v: a failed check must keep the record", tr.closedCalls, repeats)
+	}
+}
+
+// githubTracker.Closed reads the issue itself: closed and gone (404, 410)
+// are closed; open is not; any other answer is an error.
+func TestGitHubTrackerClosedReadsTheIssueState(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		status  int
+		body    string
+		want    bool
+		wantErr bool
+	}{
+		{"open", 200, `{"number":7,"state":"open"}`, false, false},
+		{"closed", 200, `{"number":7,"state":"closed"}`, true, false},
+		{"not found", 404, `{}`, true, false},
+		{"gone", 410, `{}`, true, false},
+		{"forbidden", 403, `{}`, false, true},
+		{"server error", 500, `{}`, false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var path string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path = r.URL.Path
+				w.WriteHeader(c.status)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer server.Close()
+			g := &githubTracker{api: server.URL, base: server.URL + "/repos/o/r", token: "t", client: server.Client()}
+			got, err := g.Closed(context.Background(), 7)
+			if path != "/repos/o/r/issues/7" || got != c.want || (err != nil) != c.wantErr {
+				t.Fatalf("path=%q closed=%v err=%v, want closed=%v err=%v", path, got, err, c.want, c.wantErr)
+			}
+		})
 	}
 }
