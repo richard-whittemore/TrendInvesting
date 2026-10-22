@@ -528,8 +528,16 @@ func describe(out io.Writer, name string, end restart.EndState, approval event.O
 		if !end.SaleAttempted && *approval.IncidentInForce.SaleAttempted {
 			b.WriteString(" (stated by -sale-attempted: the log records no attempt)")
 		}
+		// A sale stated attempted (-sale-attempted: the owner sold by hand)
+		// stays attempted whatever is settled, so the fresh run makes no sale
+		// (ADR 0019, amended 2026-10-17, reading 4).
 		for _, s := range approval.IncidentInForce.SaleSettlements {
-			fmt.Fprintf(&b, "; sale %s settled by the adapter as never sent (%s), so it is retired and the fresh run tries the sale again under a new client order ID", s.Retirement.ClientOrderID, s.Evidence)
+			fmt.Fprintf(&b, "; sale %s settled by the adapter as never sent (%s), so it is retired", s.Retirement.ClientOrderID, s.Evidence)
+			if *approval.IncidentInForce.SaleAttempted {
+				b.WriteString(", and the sale stays attempted as -sale-attempted states: the fresh run makes no sale")
+			} else {
+				b.WriteString(" and the fresh run tries the sale again under a new client order ID")
+			}
 		}
 	default:
 		b.WriteString("; it ended normal")

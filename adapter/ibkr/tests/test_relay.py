@@ -454,8 +454,10 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
         [recorded] = self.pending.decisions()
         at = recorded.pop("at")
+        # Recorded with the input awaiting its reply, so a settlement of its
+        # run reads which input's order it decides (settle_ended_run).
         self.assertEqual(recorded, {"client_order_id": "tw-1", "decision": "sent", "session_date": "2026-10-16",
-                                    "reason": "IBKR shows tw-1 cancelled unfilled"})
+                                    "reason": "IBKR shows tw-1 cancelled unfilled", "input_id": "session:0"})
         when = datetime.fromisoformat(at)
         self.assertEqual(when.utcoffset(), timedelta(0), "the decision's time is kept in UTC")
         self.assertEqual(when.microsecond, 0, "to the second")
@@ -868,7 +870,7 @@ class RelayTests(unittest.TestCase):
         [recorded] = self.pending.decisions()
         recorded.pop("at")
         self.assertEqual(recorded, {"client_order_id": "tw-1", "decision": "never-sent", "session_date": "2026-10-16",
-                                    "reason": "released 2026-10-15, refused as stale"})
+                                    "reason": "released 2026-10-15, refused as stale", "input_id": "session:0"})
 
         goes_on = self.relay(Restarts(log, decisions), mapper=refused)
         goes_on.exchange(envelope(1))
@@ -906,6 +908,23 @@ class RelayTests(unittest.TestCase):
                 self.assertIn("never sent", str(raised.exception))
                 self.assertEqual(self.sent, [])
                 self.assertEqual(self.pending.load(), envelope(0), "the input still awaits its reply")
+                # The broker's word is recorded before the stop, under the
+                # lock the relay holds, so no later settlement reads the order
+                # as never sent (fail closed, AGENTS.md).
+                self.assertEqual(self.pending.handovers(), {"tw-1": "at-broker"})
+                last = self.pending.decisions()[-1]
+                self.assertEqual((last["client_order_id"], last["decision"], last["input_id"]),
+                                 ("tw-1", "at-broker", "session:0"))
+                self.assertNotIn("tw-1", self.pending.settled_orders().ended)
+                # Started again, it stops again whatever IBKR shows now, until
+                # the owner marks it sent.
+                again = self.relay(Restarts(log, decisions), mapper=refused)
+                with self.assertRaises(NeverSentAtBroker):
+                    again.exchange(envelope(1))
+                again.close()
+                for decision in ("never-sent", "not-handed-over", "resend"):
+                    with self.assertRaises(ResolveRefused):
+                        resolve(self.pending, "tw-1", decision, "IBKR has it", today=date(2026, 10, 16))
                 # The owner, having found it at IBKR, marks it sent; then the
                 # relay goes on without sending it.
                 with self.assertRaises(ResolveRefused):
@@ -1518,10 +1537,35 @@ class RetireTests(unittest.TestCase):
                     relay.exchange(envelope(0))
                 relay.close()
                 self.assertEqual(self.retired_entries(), [], "no retirement is queued for an order IBKR shows")
-                self.assertEqual([d for d in self.pending.decisions() if d.get("input_id")], [])
+                self.assertEqual([d for d in self.pending.decisions() if d.get("input_id") and d["decision"] == "retired"], [])
                 resolve(PendingInput(self.pending.path), "tw-1", "sent", "IBKR shows it", today=date(2026, 10, 17))
                 self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
                 self.assertEqual(self.retired_entries(), [])
+
+    def test_a_retired_order_ibkr_shows_is_marked_at_broker_and_its_queued_retirement_struck_off(self):
+        # Retired (the session over) and then found at IBKR when its input is
+        # asked for again: an order IBKR shows is never retired (ADR 0026,
+        # amended 2026-10-22, "The adapter"), so the queued retirement is
+        # struck off, and the broker's word recorded, before the relay stops.
+        log, decisions = {}, {"session:0": [released("tw-1")]}
+        retired = self.relay(Restarts(log, decisions), check=session_over)
+        real = self.pending.clear
+
+        def stop(*args):
+            raise OSError("stopped before the clear")
+
+        self.pending.clear = stop
+        with self.assertRaises(OSError):
+            retired.exchange(envelope(0))
+        retired.close()
+        self.pending.clear = real
+        self.assertEqual(len(self.retired_entries()), 1)
+        found = self.relay(Restarts(log, decisions), broker=holding(open_orders=["tw-1"]))
+        with self.assertRaises(NeverSentAtBroker):
+            found.exchange(envelope(1))
+        found.close()
+        self.assertEqual(self.retired_entries(), [], "no retirement of an order IBKR shows reaches the engine")
+        self.assertEqual(self.pending.handovers(), {"tw-1": "at-broker"})
 
     def test_a_retirement_already_queued_is_struck_off_for_an_order_ibkr_shows(self):
         # A stop after the retirement was queued for the engine but before the
@@ -1565,8 +1609,8 @@ class RetireTests(unittest.TestCase):
                     self.assertEqual([e["id"] for e in self.retired_entries()], others,
                                      "only the retirements of the order IBKR shows are struck off")
                     self.assertEqual([d for d in self.pending.decisions() if d.get("input_id") == "session:0"
-                                      and record != {"input_id": "session:0"}], [])
-                    self.assertEqual(self.pending.handovers().get("tw-1"), "never-sent")
+                                      and d["decision"] == "retired" and record != {"input_id": "session:0"}], [])
+                    self.assertEqual(self.pending.handovers().get("tw-1"), "at-broker")
                     resolve(PendingInput(self.pending.path), "tw-1", "sent", "IBKR shows it", today=date(2026, 10, 17))
                     self.assertEqual([e["id"] for e in self.retired_entries()], others)
 

@@ -19,8 +19,10 @@ const (
 	// NeverSentRefused: the adapter recorded that it refused the order for
 	// good before any mark (its refusal record), so it never handed it over.
 	NeverSentRefused = "refused"
-	// NeverSentMarked: the record marks the order never sent: the owner
-	// settled it so, or the adapter retired it.
+	// NeverSentMarked: the record marks the order never sent, or, for an
+	// input settled before the run ended, the last decision the adapter
+	// recorded for it settles it so: the owner settled it so, or the adapter
+	// retired it.
 	NeverSentMarked = "never-sent"
 )
 

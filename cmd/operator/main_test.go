@@ -820,6 +820,19 @@ func TestTheApprovalReadsTheAdaptersSettlementOfANeverSentSale(t *testing.T) {
 		}
 	}
 
+	// Beside -sale-attempted (the owner sold by hand), the settlement still
+	// retires the never-sent order, but the fresh run makes no sale, and the
+	// description never says it tries one.
+	byHand := filepath.Join(dir, "by-hand.json")
+	out, err = invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", byHand, "-never-sent", settled,
+		"-sale-attempted", "-positions", "SPY=9", "-cash", "100", "-currency", "USD", "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "tries the sale again") || !strings.Contains(out, "stays attempted as -sale-attempted states") {
+		t.Errorf("printed %q, want the sale to stay attempted as -sale-attempted states, never tried again", out)
+	}
+
 	plain := filepath.Join(dir, "plain.json")
 	if _, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", plain, "-at", at); err != nil {
 		t.Fatal(err)

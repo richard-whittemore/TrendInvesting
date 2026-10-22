@@ -553,14 +553,25 @@ Reading 4's retirement needs the engine to read it, and an engine run that
 has ended reads nothing more: when a run ends while the IBKR adapter still
 holds a sale it released and never sent, that run's log records the sale as
 attempted, and the fresh run would never try it again. So, before the
-owner approves the fresh run, the adapter settles each order the ended
-run's last reply released that its write-ahead record leaves unmarked or
-marks never sent (`relay.py settle-ended-run`): one line each, naming the
-ended log, the run, the releasing input, its evidence and the owner's
-retirement it amounts to, and the order is marked never sent so no adapter
-sends it. An order marked handed over, sent, or allowed to be sent again,
-or one the ended log shows retired, reported on or executed, is never
-settled. The approval tool (`operator approve -never-sent`) applies each
+owner approves the fresh run, the adapter settles each order any reply of
+the ended run released (every input its log commits, not only the one
+left waiting) that its own records show never sent (`relay.py
+settle-ended-run`): for the waiting input, its write-ahead record leaves
+the order unmarked, or marks it never sent with the owner's or the
+adapter's decision behind the mark; for an earlier input, whose marks were
+cleared with it, the last decision recorded for the order settles it never
+sent for that input. One line each, naming the ended log, the run, the
+releasing input, its evidence and the owner's retirement it amounts to;
+the order is marked never sent so no adapter sends it, and any retirement
+of it still queued for the ended run's engine is struck off, since the
+fresh run's engine would refuse it. Every other order is refused, never
+settled (fail closed): one marked handed over, sent, or allowed to be sent
+again; one the relay found IBKR showing, which it records durably
+(`at-broker`) before it stops; a never-sent mark no decision backs; and one
+the ended log or the adapter's outbox shows retired, reported on or
+executed. The command writes its file whole, atomically, each time it
+runs, so a line whose order the owner has since found at IBKR and marked
+sent is withdrawn. The approval tool (`operator approve -never-sent`) applies each
 line to the ended log after its last record, by the engine's own
 retirement rule (the restart reading never re-implements it), and checks
 that the named input released the order; a sale back to 98% it settles is
