@@ -322,14 +322,19 @@ under the kill switch too, though it carries the incident's or the
 engagement's tag. The new order's ID survives a restart: each decision
 records the retired sale and its attempt number, `operator approve`
 writes how many of the incident's sales were retired into the fresh run's
-approval (`sale_retired_attempts`), and each decision of that fresh run
-records the count its approval carried and whether the sale has been
-attempted, by an earlier run or this one (`restored_sale`), so a run
+approval (`sale_retired_attempts`), and each decision made while the
+incident is in force records the count its approval carried, if any, and
+whether the sale has been attempted, by an earlier run or this one
+(`restored_sale`), whether or not the run was approved, so a run
 restarted from any of them, or a later fresh run, never gives an attempt
 a retired order's ID, nor attempts again a sale already attempted. A
-restart from a decision reads that decision before any IBKR reading that
-would fire the incident's sale; a reading that arrives first is refused,
-and the run stops rather than guess.
+retirement frees only an attempt this run made: an attempt the approval
+says an earlier run made stays attempted. A restart from a decision reads
+that decision before any IBKR reading that would fire the incident's
+sale; a reading that arrives first, or after a decision that records no
+attempt for that incident, is refused before it changes anything, so the
+alarm it would have raised and the sale it would have fired are raised
+and fired by the next such reading once the decision has been read.
 
 **When it does not go.** It is *withheld*, and recorded as
 `risk.sale.withheld`, when:

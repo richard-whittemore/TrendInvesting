@@ -321,21 +321,35 @@ func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool, retired int
 	return nil
 }
 
-// RestoredSaleAttempt is the sale attempt RestoreSaleAttempt restored, as
-// this run now holds it for instrumentID: its incident, whether its sale was
-// attempted, by an earlier run or by this one and not since retired, and how
-// many of its attempts earlier runs retired, so a decision records it and a
-// run restarted from the decision restores it as this run holds it, never
-// attempting again under a live attempt's client order ID; this run's own
-// retirements the decision records with the retired orders (ADR 0019,
-// amended 2026-10-15: one attempt; ADR 0026, point 2, "Order identity", and
-// point 5: recovered, never recomputed). ok is false when none was restored.
+// RestoredSaleAttempt is the incident's sale attempt as this run now holds
+// it for instrumentID: the one RestoreSaleAttempt restored, or, with none
+// restored, that of the incident in force that tags instrumentID's sale
+// (Halted, or Degraded on it), whether this run attempted it or not. It
+// gives the incident, whether its sale was attempted, by an earlier run or
+// by this one and not since retired, and how many of its attempts earlier
+// runs retired, so a decision records it and a run restarted from the
+// decision restores it as this run holds it, never attempting again under a
+// live attempt's client order ID; this run's own retirements the decision
+// records with the retired orders (ADR 0019, amended 2026-10-15: one
+// attempt; ADR 0026, point 2, "Order identity", and point 5: recovered,
+// never recomputed). ok is false when there is neither.
 func (g *Gate) RestoredSaleAttempt(instrumentID string) (incidentID string, attempted bool, retired int, ok bool) {
-	if g.restored == "" {
+	incident := g.restored
+	if incident == "" && (g.state == StateHalted || g.state == StateDegraded && slices.Contains(g.scope, instrumentID)) {
+		incident = g.incident
+	}
+	if incident == "" {
 		return "", false, 0, false
 	}
-	return g.restored, g.saleAttemptedFor(g.restored, instrumentID), g.attempts[g.restored].retired, true
+	if a := g.attempts[incident]; a != nil {
+		retired = a.retired
+	}
+	return incident, g.saleAttemptedFor(incident, instrumentID), retired, true
 }
+
+// RestoredIncident is the incident whose sale attempt RestoreSaleAttempt
+// restored, "" when none was.
+func (g *Gate) RestoredIncident() string { return g.restored }
 
 // RestoreRetiredSale records, from a recovered decision, that the attempt
 // numbered attempt (the first is 1) of the sale back to 98% for tag and

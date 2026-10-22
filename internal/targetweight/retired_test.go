@@ -560,6 +560,97 @@ func TestASnapshotBeforeTheRecoveryNeverFiresTheRecordedIncidentsSale(t *testing
 	}
 }
 
+// TestARefusedSnapshotBeforeTheRecoveryLeavesTheUrgentSaleToFire: refusing
+// a broker snapshot read before the recovered decision changes nothing, so
+// the alarm it would have turned urgent is still to come: once the recovered
+// decision states the incident's attempts, the next urgent snapshot journals
+// the alarm and fires the sale (ADR 0019, amended 2026-10-15; ADR 0027,
+// section 6: replay goes on past a refused input; fail closed, AGENTS.md).
+func TestARefusedSnapshotBeforeTheRecoveryLeavesTheUrgentSaleToFire(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[17]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	state := haltedState(t)
+	p.Boost.RestoredSale = &event.BoostRestoredSale{IncidentID: state.ID}
+	h, s := configured(t)
+	mustApply(t, h, state)
+	at := sessionEnd(0)
+	mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k0", at, (&account{cash: -2000, held: 60}).broker(at, 100)))
+	urgent := func(at time.Time) event.BrokerSnapshotPayload {
+		b := (&account{cash: -2000, held: 60}).broker(at, 100)
+		b.ExcessLiquidity = 0.1 * b.NetLiquidation
+		return b
+	}
+	at = at.Add(time.Minute)
+	if _, err := h.Apply(context.Background(), s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k1", at, urgent(at))); err == nil {
+		t.Fatal("setup: the urgent snapshot before the recovery was read, want it refused")
+	}
+	mustApply(t, h, s.envelope(t, recovery.Type, recovery.SchemaVersion, recovery.ID, recovery.EventTime, p))
+	at = at.Add(time.Minute)
+	out := mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k2", at, urgent(at)))
+	if alarms, sold := ofType(out, event.MarginAlarmEventType), sales(t, out); len(alarms) != 1 || len(sold) != 1 || sold[0].Tag != state.ID {
+		t.Fatalf("the urgent snapshot after the recovery emitted alarms %+v and sales %+v, want the alarm and the incident's one sale", alarms, sold)
+	}
+}
+
+// TestARecoveryThatStatesNoAttemptLeavesTheRecordedIncidentsSaleRefused: a
+// recovered decision that restores no sale attempt for the incident the
+// recorded engine state restored does not state its attempts, so a broker
+// snapshot before the run's first bar that would fire its sale is refused
+// still (ADR 0019, amended 2026-10-15: one attempt; fail closed, AGENTS.md).
+func TestARecoveryThatStatesNoAttemptLeavesTheRecordedIncidentsSaleRefused(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[17]
+	h, s := configured(t)
+	mustApply(t, h, recovery)
+	mustApply(t, h, haltedState(t))
+	at := sessionEnd(0)
+	mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k0", at, (&account{cash: -2000, held: 60}).broker(at, 100)))
+	at = at.Add(time.Minute)
+	b := (&account{cash: -2000, held: 60}).broker(at, 100)
+	b.ExcessLiquidity = 0.1 * b.NetLiquidation
+	out, err := h.Apply(context.Background(), s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k1", at, b))
+	if err == nil || !strings.Contains(err.Error(), "recovered decision") {
+		t.Fatalf("an urgent snapshot after a recovery stating no attempt: %v, sales %+v; want it refused", err, sales(t, out))
+	}
+	// One the observation itself refuses is refused for its own reason.
+	stale := (&account{cash: -2000, held: 60}).broker(sessionEnd(0), 100)
+	if _, err := h.Apply(context.Background(), s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k2", sessionEnd(0), stale)); err == nil || !strings.Contains(err.Error(), "does not follow") {
+		t.Errorf("a snapshot no later than the last: %v, want it refused as not following", err)
+	}
+}
+
+// TestARestartedRunsOwnSaleAttemptIsRecordedInItsDecisions: a run restarted
+// into an earlier run's incident with no approval attempts the incident's
+// sale itself; its later decisions record that attempt (restored_sale), so a
+// run restarted from one never attempts the sale again under the live
+// attempt's client order ID (ADR 0019, amended 2026-10-15: one attempt; ADR
+// 0026, point 5: recovered, never recomputed).
+func TestARestartedRunsOwnSaleAttemptIsRecordedInItsDecisions(t *testing.T) {
+	state := haltedState(t)
+	urgentAt := func(n int) map[int]func(*event.BrokerSnapshotPayload) {
+		return map[int]func(*event.BrokerSnapshotPayload){n: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	}
+	full := simulate(t, options{brokers: true})
+	first := simulate(t, options{brokers: true, prelude: []event.Envelope{state}, closes: syntheticCloses()[:18], snapshots: full.inputs, brokerMutate: urgentAt(16)})
+	live := orderplan.SaleAttemptClientOrderID(state.ID, "SPY", 0)
+	if sold := sales(t, first.decisions); len(sold) != 1 || sold[0].ClientOrderID != live {
+		t.Fatalf("setup: the restarted run's sales %+v, want one under %s", sold, live)
+	}
+	decisions := ofType(first.decisions, event.TargetsDecidedEventType)
+	recovery := decisions[len(decisions)-1]
+	var d event.TargetsDecidedPayload
+	decode(t, recovery, &d)
+	if want := (event.BoostRestoredSale{IncidentID: state.ID, Attempted: true}); d.Boost.RestoredSale == nil || *d.Boost.RestoredSale != want {
+		t.Fatalf("the decision after the run's own sale records the restored sale as %+v, want %+v", d.Boost.RestoredSale, want)
+	}
+	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, brokers: true, prelude: []event.Envelope{state}, brokerMutate: urgentAt(22)})
+	if sold := sales(t, r.decisions); len(sold) != 0 {
+		t.Fatalf("the run restarted from that decision sold %+v, want nothing: the sale under %s was attempted", sold, live)
+	}
+}
+
 // TestARecoveredSaleAttemptTheRunAlreadyHoldsIsRefused: a sale fired by a
 // broker snapshot before the recovery writes its tag's attempt record, so a
 // recovered decision restoring an attempt under that tag is refused rather

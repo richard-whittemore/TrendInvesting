@@ -1460,18 +1460,24 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   (`operator.run.approved` version 4, ADR 0027), counted only from
   retirements the engine applied, by the engine's one rule for applying a
   retirement, which the reporter and the restart reading call too, so its
-  next attempt follows them too; each of the fresh run's decisions records
-  the sale attempt its approval restored as the run holds it at the
-  decision (`restored_sale`): attempted once the approval or the run itself
-  attempted it and no retirement has since freed it, with the approval's
-  retired count, the run's own retirements being recorded among the
-  retired orders, so a run restarted from one restores it as the approved
+  next attempt follows them too; each decision records the sale attempt
+  as the run holds it at the decision (`restored_sale`): the one the fresh
+  run's approval restored or, with none restored, that of the incident in
+  force on Boost's instrument, approved or not: attempted once the approval
+  or the run itself attempted it and no retirement has since freed it, with
+  the approval's retired count, the run's own retirements being recorded
+  among the retired orders, so a run restarted from one restores it as the
   run held it and never attempts the sale again under a live attempt's
-  client order ID. A recovered decision comes before any broker snapshot
-  that would fire the sale of an incident an earlier run's recorded engine
-  state restored: such a snapshot read before the recovered decision, the
-  approval or the run's first bar or session is refused, since only the
-  decision or the approval states that incident's attempts. A
+  client order ID. A retirement frees only an attempt the run itself made,
+  never one the approval restored as an earlier run's. A recovered
+  decision comes before any broker snapshot that would fire the sale of an
+  incident an earlier run's recorded engine state restored: such a
+  snapshot read before the approval, before a recovered decision that
+  restored that incident's attempt, and before the run's first bar or
+  session, is refused, since only the approval or such a decision states
+  that incident's attempts. It is refused on what it would fire, before it
+  is observed, so the refusal changes no alarm and no retry, and a later
+  snapshot fires what it would have (ADR 0027, section 6). A
   retired urgent sale is attempted again while the alarm stays urgent
   whatever its tag: one fired while Halted, Degraded on the instrument or
   under the kill switch carries the incident's or the engagement's tag. A
@@ -1489,6 +1495,13 @@ amends point 2, "Boost" (the re-plan of the watched order), and point 5
   it is; when that record's entry has already reached the engine, the
   engine is told again of this input's release, under an entry named after
   the order and the input, and the retirement is recorded for this input,
-  so the engine ends the order and the record says whose it was.
+  so the engine ends the order and the record says whose it was. Found
+  again after a stop under either name, that entry is never queued twice.
+  It is queued only while the adapter holds its lock, only once IBKR shows
+  nothing under the order's tag (an order IBKR shows is marked never sent
+  and stops the adapter for `resolve --sent`, with nothing queued), and
+  only from a record that reads as a retirement the adapter writes: one of
+  the two reasons, a detail, and who retired it fitting the reason;
+  anything else stops the adapter.
 - **Replay.** Rules version 1.22.0 refused the input, so a journal holding
   a retirement decides differently and does not replay across the two.

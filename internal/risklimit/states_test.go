@@ -507,6 +507,41 @@ func TestMarginAlarmLevels(t *testing.T) {
 	}
 }
 
+// TestBrokerFiresTellsWhatObservingWouldFireAndChangesNothing: BrokerFires
+// reads, by ObserveBroker's own rules, which sale back to 98% a broker
+// snapshot would fire, and changes nothing, so a caller that refuses the
+// snapshot on it leaves the alarm for the next one (fail closed, AGENTS.md).
+func TestBrokerFiresTellsWhatObservingWouldFireAndChangesNothing(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	blind := broker(14700)
+	blind.Unreadable, blind.ExcessLiquidity = []string{event.BrokerComponentExcessLiquidity}, 0
+	if urgent, exit, err := g.BrokerFires("broker:0", blind); err != nil || urgent || exit {
+		t.Errorf("a first snapshot with no reading starts the stale clock: %v %v %v, want nothing fired", urgent, exit, err)
+	}
+	s := broker(14700)
+	s.ExcessLiquidity = 1000
+	for range 2 {
+		if urgent, exit, err := g.BrokerFires("broker:1", s); err != nil || !urgent || exit {
+			t.Fatalf("an urgent reading: %v %v %v, want the urgent sale", urgent, exit, err)
+		}
+	}
+	if obs := observe(t, g, "broker:1", s); !obs.Urgent || obs.Alarm == nil {
+		t.Fatalf("observed after BrokerFires: %+v, want the urgent alarm and its sale", obs)
+	}
+	s.AsOf = at.Add(time.Minute)
+	if urgent, _, err := g.BrokerFires("broker:2", s); err != nil || urgent {
+		t.Errorf("the level stands: %v %v, want nothing fired", urgent, err)
+	}
+	other := s
+	other.AccountID = "ira"
+	if _, _, err := g.BrokerFires("broker:3", other); err == nil {
+		t.Error("a snapshot ObserveBroker refuses was read")
+	}
+	if urgent, exit, err := iraGate(t, 0).BrokerFires("broker:1", s); err != nil || urgent || exit {
+		t.Errorf("an IRA has no margin alarm: %v %v %v", urgent, exit, err)
+	}
+}
+
 func TestMarginAlarmChangesOnlyOnANewLevel(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	s := broker(14700)

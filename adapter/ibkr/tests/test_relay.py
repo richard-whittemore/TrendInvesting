@@ -1497,6 +1497,102 @@ class RetireTests(unittest.TestCase):
                     mine = [d for d in self.pending.decisions() if d.get("input_id") == "session:0"]
                     self.assertEqual([(d["client_order_id"], d["decision"]) for d in mine], [("tw-1", "retired")], attempt)
 
+    def record_inputless_retirement(self, **fields):
+        self.pending.record_decision(dict({"client_order_id": "tw-1", "decision": "retired", "reason": "session over",
+                                           "retired": "session over", "retired_by": "adapter",
+                                           "at": "2026-10-16T13:30:00Z", "session_date": "2026-10-16"}, **fields))
+
+    def test_a_retirement_recorded_with_no_input_is_never_queued_for_an_order_ibkr_shows(self):
+        # IBKR showing the order's tag, open or executed, wins over the
+        # record: an order IBKR shows is never retired (ADR 0026, amended
+        # 2026-10-22, "The adapter"), so no retirement is queued for the
+        # engine, and the stop's remedy, resolve --sent, settles it.
+        for broker in (holding(open_orders=["tw-1"]), holding(executions=["tw-1"])):
+            with self.subTest(broker=broker):
+                self.pending.clear()
+                for path in (self.pending.decisions_path, self.outbox.path, self.pending.handover_path):
+                    Path(path).unlink(missing_ok=True)
+                self.record_inputless_retirement()
+                relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}), broker=broker)
+                with self.assertRaises(NeverSentAtBroker):
+                    relay.exchange(envelope(0))
+                relay.close()
+                self.assertEqual(self.retired_entries(), [], "no retirement is queued for an order IBKR shows")
+                self.assertEqual([d for d in self.pending.decisions() if d.get("input_id")], [])
+                resolve(PendingInput(self.pending.path), "tw-1", "sent", "IBKR shows it", today=date(2026, 10, 17))
+                self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+                self.assertEqual(self.retired_entries(), [])
+
+    def test_a_retirement_recorded_with_no_input_is_finished_only_while_the_relay_holds_the_lock(self):
+        # Closed while it asks IBKR, the relay edits nothing more (Relay.close):
+        # no retirement is queued, recorded or marked after the lock is gone.
+        self.record_inputless_retirement()
+        relays = []
+
+        def closing_broker():
+            relays[0].close()
+            return holding()()
+
+        relays.append(self.relay(Restarts({}, {"session:0": [released("tw-1")]}), broker=closing_broker))
+        with self.assertRaises(PendingInUse):
+            relays[0].exchange(envelope(0))
+        self.assertEqual(self.retired_entries(), [])
+        self.assertEqual([d for d in self.pending.decisions() if d.get("input_id")], [])
+        self.assertEqual(self.pending.handovers(), {})
+
+    def test_a_retirement_recorded_with_no_input_that_is_not_as_the_relay_writes_one_stops_the_relay(self):
+        # Turned into an engine input only once it reads as a retirement
+        # (internal/event OrderRetiredPayload): a reason of the two, a detail,
+        # and who retired it fitting the reason; anything else stops the
+        # relay with nothing queued, recorded or marked (fail closed,
+        # AGENTS.md).
+        for bad in ({"retired": None}, {"retired": "cancelled"}, {"reason": None}, {"reason": ""},
+                    {"retired_by": None}, {"retired_by": "richard"}, {"retired": "owner retired"},
+                    {"retired": "owner retired", "retired_by": ""}):
+            with self.subTest(bad=bad):
+                self.pending.clear()
+                for path in (self.pending.decisions_path, self.outbox.path, self.pending.handover_path):
+                    Path(path).unlink(missing_ok=True)
+                self.record_inputless_retirement(**bad)
+                relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}))
+                with self.assertRaises(HandoverRecordInvalid) as stopped:
+                    relay.exchange(envelope(0))
+                relay.close()
+                self.assertIn("tw-1", str(stopped.exception))
+                self.assertEqual(self.retired_entries(), [])
+                self.assertEqual(self.pending.handovers(), {})
+                self.assertEqual(self.sent, [])
+
+    def test_a_retirement_recorded_with_no_input_is_queued_once_across_a_stop(self):
+        # A stop after this input's retirement was queued under the ID naming
+        # the input, before it was recorded, finds that entry again: it is
+        # recorded from the entry, never queued a second time, so the engine
+        # is told once (ADR 0026, amended 2026-10-22, "The adapter").
+        self.record_inputless_retirement()
+        first = self.relay(Restarts({}, {"session:0": [released("tw-1")]}))
+        real = self.pending.record_decision
+
+        def die(decision):
+            raise OSError("stopped before the retirement was recorded")
+
+        self.pending.record_decision = die
+        with self.assertRaises(OSError):
+            first.exchange(envelope(0))
+        first.close()
+        self.pending.record_decision = real
+        later = datetime(2026, 10, 17, 15, 0, 0, tzinfo=timezone.utc)
+        again = Relay(connect=Restarts({}, {"session:0": [released("tw-1")]}), sender=Sending(self.sent.append),
+                      pending=self.pending, broker_orders=holding(), to_request=to_request,
+                      today=lambda: date(2026, 10, 17), now=lambda: later)
+        self.addCleanup(again.close)
+        again.exchange(envelope(0))
+        again.close()
+        [entry] = self.retired_entries()
+        self.assertEqual(entry["id"], "order-retired:tw-1:session:0")
+        [mine] = [d for d in self.pending.decisions() if d.get("input_id") == "session:0"]
+        self.assertEqual(mine["at"], entry["payload"]["retired_at"], "recorded from the entry queued before the stop")
+        self.assertEqual(self.sent, [])
+
     def test_an_order_whose_session_is_over_that_ibkr_shows_is_never_retired(self):
         # Checked at IBKR first, as every order is: one IBKR shows under its
         # tag was sent, so it is taken as sent, never retired.

@@ -1237,6 +1237,9 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	if err := h.refuseSharedVenue(in, p.OpenOrders); err != nil {
 		return nil, err
 	}
+	if err := h.refuseUnstatedSale(in, p); err != nil {
+		return nil, err
+	}
 	obs, err := h.gate.ObserveBroker(in.ID, p)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
@@ -1256,31 +1259,44 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 		if !trigger.fired {
 			continue
 		}
-		if err := h.refuseUnstatedSale(in, trigger.name); err != nil {
-			return nil, err
-		}
 		b.sale(trigger.name)
 	}
 	return b.result()
 }
 
 // refuseUnstatedSale refuses a broker snapshot read before the recovered
-// decision or the owner's approval, and before the run began, that would
-// fire the sale back to 98% of an incident an earlier run's recorded engine
-// state restored: the incident's attempts, attempted or retired, are the
-// earlier run's, which only the recovered decision or the approval states,
-// so the sale is never planned without them under an attempt's client order
-// ID that may be working at IBKR (ADR 0019, amended 2026-10-15: one attempt
+// decision or the owner's approval states the attempts of the incident an
+// earlier run's recorded engine state restored, and before the run began,
+// that would fire that incident's sale back to 98%: the incident's attempts,
+// attempted or retired, are the earlier run's, which only the approval, or a
+// recovered decision that restored that incident's attempt, states, so the
+// sale is never planned without them under an attempt's client order ID
+// that may be working at IBKR (ADR 0019, amended 2026-10-15: one attempt
 // per incident; ADR 0026, point 5: recovered, never recomputed; fail closed,
-// AGENTS.md).
-func (h *Handler) refuseUnstatedSale(in event.Envelope, trigger string) error {
-	if h.recordedIncident == "" || h.recovered || h.approved || h.started {
+// AGENTS.md). It is decided before the snapshot is observed, on what the
+// gate would fire from it (risklimit.Gate.BrokerFires), so a refused
+// snapshot leaves the alarm and every withheld sale's retry as they were,
+// and a later snapshot fires what this one would have (ADR 0027, section 6:
+// replay goes on past a refused input).
+func (h *Handler) refuseUnstatedSale(in event.Envelope, p event.BrokerSnapshotPayload) error {
+	stated := h.approved || h.recovered && h.gate.RestoredIncident() == h.recordedIncident
+	if h.recordedIncident == "" || stated || h.started {
 		return nil
 	}
-	if h.gate.SaleTag(trigger, h.cfg.Boost.InstrumentID) != h.recordedIncident {
-		return nil
+	urgent, retryExit, err := h.gate.BrokerFires(in.ID, p)
+	if err != nil {
+		// The observation's own refusal, worded as applyBrokerSnapshot words it.
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
-	return fmt.Errorf("targetweight: %s %s would fire recorded incident %s's sale before the recovered decision states its attempts; the recovered decision comes before such a snapshot", in.Type, in.ID, h.recordedIncident)
+	for _, trigger := range []struct {
+		fired bool
+		name  string
+	}{{urgent, event.SaleTriggerMarginUrgent}, {retryExit, event.SaleTriggerExit}} {
+		if trigger.fired && h.gate.SaleTag(trigger.name, h.cfg.Boost.InstrumentID) == h.recordedIncident {
+			return fmt.Errorf("targetweight: %s %s would fire recorded incident %s's sale before the recovered decision states its attempts; the recovered decision comes before such a snapshot", in.Type, in.ID, h.recordedIncident)
+		}
+	}
+	return nil
 }
 
 // learnListings reads the open orders IBKR lists: one listed under the

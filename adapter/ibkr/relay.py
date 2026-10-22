@@ -1094,11 +1094,17 @@ class Relay:
                 continue
             if broker is None:
                 broker = _tags(self._broker_orders())
-            if mark is None and _finish_retirement(self._pending, order, envelope.get("id"), self._now(), self._today()):
+            if mark is None:
                 # A retirement a stop left unmarked is finished before the
                 # order could be judged sendable again: the engine is told it
-                # was never sent, so it never is.
-                mark = NEVER_SENT
+                # was never sent, so it never is. Finished under the step, as
+                # every edit of the record is, so never after close released
+                # the lock (Relay.close), and judged on what IBKR shows first.
+                with self._step:
+                    self._require_held()
+                    if _finish_retirement(self._pending, order, envelope.get("id"), self._now(), self._today(),
+                                          cid in broker):
+                        mark = NEVER_SENT
             if mark == NEVER_SENT:
                 # Honoured only once IBKR shows no order or execution under
                 # its tag: the settlement says it never left the process.
@@ -1394,7 +1400,7 @@ def retire_order(pending, order, reason, detail, by, at, today, input_id, entry_
     pending.mark(cid, NEVER_SENT)
 
 
-def _finish_retirement(pending, order, input_id, now, today):
+def _finish_retirement(pending, order, input_id, now, today, at_broker):
     """Finish a retirement of cid that a stop left unmarked, and say whether one was begun.
 
     retire_order records the retirement for the engine first (the outbox),
@@ -1416,8 +1422,15 @@ def _finish_retirement(pending, order, input_id, now, today):
     at now) under an entry named after the order and the input, and the
     retirement is recorded for input_id, as retire_order does, so the engine
     ends the order and the record says whose it was; the entry's ID finds it
-    again after a stop before the mark (ADR 0026, amended 2026-10-22, "The
-    adapter").
+    again after a stop before the record or the mark, so it is queued once
+    (ADR 0026, amended 2026-10-22, "The adapter"). at_broker says whether
+    IBKR shows an order or execution under cid's tag, which wins over the
+    record: no retirement is queued then, the order is only marked never
+    sent, and the relay stops at it (NeverSentAtBroker), since an order IBKR
+    shows is never retired (ADR 0026, amended 2026-10-22, "The adapter").
+    The record is turned into an engine input only once it reads as a
+    retirement the relay records (_recorded_retirement), so the engine is
+    never sent one it would refuse (fail closed, AGENTS.md).
     """
     cid = order["client_order_id"]
     retired = [d for d in pending.decisions()
@@ -1425,22 +1438,50 @@ def _finish_retirement(pending, order, input_id, now, today):
     own = any(d.get("input_id") == input_id for d in retired)
     unknown = not own and bool(retired) and not retired[-1].get("input_id")
     begun = own or unknown
-    entries = Outbox(pending.path + OUTBOX_SUFFIX).load()
-    entry = next((e for e in entries if e["id"] == RETIRED_ID + cid), None)
+    entries = {e["id"]: e for e in Outbox(pending.path + OUTBOX_SUFFIX).load()}
+    this_input = entries.get(RETIRED_ID + cid + ":" + input_id) if unknown else None
+    entry = this_input or entries.get(RETIRED_ID + cid)
     if not begun and entry is None:
         return False
     if unknown and entry is None:
-        d = retired[-1]
-        retire_order(pending, order, d.get("retired"), d.get("reason"), d.get("retired_by"), now, today, input_id,
+        if at_broker:
+            pending.mark(cid, NEVER_SENT)
+            return True
+        reason, detail, by = _recorded_retirement(pending, retired[-1])
+        retire_order(pending, order, reason, detail, by, now, today, input_id,
                      entry_id=RETIRED_ID + cid + ":" + input_id)
         return True
-    if not begun:
+    if not begun or this_input is not None:
         p = entry["payload"]
         pending.record_decision({"client_order_id": cid, "decision": DECIDE_RETIRED, "reason": p.get("detail"),
                                  "retired": p.get("reason"), "retired_by": p.get("retired_by"),
                                  "at": p.get("retired_at"), "session_date": today.isoformat(), "input_id": input_id})
     pending.mark(cid, NEVER_SENT)
     return True
+
+
+def _recorded_retirement(pending, d):
+    """The reason, detail and retiring identity of retirement record d, as retire_order records them.
+
+    One of the two reasons, a detail, and who retired it fitting the reason
+    (the adapter for the session over, a named owner, never the adapter, for
+    the owner's), as the engine's retirement input requires (internal/event
+    OrderRetiredPayload.Validate); anything else raises HandoverRecordInvalid,
+    so a record that cannot be one is never sent to the engine (fail closed,
+    AGENTS.md).
+    """
+    reason, detail, by = d.get("retired"), d.get("reason"), d.get("retired_by")
+    named = isinstance(by, str) and bool(by.strip())
+    fits = (reason == RETIRED_SESSION_OVER and by == RETIRED_BY_ADAPTER
+            or reason == RETIRED_BY_OWNER and named and by != RETIRED_BY_ADAPTER)
+    if not fits or not isinstance(detail, str) or not detail.strip():
+        raise HandoverRecordInvalid(
+            "{} records order {}'s retirement, with no input, as {!r} by {!r} because {!r}: not a retirement as the "
+            "relay records one ({!r} by {!r}, or {!r} by the owner named, with its reason), so it is not sent to the "
+            "engine; correct the record, then start the adapter (docs/manual/redelivery.md)".format(
+                pending.decisions_path, d.get("client_order_id"), reason, by, detail, RETIRED_SESSION_OVER,
+                RETIRED_BY_ADAPTER, RETIRED_BY_OWNER))
+    return reason, detail, by
 
 
 def _effective_user():

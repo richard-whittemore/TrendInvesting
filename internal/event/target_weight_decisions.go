@@ -263,14 +263,16 @@ type BoostFigures struct {
 	// them (ADR 0026, point 2, "Boost", and point 5, amended 2026-10-22).
 	// Omitted when none.
 	RetiredOrders []BoostRetiredOrder `json:"retired_orders,omitempty"`
-	// RestoredSale is the record of the incident's sale back to 98% that the
-	// owner's approval of this run restored (IncidentInForce): whether an
-	// earlier run attempted it and how many of its attempts earlier runs
-	// retired as never sent, so a run restarted from the decision restores
-	// it as the approved run holds it and its next attempt never reuses a
-	// retired order's client order ID (ADR 0019, amended 2026-10-15; ADR
-	// 0026, point 2, "Order identity", and point 5: recovered, never
-	// recomputed). Omitted when the approval restored none.
+	// RestoredSale is the record of the incident's sale back to 98% as the
+	// run holds it: the one the owner's approval of this run restored
+	// (IncidentInForce) or, with none restored, that of the incident in
+	// force on Boost's instrument, approved or not: whether it was attempted,
+	// by an earlier run or by this one and not since retired, and how many
+	// of its attempts earlier runs retired as never sent, so a run restarted
+	// from the decision restores it as this run holds it and never attempts
+	// it again, nor reuses a retired order's client order ID (ADR 0019,
+	// amended 2026-10-15; ADR 0026, point 2, "Order identity", and point 5:
+	// recovered, never recomputed). Omitted when there is neither.
 	RestoredSale *BoostRestoredSale `json:"restored_sale,omitempty"`
 	// NamedOrders are the client order IDs, strictly ascending, of the
 	// watched, undecided and working orders a venue has named (a lifecycle
@@ -362,10 +364,9 @@ type BoostRetiredOrder struct {
 	SaleAttempt int    `json:"sale_attempt,omitempty"`
 }
 
-// BoostRestoredSale is the sale attempt an approval restored
-// (BoostFigures.RestoredSale): its incident, whether an earlier run
-// attempted the sale, and how many of its attempts earlier runs retired as
-// never sent.
+// BoostRestoredSale is the incident's sale attempt as the run holds it
+// (BoostFigures.RestoredSale): its incident, whether the sale was attempted,
+// and how many of its attempts earlier runs retired as never sent.
 type BoostRestoredSale struct {
 	IncidentID      string `json:"incident_id"`
 	Attempted       bool   `json:"attempted"`
