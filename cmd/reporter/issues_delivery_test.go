@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -451,6 +452,24 @@ func TestAnAnswerOverTheReadLimitIsAnError(t *testing.T) {
 	if issues := gh.snapshot(); len(issues) != 1 || commentsOf(issues) != 0 {
 		t.Fatalf("an oversized answer wrote: %d issues", len(issues))
 	}
+	// The listing is the firing's one source of truth: an oversized one
+	// stops every later GitHub delivery in the firing, and is not read again.
+	b := haltAlert()
+	b.Key = "reconciliation:x@joint"
+	if err := s.send(b, 0); err == nil || !strings.Contains(err.Error(), "not tried") {
+		t.Fatalf("a second alert after an oversized listing was tried: %v", err)
+	}
+	gh.mu.Lock()
+	listings := 0
+	for _, m := range gh.methods {
+		if m == "GET /repos/owner/repo/issues" {
+			listings++
+		}
+	}
+	gh.mu.Unlock()
+	if listings != 1 {
+		t.Fatalf("the oversized listing was read %d times in one firing, want 1", listings)
+	}
 }
 
 // A journal too large to hold in memory is not read for the issue's evidence,
@@ -482,8 +501,9 @@ func TestAJournalOverTheEvidenceLimitIsNotRead(t *testing.T) {
 
 // One issue's comments page over the read limit fails that one delivery. It
 // does not trip the channel's latch, so a second alert in the same firing is
-// still delivered (only the listing, the identity and transport failures are
-// remembered for the firing).
+// still delivered (note remembers for the firing only a failed listing, a
+// deadline and an unavailable tracker: a rate limit, a server error, a
+// transport failure).
 func TestAnOversizedCommentsPageFailsOnlyThatDelivery(t *testing.T) {
 	gh := &fakeGitHub{}
 	url := fakeGitHubServer(t, gh)
@@ -512,41 +532,171 @@ func TestAnOversizedCommentsPageFailsOnlyThatDelivery(t *testing.T) {
 	}
 }
 
-// The limit is the largest legitimate page: 100 items, each of up to
-// maxIssueText characters, every one escaped at the widest the JSON encoding
-// goes, plus the item's own fields.
+// Each limit is the largest legitimate page of its endpoint: the page's items,
+// each with a body of up to maxIssueText characters, every character escaped
+// at the widest the JSON encoding goes (a supplementary character is two
+// UTF-16 units, \ud83d\ude00, 12 bytes), plus the item's own fields.
 func TestTheReadLimitHoldsAPageOfEscapedBodies(t *testing.T) {
-	page := make([]map[string]string, 100)
-	for i := range page {
-		page[i] = map[string]string{"body": strings.Repeat("\x01", maxIssueText)}
+	supplementary := strings.Repeat(`\ud83d\ude00`, maxIssueText)
+	page := func(items int) int {
+		// The allowance covers everything in an item but its body; the page's
+		// brackets and commas come out of it.
+		const frame = `{"body":"","pad":""}`
+		item := `{"body":"` + supplementary + `","pad":"` + strings.Repeat("p", itemAllowanceBytes-len(frame)-2) + `"}`
+		return len("[") + items*len(item) + (items - 1) + len("]")
 	}
-	raw, err := json.Marshal(page)
-	if err != nil {
+	if n := page(listingPageSize); int64(n) > maxListingAnswerBytes {
+		t.Fatalf("a legitimate listing page of %d bytes is over the read limit %d", n, int64(maxListingAnswerBytes))
+	}
+	if n := page(commentsPageSize); int64(n) > maxCommentsAnswerBytes {
+		t.Fatalf("a legitimate comments page of %d bytes is over the read limit %d", n, int64(maxCommentsAnswerBytes))
+	}
+	if maxCommentsAnswerBytes >= maxListingAnswerBytes/2 {
+		t.Fatalf("the comments limit %d is not sized for its smaller page", int64(maxCommentsAnswerBytes))
+	}
+}
+
+// Comments are read thirty to a page, so the largest answer held in memory
+// is a third of a listing's, and every page of a longer issue is read.
+func TestCommentsAreReadThirtyToAPage(t *testing.T) {
+	gh := &fakeGitHub{}
+	url := fakeGitHubServer(t, gh)
+	a := haltAlert()
+	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
 		t.Fatal(err)
 	}
-	if int64(len(raw)) > maxAnswerBytes {
-		t.Fatalf("a legitimate page of %d bytes is over the read limit %d", len(raw), int64(maxAnswerBytes))
+	gh.mu.Lock()
+	for c := range 70 {
+		gh.issues[0].comments = append(gh.issues[0].comments, fmt.Sprintf("note %d", c))
+	}
+	gh.mu.Unlock()
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodGet {
+			queries = append(queries, r.URL.Query().Get("per_page"))
+		}
+		gh.handler(w, r)
+	}))
+	t.Cleanup(server.Close)
+	own, err := githubChannel(t, server.URL, time.Second).tracker.OwnComments(context.Background(), 1)
+	if err != nil || len(own) != 70 {
+		t.Fatalf("%d own comments, %v", len(own), err)
+	}
+	if want := []string{"30", "30", "30"}; !slices.Equal(queries, want) {
+		t.Fatalf("comment pages asked for per_page %v, want %v", queries, want)
+	}
+}
+
+// A rate limit or a server error is the channel's failure whatever size its
+// body is: the status decides before the body is read, so an oversized
+// error answer still stops the firing's later deliveries.
+func TestAnOversizedErrorAnswerIsStillClassified(t *testing.T) {
+	for _, c := range []struct {
+		name, method string
+		status       int
+		want         string
+	}{
+		{"comments 429", http.MethodGet, http.StatusTooManyRequests, "rate limited"},
+		{"comments 503", http.MethodGet, http.StatusServiceUnavailable, "503"},
+		{"write 429", http.MethodPost, http.StatusTooManyRequests, "rate limited"},
+		{"write 503", http.MethodPost, http.StatusServiceUnavailable, "503"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			gh := &fakeGitHub{}
+			a, b := haltAlert(), haltAlert()
+			b.Key = "reconciliation:x@joint"
+			plain := fakeGitHubServer(t, gh)
+			for _, x := range []report.Alert{a, b} {
+				if err := githubChannel(t, plain, time.Second).send(x, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == c.method && strings.HasSuffix(r.URL.Path, "/comments") {
+					w.WriteHeader(c.status)
+					_, _ = w.Write([]byte(strings.Repeat("x", 20000)))
+					return
+				}
+				gh.handler(w, r)
+			}))
+			t.Cleanup(server.Close)
+			s := githubChannel(t, server.URL, time.Second)
+			s.tracker.(*githubTracker).maxAnswer = 8192
+			err := s.send(a, 1)
+			if err == nil || strings.Contains(err.Error(), "larger than") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("an oversized %d answer was not classed by its status: %v", c.status, err)
+			}
+			if err := s.send(b, 1); err == nil || !strings.Contains(err.Error(), "not tried") {
+				t.Fatalf("the firing went on after an oversized %d answer: %v", c.status, err)
+			}
+		})
 	}
 }
 
 // The token is sent only to the address that was checked: a redirect is
-// refused, never followed, so it cannot carry the token to another address.
+// refused, never followed, so it cannot carry the token, or a write's body, to
+// another address. Every status and every method is an error naming it, and
+// the address the redirect names receives no request.
 func TestARedirectIsNeverFollowed(t *testing.T) {
-	var reached atomic.Int32
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reached.Add(1)
-		_, _ = w.Write([]byte("[]"))
-	}))
-	t.Cleanup(other.Close)
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
-	}))
-	t.Cleanup(redirector.Close)
-	if err := githubChannel(t, redirector.URL, time.Second).send(haltAlert(), 0); err == nil {
-		t.Fatal("a redirected answer counted as delivered")
+	const base = "/repos/owner/repo/issues"
+	type call func(tr issueTracker) error
+	ops := []struct {
+		name, method string
+		// path is the whole path to redirect, or, with suffix, its end.
+		path   string
+		suffix bool
+		do     call
+	}{
+		{"listing", http.MethodGet, base, false, func(tr issueTracker) error {
+			_, _, err := tr.Latest(context.Background(), "marker")
+			return err
+		}},
+		{"comments", http.MethodGet, "/comments", true, func(tr issueTracker) error {
+			_, err := tr.OwnComments(context.Background(), 1)
+			return err
+		}},
+		{"create", http.MethodPost, base, false, func(tr issueTracker) error {
+			_, err := tr.Create(context.Background(), "title", "body", []string{"alert"})
+			return err
+		}},
+		{"comment", http.MethodPost, "/comments", true, func(tr issueTracker) error {
+			return tr.Comment(context.Background(), 1, "body")
+		}},
+		{"close", http.MethodPatch, base + "/1", false, func(tr issueTracker) error {
+			return tr.CloseIssue(context.Background(), 1)
+		}},
+		{"unlabel", http.MethodDelete, "/labels/" + alertLabel, true, func(tr issueTracker) error {
+			return tr.MarkResolved(context.Background(), 1)
+		}},
 	}
-	if n := reached.Load(); n != 0 {
-		t.Fatalf("the redirect was followed %d times", n)
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, op := range ops {
+			t.Run(fmt.Sprintf("%d %s %s", status, op.method, op.name), func(t *testing.T) {
+				var reached atomic.Int32
+				other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					reached.Add(1)
+					_, _ = w.Write([]byte("[]"))
+				}))
+				t.Cleanup(other.Close)
+				a := haltAlert()
+				gh := &fakeGitHub{issues: []*fakeIssue{{number: 1, body: issueMarker(a.Key), labels: []string{"alert"}, open: true}}}
+				redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == op.method && (r.URL.Path == op.path || (op.suffix && strings.HasSuffix(r.URL.Path, op.path))) {
+						http.Redirect(w, r, other.URL+r.URL.Path, status)
+						return
+					}
+					gh.handler(w, r)
+				}))
+				t.Cleanup(redirector.Close)
+				err := op.do(githubChannel(t, redirector.URL, time.Second).tracker)
+				if err == nil || !strings.Contains(err.Error(), strconv.Itoa(status)) {
+					t.Fatalf("a %d answer was not an error naming its status: %v", status, err)
+				}
+				if n := reached.Load(); n != 0 {
+					t.Fatalf("the redirect was followed %d times", n)
+				}
+			})
+		}
 	}
 }
 

@@ -52,10 +52,10 @@ const (
 	// maxIssuePages bounds the listing of alert issues, 100 an issue page, so
 	// 1,000 are matched; a longer listing is an error, never taken as whole.
 	maxIssuePages = 10
-	// maxCommentPages bounds the reading of one issue's comments, 100 a page;
-	// a longer one is an error, so a delivery whose comment cannot be ruled
-	// out writes nothing.
-	maxCommentPages = 10
+	// maxCommentPages bounds the reading of one issue's comments, 30 a page
+	// (commentsPageSize), enough pages for maxComments; a longer one is an
+	// error, so a delivery whose comment cannot be ruled out writes nothing.
+	maxCommentPages = (maxComments + commentsPageSize - 1) / commentsPageSize
 	// maxDeliveryRequests bounds the requests of one delivery: the listing,
 	// the channel's own identity, every page of the issue's comments, then a
 	// write, a close, the resolved label's addition and the alert label's
@@ -425,7 +425,7 @@ func (s *issuesSender) open(a report.Alert) error {
 		resolved, err := s.hasComment(ctx, issue.Number, resolvedMarker(a.Key))
 		switch {
 		case errors.Is(err, errTooManyComments):
-			note = fmt.Sprintf("The earlier issue of this alert, #%d, has more than %d comments, so it is taken as closed and this issue replaces it.\n\n", issue.Number, maxCommentPages*100)
+			note = fmt.Sprintf("The earlier issue of this alert, #%d, has more than %d comments, so it is taken as closed and this issue replaces it.\n\n", issue.Number, maxComments)
 		case err != nil || !resolved:
 			return s.note(err, false)
 		}
@@ -721,7 +721,7 @@ type ghIssue struct {
 }
 
 // errTooManyComments is an issue whose comments are too many to read whole.
-var errTooManyComments = fmt.Errorf("issue has more than %d comments, so whether this delivery was made cannot be told and nothing is written", maxCommentPages*100)
+var errTooManyComments = fmt.Errorf("issue has more than %d comments, so whether this delivery was made cannot be told and nothing is written", maxComments)
 
 // errNoAuthor is a comment GitHub names no author of.
 var errNoAuthor = errors.New("GitHub named a comment without its author, so whether this delivery was made cannot be told and nothing is written")
@@ -752,11 +752,13 @@ func withRequestBudget(ctx context.Context, n int) context.Context {
 	return context.WithValue(ctx, requestBudget{}, &n)
 }
 
-func (g *githubTracker) call(ctx context.Context, method, path string, in, out any) (http.Header, error) {
-	return g.callURL(ctx, method, g.base+path, in, out)
+// call is one request to the repository's API, its answer read to at most
+// limit bytes.
+func (g *githubTracker) call(ctx context.Context, method, path string, limit int64, in, out any) (http.Header, error) {
+	return g.callURL(ctx, method, g.base+path, limit, in, out)
 }
 
-func (g *githubTracker) callURL(ctx context.Context, method, target string, in, out any) (http.Header, error) {
+func (g *githubTracker) callURL(ctx context.Context, method, target string, limit int64, in, out any) (http.Header, error) {
 	if left, ok := ctx.Value(requestBudget{}).(*int); ok {
 		if *left <= 0 {
 			return nil, errors.New("this delivery used every request it may make")
@@ -790,25 +792,15 @@ func (g *githubTracker) callURL(ctx context.Context, method, target string, in, 
 		return nil, fmt.Errorf("request failed (%w)", errUnavailable)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	limit := g.maxAnswer
-	if limit <= 0 {
-		limit = maxAnswerBytes
-	}
-	answer, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		// An answer that stops on the way is a timeout like any other.
-		return nil, fmt.Errorf("GitHub's answer did not arrive whole (%w)", errUnavailable)
-	}
-	if int64(len(answer)) > limit {
-		// A prefix is never parsed as the whole answer.
-		// It fails this one call: only the listing, which note remembers, and
-		// the channel's identity take the rest of the firing with them.
-		return nil, fmt.Errorf("GitHub's answer is larger than %d bytes", limit)
+	if g.maxAnswer > 0 {
+		limit = g.maxAnswer
 	}
 	if resp.StatusCode/100 != 2 {
-		// A limit GitHub applies, or a fault of its own, is the channel's
-		// failure like any other: the alert is sent again at a later firing,
-		// and the rest of this firing does not ask again.
+		// The status decides first, and the body of an error answer is never
+		// read: a limit GitHub applies, or a fault of its own, is the
+		// channel's failure like any other, whatever size its body is. The
+		// alert is sent again at a later firing, and the rest of this firing
+		// does not ask again.
 		if resp.StatusCode == http.StatusTooManyRequests || resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != "" {
 			return nil, fmt.Errorf("GitHub answered %s: rate limited, tried again at a later firing (%w)", resp.Status, errUnavailable)
 		}
@@ -818,12 +810,48 @@ func (g *githubTracker) callURL(ctx context.Context, method, target string, in, 
 		return nil, &statusError{code: resp.StatusCode, status: resp.Status}
 	}
 	if out != nil {
-		if err := json.Unmarshal(answer, out); err != nil {
+		// The answer is decoded as it is read, to at most limit bytes: a
+		// prefix is never parsed as the whole answer. An answer over the
+		// limit fails this one call, as a failed lookup of the channel's
+		// identity fails the deliveries that need it; only a failed listing
+		// takes the rest of the firing with it (note).
+		lr := &io.LimitedReader{R: resp.Body, N: limit + 1}
+		dec := json.NewDecoder(lr)
+		err := dec.Decode(out)
+		if err == nil {
+			// Anything but white space after the value is not an answer.
+			var syntax *json.SyntaxError
+			if _, tail := dec.Token(); tail == nil || errors.As(tail, &syntax) {
+				err = errTrailingData
+			}
+		}
+		switch {
+		case lr.N <= 0:
+			return nil, fmt.Errorf("GitHub's answer is larger than %d bytes", limit)
+		case err == nil:
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			// An answer that stops on the way is a timeout like any other.
+			return nil, fmt.Errorf("GitHub's answer did not arrive whole (%w)", errUnavailable)
+		case isDecodeFault(err):
 			return nil, errors.New("GitHub's answer was not understood")
+		default:
+			return nil, fmt.Errorf("GitHub's answer did not arrive whole (%w)", errUnavailable)
 		}
 	}
 	return resp.Header, nil
 }
+
+// isDecodeFault reports whether err is the decoder's judgement of the bytes
+// it was given (not valid JSON, or not the shape asked for), not a failure
+// of the connection they came over.
+func isDecodeFault(err error) bool {
+	var syntax *json.SyntaxError
+	var kind *json.UnmarshalTypeError
+	return errors.Is(err, io.EOF) || errors.Is(err, errTrailingData) || errors.As(err, &syntax) || errors.As(err, &kind)
+}
+
+// errTrailingData is an answer with more after its JSON value.
+var errTrailingData = errors.New("data after the JSON value")
 
 // nextPage reports whether GitHub's Link header names a next page.
 func nextPage(h http.Header) bool {
@@ -848,7 +876,7 @@ func (g *githubTracker) load(ctx context.Context) error {
 			return fmt.Errorf("more than %d issues carry the %s label, so the list of alert issues is incomplete and none is written; remove the label from old closed issues whose incident is over (resolved, or acknowledged and no longer repeating)", maxIssuePages*100, alertLabel)
 		}
 		var issues []ghIssue
-		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues?labels=%s&state=all&sort=created&direction=desc&per_page=100&page=%d", alertLabel, page), nil, &issues)
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues?labels=%s&state=all&sort=created&direction=desc&per_page=%d&page=%d", alertLabel, listingPageSize, page), maxListingAnswerBytes, nil, &issues)
 		if err != nil {
 			return err
 		}
@@ -914,7 +942,7 @@ func (g *githubTracker) Listed(ctx context.Context) (map[int]bool, error) {
 // so a label taken off it does not make it look gone; GitHub's 404 and 410 are gone.
 func (g *githubTracker) Closed(ctx context.Context, number int) (bool, error) {
 	var issue ghIssue
-	_, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues/%d", number), nil, &issue)
+	_, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues/%d", number), maxItemAnswerBytes, nil, &issue)
 	var status *statusError
 	if errors.As(err, &status) && (status.code == http.StatusNotFound || status.code == http.StatusGone) {
 		return true, nil
@@ -931,7 +959,7 @@ func (g *githubTracker) Create(ctx context.Context, title, body string, labels [
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var out ghIssue
-	if _, err := g.call(ctx, http.MethodPost, "/issues", map[string]any{"title": title, "body": body, "labels": labels}, &out); err != nil {
+	if _, err := g.call(ctx, http.MethodPost, "/issues", maxItemAnswerBytes, map[string]any{"title": title, "body": body, "labels": labels}, &out); err != nil {
 		return 0, err
 	}
 	if out.Number <= 0 {
@@ -944,8 +972,8 @@ func (g *githubTracker) Create(ctx context.Context, title, body string, labels [
 	return out.Number, nil
 }
 
-// OwnComments reads every page of the issue's comments, at most
-// maxCommentPages, and returns those the token's user wrote.
+// OwnComments reads every page of the issue's comments, at most maxComments
+// of them, and returns those the token's user wrote.
 func (g *githubTracker) OwnComments(ctx context.Context, number int) ([]string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -954,7 +982,7 @@ func (g *githubTracker) OwnComments(ctx context.Context, number int) ([]string, 
 	}
 	if g.self == 0 {
 		var me ghUser
-		if _, err := g.callURL(ctx, http.MethodGet, g.api+"/user", nil, &me); err != nil {
+		if _, err := g.callURL(ctx, http.MethodGet, g.api+"/user", maxItemAnswerBytes, nil, &me); err != nil {
 			g.selfErr = err
 			return nil, err
 		}
@@ -965,6 +993,7 @@ func (g *githubTracker) OwnComments(ctx context.Context, number int) ([]string, 
 		g.self = me.ID
 	}
 	var bodies []string
+	seen := 0
 	for page := 1; ; page++ {
 		if page > maxCommentPages {
 			return nil, errTooManyComments
@@ -973,9 +1002,13 @@ func (g *githubTracker) OwnComments(ctx context.Context, number int) ([]string, 
 			Body string  `json:"body"`
 			User *ghUser `json:"user"`
 		}
-		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues/%d/comments?per_page=100&page=%d", number, page), nil, &comments)
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("/issues/%d/comments?per_page=%d&page=%d", number, commentsPageSize, page), maxCommentsAnswerBytes, nil, &comments)
 		if err != nil {
 			return nil, err
+		}
+		seen += len(comments)
+		if seen > maxComments {
+			return nil, errTooManyComments
 		}
 		for _, c := range comments {
 			// A comment of no author cannot be ruled out as the channel's
@@ -996,7 +1029,7 @@ func (g *githubTracker) OwnComments(ctx context.Context, number int) ([]string, 
 func (g *githubTracker) Comment(ctx context.Context, number int, body string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, err := g.call(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/comments", number), map[string]string{"body": body}, nil); err != nil {
+	if _, err := g.call(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/comments", number), maxItemAnswerBytes, map[string]string{"body": body}, nil); err != nil {
 		return err
 	}
 	for m, i := range g.latest {
@@ -1011,7 +1044,7 @@ func (g *githubTracker) Comment(ctx context.Context, number int, body string) er
 func (g *githubTracker) CloseIssue(ctx context.Context, number int) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, err := g.call(ctx, http.MethodPatch, fmt.Sprintf("/issues/%d", number), map[string]string{"state": "closed", "state_reason": "completed"}, nil); err != nil {
+	if _, err := g.call(ctx, http.MethodPatch, fmt.Sprintf("/issues/%d", number), maxItemAnswerBytes, map[string]string{"state": "closed", "state_reason": "completed"}, nil); err != nil {
 		return err
 	}
 	for m, i := range g.latest {
@@ -1031,10 +1064,10 @@ func (g *githubTracker) CloseIssue(ctx context.Context, number int) error {
 func (g *githubTracker) MarkResolved(ctx context.Context, number int) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, err := g.call(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/labels", number), map[string][]string{"labels": {resolvedLabel}}, nil); err != nil {
+	if _, err := g.call(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/labels", number), maxItemAnswerBytes, map[string][]string{"labels": {resolvedLabel}}, nil); err != nil {
 		return err
 	}
-	if _, err := g.call(ctx, http.MethodDelete, fmt.Sprintf("/issues/%d/labels/%s", number, alertLabel), nil, nil); err != nil {
+	if _, err := g.call(ctx, http.MethodDelete, fmt.Sprintf("/issues/%d/labels/%s", number, alertLabel), maxItemAnswerBytes, nil, nil); err != nil {
 		var status *statusError
 		if !errors.As(err, &status) || status.code != http.StatusNotFound {
 			return err
@@ -1183,13 +1216,38 @@ func withRedaction(senders []sender, secrets []string) {
 }
 
 const (
-	// maxAnswerBytes is the most one GitHub answer is read to: a page of 100
-	// items, a listing of issues or a page of comments, each of up to
-	// maxIssueText characters in its body. A character is at most 4 bytes
-	// raw, but 6 once JSON escapes it (a control character is \u00XX), so
-	// each body is counted at 6 bytes a character, plus itemAllowanceBytes
-	// for the item's own fields (its user, reactions and URLs).
-	maxAnswerBytes = 100 * (6*maxIssueText + itemAllowanceBytes)
+	// listingPageSize and commentsPageSize are the items GitHub is asked for
+	// in one page of the alert listing and of an issue's comments. Comments
+	// are the smaller page: anyone may comment on a public repository's
+	// issue, so they bound what one answer can make the reporter hold.
+	listingPageSize  = 100
+	commentsPageSize = 30
+	// maxListingAnswerBytes and maxCommentsAnswerBytes are the most one
+	// answer is read to, the largest legitimate page of each endpoint: its
+	// items, each with a body of up to maxIssueText characters, plus
+	// itemAllowanceBytes for the item's own fields (its user, reactions and
+	// URLs). JSON escapes a character at its widest as UTF-16 units: one unit
+	// is \uXXXX, 6 bytes, and a supplementary character (an emoji) is two
+	// units, 12 bytes, so a body is counted at 12 bytes a character.
+	//
+	// Memory: one answer is held at a time (calls are serialised by the
+	// tracker's mutex). json.Decoder buffers the answer whole, up to the
+	// limit, and grows its buffer by doubling, so the buffer may take up to
+	// twice the limit while it grows; the decoded bodies, never larger than
+	// their escaped form, are at most the limit again. The worst case of one
+	// answer is therefore about 3 times its limit: about 69 MiB for a page of
+	// comments (limit 23 MiB), about 230 MiB for the listing (limit 77 MiB),
+	// which only the channel's own issues, written to 65,536 characters at
+	// most, fill. Answers are not kept after they are decoded, so a firing's
+	// peak is that of its largest answer, not the sum of its requests.
+	maxListingAnswerBytes  = listingPageSize * (12*maxIssueText + itemAllowanceBytes)
+	maxCommentsAnswerBytes = commentsPageSize * (12*maxIssueText + itemAllowanceBytes)
+	// maxComments is the most comments of one issue that are read; an issue
+	// with more is an error (errTooManyComments).
+	maxComments = 1000
+	// maxItemAnswerBytes is the most the answer to a request for one issue,
+	// one comment or the token's user is read to: one item of a page.
+	maxItemAnswerBytes = 12*maxIssueText + itemAllowanceBytes
 	// itemAllowanceBytes is what one item of a page takes besides its body.
 	itemAllowanceBytes = 16 << 10
 	// maxEvidenceJournal is the largest journal read into memory for an

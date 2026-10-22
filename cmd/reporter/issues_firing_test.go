@@ -403,7 +403,7 @@ func TestAResolvedIssueLosesItsAlertLabel(t *testing.T) {
 func overLimit(gh *fakeGitHub, n int) {
 	gh.mu.Lock()
 	defer gh.mu.Unlock()
-	for c := range maxCommentPages*100 + 1 {
+	for c := range maxComments + 1 {
 		gh.issues[n-1].comments = append(gh.issues[n-1].comments, fmt.Sprintf("note %d", c))
 	}
 }
@@ -427,7 +427,7 @@ func TestAResolveOverTheCommentLimitPostsNoClosingComment(t *testing.T) {
 	if err := githubChannel(t, url, 5*time.Second).resolve(a.Key); err != nil {
 		t.Fatal(err)
 	}
-	if i := gh.snapshot()[0]; i.open || len(i.comments) != maxCommentPages*100+1 {
+	if i := gh.snapshot()[0]; i.open || len(i.comments) != maxComments+1 {
 		t.Fatalf("open=%v with %d comments, want closed with no comment added", i.open, len(i.comments))
 	}
 }
