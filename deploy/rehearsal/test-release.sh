@@ -470,11 +470,30 @@ grep -q "\.aside-v9.9.8" "$work/out" || fail "--status does not list the parked 
 rmdir "$TI_PREFIX/releases/.aside-v9.9.8"
 mkdir "$TI_PREFIX/releases/.lock"
 echo 999999 >"$TI_PREFIX/releases/.lock/pid"
+# A stand-in /proc: a plain user cannot signal a root release, so liveness is
+# the pid's entry here and what its command line is.
+export TI_PROC=$work/proc
+rm -rf "$TI_PROC"; mkdir -p "$TI_PROC"
 expect "--status with a lock held" 0 "$(run --status)"
 grep -q "lock: held at $TI_PREFIX/releases/.lock" "$work/out" || fail "--status does not report the lock: $(cat "$work/out")"
 grep -q "pid 999999" "$work/out" || fail "--status does not name the lock's pid: $(cat "$work/out")"
 grep -q "not running" "$work/out" || fail "--status does not say the lock is stale: $(cat "$work/out")"
-grep -q "belongs to the running release" "$work/out" || fail "--status does not say .replaced may belong to a running release: $(cat "$work/out")"
+if grep -q "belongs to the running release" "$work/out"; then fail "--status calls .replaced a running release's when the lock is stale: $(cat "$work/out")"; fi
+# A live release owned by another user (a pid we cannot signal) is running.
+mkdir -p "$TI_PROC/999999"
+printf '/bin/bash\0/usr/local/sbin/ti-release\0v1.2.3\0' >"$TI_PROC/999999/cmdline"
+expect "--status with a live lock" 0 "$(run --status)"
+grep -q "pid 999999 is running" "$work/out" || fail "--status does not say a live release is running: $(cat "$work/out")"
+if grep -q "stale" "$work/out"; then fail "--status calls a live lock stale: $(cat "$work/out")"; fi
+expect "--status with a live lock and .replaced" 0 "$(run --status)"
+grep -q "belongs to the running release" "$work/out" || fail "--status does not say .replaced belongs to the running release: $(cat "$work/out")"
+# A reused pid (some other program) is a stale lock.
+printf 'sleep\0100\0' >"$TI_PROC/999999/cmdline"
+expect "--status with a reused pid" 0 "$(run --status)"
+grep -q "pid reused; the lock is stale" "$work/out" || fail "--status does not report a reused pid: $(cat "$work/out")"
+expect "--status with a stale lock and .replaced" 0 "$(run --status)"
+grep -q "left by a run that died" "$work/out" || fail "--status does not say .replaced was left by a dead run: $(cat "$work/out")"
+unset TI_PROC
 rm -rf "$TI_PREFIX/releases/.lock"
 expect "--status with no lock" 0 "$(run --status)"
 grep -q "lock: none" "$work/out" || fail "--status does not say the lock is clear: $(cat "$work/out")"

@@ -68,6 +68,7 @@ repo_slug=richard-whittemore/TrendInvesting
 base_url=${TI_RELEASE_URL:-https://github.com/$repo_slug/releases/download}
 api_url=${TI_RELEASE_API:-https://api.github.com}
 prefix=${TI_PREFIX:-/opt/trend-investing}
+proc=${TI_PROC:-/proc}
 link_dir=${TI_LINK_DIR:-/usr/local/bin}
 systemctl=${TI_SYSTEMCTL:-systemctl}
 gh=${TI_GH:-gh}
@@ -132,6 +133,7 @@ if test "$mode" = status; then
   st() { cat "$releases/$1" 2>/dev/null || true; }
   echo "current: $(st current)"
   echo "previous: $(st previous)"
+  lock_stale=0
   if test -d "$releases/.lock"; then
     lpid=$(cat "$releases/.lock/pid" 2>/dev/null || true)
     lmod=$(stat -c %Y "$releases/.lock" 2>/dev/null || stat -f %m "$releases/.lock" 2>/dev/null || echo "")
@@ -139,18 +141,29 @@ if test "$mode" = status; then
     if test -n "$lmod"; then lage="$(($(date +%s) - lmod))s"; fi
     if test -z "$lpid"; then
       lstate="pid unknown"
-    elif kill -0 "$lpid" 2>/dev/null; then
-      lstate="pid $lpid is running"
+    elif test ! -d "$proc/$lpid"; then
+      lstate="pid $lpid is not running: a stale lock; see the runbook before removing it"
     else
-      lstate="pid $lpid is not running: a stale lock; remove it after checking no ti-release is running"
+      # The release runs as root, so a plain user cannot signal it (kill -0
+      # would fail): look at the process table instead, and at what the pid
+      # runs, since a dead release's pid may have been given to another program.
+      lcmd=$(tr '\0' ' ' <"$proc/$lpid/cmdline" 2>/dev/null || true)
+      case $lcmd in
+        *ti-release* | *release.sh*) lstate="pid $lpid is running" ;;
+        "") lstate="pid $lpid is running (its command line cannot be read)" ;;
+        *) lstate="pid $lpid is another program (pid reused; the lock is stale); see the runbook before removing it" ;;
+      esac
     fi
+    case $lstate in *stale*) lock_stale=1 ;; esac
     echo "lock: held at $releases/.lock (age $lage, $lstate)"
   else
     echo "lock: none"
   fi
   if test -e "$releases/.replaced"; then
-    if test -d "$releases/.lock"; then
+    if test -d "$releases/.lock" && test "$lock_stale" = 0; then
       echo ".replaced: kept build $(kept_tag) at $releases/.replaced; while the lock is held it belongs to the running release and must not be touched"
+    elif test -d "$releases/.lock"; then
+      echo ".replaced: kept build $(kept_tag) at $releases/.replaced, left by a run that died; clear the lock as the runbook says, then move .replaced by hand"
     else
       echo ".replaced: kept build $(kept_tag) at $releases/.replaced (blocks the next run until moved)"
     fi
@@ -210,7 +223,7 @@ refuse_if_engine_busy
 # is removed on exit.
 install -d -m 0755 "$releases"
 lock=$releases/.lock
-mkdir "$lock" 2>/dev/null || die "another ti-release is running (or died: remove $lock)"
+mkdir "$lock" 2>/dev/null || die "another ti-release is running (or died: run sudo ti-release --status, check pgrep -af ti-release shows nothing, then sudo rm -r $lock)"
 trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true' EXIT
 printf '%s\n' "$$" >"$lock/pid" || true
 # A build kept at .replaced by an earlier failed save is the only copy: refuse,
@@ -487,7 +500,7 @@ if test "$mode" = release; then
       if mv "$releases/.replaced" "$rescue"; then kept_at=$rescue; keep_replaced=0; fi
       log "ALERT: the kept build $tag could not be moved back; its only copy is $kept_at (state still names it as previous); move it to $releases/$tag by hand"
     else
-      # Moved back: the note is stale there; a failed removal changes nothing.
+      # Moved back: the note no longer applies there; a failed removal changes nothing.
       rm -f "$releases/$tag/TAG" || true
     fi
   fi
