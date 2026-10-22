@@ -204,7 +204,10 @@ func TestTextRedactsAFigureWhateverItsNeighbours(t *testing.T) {
 		// second, whose digits could carry a figure.
 		"2026-02-31", "2026-04-31", "2025-02-29", "5000-10-10", "0412-12-31", "2024-01-02T21:00:00.123456789Z", "21:00:00.5",
 		// Digits of any script are digits.
-		"\u0664\u0660\u0660", "\uff14\uff10\uff10", "\u096a\u0966\u0966", "x\u0664\u0662", "sell-\u0664\u0660", "2024-01-0\u0662", "ADR \u0660\u0660\u0661\u0669",
+		"\u0664\u0660\u0660", "\uff14\uff10\uff10", "\u00b2", "400\u00b2", "\u00bd", "\u2460", "\u2167", "x\u2462\u2463", "ADR \u2460\u2461\u2462\u2463",
+		// A time of day stands alone is a figure; a date followed by a bare T,
+		// with no time, is neither a date nor a timestamp.
+		"21:00", "21:00:00", "00:00", "23:59:59Z", "2026-10-22T", "2026-10-22T.", "\u096a\u0966\u0966", "x\u0664\u0662", "sell-\u0664\u0660", "2024-01-0\u0662", "ADR \u0660\u0660\u0661\u0669",
 	} {
 		got := r.Text("saw " + in + " here")
 		if anyDigit.MatchString(got) {
@@ -223,7 +226,7 @@ func TestTextKeepsOnlyTheAllowedShapes(t *testing.T) {
 	r := report.NewRedactor(nil)
 	for _, in := range []string{
 		"2024-01-02", "2024-02-29", "1998-12-31", "2024-01-02T21:00:00Z", "2024-01-02T21:00:00+02:00", "2024-01-02T23:59:59-05:00",
-		"2024-01-02T21:00Z", "21:00", "21:00:00", "00:00", "23:59:59Z", "(ADR 0026)", "ADR 0019,",
+		"2024-01-02T21:00Z", "(ADR 0026)", "ADR 0019,",
 	} {
 		if got := r.Text("at " + in + " now"); got != "at "+in+" now" {
 			t.Errorf("Text(%q) = %q, want it kept", in, got)
@@ -281,10 +284,10 @@ func TestNoRandomFigureSurvivesBesideAnything(t *testing.T) {
 	}
 }
 
-// anyDigit is a digit of any script; allowed is the one allow-listed shape
+// anyDigit is a number of any Unicode category N (Nd, Nl, No); allowed is the one allow-listed shape
 // a random figure beside random text can make, an ADR's number.
 var (
-	anyDigit = regexp.MustCompile(`\p{Nd}`)
+	anyDigit = regexp.MustCompile(`\p{N}`)
 	allowed  = regexp.MustCompile(`ADR \d{4}`)
 )
 

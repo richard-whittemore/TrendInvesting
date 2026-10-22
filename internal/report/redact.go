@@ -151,28 +151,28 @@ func isLetter(c byte) bool {
 }
 
 // The allow-list of free text, the only tokens whose digits are kept, each
-// matched as a whole token: an ISO date, a date and time, or a time of day,
-// on the calendar (a real month and day, in a year of 19xx or 20xx) and the
-// 24-hour clock, to the second and with no fraction of it; and an ADR's
-// number written "ADR nnnn". Every other digit, of any script, is a figure
+// matched as a whole token: an ISO date, or a date and a time after a T, on
+// the calendar (a real month and day, in a year of 19xx or 20xx) and the
+// 24-hour clock, to the second and with no fraction of it (a date followed
+// by a bare T is neither); and an ADR's number written "ADR nnnn". A time of
+// day alone is not on it. Every other number, of Unicode category N (decimal
+// digits of any script, letter numbers such as roman numerals, and other
+// numbers such as superscripts, fractions and circled numbers), is a figure
 // and is removed, whatever stands beside it, an identifier's and a
 // duration's too: a public text carries no figure, and fails closed
 // (docs/live-trading/plan.md section 7).
 var (
-	isoDate = regexp.MustCompile(`^((?:19|20)\d\d)-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?:T(.*))?$`)
+	isoDate = regexp.MustCompile(`^((?:19|20)\d\d)-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?:T(.+))?$`)
 	isoTime = regexp.MustCompile(`^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$`)
 	// adrNumber is a decision record's number as it follows "ADR ".
 	adrNumber = regexp.MustCompile(`^\d{4}$`)
 )
 
 // keptToken reports whether core, a whole token less its closing
-// punctuation, is on the allow-list (isoDate, isoTime, adrNumber); afterADR
+// punctuation, is on the allow-list (isoDate, adrNumber); afterADR
 // is whether "ADR " stands before it.
 func keptToken(core string, afterADR bool) bool {
 	if afterADR && adrNumber.MatchString(core) {
-		return true
-	}
-	if isoTime.MatchString(core) {
 		return true
 	}
 	m := isoDate.FindStringSubmatch(core)
@@ -224,7 +224,7 @@ func removeFigures(s string) string {
 // numbers replaced.
 func tokenWithoutFigures(s string, i, j int) string {
 	tok := s[i:j]
-	if strings.IndexFunc(tok, unicode.IsDigit) < 0 {
+	if strings.IndexFunc(tok, unicode.IsNumber) < 0 {
 		return tok
 	}
 	if keptToken(strings.TrimRight(tok, ".,:!?"), strings.HasSuffix(s[:i], "ADR ")) {
@@ -233,13 +233,13 @@ func tokenWithoutFigures(s string, i, j int) string {
 	rs := []rune(tok)
 	var b []rune
 	for k := 0; k < len(rs); {
-		if !unicode.IsDigit(rs[k]) {
+		if !unicode.IsNumber(rs[k]) {
 			b = append(b, rs[k])
 			k++
 			continue
 		}
 		e := k
-		for e < len(rs) && (unicode.IsDigit(rs[e]) || (rs[e] == ',' || rs[e] == '.') && e+1 < len(rs) && unicode.IsDigit(rs[e+1])) {
+		for e < len(rs) && (unicode.IsNumber(rs[e]) || (rs[e] == ',' || rs[e] == '.') && e+1 < len(rs) && unicode.IsNumber(rs[e+1])) {
 			e++
 		}
 		// An exponent goes with its mantissa.
@@ -248,8 +248,8 @@ func tokenWithoutFigures(s string, i, j int) string {
 			if rs[x] == '+' || rs[x] == '-' {
 				x++
 			}
-			if x < len(rs) && unicode.IsDigit(rs[x]) {
-				for x < len(rs) && unicode.IsDigit(rs[x]) {
+			if x < len(rs) && unicode.IsNumber(rs[x]) {
+				for x < len(rs) && unicode.IsNumber(rs[x]) {
 					x++
 				}
 				e = x
@@ -269,7 +269,7 @@ func tokenWithoutFigures(s string, i, j int) string {
 }
 
 // isAlnumRune reports whether c is a letter or a digit of any script, or '_'.
-func isAlnumRune(c rune) bool { return unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' }
+func isAlnumRune(c rune) bool { return unicode.IsLetter(c) || unicode.IsNumber(c) || c == '_' }
 
 // Record renders one journal record on one line: its type and event time,
 // then its payload with the value of every withheld field and

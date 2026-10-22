@@ -446,17 +446,19 @@ position, size or P&L, in any part of it:
   price, a limit, a fill, shares, a position, a size, a weight or a P&L is
   replaced wherever it sits, and so is every other number;
 - in the query output, the same rule leaves out those columns;
-- in the alert's text and in every other piece of text, each number, in
-  digits of any script, is replaced, whatever stands beside it (a letter, a
-  currency sign, a dash, a colon, `#`), unless the whole word it sits in is
-  on this list, and only this list:
+- in the alert's text and in every other piece of text, each number is
+  replaced: a digit of any script, and every other numeral (a superscript, a
+  fraction, a circled number, a roman-numeral character), whatever stands
+  beside it (a letter, a currency sign, a dash, a colon, `#`), unless the
+  whole word it sits in is on this list, and only this list:
   - an ISO date `YYYY-MM-DD`, in a year from 1900 to 2099, on the calendar
     (a real month and a day that month has: `2024-02-29` is kept,
-    `2026-02-31` is not), alone or followed by `T` and a time;
-  - a time `hh:mm` or `hh:mm:ss` on the 24-hour clock (`00:00` to
-    `23:59:59`), with no fraction of a second, alone or after a date, and
-    optionally ending `Z` or an offset `+hh:mm` or `-hh:mm`, such as
-    `2024-01-02T21:00:00Z`;
+    `2026-02-31` is not), alone or followed by `T` and a time `hh:mm` or
+    `hh:mm:ss` on the 24-hour clock (`00:00` to `23:59:59`), with no
+    fraction of a second, optionally ending `Z` or an offset `+hh:mm` or
+    `-hh:mm`, such as `2024-01-02T21:00:00Z`; a date followed by a `T` with
+    no time after it is not kept, and neither is a time of day on its own
+    (`21:00`);
   - an ADR's number, four digits after `ADR `, such as `ADR 0019`.
 
   Everything else goes: a record number, an order or fill name such as
@@ -485,10 +487,19 @@ the alert resolves:
   of each of the next firings, whether or not the fault is back; after 3
   firings it is given up, and the fault's next incident opens a new issue
   that begins by naming the earlier one, left open, for you to close by
-  hand.
+  hand. Only a close GitHub was asked to make and refused counts toward the
+  3; a firing in which GitHub could not be reached, or had no time left, does
+  not.
 
-A closed issue has its `alert` label taken off, so closed incidents leave
-the reporter's list and never fill it.
+**Design note: a resolved issue leaves the `alert` label.** When the reporter
+resolves an issue it gives it the label `alert-resolved` and takes the `alert`
+label off, so resolved incidents leave the reporter's list of at most 1,000
+issues. The same step takes them out of every view, saved search or job that
+selects issues by the label `alert`: any job that needs to find resolved
+incidents (a triage job, say) must poll by `alert-resolved`, or by the hidden
+key line and the issue's state, never by `alert` alone. An issue you close
+by hand keeps the `alert` label and counts toward the 1,000 until you remove
+it yourself.
 
 An alert that reports a single event, such as one refused order, has nothing
 that resolves it: its issue stays open until you close it yourself in the app
@@ -496,8 +507,13 @@ once you have read it. A close the reporter could not make, because GitHub
 could not be reached, is tried again at the next firing; its closing comment
 is posted once, however many tries the close takes. An issue with more than
 1,000 comments is closed with no closing comment, since the reporter cannot
-read them all to see whether one is there; once closed it counts as done, and
-the alert's next incident opens a new issue that says why.
+read them all to see whether one is there; once the reporter has
+closed it, it counts as done, and the alert's next incident opens a new
+issue. That new issue names the earlier one and says why only while the
+earlier issue still has the `alert` label (you closed it yourself and left
+the label on); an issue the reporter resolved has lost the label, so the new
+issue carries no link to it, and the closed issue is found by the label
+`alert-resolved`.
 
 If you close an issue yourself, the reporter leaves it closed. An alert that
 goes on repeating after that, because it is not yet acknowledged in the
@@ -1272,8 +1288,8 @@ passes `-clock-check`.
 | "reporter: the github-issues channel needs TI_GITHUB_ISSUES_TOKEN ..." or "... needs TI_GITHUB_ISSUES_REPO as owner/name ...", or "reporter: TI_GITHUB_API_URL must be an absolute URL ..." | That channel is set aside and the others still deliver (the rows above); no issue is opened | Fill in the name it gives in `/etc/trend-investing/secrets.env` ("Alerts as GitHub Issues", the token steps) |
 | "github-issues: GitHub answered 401 Unauthorized" (or 403 Forbidden, 404 Not Found, 5xx, or "rate limited"), or "github-issues: request failed" | That channel failed, so the alert is not delivered to it, and PagerDuty and ntfy are not held back. It is sent again at the next firing and its issue is made then; a rate limit is the same, and a firing that comes before GitHub lifts the limit fails the same way | 401: the token expired or was revoked, make a new one. 403 or 404: the token lacks Issues read and write on that one repository, or `TI_GITHUB_ISSUES_REPO` is misspelt. Otherwise wait for the next firing |
 | "github-issues: not tried: GitHub failed earlier in this firing (...)" or "github-issues: not tried: this firing's time for GitHub (the send timeout) has run out" | GitHub could not list the alert issues, ran out of `-send-timeout`, limited the rate, answered 5xx or could not be reached, earlier in the same firing, so the firing's later alerts were not sent to it. PagerDuty and ntfy had them first. All are sent again at the next firing | The reason in the brackets is the first failure; act on it as in the row above |
-| "github-issues: more than 1000 issues carry the alert label, so the list of alert issues is incomplete and none is written ..." | The channel fails every firing and writes nothing, since an issue it could not see would be opened twice. PagerDuty and ntfy still get every alert, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping. The reporter takes the label off every issue it closes, so what fills the list is issues you closed by hand | Remove the `alert` label only from closed alert issues whose incident is over, such as a single-event alert you have read (filter `label:alert is:closed`, select, Label), until fewer than 1,000 carry it. Leave the label on an issue you closed by hand while its alert still repeats (not yet acknowledged): without it the reporter cannot see that issue |
-| "github-issues: issue has more than 1000 comments, so whether this delivery was made cannot be told and nothing is written" | That issue takes no more comments, so its repeats and reminders fail on GitHub every firing; PagerDuty and ntfy still get them, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping | Acknowledge the alert (`operator acknowledge`) so it stops repeating; its issue then closes, with no closing comment, and the alert's next incident opens a new issue that names it |
+| "github-issues: more than 1000 issues carry the alert label, so the list of alert issues is incomplete and none is written ..." | The channel fails every firing and writes nothing, since an issue it could not see would be opened twice. PagerDuty and ntfy still get every alert, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping. The reporter takes the `alert` label off every issue it resolves (and adds `alert-resolved`), so what fills the list is issues you closed by hand, and single-event alerts you have read | Remove the `alert` label only from closed alert issues whose incident is over, such as a single-event alert you have read (filter `label:alert is:closed`, select, Label), until fewer than 1,000 carry it. Leave the label on an issue you closed by hand while its alert still repeats (not yet acknowledged): without it the reporter cannot see that issue |
+| "github-issues: issue has more than 1000 comments, so whether this delivery was made cannot be told and nothing is written" | That issue takes no more comments, so its repeats and reminders fail on GitHub every firing; PagerDuty and ntfy still get them, but each such firing fails the reporter's unit (its failure page) and sends no outside heartbeat ping | Acknowledge the alert (`operator acknowledge`) so it stops repeating; its issue then closes, with no closing comment and with its `alert` label taken off, and the alert's next incident opens a new issue that does not name it (find the closed one by the label `alert-resolved`) |
 | "github-issues: resolve: ... (given up after 3 firings: the next incident opens a fresh issue)" | GitHub refused, three firings running, to close the issue of a broken history made whole or a restored log cleared. The reporter stops trying, so the fault's next incident is not held back: it opens a new issue that names the old one | Close the issue it names by hand |
 | "github-issues: GitHub's listing named an issue without its number or its state" | GitHub's answer was not one the reporter can trust, so nothing is written to GitHub that firing | Usually clears at the next firing; if it persists, check `TI_GITHUB_API_URL` points at GitHub's API |
 | "github-issues: GitHub did not name the token's user", or "github-issues: GitHub named a comment without its author, so whether this delivery was made cannot be told and nothing is written" | The reporter cannot tell its own comments from others', so a delivery that must check them (a repeat, a reminder, a close, or a first delivery whose earlier issue is closed) writes nothing; the token's user is asked once a firing, so every such delivery that firing fails at once. A first delivery with no earlier issue still opens its issue | Usually clears at the next firing; if it persists, check `TI_GITHUB_API_URL` points at GitHub's API |

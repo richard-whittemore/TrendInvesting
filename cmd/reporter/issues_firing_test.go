@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -334,7 +335,7 @@ func TestAForgottenAlertWhoseCloseKeepsFailingOpensAFreshIssue(t *testing.T) {
 	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(10*time.Hour), time.Minute, record); err != nil {
 		t.Fatal(err)
 	}
-	if len(tr.issues) != 2 || !tr.issues[1].open || !strings.Contains(tr.issues[1].body, "#1") {
+	if len(tr.issues) != 2 || !tr.issues[1].open || !strings.Contains(tr.issues[1].body, "#1") || !strings.Contains(tr.issues[1].body, "left open earlier") || strings.Contains(tr.issues[1].body, "could not be closed") {
 		t.Fatalf("%d issues; the next incident must open a fresh issue naming #1: %+v", len(tr.issues), tr.issues)
 	}
 }
@@ -360,7 +361,7 @@ func TestAForgottenAlertsCloseIsRetriedWhileTheFaultIsBack(t *testing.T) {
 	if err := closeForgotten([]sender{s}, nil, seen, sent, repeats); err != nil {
 		t.Fatal(err)
 	}
-	if tr.issues[0].open || seen[channelKey(issuesChannel, a.Key)] || len(repeats) != 0 {
+	if tr.issues[0].open || seen[channelKey(issuesChannel, a.Key)] || repeats[closeTriesKey(a.Key)] != 0 || len(repeats) > 1 {
 		t.Fatalf("open=%v seen=%v repeats=%v: the retried close must close and drop its records", tr.issues[0].open, seen, repeats)
 	}
 	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(time.Hour), time.Minute, record); err != nil {
@@ -372,7 +373,8 @@ func TestAForgottenAlertsCloseIsRetriedWhileTheFaultIsBack(t *testing.T) {
 }
 
 // A resolved issue loses the alert label, so closed incidents leave the
-// listing and never fill it.
+// listing, and gains alert-resolved, so a triage job polling by label still
+// finds it.
 func TestAResolvedIssueLosesItsAlertLabel(t *testing.T) {
 	gh := &fakeGitHub{}
 	url := fakeGitHubServer(t, gh)
@@ -383,8 +385,8 @@ func TestAResolvedIssueLosesItsAlertLabel(t *testing.T) {
 	if err := githubChannel(t, url, time.Second).resolve(a.Key); err != nil {
 		t.Fatal(err)
 	}
-	if i := gh.snapshot()[0]; i.open || len(i.labels) != 0 {
-		t.Fatalf("open=%v labels=%v, want closed with no alert label", i.open, i.labels)
+	if i := gh.snapshot()[0]; i.open || len(i.labels) != 1 || i.labels[0] != "alert-resolved" {
+		t.Fatalf("open=%v labels=%v, want closed labelled alert-resolved only", i.open, i.labels)
 	}
 	if err := githubChannel(t, url, time.Second).send(a, 0); err != nil {
 		t.Fatal(err)
@@ -532,5 +534,132 @@ func TestAHandClosedUnlabelledIssueResolvesQuietly(t *testing.T) {
 	}
 	if issues := gh.snapshot(); len(issues) != 2 || !issues[1].open {
 		t.Fatalf("%d issues, want the next incident's new open issue", len(issues))
+	}
+}
+
+// giveUp runs the forgotten alert's close through every try GitHub refuses,
+// and returns the state the run keeps.
+func giveUp(t *testing.T, s *issuesSender, tr *fakeTracker, a report.Alert) (seen map[string]bool, sent map[string]time.Time, repeats map[string]int) {
+	t.Helper()
+	prefix := report.HistoryUnavailableKeyPrefix("joint")
+	seen, sent, repeats = map[string]bool{}, map[string]time.Time{}, map[string]int{}
+	s.records = repeats
+	record := func() error { return nil }
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0, time.Minute, record); err != nil {
+		t.Fatal(err)
+	}
+	forget(prefix, seen, sent, repeats)
+	tr.closeFailing = fmt.Errorf("GitHub answered 422")
+	_ = closeForgotten([]sender{s}, []string{prefix}, seen, sent, repeats)
+	for n := 1; n < maxCloseTries; n++ {
+		if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(time.Duration(n)*time.Hour), time.Minute, record); err != nil {
+			t.Fatal(err)
+		}
+		_ = closeForgotten([]sender{s}, nil, seen, sent, repeats)
+	}
+	tr.closeFailing = nil
+	return seen, sent, repeats
+}
+
+func forgottenAlert() report.Alert {
+	a := haltAlert()
+	a.Key, a.Repeat = report.HistoryUnavailableKeyPrefix("joint")+"7", false
+	return a
+}
+
+// An issue whose close was given up never suppresses a later incident, even
+// after its replacement is resolved and leaves the label-keyed listing: the
+// replacement chain is the local record's, not the listing's (ADR 0019,
+// "Alerting": once per incident).
+func TestAnAbandonedIssueNeverSuppressesALaterIncident(t *testing.T) {
+	tr := &fakeTracker{}
+	s := newIssues(tr)
+	a := forgottenAlert()
+	seen, sent, repeats := giveUp(t, s, tr, a)
+	record := func() error { return nil }
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(10*time.Hour), time.Minute, record); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.issues) != 2 {
+		t.Fatalf("%d issues, want the replacement", len(tr.issues))
+	}
+	// The replacement's incident clears and is resolved.
+	forget(report.HistoryUnavailableKeyPrefix("joint"), seen, sent, repeats)
+	if err := closeForgotten([]sender{s}, []string{report.HistoryUnavailableKeyPrefix("joint")}, seen, sent, repeats); err != nil {
+		t.Fatal(err)
+	}
+	if tr.issues[1].open || tr.issues[1].labelled() {
+		t.Fatalf("the replacement is open=%v labelled=%v, want resolved", tr.issues[1].open, tr.issues[1].labelled())
+	}
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(20*time.Hour), time.Minute, record); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.issues) != 3 || !tr.issues[2].open {
+		t.Fatalf("%d issues, want a third, open, for the later incident", len(tr.issues))
+	}
+}
+
+// A crash after the replacement was created, before the run saved its state,
+// opens no second replacement on restart: the replacement is found by its
+// marker, and the abandoned issue's number was saved when it was given up.
+func TestACrashAfterTheReplacementOpensNoSecondOne(t *testing.T) {
+	tr := &fakeTracker{}
+	s := newIssues(tr)
+	a := forgottenAlert()
+	seen, sent, repeats := giveUp(t, s, tr, a)
+	savedSeen, savedRepeats := maps.Clone(seen), maps.Clone(repeats)
+	if err := deliver([]sender{s}, a, seen, sent, repeats, t0.Add(10*time.Hour), time.Minute, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// The process died before the state was saved: the run restarts from it.
+	s2 := newIssues(tr)
+	s2.records = savedRepeats
+	if err := deliver([]sender{s2}, a, savedSeen, map[string]time.Time{}, savedRepeats, t0.Add(10*time.Hour), time.Minute, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.issues) != 2 {
+		t.Fatalf("%d issues, want one replacement only", len(tr.issues))
+	}
+}
+
+// A close that was not tried (GitHub down or the firing's time spent) is not
+// one of the three tries.
+func TestAnUntriedCloseIsNotCounted(t *testing.T) {
+	for name, fail := range map[string]func(s *issuesSender, tr *fakeTracker){
+		"not tried": func(s *issuesSender, _ *fakeTracker) { s.down = errUnavailable },
+		"unavailable": func(_ *issuesSender, tr *fakeTracker) {
+			tr.closeFailing = fmt.Errorf("request failed (%w)", errUnavailable)
+		},
+		"listing": func(_ *issuesSender, tr *fakeTracker) { tr.failing = fmt.Errorf("request failed (%w)", errUnavailable) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr := &fakeTracker{}
+			s := newIssues(tr)
+			prefix := report.HistoryUnavailableKeyPrefix("joint")
+			a := forgottenAlert()
+			seen, sent, repeats := map[string]bool{}, map[string]time.Time{}, map[string]int{}
+			s.records = repeats
+			if err := deliver([]sender{s}, a, seen, sent, repeats, t0, time.Minute, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			forget(prefix, seen, sent, repeats)
+			for n := range maxCloseTries + 2 {
+				s := newIssues(tr)
+				s.records = repeats
+				fail(s, tr)
+				if err := closeForgotten([]sender{s}, []string{prefix}, seen, sent, repeats); err == nil {
+					t.Fatalf("firing %d: an untried close is not an error", n)
+				}
+			}
+			if !seen[channelKey(issuesChannel, a.Key)] || repeats[closeTriesKey(a.Key)] != 0 || len(repeats) > 1 {
+				t.Fatalf("seen=%v repeats=%v: an untried close must keep its record", seen, repeats)
+			}
+			tr.failing, tr.closeFailing = nil, nil
+			s = newIssues(tr)
+			s.records = repeats
+			if err := closeForgotten([]sender{s}, nil, seen, sent, repeats); err != nil || tr.issues[0].open {
+				t.Fatalf("err=%v open=%v: the close must still be made", err, tr.issues[0].open)
+			}
+		})
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -127,12 +128,12 @@ func (f *fakeTracker) CloseIssue(ctx context.Context, number int) error {
 	return nil
 }
 
-func (f *fakeTracker) Unlabel(ctx context.Context, number int) error {
+func (f *fakeTracker) MarkResolved(ctx context.Context, number int) error {
 	if err := f.call(ctx); err != nil {
 		return err
 	}
 	f.writes++
-	f.issues[number-1].labels = nil
+	f.issues[number-1].labels = []string{"alert-resolved"}
 	return nil
 }
 
@@ -438,13 +439,17 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		g.issues[n-1].comments = append(g.issues[n-1].comments, in.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("{}"))
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/labels"):
+		i := g.issues[issueNumber(r.URL.Path)-1]
+		i.labels = append(i.labels, in.Labels...)
+		_, _ = w.Write([]byte("[]"))
 	case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/labels/"+alertLabel):
 		i := g.issues[issueNumber(r.URL.Path)-1]
 		if !i.labelled() {
 			http.Error(w, `{"message":"Label does not exist"}`, http.StatusNotFound)
 			return
 		}
-		i.labels = nil
+		i.labels = slices.DeleteFunc(i.labels, func(l string) bool { return l == alertLabel })
 		_, _ = w.Write([]byte("[]"))
 	case r.Method == http.MethodPatch:
 		if g.patchFailures > 0 {

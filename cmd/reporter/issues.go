@@ -33,7 +33,12 @@ const (
 	issuesChannel = "github-issues"
 	// alertLabel is the label every alert issue carries, and the one the
 	// alert issues are listed by.
-	alertLabel          = "alert"
+	alertLabel = "alert"
+	// resolvedLabel replaces alertLabel on an issue the reporter resolved, so
+	// the issue leaves the views and polls keyed by alertLabel (the reporter's
+	// own listing, bounded) yet stays findable by a job that polls resolved
+	// incidents by label.
+	resolvedLabel       = "alert-resolved"
 	defaultGitHubAPIURL = "https://api.github.com"
 	// issueEvidenceRows is how many of the journal's last records, and of each
 	// query's last rows, an issue shows.
@@ -51,8 +56,9 @@ const (
 	maxCommentPages = 10
 	// maxDeliveryRequests bounds the requests of one delivery: the listing,
 	// the channel's own identity, every page of the issue's comments, then a
-	// write, a close and the label's removal.
-	maxDeliveryRequests = maxIssuePages + 1 + maxCommentPages + 3
+	// write, a close, the resolved label's addition and the alert label's
+	// removal.
+	maxDeliveryRequests = maxIssuePages + 1 + maxCommentPages + 4
 	// maxCloseTries is how many firings try to close the issue of an alert
 	// the run forgot before its record is dropped, so that a close GitHub
 	// keeps refusing never holds back the next incident (closeForgotten).
@@ -83,9 +89,10 @@ type issueTracker interface {
 	Comment(ctx context.Context, number int, body string) error
 	// CloseIssue closes an issue.
 	CloseIssue(ctx context.Context, number int) error
-	// Unlabel takes the alert label off an issue, so it leaves the listing;
-	// an issue without it already is unlabelled.
-	Unlabel(ctx context.Context, number int) error
+	// MarkResolved gives an issue the resolved label and takes the alert
+	// label off it, so it leaves the listing; an issue without the alert
+	// label already is marked.
+	MarkResolved(ctx context.Context, number int) error
 }
 
 // issuesSender delivers an alert as an issue: the first delivery opens it, a
@@ -123,10 +130,13 @@ type issuesSender struct {
 	// down is the tracker's failure earlier in the firing.
 	down error
 	// records is the run's state file's counts (repeats), where the channel
-	// keeps, across firings, the issue of an alert whose close was given up
+	// keeps, across firings, the numbers of the issues whose close was given up
 	// (unclosedKey), so its next incident opens a fresh issue; the run sets
 	// it once the state file is read.
 	records map[string]int
+	// closing is, for each key resolve has read the issue of in this firing,
+	// that issue's number.
+	closing map[string]int
 }
 
 func (*issuesSender) name() string { return issuesChannel }
@@ -267,10 +277,14 @@ func (s *issuesSender) addComment(a report.Alert, id, heading string) error {
 	return s.note(s.tracker.Comment(ctx, issue.Number, fitIssueText(heading+"\n\n"+s.text(a), "", "\n\n"+id)), false)
 }
 
-// unclosedKey is the record (issuesSender.records) of an alert whose
-// issue's close was given up: its value is that issue's number, or 0 until
-// the next incident's first delivery finds it.
-func unclosedKey(key string) string { return channelKey(issuesChannel, "unclosed:"+key) }
+// unclosedKey is the record (issuesSender.records) that issue number n of an
+// alert was left open when its close was given up. It stays until that issue
+// leaves the listing, so the issue never suppresses a later incident, however
+// the issues that replaced it end: the replacement chain is the local
+// record's, never the listing's.
+func unclosedKey(key string, n int) string {
+	return channelKey(issuesChannel, fmt.Sprintf("unclosed:%d:%s", n, key))
+}
 
 // closeTriesKey is the record (closeForgotten's counts) of how many firings
 // have tried and failed to close the issue of an alert the run forgot.
@@ -282,7 +296,8 @@ func closeTriesKey(key string) string { return channelKey(issuesChannel, "close-
 // issues are replaced, with a note that names them: one closed with more
 // comments than are read, taken as closed by overflow, since whether its
 // closing comment is there cannot be told; and one whose close was given up
-// (closeForgotten), which is left open.
+// (closeForgotten, unclosedKey), which is left open and is replaced however
+// the issues that replaced it before have ended.
 func (s *issuesSender) open(a report.Alert) error {
 	ctx, cancel, err := s.begin()
 	if err != nil {
@@ -295,14 +310,12 @@ func (s *issuesSender) open(a report.Alert) error {
 		return s.note(err, true)
 	}
 	note := ""
-	if n, unclosed := s.records[unclosedKey(a.Key)]; unclosed {
-		if found && (n == 0 || n == issue.Number) {
-			s.records[unclosedKey(a.Key)] = issue.Number
-			note = fmt.Sprintf("The earlier issue of this alert, #%d, could not be closed when its incident cleared, so this new incident has its own issue; close #%d by hand.\n\n", issue.Number, issue.Number)
-		} else {
-			// The fresh issue was made by a send whose answer was lost, or
-			// the old one is gone from the listing.
-			delete(s.records, unclosedKey(a.Key))
+	if found && s.records[unclosedKey(a.Key, issue.Number)] > 0 {
+		// The newest issue is one left open when its close was given up: this
+		// incident is new, whatever state that issue is in, and has its own.
+		note = fmt.Sprintf("The earlier issue of this alert, #%d, was left open earlier; this new incident has its own issue.\n\n", issue.Number)
+		if issue.Open {
+			note = fmt.Sprintf("The earlier issue of this alert, #%d, was left open earlier; this new incident has its own issue; close #%d by hand.\n\n", issue.Number, issue.Number)
 		}
 	}
 	if note == "" && found && issue.Open {
@@ -328,7 +341,6 @@ func (s *issuesSender) open(a report.Alert) error {
 	if _, err = s.tracker.Create(ctx, title, fitIssueText(note+s.text(a), evidence, "\n\n"+marker), []string{alertLabel}); err != nil {
 		return s.note(err, false)
 	}
-	delete(s.records, unclosedKey(a.Key))
 	return nil
 }
 
@@ -351,6 +363,10 @@ func (s *issuesSender) resolve(key string) error {
 	if !found {
 		return nil
 	}
+	if s.closing == nil {
+		s.closing = map[string]int{}
+	}
+	s.closing[key] = issue.Number
 	id := resolvedMarker(key)
 	done, err := s.hasComment(ctx, issue.Number, id)
 	overflow := errors.Is(err, errTooManyComments)
@@ -370,7 +386,7 @@ func (s *issuesSender) resolve(key string) error {
 			return s.note(err, false)
 		}
 	}
-	return s.note(s.tracker.Unlabel(ctx, issue.Number), false)
+	return s.note(s.tracker.MarkResolved(ctx, issue.Number), false)
 }
 
 // issueCutNote ends a text cut to fit GitHub's limit.
@@ -434,11 +450,14 @@ func closeAcknowledged(senders []sender, alerts []report.Alert, seen map[string]
 // not its fault is back, and then drops the tracker's record of it, so the
 // same key arising again is a new incident: a new issue, which notifies (ADR
 // 0019, "Alerting": once per incident). It runs after every alert is
-// delivered, so a slow tracker never holds back a page. A failed close is
-// counted (closeTriesKey) and tried again at the next firing; after
-// maxCloseTries the record is dropped all the same and the alert is recorded
-// as unclosed (unclosedKey), so the next incident opens a fresh issue that
-// names the one left open, and an unfinished close never suppresses it.
+// delivered, so a slow tracker never holds back a page. A close that
+// GitHub refused is counted (closeTriesKey) and tried again at the next
+// firing; one that was not tried (the tracker failed earlier in the firing or
+// its time was spent) or found the tracker unavailable is tried again and
+// not counted. After maxCloseTries the record is dropped all the same and
+// the issue's number is recorded as unclosed (unclosedKey), so the next
+// incident opens a fresh issue that names the one left open, and an
+// unfinished close never suppresses it.
 func closeForgotten(senders []sender, prefixes []string, seen map[string]bool, sent map[string]time.Time, repeats map[string]int) error {
 	var failures []error
 	for _, s := range senders {
@@ -466,7 +485,21 @@ func closeForgotten(senders []sender, prefixes []string, seen map[string]bool, s
 					delete(repeats, k)
 				}
 			}
+			delete(r.closing, key)
 			if err := r.resolve(key); err != nil {
+				// A close counts as a try only when it was made: not when
+				// the tracker was not asked (it failed earlier in the
+				// firing, or the firing's time was spent) or was
+				// unavailable (a rate limit, a server error, a timeout).
+				number, read := r.closing[key]
+				if !read || errors.Is(err, errUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errFiringOver) {
+					// The close stays due at the next firing, with no try spent.
+					if _, ok := repeats[closeTriesKey(key)]; !ok {
+						repeats[closeTriesKey(key)] = 0
+					}
+					failures = append(failures, fmt.Errorf("%s: resolve: %w", s.name(), err))
+					continue
+				}
 				tries := repeats[closeTriesKey(key)] + 1
 				if tries < maxCloseTries {
 					repeats[closeTriesKey(key)] = tries
@@ -474,14 +507,14 @@ func closeForgotten(senders []sender, prefixes []string, seen map[string]bool, s
 					continue
 				}
 				drop()
-				if _, ok := repeats[unclosedKey(key)]; !ok {
-					repeats[unclosedKey(key)] = 0
-				}
+				repeats[unclosedKey(key, number)] = 1
 				failures = append(failures, fmt.Errorf("%s: resolve: %w (given up after %d firings: the next incident opens a fresh issue)", s.name(), err, tries))
 				continue
 			}
 			drop()
-			delete(repeats, unclosedKey(key))
+			if number, read := r.closing[key]; read {
+				delete(repeats, unclosedKey(key, number))
+			}
 		}
 	}
 	return errors.Join(failures...)
@@ -810,12 +843,17 @@ func (g *githubTracker) CloseIssue(ctx context.Context, number int) error {
 	return nil
 }
 
-// Unlabel takes the alert label off the issue
-// (https://docs.github.com/en/rest/issues/labels); GitHub's 404, the label
-// not on the issue, is taken as done. The issue then leaves the listing.
-func (g *githubTracker) Unlabel(ctx context.Context, number int) error {
+// MarkResolved gives the issue the resolved label, then takes the alert label
+// off it (https://docs.github.com/en/rest/issues/labels), in that order so a
+// failure between the two leaves the issue listed and the call tried again;
+// GitHub's 404, the alert label not on the issue, is taken as done. The issue
+// then leaves the listing.
+func (g *githubTracker) MarkResolved(ctx context.Context, number int) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if _, err := g.call(ctx, http.MethodPost, fmt.Sprintf("/issues/%d/labels", number), map[string][]string{"labels": {resolvedLabel}}, nil); err != nil {
+		return err
+	}
 	if _, err := g.call(ctx, http.MethodDelete, fmt.Sprintf("/issues/%d/labels/%s", number, alertLabel), nil, nil); err != nil {
 		var status *statusError
 		if !errors.As(err, &status) || status.code != http.StatusNotFound {
