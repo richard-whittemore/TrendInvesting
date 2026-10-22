@@ -1325,6 +1325,12 @@ func (b BoostFigures) validateRejections() []error {
 			for _, err := range w.check(true) {
 				errs = append(errs, fmt.Errorf("a restored sale's order: %w", err))
 			}
+			// Its end is the gate's, to the second (Status, EndedAt), so
+			// recovery restores it as recorded (ADR 0026); a fraction of a
+			// second would be truncated away, past the zero time to none.
+			if !o.EndedAt.IsZero() && o.EndedAt.Nanosecond() != 0 {
+				errs = append(errs, errors.New("a restored sale's order's ended_at must be a whole second; the gate holds it to the second"))
+			}
 		}
 	}
 	// A retired order is one retired as never sent: named once, in no list

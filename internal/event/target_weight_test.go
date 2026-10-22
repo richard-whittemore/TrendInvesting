@@ -1094,6 +1094,12 @@ func TestBoostRestoredSaleOrderValidate(t *testing.T) {
 		}, "venue order ID"},
 		"ended with no time": {func(o *event.BoostRestoredSaleOrder) { o.Status = event.OrderLifecycleStatusCanceled }, "ended_at"},
 		"a time with no end": {func(o *event.BoostRestoredSaleOrder) { o.EndedAt = twSession.Add(-time.Hour) }, "ended_at"},
+		"ended at a fraction of a second": {func(o *event.BoostRestoredSaleOrder) {
+			o.Status, o.EndedAt = event.OrderLifecycleStatusCanceled, twSession.Add(-time.Hour+500*time.Millisecond)
+		}, "whole second"},
+		"ended half a second past the zero time": {func(o *event.BoostRestoredSaleOrder) {
+			o.Status, o.EndedAt = event.OrderLifecycleStatusCanceled, time.Time{}.Add(500*time.Millisecond)
+		}, "whole second"},
 		"ended as submitted": {func(o *event.BoostRestoredSaleOrder) {
 			o.Status, o.EndedAt = event.OrderLifecycleStatusSubmitted, twSession.Add(-time.Hour)
 		}, "status"},

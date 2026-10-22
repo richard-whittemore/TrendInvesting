@@ -1409,8 +1409,8 @@ func (h *Handler) learnVenueID(id, venueID string) {
 
 // refuseVenue refuses record in when it would give order id the venue order
 // ID venueID that another order the run lists (the watched order, those
-// awaiting the venue's verdict, the working ones and the run's own live sale
-// back to 98%, as the next decision records each) already carries: a
+// awaiting the venue's verdict, the working ones and the run's own sale back
+// to 98%, live or ended, as the next decision records each) already carries: a
 // venue order ID names one order, and the failure is the input's, refused
 // when it arrives rather than found when the decision is written (ADR 0026,
 // point 5, amended 2026-10-18; fail closed, AGENTS.md). venueID is never
