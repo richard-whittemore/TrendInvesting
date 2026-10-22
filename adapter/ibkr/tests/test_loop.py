@@ -975,6 +975,189 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(self.settle_ended_run(), 0)
         self.assertEqual(pending.never_sent(), [])
 
+    def found_at_ibkr_stopped_after(self, write):
+        """Retire session:1's order, then stop the relay as IBKR is found showing it, just after one write of the record.
+
+        write names the write the stop follows: "decision" (the at-broker
+        decision), "mark" (the at-broker mark) or "strike" (the queued
+        retirements struck off). Returns the fresh run's engine.
+        """
+        second = self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        order = json.loads((TESTDATA / "paper_released.json").read_text())
+        retire_order(pending, order, "session over", "its session is over", "adapter",
+                     datetime(2026, 10, 16, 20, 30, tzinfo=timezone.utc), SESSION, "session:1")
+        self.assertEqual(len(self.queued_retirements()), 1)
+
+        def after(real, applies):
+            def wrapped(target, *args):
+                real(target, *args)
+                if applies(*args):
+                    raise OSError("stopped after the {} was written".format(write))
+            return wrapped
+        cls, name, applies = {
+            "decision": (PendingInput, "record_decision", lambda d: d.get("decision") == "at-broker"),
+            "mark": (PendingInput, "mark", lambda cid, state: state == "at-broker"),
+            "strike": (Outbox, "strike_all", lambda ids: bool(list(ids))),
+        }[write]
+        relay = relay_module.Relay(connect=lambda: self.engine, sender=SimpleNamespace(check=print, send=print),
+                                   pending=pending, to_request=lambda order, session: order, today=lambda: SESSION,
+                                   broker_orders=lambda: SimpleNamespace(open_orders=[SimpleNamespace(
+                                       client_order_id="tw-paper-1")], executions=[]))
+        with mock.patch.object(cls, name, after(getattr(cls, name), applies)):
+            with self.assertRaises(OSError):
+                relay.exchange(pending.load())
+        relay.close()
+        return second
+
+    def queued_retirements(self):
+        return [e for e in Outbox(self.pending + OUTBOX_SUFFIX).load() if e["event_type"] == "execution.order.retired"]
+
+    def test_a_stop_after_any_write_of_the_at_broker_record_leaves_the_order_refused_by_settle_ended_run(self):
+        # The broker's word is written durably first (the decision, then the
+        # mark) and the queued retirements are struck off last, so a stop or
+        # a failed write after any one write leaves the order readable as at
+        # the broker: settle-ended-run refuses it, an earlier run's input
+        # counts it sent, and the next start, even with IBKR no longer
+        # showing it, finishes the record and stops at it with no retirement
+        # of it left to reach an engine (fail closed, AGENTS.md; ADR 0026,
+        # amended 2026-10-22, "The adapter").
+        for write in ("decision", "mark", "strike"):
+            with self.subTest(stopped_after=write):
+                self.setUp()
+                second = self.found_at_ibkr_stopped_after(write)
+                pending = PendingInput(self.pending)
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(self.settle_ended_run(), 0)
+                self.assertEqual(pending.never_sent(), [])
+                self.assertIn("order tw-paper-1 not settled", printed.getvalue())
+                ended = relay_module.earlier_run(pending, str(second.path))
+                self.assertEqual(ended.unsent, (), "an order the relay found at IBKR was sent")
+                restarted = relay_module.Relay(
+                    connect=lambda: self.engine, sender=SimpleNamespace(check=print, send=print), pending=pending,
+                    to_request=lambda order, session: order, today=lambda: SESSION,
+                    broker_orders=lambda: SimpleNamespace(open_orders=[], executions=[]))
+                with self.assertRaises(relay_module.NeverSentAtBroker):
+                    restarted.exchange(pending.load())
+                restarted.close()
+                self.assertEqual(pending.handovers(), {"tw-paper-1": "at-broker"})
+                self.assertEqual(self.queued_retirements(), [], "no retirement of an order IBKR showed is queued")
+
+    def test_marking_sent_an_order_stopped_at_the_broker_strikes_any_retirement_of_it_still_queued(self):
+        # A stop after the at-broker mark and before the strike leaves a
+        # retirement queued; the owner's --sent strikes it first, so it never
+        # reaches the engine once the order is marked sent (ADR 0026, amended
+        # 2026-10-22, "The adapter"; fail closed, AGENTS.md).
+        self.found_at_ibkr_stopped_after("mark")
+        self.assertEqual(len(self.queued_retirements()), 1)
+        self.assertEqual(relay_main(["resolve", self.pending, "tw-paper-1", "--sent", "--reason",
+                                     "IBKR shows it working"]), 0)
+        self.assertEqual(PendingInput(self.pending).handovers(), {"tw-paper-1": "sent"})
+        self.assertEqual(self.queued_retirements(), [])
+
+    def committed_report(self, event_type, version, payload, input_id=None):
+        """A report input engine.log commits after the waiting input, as the ended run's engine read it."""
+        raw = json.dumps(payload, separators=(",", ":"))
+        self.engine.decide({"id": input_id or "later:" + event_type, "type": event_type, "envelope_version": 1,
+                            "schema_version": version, "event_time": SESSION_CLOSED,
+                            "recorded_at": SESSION_CLOSED, "sequence": self.engine.next_sequence,
+                            "source": SOURCE, "configuration_hash": CONFIGURATION_HASH,
+                            "strategy_version": STRATEGY_VERSION, "payload": payload,
+                            "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+
+    def test_settle_ended_run_prints_only_the_orders_the_owner_must_act_on_and_counts_the_sent_ones(self):
+        # An ordinary sent order the ended log reports on needs nothing of the
+        # owner: it is counted in one line, never listed as not settled, so
+        # the refusals the owner must act on (at-broker here) stand out, and
+        # the command closes by saying their sale stays attempted.
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        pending.mark("tw-paper-1", "sent")
+        self.committed_report(LIFECYCLE_TYPE, 2, {
+            "account_id": "DU0000001", "client_order_id": "tw-paper-1", "order_id": "order:11:7",
+            "instrument_id": "SPY", "side": "buy", "status": "submitted", "quantity": 9, "limit_price": 401.5,
+            "occurred_at": "2026-10-16T20:30:00Z", "message": ""})
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual(printed.getvalue().splitlines(), [
+            "1 order(s) the ended run sent or its log already retires: nothing to settle",
+            "0 order(s) settled as never sent in {} (0 already settled); approve the fresh run without "
+            "-never-sent".format(pending.never_sent_path)])
+        pending.mark("tw-paper-1", "at-broker")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.assertEqual(self.settle_ended_run(), 0)
+        lines = printed.getvalue().splitlines()
+        self.assertEqual(len(lines), 3, lines)
+        self.assertTrue(lines[0].startswith("order tw-paper-1 not settled: the relay found IBKR showing it"), lines)
+        self.assertEqual(lines[1:], [
+            "1 order(s) not settled above: each one's sale stays attempted in the fresh run until you act on it as "
+            "its line says",
+            "0 order(s) settled as never sent in {} (0 already settled); approve the fresh run without "
+            "-never-sent".format(pending.never_sent_path)])
+
+    def test_settle_ended_run_never_settles_a_client_order_id_released_twice_or_decided_in_another_run(self):
+        # A client order ID the ended log released more than once may have
+        # been sent under one release, and a last decision another run
+        # recorded is not this run's evidence: neither is ever settled, so a
+        # re-released ID is never retired though sent (fail closed, AGENTS.md).
+        self.engine.decisions["session:0"] = [released_order()]
+        pending = PendingInput(self.pending)
+        self.committed_by_the_first_run("session:0")
+        pending.mark("tw-paper-1", "sent")
+        pending.clear()
+        self.committed_by_the_first_run("session:1")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual(pending.never_sent(), [])
+        self.assertIn("order tw-paper-1 not settled: the ended log released it more than once", printed.getvalue())
+
+        self.setUp()
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        pending.mark("tw-paper-1", "never-sent")
+        pending.record_decision({"client_order_id": "tw-paper-1", "decision": "never-sent", "input_id": "session:1",
+                                 "run": "operator-run-approved:another-run", "reason": "IBKR shows nothing",
+                                 "at": "2026-10-16T20:30:00Z", "session_date": "2026-10-16"})
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual(pending.never_sent(), [])
+        self.assertIn("order tw-paper-1 not settled: its last decision was recorded in run "
+                      "operator-run-approved:another-run", printed.getvalue())
+
+    def test_settle_ended_run_with_no_input_waiting_is_refused_for_a_log_that_is_not_the_run_that_ended(self):
+        # With nothing awaiting its reply, the run the adapter's decisions
+        # last record must be the log's run, so --journal can only name the
+        # run that ended (fail closed, AGENTS.md).
+        pending = PendingInput(self.pending)
+        self.committed_by_the_first_run("session:1")
+        pending.record_refusal("session:1", "tw-paper-1", "no contract ID")
+        resolve(pending, "tw-paper-1", "never-sent", "IBKR shows nothing under tw-paper-1", today=SESSION)
+        pending.clear()
+        second = self.fresh_run("engine.log", "run-2.log")
+        printed = io.StringIO()
+        with contextlib.redirect_stderr(printed):
+            self.assertEqual(relay_main(["settle-ended-run", self.pending, "--journal", str(second.path), "--by",
+                                         "owner", "--reason", "the wrong log"]), 1)
+        self.assertIn("not the run that ended", printed.getvalue())
+        self.assertEqual(pending.never_sent(), [])
+        self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual([l["retirement"]["client_order_id"] for l in pending.never_sent()], ["tw-paper-1"])
+        # Decisions that record no run cannot say which run ended: refused.
+        self.setUp()
+        pending = PendingInput(self.pending)
+        self.committed_by_the_first_run("session:1")
+        pending.clear()
+        pending.record_decision({"client_order_id": "tw-paper-1", "decision": "never-sent", "input_id": "session:1",
+                                 "reason": "IBKR shows nothing", "at": "2026-10-16T20:30:00Z",
+                                 "session_date": "2026-10-16"})
+        self.assertEqual(self.settle_ended_run(), 1)
+        self.assertEqual(pending.never_sent(), [])
+
     def committed_by_the_first_run(self, input_id):
         """An input engine.log commits, as the relay sent it, its reply's orders as the engine scripts them."""
         payload = {"period_end": SESSION_CLOSED, "instrument_ids": ["SPY"]}
@@ -1032,6 +1215,89 @@ class LoopTests(unittest.TestCase):
         recorded = [d for d in pending.decisions() if d.get("outbox")]
         self.assertEqual([[e["id"] for e in d["outbox"]] for d in recorded],
                          [["order-retired:tw-paper-1", "order-retired:tw-paper-1:session:1"]])
+
+    def test_a_newline_terminated_damaged_settlement_line_is_refused_never_dropped_as_torn(self):
+        # Only the file's unterminated last bytes can be a write cut short; a
+        # whole damaged line followed by blank space is evidence, so the
+        # command refuses and changes nothing (fail closed, AGENTS.md rule 6).
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        Path(pending.never_sent_path).write_text("not json\n   ", encoding="utf-8")
+        self.assertEqual(self.settle_ended_run(), 1)
+        self.assertEqual(Path(pending.never_sent_path).read_text(encoding="utf-8"), "not json\n   ")
+        self.assertEqual(pending.handovers(), {})
+
+    def test_a_decision_cut_short_mid_write_leaves_the_decisions_readable_and_settle_ended_run_runs_again(self):
+        # A decision is written whole or not at all (a temporary file renamed
+        # over the decisions file), so a stop mid-write never leaves a torn
+        # line that would stop every later settlement and resolve (fail
+        # closed, AGENTS.md).
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        pending = PendingInput(self.pending)
+        real_open = open
+
+        class CutShort:
+            def __init__(self, f):
+                self.f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.f.close()
+
+            def write(self, text):
+                self.f.write(text[:len(text) // 2])
+                self.f.flush()
+                raise OSError("the power went mid-write")
+
+            def __getattr__(self, name):
+                return getattr(self.f, name)
+
+        def cut_short(path, mode="r", *args, **kwargs):
+            f = real_open(path, mode, *args, **kwargs)
+            if str(path).startswith(pending.decisions_path) and mode in ("a", "w", "ab", "wb"):
+                return CutShort(f)
+            return f
+        with mock.patch.object(relay_module, "open", cut_short, create=True):
+            with self.assertRaises(OSError):
+                settle_ended_run(pending, self.engine_log, "owner", "the run ended")
+        pending.settled_orders()
+        self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual([l["retirement"]["client_order_id"] for l in pending.never_sent()], ["tw-paper-1"])
+
+    def test_settle_ended_run_settles_an_earlier_inputs_never_sent_decision_recorded_with_no_input(self):
+        # A decision an earlier relay recorded with no input is read as the
+        # input's the ended log shows releasing that client order ID, but
+        # only when the log released it exactly once (fail closed, AGENTS.md).
+        pending = PendingInput(self.pending)
+        self.committed_by_the_first_run("session:1")
+        pending.clear()
+        Path(pending.decisions_path).write_text(json.dumps({
+            "client_order_id": "tw-paper-1", "decision": "never-sent", "reason": "IBKR shows nothing",
+            "at": "2026-10-16T20:30:00Z", "session_date": "2026-10-16"}) + "\n", encoding="utf-8")
+        self.committed_by_the_first_run("session:2")
+        self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual([(l["input_id"], l["evidence"], l["retirement"]["client_order_id"])
+                          for l in pending.never_sent()], [("session:1", "never-sent", "tw-paper-1")])
+
+    def test_settle_ended_run_is_refused_while_the_ended_runs_engine_still_holds_its_log(self):
+        # The engine holds an exclusive lock on its durable log while it runs
+        # (cmd/engine createLogFile): a run whose engine still runs has not
+        # ended, so nothing is settled for it (fail closed, AGENTS.md).
+        self.left_waiting_by_the_first_run("session:1", commits=True)
+        held = os.open(self.engine_log, os.O_WRONLY)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            printed = io.StringIO()
+            with contextlib.redirect_stderr(printed):
+                self.assertEqual(self.settle_ended_run(), 1)
+            self.assertIn("still runs", printed.getvalue())
+        finally:
+            os.close(held)
+        self.assertEqual(PendingInput(self.pending).never_sent(), [])
+        self.assertEqual(self.settle_ended_run(), 0)
+        self.assertEqual(len(PendingInput(self.pending).never_sent()), 1)
 
     def test_settle_ended_run_repairs_a_torn_last_line(self):
         # A write cut short (a power loss under an appending writer) leaves a

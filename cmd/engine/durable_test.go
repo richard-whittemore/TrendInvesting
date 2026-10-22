@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -379,6 +380,34 @@ func TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog(t *testing.T) {
 	_ = file.Close()
 	if _, err := os.Stat(filepath.Join(root, "other", "run.log")); err != nil {
 		t.Fatalf("the log is not in the link target's parent: %v", err)
+	}
+}
+
+// TestTheEngineHoldsItsDurableLogLockedWhileItRuns pins the proof the IBKR
+// adapter's settle-ended-run reads that a run has ended (ADR 0019, amended
+// 2026-10-22): the engine holds an exclusive lock on the log it streams for
+// as long as it runs, so no other process can share it until it stops.
+func TestTheEngineHoldsItsDurableLogLockedWhileItRuns(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+	logPath := filepath.Join(dir, "run.log")
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "run.jsonl"), logPath: logPath, build: "test-build"})
+	shared := func() error {
+		file, err := os.Open(logPath) // #nosec G304 -- the test's own log.
+		if err != nil {
+			t.Fatalf("open the log: %v", err)
+		}
+		defer func() { _ = file.Close() }()
+		return syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	}
+	if err := shared(); !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Fatalf("a shared lock on the running engine's log = %v, want EWOULDBLOCK: the engine holds it", err)
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("the run: %v", err)
+	}
+	if err := shared(); err != nil {
+		t.Fatalf("a shared lock on the stopped engine's log = %v, want it granted", err)
 	}
 }
 

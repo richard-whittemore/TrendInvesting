@@ -145,7 +145,7 @@ reconciliation (ADR 0025 point 5) reports its shares as an unexplained
 position difference and the engine goes Degraded then (ADR 0019) until the
 reconciliation runbook's recovery settles it.
 """
-from collections import namedtuple
+from collections import Counter, namedtuple
 import argparse
 import contextlib
 import fcntl
@@ -277,7 +277,7 @@ RUN_ENDED_FIELDS = ("at", "input", "outbox", "reason", "refused", "run", "sessio
 # found settled already, each order whose earlier settlement it withdrew and
 # each it refused to settle, as (client order ID, why), and the torn last
 # line it dropped from the settlement file (None when there was none).
-EndedRunSettlement = namedtuple("EndedRunSettlement", ("settled", "kept", "withdrawn", "refused", "torn"))
+EndedRunSettlement = namedtuple("EndedRunSettlement", ("settled", "kept", "withdrawn", "refused", "sent", "torn"))
 # The adapter's settlement of an order an ended run released and it never
 # sent (settle_ended_run), one line of PendingInput.never_sent_path, as
 # internal/event NeverSentSettlement reads it: its fields, its retirement's,
@@ -685,11 +685,37 @@ class PendingInput:
             return []
 
     def record_decision(self, decision):
-        """Append one decision durably; the file is kept for the owner, and read only by settled_orders."""
-        with open(self.decisions_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(decision, sort_keys=True, separators=(",", ":")) + "\n")
+        """Append one decision durably; the file is kept for the owner, and read only by settled_orders.
+
+        A decision for the input whose run is recorded (record_run) carries
+        that run under "run" unless it names one, so the decisions say which
+        run each was made in once the input and its run record are cleared:
+        settle_ended_run reads them to tell the run that ended (fail closed,
+        AGENTS.md).
+
+        Written whole or not at all: every decision recorded, byte for byte,
+        then this one, to a temporary file flushed and renamed over the
+        file, so a stop mid-write never leaves a torn line, which the strict
+        readers (settled_orders) would refuse at every later start, resolve
+        and settlement (fail closed, AGENTS.md). Every writer holds the
+        pending file's lock (Relay, resolve, retire, settle_ended_run), so no
+        decision is lost between the read and the rename.
+        """
+        sent_to = self.run_of()
+        if "run" not in decision and sent_to is not None and sent_to["input_id"] == decision.get("input_id"):
+            decision = dict(decision, run=sent_to["run"])
+        try:
+            with open(self.decisions_path, "rb") as f:
+                recorded = f.read()
+        except FileNotFoundError:
+            recorded = b""
+        line = (json.dumps(decision, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        tmp = self.decisions_path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(recorded + line)
             f.flush()
             os.fsync(f.fileno())
+        os.replace(tmp, self.decisions_path)
         self._sync_dir()
 
     def refusal(self):
@@ -863,13 +889,17 @@ class PendingInput:
             return [], None
         # Numbered as the file's own lines, blank ones included, so a stop
         # names the line the owner finds.
-        lines = [(n, line) for n, line in enumerate(raw.split("\n"), 1) if line.strip()]
+        segments = raw.split("\n")
         torn = None
-        if repair and lines and not raw.endswith("\n"):
+        if repair and segments[-1].strip():
+            # Only the last segment, with no line end after it, can be a
+            # write cut short; a damaged line that ends is evidence and is
+            # refused below, never dropped (fail closed, AGENTS.md).
             try:
-                self._settlement(*lines[-1])
+                self._settlement(len(segments), segments[-1])
             except HandoverRecordInvalid:
-                torn = lines.pop()[1]
+                torn = segments.pop()
+        lines = [(n, line) for n, line in enumerate(segments, 1) if line.strip()]
         return [self._settlement(n, line) for n, line in lines], torn
 
     def _settlement(self, n, line):
@@ -1193,6 +1223,16 @@ class Relay:
                 continue
             if broker is None:
                 broker = _tags(self._broker_orders())
+            if mark == AT_BROKER or mark in (None, NEVER_SENT) and _found_at_broker(
+                    self._pending, cid, envelope.get("id")):
+                # The relay found IBKR showing it before a stop: whatever
+                # IBKR shows now, it was sent, so the record is finished
+                # (_record_at_broker) and only the owner's --sent lifts the
+                # stop (fail closed, AGENTS.md).
+                with self._step:
+                    self._require_held()
+                    _record_at_broker(self._pending, cid, envelope.get("id"), self._now(), self._today())
+                raise NeverSentAtBroker(cid)
             if mark is None:
                 # A retirement a stop left unmarked is finished before the
                 # order could be judged sendable again: the engine is told it
@@ -1438,7 +1478,11 @@ def _resolve(pending, client_order_id, decision, reason, today):
     mark = marks[client_order_id]
     if mark in (NEVER_SENT, AT_BROKER) and decision == DECIDE_SENT:
         # IBKR shows the order after all (NeverSentAtBroker): it is never
-        # sent, and the record says it may be at IBKR.
+        # sent, and the record says it may be at IBKR. Any retirement of it
+        # a stop left queued is struck off first, so none reaches the engine
+        # once the mark no longer stops the relay (ADR 0026, amended
+        # 2026-10-22, "The adapter": an order IBKR shows is never retired).
+        _strike_retirements(pending, client_order_id)
         pending.record_decision(recorded)
         pending.mark(client_order_id, SENT)
         return
@@ -1590,22 +1634,41 @@ def _record_at_broker(pending, cid, input_id, now, today):
     """Record that IBKR shows cid, an order settled never sent, before the relay stops at it (NeverSentAtBroker).
 
     The broker's word wins over the settlement (fail closed, AGENTS.md): in
-    this order, every retirement of the order still in the outbox, in
-    either ID form, is struck off, so none reaches the engine (ADR 0026,
-    amended 2026-10-22, "The adapter": an order IBKR shows is never
-    retired); then DECIDE_AT_BROKER is recorded among the decisions, for
+    this order, DECIDE_AT_BROKER is recorded among the decisions, for
     input_id, kept once the mark is cleared with its input; then the order
-    is marked AT_BROKER, so no settlement of an ended run reads it as never
-    sent (settle_ended_run) and the relay stops at it on every start until
-    the owner marks it sent. A stop part way leaves the order marked never
-    sent, and the next start, seeing IBKR show it again, records it again.
+    is marked AT_BROKER; and only then is every retirement of the order
+    still in the outbox, in either ID form, struck off, so none reaches the
+    engine (ADR 0026, amended 2026-10-22, "The adapter": an order IBKR
+    shows is never retired). The durable record comes first, so a stop or a
+    failed write after any one of the three leaves the order readable as at
+    the broker: no settlement of an ended run reads it as never sent
+    (settle_ended_run, earlier_run), the relay stops at it on every start
+    until the owner marks it sent, and each such start, or the owner's
+    --sent (_resolve), finishes what the stop left: a write already made is
+    not made again, and the strike is repeated.
     """
+    if not _found_at_broker(pending, cid, input_id):
+        pending.record_decision({"client_order_id": cid, "decision": DECIDE_AT_BROKER,
+                                 "reason": "IBKR shows an open order or execution under its tag", "at": _stamp(now),
+                                 "session_date": today.isoformat(), "input_id": input_id})
+    if pending.handovers().get(cid) != AT_BROKER:
+        pending.mark(cid, AT_BROKER)
+    _strike_retirements(pending, cid)
+
+
+def _found_at_broker(pending, cid, input_id):
+    """Whether the last decision recorded for cid is DECIDE_AT_BROKER for input_id: the relay found IBKR showing it."""
+    last = None
+    for d in pending.decisions():
+        if d.get("client_order_id") == cid:
+            last = d
+    return last is not None and last.get("decision") == DECIDE_AT_BROKER and last.get("input_id") == input_id
+
+
+def _strike_retirements(pending, cid):
+    """Strike off every retirement of cid still in the outbox, in either ID form, in one write (_retirements_of)."""
     outbox = Outbox(pending.path + OUTBOX_SUFFIX)
     outbox.strike_all([e["id"] for e in _retirements_of(outbox.load(), cid)])
-    pending.record_decision({"client_order_id": cid, "decision": DECIDE_AT_BROKER,
-                             "reason": "IBKR shows an open order or execution under its tag", "at": _stamp(now),
-                             "session_date": today.isoformat(), "input_id": input_id})
-    pending.mark(cid, AT_BROKER)
 
 
 def _recorded_retirement(pending, d):
@@ -1800,8 +1863,11 @@ def earlier_run(pending, engine_log_path):
                         if kind == LOG_DECISION and envelope["type"] == RELEASED
                         and isinstance(envelope["payload"], dict) and envelope["payload"].get("send") is True
                         and _is_text(envelope["payload"].get("client_order_id"))]
-            # An order the relay found IBKR showing (AT_BROKER) was sent.
-            unsent = tuple((cid, marks.get(cid)) for cid in released if marks.get(cid) not in (SENT, AT_BROKER))
+            # An order the relay found IBKR showing (AT_BROKER, or its last
+            # decision says so: a stop before the mark) was sent (fail
+            # closed, AGENTS.md).
+            unsent = tuple((cid, marks.get(cid)) for cid in released if marks.get(cid) not in (SENT, AT_BROKER)
+                           and not _found_at_broker(pending, cid, input_id))
             return EarlierRun(input_id, os.path.basename(path), True, unsent, run)
     return EarlierRun(input_id, sent_to["log"] if sent_to is not None else None, False, (), run)
 
@@ -1930,10 +1996,17 @@ def settle_ended_run(pending, engine_log_path, by, reason, now=None):
     the order is one of NEVER_SENT_DECISIONS, recorded for that input
     (NEVER_SENT). Every other order is refused, never settled: one marked
     handed over, allowed to be sent again, sent, or at the broker (the relay
-    found IBKR showing it, AT_BROKER, or its last decision says so), a
-    never-sent mark no such decision backs, a decision recorded for another
-    input or none, and one the ended log or the outbox shows IBKR reported
-    on (so it was sent) or the log already retires.
+    found IBKR showing it, AT_BROKER, or its last decision says so), one the
+    log released more than once (one release may have been sent), one whose
+    last decision another run recorded (its "run", or the log a settlement
+    named, is not this log's), a never-sent mark no such decision backs, a
+    decision recorded for another input or none, and one the ended log or
+    the outbox shows IBKR reported on (so it was sent) or the log already
+    retires. Of these, the refusals the owner must act on carry their reason
+    (EndedRunSettlement.refused); an order simply sent (marked sent,
+    reported on as the records expect, retired in the log, or an earlier
+    input's with no never-sent decision) is only counted
+    (EndedRunSettlement.sent), so no refusal is lost among them.
 
     For each order settled, in this order, so a stop part way is finished by
     running it again: a decision is recorded (DECIDE_NEVER_SENT, with the
@@ -1947,9 +2020,13 @@ def settle_ended_run(pending, engine_log_path, by, reason, now=None):
 
     Refuses (ResolveRefused, nothing changed) an empty reason, no name or the
     adapter's own, a run as root or as any user but the one that owns the
-    adapter's files (as retire), while an adapter holds the pending file, an
-    input awaiting its reply sent to another run, and nothing to settle from
-    (no input awaiting its reply and no decision recorded). now, the clock
+    adapter's files (as retire), while an adapter holds the pending file,
+    while the engine still holds engine_log_path (_ended_log), an input
+    awaiting its reply sent to another run, nothing to settle from
+    (no input awaiting its reply and no decision recorded), and, with no
+    input awaiting its reply, a log whose run is not the run the adapter's
+    decisions last record (PendingInput.record_decision), which is the run
+    that ended (fail closed, AGENTS.md). now, the clock
     the settlement is stamped from, defaults to the time now.
     """
     if not reason or not reason.strip():
@@ -1973,9 +2050,36 @@ def settle_ended_run(pending, engine_log_path, by, reason, now=None):
     if held is None:
         raise ResolveRefused("the adapter holds the pending file {}; stop it first".format(pending.path))
     try:
-        return _settle_ended_run(pending, engine_log_path, by, reason, (now or _utc_now)())
+        ended = _ended_log(engine_log_path)
+        try:
+            return _settle_ended_run(pending, engine_log_path, by, reason, (now or _utc_now)())
+        finally:
+            os.close(ended)
     finally:
         os.close(held)
+
+
+def _ended_log(path):
+    """A shared lock on the durable log at path, as an open descriptor, proving its engine no longer runs.
+
+    The engine holds an exclusive lock on the log it streams for as long as
+    it runs (cmd/engine createLogFile), so a log whose lock cannot be shared
+    is a run that has not ended, and nothing is settled for it
+    (ResolveRefused; fail closed, AGENTS.md): its engine could still be told
+    of each order itself.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError as err:
+        raise ResolveRefused("the durable log {} cannot be opened ({}): give --journal the log of the run that "
+                             "ended".format(path, err.strerror or err)) from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise ResolveRefused("the engine whose durable log is {} still runs (it holds the log's lock): that run "
+                             "has not ended, so nothing is settled for it; stop the engine first".format(path)) from None
+    return fd
 
 
 def _settle_ended_run(pending, engine_log_path, by, reason, now):
@@ -1991,6 +2095,18 @@ def _settle_ended_run(pending, engine_log_path, by, reason, now):
                 "--journal the log of the run that ended, the one the adapter sent it to".format(
                     input_id, engine_log_path, pending.run_path, "nothing for it" if sent_to is None or
                     sent_to["input_id"] != input_id else "run {}".format(sent_to["run"])))
+    else:
+        # With no input waiting, the run the adapter's decisions last record
+        # is the run that ended: --journal must be its log (fail closed,
+        # AGENTS.md).
+        recorded = [d["run"] for d in pending.decisions() if _is_text(d.get("run"))]
+        if not recorded or recorded[-1] != run:
+            raise ResolveRefused(
+                "{} is not the run that ended: no input awaits its reply, and the adapter's decisions ({}) {}, not "
+                "{}; give --journal the log of the run that ended. If that run recorded no decision, it left no "
+                "order to settle: approve the fresh run without -never-sent".format(
+                    engine_log_path, pending.decisions_path, "name run {} last".format(recorded[-1]) if recorded
+                    else "record no run", run))
     groups = _committed_groups(engine_log_path).groups
     retired, reported = set(), set()
     for g in groups:
@@ -2015,32 +2131,37 @@ def _settle_ended_run(pending, engine_log_path, by, reason, now):
     mine = {e["retirement"]["client_order_id"]: e for e in entries if e["log"] == log}
     stamp = _stamp(now)
     today = now.astimezone(SESSION_ZONE).date()
-    settled, kept, refused, new = [], [], [], {}
-    for g in groups:
-        released_by = g[0][2]["id"]
-        for _, kind, envelope in g[1:]:
-            order = envelope["payload"]
-            if (kind != LOG_DECISION or envelope["type"] != RELEASED or not isinstance(order, dict)
-                    or order.get("send") is not True or not _is_text(order.get("client_order_id"))):
-                continue
-            order = _plain(order)
-            cid = order["client_order_id"]
-            why, evidence = _never_sent_evidence(cid, released_by, released_by == input_id, marks.get(cid),
-                                                 last.get(cid), refusal, retired, reported)
-            if evidence is None:
-                if why:
-                    refused.append((cid, why))
-                continue
-            if cid in mine:
-                kept.append(cid)
-                continue
-            settled.append(cid)
-            new[cid] = {
-                "log": log, "run": run, "input_id": released_by, "evidence": evidence,
-                "retirement": {"account_id": order.get("account_id"), "client_order_id": cid,
-                               "instrument_id": order.get("instrument_id"), "side": order.get("side"),
-                               "quantity": order.get("quantity"), "limit_price": order.get("limit_price"),
-                               "reason": RETIRED_BY_OWNER, "detail": reason, "retired_by": by, "retired_at": stamp}}
+    releases = [(g[0][2]["id"], _plain(envelope["payload"])) for g in groups for _, kind, envelope in g[1:]
+                if kind == LOG_DECISION and envelope["type"] == RELEASED and isinstance(envelope["payload"], dict)
+                and envelope["payload"].get("send") is True
+                and _is_text(envelope["payload"].get("client_order_id"))]
+    times = Counter(order["client_order_id"] for _, order in releases)
+    settled, kept, refused, sent, new = [], [], [], [], {}
+    judged = set()
+    for released_by, order in releases:
+        cid = order["client_order_id"]
+        if cid in judged:
+            # Released more than once: refused once, at its first release.
+            continue
+        judged.add(cid)
+        why, evidence = _never_sent_evidence(cid, released_by, released_by == input_id, marks.get(cid),
+                                             last.get(cid), refusal, retired, reported, times[cid], run, log)
+        if evidence is None:
+            if why:
+                refused.append((cid, why))
+            else:
+                sent.append(cid)
+            continue
+        if cid in mine:
+            kept.append(cid)
+            continue
+        settled.append(cid)
+        new[cid] = {
+            "log": log, "run": run, "input_id": released_by, "evidence": evidence,
+            "retirement": {"account_id": order.get("account_id"), "client_order_id": cid,
+                           "instrument_id": order.get("instrument_id"), "side": order.get("side"),
+                           "quantity": order.get("quantity"), "limit_price": order.get("limit_price"),
+                           "reason": RETIRED_BY_OWNER, "detail": reason, "retired_by": by, "retired_at": stamp}}
     still = set(settled) | set(kept)
     why_not = dict(refused)
     withdrawn = [(cid, why_not.get(cid, "its order is no longer one the ended run's records show never sent"))
@@ -2053,7 +2174,8 @@ def _settle_ended_run(pending, engine_log_path, by, reason, now):
         d = last.get(cid)
         if not (d is not None and d.get("decision") == DECIDE_NEVER_SENT and d.get("log") == log):
             pending.record_decision({"client_order_id": cid, "decision": DECIDE_NEVER_SENT, "reason": reason,
-                                     "settled_by": by, "log": log, "input_id": new[cid]["input_id"] if cid in new
+                                     "settled_by": by, "log": log, "run": run,
+                                     "input_id": new[cid]["input_id"] if cid in new
                                      else mine[cid]["input_id"], "at": stamp, "session_date": today.isoformat(),
                                      "outbox": struck[cid]})
     if torn is not None or new or withdrawn:
@@ -2063,28 +2185,47 @@ def _settle_ended_run(pending, engine_log_path, by, reason, now):
         if marks.get(cid) is None:
             pending.mark(cid, NEVER_SENT)
     outbox.strike_all([e["id"] for cid in sorted(still) for e in struck[cid]])
-    return EndedRunSettlement(tuple(settled), tuple(kept), tuple(withdrawn), tuple(refused), torn)
+    return EndedRunSettlement(tuple(settled), tuple(kept), tuple(withdrawn), tuple(refused), tuple(sent), torn)
 
 
-def _never_sent_evidence(cid, released_by, waiting, mark, last, refusal, retired, reported):
+def _never_sent_evidence(cid, released_by, waiting, mark, last, refusal, retired, reported, times, run, log):
     """Whether the adapter's records show cid, released by input released_by, never sent: (why not, evidence).
 
     evidence is the settlement's evidence, or None when the order is not
-    settled, with why naming the reason, empty for an order simply sent
-    (settle_ended_run reads the rules). waiting says whether released_by is
-    the input awaiting its reply, whose marks the write-ahead record holds;
-    last is the last decision recorded for cid, or None.
+    settled. why is then empty for an order simply sent, which the owner
+    need not act on (marked sent, reported on by IBKR as the records
+    expect, already retired by the ended log, or an earlier input's with no
+    never-sent decision), and otherwise names the refusal the owner must act
+    on (settle_ended_run reads the rules). waiting says whether released_by
+    is the input awaiting its reply, whose marks the write-ahead record
+    holds; last is the last decision recorded for cid, or None; times how
+    often the ended log, of run run and file name log, released cid.
     """
     decided = last.get("decision") if last is not None else None
-    if cid in reported:
-        return "IBKR reported on it (the ended log or the outbox holds a venue's report), so it was sent", None
-    if cid in retired:
-        return "the ended log already retires it", None
     if mark == AT_BROKER or decided == DECIDE_AT_BROKER:
         return ("the relay found IBKR showing it (at-broker), so it was sent; mark it sent with relay.py resolve "
                 "--sent once checked"), None
     if mark == HANDING_OVER or resend_date(mark) is not None:
         return "it is marked {!r}, so it may have reached IBKR".format(mark), None
+    if times > 1:
+        return ("the ended log released it more than once ({} times), so it may have been sent under one release "
+                "while another was not").format(times), None
+    if last is not None and _is_text(last.get("run")) and last["run"] != run:
+        return ("its last decision was recorded in run {}, not the ended log's run {}, so it is not this run's "
+                "evidence").format(last["run"], run), None
+    if last is not None and not _is_text(last.get("run")) and _is_text(last.get("log")) and last["log"] != log:
+        return ("its last decision settled log {}, not the ended log {}, so it is not this run's evidence".format(
+            last["log"], log)), None
+    claims_never_sent = (mark == NEVER_SENT or mark is None and waiting
+                         or decided in NEVER_SENT_DECISIONS and last.get("input_id") == released_by)
+    if cid in reported:
+        if claims_never_sent:
+            return ("IBKR reported on it (the ended log or the outbox holds a venue's report) though the adapter's "
+                    "records show it never sent, so it was sent; mark it sent with relay.py resolve --sent once "
+                    "checked"), None
+        return "", None
+    if cid in retired:
+        return "", None
     if mark == SENT:
         return "", None
     if mark is None and waiting:
@@ -2098,7 +2239,11 @@ def _never_sent_evidence(cid, released_by, waiting, mark, last, refusal, retired
         # its input was cleared only once every order it released was.
         return "", None
     owner_input = last.get("input_id")
-    if owner_input == released_by or owner_input is None and waiting and mark == NEVER_SENT:
+    # A decision recorded with no input (by a relay before the field) is the
+    # input's the log shows releasing cid, since it released cid only once
+    # (times, checked above), or, for the input awaiting its reply, the one
+    # whose never-sent mark the record holds.
+    if owner_input == released_by or owner_input is None and (not waiting or mark == NEVER_SENT):
         return None, NEVER_SENT
     return ("its last decision ({}) was recorded for {}, not input {}, so whose it is cannot be told".format(
         decided, "input " + owner_input if _is_text(owner_input) else "no input", released_by)), None
@@ -2696,8 +2841,16 @@ def main(argv=None, today=None):
                                                                                        done.torn))
             for cid, why in done.withdrawn:
                 print("order {}'s settlement withdrawn: {}".format(cid, why))
+            # Only the refusals the owner must act on are listed, so none is
+            # lost among the orders simply sent, which are counted.
             for cid, why in done.refused:
                 print("order {} not settled: {}".format(cid, why))
+            if done.sent:
+                print("{} order(s) the ended run sent or its log already retires: nothing to settle".format(
+                    len(done.sent)))
+            if done.refused:
+                print("{} order(s) not settled above: each one's sale stays attempted in the fresh run until you act "
+                      "on it as its line says".format(len(done.refused)))
             print("{} order(s) settled as never sent in {} ({} already settled); {}".format(
                 len(done.settled), pending.never_sent_path, len(done.kept),
                 "approve the fresh run with operator approve -never-sent {}".format(pending.never_sent_path)

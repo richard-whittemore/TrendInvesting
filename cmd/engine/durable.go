@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -19,6 +20,11 @@ import (
 // with the header CreateLog flushes into it (ADR 0027). The directory is
 // taken as spelled, not cleaned: a ".." after a symbolic link climbs from the
 // link's target, so cleaning would name, and flush, another directory.
+//
+// The file is held under an exclusive lock until it is closed, when the run
+// ends: the proof the IBKR adapter's settle-ended-run reads that the run has
+// ended before it settles any order the run released (ADR 0019, amended
+// 2026-10-22; fail closed, AGENTS.md).
 func createLogFile(path string) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -26,6 +32,10 @@ func createLogFile(path string) (*os.File, error) {
 			return nil, fmt.Errorf("engine: %s already exists: a durable log is recorded evidence and is never appended to or overwritten (ADR 0018); to continue its run, pass it to -resume and name a new -log", path)
 		}
 		return nil, fmt.Errorf("engine: create the durable log: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("engine: lock the durable log %s for the run: %w", path, err)
 	}
 	dir, _ := splitAsSpelled(path)
 	if err := syncDir(dir); err != nil {

@@ -567,9 +567,18 @@ of it still queued for the ended run's engine is struck off, since the
 fresh run's engine would refuse it. Every other order is refused, never
 settled (fail closed): one marked handed over, sent, or allowed to be sent
 again; one the relay found IBKR showing, which it records durably
-(`at-broker`) before it stops; a never-sent mark no decision backs; and one
-the ended log or the adapter's outbox shows retired, reported on or
-executed. The command writes its file whole, atomically, each time it
+(`at-broker`: the decision, then the mark, and only then the strike of any
+queued retirement, so a stop part way still leaves it `at-broker`) before it
+stops; one the ended log released more than once; one whose last decision
+was recorded in another run; a never-sent mark no decision backs; one the
+ended log retires; and one the ended log or the adapter's outbox shows
+reported on or executed (a retirement still queued in the outbox is struck
+off, not a refusal). Only the refusals the owner must act on are listed; an
+order simply sent is counted, not listed. With no input waiting, the log
+must be that of the run the adapter's decisions last record (each decision
+carries the run of its input), or the command refuses; and it refuses while
+the engine still holds the log's lock, which the engine takes for as long
+as it runs, so only a run that has ended is settled. The command writes its file whole, atomically, each time it
 runs, so a line whose order the owner has since found at IBKR and marked
 sent is withdrawn. The approval tool (`operator approve -never-sent`) applies each
 line to the ended log after its last record, by the engine's own

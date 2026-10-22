@@ -79,7 +79,10 @@ Re-delivery closes that gap:
   the run the adapter sent the waiting input to, if one is waiting. It
   reads every input that log commits, not only the waiting one: an order
   you settled `--never-sent` or `--not-handed-over` at an earlier input,
-  or that the adapter retired, is covered too. For each order a committed
+  or that the adapter retired, is covered too (a decision an earlier
+  build recorded without its input counts only when the log released the
+  order once). A retirement of it still queued for the ended run's engine
+  does not stop it being settled: it is struck off. For each order a committed
   reply released to be sent that the adapter's records show never sent, it
   writes one settlement line to `PENDING_FILE.never-sent`: the log, the
   run, the input that released it, the adapter's evidence (`unmarked`,
@@ -87,24 +90,41 @@ Re-delivery closes that gap:
   you with your reason. It then marks the order never sent, so no adapter
   ever sends it, and strikes off any retirement of it still queued for the
   ended run's engine, which the fresh run's engine would refuse. It never
-  settles an order that may have reached IBKR, and prints "order ID not
-  settled" with the reason for each: one marked about to be sent, sent, or
-  allowed to be sent again; one the adapter found IBKR showing (when the
-  adapter stops with "settled as never sent, but IBKR shows" it records
-  the order `at-broker` before it stops); a never-sent mark no recorded
-  decision backs; and one the ended log or the outbox shows retired,
-  reported on or executed. Running it again settles nothing twice. It
-  refuses while the adapter runs, for a waiting input sent to another run,
-  as root or as any user but the one that owns the adapter's files (as
-  `retire`), and without your name and a reason.
+  settles an order that may have reached IBKR. It prints "order ID not
+  settled" with the reason only for an order you must act on: one marked
+  about to be sent or allowed to be sent again; one the adapter found IBKR
+  showing (when the adapter stops with "settled as never sent, but IBKR
+  shows" it records the order `at-broker` first, before it strikes any
+  retirement of it, so a stop part way still leaves it `at-broker`); one
+  the ended log released more than once, since one release may have been
+  sent; one whose last recorded decision was made in another run; one IBKR
+  reported on (the ended log or the outbox holds a venue's report) though
+  the adapter's records show it never sent; a never-sent mark no recorded
+  decision backs; and a never-sent decision recorded for another input or
+  none. When any is listed it then prints "N order(s) not settled above:
+  each one's sale stays attempted in the fresh run until you act on it as
+  its line says". An order simply sent (marked sent, reported on by IBKR,
+  or already retired in the ended log) needs nothing of you: it is not
+  listed, only counted in one line, "N order(s) the ended run sent or its
+  log already retires: nothing to settle". The last line gives the count
+  settled and says whether to approve with `-never-sent`. Running it again
+  settles nothing twice. It refuses while the adapter runs, for a waiting
+  input sent to another run, while the engine that wrote `ENDED_LOG`
+  still runs (it holds the log locked until it stops: stop it first), with
+  no input waiting for a log that is not the run that ended (the run the adapter's decisions last record; if that
+  run recorded no decision it left nothing to settle, so approve without
+  `-never-sent`), as root or as any user but the one that owns the
+  adapter's files (as `retire`), and without your name and a reason.
 
   The command writes the file whole each time (a temporary file renamed
   over it), so a stop never leaves half a line. A file left with a torn
   last line (a write cut short, by a power loss under an earlier build) is
   repaired by running the command again: it drops that line, prints
   "dropped a torn last line", and writes the file whole from the adapter's
-  records. Any other line it cannot read refuses the command; do not edit
-  the file.
+  records. Only a last line with no line end after it is torn: any other
+  line it cannot read, a whole damaged last line included, refuses the
+  command; do not edit the file. Each decision it records is written the
+  same way, whole or not at all.
 
   If you find an order it settled at IBKR (open, cancelled or traded), it
   was sent: with the adapter stopped, mark it sent with `python3
@@ -267,6 +287,16 @@ and after a crash.
     `test_settle_ended_run_names_the_order_the_adapter_recorded_it_refused`,
     `test_settle_ended_run_never_settles_an_order_the_ended_log_shows_retired_or_reported`,
     `test_settle_ended_run_never_settles_an_order_the_relay_found_at_ibkr`,
+    `test_a_stop_after_any_write_of_the_at_broker_record_leaves_the_order_refused_by_settle_ended_run`,
+    `test_marking_sent_an_order_stopped_at_the_broker_strikes_any_retirement_of_it_still_queued`,
+    `test_settle_ended_run_never_settles_a_client_order_id_released_twice_or_decided_in_another_run`,
+    `test_settle_ended_run_prints_only_the_orders_the_owner_must_act_on_and_counts_the_sent_ones`,
+    `test_settle_ended_run_with_no_input_waiting_is_refused_for_a_log_that_is_not_the_run_that_ended`,
+    `test_settle_ended_run_is_refused_while_the_ended_runs_engine_still_holds_its_log`
+    (`cmd/engine`, `TestTheEngineHoldsItsDurableLogLockedWhileItRuns`),
+    `test_settle_ended_run_settles_an_earlier_inputs_never_sent_decision_recorded_with_no_input`,
+    `test_a_newline_terminated_damaged_settlement_line_is_refused_never_dropped_as_torn`,
+    `test_a_decision_cut_short_mid_write_leaves_the_decisions_readable_and_settle_ended_run_runs_again`,
     `test_settle_ended_run_is_refused_for_a_log_that_is_not_the_run_the_input_was_sent_to`,
     `test_settle_ended_run_is_refused_as_root_or_any_user_but_the_owner_of_the_adapters_files`
     and `test_settle_ended_run_is_refused_without_a_person_and_a_reason_and_while_the_adapter_runs`:
