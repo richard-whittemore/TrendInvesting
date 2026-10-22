@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
@@ -174,5 +176,38 @@ func TestTheJournalSliceRedactsTheLogsNames(t *testing.T) {
 		if strings.Contains(body, leak) {
 			t.Errorf("the slice names %s:\n%s", leak, body)
 		}
+	}
+}
+
+// TestTheAlertsOfALogAreComputedOncePerVersionOfIt: the reporter's rules
+// run over a log's records once for each size and modification time of
+// the file, not on every request for an alert, so polling the slice costs
+// a read, not a pass over the whole journal; a log that changed is read
+// afresh.
+func TestTheAlertsOfALogAreComputedOncePerVersionOfIt(t *testing.T) {
+	path := writeJournal(t, t.TempDir())
+	logs := newLogCache(os.ReadFile, func(p string) (io.ReadCloser, error) { return os.Open(p) })
+	var passes int
+	logs.alerts = func(envelopes []event.Envelope) ([]report.Alert, error) {
+		passes++
+		return report.Alerts(envelopes)
+	}
+	h := newHandlerCached(source{journals: []string{path}}, "SPY", logs)
+	alert := "?alert=" + strings.Repeat("0", 64)
+	for range 3 {
+		if rec := get(h, http.MethodGet, "/api/journal-slice"+alert); rec.Code != http.StatusOK {
+			t.Fatalf("status %d", rec.Code)
+		}
+	}
+	if passes != 1 {
+		t.Fatalf("the alerts were computed %d times over an unchanged log, want once", passes)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	get(h, http.MethodGet, "/api/journal-slice"+alert)
+	if passes != 2 {
+		t.Fatalf("the alerts were computed %d times after the log changed, want twice", passes)
 	}
 }

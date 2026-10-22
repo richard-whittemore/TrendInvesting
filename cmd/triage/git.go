@@ -332,8 +332,8 @@ func (w *gitWorkspace) Gate(ctx context.Context, dir string, tests, fix []string
 }
 
 // inGate runs argv in a fresh run of the gate over a copy of rev. A run
-// folder, a copy or a command that cannot be started is the gate's failure
-// (errGateUnavailable), never the change's.
+// folder, a copy or a command that cannot be started (gateBox.Run) is the
+// gate's failure (errGateUnavailable), never the change's.
 func (w *gitWorkspace) inGate(ctx context.Context, dir, rev string, argv []string) (string, error) {
 	runDir, done, err := w.gate.newRun(ctx)
 	if err != nil {
@@ -343,9 +343,9 @@ func (w *gitWorkspace) inGate(ctx context.Context, dir, rev string, argv []strin
 	if err := w.exportTree(ctx, dir, rev, runDir); err != nil {
 		return "", err
 	}
-	out, err := w.gate.Run(ctx, runDir, argv)
+	out, err := w.gate.Run(ctx, runDir, "tree", argv)
 	var exit *exec.ExitError
-	if err != nil && !errors.As(err, &exit) && ctx.Err() == nil {
+	if err != nil && !errors.Is(err, errGateUnavailable) && !errors.As(err, &exit) && ctx.Err() == nil {
 		return out, fmt.Errorf("%w: the check could not be started", errGateUnavailable)
 	}
 	return out, err

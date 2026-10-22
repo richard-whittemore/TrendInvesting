@@ -72,9 +72,10 @@ type issue struct {
 type tracker interface {
 	// Self is the login of the token's own user.
 	Self(ctx context.Context) (string, error)
-	// AlertIssues lists the issues, whatever their labels, open and closed,
-	// newest first, in one listing, opened at or after since and numbered
-	// above through; cut is a listing that reached its bound before either.
+	// AlertIssues lists the issues carrying the reporter's labels (alert,
+	// then alert-resolved), open and closed, newest first, opened at or
+	// after since and numbered above through; cut is a listing that reached
+	// its bound before either.
 	AlertIssues(ctx context.Context, since time.Time, through int) (issues []issue, cut bool, err error)
 	// IssueURL is an alert issue's address on GitHub.
 	IssueURL(number int) string
@@ -277,11 +278,12 @@ func (j *job) advance(st *state, listed map[int]bool) {
 }
 
 // candidates are the reporter's alert issues, opened since the job began,
-// numbered above Through and not yet recorded done, oldest first, from one
-// listing of every issue (so an issue opened, or relabelled, while the job
-// reads is never passed over: the reporter's labels change as an incident
-// clears, docs/manual/alerts-and-dashboard.md, "Design note: a resolved
-// issue leaves the alert label"); listed is every issue the listing
+// numbered above Through and not yet recorded done, oldest first, from the
+// listing of the reporter's two labels (an incident that clears swaps alert
+// for alert-resolved, docs/manual/alerts-and-dashboard.md, "Design note: a
+// resolved issue leaves the alert label"; alert is listed first, so an
+// issue relabelled while the job reads is never passed over, and no other
+// issue or pull request counts against the bound); listed is every issue the listing
 // returned, true for the reporter's (false: one it leaves alone), and cut
 // whether the listing was cut at its bound. An issue the reporter did not
 // open (another author, or no hidden key line) is never read further: its
@@ -434,6 +436,12 @@ func (j *job) analyse(ctx context.Context, is issue, prep prepared) (string, err
 	a, err := j.analyst.Analyse(ctx, analysisRequest{Issue: is, Slice: prep.slice, Dir: prep.dir})
 	if errors.Is(err, errInterrupted) {
 		return "", err
+	}
+	if errors.Is(err, errGateUnavailable) {
+		// The gate could not serve the session's commands: the gate's
+		// failure, not the analysis's, so the issue is not spent on it the
+		// first time.
+		return failedComment("gate unavailable: the session's commands could not be served (" + j.clean(err.Error()) + ")"), err
 	}
 	if err != nil {
 		return failedComment("the analysis failed: " + j.clean(err.Error())), nil

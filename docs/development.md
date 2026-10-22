@@ -315,17 +315,33 @@ session):
   group). Nothing else calls `kill(2)`.
 - The triage job's gate ends the gate user's processes in one function,
   `pkillGateUser` (`cmd/triage`), which resolves the gate user's UID and
-  refuses unless it exists, is not the job's own and is not root, then runs
-  `pkill -KILL -U <that UID>` through the gate's fixed sudo rule. No other
-  source names `kill`, `pkill` or `killall`, and none passes `-1` beside
-  one.
-- A test never reaches either for real: a stand-in `sudo` or `sandbox-exec`
-  refuses (exit 97) any command line naming `kill`, `pkill` or `killall`,
-  and a gate built in a test ends its processes through a fake.
+  refuses unless it exists, is not the job's own and is not root, asks
+  `sudo -l` whether the gate's fixed rule allows exactly
+  `pkill -KILL -U <that UID>`, runs it, and fails while `ps` still shows a
+  live process of that UID's; a failure makes the gate unavailable, never
+  a passed check. No other source names `kill`, `pkill` or `killall` as a
+  command, and none passes `-1` beside one.
+- A test never reaches either for real, and signals nothing itself (it
+  asks `ps` whether a process it started still runs): a stand-in `sudo` or
+  `sandbox-exec` refuses (exit 97) any command line naming `kill`, `pkill`
+  or `killall` anywhere in any argument, a `sh -c` payload included; a gate
+  built in a test ends its processes through a fake, and `pkillGateUser`'s
+  own test hands it a stand-in `sudo` that records its arguments and runs
+  nothing.
 
 `internal/procgroup`'s `TestNoKillOutsideTheGuardedFunctions` fails the
-build if any non-test source under `cmd/`, `internal/` or `transport/`
-breaks the first two rules.
+build if any source under `cmd/`, `internal/` or `transport/`, tests and
+shell scripts included, calls `kill(2)` other than through
+`procgroup.Kill` (`syscall`'s or `x/sys/unix`'s `Kill`, under any import
+name), or names a signalling program as a command (a path to one, one
+started by `exec`, or one followed by its arguments, in any string a test
+writes as a script or hands to `sh -c`) outside its short list of guarded
+declarations; `TestTheAuditCatchesEverySeededKill` proves it catches each
+form, the exact `kill -KILL -1` among them.
+
+A test that binds a Unix socket under `/tmp` (for a path short enough for
+the socket's bound) makes its folder under `TI_TEST_SOCKET_DIR` when that
+is set: the triage gate allows sockets only in each run's own folder.
 
 ## Package boundaries
 

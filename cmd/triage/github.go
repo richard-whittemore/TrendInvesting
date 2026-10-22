@@ -200,12 +200,36 @@ func (g *githubTracker) Self(ctx context.Context) (string, error) {
 	return me.Login, nil
 }
 
-// AlertIssues lists the alerts repository's issues, whatever their labels,
-// open and closed, newest first, in one listing, to the first one opened
-// before since or numbered at or below through (already handled). Past
-// maxPages pages it returns what it read, cut, rather than fail: the job
-// then analyses the newest.
+// reporterLabels are the labels the reporter gives its issues, in the
+// order they are listed: alert while the alert is open, alert-resolved once
+// it cleared (docs/manual/alerts-and-dashboard.md, "Design note: a resolved
+// issue leaves the alert label"). An issue moves only from the first to the
+// second, so listing them in this order never misses one that moves while
+// the job reads.
+var reporterLabels = []string{"alert", "alert-resolved"}
+
+// AlertIssues lists the alerts repository's issues that carry one of
+// reporterLabels, open and closed, newest first, label by label, each to
+// the first one opened before since or numbered at or below through
+// (already handled); no other issue or pull request counts against a
+// listing's bound. Past maxPages pages of a label it returns what it read,
+// cut, rather than fail: the job then analyses the newest.
 func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time, through int) ([]issue, bool, error) {
+	var out []issue
+	var cut bool
+	for _, label := range reporterLabels {
+		listed, labelCut, err := g.labelIssues(ctx, label, since, through)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, listed...)
+		cut = cut || labelCut
+	}
+	return out, cut, nil
+}
+
+// labelIssues is one label's listing of AlertIssues.
+func (g *githubTracker) labelIssues(ctx context.Context, label string, since time.Time, through int) ([]issue, bool, error) {
 	var out []issue
 	for page := 1; ; page++ {
 		if page > maxPages {
@@ -219,7 +243,7 @@ func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time, throug
 			CreatedAt   time.Time       `json:"created_at"`
 			PullRequest json.RawMessage `json:"pull_request"`
 		}
-		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?state=all&sort=created&direction=desc&per_page=%d&page=%d", g.alerts, pageSize, page), maxPageAnswer, nil, &items)
+		h, err := g.call(ctx, http.MethodGet, fmt.Sprintf("%s/issues?labels=%s&state=all&sort=created&direction=desc&per_page=%d&page=%d", g.alerts, url.QueryEscape(label), pageSize, page), maxPageAnswer, nil, &items)
 		if err != nil {
 			return nil, false, err
 		}

@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -191,7 +190,7 @@ func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 	environ := []string{"PATH=" + os.Getenv("PATH"), "ANTHROPIC_API_KEY=sk-ant-api", "ANTHROPIC_AUTH_TOKEN=x", "CLAUDE_CODE_API_KEY_HELPER=/bin/echo"}
 	readable := []string{"/Users/ti-triage/triage/work", "/Users/Shared/ti-triage-gate/modcache", "/Users/ti-triage/TrendInvesting-triage", "/Users/ti-triage/bin/ti-triage"}
 	c := claudeCLI{path: path, timeout: time.Minute, env: sessionEnv(environ, "oauth-token-value"), maxTurns: 40, tool: "/Users/ti-triage/bin/ti-triage",
-		settings: sessionSettings([]string{"/Users/ti-triage/.config/ti-triage"}, readable, []string{"/Users/ti-triage/triage/gocache"})}
+		settings: sessionSettings([]string{"/Users/ti-triage/.config/ti-triage"}, readable, nil, []string{"/private/var/folders/x/T/ti-tools-1/s"})}
 	if _, err := c.Analyse(context.Background(), requestIn(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +206,8 @@ func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 			AllowUnsandboxedCommands *bool `json:"allowUnsandboxedCommands"`
 			AutoAllowBashIfSandboxed *bool `json:"autoAllowBashIfSandboxed"`
 			Network                  struct {
-				AllowedDomains *[]string `json:"allowedDomains"`
+				AllowedDomains   *[]string `json:"allowedDomains"`
+				AllowUnixSockets []string  `json:"allowUnixSockets"`
 			} `json:"network"`
 			Filesystem struct {
 				DenyRead   []string `json:"denyRead"`
@@ -229,6 +229,7 @@ func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 	if sb.Enabled == nil || !*sb.Enabled || sb.FailIfUnavailable == nil || !*sb.FailIfUnavailable ||
 		sb.AllowUnsandboxedCommands == nil || *sb.AllowUnsandboxedCommands || sb.AutoAllowBashIfSandboxed == nil || *sb.AutoAllowBashIfSandboxed ||
 		sb.Network.AllowedDomains == nil || len(*sb.Network.AllowedDomains) != 0 ||
+		!slices.Equal(sb.Network.AllowUnixSockets, []string{"/private/var/folders/x/T/ti-tools-1/s"}) || len(sb.Filesystem.AllowWrite) != 0 ||
 		!slices.Equal(sb.Filesystem.DenyRead, []string{"/Users", "/Users/ti-triage/.config/ti-triage"}) ||
 		!slices.Equal(sb.Filesystem.AllowRead, readable) ||
 		settings.Permissions.BlockReads == nil || !*settings.Permissions.BlockReads {
@@ -261,48 +262,54 @@ func TestTheSessionRunsInClaudeCodesSandboxWithExactCommands(t *testing.T) {
 	}
 }
 
-// TestTheWrappersCommandsSeeNoToken: every command the session may run goes
-// through the job's own program (runTool), which runs the fixed command
-// line of a fixed name with a whole new environment of PATH, HOME, TMPDIR,
-// GOCACHE and GOMODCACHE from its own, and GOFLAGS and GOPROXY the job's: a
-// test the session wrote that prints its environment sees no token and no
-// setting of the session's choosing.
-func TestTheWrappersCommandsSeeNoToken(t *testing.T) {
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go is not installed")
+// fakeToolHost is the gate's side of a session's commands, recorded.
+type fakeToolHost struct {
+	dirs []string
+	done int
+	err  error
+}
+
+func (f *fakeToolHost) OpenTools(_ context.Context, dir string) (toolRun, func(), error) {
+	f.dirs = append(f.dirs, dir)
+	if f.err != nil {
+		return nil, nil, f.err
 	}
-	bin := filepath.Join(t.TempDir(), "ti-triage")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
-	cache, err := exec.Command("go", "env", "GOCACHE").Output()
-	if err != nil {
+	return func(context.Context, string) (string, int) { return "ok\n", 0 }, func() { f.done++ }, nil
+}
+
+// TestTheSessionsCommandsAreServedByTheJobOverItsSocket: for the session's
+// time the job serves its commands over the socket named in the session's
+// environment (the only Unix socket Claude Code's sandbox lets it reach),
+// for its own worktree, and stops serving them when the session ends; a
+// gate that cannot serve them is "gate unavailable", and no session starts.
+func TestTheSessionsCommandsAreServedByTheJobOverItsSocket(t *testing.T) {
+	path, record := fakeClaude(t, goodAnswer, 0)
+	host := &fakeToolHost{}
+	socket := shortSocket(t)
+	c := claudeCLI{path: path, timeout: time.Minute, env: sessionEnv([]string{"PATH=" + os.Getenv("PATH")}, ""), maxTurns: 5, socket: socket, tools: host}
+	req := requestIn(t)
+	if _, err := c.Analyse(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	mod := t.TempDir()
-	write(t, mod, "go.mod", "module example.com/leak\n\ngo 1.24\n")
-	write(t, mod, "leak_test.go", "package leak\n\nimport (\n\t\"os\"\n\t\"strings\"\n\t\"testing\"\n)\n\n"+
-		"func TestPrintTheEnvironment(t *testing.T) {\n\tt.Fatal(\"ENV<\" + strings.Join(os.Environ(), \"|\") + \">ENV\")\n}\n")
-	cmd := exec.Command(bin, "tool", "go-test")
-	cmd.Dir = mod
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir(), "GOCACHE=" + strings.TrimSpace(string(cache)),
-		"GOMODCACHE=" + t.TempDir(), "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-secretsecret", "TI_TRIAGE_GITHUB_TOKEN=ghp_secretsecretsecretsecret00",
-		"GOFLAGS=-toolexec=/evil", "GOPROXY=https://evil.example", "SSH_AUTH_SOCK=/tmp/agent"}
-	out, _ := cmd.CombinedOutput()
-	start, end := bytes.Index(out, []byte("ENV<")), bytes.Index(out, []byte(">ENV"))
-	if start < 0 || end < start {
-		t.Fatalf("the test did not print its environment:\n%s", out)
+	if !strings.Contains(readRecord(t, record, "env"), toolsSocketEnv+"="+socket+"\n") {
+		t.Errorf("the session is not told its commands' socket")
 	}
-	for _, e := range strings.Split(string(out)[start+4:end], "|") {
-		name, value, _ := strings.Cut(e, "=")
-		// go test itself adds PWD and its own GO settings to the test's.
-		kept := slices.Contains([]string{"PATH", "HOME", "TMPDIR", "PWD"}, name) || strings.HasPrefix(name, "GO")
-		if !kept || strings.Contains(value, "secret") || strings.Contains(value, "evil") {
-			t.Errorf("the session's test saw %s", e)
-		}
+	if !slices.Equal(host.dirs, []string{req.Dir}) || host.done != 1 {
+		t.Errorf("tools opened for %q, ended %d times; want the session's worktree once", host.dirs, host.done)
 	}
-	if code := exec.Command(bin, "tool", "go", "test").Run(); code == nil {
-		t.Error("the wrapper ran a command line of the session's choosing")
+	if _, err := os.Stat(socket); !os.IsNotExist(err) {
+		t.Errorf("the socket outlived the session: %v", err)
+	}
+	failing := &fakeToolHost{err: fmt.Errorf("%w: no run folder", errGateUnavailable)}
+	c.tools = failing
+	if err := os.Remove(record + ".stdin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Analyse(context.Background(), req); !errors.Is(err, errGateUnavailable) {
+		t.Fatalf("err = %v, want gate unavailable", err)
+	}
+	if _, err := os.Stat(record + ".stdin"); !os.IsNotExist(err) {
+		t.Error("a session started with no way to run its commands")
 	}
 }
 
@@ -330,16 +337,24 @@ func TestASessionPastItsTimeIsKilledWithItsChildren(t *testing.T) {
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid <= 1 {
-		t.Fatalf("the child's pid %q: %v", raw, err) // never signal 0, 1 or below
+		t.Fatalf("the child's pid %q: %v", raw, err)
 	}
+	// Whether the child still runs is asked of ps, which sends no signal: a
+	// test signals nothing itself (docs/development.md, "Ending processes").
 	deadline := time.Now().Add(2 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
+	for running(pid) {
 		if time.Now().After(deadline) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatal("the session's child outlived it")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// running reports whether ps lists pid as a process that is not a zombie.
+func running(pid int) bool {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	stat := strings.TrimSpace(string(out))
+	return err == nil && stat != "" && !strings.HasPrefix(stat, "Z")
 }
 
 // TestTheIssueAndTheSliceAreHandedAsDataNotInstructions: the prompt marks

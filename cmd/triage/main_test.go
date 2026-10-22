@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -44,10 +45,16 @@ func newEndToEnd(t *testing.T) *endToEnd {
 	ws, _, _ := gitWorld(t)
 	// The gate user is nobody, a user that is not the test's own, as the
 	// job requires; the stand-in sudo runs every command as the test's user
-	// all the same, and refuses any signalling program, so the job's end of
-	// the gate user's processes never reaches one (pkillGateUser refuses
-	// nobody's UID on macOS, and the stand-in refuses pkill elsewhere).
+	// all the same, and refuses any signalling program.
 	gate := standInGate(t)
+	// The job's real end of the gate user's processes would, with the
+	// stand-in running every command as the test's own user, end the
+	// test's: the end-to-end job ends nothing.
+	ender := gateEnder
+	gateEnder = func(string, string, string) func(context.Context) error {
+		return func(context.Context) error { return nil }
+	}
+	t.Cleanup(func() { gateEnder = ender })
 	claude, record := fakeClaude(t, `{"type":"result","subtype":"success","is_error":false,"structured_output":{"kind":"data-problem","what_happened":"The bar arrived late.","rule":"ADR 0025","owner_action":"","fix_title":"","fix_summary":""}}`, 0)
 	stateDir := t.TempDir()
 	token := filepath.Join(stateDir, "token")

@@ -196,7 +196,12 @@ func TestStatsRenderATableRow(t *testing.T) {
 
 func TestRunMeasuresEveryRoundTrip(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("/tmp", "spk-")
+	// The triage gate names its run's own socket folder (docs/development.md, "Ending processes").
+	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
+	if !ok {
+		root = "/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "spk-")
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
 	}
@@ -245,7 +250,12 @@ func TestRunMeasuresEveryRoundTrip(t *testing.T) {
 
 func TestRunReportsAnUnavailableEngine(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("/tmp", "spk-")
+	// The triage gate names its run's own socket folder (docs/development.md, "Ending processes").
+	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
+	if !ok {
+		root = "/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "spk-")
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
 	}

@@ -103,7 +103,11 @@ const internalTestTimeout = 10 * time.Second
 // also marking the server closed, which is what Server.Close would do.
 func TestServeContextReportsAnAcceptFailure(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("/tmp", "ti-")
+	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
+	if !ok {
+		root = "/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "ti-")
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
 	}

@@ -25,10 +25,11 @@ var prompt string
 
 // sessionTools are the only commands the session may run, by name, each a
 // fixed command line: the tests, vet, gofmt's listing and git's read-only
-// commands, with no flag of the session's choosing, so no -exec, -toolexec,
-// -vettool or -o runs or leaves another program. Each runs through the
-// job's own program (runTool), which hands it a whole new environment, so
-// no command the session runs, and no test it wrote, sees the Claude token
+// commands (the log to its last 100 commits), with no flag of the
+// session's choosing, so no -exec, -toolexec, -vettool or -o runs or leaves
+// another program. The session's wrapper (runTool) only names one to the
+// job, which runs it (serveTools): the Go ones as the gate user, so no test
+// the session wrote runs as the user holding the Claude token
 // (docs/manual/alerts-and-dashboard.md, "What the session and the gate can
 // and cannot do").
 var sessionTools = map[string][]string{
@@ -37,7 +38,7 @@ var sessionTools = map[string][]string{
 	"gofmt":      {"gofmt", "-l", "."},
 	"git-diff":   {"git", "-c", "core.fsmonitor=false", "--no-pager", "diff"},
 	"git-status": {"git", "-c", "core.fsmonitor=false", "--no-pager", "status"},
-	"git-log":    {"git", "-c", "core.fsmonitor=false", "--no-pager", "log"},
+	"git-log":    {"git", "-c", "core.fsmonitor=false", "--no-pager", "log", "-n", "100"},
 	"git-show":   {"git", "-c", "core.fsmonitor=false", "--no-pager", "show"},
 }
 
@@ -103,15 +104,16 @@ const (
 
 // sessionSettings is the session's own settings (--settings): Claude Code's
 // sandbox around every command the session runs, required
-// (failIfUnavailable), with no command let out of it, no network, reads
-// under /Users denied but for allowRead (the worktrees, the build cache,
-// the module cache, the job's clone, the Go toolchain, the job's program),
+// (failIfUnavailable), with no command let out of it, no network but the
+// Unix sockets in sockets (the job's, which its wrapper asks), reads under
+// /Users denied but for allowRead (the worktrees and the job's program),
 // the token folders (denyRead) denied again, writes allowed only in the
-// worktree and the build cache, and the Claude token unset for every
-// command (sandbox.credentials); and file reads kept to the working folder.
-func sessionSettings(denyRead, allowRead, allowWrite []string) string {
+// worktree and allowWrite, and the Claude token unset for every command
+// (sandbox.credentials); and file reads kept to the working folder.
+func sessionSettings(denyRead, allowRead, allowWrite, sockets []string) string {
 	type network struct {
-		AllowedDomains []string `json:"allowedDomains"`
+		AllowedDomains   []string `json:"allowedDomains"`
+		AllowUnixSockets []string `json:"allowUnixSockets"`
 	}
 	type filesystem struct {
 		DenyRead   []string `json:"denyRead"`
@@ -141,7 +143,7 @@ func sessionSettings(denyRead, allowRead, allowWrite []string) string {
 		Sandbox     sandbox     `json:"sandbox"`
 		Permissions permissions `json:"permissions"`
 	}{
-		Sandbox: sandbox{Enabled: true, FailIfUnavailable: true, Network: network{AllowedDomains: []string{}},
+		Sandbox: sandbox{Enabled: true, FailIfUnavailable: true, Network: network{AllowedDomains: []string{}, AllowUnixSockets: append([]string{}, sockets...)},
 			Filesystem: filesystem{DenyRead: append([]string{"/Users"}, denyRead...), AllowRead: append([]string{}, allowRead...),
 				AllowWrite: append([]string{}, allowWrite...)},
 			Credentials: credentials{EnvVars: []envVar{{Name: "CLAUDE_CODE_OAUTH_TOKEN", Mode: "deny"}}}},
@@ -169,8 +171,11 @@ type claudeCLI struct {
 	env      []string
 	settings string
 	// tool is the job's own program, the wrapper every command of the
-	// session runs through (runTool).
-	tool string
+	// session runs through (runTool); socket where the wrapper reaches the
+	// job, and tools the job's side of the commands (serveTools).
+	tool   string
+	socket string
+	tools  toolHost
 }
 
 // claudeArgs is the session's fixed command line.
@@ -197,10 +202,24 @@ func (c claudeCLI) claudeArgs() []string {
 func (c claudeCLI) Analyse(parent context.Context, req analysisRequest) (analysis, error) {
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
+	env := c.env
+	if c.tools != nil {
+		run, done, err := c.tools.OpenTools(ctx, req.Dir)
+		if err != nil {
+			return analysis{}, err
+		}
+		defer done()
+		stop, err := serveTools(ctx, c.socket, run)
+		if err != nil {
+			return analysis{}, fmt.Errorf("%w: the session's commands cannot be served: %w", errGateUnavailable, err)
+		}
+		defer stop()
+		env = withEnv(env, toolsSocketEnv, c.socket)
+	}
 	//nolint:gosec // G204: the program is the operator's -claude flag and its arguments are the fixed list claudeArgs builds.
 	cmd := exec.CommandContext(ctx, c.path, c.claudeArgs()...)
 	cmd.Dir = req.Dir
-	cmd.Env = c.env
+	cmd.Env = env
 	// Its own process group, killed whole at its time or the job's stop, so
 	// no command it started outlives it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

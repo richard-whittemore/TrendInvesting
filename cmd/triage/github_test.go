@@ -68,7 +68,17 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"login": "owner", "id": f.selfID})
 	case r.Method == http.MethodGet && repo != "" && rest == "/issues":
 		f.listQueries = append(f.listQueries, r.URL.RawQuery)
-		f.page(w, r, f.issues, page)
+		label := r.URL.Query().Get("labels")
+		var matching []map[string]any
+		for _, is := range f.issues {
+			for _, l := range is["labels"].([]map[string]any) {
+				if label == "" || l["name"] == label {
+					matching = append(matching, is)
+					break
+				}
+			}
+		}
+		f.page(w, r, matching, page)
 	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "issues" && parts[2] == "comments":
 		n, _ := strconv.Atoi(parts[1])
 		f.page(w, r, f.comments[n], page)
@@ -157,12 +167,12 @@ func TestTheAPIAddressMustBeGitHubOverHTTPSOrTheNamedHost(t *testing.T) {
 	}
 }
 
-// TestAlertIssuesListsEveryIssueOnceUntilTheStartAndSkipsPulls: the
-// listing is one listing of every issue, whatever its label (so an issue
-// relabelled while the job reads is never missed), newest first; it stops
-// at the first issue older than since, and never takes a pull request for
-// an issue.
-func TestAlertIssuesListsEveryIssueOnceUntilTheStartAndSkipsPulls(t *testing.T) {
+// TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls: the
+// listing is of the reporter's two labels, alert and then alert-resolved
+// (so an alert that cleared, and swapped one for the other, before the job
+// read it is still listed), newest first; each stops at the first issue
+// older than since, and never takes a pull request for an issue.
+func TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls(t *testing.T) {
 	f, srv := newFakeGitHub(t)
 	f.pageSize = 2
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
@@ -180,12 +190,37 @@ func TestAlertIssuesListsEveryIssueOnceUntilTheStartAndSkipsPulls(t *testing.T) 
 		t.Fatalf("listed %+v", got)
 	}
 	if n := len(f.sent()); n != 3 {
-		t.Errorf("%d requests; the listing should stop at the page holding an issue older than the start", n)
+		t.Errorf("%d requests; each listing should stop at the page holding an issue older than the start", n)
 	}
+	var labels []string
 	for _, q := range f.listQueries {
-		if strings.Contains(q, "labels=") {
-			t.Errorf("the listing is filtered by label: %s", q)
+		v, _ := url.ParseQuery(q)
+		labels = append(labels, v.Get("labels"))
+	}
+	if len(labels) != 3 || labels[0] != alertLabel || labels[1] != alertLabel || labels[2] != resolvedLabel {
+		t.Errorf("listings by label %q, want alert's pages, then alert-resolved's", labels)
+	}
+}
+
+// TestUnrelatedIssuesAndPullsNeverHideAnOlderAlert: issues and pull
+// requests that carry neither of the reporter's labels never count against
+// the listing's bound, so a flood of them after an alert neither cuts the
+// listing nor keeps the alert from being reached.
+func TestUnrelatedIssuesAndPullsNeverHideAnOlderAlert(t *testing.T) {
+	f, srv := newFakeGitHub(t)
+	f.pageSize = 1
+	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
+	for n := 2*maxPages + 10; n > 1; n-- {
+		item := map[string]any{"number": n, "title": "x", "body": "x", "labels": []map[string]any{{"name": "enhancement"}}, "created_at": since.Add(time.Duration(n) * time.Minute).Format(time.RFC3339), "user": map[string]any{"login": "someone", "id": 5}}
+		if n%2 == 0 {
+			item["pull_request"] = map[string]any{"url": "x"}
 		}
+		f.issues = append(f.issues, item)
+	}
+	f.addIssue(1, alertLabel, "owner", since.Add(time.Minute), alertBody)
+	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
+	if err != nil || cut || len(got) != 1 || got[0].Number != 1 {
+		t.Fatalf("listed %+v, cut %v, err %v; want the alert, reached, and no cut", got, cut, err)
 	}
 }
 
@@ -205,7 +240,7 @@ func TestAListingLongerThanItsBoundIsCutNotFailed(t *testing.T) {
 	}
 	before := len(f.sent())
 	got, cut, err = trackerFor(t, srv).AlertIssues(context.Background(), since, maxPages)
-	if err != nil || cut || len(got) != 2 || len(f.sent())-before != 3 {
+	if err != nil || cut || len(got) != 2 || len(f.sent())-before != 4 {
 		t.Fatalf("listed %v, cut %v, err %v, %d requests; want the two past through, stopping at it", got, cut, err, len(f.sent())-before)
 	}
 }

@@ -29,15 +29,17 @@ import (
 // job's, never root), through sudo with a fixed rule
 // (docs/runbooks/mac-mini.md, "2. The alert triage job"), inside
 // sandbox-exec with a profile that denies the network (loopback aside, but
-// not any port another program already listens on), every write outside
-// its run folder and the shared temporary folders, and every read under
-// /Users but the folders it needs, with an environment the job builds
-// whole: an empty home, the module cache read-only and offline, Go's
-// vulnerability database from a file, and no token of any kind. Each
-// command runs over a fresh copy of one commit, which the gate user itself
+// not any port another program listens on when the command starts, nor any
+// Unix socket but its run's own), every write outside its run folder and
+// the shared temporary folders, and every read under /Users but the
+// folders it needs, with an environment the job builds whole: an empty
+// home, the module cache read-only and offline, Go's vulnerability
+// database from a file, and no token of any kind. Each command runs over a
+// fresh copy of one commit (a check's) or of the worktree as the session
+// left it (a session's command, serveTools), which the gate user itself
 // unpacks and makes a repository, so git, run as the gate user, owns what
 // it reads; the gate user never touches the job's clone or worktree, and
-// the job never runs anything from a copy once the gate user has had it.
+// the job never enters a copy or runs anything from it.
 
 // gateBox is the gate's user, sandbox and folder.
 type gateBox struct {
@@ -62,18 +64,37 @@ type gateBox struct {
 	// stand-in gate runs every command as the test's user).
 	sameUser bool
 	// listening is every port a program on this Mac listens on, which the
-	// profile denies a command (netstatListening; tests: nil, none, or a
-	// stand-in).
+	// profile denies a command, read just before each command
+	// (netstatListening; tests: nil, none, or a stand-in).
 	listening func(ctx context.Context) ([]int, error)
-	// endGateProcesses ends every process the gate user still runs
-	// (pkillGateUser; tests: a recording fake). Without it the gate is
-	// unavailable: no command runs that could not be ended.
+	// endGateProcesses ends every process the gate user still runs, and
+	// fails unless none is left (pkillGateUser; tests: a fake). Without it,
+	// or when it fails, the gate is unavailable: no command runs that could
+	// not be ended, and none succeeds with a process left behind.
 	endGateProcesses func(ctx context.Context) error
+	// sockets is the folder each run's own socket folder is made in: the
+	// real path of /tmp ("" is it), where a socket's path is short enough.
+	sockets string
 }
 
 func (g *gateBox) modCache() string { return filepath.Join(g.root, "modcache") }
 func (g *gateBox) vulnDB() string   { return filepath.Join(g.root, "vulndb") }
 func (g *gateBox) runs() string     { return filepath.Join(g.root, "runs") }
+
+// socketDir is runDir's own socket folder, the only place outside runDir
+// its commands may bind or reach a Unix socket: short (tig- and the run's
+// name, under /tmp), for the tests whose socket paths must fit the
+// platform's bound, and made by the gate user at its run's first command.
+func (g *gateBox) socketDir(runDir string) string {
+	root := g.sockets
+	if root == "" {
+		root = "/tmp"
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = resolved
+		}
+	}
+	return filepath.Join(root, "tig-"+filepath.Base(runDir))
+}
 
 // errGateUnavailable is a gate that cannot run: its user, its sandbox or its
 // folder is missing or wrong, or a check could not be started in it.
@@ -110,8 +131,8 @@ func (g *gateBox) Available(ctx context.Context) error {
 		return fmt.Errorf("%w: %w", errGateUnavailable, err)
 	}
 	defer done()
-	if _, err := g.Run(ctx, runDir, []string{"/usr/bin/true"}); err != nil {
-		return fmt.Errorf("%w: the probe through sudo and sandbox-exec failed", errGateUnavailable)
+	if _, err := g.Run(ctx, runDir, "", []string{"/usr/bin/true"}); err != nil {
+		return fmt.Errorf("%w: the probe through sudo and sandbox-exec, and the end of the gate user's processes after it, failed", errGateUnavailable)
 	}
 	return nil
 }
@@ -160,12 +181,12 @@ func (g *gateBox) newRun(ctx context.Context) (runDir string, done func(), err e
 	return runDir, func() { g.removeRun(ctx, runDir) }, nil
 }
 
-// removeRun empties a run folder as the gate user, then removes what is
-// left (the job's own folders) as the job.
+// removeRun empties a run folder and removes its socket folder as the gate
+// user, then removes what is left (the job's own folders) as the job.
 func (g *gateBox) removeRun(ctx context.Context, runDir string) {
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
-	_, _ = g.Run(cleanup, runDir, []string{"/bin/sh", "-c", `chmod -R u+rwX "$0" 2>/dev/null; rm -rf "$0"/* "$0"/.[!.]*`, runDir})
+	_, _ = g.Run(cleanup, runDir, "", []string{"/bin/sh", "-c", `chmod -R u+rwX "$0" "$1" 2>/dev/null; rm -rf "$0"/* "$0"/.[!.]* "$1"`, runDir, g.socketDir(runDir)})
 	_ = os.RemoveAll(runDir)
 }
 
@@ -205,9 +226,22 @@ func (g *gateBox) Sweep(ctx context.Context) error {
 	return nil
 }
 
-// Run runs argv as the gate user in the sandbox, in runDir's tree when it
-// has one, and afterwards ends every process the gate user still runs.
-func (g *gateBox) Run(ctx context.Context, runDir string, argv []string) (string, error) {
+// Run runs argv as the gate user in the sandbox, in runDir's folder wd
+// ("" for runDir itself), and afterwards ends every process the gate user
+// still runs. The job starts sudo in /, never in a folder of the gate
+// user's (its copy is the gate user's alone, mode 700): env, as the gate
+// user inside the sandbox, enters the folder. The ports in use are read
+// just before the command starts. A command the gate could not start
+// (sudo, sandbox-exec, env or the program missing or refusing: the
+// launcher never ran it) and one after which the gate user's processes
+// could not all be ended are the gate's failure (errGateUnavailable),
+// never the command's.
+func (g *gateBox) Run(ctx context.Context, runDir, wd string, argv []string) (string, error) {
+	var id [8]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("%w: no randomness for the command's launch mark", errGateUnavailable)
+	}
+	marker := filepath.Join(runDir, "launched-"+hex.EncodeToString(id[:]))
 	var ports []int
 	if g.listening != nil {
 		var err error
@@ -215,18 +249,36 @@ func (g *gateBox) Run(ctx context.Context, runDir string, argv []string) (string
 			return "", fmt.Errorf("%w: the ports in use could not be read", errGateUnavailable)
 		}
 	}
-	name, args := g.command(runDir, argv, ports)
+	name, args := g.command(runDir, wd, marker, argv, ports)
 	if args == nil {
-		return "", errors.New("the run folder's name cannot be put in the sandbox's profile")
+		return "", fmt.Errorf("%w: the run folder's name cannot be put in the sandbox's profile", errGateUnavailable)
 	}
-	dir := filepath.Join(runDir, "tree")
-	if _, err := os.Stat(dir); err != nil {
-		dir = runDir
+	out, err := withStop(g.run, func() { _ = g.stopAll() }).Run(ctx, "/", nil, name, args...)
+	_, unlaunched := os.Stat(marker)
+	_ = os.Remove(marker)
+	if serr := g.stopAll(); serr != nil {
+		return out, fmt.Errorf("%w: the gate user's processes could not all be ended (%w)", errGateUnavailable, serr)
 	}
-	out, err := withStop(g.run, g.stopAll).Run(ctx, dir, nil, name, args...)
-	g.stopAll()
+	if unlaunched != nil && ctx.Err() == nil {
+		return out, fmt.Errorf("%w: sudo, sandbox-exec or env could not start %s", errGateUnavailable, filepath.Base(argv[0]))
+	}
 	return out, err
 }
+
+// launcher is the last step of every gate command, run by the gate user
+// inside the sandbox ($0 the command's launch mark, then the command): it
+// makes the run's socket folder its own, then marks the command launched
+// and replaces itself with it. A command line that never reached it
+// (sudo, sandbox-exec or env failing), or whose program is not on the
+// gate's PATH, leaves no mark; once the mark is made, the exit status is
+// the command's own.
+const launcher = `command -v "$1" >/dev/null 2>&1 || { printf 'gate: %s cannot be started\n' "$1" >&2; exit 127; }
+if ! /bin/mkdir -m 700 "$TI_TEST_SOCKET_DIR" 2>/dev/null; then
+  [ -d "$TI_TEST_SOCKET_DIR" ] && [ -O "$TI_TEST_SOCKET_DIR" ] || { echo "gate: the run's socket folder belongs to another user" >&2; exit 127; }
+fi
+: > "$0" || exit 127
+exec "$@"
+`
 
 // withStop is r with stop run when a command is killed, through a time
 // bound; any other runner (a test's) is r unchanged.
@@ -243,25 +295,28 @@ func withStop(r runner, stop func()) runner {
 }
 
 // stopAll ends every process of the gate user, which only ever runs the
-// gate, so a background process a test started never outlives its check.
-// It goes through endGateProcesses only, which refuses any target but the
-// gate user's own processes.
-func (g *gateBox) stopAll() {
+// gate, so a background process a test started never outlives its check;
+// it fails unless every one is ended. It goes through endGateProcesses
+// only, which refuses any target but the gate user's own processes.
+func (g *gateBox) stopAll() error {
 	if g.endGateProcesses == nil {
-		return
+		return errors.New("the gate user's processes cannot be ended")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = g.endGateProcesses(ctx)
+	return g.endGateProcesses(ctx)
 }
 
 // pkillGateUser is the gate's end of the gate user's processes, and the
 // only code of the job that names a program sending signals
 // (docs/development.md, "Ending processes"; TestNoKillOutsideTheGuardedFunctions):
 // fail closed, it resolves the gate user's UID and refuses unless that UID
-// exists, is not this process's own and is not root, then runs, through the
-// fixed sudo rule, pkill with that UID as its only target.
-func pkillGateUser(sudo, gateUser string) func(ctx context.Context) error {
+// exists, is not this process's own and is not root; asks sudo whether its
+// fixed rule allows exactly pkill -KILL -U <that UID> (sudo -l, which runs
+// nothing), so a missing rule is never taken for pkill finding no process
+// (both exit 1); runs it; and then fails while ps still shows a process of
+// that UID's that is not a zombie.
+func pkillGateUser(sudo, gateUser, ps string) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		//nolint:gosec // G204: the operator's -gate-user, read by id.
 		out, err := exec.CommandContext(ctx, "/usr/bin/id", "-u", gateUser).Output()
@@ -272,14 +327,41 @@ func pkillGateUser(sudo, gateUser string) func(ctx context.Context) error {
 		if err != nil || uid <= 0 || uid == os.Getuid() {
 			return fmt.Errorf("the gate user's UID %q is root, this job's own or not a UID, so no process is ended", strings.TrimSpace(string(out)))
 		}
+		pkill := []string{"/usr/bin/pkill", "-KILL", "-U", strconv.Itoa(uid)}
 		//nolint:gosec // G204: the fixed sudo rule, the gate user and its own UID.
-		err = exec.CommandContext(ctx, sudo, "-n", "-u", gateUser, "/usr/bin/pkill", "-KILL", "-U", strconv.Itoa(uid)).Run()
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 1 {
-			return nil // pkill found no process of the gate user's
+		if err := exec.CommandContext(ctx, sudo, append([]string{"-n", "-u", gateUser, "-l"}, pkill...)...).Run(); err != nil {
+			return errors.New("the sudo rule does not let this job end the gate user's processes (pkill -KILL -U <its UID>)")
 		}
-		return err
+		//nolint:gosec // G204: the fixed sudo rule, the gate user and its own UID.
+		err = exec.CommandContext(ctx, sudo, append([]string{"-n", "-u", gateUser}, pkill...)...).Run()
+		var exit *exec.ExitError
+		if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) { // 1: pkill found no process
+			return errors.New("pkill of the gate user's processes failed")
+		}
+		for {
+			//nolint:gosec // G204: the ps program and the gate user's own UID.
+			listed, _ := exec.CommandContext(ctx, ps, "-U", strconv.Itoa(uid), "-o", "stat=").Output()
+			if !runningIn(string(listed)) {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return errors.New("the gate user still runs processes after pkill")
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
 	}
+}
+
+// runningIn reports whether ps's stat column names a process that is not a
+// zombie (ended, waiting for its parent to read it).
+func runningIn(stats string) bool {
+	for _, stat := range strings.Fields(stats) {
+		if !strings.HasPrefix(stat, "Z") {
+			return true
+		}
+	}
+	return false
 }
 
 // ibkrPorts are the API ports of IB Gateway and TWS (live and paper), which
@@ -343,11 +425,13 @@ func (g *gateBox) readable(runDir string) []string {
 	return out
 }
 
-// command is the gate's command line for argv in runDir: sudo to the gate
-// user, sandbox-exec with the profile, env with the whole environment, then
+// command is the gate's command line for argv in runDir's folder wd: sudo
+// to the gate user, sandbox-exec with the profile, env with the whole
+// environment entering the folder (-C), then the launcher with marker and
 // argv. A folder whose name would break the profile gives no command.
-func (g *gateBox) command(runDir string, argv []string, ports []int) (name string, args []string) {
-	profile, ok := sandboxProfile(runDir, g.readable(runDir), g.denyRead, ports)
+func (g *gateBox) command(runDir, wd, marker string, argv []string, ports []int) (name string, args []string) {
+	sockets := g.socketDir(runDir)
+	profile, ok := sandboxProfile(runDir, sockets, g.readable(runDir), g.denyRead, ports)
 	if !ok {
 		return "", nil
 	}
@@ -360,11 +444,13 @@ func (g *gateBox) command(runDir string, argv []string, ports []int) (name strin
 		"HOME=" + home, "TMPDIR=" + filepath.Join(home, "tmp"), "PATH=" + g.path, "LANG=en_US.UTF-8",
 		"GOFLAGS=-mod=readonly", "GOPROXY=off", "GOTOOLCHAIN=local", "GOWORK=off",
 		"GOMODCACHE=" + g.modCache(), "GOCACHE=" + gocache, "GOVULNDB=file://" + g.vulnDB(),
+		"TI_TEST_SOCKET_DIR=" + sockets,
 	}
 	if g.golden != "" {
 		env = append(env, "TI_GOLDEN_DIR="+g.golden)
 	}
-	args = append([]string{"-n", "-u", g.user, g.sandboxExec, "-p", profile, "/usr/bin/env", "-i"}, env...)
+	args = append([]string{"-n", "-u", g.user, g.sandboxExec, "-p", profile, "/usr/bin/env", "-i", "-C", filepath.Join(runDir, wd)}, env...)
+	args = append(args, "/bin/sh", "-c", launcher, marker)
 	return g.sudo, append(args, argv...)
 }
 
@@ -372,14 +458,15 @@ func (g *gateBox) command(runDir string, argv []string, ports []int) (name strin
 // a test need, except the network beyond loopback (DNS included: the
 // resolver's socket is not loopback), any loopback port in ports or
 // ibkrPorts (a program already listening there: a test's own servers listen
-// on fresh ports), writes outside the run folder and the shared temporary
-// folders, and reads under /Users but of readable (and the folders above
-// them, by name only), with denyRead denied again. ps is allowed out of
-// the sandbox only because the setuid program cannot run in it, and it
-// reaches nothing. A path holding a quote, a backslash or a line break is
-// refused.
-func sandboxProfile(runDir string, readable, denyRead []string, ports []int) (string, bool) {
-	paths := append(append([]string{runDir}, readable...), denyRead...)
+// on fresh ports), any Unix socket but those in the run folder and its own
+// socket folder sockets (a host service's under /private/tmp is out of
+// reach), writes outside the run folder and the shared temporary folders,
+// and reads under /Users but of readable (and the folders above them, by
+// name only), with denyRead denied again. ps is allowed out of the sandbox
+// only because the setuid program cannot run in it, and it reaches nothing.
+// A path holding a quote, a backslash or a line break is refused.
+func sandboxProfile(runDir, sockets string, readable, denyRead []string, ports []int) (string, bool) {
+	paths := append(append([]string{runDir, sockets}, readable...), denyRead...)
 	for _, p := range paths {
 		if strings.ContainsAny(p, "\"\\\n\r") || !filepath.IsAbs(p) {
 			return "", false
@@ -390,8 +477,8 @@ func sandboxProfile(runDir string, readable, denyRead []string, ports []int) (st
 	b.WriteString("(version 1)\n(allow default)\n")
 	b.WriteString("(deny network*)\n")
 	b.WriteString(`(allow network* (local ip "localhost:*") (remote ip "localhost:*"))` + "\n")
-	b.WriteString(`(allow network* (remote unix-socket (subpath "/private/tmp")) (remote unix-socket (subpath ` + quote(runDir) + `)))` + "\n")
-	b.WriteString(`(allow network-bind (local unix-socket (subpath "/private/tmp")) (local unix-socket (subpath ` + quote(runDir) + `)))` + "\n")
+	b.WriteString(`(allow network* (remote unix-socket (subpath ` + quote(runDir) + `)) (remote unix-socket (subpath ` + quote(sockets) + `)))` + "\n")
+	b.WriteString(`(allow network-bind (local unix-socket (subpath ` + quote(runDir) + `)) (local unix-socket (subpath ` + quote(sockets) + `)))` + "\n")
 	denied := slices.Clone(ibkrPorts)
 	for _, p := range ports {
 		if !slices.Contains(denied, p) {
@@ -429,8 +516,10 @@ func sandboxProfile(runDir string, readable, denyRead []string, ports []int) (st
 // refuses a path that leaves it, or one through a link), then made a git
 // repository of one commit (the deployment tests clone their checkout),
 // with no hook, no file-system monitor and no configuration but its own.
+// A copy an earlier command of the same run made (a session's) is replaced.
 const copyScript = `set -eu
 umask 077
+if [ -e tree ]; then chmod -R u+rwX tree; rm -rf tree; fi
 mkdir tree
 /usr/bin/tar -xf commit.tar -C tree
 cd tree
@@ -453,7 +542,7 @@ func (w *gitWorkspace) exportTree(ctx context.Context, dir, rev, runDir string) 
 	if err := os.Chmod(archive, 0o640); err != nil {
 		return fmt.Errorf("%w: the commit's archive could not be opened to the gate user", errGateUnavailable)
 	}
-	if _, err := w.gate.Run(ctx, runDir, []string{"/bin/sh", "-c", copyScript}); err != nil {
+	if _, err := w.gate.Run(ctx, runDir, "", []string{"/bin/sh", "-c", copyScript}); err != nil {
 		return fmt.Errorf("%w: the gate user could not make the copy of the commit (sudo, sandbox-exec or the archive)", errGateUnavailable)
 	}
 	return nil

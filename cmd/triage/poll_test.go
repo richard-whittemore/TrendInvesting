@@ -913,6 +913,26 @@ func TestAGateThatCannotRunTheChecksDoesNotSpendTheIssue(t *testing.T) {
 	}
 }
 
+// TestASessionWhoseCommandsTheGateCannotServeDoesNotSpendTheIssue: a
+// session whose commands could not be served by the gate (its run folder or
+// the job's socket failing) is the gate's failure, not the analysis's: the
+// issue is analysed again at the next poll, once.
+func TestASessionWhoseCommandsTheGateCannotServeDoesNotSpendTheIssue(t *testing.T) {
+	w := newWorld(t)
+	w.analyst.err = fmt.Errorf("%w: the session's commands cannot be served", errGateUnavailable)
+	if err := w.job.poll(context.Background()); !errors.Is(err, errGateUnavailable) {
+		t.Fatalf("err = %v, want gate unavailable", err)
+	}
+	if own := w.tracker.ownComments(41); len(own) != 0 {
+		t.Fatalf("the issue was spent on a gate that could not serve the session: %v", own)
+	}
+	w.analyst.err = nil
+	w.poll(t)
+	if own := w.tracker.ownComments(41); len(w.analyst.requests) != 2 || len(own) != 1 {
+		t.Fatalf("model calls %d, comments %v; want the issue analysed again", len(w.analyst.requests), own)
+	}
+}
+
 // TestTheDailyCapChargesTheDayOfTheModelCallNotOfItsPreparation: the day is
 // read, the cap checked and the call recorded only once the preparation
 // (the gate's probe, the slice, the worktree, the module downloads) is

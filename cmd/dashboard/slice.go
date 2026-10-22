@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,27 +75,48 @@ func sliceAlert(r *http.Request) (string, error) {
 	return v, nil
 }
 
-// raises reports whether the log's own alerts (report.Alerts, the reporter's
-// rules over its records) include the one whose key hashes to want.
-func raises(loaded journalquery.Journal, want string) bool {
+// cachedAlerts is the hashes of the keys of every alert a log's own records
+// raise, as of the log's size and modification time.
+type cachedAlerts struct {
+	size     int64
+	modified time.Time
+	keys     map[string]bool
+}
+
+// raises reports whether the log at path, read as loaded when its file was
+// as info says, raises the alert whose key hashes to want (report.Alerts,
+// the reporter's rules over its records). The rules run once per size and
+// modification time of the file, so polling the slice does not pass over
+// the whole journal at every request.
+func (c *logCache) raises(path string, info fs.FileInfo, loaded journalquery.Journal, want string) bool {
 	if want == "" {
 		return false
+	}
+	c.mu.Lock()
+	hit, ok := c.raised[path]
+	c.mu.Unlock()
+	if ok && info != nil && hit.size == info.Size() && hit.modified.Equal(info.ModTime()) {
+		return hit.keys[want]
 	}
 	envelopes := make([]event.Envelope, 0, len(loaded.Records))
 	for _, rec := range loaded.Records {
 		envelopes = append(envelopes, rec.Envelope)
 	}
-	alerts, err := report.Alerts(envelopes)
+	keys := map[string]bool{}
+	alerts, err := c.alerts(envelopes)
 	if err != nil {
-		return false
+		return false // not kept: a fault fixed at the file is seen on the next request
 	}
 	for _, a := range alerts {
 		sum := sha256.Sum256([]byte(a.Key))
-		if hex.EncodeToString(sum[:]) == want {
-			return true
-		}
+		keys[hex.EncodeToString(sum[:])] = true
 	}
-	return false
+	if info != nil {
+		c.mu.Lock()
+		c.raised[path] = cachedAlerts{size: info.Size(), modified: info.ModTime(), keys: keys}
+		c.mu.Unlock()
+	}
+	return keys[want]
 }
 
 // sliceWindow reads the route's optional window: from and to, RFC 3339
@@ -173,6 +195,12 @@ func serveSlice(sources source, logs *logCache) http.HandlerFunc {
 // report's error is printed under whatever table came back.
 func sliceOf(b *strings.Builder, name, path string, logs *logCache, filter journalquery.Filter, alert string, r report.Redactor) {
 	shown := r.Identifiers(name)
+	// The file's version is taken before it is read, so what is kept of it
+	// is never newer than what was read.
+	info, err := logs.stat(path)
+	if err != nil {
+		info = nil
+	}
 	raw, err := logs.readFile(path)
 	if err != nil {
 		fmt.Fprintf(b, "## %s: journal unavailable\n\n", shown)
@@ -185,7 +213,7 @@ func sliceOf(b *strings.Builder, name, path string, logs *logCache, filter journ
 	}
 	if n := len(loaded.Records); n > 0 {
 		raised := ""
-		if raises(loaded, alert) {
+		if logs.raises(path, info, loaded, alert) {
 			raised = ", and raised the alert"
 		}
 		fmt.Fprintf(b, "## %s: covers %s to %s%s\n\n", shown,

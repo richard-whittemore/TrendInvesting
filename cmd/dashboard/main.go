@@ -475,12 +475,17 @@ type logCache struct {
 	starts    map[string]cachedLog
 	histories map[string]cachedLog
 	tied      map[string]cachedLog
+	// alerts is the reporter's rules over a log's records (report.Alerts;
+	// tests: a counter); raised keeps each log's alert keys' hashes.
+	alerts func([]event.Envelope) ([]report.Alert, error)
+	raised map[string]cachedAlerts
 }
 
 // newLogCache is an empty cache reading whole logs with readFile and the
 // first records of a log through open.
 func newLogCache(readFile func(string) ([]byte, error), open func(string) (io.ReadCloser, error)) *logCache {
-	return &logCache{stat: os.Stat, readFile: readFile, open: open, starts: map[string]cachedLog{}, histories: map[string]cachedLog{}, tied: map[string]cachedLog{}}
+	return &logCache{stat: os.Stat, readFile: readFile, open: open, starts: map[string]cachedLog{}, histories: map[string]cachedLog{}, tied: map[string]cachedLog{},
+		alerts: report.Alerts, raised: map[string]cachedAlerts{}}
 }
 
 // cachedLog is what is kept of one log, or the reason it does not recover,

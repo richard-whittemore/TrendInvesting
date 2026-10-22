@@ -165,15 +165,26 @@ tokens or enter them.
 
    `id` must name `gid=...(ti-triage-gate)`, not `staff`, and a UID that is
    neither 0 nor `ti-triage`'s (the job refuses the gate otherwise). The
-   password is random and never used. The rule lets `ti-triage` run two
-   command lines as the gate user and nothing else: `sandbox-exec` (every
-   gate command runs inside it, with a profile the job builds that denies
-   the network except loopback, every loopback port another program on
-   the Mac already listens on and IB Gateway's and TWS's API ports, every
-   write outside the gate's run folder and the shared temporary folders,
-   and every read under `/Users` but the gate's own folders) and
-   `pkill -KILL -U <the gate user's UID>`, exactly, to end the gate user's
-   own processes after each command; nothing can end any other user's.
+   password is random and never used. The rule has two entries, and they
+   bound differently:
+   - `/usr/bin/sandbox-exec`, with **no argument pinned**: `ti-triage` may
+     run `sandbox-exec` with any arguments as the gate user, so any profile
+     (even `(allow default)`) and any program. The job always passes its
+     own profile (no network except loopback, less every loopback port
+     another program listens on when the command starts and IB Gateway's
+     and TWS's API ports; no Unix socket but the run's own; no write
+     outside the gate's run folder and the shared temporary folders; no
+     read under `/Users` but the gate's own folders), but the rule does not
+     enforce that: what it bounds is the user, `ti-triage-gate`, which
+     cannot read `ti-triage`'s home, its tokens or its processes, is not
+     root, and cannot signal any other user's process.
+   - `/usr/bin/pkill -KILL -U <the gate user's UID>`, **exactly**: the only
+     signal the job can send through sudo ends the gate user's own
+     processes after each command. The job checks this entry with
+     `sudo -n -u ti-triage-gate -l /usr/bin/pkill -KILL -U <uid>` before
+     each use, so a missing entry makes the gate unavailable rather than
+     being taken for "no process left".
+
    `visudo -c` must say "parsed OK". If you made the rule before this
    change with `/bin/kill`, replace it with this one.
 3. **[OWNER] The gate's folder.** It holds the gate's runs, the module cache
@@ -256,16 +267,17 @@ tokens or enter them.
    `/Users/ti-triage/.config/ti-triage/claude-token`. Its reach: it makes
    model calls billed to that subscription, nothing more (it opens no
    repository, server or broker). The job hands it to Claude Code only, in
-   its environment. No command the session runs has it in its
-   environment: each runs through the job's own program, which starts it
-   with a new environment of `PATH`, `HOME`, `TMPDIR`, `GOCACHE`,
-   `GOMODCACHE`, `GOFLAGS` and `GOPROXY` only, and Claude Code's sandbox
-   unsets it for every command as well. Commands run as `ti-triage`, and
-   macOS may let a process read the starting environment of another
-   process of the same user, so Claude Code's own copy is out of their
-   environment but not certainly out of their reach; what keeps it in is no network in the
-   sandbox and the job removing its text from every comment and every
-   push. The gate never has it.
+   its environment. No code the session wrote runs as `ti-triage`: the
+   only program its commands start is the job's own wrapper, which sends
+   the command's name to the job over a socket in a folder only
+   `ti-triage` can open and runs nothing itself; the job runs `go test`,
+   `go vet` and `gofmt` as `ti-triage-gate` in the gate's sandbox, over a
+   copy of the worktree, and git's read-only commands itself with git's
+   configuration cut off. `ti-triage-gate` cannot read another user's
+   processes or files, so a test the session wrote cannot read the token
+   from Claude Code's environment. What remains is Claude Code itself and
+   the model's words, which the job redacts before posting or pushing. The
+   gate never has it.
 8. **Build the program** from the clone, at `main`, with no changes:
 
    ```

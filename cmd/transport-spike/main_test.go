@@ -50,7 +50,12 @@ func TestServeRefusesAnUnbindableSocket(t *testing.T) {
 
 func TestBenchMeasuresRoundTripsAgainstAServer(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("/tmp", "cli-")
+	// The triage gate names its run's own socket folder (docs/development.md, "Ending processes").
+	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
+	if !ok {
+		root = "/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "cli-")
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
 	}

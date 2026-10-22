@@ -80,11 +80,17 @@ func standInGate(t *testing.T) *gateBox {
 
 // refuseSignals begins every stand-in sudo and sandbox-exec: a stand-in runs
 // its command as the test's own user, so a command line naming a program
-// that sends signals (kill, pkill, killall) is refused before anything
-// runs, whatever its target.
-const refuseSignals = `for a in "$@"; do
-  case "${a##*/}" in kill|pkill|killall) echo "stand-in: refused $a" >&2; exit 97 ;; esac
+// that sends signals (kill, pkill, killall) anywhere in any argument, a
+// shell's `-c` payload included, is refused before anything runs, whatever
+// its target. Each argument is cut into words at every character a shell
+// separates a command by.
+const refuseSignals = `set -f
+for a in "$@"; do
+  for w in $(printf '%s\n' "$a" | tr -c 'A-Za-z0-9_./-' ' '); do
+    case "${w##*/}" in kill|pkill|killall) echo "stand-in: refused $w" >&2; exit 97 ;; esac
+  done
 done
+set +f
 `
 
 // TestTheStandInsRefuseEverySignallingProgram: the stand-in sudo and
@@ -107,10 +113,15 @@ func TestTheStandInsRefuseEverySignallingProgram(t *testing.T) {
 		if prog == g.sandboxExec {
 			lead = []string{"-p", "(version 1)"}
 		}
-		if code := exitOf(prog, append(lead, "/bin/kill", "-l")...); code != 97 {
-			t.Fatalf("%s ran kill -l (exit %d): its guard is broken, so nothing more is tried", prog, code)
+		// Harmless lines first, in every form: the program itself, and inside
+		// a shell's payload.
+		for _, harmless := range [][]string{{"/bin/kill", "-l"}, {"/bin/sh", "-c", "kill -l"}, {"/usr/bin/env", "-i", "/bin/sh", "-c", "true; /bin/kill -l"}} {
+			if code := exitOf(prog, append(lead, harmless...)...); code != 97 {
+				t.Fatalf("%s ran %q (exit %d): its guard is broken, so nothing more is tried", prog, harmless, code)
+			}
 		}
-		for _, line := range [][]string{{"/bin/kill", "-KILL", "-1"}, {"/usr/bin/pkill", "-KILL", "-U", "0"}, {"killall", "-KILL", "Dock"}, {"/usr/bin/env", "-i", "kill", "-KILL", "-1"}} {
+		for _, line := range [][]string{{"/bin/kill", "-KILL", "-1"}, {"/usr/bin/pkill", "-KILL", "-U", "0"}, {"killall", "-KILL", "Dock"}, {"/usr/bin/env", "-i", "kill", "-KILL", "-1"},
+			{"/bin/sh", "-c", "sleep 0; kill -KILL -1"}, {"/bin/sh", "-c", "x=1;pkill -U 0"}} {
 			if code := exitOf(prog, append(lead, line...)...); code != 97 {
 				t.Errorf("%s did not refuse %q (exit %d)", prog, line, code)
 			}
@@ -307,7 +318,7 @@ func TestTheGateCommandRunsAsItsOwnUserInASandbox(t *testing.T) {
 	g := &gateBox{user: "ti-triage-gate", root: "/Users/Shared/ti-triage-gate", path: "/opt/homebrew/bin:/usr/bin:/bin",
 		sudo: "/usr/bin/sudo", sandboxExec: "/usr/bin/sandbox-exec", denyRead: []string{"/Users/ti-triage"}, golden: "/Users/Shared/golden",
 		toolchain: "/Users/Shared/go"}
-	name, args := g.command("/Users/Shared/ti-triage-gate/runs/r1", []string{"make", "check"}, []int{50267})
+	name, args := g.command("/Users/Shared/ti-triage-gate/runs/r1", "tree", "/Users/Shared/ti-triage-gate/runs/r1/launched-1", []string{"make", "check"}, []int{50267})
 	argv := append([]string{name}, args...)
 	if !slices.Equal(argv[:6], []string{"/usr/bin/sudo", "-n", "-u", "ti-triage-gate", "/usr/bin/sandbox-exec", "-p"}) {
 		t.Fatalf("argv %q", argv)
@@ -338,10 +349,14 @@ func TestTheGateCommandRunsAsItsOwnUserInASandbox(t *testing.T) {
 	if i := strings.Index(profile, `(deny file-read* (subpath "/Users/ti-triage"))`); i < lastAllow {
 		t.Errorf("the job's own folder is not denied after the allowed ones:\n%s", profile)
 	}
-	if !slices.Equal(argv[7:9], []string{"/usr/bin/env", "-i"}) || !slices.Equal(argv[len(argv)-2:], []string{"make", "check"}) {
+	if !slices.Equal(argv[7:11], []string{"/usr/bin/env", "-i", "-C", "/Users/Shared/ti-triage-gate/runs/r1/tree"}) || !slices.Equal(argv[len(argv)-2:], []string{"make", "check"}) {
 		t.Fatalf("argv %q", argv)
 	}
-	env := argv[9 : len(argv)-2]
+	launch := slices.Index(argv, "/bin/sh")
+	if launch < 0 || argv[launch+1] != "-c" || argv[launch+2] != launcher || argv[launch+3] != "/Users/Shared/ti-triage-gate/runs/r1/launched-1" {
+		t.Fatalf("argv %q does not end in the launcher", argv)
+	}
+	env := argv[11:launch]
 	for _, want := range []string{"HOME=/Users/Shared/ti-triage-gate/runs/r1/home", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOTOOLCHAIN=local", "GOWORK=off",
 		"GOMODCACHE=/Users/Shared/ti-triage-gate/modcache", "GOVULNDB=file:///Users/Shared/ti-triage-gate/vulndb", "TI_GOLDEN_DIR=/Users/Shared/golden", "PATH=/opt/homebrew/bin:/usr/bin:/bin"} {
 		if !slices.Contains(env, want) {
@@ -353,7 +368,7 @@ func TestTheGateCommandRunsAsItsOwnUserInASandbox(t *testing.T) {
 			t.Errorf("env holds %s", e)
 		}
 	}
-	if _, args := g.command(`/tmp/a"b`, []string{"true"}, nil); args != nil {
+	if _, args := g.command(`/tmp/a"b`, "", "/tmp/m", []string{"true"}, nil); args != nil {
 		t.Errorf("a folder whose name would break the profile was accepted: %q", args)
 	}
 }
@@ -398,13 +413,13 @@ func TestTheSandboxDeniesTheNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(outside) })
-	if _, err := g.Run(context.Background(), runDir, []string{"/bin/sh", "-c", "echo x > " + outside}); err == nil {
+	if _, err := g.Run(context.Background(), runDir, "", []string{"/bin/sh", "-c", "echo x > " + outside}); err == nil {
 		t.Error("the sandbox let a command write outside its run folder")
 	}
-	if _, err := g.Run(context.Background(), runDir, []string{"/bin/sh", "-c", "echo x > \"$HOME/inside\""}); err != nil {
+	if _, err := g.Run(context.Background(), runDir, "", []string{"/bin/sh", "-c", "echo x > \"$HOME/inside\""}); err != nil {
 		t.Errorf("the sandbox refused a write in its run folder: %v", err)
 	}
-	if out, err := g.Run(context.Background(), runDir, []string{"/usr/bin/curl", "-sS", "-m", "5", "-o", "/dev/null", "https://example.com"}); err == nil {
+	if out, err := g.Run(context.Background(), runDir, "", []string{"/usr/bin/curl", "-sS", "-m", "5", "-o", "/dev/null", "https://example.com"}); err == nil {
 		t.Errorf("the sandbox let a command reach the network: %s", out)
 	}
 	// A program already listening on loopback (IB Gateway, the dashboard's
@@ -431,16 +446,45 @@ func TestTheSandboxDeniesTheNetwork(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
-	if out, err := g.Run(context.Background(), runDir, []string{"/usr/bin/curl", "-sS", "-m", "5", "-o", "/dev/null", "http://" + l.Addr().String() + "/"}); err == nil || !strings.Contains(out, "connect") {
+	if out, err := g.Run(context.Background(), runDir, "", []string{"/usr/bin/curl", "-sS", "-m", "5", "-o", "/dev/null", "http://" + l.Addr().String() + "/"}); err == nil || !strings.Contains(out, "connect") {
 		t.Errorf("the sandbox let a command reach a port already listening on loopback: %v %s", err, out)
 	}
 	own := "import socket\ns = socket.socket()\ns.bind(('127.0.0.1', 0))\ns.listen()\nc = socket.create_connection(s.getsockname())\nprint('own server reached')\n"
-	if out, err := g.Run(context.Background(), runDir, []string{"/usr/bin/python3", "-c", own}); err != nil || !strings.Contains(out, "own server reached") {
+	if out, err := g.Run(context.Background(), runDir, "", []string{"/usr/bin/python3", "-c", own}); err != nil || !strings.Contains(out, "own server reached") {
 		t.Errorf("the sandbox refused a server of the command's own: %v %s", err, out)
+	}
+	// A Unix socket a host service listens on under /private/tmp is out of
+	// reach; one in the command's own socket folder is not.
+	hostDir, err := os.MkdirTemp("/tmp", "host-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(hostDir) }()
+	host, err := net.Listen("unix", filepath.Join(hostDir, "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = host.Close() }()
+	go func() {
+		for {
+			c, err := host.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	reach := "import socket, sys\ns = socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])\nprint('reached')\n"
+	if out, err := g.Run(context.Background(), runDir, "", []string{"/usr/bin/python3", "-c", reach, filepath.Join(hostDir, "s")}); err == nil || strings.Contains(out, "reached") {
+		t.Errorf("the sandbox let a command reach a host's socket under /tmp: %v %s", err, out)
+	}
+	ownSocket := "import os, socket\np = os.path.join(os.environ['TI_TEST_SOCKET_DIR'], 's')\nl = socket.socket(socket.AF_UNIX)\nl.bind(p)\nl.listen()\nc = socket.socket(socket.AF_UNIX)\nc.connect(p)\nprint('own socket reached')\n"
+	if out, err := g.Run(context.Background(), runDir, "", []string{"/usr/bin/python3", "-c", ownSocket}); err != nil || !strings.Contains(out, "own socket reached") {
+		t.Errorf("the sandbox refused a socket in the command's own socket folder: %v %s", err, out)
 	}
 	// Reads under /Users are denied but for the folders the gate needs.
 	if src, err := filepath.Abs("gate.go"); err == nil && strings.HasPrefix(src, "/Users/") {
-		if out, err := g.Run(context.Background(), runDir, []string{"/bin/cat", src}); err == nil {
+		if out, err := g.Run(context.Background(), runDir, "", []string{"/bin/cat", src}); err == nil {
 			t.Errorf("the sandbox let a command read %s: %s", src, out[:min(len(out), 80)])
 		}
 	}
