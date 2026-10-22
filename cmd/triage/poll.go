@@ -48,8 +48,9 @@ const (
 	maxField = 8000
 	// maxTitle bounds a PR title.
 	maxTitle = 120
-	// retention is how long after an alert issue closed the job keeps the
-	// record that it handled it.
+	// retention is how long a done record is kept: it expires 30 days after
+	// the record was last listed, and an expired record is dropped from the
+	// state. It also bounds the closed-issue listing window.
 	retention = 30 * 24 * time.Hour
 )
 

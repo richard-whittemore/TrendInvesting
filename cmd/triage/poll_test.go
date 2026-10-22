@@ -833,12 +833,13 @@ func TestHandledIssuesAreNeverReadAgain(t *testing.T) {
 	}
 }
 
-// TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed: an issue closed
-// for more than 30 days is no longer listed or read, and the record of one
-// handled is dropped; one closed more recently is kept. A record still owed
+// TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItWasLastListed: an issue
+// closed for more than 30 days is no longer listed or read, and the record of
+// one handled is dropped 30 days after it was last listed, whatever its
+// closing time; one last listed more recently is kept. A record still owed
 // its comment is kept as it is, but its issue is not read once it is that
 // old.
-func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItClosed(t *testing.T) {
+func TestAClosedAlertsRecordIsDroppedThirtyDaysAfterItWasLastListed(t *testing.T) {
 	w := newWorld(t)
 	day := 24 * time.Hour
 	start := pollTime.Add(-90 * day)
@@ -929,11 +930,11 @@ func TestARecordWhoseIssueDisappearsFromListingsIsBounded(t *testing.T) {
 	}
 }
 
-// TestAClosedIssueHandledJustBeforeDay30IsNotAnalysedAgain: an issue
-// closed 29.5 days ago and handled in this poll has its closing time and
-// listing time recorded, so the record outlives the issue's leaving the
+// TestAClosedIssueHandledJustBeforeDay30KeepsItsRecordUntilUnlistedFor30Days:
+// an issue closed 29.5 days ago and handled in this poll has its closing time
+// and listing time recorded, so the record outlives the issue's leaving the
 // listing the next day and is dropped only 30 days after its last listing.
-func TestAClosedIssueHandledJustBeforeDay30IsNotAnalysedAgain(t *testing.T) {
+func TestAClosedIssueHandledJustBeforeDay30KeepsItsRecordUntilUnlistedFor30Days(t *testing.T) {
 	w := newWorld(t)
 	day := 24 * time.Hour
 	closed := pollTime.Add(-29*day - 12*time.Hour)
