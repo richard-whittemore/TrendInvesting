@@ -151,7 +151,7 @@ func TestDashboardJSONCarriesTheSummariesAndAlerts(t *testing.T) {
 
 func TestEveryRouteRefusesEveryWritingMethod(t *testing.T) {
 	h := newHandlerFor([]string{writeJournal(t, t.TempDir())}, nil, nil, "SPY")
-	for _, path := range []string{"/", "/api/summary.json", "/healthz", "/nowhere"} {
+	for _, path := range []string{"/", "/api/summary.json", "/api/journal-slice", "/healthz", "/nowhere"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, "PURGE"} {
 			rec := get(h, method, path)
 			if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD" {

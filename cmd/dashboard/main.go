@@ -222,6 +222,7 @@ func newHandlerCached(sources source, benchmark string, logs *logCache) http.Han
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(accounts)
 	})
+	mux.HandleFunc("/api/journal-slice", serveSlice(sources, logs))
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		accounts, err := load(sources, benchmark, logs)
 		if err != nil {

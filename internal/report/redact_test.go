@@ -309,3 +309,28 @@ func TestFieldNamesThatRedactAlikeAreAllKept(t *testing.T) {
 		}
 	}
 }
+
+// TestIdentifiersTakesOutWhatNamesTheAccountButKeepsFigures: text bound for
+// a private reader that needs the figures, such as the journal slice the
+// triage job hands Claude, loses every secret, account id, token and
+// Tailscale host or address, exactly as Text does, and keeps its numbers.
+func TestIdentifiersTakesOutWhatNamesTheAccountButKeepsFigures(t *testing.T) {
+	r := report.NewRedactor([]string{"s3cret-topic-value", "myhost"})
+	in := "topic s3cret-topic-value account DU1234567 and U7654321 tokens ghp_abcdefghijklmnopqrstuvwxyz0123456789 " +
+		"github_pat_11ABCDEFG0abcdefghijklmnopqrstu_vwxyz0123456789 host lightsail.tail1a2b3.ts.net at 100.101.102.103 on myhost; " +
+		"bought 39 SPY at 101.25, cash $12,345.67"
+	got := r.Identifiers(in)
+	for _, leak := range []string{"s3cret-topic-value", "DU1234567", "U7654321", "ghp_", "github_pat_", "ts.net", "100.101.102.103", "myhost"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("identifiers left %q:\n%s", leak, got)
+		}
+	}
+	for _, kept := range []string{"bought 39 SPY at 101.25", "$12,345.67"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("identifiers removed the figure %q:\n%s", kept, got)
+		}
+	}
+	if r.Identifiers("plain text 42") != "plain text 42" {
+		t.Error("text with no identifier changed")
+	}
+}

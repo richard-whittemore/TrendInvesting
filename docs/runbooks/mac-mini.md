@@ -5,7 +5,7 @@ with a real systemd, for trying the provisioner, the units and your own
 steps before doing them on the Lightsail server, where paper trading runs
 (`docs/runbooks/lightsail-deployment.md`). What it is and why: the manual
 chapter [mac-mini](../manual/mac-mini.md). Its steps: building the programs and creating the container, or
-re-attaching to it.*
+re-attaching to it; and, outside the container, the alert triage job.*
 
 ## Before you start
 
@@ -113,6 +113,105 @@ secrets and its durable logs, and nothing backs them up.
 
 **If up.sh says another up.sh is working on the container**, wait for it.
 If no such process exists any more, run up.sh again: it takes the lock over.
+
+## 2. The alert triage job
+
+Not part of the container: it runs on the Mac itself, under launchd, as a
+macOS user of its own. What it does, what it can and cannot do, its cost cap
+and its off switch: the manual chapter
+[alerts and dashboard](../manual/alerts-and-dashboard.md), "Alerts analysed
+by Claude". **Owner steps** are marked **[OWNER]**; agents never create
+tokens or enter them.
+
+1. **[OWNER] A macOS user of its own.** System Settings, Users & Groups, Add
+   User: a Standard user named `ti-triage`. Never sign it in to iCloud,
+   never give it an SSH key, never run `gh auth login` as it: what it holds
+   is all the job, and the code its sessions write, can reach. Keep the
+   Mac mini awake (System Settings, Energy: prevent automatic sleeping) and
+   on the tailnet.
+2. **Its tools.** Go is the system's (`/usr/local/go`). Install Claude Code
+   for that user, from the official installer, as that user
+   (`sudo -iu ti-triage`, then the install command from Claude Code's
+   documentation); it lands in `/Users/ti-triage/.local/bin`.
+3. **Its own clone, outside the synced folders** (read-only `https`, no
+   credential):
+
+   ```
+   sudo -iu ti-triage git clone https://github.com/richard-whittemore/TrendInvesting.git /Users/ti-triage/TrendInvesting-triage
+   ```
+
+4. **[OWNER] The triage token.** On GitHub: Settings, Developer settings,
+   Personal access tokens, Fine-grained tokens, Generate new token. Name it
+   `ti-triage`, set an expiry (90 days), "Only select repositories" with the
+   one repository, and under "Repository permissions" set **Contents**,
+   **Issues** and **Pull requests** to "Read and write" and leave every other
+   permission at "No access" (Metadata read-only is added by GitHub). It
+   needs Contents to push a fix's branch, which is why `main` must stay
+   protected: check that the repository's ruleset for `main` requires a pull
+   request, so this token can never push to `main` itself. Put it in a file
+   only `ti-triage` can read, typed on the terminal, never on a command line:
+
+   ```
+   sudo -u ti-triage sh -c 'umask 077; mkdir -p /Users/ti-triage/.config/ti-triage; cat > /Users/ti-triage/.config/ti-triage/github-token'
+   ```
+
+   Paste the token, press Return, then Ctrl-D. If the reporter's token
+   (`TI_GITHUB_ISSUES_TOKEN` on the server) belongs to a different GitHub
+   user than this one, add `-alert-author <that login>` to the plist (step
+   7). Put the expiry in your calendar; to rotate, replace the file's line
+   and delete the old token.
+5. **[OWNER] The Claude token.** As yourself, run `claude setup-token` and
+   sign in with the subscription the job should use; it prints a long-lived
+   token. Store it the same way, in
+   `/Users/ti-triage/.config/ti-triage/claude-token`. The job hands it only
+   to its sessions, never to the gate's commands or to git.
+6. **Build the program** from the clone, at `main`, with no changes:
+
+   ```
+   sudo -iu ti-triage sh -c 'cd /Users/ti-triage/TrendInvesting-triage && git fetch origin && git checkout --detach origin/main && git status --short && mkdir -p /Users/ti-triage/bin /Users/ti-triage/triage && go build -o /Users/ti-triage/bin/ti-triage ./cmd/triage'
+   ```
+
+   `git status --short` must print nothing. To upgrade later, run the same
+   line again.
+7. **[OWNER] The read-only access path.** The job needs no key for the
+   server: it reads the dashboard's `/api/journal-slice` over the tailnet,
+   which answers reads only, with no credential at all. Check two things:
+   - the server runs a dashboard build that serves it: from the Mac mini,
+     `curl -sS https://<server>.<tailnet>.ts.net/api/journal-slice | head`
+     prints `## <log>: journal-query refusals` (a release with this change,
+     `docs/runbooks/lightsail-deployment.md`, "Upgrading");
+   - the tailnet lets nothing on the Mac mini log in to the server by
+     itself. Tailscale SSH trusts the machine, not the macOS user, so in the
+     tailnet's policy file make sure no SSH rule with `"action": "accept"`
+     admits the Mac mini to the server; keep `"check"` (which asks you to
+     sign in again in a browser) or allow SSH to the server from your laptop
+     only. This is the step that makes "no write path to the server" true
+     for every process on the Mac mini, not only for the job.
+8. **Install the launchd job.** Edit the copy's `-slice-url` to the
+   server's tailnet name, then:
+
+   ```
+   cp /Users/ti-triage/TrendInvesting-triage/deploy/mac-mini/triage/com.trendinvesting.triage.plist /tmp/ti-triage.plist
+   nano /tmp/ti-triage.plist        # replace <server>.<tailnet>
+   plutil -lint /tmp/ti-triage.plist
+   sudo install -o root -g wheel -m 644 /tmp/ti-triage.plist /Library/LaunchDaemons/com.trendinvesting.triage.plist
+   sudo launchctl bootstrap system /Library/LaunchDaemons/com.trendinvesting.triage.plist
+   ```
+
+   It runs at once and then every five minutes. To use the golden scenarios
+   in the gate's `make check`, add `TI_GOLDEN_DIR` to the plist's
+   `EnvironmentVariables`. To change a setting (such as `-daily-cap`), edit
+   the installed plist, then `sudo launchctl bootout
+   system/com.trendinvesting.triage` and bootstrap it again.
+9. **Check it.** `sudo cat /Users/ti-triage/triage/triage.log` shows each
+   poll's error, if any; a quiet log is a poll that found nothing new.
+   `sudo launchctl print system/com.trendinvesting.triage` shows its last
+   exit status. The first poll records when the job began: only alert
+   issues opened after it are analysed. The next alert issue should have its
+   comment within about five minutes.
+
+**Switching it off:** `sudo -u ti-triage touch /Users/ti-triage/triage/OFF`;
+delete the file to switch it on again. The manual chapter has the rest.
 
 ## Checking the launcher itself
 

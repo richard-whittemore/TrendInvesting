@@ -20,6 +20,10 @@ you about it, so you do not have to go looking.
 Neither can place, change or cancel an order, and neither talks to the broker.
 They only read.
 
+A third, the triage job on the Mac mini, reads each alert issue and writes
+one comment analysing it, with Claude Code ("Alerts analysed by Claude",
+below). It too places nothing and only reads the server.
+
 ## What they read
 
 A run leaves one of two files, and both programs read either.
@@ -566,6 +570,136 @@ is sent again at the next firing, and an issue is made then.
 Never paste the token into an issue, a chat or the repository. The reporter
 never prints it: it is removed from every message and issue.
 
+## Alerts analysed by Claude
+
+A job on the Mac mini reads each alert issue, asks Claude Code what
+happened, and writes the answer as one comment on the issue, usually within
+minutes of the issue opening. The comment says what happened, which rule
+applied (the ADR or manual section), and which of three kinds it is: a
+**code defect**, a **data problem**, or an **owner action**. For a code
+defect it may also open a fix as a draft pull request. For an owner action
+it says what you must do, and never does it.
+
+**How it works.** launchd runs `ti-triage` every five minutes, as the
+macOS user `ti-triage` (setup: `docs/runbooks/mac-mini.md`, "2. The alert
+triage job"). Each run is one poll:
+
+1. It lists the issues labelled `alert`, and those labelled
+   `alert-resolved` (an alert that cleared between two polls has lost the
+   `alert` label; "Design note: a resolved issue leaves the alert label",
+   above), open and closed, opened since the job was first switched on.
+   Issues from before that are left alone, so switching the job on never
+   sweeps up old incidents.
+2. It keeps only the reporter's own issues: opened by the reporter's GitHub
+   user (`-alert-author`, by default the triage token's own user) and
+   ending with the reporter's hidden key line. Anything else is never read
+   further, so a stranger's words never reach Claude.
+3. An issue already holding the job's comment is done. The comment ends
+   with a hidden line, `<!-- ti-triage:analysis -->` (or
+   `<!-- ti-triage:skipped -->`), and only a comment written by the triage
+   token's own user counts: the same line pasted by someone else does not.
+   The job also records each issue it finished in its state file, so a poll
+   with nothing new reads no comment at all.
+4. For each new issue, it fetches the journal slice (below), makes a fresh
+   worktree of `main` in its own clone, and starts one headless Claude Code
+   session there, with a fixed prompt built into the program
+   (`cmd/triage/prompt.md`). The session is handed the issue's title and
+   body (never its comments, which anyone can write) and the slice.
+5. It turns the session's answer into the comment, through the reporter's
+   own redactor, and posts it. A second poll adds nothing.
+
+**What it reads from the server.** Only the journal slice: the dashboard
+serves it at `/api/journal-slice` on the tailnet, as plain text. It is the
+output of five `journal-query` reports (`refusals`, `orders`, `reconcile`,
+`operator`, `fills`) over each account's current run, each cut to its last
+50 rows. The dashboard answers `GET` and `HEAD` only, on every route, so
+nothing can be written through it, and the job sends no password, token or
+cookie to fetch it: it holds no credential for the server at all. Before the
+session sees the slice or the issue, the job takes out every IBKR account
+id, GitHub token, Tailscale host name and address, and this Mac's own
+names, the same list the reporter removes, but keeps the figures, which the
+analysis needs. The figures go to Claude as part of the session, as they
+would if you pasted `journal-query` output into Claude yourself; they never
+go to GitHub.
+
+**What it can do, and what it cannot.**
+
+- The session's tools are a fixed list in the program: read and search the
+  worktree, edit files in it, and run `go test`, `go vet`, `go build`,
+  `gofmt` and git's read-only commands. Everything else is denied without
+  asking (no prompt can be answered in a headless session): the web, every
+  MCP server, `git commit` and `git push`, `gh`, `ssh`, `curl`,
+  `tailscale`, `sudo` and the like. Your own Claude Code settings are not
+  loaded (`--restricted`), and the session cannot leave the worktree with
+  its file tools.
+- The session's environment holds no GitHub token, no SSH agent, and no git
+  credential helper (git's system and global settings are cut off, so the
+  macOS keychain is never asked), and `gh` is pointed at a configuration that
+  does not exist, so it is not logged in.
+- It never performs an owner action. It has no way to: the macOS user holds
+  no SSH key and no login for the server, the broker or the secrets file,
+  and the slice is read-only. An owner action is stated in the comment
+  under "What you must do", in the runbook's words, and left to you.
+- It never merges, never marks a pull request ready, never asks for a
+  review, and never mentions anyone: every `@` mention is taken out of what
+  it writes, so it never calls `@coderabbitai` or `@greptileai`.
+
+**What a comment holds.** "Triage", then **What happened**, **Which rule
+applied**, **Kind**, and for an owner action **What you must do**, or for a
+code defect **Fix**. Every word Claude wrote goes through the same redactor
+as the alert issues ("What is kept out", above): no secret, account id,
+token, Tailscale host or figure reaches the comment; only dates and ADR
+numbers keep their digits. The one thing not redacted is the link to a fix
+PR, which the job builds from GitHub's own answer. Each of Claude's answers
+is cut at 8,000 bytes.
+
+**A code defect's fix.** Only for a code defect, the session may change the
+worktree, tests first. The job then takes the change through the
+repository's normal flow, mechanically, and opens it only if every step
+passes:
+
+1. It sorts the changed files into tests (`*_test.go`, `test_*.py`,
+   `*_test.py`, `test-*.sh`, anything under `testdata/`) and the rest. A
+   change with no test, or only tests, is not opened.
+2. It commits the tests alone, then the rest, as `TrendInvesting triage`.
+3. At the tests' commit it runs `-test-cmd` (default `go test ./...`),
+   which must **fail**: the test shows the defect. At the fix's commit it
+   runs `-check-cmd` (default `make check`), which must **pass**.
+4. It checks the commits' messages and every added line with the same
+   redactor, and pushes nothing that holds an account id, a token, a secret
+   or a host name.
+5. It pushes the branch `triage/alert-<issue>` (never forced, never to
+   `main`) and opens a **draft** pull request into `main`, whose body names
+   the alert issue and says the tests came first. The comment links it.
+
+The draft then waits for you: mark it ready to start the review bots and
+the merge gate as for any other PR, or close it. When any step fails, the
+comment's **Fix** line says which, and nothing is opened.
+
+**What it costs, and the cap.** A poll that finds no issue without its
+comment makes no model call; it only lists issues on GitHub. Each issue gets
+at most one session, ever: the call is recorded in the state file before it
+is made, so a run that dies during it does not make it again (the issue then
+gets "triage failed: the analysis did not finish"). A session is bounded by
+`-max-turns` (default 60) and `-claude-timeout` (default 20 minutes). At most
+`-daily-cap` sessions (default 10) are made in a New York day; past it, each
+new issue gets the comment "triage skipped: daily limit" once, and is never
+analysed later. A session uses the Claude subscription of the login it is
+given (`-claude-token-file`), not a pay-per-use key.
+
+**Switching it off.** Create the file `OFF` in the job's folder, as the
+`ti-triage` user: `sudo -u ti-triage touch /Users/ti-triage/triage/OFF`.
+Every poll after that reads nothing, calls nothing and writes nothing, and
+says "triage: off" in its log. Delete the file to switch it back on; issues
+opened while it was off are then analysed (each within the cap). To stop
+launchd starting it at all, `sudo launchctl bootout
+system/com.trendinvesting.triage`; to start it again, `sudo launchctl
+bootstrap system /Library/LaunchDaemons/com.trendinvesting.triage.plist`.
+
+**Its log.** `/Users/ti-triage/triage/triage.log`. A poll that fails names
+the issue and why ("triage: issue #41: GitHub answered 502 Bad Gateway");
+the next poll tries again. Its rows are in "The triage job", below.
+
 ## Running the reporter
 
 On the server it runs as `ti-reporter@boost.service`, started by its timer,
@@ -633,6 +767,13 @@ On the server it runs as `ti-dashboard.service`:
 Port 8088 is the program's default, the unit's, and the one the Lightsail
 runbook publishes to your tailnet (`sudo tailscale serve --bg 8088`). It reads
 no secret and is given none.
+
+Besides the page and `/api/summary.json`, it serves `/api/journal-slice`:
+the output of `journal-query`'s `refusals`, `orders`, `reconcile`,
+`operator` and `fills` over each account's current run, each cut to its
+last 50 rows, as plain text, headed by the log's file name (never its
+path). It is what the triage job reads ("Alerts analysed by Claude",
+above); like every route, it answers `GET` and `HEAD` only.
 
 `-engine-dir` names the folder the engine keeps its logs in. On every request
 the page finds the account's current run there, the newest link of the chain
@@ -1334,6 +1475,25 @@ passes `-clock-check`.
 | It will not start: "dashboard: -cash-ledger ... must be SOURCE=PATH ...", "... names ..., which is no -journal or -engine-dir", "... is given twice for ..." or "... names no ledger file" | It refuses to guess which account a ledger belongs to; a `-journal`'s ledger is always named | Name each ledger as `SOURCE=PATH` with SOURCE exactly the `-engine-dir` or `-journal` it belongs to ("Running the dashboard", above) |
 | It will not start: "dashboard: ... is neither loopback nor a Tailscale address ..." or "... is not an address of this host's Tailscale interface" | It refuses to listen anywhere but loopback or this machine's own Tailscale address | Use `-addr 127.0.0.1:8088` (the unit's) and publish it with `sudo tailscale serve --bg 8088` |
 
+### The triage job
+
+`/Users/ti-triage/triage/triage.log` on the Mac mini shows every poll's
+error.
+
+| What you see | What the program does | What you do |
+| --- | --- | --- |
+| No triage comment appears on a new alert issue | Possible causes: the job is off (the `OFF` file, or launchd's job is not loaded), the Mac mini is asleep or off the tailnet, the token expired, or the issue is not the reporter's (another author, or no hidden key line), or it was opened before the job was first switched on. The alert itself is unaffected: PagerDuty and ntfy have it | Read the log. `sudo launchctl print system/com.trendinvesting.triage` shows whether launchd runs it. Check `-alert-author` names the reporter's GitHub user if the two tokens belong to different users |
+| "triage: off (/Users/ti-triage/triage/OFF exists); nothing read, nothing written" in the log | Every poll does nothing while the file is there | Delete the file to switch the job back on |
+| "triage skipped: daily limit" on an issue | The day's `-daily-cap` sessions were made, so this issue was not analysed, and never will be | Read the alert and its journal yourself. Raise `-daily-cap` in the plist only if the cost is worth it |
+| "triage failed: ..." on an issue (the analysis failed, ran past its time, named no known kind, did not finish, or the repository could not be prepared) | That issue's one session is spent; it is not tried again | Read the alert and its journal yourself, and the log for the reason |
+| "**Fix.** No fix PR was opened: ..." in a comment | The session found a code defect, but its change failed a step of the gate: no test, only tests, the test did not fail before the fix, the check failed, it held an identifier, or the push or the PR failed. Nothing was opened; if the push worked, the branch `triage/alert-<issue>` is on GitHub | Treat it as a defect report: fix it the normal way, or delete the branch |
+| A draft PR from `triage/alert-<issue>` | The job's proposed fix, tests first, never merged by the job | Review it; mark it ready to start the review bots and the merge gate, or close it |
+| "triage: the state file ... is not understood, so nothing is done" or "the state file cannot be read" | No poll runs: without the record the job cannot tell which issues it already made a session for | Move `/Users/ti-triage/triage/state.json` aside. The next poll starts a new record: issues already analysed are recognised by their comments; one opened before that poll is left alone |
+| "triage: issue #N: GitHub answered 401 Unauthorized" (or 403, 404) | The poll writes nothing for that issue; the next poll tries again | The triage token expired, was revoked, or lacks a permission: make a new one (runbook, step 4) |
+| "triage: another poll is running; this one does nothing" | A poll started by hand while launchd's ran, or the other way round | Nothing |
+| "triage: -token-file must be a file only you can read (chmod 600)" | The job does not start | `chmod 600` the file, as `ti-triage` |
+| A comment saying "The journal slice could not be fetched" | The dashboard could not be reached over the tailnet, so the analysis used the alert issue alone | Check the dashboard (`systemctl status ti-dashboard`) and that the Mac mini is on the tailnet |
+
 ## What backs this
 
 - ADR 0019, amendment of 2026-09-24, "Alerting": what alerts, once per
@@ -1393,6 +1553,20 @@ passes `-clock-check`.
   `TestTheCostsCardSitsUnderTheEquityComparisonWithEveryPeriodAndKind`,
   `TestTheDashboardTotalsTheCostsLedgerBesideEachAccountsCashLedger` and
   `TestTheServiceFileServesTheBoostLogOnTheOnePort`.
+- Tests in `cmd/triage`, among them
+  `TestAFakeAlertIssueGetsOneAnalysisCommentAndASecondPollAddsNothing`,
+  `TestAPollWithNothingNewSpendsNoModelUsage`,
+  `TestTheDailyCapSkipsWithOneCommentAndNoModelCall`,
+  `TestAResolvedIssueNeverAnalysedIsAnalysed`, `TestTheOffFileStopsTheJob`,
+  `TestAnInvocationIsRecordedBeforeTheModelIsCalled`,
+  `TestADefectGoesThroughTheGateToADraftPullRequestOnGitHub`,
+  `TestTheGateCommitsTheTestFirstRedThenTheFixGreenAndPushesTheBranch`,
+  `TestAnOwnerActionIsStatedAndNeverDone`,
+  `TestNoSecretAccountIDOrFigureReachesACommentOrPR`,
+  `TestTheSliceIsAPlainGETWithNoCredential` and
+  `TestTheClaudeSessionIsHeadlessWithItsToolsRestricted`; in
+  `cmd/dashboard`, `TestTheJournalSliceServesTheJournalQueryReportsOfEachCurrentRun`
+  and `TestEveryRouteRefusesEveryWritingMethod`, which covers the slice.
 - Tests in `internal/report` for the costs block:
   `TestTotalsPerKindForTheMonthTheYearAndSinceTheStart`,
   `TestACommissionAlreadyOnAFillIsNotCountedTwice`,
