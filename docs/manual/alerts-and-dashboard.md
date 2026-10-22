@@ -603,7 +603,11 @@ triage job"). Each run is one poll:
    means an issue relabelled while the job reads is never passed over, and
    no other issue or pull request can fill a listing and keep an alert out
    of reach), open and closed, newest first, opened since the job was first switched on. Issues from before that are left alone, so switching
-   the job on never sweeps up old incidents. A listing stops at the issues
+   the job on never sweeps up old incidents. Before either listing it reads
+   the newest issue number in the repository, and keeps only the listed
+   issues numbered at or below it: an alert opened while the two listings
+   are read can be in neither, or in the second only, so it waits for the
+   next poll rather than let the job's mark pass it. A listing stops at the issues
    the job has already handled (its state file keeps the highest issue
    number up to which every alert issue is handled), so a long history never
    fills a listing; a listing of more than 1,000 new issues is cut, the
@@ -748,9 +752,19 @@ The gate (the code the session wrote, when the job tests a fix):
   any kind. Afterwards every process the gate user still runs is ended
   (`pkill -KILL -U` with the gate user's own UID, the only target the job
   ever gives it, after `sudo -l` confirms the rule allows exactly that),
-  the job checks with `ps` that none is left, and the copy is removed. If
-  they cannot all be ended, the command does not count as passed: the gate
-  is unavailable for that run.
+  the job checks with `ps` that none is left (a process still listed is
+  sent the same `pkill` once more, then checked again), and the copy is
+  removed. If they cannot all be ended, or `ps` cannot list them (it fails
+  or runs out of time), the command does not count as passed: the gate is
+  unavailable for that run, and for a session's own command the issue is
+  tried again later, whatever the session answered.
+- **Checks** exactly the tree that is pushed: the job writes the copy's
+  archive itself from git's objects, file by file, so a `.gitattributes`
+  the session wrote (`export-ignore`, `export-subst`) cannot leave a file
+  out of the copy or change one. It writes each archive into a fresh folder
+  of its own that the gate user can read but not change, and the run
+  folder is sticky, so nothing the gate's code left there (a link where the
+  archive was) can turn the job's write onto a file of the job's.
 - **Cannot** reach either token, the network, the job's state, or the
   clone the job pushes from. If the gate user, `sandbox-exec`, the `sudo`
   rule or the gate's folder is missing or wrong, no session is started,
@@ -1725,6 +1739,10 @@ nor that nothing was analysed ("Its log", above).
   `TestTheRedCheckMustShowTheNewTestFailingByName`,
   `TestTheGateCommandRunsAsItsOwnUserInASandbox`,
   `TestTheSandboxDeniesTheNetwork`, `TestAnUnavailableGateRefuses`,
+  `TestALinkTheGatePlantsNeverRedirectsTheJobsWrites`,
+  `TestTheGatesCopyIgnoresTheSessionsExportRules`,
+  `TestAGateFailureDuringTheSessionsCommandsIsTheGates`,
+  `TestAnAlertOpenedBetweenTheTwoListingsIsNeverPassedOver`,
   `TestOnlyGoCodeAndDocsAreOpenedAsAFix`,
   `TestThePrePushCheckReadsFileNamesAndRefusesBinaries`,
   `TestAnOwnerActionIsStatedAndNeverDone`,

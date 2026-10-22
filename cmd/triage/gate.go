@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -173,8 +175,14 @@ func (g *gateBox) newRun(ctx context.Context) (runDir string, done func(), err e
 		if err := os.Mkdir(d, 0o770); err != nil {
 			return "", nil, errors.New("the run folder could not be made")
 		}
+		mode := os.FileMode(0o770)
+		if d == runDir {
+			// Sticky: the gate user never renames or removes what the job
+			// makes in it (exportTree's folders).
+			mode |= os.ModeSticky
+		}
 		//nolint:gosec // G301/G302: the gate user, in the gate's group, must write here; no one else can reach the gate's folder (mode 750).
-		if err := os.Chmod(d, 0o770); err != nil {
+		if err := os.Chmod(d, mode); err != nil {
 			return "", nil, errors.New("the run folder could not be made")
 		}
 	}
@@ -332,17 +340,34 @@ func pkillGateUser(sudo, gateUser, ps string) func(ctx context.Context) error {
 		if err := exec.CommandContext(ctx, sudo, append([]string{"-n", "-u", gateUser, "-l"}, pkill...)...).Run(); err != nil {
 			return errors.New("the sudo rule does not let this job end the gate user's processes (pkill -KILL -U <its UID>)")
 		}
-		//nolint:gosec // G204: the fixed sudo rule, the gate user and its own UID.
-		err = exec.CommandContext(ctx, sudo, append([]string{"-n", "-u", gateUser}, pkill...)...).Run()
-		var exit *exec.ExitError
-		if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) { // 1: pkill found no process
-			return errors.New("pkill of the gate user's processes failed")
+		signal := func() error {
+			//nolint:gosec // G204: the fixed sudo rule, the gate user and its own UID.
+			err := exec.CommandContext(ctx, sudo, append([]string{"-n", "-u", gateUser}, pkill...)...).Run()
+			var exit *exec.ExitError
+			if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) { // 1: pkill found no process
+				return errors.New("pkill of the gate user's processes failed")
+			}
+			return nil
 		}
-		for {
-			//nolint:gosec // G204: the ps program and the gate user's own UID.
-			listed, _ := exec.CommandContext(ctx, ps, "-U", strconv.Itoa(uid), "-o", "stat=").Output()
-			if !runningIn(string(listed)) {
+		if err := signal(); err != nil {
+			return err
+		}
+		for resignalled := false; ; {
+			left, err := gateProcessesLeft(ctx, ps, uid)
+			if err != nil {
+				return err
+			}
+			if !left {
 				return nil
+			}
+			// One forked while pkill read the process table: signalled once
+			// more, through the same line.
+			if !resignalled {
+				resignalled = true
+				if err := signal(); err != nil {
+					return err
+				}
+				continue
 			}
 			select {
 			case <-ctx.Done():
@@ -351,6 +376,26 @@ func pkillGateUser(sudo, gateUser, ps string) func(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// gateProcessesLeft reports whether ps lists a process of uid's that is not
+// a zombie. Only ps's own "none matched" (exit 1, nothing printed) is no
+// process left; a ps that could not run, failed otherwise or ran out of
+// time leaves the state unknown, which is an error (docs/development.md,
+// "Ending processes": fail closed).
+func gateProcessesLeft(ctx context.Context, ps string, uid int) (bool, error) {
+	//nolint:gosec // G204: the ps program and the gate user's own UID.
+	listed, err := exec.CommandContext(ctx, ps, "-U", strconv.Itoa(uid), "-o", "stat=").Output()
+	var exit *exec.ExitError
+	switch {
+	case ctx.Err() != nil:
+		return false, errors.New("the gate user's processes could not be listed in time")
+	case err == nil:
+		return runningIn(string(listed)), nil
+	case errors.As(err, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(string(listed)) == "":
+		return false, nil
+	}
+	return false, errors.New("the gate user's processes could not be listed")
 }
 
 // runningIn reports whether ps's stat column names a process that is not a
@@ -512,16 +557,17 @@ func sandboxProfile(runDir, sockets string, readable, denyRead []string, ports [
 }
 
 // copyScript is what the gate user runs in a fresh run folder to make the
-// copy of a commit: the archive the job wrote unpacked into tree (bsdtar
-// refuses a path that leaves it, or one through a link), then made a git
-// repository of one commit (the deployment tests clone their checkout),
-// with no hook, no file-system monitor and no configuration but its own.
-// A copy an earlier command of the same run made (a session's) is replaced.
+// copy of a commit: the archive the job wrote ($0, in a folder of the job's
+// the gate user can read but not change) unpacked into tree (bsdtar refuses
+// a path that leaves it, or one through a link), then made a git repository
+// of one commit (the deployment tests clone their checkout), with no hook,
+// no file-system monitor and no configuration but its own. A copy an
+// earlier command of the same run made (a session's) is replaced.
 const copyScript = `set -eu
 umask 077
 if [ -e tree ]; then chmod -R u+rwX tree; rm -rf tree; fi
 mkdir tree
-/usr/bin/tar -xf commit.tar -C tree
+/usr/bin/tar -xf "$0" -C tree
 cd tree
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 safe="-c core.hooksPath=/dev/null -c core.fsmonitor=false"
@@ -530,22 +576,178 @@ git $safe add -A
 git $safe -c commit.gpgsign=false -c user.name=TrendInvesting-gate -c user.email=gate@trend-investing.invalid commit --quiet --no-verify -m "the commit under the gate"
 `
 
-// exportTree writes rev of the worktree at dir as an archive into runDir
-// (the job's only step), and has the gate user make the copy from it
-// (copyScript), so every file of the copy is the gate user's own.
+// exportTree writes rev of the worktree at dir as an archive (the job's
+// only step) and has the gate user make the copy from it (copyScript), so
+// every file of the copy is the gate user's own. The run folder is the gate
+// user's to write in and a session's commands share it, so the job never
+// writes to a path there the gate user could have made: each archive goes
+// into a folder the job makes afresh (stageFolder), which the gate user can
+// read but neither change nor, the run folder being sticky, rename, and is
+// created there, never followed through a link (O_EXCL, O_NOFOLLOW).
 func (w *gitWorkspace) exportTree(ctx context.Context, dir, rev, runDir string) error {
-	archive := filepath.Join(runDir, "commit.tar")
-	if err := w.git(ctx, dir, "archive", "--format=tar", "-o", archive, rev); err != nil {
-		return fmt.Errorf("%w: git archive of the commit failed", errGateUnavailable)
+	stage, err := stageFolder(runDir)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errGateUnavailable, err)
 	}
-	//nolint:gosec // G302: the gate user, in the gate's group, reads the archive; no one else can reach the gate's folder.
-	if err := os.Chmod(archive, 0o640); err != nil {
-		return fmt.Errorf("%w: the commit's archive could not be opened to the gate user", errGateUnavailable)
+	defer func() { _ = os.RemoveAll(stage) }()
+	archive := filepath.Join(stage, "commit.tar")
+	//nolint:gosec // G302/G304: a new file in the job's fresh folder; the gate user, in the gate's group, reads it.
+	f, err := os.OpenFile(archive, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o640)
+	if err != nil {
+		return fmt.Errorf("%w: the commit's archive could not be made", errGateUnavailable)
 	}
-	if _, err := w.gate.Run(ctx, runDir, "", []string{"/bin/sh", "-c", copyScript}); err != nil {
+	werr := w.treeTar(ctx, dir, rev, f)
+	if werr == nil {
+		werr = f.Chmod(0o640)
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("%w: the commit's archive could not be written", errGateUnavailable)
+	}
+	if _, err := w.gate.Run(ctx, runDir, "", []string{"/bin/sh", "-c", copyScript, archive}); err != nil {
 		return fmt.Errorf("%w: the gate user could not make the copy of the commit (sudo, sandbox-exec or the archive)", errGateUnavailable)
 	}
 	return nil
+}
+
+// stageFolder makes a fresh folder of the job's in runDir, which the gate's
+// group may read and enter but not write in: made by mkdir, which never
+// follows or reuses what is there, and checked to be a folder of this
+// user's before its mode is set.
+func stageFolder(runDir string) (string, error) {
+	var id [8]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", errors.New("no randomness for the archive's folder")
+	}
+	stage := filepath.Join(runDir, "in-"+hex.EncodeToString(id[:]))
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		return "", errors.New("the archive's folder could not be made")
+	}
+	info, err := os.Lstat(stage)
+	st, ok := sysStat(info)
+	if err != nil || !info.IsDir() || !ok || int(st.Uid) != os.Getuid() {
+		return "", errors.New("the archive's folder is not the job's own")
+	}
+	//nolint:gosec // G302: the gate user, in the gate's group, reads the archive here; no one else can reach the gate's folder (mode 750).
+	if err := os.Chmod(stage, 0o750); err != nil {
+		return "", errors.New("the archive's folder could not be opened to the gate user")
+	}
+	return stage, nil
+}
+
+// sysStat is info's system record, if it has one.
+func sysStat(info os.FileInfo) (*syscall.Stat_t, bool) {
+	if info == nil {
+		return nil, false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return st, ok
+}
+
+// maxLinkTarget bounds a link's target in the archive.
+const maxLinkTarget = 4096
+
+// treeTar writes rev's tree, in the repository at dir, to out as a tar
+// archive, file by file from git's own objects (ls-tree, then cat-file),
+// never through git archive: no attribute the tree holds (export-ignore,
+// export-subst) changes what the gate checks, so its copy is exactly the
+// tree that is pushed. A link stays a link; a submodule is an empty folder.
+func (w *gitWorkspace) treeTar(ctx context.Context, dir, rev string, out io.Writer) error {
+	listing, err := w.gitOutput(ctx, dir, "ls-tree", "-r", "-z", "--full-tree", rev)
+	if err != nil {
+		return err
+	}
+	//nolint:gosec // G204: git's own fixed command, in a folder the job made.
+	cmd := exec.CommandContext(ctx, "git", append(slices.Clone(gitSafe), "cat-file", "--batch")...)
+	cmd.Dir, cmd.Env = dir, w.env
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	objects, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return errors.New("git cat-file could not be started")
+	}
+	r := bufio.NewReader(objects)
+	werr := writeTreeTar(tar.NewWriter(out), listing, in, r)
+	_ = in.Close()
+	_, _ = io.Copy(io.Discard, r)
+	if err := cmd.Wait(); werr == nil && err != nil {
+		werr = errors.New("git cat-file failed")
+	}
+	return werr
+}
+
+// writeTreeTar writes each entry of an ls-tree -r -z listing to tw, asking
+// cat-file --batch (its input in, its output r) for each blob in turn.
+func writeTreeTar(tw *tar.Writer, listing string, in io.Writer, r *bufio.Reader) error {
+	now := time.Now()
+	for _, entry := range strings.Split(listing, "\x00") {
+		if entry == "" {
+			continue
+		}
+		meta, path, ok := strings.Cut(entry, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 3 || path == "" {
+			return errors.New("git ls-tree's listing was not understood")
+		}
+		mode, kind, oid := f[0], f[1], f[2]
+		if kind == "commit" {
+			if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: path + "/", Mode: 0o755, ModTime: now}); err != nil {
+				return err
+			}
+			continue
+		}
+		if kind != "blob" {
+			return fmt.Errorf("git ls-tree listed a %s in the tree", kind)
+		}
+		if _, err := fmt.Fprintln(in, oid); err != nil {
+			return errors.New("git cat-file could not be asked")
+		}
+		head, err := r.ReadString('\n')
+		hf := strings.Fields(head)
+		if err != nil || len(hf) != 3 || hf[0] != oid || hf[1] != "blob" {
+			return errors.New("git cat-file's answer was not understood")
+		}
+		size, err := strconv.ParseInt(hf[2], 10, 64)
+		if err != nil || size < 0 {
+			return errors.New("git cat-file's answer was not understood")
+		}
+		h := &tar.Header{Typeflag: tar.TypeReg, Name: path, Mode: 0o644, Size: size, ModTime: now, Format: tar.FormatPAX}
+		switch mode {
+		case "100644":
+		case "100755":
+			h.Mode = 0o755
+		case "120000":
+			if size > maxLinkTarget {
+				return errors.New("a link in the tree names a target longer than its bound")
+			}
+			target := make([]byte, size)
+			if _, err := io.ReadFull(r, target); err != nil {
+				return errors.New("git cat-file's answer was cut short")
+			}
+			h = &tar.Header{Typeflag: tar.TypeSymlink, Name: path, Linkname: string(target), Mode: 0o777, ModTime: now, Format: tar.FormatPAX}
+		default:
+			return fmt.Errorf("git ls-tree listed a file of mode %s", mode)
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			return err
+		}
+		if h.Typeflag == tar.TypeReg {
+			if _, err := io.CopyN(tw, r, size); err != nil {
+				return errors.New("git cat-file's answer was cut short")
+			}
+		}
+		if b, err := r.ReadByte(); err != nil || b != '\n' {
+			return errors.New("git cat-file's answer was not understood")
+		}
+	}
+	return tw.Close()
 }
 
 // vulnDBURL is Go's vulnerability database whole

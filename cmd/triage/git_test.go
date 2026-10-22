@@ -42,6 +42,16 @@ func mustGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// testSocketRoot is where a test makes a folder for a Unix socket: the
+// triage gate's TI_TEST_SOCKET_DIR when it is set and not empty, otherwise
+// /tmp, whose paths are short enough for a socket's bound.
+func testSocketRoot() string {
+	if root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR"); ok && root != "" {
+		return root
+	}
+	return "/tmp"
+}
+
 // script writes an executable shell script.
 func script(t *testing.T, dir, name, body string) string {
 	t.Helper()
@@ -399,8 +409,20 @@ func TestTheSandboxDeniesTheNetwork(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
 		t.Skip("no sandbox-exec")
 	}
+	// Inside a sandbox already (the triage gate's own check of a fix), no
+	// other can be applied (sandbox_apply: Operation not permitted).
+	if err := exec.Command("/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true").Run(); err != nil {
+		t.Skip("this test runs in a sandbox already, which cannot start another")
+	}
 	g := standInGate(t)
 	g.sandboxExec = "/usr/bin/sandbox-exec"
+	// Under an enclosing gate the sockets go in the folder it allows
+	// (docs/development.md, TI_TEST_SOCKET_DIR): the nested gate's own, and
+	// the host's beside it, outside the nested gate's.
+	socketRoot := testSocketRoot()
+	if socketRoot != "/tmp" {
+		g.sockets = socketRoot
+	}
 	runDir, done, err := g.newRun(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +477,7 @@ func TestTheSandboxDeniesTheNetwork(t *testing.T) {
 	}
 	// A Unix socket a host service listens on under /private/tmp is out of
 	// reach; one in the command's own socket folder is not.
-	hostDir, err := os.MkdirTemp("/tmp", "host-")
+	hostDir, err := os.MkdirTemp(socketRoot, "host-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +703,7 @@ func TestTheGatesCopyIsTheGateUsersOwnAndServesTheDeploymentTests(t *testing.T) 
 	for _, argv := range r.argv {
 		line := strings.Join(argv, " ")
 		switch {
-		case argv[0] == w.gate.sudo && strings.Contains(line, "/usr/bin/tar -xf commit.tar") && strings.Contains(line, " init "):
+		case argv[0] == w.gate.sudo && strings.Contains(line, "/usr/bin/tar -xf \"$0\"") && strings.Contains(line, " init "):
 			unpacked++
 		case argv[0] == "git" && (slices.Contains(argv, "init") || slices.Contains(argv, "commit") && strings.Contains(line, "under the gate")):
 			initialised++

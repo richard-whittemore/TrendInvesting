@@ -41,10 +41,14 @@ go wrong" table), the ADRs in `docs/adr/`, and the code.
   lines listed under "Your commands" at the end of this prompt, each as
   written: the job's own program, which runs `go test ./...`,
   `go vet ./...`, `gofmt -l .`, `git diff`, `git status`, `git log` or
-  `git show` for you. No other command and no other flag is allowed. Your
-  commands run in a sandbox with no network at all, loopback included, so
-  a test that starts a local server fails there; the job's own gate runs
-  the tests again where loopback works.
+  `git show` for you. No other command and no other flag is allowed. The
+  job runs `go test`, `go vet` and `gofmt` in its gate, over a copy of the
+  worktree as you left it, in a sandbox with no network beyond loopback.
+  On loopback a test may start its own server on a fresh port and reach
+  it, but no port another program was already listening on when the
+  command started, and Unix sockets only in the folder named by
+  `TI_TEST_SOCKET_DIR`; so a test that fails there has failed, not been
+  stopped by the sandbox.
 - You never perform an owner action, and you never try to. You hold no way
   to reach the server, the broker or the secrets, and you must not look for
   one. For an owner action, state the step in `owner_action`, in the words

@@ -267,14 +267,16 @@ type fakeToolHost struct {
 	dirs []string
 	done int
 	err  error
+	// gateErr is the gate's failure one of the session's commands met.
+	gateErr error
 }
 
-func (f *fakeToolHost) OpenTools(_ context.Context, dir string) (toolRun, func(), error) {
+func (f *fakeToolHost) OpenTools(_ context.Context, dir string) (toolRun, func() error, error) {
 	f.dirs = append(f.dirs, dir)
 	if f.err != nil {
 		return nil, nil, f.err
 	}
-	return func(context.Context, string) (string, int) { return "ok\n", 0 }, func() { f.done++ }, nil
+	return func(context.Context, string) (string, int) { return "ok\n", 0 }, func() error { f.done++; return f.gateErr }, nil
 }
 
 // TestTheSessionsCommandsAreServedByTheJobOverItsSocket: for the session's
@@ -394,5 +396,18 @@ func TestACancelledSessionIsInterruptedNotTimedOut(t *testing.T) {
 	_, err := cl.Analyse(ctx, requestIn(t))
 	if !errors.Is(err, errInterrupted) || strings.Contains(err.Error(), "ran past") {
 		t.Fatalf("err = %v, want errInterrupted", err)
+	}
+}
+
+// TestAGateFailureDuringTheSessionsCommandsIsTheGates: a gate failure one
+// of the session's commands met (sudo refusing, the gate user's processes
+// not all ended) is the gate's, whatever the session answered afterwards,
+// so the issue is tried again once the gate is back, not taken as analysed.
+func TestAGateFailureDuringTheSessionsCommandsIsTheGates(t *testing.T) {
+	path, _ := fakeClaude(t, goodAnswer, 0)
+	host := &fakeToolHost{gateErr: fmt.Errorf("%w: the gate user's processes could not all be ended", errGateUnavailable)}
+	c := claudeCLI{path: path, timeout: time.Minute, env: sessionEnv([]string{"PATH=" + os.Getenv("PATH")}, ""), maxTurns: 5, socket: shortSocket(t), tools: host}
+	if _, err := c.Analyse(context.Background(), requestIn(t)); !errors.Is(err, errGateUnavailable) {
+		t.Fatalf("err = %v, want gate unavailable", err)
 	}
 }

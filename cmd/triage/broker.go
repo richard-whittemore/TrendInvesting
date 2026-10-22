@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,9 +43,10 @@ const toolExitUnavailable = 125
 type toolRun func(ctx context.Context, name string) (out string, code int)
 
 // toolHost opens a session's commands over its worktree: run runs each,
-// done ends them (gitWorkspace.OpenTools; tests: a fake).
+// done ends them and returns the gate's failure (errGateUnavailable) if
+// any command met one (gitWorkspace.OpenTools; tests: a fake).
 type toolHost interface {
-	OpenTools(ctx context.Context, dir string) (run toolRun, done func(), err error)
+	OpenTools(ctx context.Context, dir string) (run toolRun, done func() error, err error)
 }
 
 // maxToolRequest bounds a request: a tool's name and its line break.
@@ -162,45 +164,69 @@ func gitToolArgs(name string) []string {
 }
 
 // OpenTools makes one gate run for a session's commands over its worktree
-// dir; done removes it. Each command's build cache stays in that run, so a
-// second go test is quick, and no other session's or check's cache is fed
-// by it.
-func (w *gitWorkspace) OpenTools(ctx context.Context, dir string) (run toolRun, done func(), err error) {
-	runDir, done, err := w.gate.newRun(ctx)
+// dir; done removes it and returns the first gate failure a command met
+// (errGateUnavailable), so the job's handling of a gate failure (the issue
+// tried again later) applies whatever the session answered. Each command's
+// build cache stays in that run, so a second go test is quick, and no other
+// session's or check's cache is fed by it.
+func (w *gitWorkspace) OpenTools(ctx context.Context, dir string) (run toolRun, done func() error, err error) {
+	runDir, remove, err := w.gate.newRun(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", errGateUnavailable, err)
 	}
-	run = func(ctx context.Context, name string) (string, int) { return w.sessionTool(ctx, dir, runDir, name) }
-	return run, done, nil
+	var mu sync.Mutex
+	var failed error
+	run = func(ctx context.Context, name string) (string, int) {
+		out, code, gateErr := w.sessionTool(ctx, dir, runDir, name)
+		if gateErr != nil {
+			mu.Lock()
+			if failed == nil {
+				failed = gateErr
+			}
+			mu.Unlock()
+		}
+		return out, code
+	}
+	return run, func() error {
+		remove()
+		mu.Lock()
+		defer mu.Unlock()
+		return failed
+	}, nil
 }
 
 // sessionTool runs one of sessionTools for the session in dir: git's
 // read-only commands as the job in the worktree, the others as the gate
 // user over a copy of the worktree as it stands (snapshot), in runDir.
-func (w *gitWorkspace) sessionTool(ctx context.Context, dir, runDir, name string) (out string, code int) {
+// gateErr is the gate's failure (errGateUnavailable), if the command met
+// one.
+func (w *gitWorkspace) sessionTool(ctx context.Context, dir, runDir, name string) (out string, code int, gateErr error) {
 	argv := sessionTools[name]
 	if argv == nil {
-		return "triage tool: no such tool\n", 2
+		return "triage tool: no such tool\n", 2, nil
 	}
 	if err := w.checkGitFile(dir); err != nil {
-		return "triage tool: " + err.Error() + "\n", toolExitUnavailable
+		// A worktree's git file the session changed is the session's doing,
+		// never the gate's failure.
+		return "triage tool: " + err.Error() + "\n", toolExitUnavailable, nil //nolint:nilerr // the session's answer, not the gate's error
 	}
 	if argv[0] == "git" {
 		gitOut, err := w.run.Run(ctx, dir, w.env, "git", gitToolArgs(name)...)
-		return gitOut, exitStatus(err)
+		return gitOut, exitStatus(err), nil
 	}
 	tree, err := w.snapshot(ctx, dir)
 	if err != nil {
-		return "triage tool: gate unavailable: " + err.Error() + "\n", toolExitUnavailable
+		gateErr = fmt.Errorf("%w: %w", errGateUnavailable, err)
+		return "triage tool: " + gateErr.Error() + "\n", toolExitUnavailable, gateErr
 	}
 	if err := w.exportTree(ctx, dir, tree, runDir); err != nil {
-		return "triage tool: " + err.Error() + "\n", toolExitUnavailable
+		return "triage tool: " + err.Error() + "\n", toolExitUnavailable, err
 	}
 	out, err = w.gate.Run(ctx, runDir, "tree", argv)
 	if errors.Is(err, errGateUnavailable) {
-		return out + "\ntriage tool: " + err.Error() + "\n", toolExitUnavailable
+		return out + "\ntriage tool: " + err.Error() + "\n", toolExitUnavailable, err
 	}
-	return out, exitStatus(err)
+	return out, exitStatus(err), nil
 }
 
 // exitStatus is a command's exit status: 0, its own, or 1 for one that

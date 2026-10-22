@@ -214,7 +214,20 @@ var reporterLabels = []string{"alert", "alert-resolved"}
 // (already handled); no other issue or pull request counts against a
 // listing's bound. Past maxPages pages of a label it returns what it read,
 // cut, rather than fail: the job then analyses the newest.
+//
+// The listings are read one after the other, so each covers the issues
+// that existed when it began: the first covers the fewest. An issue opened
+// after that (alert while the first was read, or alert-resolved before the
+// second) can be in neither listing, or in the second alone, so only issues
+// numbered at or below the newest number before the first listing (the
+// least either listing covers) are returned; the others are the next
+// poll's. The handled-through mark (advance) never passes an issue it was
+// not shown.
 func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time, through int) ([]issue, bool, error) {
+	covered, err := g.newestNumber(ctx)
+	if err != nil {
+		return nil, false, err
+	}
 	var out []issue
 	var cut bool
 	for _, label := range reporterLabels {
@@ -222,10 +235,32 @@ func (g *githubTracker) AlertIssues(ctx context.Context, since time.Time, throug
 		if err != nil {
 			return nil, false, err
 		}
-		out = append(out, listed...)
+		for _, is := range listed {
+			if is.Number <= covered {
+				out = append(out, is)
+			}
+		}
 		cut = cut || labelCut
 	}
 	return out, cut, nil
+}
+
+// newestNumber is the number of the alerts repository's newest issue or
+// pull request (they share numbers), 0 when it has none.
+func (g *githubTracker) newestNumber(ctx context.Context) (int, error) {
+	var items []struct {
+		Number int `json:"number"`
+	}
+	if _, err := g.call(ctx, http.MethodGet, g.alerts+"/issues?state=all&sort=created&direction=desc&per_page=1", maxPageAnswer, nil, &items); err != nil {
+		return 0, err
+	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+	if items[0].Number <= 0 {
+		return 0, errors.New("GitHub's listing named an issue without its number")
+	}
+	return items[0].Number, nil
 }
 
 // labelIssues is one label's listing of AlertIssues.

@@ -213,7 +213,8 @@ func pkillStandIns(t *testing.T, listing, pkill int, ps string) (sudo, psPath, r
 // processes, with stand-ins that run nothing, asks sudo whether its rule
 // allows exactly pkill -KILL -U <the gate user's UID> before running it, so
 // a missing rule is told apart from pkill finding nothing (both exit 1);
-// it then fails while ps still shows a live process of the gate user's.
+// it then fails while ps still shows a live process of the gate user's,
+// or when ps cannot tell.
 func TestPkillGateUserEndsOnlyTheGateUsersOwn(t *testing.T) {
 	u, err := user.Lookup("daemon")
 	if err != nil || u.Uid == "0" || u.Uid == strconv.Itoa(os.Getuid()) {
@@ -254,5 +255,37 @@ func TestPkillGateUserEndsOnlyTheGateUsersOwn(t *testing.T) {
 		if err := pkillGateUser(sudo, refused, ps)(ctx); err == nil {
 			t.Errorf("%s was not refused", refused)
 		}
+	}
+	// A ps that cannot list the gate user's processes (it fails, is killed
+	// or is absent) leaves their state unknown: the gate is unavailable,
+	// never "every process ended". A process ps still lists after pkill
+	// (forked while pkill read the table) is signalled once more, through
+	// the same line, and checked again.
+	sudo6, _, _ := pkillStandIns(t, 0, 0, "")
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"fails":     "exit 2\n",
+		"is killed": "exit 137\n",
+		"is absent": "",
+	} {
+		ps := filepath.Join(dir, "ps-missing")
+		if body != "" {
+			ps = script(t, dir, "ps-"+strings.ReplaceAll(name, " ", "-"), body)
+		}
+		if err := pkillGateUser(sudo6, "daemon", ps)(ctx); err == nil {
+			t.Errorf("a ps that %s was taken for no process left", name)
+		}
+	}
+	// A survivor the first time, none the second.
+	count := filepath.Join(dir, "count")
+	once := script(t, dir, "ps-once", "if [ -e '"+count+"' ]; then exit 1; fi\n: > '"+count+"'\nprintf 'S\\n'\n")
+	survivor, _, record6 := pkillStandIns(t, 0, 0, "")
+	if err := pkillGateUser(survivor, "daemon", once)(ctx); err != nil {
+		t.Fatalf("a survivor ended by the second pkill: %v", err)
+	}
+	raw, _ = os.ReadFile(record6)
+	line := "-n -u daemon /usr/bin/pkill -KILL -U " + u.Uid + "\n"
+	if want := "-n -u daemon -l /usr/bin/pkill -KILL -U " + u.Uid + "\n" + line + line; string(raw) != want {
+		t.Fatalf("sudo was asked %q, want the rule, pkill, and pkill once more %q", raw, want)
 	}
 }

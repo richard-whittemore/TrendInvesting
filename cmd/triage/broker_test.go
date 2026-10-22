@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -178,7 +179,7 @@ func TestASessionsToolsRunAsTheGateUserOverACopyOfItsWorktree(t *testing.T) {
 	if out, code := run(ctx, "not-a-tool"); code == 0 {
 		t.Errorf("an unknown tool ran: %q", out)
 	}
-	done()
+	_ = done()
 	if left, _ := os.ReadDir(filepath.Join(w.gate.root, "runs")); len(left) != 0 {
 		t.Errorf("the session's gate run was left behind: %v", left)
 	}
@@ -200,5 +201,124 @@ func TestASessionsToolsRunAsTheGateUserOverACopyOfItsWorktree(t *testing.T) {
 	}
 	if !gitRan {
 		t.Errorf("git-status did not run as the job: %q", r.argv[before:])
+	}
+}
+
+// TestALinkTheGatePlantsNeverRedirectsTheJobsWrites: a session's commands
+// share one run folder, which the gate user can write in. A link its code
+// planted there (in place of the archive an earlier command used) is never
+// followed by the job's next write: the job writes each archive into a
+// fresh folder of its own that the gate user can read but not change, and
+// the run folder keeps the gate user from renaming or removing what the
+// job made (the sticky bit).
+func TestALinkTheGatePlantsNeverRedirectsTheJobsWrites(t *testing.T) {
+	w, _, _ := gitWorld(t)
+	ctx := context.Background()
+	dir, err := w.Prepare(ctx, "triage/alert-53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove(ctx, dir)
+	run, done, err := w.OpenTools(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = done() }()
+	if out, code := run(ctx, "gofmt"); code != 0 {
+		t.Fatalf("gofmt: exit %d, %q", code, out)
+	}
+	runs, err := os.ReadDir(filepath.Join(w.gate.root, "runs"))
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs %v, %v; want the session's one", runs, err)
+	}
+	runDir := filepath.Join(w.gate.root, "runs", runs[0].Name())
+	if info, err := os.Lstat(runDir); err != nil || info.Mode()&os.ModeSticky == 0 {
+		t.Errorf("the run folder is not sticky (%v): the gate user could rename what the job made in it", err)
+	}
+	victim := filepath.Join(t.TempDir(), "job-state")
+	if err := os.WriteFile(victim, []byte("the job's own\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// What the gate's code could do between two commands: put links where
+	// the job writes, to a file only the job may change.
+	for _, name := range []string{"commit.tar", "in", "stage"} {
+		p := filepath.Join(runDir, name)
+		_ = os.RemoveAll(p)
+		if err := os.Symlink(victim, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, code := run(ctx, "gofmt"); code != 0 {
+		t.Fatalf("gofmt after the links: exit %d, %q", code, out)
+	}
+	raw, err := os.ReadFile(victim)
+	info, serr := os.Stat(victim)
+	if err != nil || string(raw) != "the job's own\n" || serr != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("the job wrote through a link the gate planted: %d bytes, %v", len(raw), info.Mode())
+	}
+}
+
+// TestTheGatesCopyIgnoresTheSessionsExportRules: the copy the gate checks
+// is exactly the tree the session left: a .gitattributes the session wrote
+// can neither leave a file out of it (export-ignore: a failing test the
+// gate would never run, then pushed) nor rewrite one (export-subst).
+func TestTheGatesCopyIgnoresTheSessionsExportRules(t *testing.T) {
+	w, _, _ := gitWorld(t)
+	ctx := context.Background()
+	dir, err := w.Prepare(ctx, "triage/alert-54")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove(ctx, dir)
+	write(t, dir, ".gitattributes", "internal/x/x_test.go export-ignore\ninternal/x/subst.txt export-subst\n")
+	write(t, dir, "internal/x/x_test.go", fixedTest)
+	write(t, dir, "internal/x/subst.txt", "$Format:%H$\n")
+	run, done, err := w.OpenTools(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = done() }()
+	out, code := run(ctx, "go-test")
+	if code != 1 || !strings.Contains(out, "--- FAIL: TestFixed") {
+		t.Errorf("go-test: exit %d; the session's failing test was left out of the gate's copy:\n%s", code, out)
+	}
+	runs, err := os.ReadDir(filepath.Join(w.gate.root, "runs"))
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs %v, %v; want the session's one", runs, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(w.gate.root, "runs", runs[0].Name(), "tree", "internal", "x", "subst.txt"))
+	if err != nil || string(raw) != "$Format:%H$\n" {
+		t.Errorf("the gate's copy of subst.txt is %q (%v), not the session's", raw, err)
+	}
+}
+
+// TestAGateFailureInASessionsCommandIsKept: a session's command that met a
+// gate failure answers the wrapper with the gate's status, and the end of
+// the session's commands returns that failure (errGateUnavailable).
+func TestAGateFailureInASessionsCommandIsKept(t *testing.T) {
+	w, _, _ := gitWorld(t)
+	ctx := context.Background()
+	dir, err := w.Prepare(ctx, "triage/alert-55")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove(ctx, dir)
+	run, done, err := w.OpenTools(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, code := run(ctx, "gofmt"); code != 0 {
+		t.Fatalf("gofmt: exit %d, %q", code, out)
+	}
+	w.gate.endGateProcesses = func(context.Context) error { return errors.New("the sudo rule does not allow it") }
+	if out, code := run(ctx, "gofmt"); code != toolExitUnavailable {
+		t.Errorf("gofmt with the gate failing: exit %d, %q; want %d", code, out, toolExitUnavailable)
+	}
+	w.gate.endGateProcesses = func(context.Context) error { return nil }
+	if out, code := run(ctx, "gofmt"); code != 0 {
+		t.Fatalf("gofmt with the gate back: exit %d, %q", code, out)
+	}
+	if err := done(); !errors.Is(err, errGateUnavailable) {
+		t.Fatalf("done = %v, want the gate's failure kept", err)
 	}
 }

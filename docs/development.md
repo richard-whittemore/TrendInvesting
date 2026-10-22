@@ -341,7 +341,8 @@ form, the exact `kill -KILL -1` among them.
 
 A test that binds a Unix socket under `/tmp` (for a path short enough for
 the socket's bound) makes its folder under `TI_TEST_SOCKET_DIR` when that
-is set: the triage gate allows sockets only in each run's own folder.
+is set and not empty: the triage gate allows sockets only in each run's own
+folder.
 
 ## Package boundaries
 

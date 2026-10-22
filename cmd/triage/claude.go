@@ -199,19 +199,26 @@ func (c claudeCLI) claudeArgs() []string {
 
 // Analyse runs the session in the request's worktree, handing it the prompt,
 // the issue and the slice on its input, and reads its structured answer.
-func (c claudeCLI) Analyse(parent context.Context, req analysisRequest) (analysis, error) {
+func (c claudeCLI) Analyse(parent context.Context, req analysisRequest) (got analysis, err error) {
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 	env := c.env
 	if c.tools != nil {
-		run, done, err := c.tools.OpenTools(ctx, req.Dir)
-		if err != nil {
-			return analysis{}, err
+		run, done, openErr := c.tools.OpenTools(ctx, req.Dir)
+		if openErr != nil {
+			return analysis{}, openErr
 		}
-		defer done()
-		stop, err := serveTools(ctx, c.socket, run)
-		if err != nil {
-			return analysis{}, fmt.Errorf("%w: the session's commands cannot be served: %w", errGateUnavailable, err)
+		// A gate failure one of the session's commands met is the gate's,
+		// whatever the session answered: the issue is tried again later. It
+		// runs after the commands stop being served (deferred below).
+		defer func() {
+			if gateErr := done(); gateErr != nil && !errors.Is(err, errInterrupted) {
+				got, err = analysis{}, gateErr
+			}
+		}()
+		stop, serveErr := serveTools(ctx, c.socket, run)
+		if serveErr != nil {
+			return analysis{}, fmt.Errorf("%w: the session's commands cannot be served: %w", errGateUnavailable, serveErr)
 		}
 		defer stop()
 		env = withEnv(env, toolsSocketEnv, c.socket)

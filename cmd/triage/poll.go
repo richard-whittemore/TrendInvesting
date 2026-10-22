@@ -74,8 +74,9 @@ type tracker interface {
 	Self(ctx context.Context) (string, error)
 	// AlertIssues lists the issues carrying the reporter's labels (alert,
 	// then alert-resolved), open and closed, newest first, opened at or
-	// after since and numbered above through; cut is a listing that reached
-	// its bound before either.
+	// after since and numbered above through, and none numbered above the
+	// newest issue when the listing began (so none is passed over); cut is
+	// a listing that reached its bound before either.
 	AlertIssues(ctx context.Context, since time.Time, through int) (issues []issue, cut bool, err error)
 	// IssueURL is an alert issue's address on GitHub.
 	IssueURL(number int) string

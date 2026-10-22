@@ -52,7 +52,7 @@ func TestBenchMeasuresRoundTripsAgainstAServer(t *testing.T) {
 	t.Parallel()
 	// The triage gate names its run's own socket folder (docs/development.md, "Ending processes").
 	root, ok := os.LookupEnv("TI_TEST_SOCKET_DIR")
-	if !ok {
+	if !ok || root == "" { // set but empty is unset
 		root = "/tmp"
 	}
 	dir, err := os.MkdirTemp(root, "cli-")

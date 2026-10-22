@@ -30,6 +30,9 @@ type fakeGitHub struct {
 	pageSize int
 	// listQueries are the issue listings' queries.
 	listQueries []string
+	// afterList, when set, runs after each issue listing is answered (the
+	// lock held), with the label it listed ("" for none).
+	afterList func(label string)
 }
 
 func newFakeGitHub(t *testing.T) (*fakeGitHub, *httptest.Server) {
@@ -79,6 +82,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		f.page(w, r, matching, page)
+		if f.afterList != nil {
+			f.afterList(label)
+		}
 	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "issues" && parts[2] == "comments":
 		n, _ := strconv.Atoi(parts[1])
 		f.page(w, r, f.comments[n], page)
@@ -176,29 +182,74 @@ func TestAlertIssuesListsTheReportersLabelsUntilTheStartAndSkipsPulls(t *testing
 	f, srv := newFakeGitHub(t)
 	f.pageSize = 2
 	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
-	f.addIssue(5, alertLabel, "owner", since.Add(3*time.Hour), alertBody)
-	f.addIssue(4, alertLabel, "owner", since.Add(2*time.Hour), alertBody)
-	f.addIssue(9, resolvedLabel, "owner", since.Add(90*time.Minute), alertBody)
-	f.issues = append(f.issues, map[string]any{"number": 3, "pull_request": map[string]any{"url": "x"}, "labels": []map[string]any{{"name": alertLabel}}, "created_at": since.Add(time.Hour).Format(time.RFC3339), "user": map[string]any{"login": "owner"}})
+	f.addIssue(7, alertLabel, "owner", since.Add(3*time.Hour), alertBody)
+	f.addIssue(6, alertLabel, "owner", since.Add(2*time.Hour), alertBody)
+	f.addIssue(5, resolvedLabel, "owner", since.Add(90*time.Minute), alertBody)
+	f.issues = append(f.issues, map[string]any{"number": 4, "pull_request": map[string]any{"url": "x"}, "labels": []map[string]any{{"name": alertLabel}}, "created_at": since.Add(time.Hour).Format(time.RFC3339), "user": map[string]any{"login": "owner"}})
 	f.addIssue(2, alertLabel, "owner", since.Add(-time.Hour), alertBody)
 	f.addIssue(1, alertLabel, "owner", since.Add(-2*time.Hour), alertBody)
 	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
 	if err != nil || cut {
 		t.Fatal(err)
 	}
-	if len(got) != 3 || got[0].Number != 5 || got[1].Number != 4 || got[2].Number != 9 || got[0].Author != "owner" || got[0].Body != alertBody {
+	if len(got) != 3 || got[0].Number != 7 || got[1].Number != 6 || got[2].Number != 5 || got[0].Author != "owner" || got[0].Body != alertBody {
 		t.Fatalf("listed %+v", got)
 	}
-	if n := len(f.sent()); n != 3 {
-		t.Errorf("%d requests; each listing should stop at the page holding an issue older than the start", n)
+	if n := len(f.sent()); n != 4 {
+		t.Errorf("%d requests; want the newest issue's number, then each listing stopping at the page holding an issue older than the start", n)
 	}
 	var labels []string
 	for _, q := range f.listQueries {
 		v, _ := url.ParseQuery(q)
 		labels = append(labels, v.Get("labels"))
 	}
-	if len(labels) != 3 || labels[0] != alertLabel || labels[1] != alertLabel || labels[2] != resolvedLabel {
-		t.Errorf("listings by label %q, want alert's pages, then alert-resolved's", labels)
+	if len(labels) != 4 || labels[0] != "" || labels[1] != alertLabel || labels[2] != alertLabel || labels[3] != resolvedLabel {
+		t.Errorf("listings by label %q, want the newest issue of any label, then alert's pages, then alert-resolved's", labels)
+	}
+}
+
+// TestAnAlertOpenedBetweenTheTwoListingsIsNeverPassedOver: an alert opened
+// after the alert listing was read, and one opened and resolved before the
+// alert-resolved listing, are in neither listing or only the second: the
+// listing never returns an issue numbered above one it missed, so the
+// handled-through mark (advance) never passes an alert it was not shown.
+func TestAnAlertOpenedBetweenTheTwoListingsIsNeverPassedOver(t *testing.T) {
+	f, srv := newFakeGitHub(t)
+	since := time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC)
+	f.addIssue(100, alertLabel, "owner", since.Add(time.Hour), alertBody)
+	f.afterList = func(label string) {
+		if label != alertLabel {
+			return
+		}
+		f.afterList = nil
+		older := f.issues
+		f.issues = nil
+		f.addIssue(102, resolvedLabel, "owner", since.Add(3*time.Hour), alertBody)
+		f.addIssue(101, alertLabel, "owner", since.Add(2*time.Hour), alertBody)
+		f.issues = append(f.issues, older...)
+	}
+	got, cut, err := trackerFor(t, srv).AlertIssues(context.Background(), since, 0)
+	if err != nil || cut {
+		t.Fatal(err, cut)
+	}
+	listed := map[int]bool{}
+	for _, is := range got {
+		listed[is.Number] = true
+	}
+	for _, is := range got {
+		for n := 100; n < is.Number; n++ {
+			if !listed[n] {
+				t.Fatalf("listed #%d but not the alert #%d below it: the mark would pass #%d (listed %v)", is.Number, n, n, listed)
+			}
+		}
+	}
+	if !listed[100] {
+		t.Fatalf("the alert open before either listing was not listed: %v", listed)
+	}
+	// The next listing, with nothing opened between, reaches both.
+	got, _, err = trackerFor(t, srv).AlertIssues(context.Background(), since, 100)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("the next listing: %+v, %v; want #101 and #102", got, err)
 	}
 }
 
@@ -240,7 +291,7 @@ func TestAListingLongerThanItsBoundIsCutNotFailed(t *testing.T) {
 	}
 	before := len(f.sent())
 	got, cut, err = trackerFor(t, srv).AlertIssues(context.Background(), since, maxPages)
-	if err != nil || cut || len(got) != 2 || len(f.sent())-before != 4 {
+	if err != nil || cut || len(got) != 2 || len(f.sent())-before != 5 {
 		t.Fatalf("listed %v, cut %v, err %v, %d requests; want the two past through, stopping at it", got, cut, err, len(f.sent())-before)
 	}
 }
