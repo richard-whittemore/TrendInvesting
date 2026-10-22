@@ -682,12 +682,20 @@ The session (Claude Code, as `ti-triage`):
   the four `git` commands itself, in the worktree, with git's system and
   global settings cut off and no hook or file-system monitor, so git runs
   nothing the session wrote. So no code the session wrote ever runs as
-  `ti-triage`, the user that holds the Claude token. A command the session
-  gives up on (Claude Code's own time limit for a command) is stopped in
-  the gate too, and counts as an interrupted command, never as a gate
-  outage: the job does not keep the alert for a later try because of it.
-  Writing the archive of a copy is bounded by the same command time limit
-  as every other gate command. Nothing else is allowed,
+  `ti-triage`, the user that holds the Claude token. Which cancellations count:
+  a command the session gives up on (Claude Code's own time limit for a
+  command, or the session's deadline) is an interrupted command, never a
+  gate outage, when that happens before the command starts or while the
+  session's own command (`go test`, `go vet`, `gofmt`) runs; it is stopped
+  in the gate too, and the job does not keep the alert for a later try
+  because of it. It is kept as a gate outage, whatever canceled the
+  command, in two cases: a gate-side step (reading the objects, the
+  ports in use, `sudo`, making the copy, writing its archive) that ran
+  past its own time limit of two minutes, well under Claude Code's limit
+  (these steps do not follow the session's cancellation, so a stalled one
+  ends at its own limit), and a command after which the gate user's
+  processes could not all be ended. Any other failure of a gate-side step
+  is a gate outage too. Nothing else is allowed,
   and in a headless session nothing can be asked: the web, every MCP
   server, `git commit` and `git push`, `go build`, `gh`, `ssh`, `curl`,
   `tailscale`, `sudo` and the like are denied.

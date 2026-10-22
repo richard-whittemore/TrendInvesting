@@ -74,6 +74,8 @@ type gateBox struct {
 	// or when it fails, the gate is unavailable: no command runs that could
 	// not be ended, and none succeeds with a process left behind.
 	endGateProcesses func(ctx context.Context) error
+	// stepTimeout is the time limit of each gate-side step (0: gateStepTimeout).
+	stepTimeout time.Duration
 	// sockets is the folder each run's own socket folder is made in: the
 	// real path of /tmp ("" is it), where a socket's path is short enough.
 	sockets string
@@ -101,6 +103,25 @@ func (g *gateBox) socketDir(runDir string) string {
 // errGateUnavailable is a gate that cannot run: its user, its sandbox or its
 // folder is missing or wrong, or a check could not be started in it.
 var errGateUnavailable = errors.New("gate unavailable")
+
+// gateStepTimeout is the time limit of each gate-side step (the ports in
+// use, the object reads, the copy): well under Claude Code's own limit for a
+// command, so a stalled step ends as the gate's failure before the wrapper
+// gives up on the session's command.
+const gateStepTimeout = 2 * time.Minute
+
+// errGateStalled is a gate-side step that ran past its own time limit.
+var errGateStalled = errors.New("a gate step ran past its time limit")
+
+// stepContext is the context of one gate-side step: the session's values,
+// never its cancellation or deadline, with the step's own time limit.
+func (g *gateBox) stepContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	d := g.stepTimeout
+	if d <= 0 {
+		d = gateStepTimeout
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), d)
+}
 
 // errProcessesLeft is a gate command after which the gate user's processes
 // could not all be ended: a failure of the gate whatever cancelled the command.
@@ -256,8 +277,15 @@ func (g *gateBox) Run(ctx context.Context, runDir, wd string, argv []string) (st
 	marker := filepath.Join(runDir, "launched-"+hex.EncodeToString(id[:]))
 	var ports []int
 	if g.listening != nil {
+		step, cancel := g.stepContext(ctx)
 		var err error
-		if ports, err = g.listening(ctx); err != nil {
+		ports, err = g.listening(step)
+		stalled := step.Err() != nil
+		cancel()
+		if err != nil {
+			if stalled {
+				return "", fmt.Errorf("%w: %w: the ports in use could not be read", errGateUnavailable, errGateStalled)
+			}
 			return "", fmt.Errorf("%w: the ports in use could not be read", errGateUnavailable)
 		}
 	}

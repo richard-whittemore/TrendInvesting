@@ -356,8 +356,8 @@ func TestAnArchiveThatStallsEndsAtTheCommandTimeout(t *testing.T) {
 }
 
 // TestACanceledSessionCommandIsNotAGateOutage: a command the session's
-// wrapper gave up on (its context canceled) during the snapshot or the
-// export is interrupted, not the gate's failure, so a later command that
+// wrapper gave up on (its context canceled) before it starts or while the
+// session's own command runs is interrupted, not the gate's failure, so a later command that
 // succeeds leaves the session's answer valid.
 func TestACanceledSessionCommandIsNotAGateOutage(t *testing.T) {
 	w, _, _ := gitWorld(t)
@@ -376,14 +376,64 @@ func TestACanceledSessionCommandIsNotAGateOutage(t *testing.T) {
 	if out, code := run(canceled, "gofmt"); code != toolExitUnavailable {
 		t.Errorf("canceled before the snapshot: exit %d, %q; want %d", code, out, toolExitUnavailable)
 	}
-	stalledCatFile(t)
+	w.gate.run = stallingCommandRunner{}
 	mid, cancelMid := context.WithCancel(ctx)
 	go func() { time.Sleep(300 * time.Millisecond); cancelMid() }()
 	start := time.Now()
 	if out, code := run(mid, "gofmt"); code != toolExitUnavailable || time.Since(start) > 10*time.Second {
-		t.Errorf("canceled during the export: exit %d after %s, %q", code, time.Since(start), out)
+		t.Errorf("canceled while the command ran: exit %d after %s, %q", code, time.Since(start), out)
 	}
 	if err := done(); err != nil {
 		t.Fatalf("done = %v: a canceled command was kept as the gate's failure", err)
+	}
+}
+
+// stallingCommandRunner runs every gate command for real but the session's
+// gofmt, which it holds until its context ends.
+type stallingCommandRunner struct{}
+
+func (stallingCommandRunner) Run(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
+	if slices.Contains(args, "gofmt") {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return execRunner{}.Run(ctx, dir, env, name, args...)
+}
+
+// TestAStalledGateStepIsAGateOutageUnderASessionDeadline: a gate-side step
+// (the object read, the ports in use) that stalls is the gate's failure even
+// when the session's own deadline ends first: each such step has a time
+// limit of its own, well under the wrapper's, and does not follow the
+// session's context.
+func TestAStalledGateStepIsAGateOutageUnderASessionDeadline(t *testing.T) {
+	for _, step := range []string{"object read", "ports in use"} {
+		t.Run(step, func(t *testing.T) {
+			w, _, _ := gitWorld(t)
+			ctx := context.Background()
+			dir, err := w.Prepare(ctx, "triage/alert-57")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Remove(ctx, dir)
+			w.gate.stepTimeout = 600 * time.Millisecond
+			if step == "object read" {
+				stalledCatFile(t)
+			} else {
+				w.gate.listening = func(ctx context.Context) ([]int, error) { <-ctx.Done(); return nil, ctx.Err() }
+			}
+			run, done, err := w.OpenTools(ctx, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			if out, code := run(session, "gofmt"); code != toolExitUnavailable || time.Since(start) > 10*time.Second {
+				t.Errorf("stalled %s: exit %d after %s, %q", step, code, time.Since(start), out)
+			}
+			if err := done(); !errors.Is(err, errGateUnavailable) {
+				t.Fatalf("done = %v: a stalled gate step was taken for an interrupted command", err)
+			}
+		})
 	}
 }
